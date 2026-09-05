@@ -18,7 +18,7 @@ conflict, and validate that decisions, constraints, and open work survived.
 - [ ] Masking, checkpoints, MapReduce progress, reset/handoff, retries, and fallback decisions persist only as new deltas.
 - [ ] Raw context items remain reconstructable; masking and checkpoints affect only the derived model view.
 - [ ] Every checkpoint and mapped summary identifies the exact context item range it covers.
-- [ ] A recent high-fidelity window remains raw and in chronological order after checkpointing.
+- [ ] A recent high-fidelity window remains raw and in chronological order after checkpointing, unless one indivisible native tool chain alone would leave no room for a valid checkpoint.
 - [ ] Protected task state, user constraints, decisions, and open work cannot be silently discarded by deterministic masking.
 - [ ] A failed, interrupted, or partial compaction never changes the committed model view.
 - [ ] Legacy histories and legacy in-progress split state remain readable without rewriting existing bytes.
@@ -44,18 +44,26 @@ conflict, and validate that decisions, constraints, and open work survived.
 - [x] Large bash/web outputs already use recoverable head/middle/tail truncation before entering context; masking must compose with those references instead of creating another authoritative store.
 - [x] The live TODO block is already protected structured state, but the remaining objective/decision/open-work state exists only inside free-form compaction summaries.
 
-## Phase 1 — Deterministic masking and referenced checkpoint composition (current)
+## Phase 1 — Deterministic masking and referenced checkpoint composition (complete)
 
-- [ ] Define serializable item-range/checkpoint metadata and a persisted masked-result set with backward-compatible defaults.
-- [ ] Add deterministic masking for reacted-to historical tool results while preserving a configurable recent raw token window and valid tool-call/result pairing.
-- [ ] Render masked results as typed, range-addressable placeholders while retaining their original content in the authoritative history and in-memory projection.
-- [ ] Change compaction planning to select an old prefix for checkpointing while preserving recent raw items; include previous checkpoints in the selected source state.
-- [ ] Commit a checkpoint atomically with exact covered ranges, hide only its covered source items, and compose the checkpoint before the remaining raw tail regardless of append position.
-- [ ] Persist/replay masked IDs and checkpoint metadata through append-only context deltas, including legacy defaults and visibility repair.
-- [ ] Add focused tests for masking safety, raw-window preservation, chronological composition, checkpoint references, restore/replay, revert/fork compatibility, and byte-prefix immutability.
-- [ ] Validate context-manager and session-history/store tests; mark Phase 1 complete before starting Phase 2.
+- [x] Define serializable item-range/checkpoint metadata and a persisted masked-result set with backward-compatible defaults.
+- [x] Add deterministic masking for reacted-to historical tool results while preserving a configurable recent raw token window and valid tool-call/result pairing.
+- [x] Render masked results as typed, range-addressable placeholders while retaining their original content in the authoritative history and in-memory projection.
+- [x] Change compaction planning to select an old prefix for checkpointing while preserving recent raw items; include previous checkpoints in the selected source state.
+- [x] Detect an oversized native tool chain in the raw reserve and checkpoint it whole rather than mutating signed call arguments or accepting a handoff that remains over budget.
+- [x] Commit a checkpoint atomically with exact covered ranges, derive source visibility from the checkpoint, and compose it before the remaining raw tail regardless of append position.
+- [x] Persist/replay masked IDs and checkpoint metadata through append-only context deltas, including legacy defaults and visibility repair.
+- [x] Add focused tests for masking safety, raw-window preservation, chronological composition, checkpoint references, restore/replay, revert/fork compatibility, and byte-prefix immutability.
+- [x] Validate context-manager and session-history/store tests; mark Phase 1 complete before starting Phase 2.
 
-## Phase 2 — Independent map segments and hierarchical reduction
+### Phase 1 validation record
+
+- [x] `cargo test --lib --no-default-features`: 219 passed, 1 ignored.
+- [x] `cargo test --bin cosh --no-default-features`: 416 passed, 16 ignored.
+- [x] `cargo clippy --lib --bin cosh --no-default-features -- -D warnings` passed.
+- [x] Targeted `rustfmt --check` and `git diff --check` passed.
+
+## Phase 2 — Independent map segments and hierarchical reduction (current)
 
 - [ ] Replace greedy split staging with versioned MapReduce staging while retaining a deserialization path for legacy `SplitState`.
 - [ ] Partition the selected checkpoint source into independent token-bounded segments without continuity tails; record exact item ranges and stable segment ordinals.

@@ -143,6 +143,7 @@ pub(crate) fn realistic_context(rounds: usize) -> cosh::harness::context::Contex
         split: None,
         visible_from: None,
         hidden: Default::default(),
+        masked: Default::default(),
     }
 }
 

@@ -319,7 +319,7 @@ impl ContextManager {
         }
         let fits = self.encoding.estimate(&split.buffer) <= split.window;
         if fits {
-            self.apply_llm_summary(split.buffer);
+            self.apply_full_llm_summary(split.buffer);
         }
         fits
     }

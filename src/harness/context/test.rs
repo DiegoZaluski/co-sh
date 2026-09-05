@@ -306,6 +306,44 @@ fn sweep_keeps_useful_chains_intact() {
     assert_eq!(cm.items_snapshot().len(), 3, "nothing is removed");
 }
 
+#[test]
+fn deterministic_masking_keeps_the_recent_window_raw_and_the_source_recoverable() {
+    let mut cm = cm(1_000);
+    cm.add_user("inspect both files");
+    cm.add_tool_call("old", "fs_read", r#"{"path":"old.rs"}"#);
+    let old_payload = prose_copies(120);
+    cm.add_tool_result("old", &old_payload);
+    cm.add_assistant("The old file establishes the baseline.", false);
+    cm.add_tool_call("recent", "fs_read", r#"{"path":"recent.rs"}"#);
+    cm.add_tool_result("recent", "fresh contents");
+
+    assert_eq!(cm.run(), RunOutcome::Resolved, "masking relieves pressure");
+    let state = cm.save_state();
+    assert_eq!(state.masked, HashSet::from([3]));
+    assert!(matches!(
+        &state.items[2],
+        ContextItem::ToolResult { content, .. } if content == &old_payload
+    ));
+
+    let messages = cm.build_messages("");
+    assert!(messages.iter().any(|message| {
+        message
+            .content
+            .as_deref()
+            .is_some_and(|content| content.contains("source context item #3"))
+    }));
+    assert!(
+        messages
+            .iter()
+            .any(|message| { message.content.as_deref() == Some("fresh contents") })
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| { message.content.as_deref() == Some(old_payload.as_str()) })
+    );
+}
+
 // ── Budget trigger + LLM compaction ───────────────────────────────────────
 
 #[test]
@@ -400,6 +438,81 @@ fn apply_llm_summary_hides_everything_behind_the_summary() {
     );
 }
 
+#[test]
+fn automatic_checkpoint_preserves_a_recent_raw_tail_and_records_exact_ranges() {
+    let mut cm = cm(1_000);
+    cm.add_user(&prose_copies(120)); // id 1: old, large source
+    cm.add_assistant("old conclusion", true); // id 2: recent raw budget starts here
+    cm.add_user("latest instruction"); // id 3
+    cm.add_assistant("working on it", false); // id 4
+
+    let request = cm.llm_compaction_request().expect("checkpoint is required");
+    assert!(request.prompt.contains("Paragraph 0 discusses"));
+    assert!(!request.prompt.contains("latest instruction"));
+    assert!(cm.apply_llm_summary("## Objective\n- continue safely".into()));
+
+    let items = cm.items_snapshot();
+    let ContextItem::Compaction {
+        covered_ranges,
+        summary,
+        ..
+    } = items.last().expect("checkpoint appended")
+    else {
+        panic!("last item must be a checkpoint");
+    };
+    assert_eq!(summary, "## Objective\n- continue safely");
+    assert_eq!(
+        covered_ranges,
+        &[ContextItemRange {
+            start_id: 1,
+            end_id: 1,
+        }]
+    );
+
+    let messages = cm.build_messages("");
+    assert_eq!(messages[0].content.as_deref(), Some(summary.as_str()));
+    assert!(
+        messages
+            .iter()
+            .any(|message| { message.content.as_deref() == Some("latest instruction") })
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| { message.content.as_deref() == Some("working on it") })
+    );
+}
+
+#[test]
+fn successive_checkpoints_carry_transitive_coverage_and_hide_old_anchors() {
+    let mut cm = cm(1_000);
+    cm.add_user(&prose_copies(120)); // id 1
+    assert!(cm.apply_llm_summary("## Objective\n- first checkpoint".into())); // id 2
+    cm.add_user(&prose_copies(120)); // id 3
+    cm.add_assistant("recent raw tail", false); // id 4
+
+    assert!(cm.apply_llm_summary("## Objective\n- merged checkpoint".into())); // id 5
+    let items = cm.items_snapshot();
+    let ContextItem::Compaction { covered_ranges, .. } = items.last().unwrap() else {
+        panic!("expected merged checkpoint");
+    };
+    assert_eq!(
+        covered_ranges,
+        &[ContextItemRange {
+            start_id: 1,
+            end_id: 3,
+        }]
+    );
+
+    let messages = cm.build_messages("");
+    assert_eq!(messages.len(), 2);
+    assert_eq!(
+        messages[0].content.as_deref(),
+        Some("## Objective\n- merged checkpoint")
+    );
+    assert_eq!(messages[1].content.as_deref(), Some("recent raw tail"));
+}
+
 // ── Save / restore ────────────────────────────────────────────────────────
 
 #[test]
@@ -456,12 +569,14 @@ fn overflow_stuck_is_keyed_by_model_not_provider() {
 #[test]
 fn apply_llm_summary_keeps_the_stuck_state_when_the_verdict_fails() {
     let mut cm = cm(1000); // trigger = 800
+    cm.add_user(&prose_copies(200));
     cm.mark_overflow("gpt-4o");
-    // A degenerate summary that lands above the trigger reports failure AND
-    // keeps the stuck state — the next request may still overflow, and the
-    // stuck guard exists to stop burning doomed calls.
+    let before = cm.items_snapshot().len();
+    // A degenerate summary that would land above the trigger reports failure,
+    // keeps the stuck state, and leaves the committed model view unchanged.
     let ok = cm.apply_llm_summary(prose_copies(200));
     assert!(!ok);
+    assert_eq!(cm.items_snapshot().len(), before);
     assert!(
         cm.overflow_stuck("gpt-4o"),
         "a failed compaction must not clear the stuck overflow"

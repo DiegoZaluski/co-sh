@@ -936,12 +936,10 @@ async fn known_window_overflow_drives_split_and_commits_the_anchor() {
             .ok()
             .flatten()
             .unwrap_or((ContextManagerState::default(), 0));
+    let mut restored_manager = ContextManager::new(state.max_tokens);
+    restored_manager.restore_state(&state);
+    let model_messages = restored_manager.build_messages("");
     let items = state.items;
-    // Visibility mirror (append-only): the model sees items past the boundary
-    // and outside the hidden set.
-    let is_visible = |it: &ContextItem| {
-        it.id() >= state.visible_from.unwrap_or(0) && !state.hidden.contains(&it.id())
-    };
     handle.abort();
 
     // The split surfaced the SAME continuous "Summarizing" box to the TUI.
@@ -1015,13 +1013,19 @@ async fn known_window_overflow_drives_split_and_commits_the_anchor() {
         "the loop's final answer follows the anchor; items={items:?}"
     );
     // The model sees only: anchor, in-flight input, final answer.
-    let visible_count = items.iter().filter(|it| is_visible(it)).count();
-    assert_eq!(visible_count, 3, "anchor + in-flight input + final answer");
+    assert_eq!(
+        model_messages.len(),
+        3,
+        "anchor + in-flight input + final answer"
+    );
     assert!(
-        !is_visible(&items[0]),
+        !model_messages.iter().any(|message| message
+            .content
+            .as_deref()
+            .is_some_and(|content| content.starts_with("u "))),
         "the pre-split history is hidden behind the boundary"
     );
-    // Contenção antecipada: the committed anchor fits the known window.
+    // Early containment: the committed anchor fits the known window.
     assert!(
         total_tokens <= 600,
         "the anchor must fit the known window; total_tokens={total_tokens}"
@@ -1110,10 +1114,10 @@ async fn reactive_overflow_reports_window_and_drives_split_inside_llm_compact() 
         .ok()
         .flatten()
         .unwrap_or((ContextManagerState::default(), false));
+    let mut restored_manager = ContextManager::new(state.max_tokens);
+    restored_manager.restore_state(&state);
+    let model_messages = restored_manager.build_messages("");
     let items = state.items;
-    let is_visible = |it: &ContextItem| {
-        it.id() >= state.visible_from.unwrap_or(0) && !state.hidden.contains(&it.id())
-    };
     handle.abort();
 
     // The single-shot overflow escalated into the split, which SUCCEEDED.
@@ -1190,12 +1194,10 @@ async fn reactive_overflow_reports_window_and_drives_split_inside_llm_compact() 
     );
     // The model sees only the anchor and whatever came after it.
     assert!(
-        !items.iter().any(|it| is_visible(it)
-            && matches!(
-                it,
-                ContextItem::User { original, .. } | ContextItem::Assistant { original, .. }
-                    if original.starts_with("u ")
-            )),
+        !model_messages.iter().any(|message| message
+            .content
+            .as_deref()
+            .is_some_and(|content| content.starts_with("u "))),
         "the pre-split history never reaches the model"
     );
     // The reactive split resolves without marking the provider stuck.

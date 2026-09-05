@@ -1092,6 +1092,14 @@ impl Harness {
                     if let Some(w) = window_tokens {
                         self.remember_error_window(w);
                     }
+                    // Re-run the deterministic funnel against the provider's
+                    // newly-known effective window before paying for chunked
+                    // summarization. Old tool results may now be maskable
+                    // while the recent raw window remains untouched.
+                    if matches!(self.context_manager.run(), RunOutcome::Resolved) {
+                        self.compaction_generic_retries = 0;
+                        break CompactionOutcome::ResolvedByContingency;
+                    }
                     if self.split_context(tx).await {
                         self.compaction_generic_retries = 0;
                         break CompactionOutcome::ResolvedByContingency;
@@ -2457,6 +2465,9 @@ impl Harness {
                     // the overflow is stuck — surface the (throttled) warning
                     // and fall through to the normal error handling with a
                     // HUMAN-readable message.
+                    if matches!(self.context_manager.run(), RunOutcome::Resolved) {
+                        continue;
+                    }
                     if self.split_context(&tx).await {
                         continue;
                     }

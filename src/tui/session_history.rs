@@ -166,6 +166,8 @@ pub(crate) enum ContextDelta {
         split: Option<SplitState>,
         visible_from: Option<u64>,
         hidden: HashSet<u64>,
+        #[serde(default)]
+        masked: HashSet<u64>,
     },
     ItemUpsert {
         item: ContextItem,
@@ -191,6 +193,10 @@ pub(crate) enum ContextDelta {
     Hidden {
         item_ids: Vec<u64>,
         hidden: bool,
+    },
+    Masked {
+        item_ids: Vec<u64>,
+        masked: bool,
     },
 }
 
@@ -551,6 +557,7 @@ fn apply_context(state: &mut BranchProjection, change: &ContextDelta) {
             split,
             visible_from,
             hidden,
+            masked,
         } => {
             state.context = Some(ContextManagerState {
                 items: VecDeque::new(),
@@ -560,6 +567,7 @@ fn apply_context(state: &mut BranchProjection, change: &ContextDelta) {
                 split: split.clone(),
                 visible_from: *visible_from,
                 hidden: hidden.clone(),
+                masked: masked.clone(),
             });
         }
         ContextDelta::ItemUpsert { item } => {
@@ -595,6 +603,16 @@ fn apply_context(state: &mut BranchProjection, change: &ContextDelta) {
                 }
             }
         }
+        ContextDelta::Masked { item_ids, masked } => {
+            let context = context_or_default(state);
+            for id in item_ids {
+                if *masked {
+                    context.masked.insert(*id);
+                } else {
+                    context.masked.remove(id);
+                }
+            }
+        }
     }
 }
 
@@ -605,7 +623,16 @@ fn repair_context_visibility(context: &mut ContextManagerState) {
         context.visible_from = None;
     }
     let live: HashSet<u64> = context.items.iter().map(ContextItem::id).collect();
+    let live_results: HashSet<u64> = context
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            ContextItem::ToolResult { id, .. } => Some(*id),
+            _ => None,
+        })
+        .collect();
     context.hidden.retain(|id| live.contains(id));
+    context.masked.retain(|id| live_results.contains(id));
 }
 
 /// Result of decoding a physical JSONL file. Legacy records become one
@@ -713,6 +740,8 @@ struct LegacyContextBookkeeping {
     split: Option<SplitState>,
     visible_from: Option<u64>,
     hidden: HashSet<u64>,
+    #[serde(default)]
+    masked: HashSet<u64>,
 }
 
 impl LegacyContextBookkeeping {
@@ -725,6 +754,7 @@ impl LegacyContextBookkeeping {
             split: self.split,
             visible_from: self.visible_from,
             hidden: self.hidden,
+            masked: self.masked,
         }
     }
 }
@@ -834,6 +864,7 @@ mod tests {
                         split: None,
                         visible_from: None,
                         hidden: HashSet::new(),
+                        masked: HashSet::new(),
                     },
                 },
             ),
@@ -966,6 +997,7 @@ mod tests {
                 ContextItem::Compaction {
                     id: 2,
                     summary: "summary".into(),
+                    covered_ranges: Vec::new(),
                 },
             ]),
             next_id: 3,
@@ -974,6 +1006,7 @@ mod tests {
             split: None,
             visible_from: Some(2),
             hidden: HashSet::from([1]),
+            masked: HashSet::new(),
         });
         let projection = HistoryProjection::replay(
             Some(legacy),
@@ -1018,6 +1051,7 @@ mod tests {
             split: None,
             visible_from: None,
             hidden: HashSet::new(),
+            masked: HashSet::new(),
         });
         let events = [
             HistoryEvent::new(

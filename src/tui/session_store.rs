@@ -62,7 +62,7 @@ struct SaveJob {
 }
 
 enum StoreJob {
-    Save(SaveJob),
+    Save(Box<SaveJob>),
     Title {
         session_id: String,
         title: String,
@@ -136,10 +136,10 @@ impl SessionStore {
     /// wait for its deltas to land. Context state is left untouched.
     pub fn save_session(&self, session: &Session) {
         self.enqueue_job(
-            StoreJob::Save(SaveJob {
+            StoreJob::Save(Box::new(SaveJob {
                 session: Box::new(session.clone()),
                 context: None,
-            }),
+            })),
             true,
         );
     }
@@ -151,10 +151,10 @@ impl SessionStore {
         let mut session = session.clone();
         Self::update_ctx_ids(&mut session, context);
         self.enqueue_job(
-            StoreJob::Save(SaveJob {
+            StoreJob::Save(Box::new(SaveJob {
                 session: Box::new(session),
                 context: Some(context.clone()),
-            }),
+            })),
             true,
         );
     }
@@ -163,10 +163,10 @@ impl SessionStore {
     /// [`Self::save_session`].
     pub fn save_session_async(&self, session: &crate::types::Session) {
         self.enqueue_job(
-            StoreJob::Save(SaveJob {
+            StoreJob::Save(Box::new(SaveJob {
                 session: Box::new(session.clone()),
                 context: None,
-            }),
+            })),
             false,
         );
     }
@@ -187,10 +187,10 @@ impl SessionStore {
     ) {
         Self::update_ctx_ids(session, &context);
         self.enqueue_job(
-            StoreJob::Save(SaveJob {
+            StoreJob::Save(Box::new(SaveJob {
                 session: Box::new(session.clone()),
                 context: Some(context),
-            }),
+            })),
             false,
         );
     }
@@ -900,6 +900,7 @@ fn diff_context(
                 split: requested.split.clone(),
                 visible_from: requested.visible_from,
                 hidden: requested.hidden.clone(),
+                masked: requested.masked.clone(),
             },
         });
         deltas.extend(requested.items.iter().cloned().map(|item| Delta::Context {
@@ -985,6 +986,32 @@ fn diff_context(
             change: ContextDelta::Hidden {
                 item_ids: shown,
                 hidden: false,
+            },
+        });
+    }
+    let masked: Vec<u64> = requested
+        .masked
+        .difference(&current.masked)
+        .copied()
+        .collect();
+    if !masked.is_empty() {
+        deltas.push(Delta::Context {
+            change: ContextDelta::Masked {
+                item_ids: masked,
+                masked: true,
+            },
+        });
+    }
+    let unmasked: Vec<u64> = current
+        .masked
+        .difference(&requested.masked)
+        .copied()
+        .collect();
+    if !unmasked.is_empty() {
+        deltas.push(Delta::Context {
+            change: ContextDelta::Masked {
+                item_ids: unmasked,
+                masked: false,
             },
         });
     }
@@ -1211,6 +1238,7 @@ mod tests {
             split: None,
             visible_from: None,
             hidden: Default::default(),
+            masked: Default::default(),
         }
     }
 
@@ -1696,6 +1724,7 @@ mod tests {
             split: None,
             visible_from: None,
             hidden: HashSet::new(),
+            masked: HashSet::new(),
         };
         store.save_session_with_context(&session, &initial);
         let path = store.file_path(&session.id);
@@ -1798,16 +1827,86 @@ mod tests {
         let restored = store.load_context(&session.id).unwrap();
         assert!(restored.split.is_none());
         assert_eq!(restored.overflow_model, None);
-        assert_eq!(restored.visible_from, Some(3));
+        assert_eq!(restored.visible_from, None);
+        assert!(
+            restored.hidden.is_empty(),
+            "checkpoint coverage is derived from its ranges, not hidden debris"
+        );
         assert!(matches!(
             restored.items.back(),
-            Some(ContextItem::Compaction { id: 3, summary }) if summary == "compacted"
+            Some(ContextItem::Compaction {
+                id: 3,
+                summary,
+                covered_ranges,
+            }) if summary == "compacted"
+                && covered_ranges == &[cosh::harness::context::ContextItemRange {
+                    start_id: 1,
+                    end_id: 2,
+                }]
         ));
         let mut replayed = cosh::harness::context::ContextManager::new(1);
         replayed.restore_state(&restored);
         let messages = replayed.build_messages("");
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].content.as_deref(), Some("compacted"));
+    }
+
+    #[test]
+    fn masked_tool_results_round_trip_as_append_only_view_deltas() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+        let session = make_test_session(
+            "masked-results",
+            "Masked results",
+            vec![make_assistant_msg("msg-0", "tool interaction")],
+        );
+        let mut context = make_context(vec![
+            ContextItem::ToolCall {
+                id: 1,
+                call_id: "call-1".into(),
+                name: "fs_read".into(),
+                arguments: r#"{"path":"large.rs"}"#.into(),
+                thought_signature: String::new(),
+                thinking_blocks: Vec::new(),
+            },
+            ContextItem::ToolResult {
+                id: 2,
+                call_id: "call-1".into(),
+                content: "complete immutable payload".into(),
+                useless: false,
+            },
+        ]);
+        context.masked.insert(2);
+        store.save_session_with_context(&session, &context);
+        let path = store.file_path(&session.id);
+        let first = std::fs::read(&path).unwrap();
+
+        let restored = store.load_context(&session.id).unwrap();
+        assert_eq!(restored.masked, HashSet::from([2]));
+        assert!(matches!(
+            &restored.items[1],
+            ContextItem::ToolResult { content, .. } if content == "complete immutable payload"
+        ));
+        let mut manager = cosh::harness::context::ContextManager::new(100_000);
+        manager.restore_state(&restored);
+        let messages = manager.build_messages("");
+        assert!(
+            messages[1]
+                .content
+                .as_deref()
+                .is_some_and(|content| content.contains("source context item #2"))
+        );
+
+        let mut unmasked = restored;
+        unmasked.masked.clear();
+        store.save_session_with_context(&session, &unmasked);
+        let second = std::fs::read(&path).unwrap();
+        assert!(second.starts_with(&first));
+        assert!(
+            store
+                .load_context(&session.id)
+                .is_some_and(|state| state.masked.is_empty())
+        );
     }
 
     /// A display-only save emits no context deltas, so display changes can
@@ -2446,8 +2545,8 @@ mod tests {
         );
     }
 
-    /// Reference selection across a compaction anchor repairs the derived
-    /// visibility boundary without deleting the original anchor event.
+    /// Reference selection across a checkpoint derives visibility from the
+    /// selected anchor ranges without deleting the original anchor event.
     #[test]
     fn revert_past_the_compaction_boundary_un_compacts() {
         let dir = tempfile::tempdir().unwrap();
@@ -2461,15 +2560,18 @@ mod tests {
                 make_user_msg("msg-2", "post"),
             ],
         );
-        let mut context = make_context(vec![
+        let context = make_context(vec![
             user_item(1, "pre-compaction"),
             ContextItem::Compaction {
                 id: 2,
                 summary: "the anchor".into(),
+                covered_ranges: vec![cosh::harness::context::ContextItemRange {
+                    start_id: 1,
+                    end_id: 1,
+                }],
             },
             user_item(3, "post"),
         ]);
-        context.visible_from = Some(2); // hides id 1
         store.save_session_with_context(&session, &context);
         let path = store.file_path("7400");
         let before = std::fs::read(&path).unwrap();
@@ -2493,7 +2595,12 @@ mod tests {
         assert!(store.fork_session("7400", "msg-1", &forked));
         let child = store.load_context("7400-child").unwrap();
         assert_eq!(child.items.len(), 2);
-        assert_eq!(child.visible_from, Some(2), "the anchor survived");
+        assert_eq!(child.visible_from, None);
+        let mut child_manager = cosh::harness::context::ContextManager::new(100_000);
+        child_manager.restore_state(&child);
+        let messages = child_manager.build_messages("");
+        assert_eq!(messages.len(), 1, "the checkpoint covers its source");
+        assert_eq!(messages[0].content.as_deref(), Some("the anchor"));
     }
 
     /// With append-only visibility the ctx_ids mapping NEVER freezes: the

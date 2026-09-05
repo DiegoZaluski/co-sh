@@ -2,9 +2,10 @@
 //!
 //! The [`ContextManager`] owns every conversation item — user prompts,
 //! assistant outputs, tool calls and tool results — in display order. Content
-//! is rendered verbatim; the only compaction is the LLM summarizer: when the
-//! held context reaches 80% of the budget, [`Self::run`] returns
-//! [`RunOutcome::NeedsLlmCompaction`] and the harness drives the compaction.
+//! is rendered through a recoverable layered view. Old useful tool results can
+//! be replaced by typed references, a recent token window stays verbatim, and
+//! an LLM checkpoint covers the remaining old prefix when the view still
+//! reaches 80% of the budget.
 //!
 //! [`build_messages`](Self::build_messages) renders the timeline as a
 //! provider-ready `Vec<ChatMessage>` with a 1:1 item→message mapping. The
@@ -41,6 +42,21 @@ pub const MAX_CONTEXT_TOKENS: usize = 100_000;
 
 /// Percentage of the budget at which the compaction runs.
 const COMPACT_PCT: usize = 80;
+
+/// Percentage of the model window reserved for the most recent conversation
+/// turn in verbatim form. Older content is eligible for deterministic tool
+/// result masking and checkpointing; the newest turn remains a high-fidelity
+/// handoff after compaction.
+const RECENT_RAW_PCT: usize = 20;
+
+/// Inclusive range of monotonic context item IDs covered by a derived
+/// checkpoint. Multiple ranges are used when already-hidden items leave gaps,
+/// so the metadata describes exactly which visible source items were folded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextItemRange {
+    pub start_id: u64,
+    pub end_id: u64,
+}
 
 /// A single conversation item in display order. **One item = one message** in
 /// [`ContextManager::build_messages`], so message positions are preserved by
@@ -95,12 +111,18 @@ pub enum ContextItem {
     /// The final text response of a completed agent loop. Replaces the raw
     /// assistant text in place.
     Closure { id: u64, content: String },
-    /// The continuation summary produced by the LLM compaction (the
-    /// last-resort fallback). Appended as an anchor that hides the
-    /// pre-existing timeline behind the visibility boundary (append-only);
-    /// renders as an assistant message. The next LLM compaction folds it
-    /// into the new summary (update mode).
-    Compaction { id: u64, summary: String },
+    /// A derived continuation checkpoint produced by LLM compaction. It is
+    /// appended to immutable history and records the exact ranges it covers;
+    /// model composition places it before the recent raw tail. A later
+    /// checkpoint folds the prior checkpoint and carries its coverage forward.
+    Compaction {
+        id: u64,
+        summary: String,
+        /// Exact visible source ranges folded into this checkpoint. Empty for
+        /// legacy compaction records written before range metadata existed.
+        #[serde(default)]
+        covered_ranges: Vec<ContextItemRange>,
+    },
     /// A terminal API/runtime error surfaced to the user. DISPLAY-ONLY:
     /// [`ContextManager::build_messages`] skips it (an API failure must never
     /// reach the LLM as if it were assistant output — the live loop keeps the
@@ -172,7 +194,7 @@ impl ContextItem {
 /// persistence. Nothing is in-flight between save and restore — the snapshot
 /// is a plain clone. `overflow_model` records the stuck context-window
 /// overflow, and `split` the staging of an in-progress
-/// split-and-concatenate.
+/// split-and-concatenate, plus the deterministic model-view selectors.
 ///
 /// The timeline is APPEND-ONLY: nothing is ever removed by compaction, the
 /// useless-chain sweep or the abandoned-input cleanup. Those events only move
@@ -200,16 +222,19 @@ pub struct ContextManagerState {
     /// Staging of an in-progress split-and-concatenate, so an interrupted
     /// split resumes exactly where it stopped.
     pub split: Option<SplitState>,
-    /// Compaction boundary: every item with `id < visible_from` is
-    /// pre-compaction — folded into the `Compaction` summary item, kept on
-    /// disk for revert/fork but never shown to the model. `None` = nothing
-    /// was compacted yet (the whole timeline is visible).
+    /// Legacy compaction boundary. New checkpoints derive coverage from their
+    /// own exact ranges, but this remains for replaying histories written by
+    /// older versions without rewriting them.
     pub visible_from: Option<u64>,
     /// Item ids hidden from the model one by one (useless-chain sweep,
     /// abandoned prompts, cancelled-run debris). Kept in the timeline for
     /// revert/fork; never sent to the model. Ids below `visible_from` are
     /// implicitly hidden too and are pruned from here on compaction.
     pub hidden: HashSet<u64>,
+    /// Tool result IDs whose full payload remains in `items` and immutable
+    /// history, but whose model-facing projection is a small typed reference.
+    #[serde(default)]
+    pub masked: HashSet<u64>,
 }
 
 impl Default for ContextManagerState {
@@ -222,6 +247,7 @@ impl Default for ContextManagerState {
             split: None,
             visible_from: None,
             hidden: HashSet::new(),
+            masked: HashSet::new(),
         }
     }
 }
@@ -258,7 +284,7 @@ pub struct LlmCompactionRequest {
     /// summarizer is a separate agent with its own instructions.
     pub system: String,
     /// The complete summarization prompt (instruction + template + serialized
-    /// transcript of the entire remaining context).
+    /// transcript of the selected old prefix; the recent raw tail is omitted.
     pub prompt: String,
 }
 
@@ -291,16 +317,20 @@ pub struct ContextManager {
     /// projection and persisted as a context delta so an interrupted split
     /// resumes exactly where it stopped.
     split: Option<SplitState>,
-    /// Compaction boundary: every item with `id < visible_from` is
-    /// pre-compaction — folded into the `Compaction` summary item, kept in
-    /// the timeline for revert/fork but never shown to the model. `None` =
-    /// nothing was compacted yet (the whole timeline is visible).
+    /// Legacy compaction boundary retained for backward-compatible replay.
+    /// New checkpoint coverage is derived from `Compaction::covered_ranges`.
     visible_from: Option<u64>,
     /// Item ids hidden from the model one by one (useless-chain sweep,
     /// abandoned prompts, cancelled-run debris). Kept in the timeline for
     /// revert/fork; never sent to the model. Ids below `visible_from` are
     /// implicitly hidden too and are pruned from here on compaction.
     hidden: HashSet<u64>,
+    /// Useful but old tool results represented by small typed placeholders in
+    /// the model view. The original result remains untouched in `items`.
+    masked: HashSet<u64>,
+    /// Derived coverage of the newest base-visible checkpoint. Rebuilt from
+    /// immutable checkpoint metadata on restore; never persisted separately.
+    checkpoint_coverage: Vec<ContextItemRange>,
     /// The dedicated protected TODO block: mirrors the tools' `Plan` list and
     /// renders it as a protected block at the END of the messages (merged into
     /// the trailing `user` turn when there is one — block first, steering
@@ -339,6 +369,43 @@ fn assistant_message(text: &str) -> ChatMessage {
     }
 }
 
+fn masked_tool_result(id: u64) -> String {
+    format!(
+        "[Historical tool result masked from the active view; source context item #{id} remains in the immutable session history.]"
+    )
+}
+
+fn coalesce_ranges(ids: &[u64]) -> Vec<ContextItemRange> {
+    let mut ranges: Vec<ContextItemRange> = Vec::new();
+    for &id in ids {
+        match ranges.last_mut() {
+            Some(last) if last.end_id.checked_add(1) == Some(id) => last.end_id = id,
+            _ => ranges.push(ContextItemRange {
+                start_id: id,
+                end_id: id,
+            }),
+        }
+    }
+    ranges
+}
+
+fn merge_ranges(mut ranges: Vec<ContextItemRange>) -> Vec<ContextItemRange> {
+    ranges.sort_unstable_by_key(|range| (range.start_id, range.end_id));
+    let mut merged: Vec<ContextItemRange> = Vec::new();
+    for range in ranges {
+        match merged.last_mut() {
+            Some(last)
+                if range.start_id <= last.end_id
+                    || last.end_id.checked_add(1) == Some(range.start_id) =>
+            {
+                last.end_id = last.end_id.max(range.end_id);
+            }
+            _ => merged.push(range),
+        }
+    }
+    merged
+}
+
 impl ContextManager {
     pub fn new(max_tokens: usize) -> Self {
         Self {
@@ -350,6 +417,8 @@ impl ContextManager {
             split: None,
             visible_from: None,
             hidden: HashSet::new(),
+            masked: HashSet::new(),
+            checkpoint_coverage: Vec::new(),
             todo: TodoContext::new(),
             cached_items_tokens: 0,
             manual_compaction: false,
@@ -745,6 +814,7 @@ impl ContextManager {
     /// compaction and applies the summary via [`Self::apply_llm_summary`].
     pub fn run(&mut self) -> RunOutcome {
         self.sweep_useless_chains();
+        self.mask_stale_tool_results();
         if self.total_tokens() < self.trigger() {
             RunOutcome::Resolved
         } else {
@@ -805,9 +875,136 @@ impl ContextManager {
         }
     }
 
-    /// Build the LLM-compaction request: the entire remaining timeline —
-    /// every item, the `Closure` included — serialized into an opencode-style
-    /// transcript, wrapped in the summarization prompt.
+    /// Replace useful but old tool result payloads with small typed references
+    /// in the model-facing projection. The raw result stays in `items` and in
+    /// immutable history, and remains available to checkpoint construction.
+    /// Only results before the recent raw window are eligible; the newest
+    /// interaction therefore always reaches the model verbatim.
+    fn mask_stale_tool_results(&mut self) {
+        if self.manual_compaction || self.total_tokens() < self.normal_trigger() {
+            return;
+        }
+        let raw_start = self.recent_raw_start();
+        for idx in 0..raw_start {
+            if self.total_tokens() < self.normal_trigger() {
+                break;
+            }
+            let id = match &self.items[idx] {
+                ContextItem::ToolResult {
+                    id, useless: false, ..
+                } if !self.is_hidden(&self.items[idx]) && !self.masked.contains(id) => *id,
+                _ => continue,
+            };
+            let old_tokens = self.items[idx].tokens(self.encoding);
+            let new_tokens = self.encoding.estimate(&masked_tool_result(id));
+            self.masked.insert(id);
+            self.cached_items_tokens = self
+                .cached_items_tokens
+                .saturating_sub(old_tokens)
+                .saturating_add(new_tokens);
+        }
+    }
+
+    /// Raw timeline index at which the high-fidelity recent window starts.
+    /// The window is token-bounded and expanded backwards when its first tool
+    /// result needs an earlier matching call to keep native tool structure
+    /// valid.
+    fn recent_raw_start(&self) -> usize {
+        let target = self.max_tokens.saturating_mul(RECENT_RAW_PCT) / 100;
+        let mut held = 0usize;
+        let mut start = self.items.len();
+        for (idx, item) in self.items.iter().enumerate().rev() {
+            if self.is_hidden(item) || matches!(item, ContextItem::Compaction { .. }) {
+                continue;
+            }
+            let tokens = self.visible_item_tokens(item);
+            if start < self.items.len() && (held >= target || held.saturating_add(tokens) > target)
+            {
+                break;
+            }
+            held = held.saturating_add(tokens);
+            start = idx;
+        }
+        if start == self.items.len() {
+            return start;
+        }
+
+        // A result in the retained tail must keep its native call. Parallel
+        // calls can put several results after the boundary, so expand to the
+        // oldest required call in one pass.
+        let retained_results: HashSet<String> = self
+            .items
+            .iter()
+            .skip(start)
+            .filter(|item| !self.is_hidden(item))
+            .filter_map(|item| match item {
+                ContextItem::ToolResult { call_id, .. } => Some(call_id.clone()),
+                _ => None,
+            })
+            .collect();
+        for (idx, item) in self.items.iter().take(start).enumerate() {
+            if let ContextItem::ToolCall { call_id, .. } = item
+                && retained_results.contains(call_id)
+            {
+                start = start.min(idx);
+            }
+        }
+        start
+    }
+
+    /// Raw indexes selected for the next checkpoint. Automatic compaction
+    /// covers the old prefix and every previous checkpoint while preserving a
+    /// recent raw tail. Manual compaction intentionally keeps its historical
+    /// whole-view behavior. A single item larger than the budget is selected
+    /// whole because no non-empty tail/source split exists.
+    fn checkpoint_source_indices(&self) -> Vec<usize> {
+        let mut visible = self.all_visible_source_indices();
+        if self.manual_compaction {
+            return visible;
+        }
+        let raw_start = self.recent_raw_start();
+        let mut source: Vec<usize> = visible
+            .iter()
+            .copied()
+            .filter(|&idx| {
+                idx < raw_start || matches!(self.items[idx], ContextItem::Compaction { .. })
+            })
+            .collect();
+        let source_set: HashSet<usize> = source.iter().copied().collect();
+        let raw_tokens = visible
+            .iter()
+            .filter(|idx| !source_set.contains(idx))
+            .fold(0usize, |total, &idx| {
+                total.saturating_add(self.visible_item_tokens(&self.items[idx]))
+            });
+        let raw_target = self.max_tokens.saturating_mul(RECENT_RAW_PCT) / 100;
+        if raw_tokens > raw_target {
+            // Pair-preserving expansion (or one giant newest item) can make
+            // the supposedly recent tail larger than its entire reservation.
+            // Fold it whole rather than mutate provider-signed tool calls or
+            // commit a checkpoint that cannot relieve pressure.
+            return visible;
+        }
+        if source.is_empty() && self.total_tokens() >= self.normal_trigger() {
+            // Pathological one-item context: preserving a raw tail would leave
+            // nothing to checkpoint and cannot relieve the overflow.
+            source = std::mem::take(&mut visible);
+        }
+        source
+    }
+
+    fn all_visible_source_indices(&self) -> Vec<usize> {
+        self.items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| !self.is_hidden(item) && !matches!(item, ContextItem::Error { .. }))
+            .map(|(idx, _)| idx)
+            .collect()
+    }
+
+    /// Build an LLM-checkpoint request from the selected old prefix, serialized
+    /// into an opencode-style transcript. The recent raw window is deliberately
+    /// excluded and remains verbatim after the checkpoint is committed.
     ///
     /// A [`ContextItem::Compaction`] item (the previous summary) switches the
     /// prompt to update mode: the summary is NOT embedded in the instruction —
@@ -823,18 +1020,20 @@ impl ContextManager {
         if self.items.is_empty() || self.total_tokens() < self.trigger() {
             return None;
         }
-        // Only model-VISIBLE content is summarized: pre-compaction items are
-        // already folded into the previous summary, hidden chains were
-        // rejected — re-summarizing them would bloat the request and pollute
-        // the new summary.
-        let has_previous_summary = self
-            .items
+        let source = self.checkpoint_source_indices();
+        if source.is_empty() {
+            return None;
+        }
+        // Only the selected OLD prefix is checkpointed. The most recent turn
+        // stays raw and is composed after the checkpoint on the next model
+        // request. Masked results deliberately serialize their original
+        // payload here: masking is a view optimization, never data loss.
+        let has_previous_summary = source
             .iter()
-            .any(|it| matches!(it, ContextItem::Compaction { .. }) && !self.is_hidden(it));
-        let context = self
-            .items
+            .any(|&idx| matches!(self.items[idx], ContextItem::Compaction { .. }));
+        let context = source
             .iter()
-            .filter(|it| !self.is_hidden(it))
+            .map(|&idx| &self.items[idx])
             .map(serialize_item)
             .filter(|line| !line.is_empty())
             .collect::<Vec<String>>()
@@ -845,36 +1044,89 @@ impl ContextManager {
         })
     }
 
-    /// Apply the LLM-compaction summary: the ENTIRE pre-existing timeline is
-    /// hidden behind the new [`ContextItem::Compaction`] item (append-only —
-    /// nothing is deleted; revert past the boundary un-compacts). Returns
-    /// whether the total is now below the 80% trigger — the summary should be
-    /// small enough, but a degenerate huge summary is surfaced so the harness
-    /// can report failure. The verdict always uses the NORMAL trigger (manual
-    /// `/compact` mode zeroes [`Self::trigger`] only for the run; a manual
-    /// pass legitimately lands far below it).
+    /// Atomically commit an LLM checkpoint over the planned old prefix. Exact
+    /// coverage is stored on the appended item and the recent raw tail remains
+    /// visible. A candidate that would not land below the normal 80% trigger is
+    /// rejected without changing the view. Manual `/compact` selects the full
+    /// visible source to preserve its explicit whole-session semantics.
     pub fn apply_llm_summary(&mut self, summary: String) -> bool {
-        let id = self.next_id();
-        // The boundary hides every pre-existing item (all ids are < `id` —
-        // it was just allocated); the Compaction item itself is visible.
-        self.visible_from = Some(id);
-        // All pre-existing hidden ids sit below the new boundary — the
-        // boundary covers them from here on, so the set empties.
-        self.hidden.clear();
-        // The cached total now covers only the visible timeline: re-tokenize
-        // (rare event; the recompute itself skips hidden items).
-        self.recompute_cached_tokens();
-        self.push_item(ContextItem::Compaction { id, summary });
-        let fits = self.total_tokens() < self.normal_trigger();
-        // A compaction that LANDED below the trigger is proof the provider
-        // accepts the context again — any recorded stuck overflow is no
-        // longer relevant. A degenerate huge summary keeps the stuck state:
-        // the next request may still overflow, and the stuck guard exists
-        // precisely to stop burning doomed calls.
-        if fits {
-            self.clear_overflow();
+        let mut source = self.checkpoint_source_indices();
+        if source.is_empty() {
+            // Direct callers can apply a summary below the automatic trigger.
+            // With no planned old prefix, preserve the historical whole-view
+            // behavior rather than silently accepting an empty checkpoint.
+            source = self.all_visible_source_indices();
         }
-        fits
+        self.apply_summary_to_source(summary, &source)
+    }
+
+    /// Apply a summary explicitly produced from the complete visible source.
+    /// This keeps the legacy split staging correct until MapReduce replaces it:
+    /// the split already summarized the raw tail, so retaining that tail would
+    /// duplicate it in the model view.
+    pub(super) fn apply_full_llm_summary(&mut self, summary: String) -> bool {
+        let source = self.all_visible_source_indices();
+        if source.is_empty() || summary.trim().is_empty() {
+            return false;
+        }
+        self.commit_summary_to_source(summary, &source);
+        self.clear_overflow();
+        true
+    }
+
+    fn apply_summary_to_source(&mut self, summary: String, source: &[usize]) -> bool {
+        if source.is_empty() || summary.trim().is_empty() {
+            return false;
+        }
+        let removed_tokens = source.iter().fold(0usize, |total, &idx| {
+            total.saturating_add(self.visible_item_tokens(&self.items[idx]))
+        });
+        let projected = self
+            .cached_items_tokens
+            .saturating_sub(removed_tokens)
+            .saturating_add(self.encoding.estimate(&summary))
+            .saturating_add(self.todo.tokens(self.encoding));
+        if projected >= self.normal_trigger() {
+            // A degenerate summary is not a state transition. Keep the current
+            // model view intact so failure and retry are genuinely atomic.
+            return false;
+        }
+        self.commit_summary_to_source(summary, source);
+        self.clear_overflow();
+        true
+    }
+
+    fn commit_summary_to_source(&mut self, summary: String, source: &[usize]) {
+        let direct_ids: Vec<u64> = source.iter().map(|&idx| self.items[idx].id()).collect();
+        let mut all_ranges = coalesce_ranges(&direct_ids);
+        for &idx in source {
+            if let ContextItem::Compaction {
+                covered_ranges: prior_ranges,
+                ..
+            } = &self.items[idx]
+            {
+                all_ranges.extend_from_slice(prior_ranges);
+            }
+        }
+        let covered_ranges = merge_ranges(all_ranges);
+        let id = self.next_id();
+        // Commit atomically in the runtime projection: cover only the planned
+        // old prefix. The recent raw tail remains visible even though its IDs
+        // precede the newly appended checkpoint; coverage comes from the
+        // checkpoint ranges instead of advancing the legacy prefix boundary.
+        for covered in &direct_ids {
+            self.masked.remove(covered);
+        }
+        self.push_item(ContextItem::Compaction {
+            id,
+            summary,
+            covered_ranges: covered_ranges.clone(),
+        });
+        self.checkpoint_coverage = covered_ranges;
+        // Coverage is derived from the newly appended checkpoint itself. This
+        // makes revert/fork removal automatically reveal its source without a
+        // compensating visibility mutation.
+        self.recompute_cached_tokens();
     }
 
     /// True when the LLM compaction is KNOWN to be stuck for `model`: a
@@ -935,12 +1187,23 @@ impl ContextManager {
         // after `system` is rejected by some providers (e.g. Mistral).
         // Orphans should not exist thanks to chain-aware hiding, but a
         // restored snapshot could still hold them.
-        for item in self
-            .items
+        let visible: Vec<&ContextItem> =
+            self.items.iter().filter(|it| !self.is_hidden(it)).collect();
+        // Checkpoints are append-only timeline items, but semantically form
+        // the handoff prefix for the raw recent window. Compose them first;
+        // retain chronological order within checkpoints and within raw items.
+        let projected = visible
             .iter()
-            .filter(|it| !self.is_hidden(it))
-            .skip_while(|it| matches!(it, ContextItem::ToolResult { .. }))
-        {
+            .copied()
+            .filter(|it| matches!(it, ContextItem::Compaction { .. }))
+            .chain(
+                visible
+                    .iter()
+                    .copied()
+                    .filter(|it| !matches!(it, ContextItem::Compaction { .. })),
+            )
+            .skip_while(|it| matches!(it, ContextItem::ToolResult { .. }));
+        for item in projected {
             match item {
                 ContextItem::User { original, .. } => {
                     // User prompts are rendered verbatim.
@@ -976,9 +1239,17 @@ impl ContextManager {
                     messages.push(msg);
                 }
                 ContextItem::ToolResult {
-                    call_id, content, ..
+                    id,
+                    call_id,
+                    content,
+                    ..
                 } => {
-                    messages.push(tool_result_message(call_id, content));
+                    let rendered = if self.masked.contains(id) {
+                        masked_tool_result(*id)
+                    } else {
+                        content.clone()
+                    };
+                    messages.push(tool_result_message(call_id, &rendered));
                 }
                 ContextItem::Closure { content, .. } => {
                     messages.push(assistant_message(content));
@@ -1061,6 +1332,7 @@ impl ContextManager {
             split: self.split.clone(),
             visible_from: self.visible_from,
             hidden: self.hidden.clone(),
+            masked: self.masked.clone(),
         }
     }
 
@@ -1077,6 +1349,17 @@ impl ContextManager {
         self.split = state.split.clone();
         self.visible_from = state.visible_from;
         self.hidden = state.hidden.clone();
+        self.masked = state.masked.clone();
+        let live_results: HashSet<u64> = self
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                ContextItem::ToolResult { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect();
+        self.masked.retain(|id| live_results.contains(id));
+        self.rebuild_checkpoint_coverage();
         // The TODO block mirror is not persisted (the tools' Plan state is
         // not part of the snapshot): clear it so a restored session never
         // surfaces a stale block — the harness re-syncs it at the next loop
@@ -1113,8 +1396,17 @@ impl ContextManager {
             .iter()
             .filter(|it| !self.is_hidden(it))
             .fold(0usize, |acc, it| {
-                acc.saturating_add(it.tokens(self.encoding))
+                acc.saturating_add(self.visible_item_tokens(it))
             });
+    }
+
+    fn visible_item_tokens(&self, item: &ContextItem) -> usize {
+        match item {
+            ContextItem::ToolResult { id, .. } if self.masked.contains(id) => {
+                self.encoding.estimate(&masked_tool_result(*id))
+            }
+            _ => item.tokens(self.encoding),
+        }
     }
 
     /// Token count at which the 80% compaction trigger fires: 80% of the
@@ -1171,7 +1463,7 @@ impl ContextManager {
                 .items
                 .iter()
                 .filter(|it| !self.is_hidden(it))
-                .map(|it| it.tokens(self.encoding))
+                .map(|it| self.visible_item_tokens(it))
                 .sum();
             debug_assert_eq!(
                 self.cached_items_tokens, brute,
@@ -1183,13 +1475,37 @@ impl ContextManager {
             .saturating_add(self.todo.tokens(self.encoding))
     }
 
-    /// Whether the model must NEVER see this item: it sits before the
-    /// compaction boundary (folded into the `Compaction` summary) or it was
-    /// hidden individually (useless-chain sweep, abandoned prompt). O(1) —
-    /// an integer compare plus a hash lookup; no scans anywhere.
+    /// Whether the model must not see this raw item: it is behind a legacy
+    /// boundary, explicitly hidden as debris, or covered by the newest derived
+    /// checkpoint. Checkpoint coverage is intentionally derived so removing an
+    /// anchor through revert/fork automatically reveals its source.
     fn is_hidden(&self, item: &ContextItem) -> bool {
         let id = item.id();
-        id < self.visible_from.unwrap_or(0) || self.hidden.contains(&id)
+        id < self.visible_from.unwrap_or(0)
+            || self.hidden.contains(&id)
+            || self.latest_checkpoint_covers(id)
+    }
+
+    fn latest_checkpoint_covers(&self, item_id: u64) -> bool {
+        self.checkpoint_coverage
+            .iter()
+            .any(|range| range.start_id <= item_id && item_id <= range.end_id)
+    }
+
+    fn rebuild_checkpoint_coverage(&mut self) {
+        self.checkpoint_coverage = self
+            .items
+            .iter()
+            .rev()
+            .find_map(|item| match item {
+                ContextItem::Compaction {
+                    id, covered_ranges, ..
+                } if *id >= self.visible_from.unwrap_or(0) && !self.hidden.contains(id) => {
+                    Some(covered_ranges.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
     }
 
     /// Hide the item at `idx`: it stays in the timeline (revert/fork can
@@ -1199,9 +1515,15 @@ impl ContextManager {
     /// a per-item cost map in sync).
     fn hide_at(&mut self, idx: usize) {
         let id = self.items[idx].id();
-        let tokens = self.items[idx].tokens(self.encoding);
+        let tokens = self.visible_item_tokens(&self.items[idx]);
+        let checkpoint = matches!(self.items[idx], ContextItem::Compaction { .. });
         self.hidden.insert(id);
+        self.masked.remove(&id);
         self.cached_items_tokens = self.cached_items_tokens.saturating_sub(tokens);
+        if checkpoint {
+            self.rebuild_checkpoint_coverage();
+            self.recompute_cached_tokens();
+        }
     }
 
     /// Hide the item at `idx`. For tool items the matching call/result
