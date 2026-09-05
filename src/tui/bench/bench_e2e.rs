@@ -141,6 +141,7 @@ pub(crate) fn realistic_context(rounds: usize) -> cosh::harness::context::Contex
         max_tokens: 100_000,
         overflow_model: None,
         split: None,
+        map_reduce: None,
         visible_from: None,
         hidden: Default::default(),
         masked: Default::default(),

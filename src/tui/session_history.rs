@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use cosh::harness::context::{ContextItem, ContextManagerState, SplitState};
+use cosh::harness::context::{ContextItem, ContextManagerState, MapReduceState, SplitState};
 use serde::{Deserialize, Serialize};
 
 use crate::types::{Message, MessageRole, Part, Session};
@@ -164,6 +164,8 @@ pub(crate) enum ContextDelta {
         max_tokens: usize,
         overflow_model: Option<String>,
         split: Option<SplitState>,
+        #[serde(default)]
+        map_reduce: Box<Option<MapReduceState>>,
         visible_from: Option<u64>,
         hidden: HashSet<u64>,
         #[serde(default)]
@@ -186,6 +188,9 @@ pub(crate) enum ContextDelta {
     },
     Split {
         value: Option<SplitState>,
+    },
+    MapReduce {
+        value: Box<Option<MapReduceState>>,
     },
     VisibleFrom {
         value: Option<u64>,
@@ -555,6 +560,7 @@ fn apply_context(state: &mut BranchProjection, change: &ContextDelta) {
             max_tokens,
             overflow_model,
             split,
+            map_reduce,
             visible_from,
             hidden,
             masked,
@@ -565,6 +571,7 @@ fn apply_context(state: &mut BranchProjection, change: &ContextDelta) {
                 max_tokens: *max_tokens,
                 overflow_model: overflow_model.clone(),
                 split: split.clone(),
+                map_reduce: map_reduce.as_ref().clone(),
                 visible_from: *visible_from,
                 hidden: hidden.clone(),
                 masked: masked.clone(),
@@ -592,6 +599,9 @@ fn apply_context(state: &mut BranchProjection, change: &ContextDelta) {
             context_or_default(state).overflow_model = value.clone();
         }
         ContextDelta::Split { value } => context_or_default(state).split = value.clone(),
+        ContextDelta::MapReduce { value } => {
+            context_or_default(state).map_reduce = value.as_ref().clone();
+        }
         ContextDelta::VisibleFrom { value } => context_or_default(state).visible_from = *value,
         ContextDelta::Hidden { item_ids, hidden } => {
             let context = context_or_default(state);
@@ -623,6 +633,13 @@ fn repair_context_visibility(context: &mut ContextManagerState) {
         context.visible_from = None;
     }
     let live: HashSet<u64> = context.items.iter().map(ContextItem::id).collect();
+    if context
+        .map_reduce
+        .as_ref()
+        .is_some_and(|state| state.source_item_ids.iter().any(|id| !live.contains(id)))
+    {
+        context.map_reduce = None;
+    }
     let live_results: HashSet<u64> = context
         .items
         .iter()
@@ -738,6 +755,8 @@ struct LegacyContextBookkeeping {
     max_tokens: usize,
     overflow_model: Option<String>,
     split: Option<SplitState>,
+    #[serde(default)]
+    map_reduce: Option<MapReduceState>,
     visible_from: Option<u64>,
     hidden: HashSet<u64>,
     #[serde(default)]
@@ -752,6 +771,7 @@ impl LegacyContextBookkeeping {
             max_tokens: self.max_tokens,
             overflow_model: self.overflow_model,
             split: self.split,
+            map_reduce: self.map_reduce,
             visible_from: self.visible_from,
             hidden: self.hidden,
             masked: self.masked,
@@ -862,6 +882,7 @@ mod tests {
                         max_tokens: 100,
                         overflow_model: None,
                         split: None,
+                        map_reduce: Box::new(None),
                         visible_from: None,
                         hidden: HashSet::new(),
                         masked: HashSet::new(),
@@ -1004,6 +1025,7 @@ mod tests {
             max_tokens: 100,
             overflow_model: None,
             split: None,
+            map_reduce: None,
             visible_from: Some(2),
             hidden: HashSet::from([1]),
             masked: HashSet::new(),
@@ -1049,6 +1071,7 @@ mod tests {
             max_tokens: 100,
             overflow_model: None,
             split: None,
+            map_reduce: None,
             visible_from: None,
             hidden: HashSet::new(),
             masked: HashSet::new(),

@@ -1,12 +1,12 @@
 //! Prompt construction and transcript serialization for the LLM compaction
-//! and the split-and-concatenate contingency.
+//! and its one-shot, MapReduce, and legacy split contingencies.
 //!
 //! The summarizer is a DEDICATED agent with its OWN instructions, completely
 //! separate from the agent loop's fixed system prompt in `core.rs`: it never
 //! sees the main system prompt, the tool definitions, or the harness
 //! instructions (opencode-style).
 
-use super::ContextItem;
+use super::{ContextItem, ContextItemRange};
 
 /// The summarization template the LLM compaction asks the model to fill
 /// (opencode's `SUMMARY_TEMPLATE`, kept as inspiration): a structured anchor
@@ -187,4 +187,116 @@ pub(super) fn build_split_prompt(
     out.push_str("[Conversation chunk to summarize]:\n");
     out.push_str(chunk);
     out
+}
+
+/// System instructions for independent MapReduce map calls. A map call has no
+/// preceding-summary continuity: its range label is the sole provenance for
+/// every fact it emits.
+pub(super) const MAP_SUMMARIZER_SYSTEM: &str = "\
+You extract durable task state from one independent segment of an AI coding
+session. You do not see earlier or later segments.
+Rules:
+- Use only facts supported by the supplied immutable source range.
+- Preserve exact constraints, decisions and their rationale, invalidations,
+  completed and open work, file paths, symbols, commands, errors, and evidence.
+- Distinguish completed work from proposed or partially completed work.
+- Record contradictions or missing context under Unresolved Conflicts.
+- Respect the requested output limit; prefer terse bullets.
+- Never invent continuity with another segment and never mention compaction.";
+
+pub(super) fn build_map_prompt(
+    ordinal: usize,
+    ranges: &[ContextItemRange],
+    transcript: &str,
+    target_tokens: usize,
+) -> String {
+    format!(
+        "Summarize map segment {ordinal} covering exactly {}. Keep the result under approximately {target_tokens} tokens.\n\n\
+         Output exactly these headings:\n\
+         ## Source Ranges\n\
+         ## Objective and Constraints\n\
+         ## Decisions\n\
+         ## Invalidations\n\
+         ## Completed Work\n\
+         ## Open Work\n\
+         ## Artifacts and Evidence\n\
+         ## Unresolved Conflicts\n\n\
+         Under Source Ranges, repeat exactly: {}\n\n\
+         [Independent immutable source segment]\n{}",
+        format_ranges(ranges),
+        format_ranges(ranges),
+        transcript,
+    )
+}
+
+/// System instructions for every reduction level. A reducer reconciles the
+/// complete ordered set it receives instead of greedily continuing a prior
+/// summary. It may request a bounded raw reread when provenance conflicts.
+pub(super) const REDUCE_SUMMARIZER_SYSTEM: &str = "\
+You reconcile ordered, range-addressed summaries of an AI coding session.
+Build a globally consistent continuation state: deduplicate facts, remove
+explicitly invalidated state, preserve decisions, constraints, evidence, and
+open work, and never promote proposals to completed work.
+If an important conflict cannot be resolved from the supplied summaries,
+output only `REREAD: start-end,...` using context item IDs from their covered
+ranges. Otherwise follow the requested output structure exactly. Never invent
+facts and never mention compaction.";
+
+pub(super) fn build_reduce_prompt(
+    level: usize,
+    ranges: &[ContextItemRange],
+    summaries: &str,
+    final_group: bool,
+) -> String {
+    let output = if final_group {
+        SUMMARY_TEMPLATE
+    } else {
+        "Return one self-contained structured intermediate summary. Begin with a `## Source Ranges` heading containing the exact union supplied below, then retain objective/constraints, decisions, invalidations, completed work, open work, artifacts/evidence, and unresolved conflicts."
+    };
+    format!(
+        "Reduce level {level}, covering exactly {}.\n\n{output}\n\n\
+         Preserve chronological precedence: a later supported decision or invalidation supersedes an earlier one. If source summaries materially conflict and the correct state matters, use the REREAD protocol instead of guessing.\n\n\
+         [Ordered summaries]\n{}",
+        format_ranges(ranges),
+        summaries,
+    )
+}
+
+pub(super) const VALIDATOR_SYSTEM: &str = "\
+You audit a candidate continuation checkpoint against range-addressed map
+summaries. Check especially that user constraints, decisions, invalidations,
+completed versus open work, blockers, and the immediate next action survived
+accurately. Output exactly `PASS` when no material omission or contradiction
+exists. Otherwise output terse correction instructions supported by the map
+summaries. Never add unsupported facts.";
+
+pub(super) fn build_validation_prompt(candidate: &str, summaries: &str) -> String {
+    format!(
+        "[Candidate checkpoint]\n{candidate}\n\n\
+         [Map summaries to audit]\n{summaries}\n\n\
+         Return PASS or precise correction instructions."
+    )
+}
+
+pub(super) fn build_correction_prompt(candidate: &str, audits: &[String]) -> String {
+    format!(
+        "Correct the candidate checkpoint using every audit below. Do not lose accurate candidate details and do not add unsupported facts.\n\n\
+         {SUMMARY_TEMPLATE}\n\n\
+         [Candidate checkpoint]\n{candidate}\n\n\
+         [Validation audits]\n{}",
+        audits
+            .iter()
+            .enumerate()
+            .map(|(index, audit)| format!("[Audit {}]\n{}", index + 1, audit))
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    )
+}
+
+fn format_ranges(ranges: &[ContextItemRange]) -> String {
+    ranges
+        .iter()
+        .map(|range| format!("#{}-#{}", range.start_id, range.end_id))
+        .collect::<Vec<_>>()
+        .join(", ")
 }

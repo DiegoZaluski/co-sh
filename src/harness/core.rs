@@ -1216,7 +1216,202 @@ impl Harness {
         }
     }
 
-    /// Drive the split-and-concatenate contingency to completion.
+    /// Drive the active long-context contingency to completion. New work uses
+    /// hierarchical MapReduce; persisted legacy split state keeps its original
+    /// execution path so upgrades never strand an in-progress session.
+    async fn split_context(
+        &mut self,
+        tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
+    ) -> bool {
+        if self.context_manager.split_active() {
+            self.legacy_split_context(tx).await
+        } else {
+            self.map_reduce_context(tx).await
+        }
+    }
+
+    /// Build a checkpoint from independent map summaries, recursively reduce
+    /// the complete ordered set, then audit the candidate before committing.
+    /// Accepted staging remains range-addressed and resumable on any failure;
+    /// the committed model view is unchanged until validation succeeds.
+    async fn map_reduce_context(
+        &mut self,
+        tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
+    ) -> bool {
+        use super::events::{HarnessEvent, LlmCompactionEvent, ToastVariant};
+
+        let model = self.connector.effective_model().unwrap_or("?").to_string();
+        if !self.context_manager.map_reduce_active() {
+            let window = self
+                .known_split_window()
+                .unwrap_or_else(|| self.context_manager.max_tokens());
+            if !self.context_manager.begin_map_reduce(window) {
+                return false;
+            }
+        }
+
+        let _ = tx.send(HarnessEvent::LlmCompaction {
+            event: LlmCompactionEvent::Started,
+        });
+        let result = self.drive_map_reduce(tx).await;
+        self.compaction_generic_retries = 0;
+        match &result {
+            Err(CompactionErr::Other(message)) => {
+                let _ = tx.send(HarnessEvent::Toast {
+                    message: format!("LLM compaction failed: {message}"),
+                    variant: ToastVariant::Error,
+                });
+            }
+            Err(CompactionErr::ContextWindow { window_tokens }) => {
+                if let Some(window) = window_tokens {
+                    self.remember_error_window(*window);
+                }
+                self.context_manager.mark_overflow(&model);
+                self.notify_context_overflow(tx);
+            }
+            Err(CompactionErr::Interrupted) | Ok(_) => {}
+        }
+        let ok = result.is_ok_and(|committed| committed);
+        let _ = tx.send(HarnessEvent::LlmCompaction {
+            event: if ok {
+                LlmCompactionEvent::Finished
+            } else {
+                LlmCompactionEvent::Failed
+            },
+        });
+        ok
+    }
+
+    async fn drive_map_reduce(
+        &mut self,
+        tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
+    ) -> Result<bool, CompactionErr> {
+        loop {
+            if let Some(request) = self
+                .context_manager
+                .pending_map_requests()
+                .into_iter()
+                .next()
+            {
+                let summary = self
+                    .summarize_checkpoint_request(&request.system, &request.prompt, tx)
+                    .await?;
+                if !self
+                    .context_manager
+                    .accept_map_summary(request.ordinal, &summary)
+                {
+                    return Err(CompactionErr::Other(
+                        "could not accept a MapReduce segment summary".into(),
+                    ));
+                }
+                continue;
+            }
+
+            if let Some(request) = self.context_manager.next_reduce_request() {
+                let mut summary = self
+                    .summarize_checkpoint_request(&request.system, &request.prompt, tx)
+                    .await?;
+                let reread = self.context_manager.parse_reread_request(&summary);
+                if summary.trim().starts_with("REREAD:") && reread.is_empty() {
+                    return Err(CompactionErr::Other(
+                        "reducer requested an invalid source range".into(),
+                    ));
+                }
+                if !reread.is_empty() {
+                    let conflict = self
+                        .context_manager
+                        .conflict_reduce_request(&request, &reread)
+                        .ok_or_else(|| {
+                            CompactionErr::Other("reducer requested an invalid source range".into())
+                        })?;
+                    summary = self
+                        .summarize_checkpoint_request(&conflict.system, &conflict.prompt, tx)
+                        .await?;
+                    if summary.trim().starts_with("REREAD:") {
+                        return Err(CompactionErr::Other(
+                            "reducer could not resolve a conflict after raw reread".into(),
+                        ));
+                    }
+                }
+                if !self
+                    .context_manager
+                    .accept_reduce_summary(&request, &summary)
+                {
+                    return Err(CompactionErr::Other(
+                        "could not accept a MapReduce reduction".into(),
+                    ));
+                }
+                continue;
+            }
+
+            if let Some(request) = self.context_manager.next_validation_request() {
+                let audit = self
+                    .summarize_checkpoint_request(&request.system, &request.prompt, tx)
+                    .await?;
+                if !self.context_manager.accept_validation(&request, &audit) {
+                    return Err(CompactionErr::Other(
+                        "could not accept a checkpoint validation result".into(),
+                    ));
+                }
+                continue;
+            }
+
+            if let Some(request) = self.context_manager.correction_request() {
+                let corrected = self
+                    .summarize_checkpoint_request(&request.system, &request.prompt, tx)
+                    .await?;
+                if !self.context_manager.accept_correction(&corrected) {
+                    return Err(CompactionErr::Other(
+                        "could not accept a corrected checkpoint".into(),
+                    ));
+                }
+                continue;
+            }
+
+            return Ok(self.context_manager.commit_map_reduce());
+        }
+    }
+
+    async fn summarize_checkpoint_request(
+        &mut self,
+        system: &str,
+        prompt: &str,
+        tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
+    ) -> Result<String, CompactionErr> {
+        use super::events::HarnessEvent;
+
+        let mut retries = 0usize;
+        loop {
+            let mut summary = String::new();
+            match self
+                .stream_summarize_for_compaction(system, prompt, |chunk| {
+                    summary.push_str(chunk);
+                    let _ = tx.send(HarnessEvent::LlmCompactionToken {
+                        text: chunk.to_string(),
+                    });
+                })
+                .await
+            {
+                Ok(()) if !summary.trim().is_empty() => return Ok(summary),
+                Ok(()) => {
+                    return Err(CompactionErr::Other(
+                        "summarizer returned an empty response".into(),
+                    ));
+                }
+                Err(CompactionErr::Other(error)) => {
+                    retries += 1;
+                    if retries >= MAX_COMPACTION_RETRIES {
+                        return Err(CompactionErr::Other(error));
+                    }
+                    tokio::time::sleep(compaction_retry_backoff(retries)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    /// Drive a persisted legacy split-and-concatenate contingency to
+    /// completion.
     ///
     /// The timeline is summarized in sequential chunks (whole items, in
     /// historical order) by the split summarizer; each returned summary is
@@ -1227,7 +1422,7 @@ impl Harness {
     ///
     /// Returns whether the split was committed. `false` means the context is
     /// unchanged — the caller marks the overflow stuck and notifies the user.
-    async fn split_context(
+    async fn legacy_split_context(
         &mut self,
         tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
     ) -> bool {
@@ -2357,7 +2552,7 @@ impl Harness {
             // single-shot compaction transcript would itself overflow the
             // provider — drive the split-and-concatenate path instead (a
             // restored in-progress split is always resumed).
-            if self.context_manager.split_active()
+            if self.context_manager.compaction_staging_active()
                 || self
                     .known_split_window()
                     .is_some_and(|w| self.context_manager.display_info().total_tokens > w)
@@ -2588,7 +2783,7 @@ impl Harness {
                     // hold: when its window is known and the estimate exceeds
                     // it, drive the split contingency BEFORE retrying the
                     // request (an in-progress split is always resumed).
-                    if self.context_manager.split_active()
+                    if self.context_manager.compaction_staging_active()
                         || self
                             .known_split_window()
                             .is_some_and(|w| self.context_manager.display_info().total_tokens > w)

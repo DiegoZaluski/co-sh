@@ -14,10 +14,15 @@
 //! long as it remains in the timeline.
 
 mod error_catalog;
+mod map_reduce;
 mod split;
 mod summarize;
 
 pub use error_catalog::error_catalog_window;
+pub use map_reduce::{
+    MapReducePhase, MapReduceState, MapRequest, MapSegment, ReduceRequest, SegmentSlice,
+    SummaryNode, ValidationRequest,
+};
 pub use split::{SplitChunkRequest, SplitState};
 use summarize::{SUMMARIZER_SYSTEM, build_llm_prompt, serialize_item};
 #[cfg(test)]
@@ -193,8 +198,9 @@ impl ContextItem {
 /// (`Done`/`Stopped`/`Error`/`ContextSnapshot`) and handed to the TUI for
 /// persistence. Nothing is in-flight between save and restore — the snapshot
 /// is a plain clone. `overflow_model` records the stuck context-window
-/// overflow, and `split` the staging of an in-progress
-/// split-and-concatenate, plus the deterministic model-view selectors.
+/// overflow, `map_reduce` the current checkpoint-construction staging, and
+/// `split` any legacy split-and-concatenate staging, plus the deterministic
+/// model-view selectors.
 ///
 /// The timeline is APPEND-ONLY: nothing is ever removed by compaction, the
 /// useless-chain sweep or the abandoned-input cleanup. Those events only move
@@ -220,8 +226,13 @@ pub struct ContextManagerState {
     /// stuck overflow.
     pub overflow_model: Option<String>,
     /// Staging of an in-progress split-and-concatenate, so an interrupted
-    /// split resumes exactly where it stopped.
+    /// split written by an older version resumes exactly where it stopped.
     pub split: Option<SplitState>,
+    /// Range-addressed, resumable staging for hierarchical checkpoint
+    /// construction. It contains references and derived summaries, never a
+    /// second copy of the authoritative raw transcript.
+    #[serde(default)]
+    pub map_reduce: Option<MapReduceState>,
     /// Legacy compaction boundary. New checkpoints derive coverage from their
     /// own exact ranges, but this remains for replaying histories written by
     /// older versions without rewriting them.
@@ -245,6 +256,7 @@ impl Default for ContextManagerState {
             max_tokens: MAX_CONTEXT_TOKENS,
             overflow_model: None,
             split: None,
+            map_reduce: None,
             visible_from: None,
             hidden: HashSet::new(),
             masked: HashSet::new(),
@@ -311,12 +323,14 @@ pub struct ContextManager {
     /// so a stuck session stays notified across turns until the user switches
     /// the model or starts a new session.
     overflow_model: Option<String>,
-    /// Persistent staging of the split-and-concatenate contingency. The
-    /// timeline is untouched while it is `Some`; the buffer is committed
-    /// atomically by [`Self::commit_split`]. Included in the transport
-    /// projection and persisted as a context delta so an interrupted split
-    /// resumes exactly where it stopped.
+    /// Legacy persistent staging for split-and-concatenate histories. New
+    /// contingencies use range-addressed MapReduce, but an interrupted legacy
+    /// split must remain resumable after an upgrade.
     split: Option<SplitState>,
+    /// Persistent, range-addressed MapReduce staging. The committed model view
+    /// is untouched while this is `Some`; only a validated final summary is
+    /// appended as a checkpoint.
+    map_reduce: Option<MapReduceState>,
     /// Legacy compaction boundary retained for backward-compatible replay.
     /// New checkpoint coverage is derived from `Compaction::covered_ranges`.
     visible_from: Option<u64>,
@@ -375,7 +389,7 @@ fn masked_tool_result(id: u64) -> String {
     )
 }
 
-fn coalesce_ranges(ids: &[u64]) -> Vec<ContextItemRange> {
+pub(super) fn coalesce_ranges(ids: &[u64]) -> Vec<ContextItemRange> {
     let mut ranges: Vec<ContextItemRange> = Vec::new();
     for &id in ids {
         match ranges.last_mut() {
@@ -389,7 +403,7 @@ fn coalesce_ranges(ids: &[u64]) -> Vec<ContextItemRange> {
     ranges
 }
 
-fn merge_ranges(mut ranges: Vec<ContextItemRange>) -> Vec<ContextItemRange> {
+pub(super) fn merge_ranges(mut ranges: Vec<ContextItemRange>) -> Vec<ContextItemRange> {
     ranges.sort_unstable_by_key(|range| (range.start_id, range.end_id));
     let mut merged: Vec<ContextItemRange> = Vec::new();
     for range in ranges {
@@ -415,6 +429,7 @@ impl ContextManager {
             encoding: TokenEncoding::Cl100k,
             overflow_model: None,
             split: None,
+            map_reduce: None,
             visible_from: None,
             hidden: HashSet::new(),
             masked: HashSet::new(),
@@ -617,7 +632,16 @@ impl ContextManager {
     /// it was already loaded via `with_history`).
     pub fn last_user_equals(&self, text: &str) -> bool {
         matches!(
-            self.items.back(),
+            self.items
+                .iter()
+                .rev()
+                .find(|item| {
+                    !self.is_hidden(item)
+                        && !matches!(
+                            item,
+                            ContextItem::Compaction { .. } | ContextItem::Error { .. }
+                        )
+                }),
             Some(ContextItem::User { original, .. }) if original == text
         )
     }
@@ -910,7 +934,11 @@ impl ContextManager {
     /// result needs an earlier matching call to keep native tool structure
     /// valid.
     fn recent_raw_start(&self) -> usize {
-        let target = self.max_tokens.saturating_mul(RECENT_RAW_PCT) / 100;
+        self.recent_raw_start_for(self.max_tokens)
+    }
+
+    fn recent_raw_start_for(&self, max_tokens: usize) -> usize {
+        let target = max_tokens.saturating_mul(RECENT_RAW_PCT) / 100;
         let mut held = 0usize;
         let mut start = self.items.len();
         for (idx, item) in self.items.iter().enumerate().rev() {
@@ -958,11 +986,15 @@ impl ContextManager {
     /// whole-view behavior. A single item larger than the budget is selected
     /// whole because no non-empty tail/source split exists.
     fn checkpoint_source_indices(&self) -> Vec<usize> {
+        self.checkpoint_source_indices_for(self.max_tokens)
+    }
+
+    fn checkpoint_source_indices_for(&self, max_tokens: usize) -> Vec<usize> {
         let mut visible = self.all_visible_source_indices();
         if self.manual_compaction {
             return visible;
         }
-        let raw_start = self.recent_raw_start();
+        let raw_start = self.recent_raw_start_for(max_tokens);
         let mut source: Vec<usize> = visible
             .iter()
             .copied()
@@ -977,7 +1009,7 @@ impl ContextManager {
             .fold(0usize, |total, &idx| {
                 total.saturating_add(self.visible_item_tokens(&self.items[idx]))
             });
-        let raw_target = self.max_tokens.saturating_mul(RECENT_RAW_PCT) / 100;
+        let raw_target = max_tokens.saturating_mul(RECENT_RAW_PCT) / 100;
         if raw_tokens > raw_target {
             // Pair-preserving expansion (or one giant newest item) can make
             // the supposedly recent tail larger than its entire reservation.
@@ -985,7 +1017,8 @@ impl ContextManager {
             // commit a checkpoint that cannot relieve pressure.
             return visible;
         }
-        if source.is_empty() && self.total_tokens() >= self.normal_trigger() {
+        if source.is_empty() && self.total_tokens() >= max_tokens.saturating_mul(COMPACT_PCT) / 100
+        {
             // Pathological one-item context: preserving a raw tail would leave
             // nothing to checkpoint and cannot relieve the overflow.
             source = std::mem::take(&mut visible);
@@ -1075,6 +1108,15 @@ impl ContextManager {
     }
 
     fn apply_summary_to_source(&mut self, summary: String, source: &[usize]) -> bool {
+        self.apply_summary_to_source_with_trigger(summary, source, self.normal_trigger())
+    }
+
+    fn apply_summary_to_source_with_trigger(
+        &mut self,
+        summary: String,
+        source: &[usize],
+        trigger: usize,
+    ) -> bool {
         if source.is_empty() || summary.trim().is_empty() {
             return false;
         }
@@ -1086,7 +1128,7 @@ impl ContextManager {
             .saturating_sub(removed_tokens)
             .saturating_add(self.encoding.estimate(&summary))
             .saturating_add(self.todo.tokens(self.encoding));
-        if projected >= self.normal_trigger() {
+        if projected >= trigger {
             // A degenerate summary is not a state transition. Keep the current
             // model view intact so failure and retry are genuinely atomic.
             return false;
@@ -1330,6 +1372,7 @@ impl ContextManager {
             max_tokens: self.max_tokens,
             overflow_model: self.overflow_model.clone(),
             split: self.split.clone(),
+            map_reduce: self.map_reduce.clone(),
             visible_from: self.visible_from,
             hidden: self.hidden.clone(),
             masked: self.masked.clone(),
@@ -1347,6 +1390,7 @@ impl ContextManager {
         // Split progress is REAL progress (the buffer + cursor) — a restored
         // session resumes the split exactly where it stopped.
         self.split = state.split.clone();
+        self.map_reduce = state.map_reduce.clone();
         self.visible_from = state.visible_from;
         self.hidden = state.hidden.clone();
         self.masked = state.masked.clone();

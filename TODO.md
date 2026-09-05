@@ -63,20 +63,27 @@ conflict, and validate that decisions, constraints, and open work survived.
 - [x] `cargo clippy --lib --bin cosh --no-default-features -- -D warnings` passed.
 - [x] Targeted `rustfmt --check` and `git diff --check` passed.
 
-## Phase 2 — Independent map segments and hierarchical reduction (current)
+## Phase 2 — Independent map segments and hierarchical reduction (complete)
 
-- [ ] Replace greedy split staging with versioned MapReduce staging while retaining a deserialization path for legacy `SplitState`.
-- [ ] Partition the selected checkpoint source into independent token-bounded segments without continuity tails; record exact item ranges and stable segment ordinals.
-- [ ] Make every map prompt produce a self-contained structured mini-summary containing its source range and explicit decisions, constraints, invalidations, completed work, open work, artifacts, and unresolved conflicts.
-- [ ] Store successful map outputs independently and idempotently so interrupted work resumes without regenerating completed segments.
-- [ ] Build a reducer request over all ordered mini-summaries; if that request cannot fit, recursively reduce bounded groups while preserving the union of their source ranges.
-- [ ] Add a reducer conflict protocol that can request bounded raw item ranges and rerun reduction with those excerpts.
-- [ ] Add a validation pass that audits the candidate against all mapped summaries and either accepts it or returns a corrected final checkpoint.
-- [ ] Commit only the validated final checkpoint; abort/interrupt leaves the prior view unchanged and all raw events reachable.
-- [ ] Add unit tests for range partitioning, ordering, interruption/resume, recursive reduction, conflict re-read, validation correction/failure, oversized single items, and atomic commit.
-- [ ] Validate focused context and harness tests; mark Phase 2 complete before starting Phase 3.
+- [x] Replace greedy split staging with versioned MapReduce staging while retaining a deserialization path for legacy `SplitState`.
+- [x] Partition the selected checkpoint source into independent token-bounded segments without continuity tails; record exact item ranges and stable segment ordinals.
+- [x] Make every map prompt produce a self-contained structured mini-summary containing its source range and explicit decisions, constraints, invalidations, completed work, open work, artifacts, and unresolved conflicts.
+- [x] Store successful map outputs independently and idempotently so interrupted work resumes without regenerating completed segments.
+- [x] Build a reducer request over all ordered mini-summaries; if that request cannot fit, recursively reduce bounded groups while preserving the union of their source ranges.
+- [x] Add a reducer conflict protocol that can request bounded raw item ranges and rerun reduction with those excerpts.
+- [x] Add a validation pass that audits the candidate against all mapped summaries and either accepts it or returns a corrected final checkpoint.
+- [x] Commit only the validated final checkpoint; abort/interrupt leaves the prior view unchanged and all raw events reachable.
+- [x] Add unit tests for range partitioning, ordering, interruption/resume, recursive reduction, conflict re-read, validation correction/failure, oversized single items, and atomic commit.
+- [x] Validate focused context and harness tests; mark Phase 2 complete before starting Phase 3.
 
-## Phase 3 — Parallel mapping with sequential provider fallback
+### Phase 2 validation record
+
+- [x] `cargo test --lib --no-default-features`: 225 passed, 1 ignored.
+- [x] `cargo test --bin cosh --no-default-features`: 416 passed, 16 ignored. One fork-title test failed in the first parallel run, passed alone, and passed in the full rerun.
+- [x] `cargo clippy --lib --bin cosh --no-default-features -- -D warnings` passed.
+- [x] Targeted Rust formatting and `git diff --check` passed.
+
+## Phase 3 — Parallel mapping with sequential provider fallback (current)
 
 - [ ] Add bounded concurrent map execution using cloned no-tools connectors and stable ordinal-based result placement.
 - [ ] Preserve cancellation, per-request usage reporting, retry classification, and deterministic test behavior under concurrency.

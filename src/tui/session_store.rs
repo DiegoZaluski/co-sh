@@ -898,6 +898,7 @@ fn diff_context(
                 max_tokens: requested.max_tokens,
                 overflow_model: requested.overflow_model.clone(),
                 split: requested.split.clone(),
+                map_reduce: Box::new(requested.map_reduce.clone()),
                 visible_from: requested.visible_from,
                 hidden: requested.hidden.clone(),
                 masked: requested.masked.clone(),
@@ -953,6 +954,13 @@ fn diff_context(
         deltas.push(Delta::Context {
             change: ContextDelta::Split {
                 value: requested.split.clone(),
+            },
+        });
+    }
+    if !serialized_equal(&current.map_reduce, &requested.map_reduce) {
+        deltas.push(Delta::Context {
+            change: ContextDelta::MapReduce {
+                value: Box::new(requested.map_reduce.clone()),
             },
         });
     }
@@ -1236,6 +1244,7 @@ mod tests {
             max_tokens: 100_000,
             overflow_model: None,
             split: None,
+            map_reduce: None,
             visible_from: None,
             hidden: Default::default(),
             masked: Default::default(),
@@ -1722,6 +1731,7 @@ mod tests {
             max_tokens: 100_000,
             overflow_model: None,
             split: None,
+            map_reduce: None,
             visible_from: None,
             hidden: HashSet::new(),
             masked: HashSet::new(),
@@ -1745,6 +1755,10 @@ mod tests {
             window: 64_000,
             buffer_tokens: 2,
         });
+        let mut staging_manager = cosh::harness::context::ContextManager::new(128);
+        staging_manager.add_user(&"map source ".repeat(200));
+        assert!(staging_manager.begin_map_reduce(128));
+        changed.map_reduce = staging_manager.save_state().map_reduce;
         changed.visible_from = Some(2);
         changed.hidden.insert(1);
         store.save_session_with_context(&session, &changed);
@@ -1759,6 +1773,7 @@ mod tests {
         assert_eq!(restored.max_tokens, 64_000);
         assert_eq!(restored.overflow_model.as_deref(), Some("model-a"));
         assert!(restored.split.is_some());
+        assert!(restored.map_reduce.is_some());
         assert_eq!(restored.visible_from, Some(2));
         assert_eq!(restored.hidden, HashSet::from([1]));
 
@@ -1767,6 +1782,7 @@ mod tests {
         cleared.next_id = 10;
         cleared.overflow_model = None;
         cleared.split = None;
+        cleared.map_reduce = None;
         cleared.visible_from = None;
         cleared.hidden.clear();
         store.save_session_with_context(&session, &cleared);
@@ -1777,6 +1793,7 @@ mod tests {
         assert_eq!(restored.next_id, 10);
         assert_eq!(restored.overflow_model, None);
         assert!(restored.split.is_none());
+        assert!(restored.map_reduce.is_none());
         assert_eq!(restored.visible_from, None);
         assert!(restored.hidden.is_empty());
     }

@@ -997,17 +997,18 @@ async fn known_window_overflow_drives_split_and_commits_the_anchor() {
         )),
         "the giant history is RETAINED behind the anchor (append-only)"
     );
-    // The re-added in-flight input and the loop's final answer follow it.
+    // The in-flight input remains as the recent raw tail. Because the
+    // checkpoint is append-only it is physically written after that input,
+    // while model composition places the checkpoint before the raw tail.
     assert!(
-        matches!(
-            &items[anchor_idx + 1],
-            ContextItem::User { original, .. } if original == "hi"
-        ),
-        "the in-flight input is re-added after the split; items={items:?}"
+        items
+            .iter()
+            .any(|item| matches!(item, ContextItem::User { original, .. } if original == "hi")),
+        "the in-flight input remains verbatim after MapReduce; items={items:?}"
     );
     assert!(
         matches!(
-            &items[anchor_idx + 2],
+            &items[anchor_idx + 1],
             ContextItem::Closure { content, .. } if content == "final answer"
         ),
         "the loop's final answer follows the anchor; items={items:?}"
@@ -1056,19 +1057,23 @@ async fn reactive_overflow_reports_window_and_drives_split_inside_llm_compact() 
     ]);
     h.context_manager.close_loop();
     // Mock CHAT queue: call 1 = the single-shot compaction summarizer, which
-    // fails with a ContextWindow that REPORTS the window (600); the rest =
-    // the split chunks, which succeed. The timeline at split time holds THREE
-    // items (the loaded history + the in-flight "hi" input); every chunk
-    // boundary is forced because each pair of remaining items together
-    // exceeds the tiny budget (window 600 − min(overhead, window/2) = 300)
-    // — so three chunks follow the overflow.
+    // reports a 600-token ContextWindow. Eight independent maps cover the two
+    // oversized source items, one reducer reconciles all maps, and a final
+    // validation passes. The in-flight "hi" stays in the recent raw tail.
     let overflow = format!("{CONTEXT_WINDOW_MARKER}:600");
     h = h
         .with_mock_chats(vec![
             Err(overflow.as_str()),
-            Ok("## Objective\n- reactive chunk one"),
-            Ok("## Objective\n- reactive chunk two"),
-            Ok("## Objective\n- reactive chunk three"),
+            Ok("## Source Ranges\n- reactive map"),
+            Ok("## Source Ranges\n- reactive map"),
+            Ok("## Source Ranges\n- reactive map"),
+            Ok("## Source Ranges\n- reactive map"),
+            Ok("## Source Ranges\n- reactive map"),
+            Ok("## Source Ranges\n- reactive map"),
+            Ok("## Source Ranges\n- reactive map"),
+            Ok("## Source Ranges\n- reactive map"),
+            Ok("## Objective\n- reactive final"),
+            Ok("PASS"),
         ])
         .with_mock_stream(Ok(vec!["final answer"]));
 
@@ -1150,7 +1155,7 @@ async fn reactive_overflow_reports_window_and_drives_split_inside_llm_compact() 
         )),
         "the split resolves the overflow without the stuck-provider warning; events={events:?}"
     );
-    // The split chunks streamed to the TUI as one continuous box.
+    // Every MapReduce phase currently streams through the same compaction box.
     let streamed: String = events
         .iter()
         .filter_map(|e| match e {
@@ -1159,8 +1164,8 @@ async fn reactive_overflow_reports_window_and_drives_split_inside_llm_compact() 
         })
         .collect();
     assert!(
-        streamed.contains("reactive chunk one") && streamed.contains("reactive chunk three"),
-        "every split chunk must stream; streamed={streamed:?}"
+        streamed.contains("reactive map") && streamed.contains("reactive final"),
+        "map and reduce calls must stream; streamed={streamed:?}"
     );
     assert!(
         events
@@ -1169,20 +1174,17 @@ async fn reactive_overflow_reports_window_and_drives_split_inside_llm_compact() 
         "the loop completes; events={events:?}"
     );
 
-    // Append-only commit: the concatenated anchor is appended; the old
-    // timeline is retained but hidden behind the boundary.
+    // Append-only commit: the validated checkpoint is appended; the old
+    // timeline is retained and covered only in the derived view.
     let anchor = items.iter().find_map(|it| match it {
-        ContextItem::Compaction { summary, .. }
-            if summary.contains("reactive chunk one")
-                && summary.contains("reactive chunk three") =>
-        {
+        ContextItem::Compaction { summary, .. } if summary.contains("reactive final") => {
             Some(summary.clone())
         }
         _ => None,
     });
     assert!(
         anchor.is_some(),
-        "the concatenated buffer is the new anchor; items={items:?}"
+        "the reduced checkpoint is the new anchor; items={items:?}"
     );
     assert!(
         items.iter().any(|it| matches!(
