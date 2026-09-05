@@ -1,91 +1,102 @@
-# Append-only session history refactor
+# Layered context compaction refactor
+
+## Goal
+
+Replace the greedy split-and-concatenate contingency with a recoverable layered
+context policy:
+
+`deterministic masking + structured state + recent raw window + referenced checkpoints + reset/handoff`
+
+When one-shot compaction cannot fit the active model, use hierarchical
+MapReduce: summarize independent event ranges, reduce the complete set of
+range-addressed summaries, re-read raw ranges when the reducer reports a
+conflict, and validate that decisions, constraints, and open work survived.
 
 ## Non-negotiable invariants
 
-- [x] Every write to an existing session JSONL uses append mode only.
-- [x] A session JSONL is the only authoritative record for metadata, display messages, context state, branches, revert, rollback, and deletion.
-- [x] Every persisted state transition is a typed `Delta`; `Genesis` is the first delta of every new history.
-- [x] Previously written bytes are never replaced, truncated, copied over, or removed by a session operation.
-- [x] `Reference` identifies a reconstructable state in a history; branches and history actions store references rather than duplicated session snapshots.
-- [x] A fork is a logical branch in its parent's JSONL and never creates or copies a JSONL.
-- [x] Revert and rollback append deltas; original events remain reachable in history.
-- [x] Snapshots, caches, summaries, and display/context structures are projections only and can be rebuilt from deltas.
-- [x] Legacy JSONL remains readable and can receive append-only deltas without migration rewrites.
+- [ ] Session JSONL remains the sole authoritative history and strictly append-only.
+- [ ] Masking, checkpoints, MapReduce progress, reset/handoff, retries, and fallback decisions persist only as new deltas.
+- [ ] Raw context items remain reconstructable; masking and checkpoints affect only the derived model view.
+- [ ] Every checkpoint and mapped summary identifies the exact context item range it covers.
+- [ ] A recent high-fidelity window remains raw and in chronological order after checkpointing.
+- [ ] Protected task state, user constraints, decisions, and open work cannot be silently discarded by deterministic masking.
+- [ ] A failed, interrupted, or partial compaction never changes the committed model view.
+- [ ] Legacy histories and legacy in-progress split state remain readable without rewriting existing bytes.
+- [ ] Provider concurrency failures fall back to bounded sequential mapping without losing successful segment results.
+- [ ] Existing behavior is preserved unless it conflicts with the layered context architecture.
 
-## Lifecycle and violation inventory (analysis complete)
+## Lifecycle analysis and violation inventory (complete)
 
-- [x] Session creation currently exists only in memory until a valid dialogue save, then `write_session` creates a mutable header plus full message/item snapshots.
-- [x] Normal, incremental, stopped, error, model-selection, session-switch, and title saves all route to `persist`/`write_session`, which atomically replaces the entire JSONL.
-- [x] Header metadata (`title`, `title_generated`, `provider`, `model`, `reasoning`) and context bookkeeping (`next_id`, token budget, overflow, split, visibility boundary, hidden IDs) are rewritten on every save.
-- [x] Display messages are rewritten as full-file projections; streaming changes and `ctx_ids` updates replace earlier records rather than record transitions.
-- [x] Context items append in memory except for closure promotion; visibility, hidden IDs, overflow, split staging, token budget, and counters mutate snapshot fields and are persisted by header replacement.
-- [x] `load_ctx_filtered` physically filters projected context for revert/fork; subsequent save replaces the history with the filtered state.
-- [x] Revert truncates display messages, snapshots the whole file to `/tmp`, filters context, and rewrites the live JSONL.
-- [x] `/undo` copies a saved JSONL over the live file, then queues another full rewrite.
-- [x] Fork clones/truncates the session and context into a new session ID and a new JSONL, duplicating state.
-- [x] Session deletion and retention eviction remove JSONL files, which is incompatible with immutable history.
-- [x] Loads treat line 1 as a special header and body records as the latest complete snapshot rather than projecting deltas.
-- [x] `ContextManagerState` is the runtime/harness transfer snapshot; it must remain a derived value while persistence converts state differences into deltas.
-- [x] No distinct persisted `Hidden`/`Sample` types currently exist; hidden visibility and split/compaction staging are covered by context-state deltas, with the schema remaining extensible for future state variants.
+- [x] Context ingestion is centralized in `ContextManager`; user, assistant, tool call/result, closure, compaction, and display-only error items receive monotonic IDs.
+- [x] The current deterministic pass hides only explicitly useless tool chains and abandoned/cancelled debris; useful historical tool results remain raw until LLM compaction.
+- [x] `build_messages` currently projects every visible item in timeline order, then appends the protected live TODO block at the tail.
+- [x] Automatic compaction runs before the first model request and after tool dispatch when estimated visible tokens reach 80% of the effective model window.
+- [x] Manual `/compact` forces the same LLM path by temporarily setting the trigger to zero.
+- [x] One-shot compaction serializes the entire visible projection, updates a previous compaction anchor when present, and hides every pre-existing item behind a new summary boundary.
+- [x] Provider overflow in the main request or one-shot summarizer enters `split_context`; known window discovery and provider-reported windows size the contingency.
+- [x] The current split staging is a growing concatenated buffer plus cursor and 1,200-character continuity tail; chunks are sequential, never globally reconciled, and a single oversized item is still sent whole.
+- [x] Split progress is transport state persisted through `ContextDelta::Split`; the final anchor is committed only after all chunks succeed, but the harness does not currently emit a persistence snapshot after each chunk.
+- [x] Generic summarizer errors use bounded retries; context-window errors abort the split, mark the active model stuck, and notify the user until a model switch or successful compaction clears it.
+- [x] Fallback model switches rebuild the connector, tokenizer, tools, and window; an active split is resumed before retrying the main request.
+- [x] Summarizer calls use the active connector without tools, share the stop signal, stream text into one TUI compaction box, and report provider usage after each completed call.
+- [x] The append-only session store diffs `ContextManagerState` into item, visibility, hidden-set, overflow, split, and budget deltas; replay reconstructs branch-local context state.
+- [x] Existing `Compaction` items are structured Markdown anchors but do not record their covered item range and always replace the whole visible projection rather than preserving a recent raw window.
+- [x] Large bash/web outputs already use recoverable head/middle/tail truncation before entering context; masking must compose with those references instead of creating another authoritative store.
+- [x] The live TODO block is already protected structured state, but the remaining objective/decision/open-work state exists only inside free-form compaction summaries.
 
-## Phase 1 — Event schema and pure projection engine (complete)
+## Phase 1 — Deterministic masking and referenced checkpoint composition (current)
 
-- [x] Define versioned event-envelope, `Delta`, `Reference`, branch selector, metadata/message/context mutation, snapshot marker, revert, rollback, fork, and tombstone types in `session_history`.
-- [x] Make `Genesis` a regular delta containing only initial state needed to begin one history/branch.
-- [x] Implement a pure replay projection that derives all logical branches, current heads, session metadata/messages/`ctx_ids`, and `ContextManagerState` from ordered events.
-- [x] Implement reference resolution for exact event states and message-prefix selections, including visibility-marker repair when a selected prefix excludes a compaction anchor.
-- [x] Add legacy parsing as a synthetic immutable base projection; do not rewrite or discard legacy bytes.
-- [x] Add focused schema/replay tests for genesis, mutations, references, revert, rollback, fork inheritance, tombstones, corrupt tails, and legacy input.
-- [x] Validate with targeted session-store and context tests.
+- [ ] Define serializable item-range/checkpoint metadata and a persisted masked-result set with backward-compatible defaults.
+- [ ] Add deterministic masking for reacted-to historical tool results while preserving a configurable recent raw token window and valid tool-call/result pairing.
+- [ ] Render masked results as typed, range-addressable placeholders while retaining their original content in the authoritative history and in-memory projection.
+- [ ] Change compaction planning to select an old prefix for checkpointing while preserving recent raw items; include previous checkpoints in the selected source state.
+- [ ] Commit a checkpoint atomically with exact covered ranges, hide only its covered source items, and compose the checkpoint before the remaining raw tail regardless of append position.
+- [ ] Persist/replay masked IDs and checkpoint metadata through append-only context deltas, including legacy defaults and visibility repair.
+- [ ] Add focused tests for masking safety, raw-window preservation, chronological composition, checkpoint references, restore/replay, revert/fork compatibility, and byte-prefix immutability.
+- [ ] Validate context-manager and session-history/store tests; mark Phase 1 complete before starting Phase 2.
 
-## Phase 2 — Strict append writer and snapshot-to-delta synchronization (complete)
+## Phase 2 — Independent map segments and hierarchical reduction
 
-- [x] Replace full-file serialization/atomic rename with a single FIFO append writer that assigns monotonic event IDs and appends complete newline-delimited deltas.
-- [x] On first persistence, append `Genesis`; on later persistence, diff the requested `Session`/optional `ContextManagerState` against the replayed branch projection and append only typed mutations.
-- [x] Cover metadata/title/model/reasoning, message create/update/remove, `ctx_ids`, context item append/replace, `next_id`, token budget, overflow, split, visible boundary, and hidden-set changes.
-- [x] Ensure display-only saves preserve context by simply omitting context mutations.
-- [x] Make load/list/summary/has-session resolve projected logical branches, including branches stored in another session ID's history file.
-- [x] Replace physical delete and retention eviction with append-only logical tombstones; keep histories on disk.
-- [x] Add byte-prefix invariant tests proving every save/title/model/context/delete path leaves all prior bytes identical.
-- [x] Validate targeted tests, formatting, and compile checks.
+- [ ] Replace greedy split staging with versioned MapReduce staging while retaining a deserialization path for legacy `SplitState`.
+- [ ] Partition the selected checkpoint source into independent token-bounded segments without continuity tails; record exact item ranges and stable segment ordinals.
+- [ ] Make every map prompt produce a self-contained structured mini-summary containing its source range and explicit decisions, constraints, invalidations, completed work, open work, artifacts, and unresolved conflicts.
+- [ ] Store successful map outputs independently and idempotently so interrupted work resumes without regenerating completed segments.
+- [ ] Build a reducer request over all ordered mini-summaries; if that request cannot fit, recursively reduce bounded groups while preserving the union of their source ranges.
+- [ ] Add a reducer conflict protocol that can request bounded raw item ranges and rerun reduction with those excerpts.
+- [ ] Add a validation pass that audits the candidate against all mapped summaries and either accepts it or returns a corrected final checkpoint.
+- [ ] Commit only the validated final checkpoint; abort/interrupt leaves the prior view unchanged and all raw events reachable.
+- [ ] Add unit tests for range partitioning, ordering, interruption/resume, recursive reduction, conflict re-read, validation correction/failure, oversized single items, and atomic commit.
+- [ ] Validate focused context and harness tests; mark Phase 2 complete before starting Phase 3.
 
-## Phase 3 — Reference-based revert, rollback, snapshots, and fork (complete)
+## Phase 3 — Parallel mapping with sequential provider fallback
 
-- [x] Replace `load_ctx_filtered` and destructive revert persistence with a `Revert` delta referencing the selected pre-message state/prefix.
-- [x] Represent undo versions as persistent history references created by revert events; remove `/tmp` JSONL copies and restore-overwrite behavior.
-- [x] Make `/undo` append `Rollback` pointing at the chosen pre-revert reference, then reload the derived branch view.
-- [x] Make fork append one `Fork` delta to the parent's history with a parent/base reference and new branch metadata; never create a child JSONL or duplicate complete state.
-- [x] Update app cache/sidebar/session switching so logical branch IDs load from their shared history and refresh after head changes.
-- [x] Preserve prompt restoration, titles, model selection, context/message prefix semantics, and working-state guards.
-- [x] Add tests proving revert/rollback/fork leave the physical file prefix intact, retain original history, reconstruct exact views, and keep one JSONL.
-- [x] Validate message-action, undo, session-store, and app tests.
+- [ ] Add bounded concurrent map execution using cloned no-tools connectors and stable ordinal-based result placement.
+- [ ] Preserve cancellation, per-request usage reporting, retry classification, and deterministic test behavior under concurrency.
+- [ ] Detect provider/rate/concurrency failures, retain successful map outputs, and retry only incomplete segments sequentially with bounded backoff.
+- [ ] Treat a genuine per-segment context overflow as a repartition signal rather than a concurrency failure.
+- [ ] Emit incremental context snapshots after each accepted map/reduce result so resumable staging is actually durable.
+- [ ] Make TUI progress phase-aware without interleaving parallel mini-summary text into a misleading final-summary stream.
+- [ ] Add tests for out-of-order completion, partial parallel failure, sequential fallback, cancellation, usage events, persistence snapshots, and exactly-once segment acceptance.
+- [ ] Validate harness and TUI compaction tests; mark Phase 3 complete before starting Phase 4.
 
-## Phase 4 — Context-manager delta semantics and persistence integration audit (complete)
+## Phase 4 — Structured handoff and lifecycle integration
 
-- [x] Expose/centralize context-state comparison or mutation helpers so every persisted context change has an explicit context delta rather than opaque header bookkeeping.
-- [x] Verify closure promotion, useless-chain/abandoned-input hiding, compaction boundaries, split begin/advance/commit/abort, overflow/model changes, and max-token changes round-trip through replay.
-- [x] Treat harness `ContextManagerState` and emitted snapshots as transport/projection objects only; document that they are not authoritative persisted snapshots.
-- [x] Audit every session-store caller and every filesystem mutation for bypasses; remove obsolete header/filter/copy/atomic-rewrite code and stale comments.
-- [x] Add reconstruction tests spanning incremental saves, compaction, hidden state, interrupted split, resume, revert across compaction, fork, and rollback.
-- [x] Validate context, harness, session-store, and TUI tests.
+- [ ] Refine the checkpoint schema/prompt into protected task state: objective, constraints, decisions with provenance, file/artifact references, verified work, active work, blockers, and next action.
+- [ ] Ensure stale facts can be explicitly invalidated and do not survive merely because they appeared in an older checkpoint.
+- [ ] Use the composed checkpoint plus recent raw tail as a clean handoff after automatic, manual, reactive-overflow, and fallback-model compaction paths.
+- [ ] Ensure queued user input remains verbatim and is never consumed solely into a checkpoint.
+- [ ] Update overflow/stuck semantics so single-shot, map, reduce, validation, and main-request failures choose the correct recovery path without retry loops.
+- [ ] Update event names, UI copy, module/type documentation, and tests from split/concatenate terminology to checkpoint/MapReduce terminology.
+- [ ] Add end-to-end tests spanning repeated checkpoints, model changes, manual compaction, provider overflow, fallback models, stop/resume, rollback, revert, and fork.
+- [ ] Validate context, harness, session-store, and TUI suites; mark Phase 4 complete before starting Phase 5.
 
-## Phase 5 — Final invariant validation and cleanup (complete)
+## Phase 5 — Final invariant and quality validation
 
-- [x] Add a repository-level regression test or test helper that records file bytes before each supported operation and asserts the old bytes remain an exact prefix afterward.
-- [x] Verify one physical JSONL for a root session plus all forks and no `/tmp` session snapshots.
-- [x] Run `cargo fmt --check` and the relevant Clippy/build checks.
-- [x] Run the full test suite (and feature-gated checks where practical).
-- [x] Re-scan for `write`, `rename`, truncate, copy, and remove operations targeting session JSONL files; document any non-session JSONL operations as out of scope.
-- [x] Update module/type documentation to describe immutable event history, projections, references, and logical branches in English.
-- [x] Mark all invariants complete only after the final audit passes.
-
-## Final validation record
-
-- [x] `cargo test --bin cosh --no-default-features`: 415 passed, 16 ignored.
-- [x] Focused history/store tests: 9 history tests and 36 store tests passed.
-- [x] `cargo clippy --bin cosh --no-default-features -- -D warnings` passed.
-- [x] All changed Rust files pass targeted `rustfmt --check`; `git diff --check` passes.
-- [x] `cargo test --workspace --no-default-features` was run. The changed application and context suites passed; the workspace ended with two unrelated `cosh-sdk` gateway tests that expected a missing-key error but reached their `127.0.0.1:1` network sentinel instead.
-- [x] Repository-wide `cargo fmt --check` was run. It remains blocked by pre-existing formatting drift in `src/harness/context/todo_ctxt.rs`, `src/tui/app/mouse.rs`, `src/tui/app/tests/sidebar_mouse.rs`, and `src/tui/routes/session/question.rs`; those unrelated files were not reformatted.
-- [x] Workspace-wide strict Clippy was run. It remains blocked by the pre-existing `clippy::let_unit_value` finding in `src/harness/test/agent_loop_test.rs`; the affected binary target passes strict Clippy.
-- [x] Final mutation scan found only the append-mode writer in production session persistence. Other JSONL persistence (`usage.jsonl`) and the context error catalog are separate stores and out of scope.
+- [ ] Replay long immutable traces comparing the old greedy contingency, masking-only, one-shot checkpointing, sequential MapReduce, and parallel MapReduce.
+- [ ] Measure task-state retention, critical constraint/decision recall, stale-fact removal, open-work survival, token reduction, request count, latency, and recovery behavior.
+- [ ] Cover adversarial traces: one huge item, repeated compactions, changed files after reads, repeated failures, conflicting summaries, and compaction across revert/fork/rollback.
+- [ ] Prove every supported compaction operation leaves all previous JSONL bytes as an exact prefix and creates no second authoritative state store.
+- [ ] Re-scan persistence and context code for truncation, overwrite, unreferenced summaries, destructive rollback, or view state that cannot be rebuilt from deltas.
+- [ ] Run formatting, targeted Clippy/build checks, full workspace tests, and feature-gated checks where practical.
+- [ ] Record validation results and any unrelated pre-existing failures here.
+- [ ] Mark every invariant complete only after the final audit passes.
