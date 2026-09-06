@@ -259,6 +259,7 @@ impl App {
                         is_start: true,
                         is_streaming: false,
                         cached_line_count: None,
+                        lsp_notes: None,
                     });
                     match session.messages.last_mut() {
                         Some(msg) if msg.role == MessageRole::Assistant => msg.parts.push(part),
@@ -296,6 +297,7 @@ impl App {
                                 is_start: false,
                                 is_streaming: false,
                                 cached_line_count: None,
+                                lsp_notes: None,
                             };
                             crate::routes::session::tool_render::tool_inline_text(&temp_part)
                         };
@@ -477,6 +479,24 @@ impl App {
                     }
                     if finished {
                         self.state.right_panel.complete_last_pty(output.clone());
+                    }
+                }
+
+                HarnessEvent::ToolDiagnostics { tool, notes } => {
+                    // Emitted right before the matching ToolResult, while the
+                    // fs tool part is still Running: attach the findings so
+                    // the renderer can draw them below the output block.
+                    let Some(session) = self.state.current_session_mut() else {
+                        continue;
+                    };
+                    for part in session.messages.iter_mut().rev().flat_map(|m| &mut m.parts) {
+                        if let Part::Tool(tp) = part
+                            && tp.status == ToolStatus::Running
+                            && tp.tool == tool
+                        {
+                            tp.lsp_notes = Some(notes);
+                            break;
+                        }
                     }
                 }
 

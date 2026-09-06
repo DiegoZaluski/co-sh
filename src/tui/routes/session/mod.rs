@@ -157,6 +157,13 @@ fn hash_parts(msg: &Message) -> u64 {
                 if let Some(ref id) = t.tool_call_id {
                     hasher.write(id.as_bytes());
                 }
+                if let Some(notes) = &t.lsp_notes {
+                    for note in notes.errors.iter().chain(notes.warnings.iter()) {
+                        hasher.write(note.path.as_bytes());
+                        hasher.write(&note.line.to_le_bytes());
+                        hasher.write(note.message.as_bytes());
+                    }
+                }
             }
             Part::Reasoning(r) => {
                 hasher.write(r.text.as_bytes());
@@ -1340,6 +1347,14 @@ impl SessionView {
                     if is_block && y < bottom {
                         y += 1;
                     }
+
+                    // Passive LSP findings: errors red, warnings yellow, one
+                    // clipped line each, directly below the code/diff block.
+                    if let Some(notes) = &tool.lsp_notes
+                        && matches!(tool.status, ToolStatus::Completed)
+                    {
+                        y = Self::render_lsp_notes(buf, x, y, max_w, theme, notes);
+                    }
                 }
                 Part::Reasoning(r) => {
                     let expanded = tool_state.is_expanded_or(
@@ -1519,6 +1534,7 @@ impl SessionView {
                 // matches the drawn box even mid-loop (Running bash/glob with
                 // streamed output already draw their box).
                 let is_block = Self::tool_is_block(t);
+                let notes_h = Self::lsp_notes_height(t);
                 if is_block {
                     let output = t.output.as_deref().unwrap_or("").trim();
                     // Add 2 rows for the block's internal padding (top/bottom border lines),
@@ -1596,6 +1612,7 @@ impl SessionView {
                 } else {
                     1
                 }
+                .saturating_add(notes_h)
             }
             Part::Reasoning(r) => {
                 if r.text.is_empty() {
@@ -1628,6 +1645,44 @@ impl SessionView {
             }
             Part::Text(_) => 0,
         }
+    }
+
+    /// One clipped line per passive LSP finding, only for completed tools:
+    /// must stay in sync with the notes drawn at the end of the
+    /// `Part::Tool` branch in `render_parts`.
+    fn lsp_notes_height(t: &ToolPart) -> u16 {
+        match (&t.lsp_notes, &t.status) {
+            (Some(n), ToolStatus::Completed) => {
+                (n.errors.len() + n.warnings.len()).min(u16::MAX as usize) as u16
+            }
+            _ => 0,
+        }
+    }
+
+    /// Draw the passive LSP findings below a tool's output block: errors in
+    /// the theme's error color, warnings in its warning color.
+    fn render_lsp_notes(
+        buf: &mut Buffer,
+        x: u16,
+        y: u16,
+        max_w: u16,
+        theme: &Theme,
+        notes: &cosh_tools::fs::LspNotes,
+    ) -> u16 {
+        let error_style = Style::default().fg(rgba_color(theme.error));
+        let warning_style = Style::default().fg(rgba_color(theme.warning));
+        let mut y = y;
+        for note in &notes.errors {
+            let line = format!("\u{2717} {}:{} {}", note.path, note.line, note.message);
+            draw_text_line(buf, &line, x, y, max_w, error_style);
+            y += 1;
+        }
+        for note in &notes.warnings {
+            let line = format!("\u{26a0} {}:{} {}", note.path, note.line, note.message);
+            draw_text_line(buf, &line, x, y, max_w, warning_style);
+            y += 1;
+        }
+        y
     }
 
     fn render_queued_badge(buf: &mut Buffer, x: u16, y: u16, theme: &Theme) {

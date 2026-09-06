@@ -115,6 +115,10 @@ pub struct ToolPart {
     /// Cached line count for streaming tools (glob/grep) to avoid O(n) recounting
     #[serde(skip)]
     pub cached_line_count: Option<u32>,
+    /// Passive LSP findings collected by the fs tool that produced this part
+    /// (errors red, warnings yellow, rendered below the output block).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lsp_notes: Option<cosh_tools::fs::LspNotes>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -260,6 +264,7 @@ mod tests {
             is_start: true,
             is_streaming: false,
             cached_line_count: None,
+            lsp_notes: None,
         })
     }
 

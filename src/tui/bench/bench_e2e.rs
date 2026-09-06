@@ -279,6 +279,7 @@ async fn bench_e2e_agent_loop() {
                         is_start: false,
                         is_streaming: false,
                         cached_line_count: None,
+                        lsp_notes: None,
                     }),
                 ],
                 created_at: r as u64 * 1000 + 1,

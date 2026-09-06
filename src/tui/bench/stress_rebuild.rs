@@ -72,6 +72,7 @@ fn big_session(n_rounds: usize, file_lines: usize) -> Vec<Message> {
                     is_start: false,
                     is_streaming: false,
                     cached_line_count: None,
+                    lsp_notes: None,
                 }),
             ],
             created_at: r as u64 * 1000 + 1,

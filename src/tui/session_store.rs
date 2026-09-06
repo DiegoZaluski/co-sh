@@ -2302,6 +2302,7 @@ mod tests {
                         is_start: true,
                         is_streaming: false,
                         cached_line_count: None,
+                        lsp_notes: None,
                     })],
                     created_at: 2000,
                     agent: None,

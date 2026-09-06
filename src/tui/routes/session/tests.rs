@@ -951,6 +951,7 @@ fn test_bash_output_expand_toggles_and_grows_height() {
                 is_start: true,
                 is_streaming: false,
                 cached_line_count: None,
+                lsp_notes: None,
             }),
         ],
         created_at: 0,
@@ -1052,6 +1053,7 @@ fn test_bash_output_collapse_shrinks_without_scroll_gap() {
                 is_start: true,
                 is_streaming: false,
                 cached_line_count: None,
+                lsp_notes: None,
             }),
         ],
         created_at: 0,
@@ -1124,6 +1126,7 @@ fn test_running_bash_click_can_expand_box() {
             is_start: true,
             is_streaming: false,
             cached_line_count: None,
+            lsp_notes: None,
         })],
         created_at: 0,
         agent: None,
@@ -1180,6 +1183,7 @@ fn test_completed_bash_click_expands_while_new_content_streams() {
             is_start: true,
             is_streaming: false,
             cached_line_count: None,
+            lsp_notes: None,
         })],
         created_at: 0,
         agent: None,
@@ -1291,6 +1295,7 @@ fn test_running_glob_click_can_expand_streaming_box() {
             is_start: true,
             is_streaming: true,
             cached_line_count: Some(20),
+            lsp_notes: None,
         })],
         created_at: 0,
         agent: None,
@@ -1368,6 +1373,7 @@ fn test_completed_bash_click_expands_below_wrapped_message_with_matching_widths(
             is_start: true,
             is_streaming: false,
             cached_line_count: None,
+            lsp_notes: None,
         })],
         created_at: 0,
         agent: None,
@@ -1512,6 +1518,7 @@ fn test_completed_bash_click_expands_while_status_working() {
             is_start: true,
             is_streaming: false,
             cached_line_count: None,
+            lsp_notes: None,
         })],
         created_at: 0,
         agent: None,
@@ -1592,6 +1599,7 @@ fn test_glob_output_expand_shows_grouped_list() {
                 is_start: true,
                 is_streaming: false,
                 cached_line_count: None,
+                lsp_notes: None,
             }),
         ],
         created_at: 0,
@@ -1696,6 +1704,7 @@ fn test_bash_output_with_control_chars_does_not_pollute_cells() {
             is_start: true,
             is_streaming: false,
             cached_line_count: None,
+            lsp_notes: None,
         })],
         created_at: 0,
         agent: None,
@@ -2114,6 +2123,7 @@ fn state_with_bash_block(session_id: &str, line: &str) -> AppState {
                 is_start: false,
                 is_streaming: false,
                 cached_line_count: None,
+                lsp_notes: None,
             })],
             created_at: 0,
             agent: None,
@@ -2494,6 +2504,7 @@ fn bench_tool_message(idx: usize, out_size: usize) -> Message {
             is_start: false,
             is_streaming: false,
             cached_line_count: None,
+            lsp_notes: None,
         })],
         created_at: 0,
         agent: None,
@@ -3491,6 +3502,7 @@ fn glob_part(tool_call_id: &str, n: usize, status: ToolStatus) -> Part {
         is_start: true,
         is_streaming: false,
         cached_line_count: None,
+        lsp_notes: None,
     })
 }
 
@@ -3506,6 +3518,7 @@ fn bash_part(tool_call_id: &str, n: usize, status: ToolStatus) -> Part {
         is_start: true,
         is_streaming: false,
         cached_line_count: None,
+        lsp_notes: None,
     })
 }
 
@@ -3538,6 +3551,7 @@ fn read_part(tool_call_id: &str, n: usize, status: ToolStatus) -> Part {
         is_start: true,
         is_streaming: false,
         cached_line_count: None,
+        lsp_notes: None,
     })
 }
 
@@ -4556,6 +4570,7 @@ fn question_tool_part(status: ToolStatus) -> ToolPart {
         is_start: true,
         is_streaming: false,
         cached_line_count: None,
+        lsp_notes: None,
     }
 }
 
@@ -4721,6 +4736,7 @@ fn tool_inline_texts_have_no_trailing_ellipsis() {
                 is_start: true,
                 is_streaming: false,
                 cached_line_count: None,
+                lsp_notes: None,
             };
             let text = tool_inline_text(&part);
             assert!(
