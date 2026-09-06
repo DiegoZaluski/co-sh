@@ -111,14 +111,11 @@ pub fn validate_mcp_entry(entry: &McpServerEntry) -> Result<(), McpError> {
             Ok(())
         }
         McpTransport::Http(http) => {
-            match url::Url::parse(http.url.trim()) {
-                Ok(parsed) if matches!(parsed.scheme(), "http" | "https") && parsed.has_host() => {}
-                _ => {
-                    return Err(McpError::InvalidConfig(
-                        entry.name.clone(),
-                        "URL must be http(s):// with a host".to_string(),
-                    ));
-                }
+            if !is_valid_http_url(&http.url) {
+                return Err(McpError::InvalidConfig(
+                    entry.name.clone(),
+                    "URL must be http(s):// with a host".to_string(),
+                ));
             }
             if http.timeout_ms == 0 || http.timeout_ms > MAX_HTTP_TIMEOUT_MS {
                 return Err(McpError::InvalidConfig(
@@ -131,9 +128,9 @@ pub fn validate_mcp_entry(entry: &McpServerEntry) -> Result<(), McpError> {
     }
 }
 
-/// Whether `url` is an `http(s)://` URL with a host. Shared by entry
-/// validation and the registration wizard so both reject the same shapes.
-pub fn is_valid_http_url(url: &str) -> bool {
+/// Whether `url` is an `http(s)://` URL with a host. Single definition of
+/// the accepted shape, shared by entry validation.
+fn is_valid_http_url(url: &str) -> bool {
     match url::Url::parse(url.trim()) {
         Ok(parsed) => matches!(parsed.scheme(), "http" | "https") && parsed.has_host(),
         Err(_) => false,

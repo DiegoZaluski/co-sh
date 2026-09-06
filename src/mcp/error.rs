@@ -9,9 +9,6 @@ use thiserror::Error;
 /// arrive, revisit with structured sources instead of string matching.
 #[derive(Debug, Error)]
 pub enum McpError {
-    #[error("MCP server '{0}' is disabled")]
-    Disabled(String),
-
     #[error("MCP server '{0}' has an invalid configuration: {1}")]
     InvalidConfig(String, String),
 

@@ -250,12 +250,14 @@ impl McpManager {
         E: std::error::Error + Send + Sync + 'static,
     {
         let connect = async {
-            let client = ().serve(transport).await.map_err(|err| err.to_string())?;
+            let client = ().serve(transport).await.map_err(|err| {
+                McpError::Connect(entry_name.to_string(), err.to_string())
+            })?;
             let tools = client
                 .list_all_tools()
                 .await
-                .map_err(|err| err.to_string())?;
-            Ok::<_, String>((client, tools))
+                .map_err(|err| McpError::ListTools(entry_name.to_string(), err.to_string()))?;
+            Ok::<_, McpError>((client, tools))
         };
         // The configured per-call budget also bounds the handshake from
         // below: a server allowed slow calls gets a slow handshake too.
@@ -266,8 +268,7 @@ impl McpManager {
             .await
             .map_err(|_| {
                 McpError::Connect(entry_name.to_string(), "handshake timed out".to_string())
-            })?
-            .map_err(|err| McpError::Connect(entry_name.to_string(), err))?;
+            })??;
         self.failures.remove(entry_name);
         self.running.insert(
             entry_name.to_string(),
