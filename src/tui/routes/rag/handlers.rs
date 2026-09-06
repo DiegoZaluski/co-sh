@@ -15,6 +15,7 @@ use super::render::{
     PREVIEW_OVERLAY_WIDTH_PCT, SHOW_DESC_BTN_TEXT, TRASH_EMOJI_WIDTH,
 };
 use super::view::RagView;
+use crate::util::field_selection::DragSelection;
 
 // Keyboard handling
 
@@ -824,9 +825,10 @@ impl RagView {
     /// clamping to the field's start/end when the drag leaves its rows.
     /// Returns `true` when a selection is active (even if the byte did not move).
     pub fn extend_field_selection_at(&mut self, mouse: &MouseEvent, area: Rect) -> bool {
-        let Some((focus, _, _)) = self.field_selection else {
+        let Some(sel) = &self.field_selection else {
             return false;
         };
+        let focus = sel.field();
         let Some((name_y, name_lines, desc_y, desc_lines)) = self.create_db_field_y_ranges(area)
         else {
             return false;
@@ -889,33 +891,31 @@ impl RagView {
             CreateDbFocus::Name => self.db_name_cursor_pos = byte,
             CreateDbFocus::Description => self.db_description_cursor_pos = byte,
         }
-        self.field_selection = Some((focus, byte, byte));
+        self.field_selection = Some(DragSelection::anchor(focus, byte));
     }
 
     /// Extend the active drag selection to `byte` (the anchor stays fixed, so
     /// dragging backwards still selects the range in between).
     pub fn extend_field_selection(&mut self, byte: usize) {
-        if let Some((focus, start, _)) = self.field_selection {
-            self.field_selection = Some((focus, start, byte));
+        if let Some(sel) = self.field_selection.as_mut() {
+            sel.extend(byte);
         }
     }
 
     pub fn has_field_selection(&self) -> bool {
-        matches!(self.field_selection, Some((_, s, e)) if s != e)
+        self.field_selection.is_some_and(|sel| sel.is_active())
     }
 
     /// Text covered by the active selection in the raw input of the field.
     pub fn selected_field_text(&self) -> String {
-        let Some((focus, s, e)) = self.field_selection else {
+        let Some(sel) = &self.field_selection else {
             return String::new();
         };
-        let input = match focus {
+        let input = match sel.field() {
             CreateDbFocus::Name => &self.db_name_input,
             CreateDbFocus::Description => &self.db_description_input,
         };
-        let start = s.min(e).min(input.len());
-        let end = s.max(e).min(input.len());
-        input[start..end].to_string()
+        sel.slice_of(sel.field(), input).unwrap_or_default()
     }
 
     pub fn clear_field_selection(&mut self) {

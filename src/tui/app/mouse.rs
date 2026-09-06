@@ -146,6 +146,14 @@ impl App {
                     }
                 }
 
+                // Press inside a registration-panel value row (hook, MCP
+                // server) anchors a drag selection, mirroring the
+                // create-db fields. Labels, padding and outside clicks
+                // fall through to the dialog click dispatch on release.
+                if self.is_registration_form_open() && self.start_form_selection_at(x, y) {
+                    return Ok(true);
+                }
+
                 // Click in the visible right panel → focus that slot (bash
                 // toggle / a specific agent queue) and start a drag
                 // selection on the bash / subagent section under the cursor.
@@ -194,6 +202,11 @@ impl App {
                     if self.rag_view.extend_field_selection_at(&mouse, tools_area) {
                         return Ok(true);
                     }
+                }
+                // Drag with a registration-panel selection active extends
+                // it (same contract as the create-db fields).
+                if self.is_registration_form_open() && self.extend_form_selection_at(x, y) {
+                    return Ok(true);
                 }
                 if self.state.right_panel.has_selection() {
                     self.state.right_panel.update_drag_selection(x, y);
@@ -286,6 +299,13 @@ impl App {
                         let text = self.rag_view.selected_field_text();
                         selection::copy_selection(&text, &mut self.toast_state);
                         self.rag_view.clear_field_selection();
+                        return Ok(true);
+                    }
+
+                    // Auto-copy a registration-panel drag selection on
+                    // release. A plain click (no range) falls through to
+                    // the dialog click dispatch below (focus/dismiss).
+                    if self.copy_form_selection_on_release() {
                         return Ok(true);
                     }
 

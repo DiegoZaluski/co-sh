@@ -198,12 +198,23 @@ fn highlight_selection(
     let end = end.min(text.len());
     while p < end {
         let rp = render_byte_offset(&insertions, p).min(render.len());
-        let (row, col) = wrapped_cursor_pos(&render[..rp], value_w);
-        if row < area.height && col < area.width {
-            if let Some(cell) = buf.cell_mut((area.x + col, area.y + row)) {
-                cell.set_fg(rgba_color(field_bg));
-                cell.set_bg(rgba_color(field_fg));
+        let (mut row, mut col) = wrapped_cursor_pos(&render[..rp], value_w);
+        // The walk parks the caret before `p` on the previous line when the
+        // line is exactly full (`col == value_w`); the char itself wraps to
+        // the start of the next row — unless it is whitespace, which the
+        // renderer drops at a wrap (no drawn cell to highlight).
+        if col >= value_w {
+            let wraps = text[p..].chars().next().is_some_and(|c| !c.is_whitespace());
+            if wraps {
+                (row, col) = (row + 1, 0);
             }
+        }
+        if row < area.height
+            && col < area.width
+            && let Some(cell) = buf.cell_mut((area.x + col, area.y + row))
+        {
+            cell.set_fg(rgba_color(field_bg));
+            cell.set_bg(rgba_color(field_fg));
         }
         p += text[p..].chars().next().map_or(1, |c| c.len_utf8());
     }
@@ -718,9 +729,9 @@ impl RagView {
                 primary,
             );
         }
-        if let Some((focus, s, e)) = self.field_selection
-            && focus == CreateDbFocus::Name
-            && s != e
+        if let Some(sel) = &self.field_selection
+            && sel.field() == CreateDbFocus::Name
+            && let Some((s, e)) = sel.range_for(sel.field(), self.db_name_input.len())
         {
             highlight_selection(
                 buf,
@@ -791,9 +802,9 @@ impl RagView {
                 primary,
             );
         }
-        if let Some((focus, s, e)) = self.field_selection
-            && focus == CreateDbFocus::Description
-            && s != e
+        if let Some(sel) = &self.field_selection
+            && sel.field() == CreateDbFocus::Description
+            && let Some((s, e)) = sel.range_for(sel.field(), self.db_description_input.len())
         {
             highlight_selection(
                 buf,
@@ -1497,6 +1508,7 @@ mod tests {
         use crate::routes::rag::models::CreateDbFocus;
         use crate::routes::rag::view::RagView;
         use crate::theme::ThemeRegistry;
+        use crate::util::field_selection::DragSelection;
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
 
@@ -1507,7 +1519,8 @@ mod tests {
         view.create_db_focus = CreateDbFocus::Name;
         view.db_name_input = "hello world".into();
         view.db_name_cursor_pos = 5;
-        view.field_selection = Some((CreateDbFocus::Name, 0, 5));
+        view.field_selection = Some(DragSelection::anchor(CreateDbFocus::Name, 0));
+        view.extend_field_selection(5);
 
         let mut buf = Buffer::empty(area);
         view.render(&mut buf, area, &theme);
@@ -1516,7 +1529,7 @@ mod tests {
         let form_y = 2 + input_h;
         let name_y = form_y + 3;
         let value_x = 4 + 2 + 7;
-        let (name_lines, _) = view.create_db_field_lines(88);
+        let (_name_lines, _) = view.create_db_field_lines(88);
         // Selected cells (0..5 = "hello") must be painted dark-on-light:
         // fg = field background color, bg = field text color. The swap is
         // explicit because the markdown renderer leaves plain text fg=Reset.
@@ -1533,9 +1546,68 @@ mod tests {
                 "selection fg must be the field background color (dark text)"
             );
         }
-        // The rest of the line is untouched.
+        // The rest of the line renders normally: background untouched, and
+        // fg = the field text color that `render_markdown` applies to plain
+        // text (NOT Reset — only the selection inverts the colors).
         let cell = &buf[(value_x + 6, name_y)];
         assert_eq!(cell.bg, super::rgba_color(theme.background_element));
-        assert_eq!(cell.fg, ratatui::style::Color::Reset);
+        assert_eq!(cell.fg, super::rgba_color(theme.text));
+    }
+    #[test]
+    fn selection_highlight_covers_first_char_of_wrapped_row() {
+        // Regression: the char that starts a wrapped row used to be skipped
+        // by the highlight walk (its pre-char caret position parked on the
+        // exactly-full previous row, `col == value_w`, which the bounds
+        // guard dropped). The copied bytes were always correct — this was
+        // purely a visual bug.
+        use crate::routes::rag::models::CreateDbFocus;
+        use crate::routes::rag::view::RagView;
+        use crate::theme::ThemeRegistry;
+        use crate::util::field_selection::DragSelection;
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        // Narrow area so "abc def ghi jkl" wraps mid-selection.
+        let area = Rect::new(0, 0, 30, 40);
+        let theme = ThemeRegistry::new().default_theme().clone();
+        let sel_bg = super::rgba_color(theme.text);
+
+        let mut view = RagView::new();
+        view.toggle_create_db();
+        view.create_db_focus = CreateDbFocus::Description;
+        view.db_description_input = "abc def ghi jkl".into();
+        view.field_selection = Some(DragSelection::anchor(CreateDbFocus::Description, 8));
+        view.extend_field_selection(15);
+
+        let mut buf = Buffer::empty(area);
+        view.render(&mut buf, area, &theme);
+
+        let input_h = view.url_input.height(26);
+        let name_y = 2 + input_h + 3;
+        let (name_lines, desc_lines) = view.create_db_field_lines(18);
+        let desc_y = name_y + name_lines + 1;
+        let value_x = 13;
+
+        // Find the wrapped row: the first row after the description start
+        // whose first value cell holds a char that is part of the selection
+        // (bg = field text color). With sel 8..15 ("ghi jkl"), the wrap puts
+        // "jkl" on the next row — including the 'j'.
+        let mut checked = 0;
+        for row in 1..desc_lines {
+            let cell = &buf[(value_x, desc_y + row)];
+            if cell
+                .symbol()
+                .chars()
+                .next()
+                .is_some_and(|c| !c.is_whitespace())
+            {
+                assert_eq!(
+                    cell.bg, sel_bg,
+                    "first char of a wrapped row must be highlighted"
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 1, "exactly one wrapped row starts a selected word");
     }
 }

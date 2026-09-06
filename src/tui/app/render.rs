@@ -649,7 +649,6 @@ impl App {
                 _ => {}
             }
             let now = std::time::SystemTime::now();
-            self.toast_state.render(buf, area, &self.theme);
             // Sync terminal_focused to the dialog cursor so ThemeList/ModelList/ApiKeyInput
             // all respect the terminal focus state (blur when user clicks outside).
             if let Some(d) = self.dialog.current_mut() {
@@ -661,6 +660,11 @@ impl App {
             // whole input surface while visible (sovereign keys + mouse).
             self.slash_menu.render(buf, prompt_area, &self.theme);
             self.dialog.render(buf, area, &self.theme, now);
+            // Toasts render last so transient feedback (copied, not saved,
+            // unavailable clipboard) is never buried under a modal panel —
+            // the centered registration forms cover the top-right toast
+            // corner on compact terminals.
+            self.toast_state.render(buf, area, &self.theme);
         }
     }
 

@@ -63,8 +63,11 @@ impl App {
             }
             Event::Resize(_w, _h) => {}
             Event::Paste(text) => {
-                // If a text input dialog is visible, paste into the dialog input
-                if self.is_text_input_visible() {
+                // A registration panel (hook, MCP server) owns the
+                // keyboard while open: paste into its active field.
+                if self.is_registration_form_open() {
+                    self.paste_registration_form(&text);
+                } else if self.is_text_input_visible() {
                     if let Some(d) = self.dialog.current_mut()
                         && let DialogType::ApiKeyInput {
                             input, cursor_pos, ..

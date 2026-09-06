@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod field_selection;
 pub mod list_selection;
 pub mod markdown;
 pub mod scroll;

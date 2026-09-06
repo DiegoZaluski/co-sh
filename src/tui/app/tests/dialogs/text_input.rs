@@ -1,4 +1,4 @@
-use super::super::{App, HOME_LOCK, isolate_home, key};
+use super::super::{App, HOME_LOCK, isolate_home, key, mod_key};
 use crate::ui::dialogs::DialogType;
 use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -21,6 +21,7 @@ async fn hook_input_dialog_saves_valid_hook_and_rejects_invalid() {
         timeout: String::new(),
         field: 0,
         cursor_pos: 0,
+        selection: None,
     });
 
     // Invalid: no command yet → Enter keeps the dialog open.
@@ -59,6 +60,7 @@ async fn hook_input_dialog_esc_discards() {
         timeout: String::new(),
         field: 2,
         cursor_pos: 6,
+        selection: None,
     });
     assert!(app.handle_registration_form_key(key(KeyCode::Esc)));
     assert!(!app.dialog.visible());
@@ -134,13 +136,15 @@ async fn hook_input_click_positions_cursor() {
         timeout: String::new(),
         field: 2,
         cursor_pos: 6,
+        selection: None,
     });
 
     // Derive geometry from the SAME terminal size the app will use when
     // handling the click.
     let term = app.terminal_size();
     let values = ["", "", "exit 2", ""];
-    let (_, dialog_y, _, _, content_x, cols) = crate::ui::dialogs::form_panel_metrics(term, &values);
+    let (_, dialog_y, _, _, content_x, cols) =
+        crate::ui::dialogs::form_panel_metrics(term, &values);
     let cmd_value_row =
         crate::ui::dialogs::form_field_geometries(dialog_y, &values, cols)[2].value_y;
     use crossterm::event::{
@@ -223,10 +227,7 @@ async fn mcp_form_rejects_invalid_endpoint_and_keeps_edits() {
         assert!(app.handle_registration_form_key(key(KeyCode::Backspace)));
     }
     assert!(app.handle_registration_form_key(key(KeyCode::Enter)));
-    assert!(
-        app.dialog.visible(),
-        "blank endpoint keeps the panel open"
-    );
+    assert!(app.dialog.visible(), "blank endpoint keeps the panel open");
     assert!(
         matches!(
             app.dialog.current().map(|d| &d.dialog_type),
@@ -252,9 +253,10 @@ async fn mcp_form_rejects_duplicate_name_and_bad_timeout() {
     let _guard = HOME_LOCK.lock();
     isolate_home();
     let mut app = App::new("/tmp".to_string());
-    app.setup.mcp.servers.push(
-        cosh::mcp::build_mcp_entry("docs", "https://example.com/mcp", "").unwrap(),
-    );
+    app.setup
+        .mcp
+        .servers
+        .push(cosh::mcp::build_mcp_entry("docs", "https://example.com/mcp", "").unwrap());
     app.open_mcp_form();
 
     type_text(&mut app, "docs");
@@ -278,7 +280,10 @@ async fn mcp_form_rejects_duplicate_name_and_bad_timeout() {
         assert!(app.handle_registration_form_key(key(KeyCode::Backspace)));
     }
     assert!(app.handle_registration_form_key(key(KeyCode::Enter)));
-    assert!(!app.dialog.visible(), "blank timeout saves with the default");
+    assert!(
+        !app.dialog.visible(),
+        "blank timeout saves with the default"
+    );
     assert_eq!(app.setup.mcp.servers.len(), 2);
     assert_eq!(app.setup.mcp.servers[1].name, "docs-other");
 }
@@ -299,4 +304,425 @@ async fn mcp_form_esc_discards() {
         app.setup.mcp.servers.is_empty(),
         "esc must not persist anything"
     );
+}
+
+/// Ctrl+key event for driving the form's word ops in tests.
+fn ctrl(code: KeyCode) -> crossterm::event::KeyEvent {
+    mod_key(code, KeyModifiers::CONTROL)
+}
+
+/// Mouse helpers driving the form's press/drag/release selection flow.
+fn form_mouse(
+    kind: crossterm::event::MouseEventKind,
+    x: u16,
+    y: u16,
+) -> crossterm::event::MouseEvent {
+    crossterm::event::MouseEvent {
+        kind,
+        column: x,
+        row: y,
+        modifiers: KeyModifiers::NONE,
+    }
+}
+
+/// Value-row geometry of a hook form field, derived from the SAME
+/// terminal size the app uses when handling the mouse.
+fn hook_field_row(app: &App, values: &[&str], field: usize) -> (u16, u16) {
+    let term = app.terminal_size();
+    let (_, dialog_y, _, _, content_x, cols) = crate::ui::dialogs::form_panel_metrics(term, values);
+    let value_y = crate::ui::dialogs::form_field_geometries(dialog_y, values, cols)[field].value_y;
+    (content_x, value_y)
+}
+
+/// Press-drag-release over "exit 2" selects "xit": the release copies the
+/// RANGE (not the whole field) through the shared clipboard helper and
+/// clears the highlight.
+#[tokio::test]
+async fn registration_form_drag_selects_range_and_release_copies() {
+    use crossterm::event::{MouseButton as MBtn, MouseEventKind as MKind};
+
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.dialog.show(DialogType::HookInput {
+        event: crate::routes::settings::PRE_TOOL_USE_EVENT,
+        editing_index: None,
+        name: String::new(),
+        matcher: String::new(),
+        command: "exit 2".into(),
+        timeout: String::new(),
+        field: 2,
+        cursor_pos: 6,
+        selection: None,
+    });
+
+    let values = ["", "", "exit 2", ""];
+    let (content_x, value_y) = hook_field_row(&app, &values, 2);
+    app.handle_mouse_event(form_mouse(MKind::Down(MBtn::Left), content_x + 1, value_y))
+        .expect("press handled");
+    app.handle_mouse_event(form_mouse(MKind::Drag(MBtn::Left), content_x + 4, value_y))
+        .expect("drag handled");
+    assert!(
+        matches!(
+            app.dialog.current().map(|d| &d.dialog_type),
+            Some(DialogType::HookInput { selection, .. })
+                if matches!(
+                    selection.as_ref(),
+                    Some(sel) if sel.field() == 2 && sel.range_for(2, 6) == Some((1, 4))
+                )
+        ),
+        "drag anchors at char 1 and extends to char 4"
+    );
+
+    // Release over the panel: auto-copy consumes the range, clears the
+    // highlight, keeps the panel open.
+    app.handle_mouse_event(form_mouse(MKind::Up(MBtn::Left), content_x + 4, value_y))
+        .expect("release handled");
+    let toast = app
+        .toast_state
+        .current
+        .as_ref()
+        .expect("release shows the copy toast");
+    assert!(
+        toast.message.contains("3 chars"),
+        "the RANGE (xit) is copied, not the field: {:?}",
+        toast.message
+    );
+    assert!(
+        matches!(
+            app.dialog.current().map(|d| &d.dialog_type),
+            Some(DialogType::HookInput { selection, .. }) if selection.is_none()
+        ),
+        "release clears the highlight"
+    );
+    assert!(app.dialog.visible(), "copy keeps the panel open");
+}
+
+/// Typing and Backspace replace the selected range (standard editor
+/// behavior); the caret lands where the range started.
+#[tokio::test]
+async fn registration_form_typing_replaces_selected_range() {
+    use crossterm::event::{MouseButton as MBtn, MouseEventKind as MKind};
+
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.open_hook_form(crate::routes::settings::PRE_TOOL_USE_EVENT, None);
+    type_text(&mut app, "hello world");
+
+    let values = ["hello world", "", "", ""];
+    let (content_x, value_y) = hook_field_row(&app, &values, 0);
+    app.handle_mouse_event(form_mouse(MKind::Down(MBtn::Left), content_x + 6, value_y))
+        .expect("press handled");
+    app.handle_mouse_event(form_mouse(MKind::Drag(MBtn::Left), content_x + 11, value_y))
+        .expect("drag handled");
+
+    // Typing replaces "world".
+    assert!(app.handle_registration_form_key(key(KeyCode::Char('X'))));
+    assert!(
+        matches!(
+            app.dialog.current().map(|d| &d.dialog_type),
+            Some(DialogType::HookInput {
+                name,
+                cursor_pos,
+                selection,
+                ..
+            }) if name == "hello X" && *cursor_pos == 7 && selection.is_none()
+        ),
+        "typing swaps the range and parks the caret after it"
+    );
+
+    // Backspace over a fresh selection deletes just the range.
+    app.handle_mouse_event(form_mouse(MKind::Down(MBtn::Left), content_x + 6, value_y))
+        .expect("press handled");
+    app.handle_mouse_event(form_mouse(MKind::Drag(MBtn::Left), content_x + 7, value_y))
+        .expect("drag handled");
+    assert!(app.handle_registration_form_key(key(KeyCode::Backspace)));
+    assert!(
+        matches!(
+            app.dialog.current().map(|d| &d.dialog_type),
+            Some(DialogType::HookInput { name, .. }) if name == "hello "
+        ),
+        "Backspace deletes only the selected range"
+    );
+}
+
+/// First Esc drops the highlight (prompt convention); the panel only
+/// discards on the next Esc.
+#[tokio::test]
+async fn registration_form_esc_clears_selection_before_discarding() {
+    use crossterm::event::{MouseButton as MBtn, MouseEventKind as MKind};
+
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.dialog.show(DialogType::HookInput {
+        event: crate::routes::settings::PRE_TOOL_USE_EVENT,
+        editing_index: None,
+        name: String::new(),
+        matcher: String::new(),
+        command: "exit 2".into(),
+        timeout: String::new(),
+        field: 2,
+        cursor_pos: 6,
+        selection: None,
+    });
+
+    let values = ["", "", "exit 2", ""];
+    let (content_x, value_y) = hook_field_row(&app, &values, 2);
+    app.handle_mouse_event(form_mouse(MKind::Down(MBtn::Left), content_x + 1, value_y))
+        .expect("press handled");
+    app.handle_mouse_event(form_mouse(MKind::Drag(MBtn::Left), content_x + 4, value_y))
+        .expect("drag handled");
+
+    assert!(app.handle_registration_form_key(key(KeyCode::Esc)));
+    assert!(app.dialog.visible(), "first Esc only drops the highlight");
+    assert!(matches!(
+        app.dialog.current().map(|d| &d.dialog_type),
+        Some(DialogType::HookInput { selection, .. }) if selection.is_none()
+    ));
+    assert!(app.handle_registration_form_key(key(KeyCode::Esc)));
+    assert!(!app.dialog.visible(), "second Esc discards the panel");
+}
+
+/// Ctrl+C copies the selected range (not the whole field) and keeps the
+/// panel open.
+#[tokio::test]
+async fn registration_form_ctrl_c_copies_selected_range() {
+    use crossterm::event::{MouseButton as MBtn, MouseEventKind as MKind};
+
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.dialog.show(DialogType::HookInput {
+        event: crate::routes::settings::PRE_TOOL_USE_EVENT,
+        editing_index: None,
+        name: String::new(),
+        matcher: String::new(),
+        command: "exit 2".into(),
+        timeout: String::new(),
+        field: 2,
+        cursor_pos: 6,
+        selection: None,
+    });
+
+    let values = ["", "", "exit 2", ""];
+    let (content_x, value_y) = hook_field_row(&app, &values, 2);
+    app.handle_mouse_event(form_mouse(MKind::Down(MBtn::Left), content_x + 1, value_y))
+        .expect("press handled");
+    app.handle_mouse_event(form_mouse(MKind::Drag(MBtn::Left), content_x + 4, value_y))
+        .expect("drag handled");
+
+    assert!(app.copy_registration_form_field());
+    let toast = app
+        .toast_state
+        .current
+        .as_ref()
+        .expect("Ctrl+C shows the copy toast");
+    assert!(
+        toast.message.contains("3 chars"),
+        "the RANGE (xit) is copied, not the field: {:?}",
+        toast.message
+    );
+    assert!(app.is_registration_form_open());
+}
+
+/// The highlight paints exactly over the selected cells: covered cells
+/// wear swapped text/background colors, neighbors keep the panel style.
+#[tokio::test]
+async fn registration_form_selection_highlight_paints_selected_cells() {
+    use crossterm::event::{MouseButton as MBtn, MouseEventKind as MKind};
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.dialog.show(DialogType::HookInput {
+        event: crate::routes::settings::PRE_TOOL_USE_EVENT,
+        editing_index: None,
+        name: String::new(),
+        matcher: String::new(),
+        command: "exit 2".into(),
+        timeout: String::new(),
+        field: 2,
+        cursor_pos: 6,
+        selection: None,
+    });
+
+    let values = ["", "", "exit 2", ""];
+    let (content_x, value_y) = hook_field_row(&app, &values, 2);
+    app.handle_mouse_event(form_mouse(MKind::Down(MBtn::Left), content_x + 1, value_y))
+        .expect("press handled");
+    app.handle_mouse_event(form_mouse(MKind::Drag(MBtn::Left), content_x + 4, value_y))
+        .expect("drag handled");
+
+    let term = app.terminal_size();
+    let mut terminal = Terminal::new(TestBackend::new(term.width, term.height)).unwrap();
+    terminal.draw(|f| app.render(f, 0.016)).unwrap();
+    let buf = terminal.backend().buffer().clone();
+    let theme = app.theme.clone();
+
+    // Chars 1..4 ("xit") highlighted; char 0 ('e') untouched.
+    for (dx, expected) in [(1u16, true), (2, true), (3, true), (0, false), (4, false)] {
+        let bg = buf
+            .cell((content_x + dx, value_y))
+            .map(|c| c.bg)
+            .expect("panel cell exists");
+        assert_eq!(
+            bg,
+            if expected {
+                crate::theme::rgba_color(theme.text)
+            } else {
+                crate::theme::rgba_color(theme.background_panel)
+            },
+            "cell at +{dx} highlight mismatch"
+        );
+    }
+}
+
+/// Bracketed paste lands in the active field at the cursor with newlines
+/// stripped (fields are single-line); with no form open it is a no-op that
+/// leaves the background prompt untouched.
+#[tokio::test]
+async fn registration_form_paste_inserts_at_cursor_and_strips_newlines() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.open_mcp_form();
+
+    type_text(&mut app, "ab");
+    assert!(app.handle_registration_form_key(key(KeyCode::Left)));
+    app.paste_registration_form("X\nY\rZ");
+    assert!(
+        matches!(
+            app.dialog.current().map(|d| &d.dialog_type),
+            Some(DialogType::McpForm {
+                name,
+                cursor_pos,
+                ..
+            }) if name == "aXYZb" && *cursor_pos == 4
+        ),
+        "paste inserts at the cursor with newlines stripped"
+    );
+
+    // No form open: paste must not leak into the background prompt.
+    app.dialog.pop();
+    let before = app.prompt_view.input.clone();
+    app.paste_registration_form("nope");
+    assert!(!app.dialog.visible());
+    assert_eq!(app.prompt_view.input, before);
+}
+
+/// Ctrl+W deletes the word before the cursor (prompt/question-dialog
+/// convention); any other Ctrl+letter is consumed but ignored so it never
+/// leaks a bare letter into the field. The numeric timeout keeps word ops
+/// off, so Ctrl+W is a harmless no-op there.
+#[tokio::test]
+async fn registration_form_ctrl_w_deletes_word_and_other_ctrl_is_ignored() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.open_hook_form(crate::routes::settings::PRE_TOOL_USE_EVENT, None);
+
+    type_text(&mut app, "hello world");
+    assert!(app.handle_registration_form_key(ctrl(KeyCode::Char('w'))));
+    assert!(app.handle_registration_form_key(ctrl(KeyCode::Char('a'))));
+    assert!(
+        matches!(
+            app.dialog.current().map(|d| &d.dialog_type),
+            Some(DialogType::HookInput { name, .. }) if name == "hello "
+        ),
+        "Ctrl+W eats one word, Ctrl+A is swallowed"
+    );
+
+    // Down through matcher and command to the timeout (last field).
+    for _ in 0..3 {
+        assert!(app.handle_registration_form_key(key(KeyCode::Down)));
+    }
+    type_text(&mut app, "30");
+    assert!(app.handle_registration_form_key(ctrl(KeyCode::Char('w'))));
+    assert!(
+        matches!(
+            app.dialog.current().map(|d| &d.dialog_type),
+            Some(DialogType::HookInput { timeout, .. }) if timeout == "30"
+        ),
+        "word ops stay off on the numeric timeout"
+    );
+}
+
+/// While the panel owns the keyboard, Ctrl+C copies the active field
+/// through the shared selection helper instead of opening the quit
+/// confirm — even when the field is empty (still consumed, nothing to
+/// copy).
+#[tokio::test]
+async fn registration_form_ctrl_c_copies_active_field_instead_of_quitting() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.open_mcp_form();
+    type_text(&mut app, "docs");
+
+    assert!(app.copy_registration_form_field());
+    assert!(app.is_registration_form_open());
+    assert!(
+        !matches!(
+            app.dialog.current().map(|d| &d.dialog_type),
+            Some(DialogType::Confirm { .. })
+        ),
+        "copy must not push the quit confirm"
+    );
+
+    // Full dispatch path: Ctrl+C reaches the copy branch, not quit.
+    app.process_key_event(ctrl(KeyCode::Char('c'))).unwrap();
+    assert!(app.is_registration_form_open());
+    assert!(
+        !matches!(
+            app.dialog.current().map(|d| &d.dialog_type),
+            Some(DialogType::Confirm { .. })
+        ),
+        "dispatched Ctrl+C must not quit either"
+    );
+
+    // Empty field: still consumed, still no quit confirm.
+    for _ in 0.."docs".len() {
+        assert!(app.handle_registration_form_key(key(KeyCode::Backspace)));
+    }
+    app.process_key_event(ctrl(KeyCode::Char('c'))).unwrap();
+    assert!(app.is_registration_form_open());
+}
+
+/// Regression: the copy toast must paint ABOVE the modal registration
+/// panel. The toast used to render before the dialog, so the panel buried
+/// it — Ctrl+C looked completely dead (zero feedback) even when the
+/// clipboard write itself succeeded.
+#[tokio::test]
+async fn registration_form_copy_toast_paints_above_the_panel() {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.open_mcp_form();
+    type_text(&mut app, "docs");
+
+    // The real copy path. CI has no clipboard backend, so this shows the
+    // "... clipboard write unavailable" toast — same paint order as the
+    // success toast.
+    assert!(app.copy_registration_form_field());
+
+    // Toast message row with no title: y=3, text starts at x=toast_x+2.
+    // Cover a wide and a compact terminal: the centered panel must never
+    // bury the top-right toast at either size.
+    for (w, h) in [(100u16, 30u16), (80u16, 24u16)] {
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(|f| app.render(f, 0.016)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+
+        let toast_x = w.saturating_sub(60u16.min(w.saturating_sub(6)) + 2);
+        let row: String = (toast_x + 2..w).map(|x| buf[(x, 3)].symbol()).collect();
+        assert!(
+            row.contains("clipboard"),
+            "copy toast must stay visible above the panel at {w}x{h}, got: {row:?}"
+        );
+    }
 }

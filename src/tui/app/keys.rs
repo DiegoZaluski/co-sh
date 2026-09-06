@@ -93,6 +93,13 @@ impl App {
                     self.prompt_view.clear_selection();
                     return Ok(false);
                 }
+                // While a registration panel (hook, MCP server) owns the
+                // keyboard, Ctrl+C copies the active field instead of
+                // quitting — Esc already discards the panel.
+                if self.is_registration_form_open() {
+                    self.copy_registration_form_field();
+                    return Ok(false);
+                }
                 self.pending_delete_session_id = None;
                 self.dialog.show(DialogType::Confirm {
                     message: "Quit cosh?".into(),
@@ -209,11 +216,7 @@ impl App {
 
             // Registration panels (hook, MCP server): handled with the full
             // key event so ctrl-combos (word jumps) reach them intact.
-            if matches!(
-                self.dialog.current().map(|d| &d.dialog_type),
-                Some(DialogType::HookInput { .. }) | Some(DialogType::McpForm { .. })
-            ) && self.handle_registration_form_key(key)
-            {
+            if self.is_registration_form_open() && self.handle_registration_form_key(key) {
                 return Ok(false);
             }
 

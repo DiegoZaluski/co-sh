@@ -217,10 +217,11 @@ pub struct RagView {
     /// growth (newline insertion) to what actually fits on screen.
     pub(crate) last_area: Option<ratatui::layout::Rect>,
 
-    /// Active drag selection in the create-db fields: (field, start, end)
-    /// byte offsets into the raw input. Set while dragging with the mouse
-    /// and auto-copied on release (mirrors the chat prompt).
-    pub(crate) field_selection: Option<(CreateDbFocus, usize, usize)>,
+    /// Active drag selection in the create-db fields, set while dragging
+    /// with the mouse and auto-copied on release (mirrors the chat
+    /// prompt). The field-agnostic kernel lives in
+    /// [`crate::util::field_selection::DragSelection`].
+    pub(crate) field_selection: Option<crate::util::field_selection::DragSelection<CreateDbFocus>>,
 }
 
 impl RagView {

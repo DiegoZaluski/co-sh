@@ -1,8 +1,10 @@
 use super::super::App;
 use super::super::providers::{is_valid_local_url, save_provider_api_key};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::layout::Rect;
 
 use crate::ui::dialogs::DialogType;
+use crate::util::field_selection::DragSelection;
 
 impl App {
     pub(in crate::app) fn is_text_input_visible(&self) -> bool {
@@ -166,11 +168,346 @@ impl App {
         }
     }
 
+    /// Whether a multi-field registration form (hook or MCP panel) is
+    /// the active dialog. The form owns the keyboard while open, so the
+    /// key and bracketed-paste dispatch both consult this.
+    pub(in crate::app) fn is_registration_form_open(&self) -> bool {
+        matches!(
+            self.dialog.current().map(|d| &d.dialog_type),
+            Some(DialogType::HookInput { .. }) | Some(DialogType::McpForm { .. })
+        )
+    }
+
+    /// Paste bracketed-paste text into the registration form's active
+    /// field at the cursor. Fields are single-line, so newlines are
+    /// stripped exactly like the single-line dialogs' paste handling in
+    /// `process_event` and `QuestionDialog::handle_paste`. A drag
+    /// selection is replaced by the pasted text.
+    pub(in crate::app) fn paste_registration_form(&mut self, text: &str) {
+        let cleaned: String = text.chars().filter(|&c| c != '\n' && c != '\r').collect();
+        if cleaned.is_empty() {
+            return;
+        }
+        let Some(d) = self.dialog.current_mut() else {
+            return;
+        };
+        let (line, cursor, selection, owner): (
+            &mut String,
+            &mut usize,
+            &mut Option<DragSelection<usize>>,
+            usize,
+        ) = match &mut d.dialog_type {
+            DialogType::HookInput {
+                name,
+                matcher,
+                command,
+                timeout,
+                field,
+                cursor_pos,
+                selection,
+                ..
+            } => match [name, matcher, command, timeout].into_iter().nth(*field) {
+                Some(line) => (line, cursor_pos, selection, *field),
+                None => return,
+            },
+            DialogType::McpForm {
+                name,
+                endpoint,
+                timeout,
+                field,
+                cursor_pos,
+                selection,
+            } => match [name, endpoint, timeout].into_iter().nth(*field) {
+                Some(line) => (line, cursor_pos, selection, *field),
+                None => return,
+            },
+            _ => return,
+        };
+        if let Some((s, e)) = take_form_selection(owner, selection, line.len()) {
+            line.drain(s..e);
+            *cursor = s;
+        }
+        line.insert_str(*cursor, &cleaned);
+        *cursor += cleaned.len();
+        d.cursor.note_activity();
+    }
+    /// Copy the registration form's active field to the system clipboard
+    /// through the shared selection helper (same toast contract as every
+    /// other copy path). A drag selection copies its range; otherwise the
+    /// whole field. Always consumes the key while a form is open, even
+    /// for an empty field, which simply has nothing to copy.
+    pub(in crate::app) fn copy_registration_form_field(&mut self) -> bool {
+        let text = match self.dialog.current() {
+            Some(d) => match &d.dialog_type {
+                DialogType::HookInput {
+                    name,
+                    matcher,
+                    command,
+                    timeout,
+                    field,
+                    selection,
+                    ..
+                } => [name, matcher, command, timeout]
+                    .get(*field)
+                    .copied()
+                    .map(|line| {
+                        selection
+                            .as_ref()
+                            .and_then(|sel| sel.slice_of(*field, line))
+                            .unwrap_or_else(|| line.to_string())
+                    }),
+                DialogType::McpForm {
+                    name,
+                    endpoint,
+                    timeout,
+                    field,
+                    selection,
+                    cursor_pos: _,
+                } => [name, endpoint, timeout].get(*field).copied().map(|line| {
+                    selection
+                        .as_ref()
+                        .and_then(|sel| sel.slice_of(*field, line))
+                        .unwrap_or_else(|| line.to_string())
+                }),
+                _ => None,
+            },
+            None => None,
+        };
+        let Some(text) = text else {
+            return false;
+        };
+        if !text.is_empty() {
+            crate::util::selection::copy_selection(&text, &mut self.toast_state);
+        }
+        true
+    }
+
+    /// Clear the registration form's drag selection, if any. Reports
+    /// whether one was active (first-Esc semantics).
+    fn clear_form_selection(&mut self) -> bool {
+        let Some(d) = self.dialog.current_mut() else {
+            return false;
+        };
+        let selection = match &mut d.dialog_type {
+            DialogType::HookInput { selection, .. } => selection,
+            DialogType::McpForm { selection, .. } => selection,
+            _ => return false,
+        };
+        selection.take().is_some()
+    }
+
+    /// Anchor a drag selection on a registration-panel value row: focuses
+    /// the field, parks the caret and anchors `(field, byte, byte)`,
+    /// mirroring the create-db fields' press handling. Labels, padding
+    /// and outside clicks return false so the existing click dispatch
+    /// (focus/dismiss) runs untouched.
+    pub(in crate::app) fn start_form_selection_at(&mut self, x: u16, y: u16) -> bool {
+        use crate::ui::dialogs::{byte_at_char, form_panel_hit_field};
+        let area = self.terminal_size();
+        let hit: Option<(usize, usize)> = match self.dialog.current() {
+            Some(d) => match &d.dialog_type {
+                DialogType::HookInput {
+                    name,
+                    matcher,
+                    command,
+                    timeout,
+                    ..
+                } => {
+                    let values = [
+                        name.as_str(),
+                        matcher.as_str(),
+                        command.as_str(),
+                        timeout.as_str(),
+                    ];
+                    form_panel_hit_field(area, &values, x, y)
+                        .and_then(|(f, ci)| ci.map(|c| (f, byte_at_char(values[f], c))))
+                }
+                DialogType::McpForm {
+                    name,
+                    endpoint,
+                    timeout,
+                    ..
+                } => {
+                    let values = [name.as_str(), endpoint.as_str(), timeout.as_str()];
+                    form_panel_hit_field(area, &values, x, y)
+                        .and_then(|(f, ci)| ci.map(|c| (f, byte_at_char(values[f], c))))
+                }
+                _ => None,
+            },
+            None => None,
+        };
+        let Some((field, byte)) = hit else {
+            return false;
+        };
+        let Some(d) = self.dialog.current_mut() else {
+            return false;
+        };
+        let slots = match &mut d.dialog_type {
+            DialogType::HookInput {
+                field: active,
+                cursor_pos: cursor,
+                selection: sel,
+                ..
+            } => Some((active, cursor, sel)),
+            DialogType::McpForm {
+                field: active,
+                cursor_pos: cursor,
+                selection: sel,
+                ..
+            } => Some((active, cursor, sel)),
+            _ => None,
+        };
+        let Some((active, cursor, sel)) = slots else {
+            return false;
+        };
+        *active = field;
+        *cursor = byte;
+        *sel = Some(DragSelection::anchor(field, byte));
+        d.cursor.note_activity();
+        true
+    }
+
+    /// Extend the active drag selection to the value cell under (`x`, `y`),
+    /// clamped to the selected field's ends when the drag leaves its rows
+    /// (mirrors the create-db `extend_field_selection_at`). The caret
+    /// follows the drag end. Returns false when no selection is active.
+    pub(in crate::app) fn extend_form_selection_at(&mut self, x: u16, y: u16) -> bool {
+        let area = self.terminal_size();
+        let target: Option<(usize, usize)> = match self.dialog.current() {
+            Some(d) => match &d.dialog_type {
+                DialogType::HookInput {
+                    name,
+                    matcher,
+                    command,
+                    timeout,
+                    selection: Some(sel),
+                    ..
+                } => {
+                    let values = [
+                        name.as_str(),
+                        matcher.as_str(),
+                        command.as_str(),
+                        timeout.as_str(),
+                    ];
+                    values.get(sel.field()).map(|_| {
+                        (
+                            sel.field(),
+                            form_extend_byte(area, &values, sel.field(), x, y),
+                        )
+                    })
+                }
+                DialogType::McpForm {
+                    name,
+                    endpoint,
+                    timeout,
+                    selection: Some(sel),
+                    ..
+                } => {
+                    let values = [name.as_str(), endpoint.as_str(), timeout.as_str()];
+                    values.get(sel.field()).map(|_| {
+                        (
+                            sel.field(),
+                            form_extend_byte(area, &values, sel.field(), x, y),
+                        )
+                    })
+                }
+                _ => None,
+            },
+            None => None,
+        };
+        let Some((_, byte)) = target else {
+            return false;
+        };
+        let Some(d) = self.dialog.current_mut() else {
+            return false;
+        };
+        let slots = match &mut d.dialog_type {
+            DialogType::HookInput {
+                cursor_pos: cursor,
+                selection: sel,
+                ..
+            } => Some((cursor, sel)),
+            DialogType::McpForm {
+                cursor_pos: cursor,
+                selection: sel,
+                ..
+            } => Some((cursor, sel)),
+            _ => None,
+        };
+        let Some((cursor, sel)) = slots else {
+            return false;
+        };
+        *cursor = byte;
+        if let Some(s) = sel {
+            s.extend(byte);
+        }
+        d.cursor.note_activity();
+        true
+    }
+
+    /// Release after a drag over a registration panel: copy the selected
+    /// range through the shared selection helper and clear the highlight,
+    /// mirroring the create-db release path. Returns whether a non-empty
+    /// selection was consumed — plain clicks fall through to the normal
+    /// click dispatch (focus/dismiss).
+    pub(in crate::app) fn copy_form_selection_on_release(&mut self) -> bool {
+        let text: Option<String> = match self.dialog.current() {
+            Some(d) => match &d.dialog_type {
+                DialogType::HookInput {
+                    name,
+                    matcher,
+                    command,
+                    timeout,
+                    field,
+                    selection,
+                    ..
+                } => [name, matcher, command, timeout]
+                    .get(*field)
+                    .copied()
+                    .and_then(|line| {
+                        selection
+                            .as_ref()
+                            .and_then(|sel| sel.slice_of(*field, line))
+                    }),
+                DialogType::McpForm {
+                    name,
+                    endpoint,
+                    timeout,
+                    field,
+                    selection,
+                    ..
+                } => [name, endpoint, timeout]
+                    .get(*field)
+                    .copied()
+                    .and_then(|line| {
+                        selection
+                            .as_ref()
+                            .and_then(|sel| sel.slice_of(*field, line))
+                    }),
+                _ => None,
+            },
+            None => None,
+        };
+        let Some(text) = text else {
+            return false;
+        };
+        crate::util::selection::copy_selection(&text, &mut self.toast_state);
+        self.clear_form_selection();
+        true
+    }
+
     /// Editing keys shared by the multi-field registration forms (hook and
     /// MCP panels): the active line behaves like a single-line input,
     /// Up/Down move between visual lines first and only leave the field at
     /// its first/last line, Enter saves (invalid input keeps the panel open
-    /// with an error toast), Esc discards. Returns whether the key was
+    /// with an error toast), Esc drops a drag highlight first and discards
+    /// on the next press. Typing, paste and deletions replace a selected
+    /// range; navigation drops it. Ctrl+Left/Right jump by word and
+    /// Ctrl+Backspace/Ctrl+W delete the word before the cursor, mirroring
+    /// the chat prompt and the question dialog; any other Ctrl+letter is
+    /// consumed but ignored so it never leaks into the field. Paste arrives
+    /// through `paste_registration_form`, Ctrl+C through
+    /// `copy_registration_form_field`. Returns whether the key was
     /// consumed; with no form open every key is refused.
     pub(in crate::app) fn handle_registration_form_key(&mut self, key: KeyEvent) -> bool {
         if !self.dialog.visible() {
@@ -194,8 +531,14 @@ impl App {
                 true
             }
             KeyCode::Esc => {
-                self.dialog.pop();
-                true
+                // First Esc drops a drag highlight (prompt convention);
+                // the next one discards the panel.
+                if self.clear_form_selection() {
+                    true
+                } else {
+                    self.dialog.pop();
+                    true
+                }
             }
             _ => {
                 let cols = crate::ui::dialogs::form_panel_content_w(
@@ -210,11 +553,13 @@ impl App {
                             timeout,
                             field,
                             cursor_pos,
+                            selection,
                             ..
                         } => drive_form_edit(
                             [name, matcher, command, timeout],
                             field,
                             cursor_pos,
+                            selection,
                             key,
                             cols,
                         ),
@@ -224,9 +569,15 @@ impl App {
                             timeout,
                             field,
                             cursor_pos,
-                        } => {
-                            drive_form_edit([name, endpoint, timeout], field, cursor_pos, key, cols)
-                        }
+                            selection,
+                        } => drive_form_edit(
+                            [name, endpoint, timeout],
+                            field,
+                            cursor_pos,
+                            selection,
+                            key,
+                            cols,
+                        ),
                         _ => false,
                     }
                 } else {
@@ -328,6 +679,7 @@ impl App {
             timeout,
             field: 0,
             cursor_pos: 0,
+            selection: None,
         });
     }
 
@@ -465,7 +817,44 @@ impl App {
             _ => false,
         }
     }
+}
 
+/// Byte offset of the drag end over a registration-panel field: the
+/// clicked character inside its wrapped value rows, 0 above them and the
+/// line end below them (mirrors the create-db drag clamping). `field`
+/// always indexes `values` — the caller only extends the anchored field.
+fn form_extend_byte(area: Rect, values: &[&str], field: usize, x: u16, y: u16) -> usize {
+    use crate::ui::dialogs::{byte_at_char, form_field_geometries, form_panel_metrics};
+    let (_, dialog_y, _, _, content_x, cols) = form_panel_metrics(area, values);
+    let g = &form_field_geometries(dialog_y, values, cols)[field];
+    let value = values[field];
+    if y < g.value_y {
+        0
+    } else if y >= g.value_y + g.rows as u16 {
+        value.len()
+    } else {
+        let line = (y - g.value_y) as usize;
+        let col = x.saturating_sub(content_x) as usize;
+        let ci = (line * cols + col).min(value.chars().count());
+        byte_at_char(value, ci)
+    }
+}
+
+/// Take the drag selection owned by `field`, normalised to `(start, end)`
+/// bytes clamped to `len`. Editing keys consume it (typing replaces the
+/// range); navigation drops it without effect. Returns `None` — leaving
+/// no selection behind either way — when there is nothing to take.
+fn take_form_selection(
+    field: usize,
+    selection: &mut Option<DragSelection<usize>>,
+    len: usize,
+) -> Option<(usize, usize)> {
+    let range = selection.as_ref()?.range_for(field, len);
+    *selection = None;
+    range
+}
+
+impl App {
     /// Error toast shared by the registration-form saves.
     fn toast_form_error(&mut self, title: &str, message: String) {
         use crate::ui::toast::{ToastOptions, ToastVariant};
@@ -538,6 +927,7 @@ impl App {
             timeout: String::new(),
             field: 0,
             cursor_pos: 0,
+            selection: None,
         });
     }
 }
@@ -547,18 +937,25 @@ impl App {
 /// (`cursor_pos` is a byte index into the active line). The last field is
 /// always the plain-number timeout, so Ctrl word jumps apply to every field
 /// but the last. Up/Down first move between the value's wrapped visual lines
-/// and only change fields at the first/last line. Returns whether the key
-/// was consumed.
+/// and only change fields at the first/last line. A mouse drag selection
+/// owned by the active field is replaced by typing, paste and deletions;
+/// navigation drops it. Returns whether the key was consumed.
 fn drive_form_edit<const N: usize>(
     lines: [&mut String; N],
     field: &mut usize,
     cursor_pos: &mut usize,
+    selection: &mut Option<DragSelection<usize>>,
     key: KeyEvent,
     cols: usize,
 ) -> bool {
     debug_assert!(N > 0, "a registration form always has fields");
     let last = N - 1;
     let word_ops = *field != last;
+    // A selection only lives on the field that owns it; a stale one from
+    // another field dies before any key can observe it.
+    if selection.is_some_and(|sel| sel.field() != *field) {
+        *selection = None;
+    }
     match key.code {
         KeyCode::Up | KeyCode::Down => {
             let up = key.code == KeyCode::Up;
@@ -578,6 +975,8 @@ fn drive_form_edit<const N: usize>(
                 };
                 *cursor_pos = lines[*field].len();
             }
+            // A field switch (or a plain move) is a new caret.
+            *selection = None;
             true
         }
         KeyCode::Left => {
@@ -587,6 +986,7 @@ fn drive_form_edit<const N: usize>(
             } else if *cursor_pos > 0 {
                 *cursor_pos = target.floor_char_boundary(*cursor_pos - 1);
             }
+            *selection = None;
             true
         }
         KeyCode::Right => {
@@ -594,22 +994,30 @@ fn drive_form_edit<const N: usize>(
             if key.modifiers.contains(KeyModifiers::CONTROL) && word_ops {
                 *cursor_pos = crate::util::word_ops::find_word_end(target, *cursor_pos);
             } else if *cursor_pos < target.len() {
-                let next = target.floor_char_boundary(*cursor_pos + 1).min(target.len());
+                let next = target
+                    .floor_char_boundary(*cursor_pos + 1)
+                    .min(target.len());
                 *cursor_pos = next;
             }
+            *selection = None;
             true
         }
         KeyCode::Home => {
             *cursor_pos = 0;
+            *selection = None;
             true
         }
         KeyCode::End => {
             *cursor_pos = lines[*field].len();
+            *selection = None;
             true
         }
         KeyCode::Delete => {
             let target = &mut *lines[*field];
-            if *cursor_pos < target.len() {
+            if let Some((s, e)) = take_form_selection(*field, selection, target.len()) {
+                target.drain(s..e);
+                *cursor_pos = s;
+            } else if *cursor_pos < target.len() {
                 let next = target
                     .floor_char_boundary(*cursor_pos + 1)
                     .min(target.len());
@@ -619,7 +1027,10 @@ fn drive_form_edit<const N: usize>(
         }
         KeyCode::Backspace => {
             let target = &mut *lines[*field];
-            if *cursor_pos > 0 {
+            if let Some((s, e)) = take_form_selection(*field, selection, target.len()) {
+                target.drain(s..e);
+                *cursor_pos = s;
+            } else if *cursor_pos > 0 {
                 if key.modifiers.contains(KeyModifiers::CONTROL) && word_ops {
                     let start = crate::util::word_ops::find_word_start(target, *cursor_pos);
                     target.drain(start..*cursor_pos);
@@ -634,9 +1045,38 @@ fn drive_form_edit<const N: usize>(
         }
         KeyCode::Char(ch) => {
             let target = &mut *lines[*field];
-            target.insert(*cursor_pos, ch);
-            *cursor_pos += ch.len_utf8();
-            true
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                // Ctrl+W deletes the word before the cursor (universal
+                // terminal shortcut, same as the chat prompt and the
+                // question dialog) — or the selected range when one is
+                // active. Every other Ctrl+letter is consumed but ignored
+                // (dropping a lingering selection) so it never leaks a
+                // bare letter into the field — again matching the question
+                // dialog.
+                if ch == 'w' && word_ops {
+                    if let Some((s, e)) = take_form_selection(*field, selection, target.len()) {
+                        target.drain(s..e);
+                        *cursor_pos = s;
+                    } else if *cursor_pos > 0 {
+                        let start = crate::util::word_ops::find_word_start(target, *cursor_pos);
+                        target.drain(start..*cursor_pos);
+                        *cursor_pos = start;
+                    }
+                } else {
+                    *selection = None;
+                }
+                true
+            } else {
+                // Typing replaces the selected range (standard editor
+                // behavior, chosen over the RAG form's clear-and-type).
+                if let Some((s, e)) = take_form_selection(*field, selection, target.len()) {
+                    target.drain(s..e);
+                    *cursor_pos = s;
+                }
+                target.insert(*cursor_pos, ch);
+                *cursor_pos += ch.len_utf8();
+                true
+            }
         }
         _ => false,
     }

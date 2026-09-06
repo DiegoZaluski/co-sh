@@ -46,10 +46,11 @@ async fn rag_field_drag_selection_through_app_mouse_events() {
         app.handle_mouse_event(mouse(CKind::Drag(CBtn::Left), value_x + 11, name_y))
             .unwrap()
     );
-    assert_eq!(
+    assert!(matches!(
         app.rag_view.field_selection,
-        Some((CreateDbFocus::Name, 0, 11))
-    );
+        Some(sel) if sel.field() == CreateDbFocus::Name
+            && sel.range_for(CreateDbFocus::Name, 11) == Some((0, 11))
+    ));
     assert_eq!(app.rag_view.selected_field_text(), "hello world");
 
     // The render paints the selection: each selected cell gets the field

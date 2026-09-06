@@ -13,6 +13,7 @@ use cosh_tui::core::types::MouseEvent;
 
 use crate::component::cursor::{Cursor, CursorState};
 use crate::theme::{Theme, rgba_color};
+use crate::util::field_selection::DragSelection;
 
 /// Visual item in the model list - either a provider header or a model
 #[derive(Debug, Clone)]
@@ -258,6 +259,11 @@ pub enum DialogType {
         /// Active field: 0 name · 1 endpoint · 2 timeout.
         field: usize,
         cursor_pos: usize,
+        /// Mouse drag selection on the active field; `None` when nothing
+        /// is selected. Anchor/end come from [`form_panel_hit_field`] so
+        /// they sit on char boundaries. The field-agnostic kernel is
+        /// [`DragSelection`].
+        selection: Option<DragSelection<usize>>,
     },
     /// Rename the current session: a text prompt prefilled with the current
     /// title, Enter applies, Esc cancels.
@@ -281,6 +287,11 @@ pub enum DialogType {
         /// Active field: 0 name · 1 matcher · 2 command · 3 timeout.
         field: usize,
         cursor_pos: usize,
+        /// Mouse drag selection on the active field; `None` when nothing
+        /// is selected. Anchor/end come from [`form_panel_hit_field`] so
+        /// they sit on char boundaries. The field-agnostic kernel is
+        /// [`DragSelection`].
+        selection: Option<DragSelection<usize>>,
     },
     /// Per-message action picker shown when clicking a message in the
     /// transcript (port of opencode's "Message Actions" dialog): Copy always
@@ -748,6 +759,7 @@ impl DialogState {
                 timeout,
                 field,
                 cursor_pos,
+                selection,
                 ..
             } => {
                 let values = [
@@ -756,7 +768,7 @@ impl DialogState {
                     command.as_str(),
                     timeout.as_str(),
                 ];
-                focus_form_field(area, x, y_click, &values, field, cursor_pos)
+                focus_form_field(area, x, y_click, &values, field, cursor_pos, selection)
             }
             DialogType::McpForm {
                 name,
@@ -764,9 +776,10 @@ impl DialogState {
                 timeout,
                 field,
                 cursor_pos,
+                selection,
             } => {
                 let values = [name.as_str(), endpoint.as_str(), timeout.as_str()];
-                focus_form_field(area, x, y_click, &values, field, cursor_pos)
+                focus_form_field(area, x, y_click, &values, field, cursor_pos, selection)
             }
             DialogType::RenameSession { .. } => {
                 // Click outside the borderless prompt panel → dismiss
@@ -1574,6 +1587,7 @@ impl DialogState {
                 field,
                 cursor_pos,
                 editing_index,
+                selection,
             } => {
                 let title = if editing_index.is_some() {
                     "Edit Hook"
@@ -1585,7 +1599,12 @@ impl DialogState {
                 } else {
                     "PreToolUse · runs before each tool call"
                 };
-                let values = [name.as_str(), matcher.as_str(), command.as_str(), timeout.as_str()];
+                let values = [
+                    name.as_str(),
+                    matcher.as_str(),
+                    command.as_str(),
+                    timeout.as_str(),
+                ];
                 render_form_panel(
                     buf,
                     area,
@@ -1600,6 +1619,7 @@ impl DialogState {
                     &values,
                     *field,
                     *cursor_pos,
+                    *selection,
                 );
             }
             DialogType::McpForm {
@@ -1608,6 +1628,7 @@ impl DialogState {
                 timeout,
                 field,
                 cursor_pos,
+                selection,
             } => {
                 let values = [name.as_str(), endpoint.as_str(), timeout.as_str()];
                 render_form_panel(
@@ -1624,6 +1645,7 @@ impl DialogState {
                     &values,
                     *field,
                     *cursor_pos,
+                    *selection,
                 );
             }
             DialogType::ModelList {
@@ -2951,10 +2973,7 @@ pub(crate) fn form_field_geometries(
 
 /// Shared geometry for a registration panel:
 /// `(x, y, w, h, content_x, content_w)`. Mirrors [`render_form_panel`].
-pub(crate) fn form_panel_metrics(
-    area: Rect,
-    fields: &[&str],
-) -> (u16, u16, u16, u16, u16, usize) {
+pub(crate) fn form_panel_metrics(area: Rect, fields: &[&str]) -> (u16, u16, u16, u16, u16, usize) {
     let w = form_panel_dialog_w(area);
     let cols = form_panel_content_w(w) as usize;
     let field_rows: u16 = fields
@@ -2996,7 +3015,9 @@ fn hook_marker_fg(theme: &Theme) -> Color {
 /// Map a click position to `(field, char index)` — labels focus the field,
 /// value rows also position the cursor. `None` when the click lands on
 /// padding inside the panel; the caller decides outside-panel dismissal.
-fn form_panel_hit_field(
+/// Shared with the app's drag-selection handling, which reuses the same
+/// char grid the renderer paints.
+pub(crate) fn form_panel_hit_field(
     area: Rect,
     fields: &[&str],
     x: u16,
@@ -3027,7 +3048,9 @@ fn form_panel_hit_field(
 }
 
 /// Byte offset of the `char_idx`-th character, clamped to the end.
-fn byte_at_char(value: &str, char_idx: usize) -> usize {
+/// Shared with the app's drag-selection handling (anchor/extend reuse the
+/// click grid, so highlight, cursor and selection never disagree).
+pub(crate) fn byte_at_char(value: &str, char_idx: usize) -> usize {
     value
         .char_indices()
         .nth(char_idx)
@@ -3036,7 +3059,8 @@ fn byte_at_char(value: &str, char_idx: usize) -> usize {
 
 /// Click handling shared by the registration panels (hooks, MCP servers):
 /// outside the panel dismisses, inside focuses the clicked field (labels)
-/// and moves the insertion point (value rows); padding just consumes.
+/// and moves the insertion point (value rows); a click is a new caret, so
+/// any drag selection dies here. Padding just consumes.
 fn focus_form_field(
     area: Rect,
     x: u16,
@@ -3044,6 +3068,7 @@ fn focus_form_field(
     values: &[&str],
     field: &mut usize,
     cursor_pos: &mut usize,
+    selection: &mut Option<DragSelection<usize>>,
 ) -> DialogAction {
     let (dialog_x, dialog_y, dialog_w, dialog_h, ..) = form_panel_metrics(area, values);
     let inside = x >= dialog_x
@@ -3061,6 +3086,7 @@ fn focus_form_field(
             Some(ci) => byte_at_char(values[clicked_field], ci),
             None => values[clicked_field].len(),
         };
+        *selection = None;
     }
     DialogAction::Consumed
 }
@@ -3086,6 +3112,7 @@ fn render_form_panel(
     fields: &[&str],
     active_field: usize,
     cursor_pos: usize,
+    selection: Option<DragSelection<usize>>,
 ) {
     let (dialog_x, dialog_y, dialog_w, dialog_h, content_x, cols) =
         form_panel_metrics(area, fields);
@@ -3234,6 +3261,28 @@ fn render_form_panel(
                 }
             }
         }
+        // Drag selection over this field's value: paint the covered cells
+        // with the text/background colors swapped (dark text on a light
+        // bar — the same look as the chat prompt's selection). The grid
+        // is the one `form_panel_hit_field` maps clicks onto (plain
+        // char slicing, `cols` per row), so highlight and hit-testing
+        // cannot drift.
+        if let Some(sel) = &selection
+            && let Some((s, e)) = sel.range_for(field, value.len())
+        {
+            let start_char = value[..s].chars().count();
+            let end_char = value[..e].chars().count();
+            for ci in start_char..end_char {
+                let (r, c) = (ci / cols, ci % cols);
+                if r >= g.rows {
+                    break;
+                }
+                if let Some(cell) = buf.cell_mut((content_x + c as u16, g.value_y + r as u16)) {
+                    cell.set_fg(bg_color);
+                    cell.set_bg(shown_fg);
+                }
+            }
+        }
     }
 }
 
@@ -3310,6 +3359,7 @@ mod hook_panel_tests {
             timeout: String::new(),
             field: 0,
             cursor_pos: 0,
+            selection: None,
         });
         let area = Rect::new(0, 0, 80, 30);
         let values = ["", "", "exit 2", ""];
@@ -3379,7 +3429,11 @@ mod hook_panel_tests {
         // read the VALUE row of each field instead of the whole buffer.
         let value_row_text = |buf: &Buffer, content_x: u16, y: u16| -> String {
             (content_x..area.right())
-                .map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()).unwrap_or_default())
+                .map(|x| {
+                    buf.cell((x, y))
+                        .map(|c| c.symbol().to_string())
+                        .unwrap_or_default()
+                })
                 .collect::<String>()
                 .trim_end()
                 .to_string()
@@ -3399,6 +3453,7 @@ mod hook_panel_tests {
                 values,
                 field,
                 cursor_pos,
+                None,
             );
         };
 
