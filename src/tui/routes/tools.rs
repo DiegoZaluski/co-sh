@@ -65,6 +65,11 @@ fn internal_tools() -> &'static [(&'static str, &'static str)] {
         ("skills_read", "Read a skill"),
         ("skills_read_asset", "Read a skill asset"),
         ("skills_match_skills", "Match skills to task"),
+        ("subagent_call", "Run a sub-agent for a delegated task"),
+        (
+            "lsp",
+            "Language server tools (diagnostics, definitions, references, rename, ...)",
+        ),
     ]
 }
 

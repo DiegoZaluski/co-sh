@@ -355,7 +355,7 @@ impl CoshTools {
         let all = self.tool_descriptions();
         for desc in all {
             let name = desc["name"].as_str().unwrap_or_default();
-            if disabled_tools.contains(name) {
+            if is_tool_disabled(name, disabled_tools) {
                 continue;
             }
             write_single_tool(out, &desc, include_schema);
@@ -469,7 +469,7 @@ impl CoshTools {
         all.iter()
             .filter(|desc| {
                 let name = desc["name"].as_str().unwrap_or_default();
-                !disabled_tools.contains(name)
+                !is_tool_disabled(name, disabled_tools)
             })
             .map(extract_schema)
             .collect()
@@ -662,7 +662,7 @@ fn write_single_tool(out: &mut String, desc: &serde_json::Value, include_schema:
 /// Write a single tool description only if its name is not in the disabled set.
 /// A tool is disabled when its exact name is in `disabled`, OR when its
 /// namespace prefix (e.g. `lsp`) is disabled as a group toggle.
-fn is_tool_disabled(name: &str, disabled: &HashSet<String>) -> bool {
+pub(crate) fn is_tool_disabled(name: &str, disabled: &HashSet<String>) -> bool {
     if disabled.contains(name) {
         return true;
     }
@@ -670,6 +670,26 @@ fn is_tool_disabled(name: &str, disabled: &HashSet<String>) -> bool {
         return disabled.contains(namespace);
     }
     false
+}
+
+#[cfg(test)]
+mod disabled_tests {
+    use super::is_tool_disabled;
+    use std::collections::HashSet;
+
+    #[test]
+    fn group_prefix_disables_every_tool_in_its_namespace() {
+        let disabled: HashSet<String> = ["lsp".to_string(), "bash_run".to_string()]
+            .into_iter()
+            .collect();
+        let empty: HashSet<String> = HashSet::new();
+        assert!(is_tool_disabled("lsp_diagnostics", &disabled));
+        assert!(is_tool_disabled("lsp_rename", &disabled));
+        assert!(is_tool_disabled("bash_run", &disabled));
+        assert!(!is_tool_disabled("fs_read", &disabled));
+        assert!(!is_tool_disabled("lsp", &empty));
+        assert!(!is_tool_disabled("subagent_call", &disabled));
+    }
 }
 
 fn write_tool_if_enabled(

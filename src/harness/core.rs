@@ -2,7 +2,7 @@
 use super::context::error_catalog_window;
 use super::context::{ContextManager, MAX_CONTEXT_TOKENS, MapRequest, RunOutcome};
 use super::correction_memory::CorrectionMemory;
-use super::tools::{CoshTools, Tools};
+use super::tools::{CoshTools, Tools, is_tool_disabled};
 use crate::mcp::{McpConfig, McpManager};
 use cosh_sdk::connector::{
     ChatMessage, ChatStream, ClaudeThinkingBlock, Connector, ConnectorError, ToolCallMode,
@@ -2755,9 +2755,10 @@ impl Harness {
                     cosh.tool_descriptions()
                         .into_iter()
                         .filter(|desc| {
-                            !self
-                                .disabled_tools
-                                .contains(desc["name"].as_str().unwrap_or_default())
+                            !is_tool_disabled(
+                                desc["name"].as_str().unwrap_or_default(),
+                                &self.disabled_tools,
+                            )
                         })
                         .collect()
                 }
@@ -4283,6 +4284,14 @@ impl Harness {
 
             (tc.name.clone(), args_map.clone())
         };
+
+        // A tool the user disabled on the Internal Tools screen is never
+        // dispatched, even if the model hallucinates a call (its schema was
+        // already hidden). Group prefixes (e.g. `lsp`) expand to their tools.
+        if is_tool_disabled(&tool_name, &self.disabled_tools) {
+            self.tool_issuer.pop_front();
+            return Err(format!("tool '{tool_name}' is disabled"));
+        }
 
         // The merged `subagent_call` tool has TWO dispatch paths behind one
         // visible definition: `agent` present → external CLI (the CoshTools
