@@ -651,13 +651,11 @@ impl App {
             if matches!(self.mode(), AppMode::AddProvider) && !self.dialog.visible() {
                 match key.code {
                     KeyCode::Up => {
-                        let list_area = 20;
-                        self.add_provider_view.select_prev(list_area);
+                        self.add_provider_view.select_prev();
                         return Ok(false);
                     }
                     KeyCode::Down => {
-                        let list_area = 20;
-                        self.add_provider_view.select_next(list_area);
+                        self.add_provider_view.select_next();
                         return Ok(false);
                     }
                     KeyCode::Enter => {
@@ -671,13 +669,11 @@ impl App {
                         return Ok(false);
                     }
                     KeyCode::Char(ch) => {
-                        let list_area = 20;
-                        self.add_provider_view.push_filter_char(ch, list_area);
+                        self.add_provider_view.push_filter_char(ch);
                         return Ok(false);
                     }
                     KeyCode::Backspace => {
-                        let list_area = 20;
-                        self.add_provider_view.pop_filter_char(list_area);
+                        self.add_provider_view.pop_filter_char();
                         return Ok(false);
                     }
                     _ => {}

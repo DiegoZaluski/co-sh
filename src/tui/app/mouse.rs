@@ -442,8 +442,7 @@ impl App {
                             self.router_view.select_prev(&all_models);
                         }
                     } else if matches!(self.mode(), AppMode::AddProvider) {
-                        let list_area = 20;
-                        self.add_provider_view.select_prev(list_area);
+                        self.add_provider_view.select_prev();
                     } else if matches!(self.mode(), AppMode::Settings) {
                         self.settings_view.select_prev(20, &self.setup);
                     } else if self.try_rag_scroll_up() {
@@ -510,8 +509,7 @@ impl App {
                             self.router_view.select_next(&all_models);
                         }
                     } else if matches!(self.mode(), AppMode::AddProvider) {
-                        let list_area = 20;
-                        self.add_provider_view.select_next(list_area);
+                        self.add_provider_view.select_next();
                     } else if matches!(self.mode(), AppMode::Settings) {
                         self.settings_view.select_next(20, &self.setup);
                     } else if self.try_rag_scroll_down() {

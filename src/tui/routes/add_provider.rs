@@ -58,6 +58,16 @@ fn all_providers() -> Vec<ProviderEntry> {
 pub struct AddProviderView {
     pub selection: ListSelection,
     pub search_bar: SearchBar,
+    /// How many rows actually fit in the current viewport. Updated on every
+    /// render so that scrolling, clamping and mouse hit-testing all agree on
+    /// the same value — otherwise items scroll out of view while free space
+    /// below the list is wasted.
+    visible_count: usize,
+    /// Buffer row of the first visible list item, captured at render time.
+    /// The vertical centering depends on the exact area the render used, so
+    /// the mouse path must reuse it instead of re-deriving it from its own
+    /// (differently sized) area — re-deriving shifted every hit by one row.
+    list_start_y: u16,
 }
 
 impl AddProviderView {
@@ -65,6 +75,8 @@ impl AddProviderView {
         Self {
             selection: ListSelection::new(),
             search_bar: SearchBar::new(),
+            visible_count: 0,
+            list_start_y: 0,
         }
     }
 
@@ -83,29 +95,32 @@ impl AddProviderView {
             .collect()
     }
 
-    fn clamp_selection(&mut self, visible_count: usize) {
-        self.selection.set_visible_count(visible_count);
+    fn clamp_selection(&mut self) {
+        self.selection
+            .set_visible_count(self.visible_count.max(1));
         self.selection.clamp(self.filtered_providers().len());
     }
 
-    pub fn push_filter_char(&mut self, ch: char, visible_count: usize) {
+    pub fn push_filter_char(&mut self, ch: char) {
         self.search_bar.push_char(ch);
-        self.clamp_selection(visible_count);
+        self.clamp_selection();
     }
 
-    pub fn pop_filter_char(&mut self, visible_count: usize) {
+    pub fn pop_filter_char(&mut self) {
         self.search_bar.pop_char();
-        self.clamp_selection(visible_count);
+        self.clamp_selection();
     }
 
-    pub fn select_next(&mut self, visible_count: usize) {
-        self.selection.set_visible_count(visible_count);
-        self.selection.select_next(self.filtered_providers().len());
+    pub fn select_next(&mut self) {
+        self.selection.set_visible_count(self.visible_count.max(1));
+        self.selection
+            .select_next(self.filtered_providers().len());
     }
 
-    pub fn select_prev(&mut self, visible_count: usize) {
-        self.selection.set_visible_count(visible_count);
-        self.selection.select_prev(self.filtered_providers().len());
+    pub fn select_prev(&mut self) {
+        self.selection.set_visible_count(self.visible_count.max(1));
+        self.selection
+            .select_prev(self.filtered_providers().len());
     }
 
     pub fn selected_provider(&self) -> Option<ProviderEntry> {
@@ -118,6 +133,15 @@ impl AddProviderView {
         if providers.is_empty() {
             return None;
         }
+        // Use the viewport the render computed, so hit-testing matches
+        // what is actually drawn on screen. The vertical geometry must come
+        // from the render: the mouse path receives a slightly different
+        // area, and re-deriving the centered block from it shifted every
+        // row by one.
+        let count = self.visible_count.min(providers.len());
+        if count == 0 {
+            return None;
+        }
         let my = mouse.y;
         let mx = mouse.x;
         let max_row_w = max_row_width();
@@ -125,11 +149,7 @@ impl AddProviderView {
             return None;
         }
 
-        let remaining_h = area.height.saturating_sub(1);
-        let count = max_visible_items(remaining_h).min(providers.len());
-        let block_h = count + 2;
-        let block_y = area.y + 1 + (remaining_h.saturating_sub(block_h as u16)) / 2;
-        let list_start_y = block_y + 2;
+        let list_start_y = self.list_start_y;
 
         let row_x = area.x + (area.width.saturating_sub(max_row_w as u16)) / 2;
         let hit = mx >= row_x && mx < row_x + max_row_w as u16;
@@ -153,7 +173,13 @@ impl AddProviderView {
         self.find_row_for_mouse(mouse, area)
     }
 
-    pub fn render(&self, buf: &mut Buffer, area: Rect, theme: &Theme, setup: &Setup) {
+    pub fn render(
+        &mut self,
+        buf: &mut Buffer,
+        area: Rect,
+        theme: &Theme,
+        setup: &Setup,
+    ) {
         let providers = self.filtered_providers();
         let fg = rgba_color(theme.text);
         let muted = rgba_color(theme.text_muted);
@@ -178,14 +204,15 @@ impl AddProviderView {
         // Search + gap + items: vertically centered below the title
         let remaining_h = area.height.saturating_sub(1);
         let count = max_visible_items(remaining_h).min(providers.len());
+        self.visible_count = count;
         let block_h = count + 2;
         let block_y = area.y + 1 + (remaining_h.saturating_sub(block_h as u16)) / 2;
-
         let search_w = max_w.min(area.width.saturating_sub(row_x) as usize);
         self.search_bar
             .render(buf, row_x, block_y, search_w as u16, theme);
 
         let list_start_y = block_y + 2;
+        self.list_start_y = list_start_y;
         if max_w == 0 {
             return;
         }
@@ -272,4 +299,78 @@ fn max_row_width() -> usize {
 
 const fn max_visible_items(remaining_h: u16) -> usize {
     (remaining_h.saturating_sub(3)) as usize
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::theme::ThemeRegistry;
+    use cosh_tui::core::types::{MouseButton, MouseEventType, MouseModifiers};
+
+    fn click(x: u16, y: u16) -> MouseEvent {
+        MouseEvent::new(
+            MouseEventType::Down,
+            MouseButton::Left,
+            x,
+            y,
+            MouseModifiers::none(),
+        )
+    }
+
+    /// Regression: `find_row_for_mouse` must reuse the list geometry the
+    /// render captured instead of re-deriving it from the mouse path's area,
+    /// which is one row taller than the render's and shifted every hit down
+    /// by a row.
+    #[test]
+    fn mouse_hits_match_the_rendered_list_rows() {
+        let theme = ThemeRegistry::new().themes[0].theme.clone();
+        let setup = Setup::default();
+        let term = Rect::new(0, 0, 100, 30);
+
+        // Render path (src/tui/app/render.rs): `session_area.height` is the
+        // terminal height − 3 and the AddProvider branch subtracts 1 more.
+        let render_area = Rect::new(0, 1, 100, term.height - 4);
+        // Mouse path (src/tui/app/mouse.rs): terminal height − 3, one row
+        // taller than the render area.
+        let mouse_area = Rect::new(0, 1, 100, term.height - 3);
+
+        let mut view = AddProviderView::new();
+        let mut buf = Buffer::empty(term);
+        view.render(&mut buf, render_area, &theme, &setup);
+
+        assert!(view.visible_count > 0, "viewport must show at least one row");
+        let max_w = max_row_width();
+        let row_x = render_area.x + (render_area.width.saturating_sub(max_w as u16)) / 2;
+        let name_x = row_x + 2;
+
+        // Sanity: a provider really is drawn on the first list row.
+        let drawn = (0..10u16).any(|dx| {
+            buf.cell((name_x + dx, view.list_start_y))
+                .is_some_and(|cell| cell.symbol() != " ")
+        });
+        assert!(
+            drawn,
+            "no provider drawn at first list row y={}",
+            view.list_start_y
+        );
+
+        // Every drawn row must map to its own index even though the mouse
+        // path hands us a differently sized area.
+        for i in 0..view.visible_count.min(5) {
+            let y = view.list_start_y + i as u16;
+            assert_eq!(
+                view.handle_mouse(&click(name_x, y), mouse_area),
+                Some(i),
+                "click on drawn row y={y} misaligned"
+            );
+        }
+
+        // Rows just outside the drawn list must not hit anything.
+        assert_eq!(
+            view.handle_mouse(&click(name_x, view.list_start_y - 1), mouse_area),
+            None
+        );
+        let below = view.list_start_y + view.visible_count as u16;
+        assert_eq!(view.handle_mouse(&click(name_x, below), mouse_area), None);
+    }
 }
