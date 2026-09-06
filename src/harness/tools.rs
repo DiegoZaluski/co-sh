@@ -12,7 +12,7 @@ use cosh_sdk::find::{GlobMatch, GrepMatch};
 use cosh_tools::{
     bash::{Bash, BashRunInput},
     find::{Find, GlobCallOptions, GlobMatchCallback, GrepMatchCallback},
-    fs::{Fs, FsRollbackInput, Target, TargetFile},
+    fs::{Fs, FsRollbackInput, LspNotes, Target, TargetFile},
     lsp::Lsp,
     plan::{
         Plan,
@@ -155,14 +155,21 @@ pub struct CoshTools {
 impl CoshTools {
     #[must_use]
     pub fn new(cwd: &str) -> Self {
+        let lsp = build_lsp(cwd);
+        let mut fs = Fs::new().cwd(cwd);
+        if let Some(handle) = &lsp {
+            // The handle is the toggle: every fs operation now reports
+            // passive LSP diagnostics on the files it touches.
+            fs = fs.with_lsp(Arc::clone(handle));
+        }
         Self {
             bash: Bash::new().cwd(cwd),
-            fs: Fs::new().cwd(cwd),
+            fs,
             find: Find::new().cwd(cwd),
             web: Web::new(),
             plan: Mutex::new(Plan::new()),
             question: Question::new(),
-            lsp: build_lsp(cwd),
+            lsp,
             #[cfg(feature = "embed")]
             recall: Recall::new(),
             #[cfg(feature = "embed")]
@@ -232,6 +239,27 @@ impl CoshTools {
     /// Set the event sender for streaming tool output.
     pub fn set_event_tx(&mut self, tx: tokio::sync::mpsc::UnboundedSender<HarnessEvent>) {
         self.event_tx = Some(tx);
+    }
+
+    /// Forward passive LSP findings from an fs operation to the TUI as a
+    /// dedicated event (errors render red, warnings yellow). The model sees
+    /// the same findings inline in the serialized result; this event only
+    /// carries the user-facing styling signal.
+    fn emit_lsp_notes<'a>(&self, tool: &str, notes: impl Iterator<Item = &'a LspNotes>) {
+        let mut merged = LspNotes::default();
+        for notes in notes {
+            merged.errors.extend(notes.errors.iter().cloned());
+            merged.warnings.extend(notes.warnings.iter().cloned());
+        }
+        if merged.errors.is_empty() && merged.warnings.is_empty() {
+            return;
+        }
+        if let Some(tx) = &self.event_tx {
+            let _ = tx.send(HarnessEvent::ToolDiagnostics {
+                tool: tool.to_string(),
+                notes: merged,
+            });
+        }
     }
 
     /// Clone of the event sender, if one was set (streaming tool output to
@@ -320,7 +348,6 @@ impl CoshTools {
         v.push(self.skills.description_read_asset.clone());
         v.push(self.skills.description_match_skills.clone());
         if let Some(lsp) = &self.lsp {
-            v.push(lsp.description_diagnostics.clone());
             v.push(lsp.description_definitions.clone());
             v.push(lsp.description_references.clone());
             v.push(lsp.description_symbols.clone());
@@ -501,7 +528,6 @@ impl CoshTools {
         v.push(extract_schema(&self.skills.description_read_asset));
         v.push(extract_schema(&self.skills.description_match_skills));
         if let Some(lsp) = &self.lsp {
-            v.push(extract_schema(&lsp.description_diagnostics));
             v.push(extract_schema(&lsp.description_definitions));
             v.push(extract_schema(&lsp.description_references));
             v.push(extract_schema(&lsp.description_symbols));
@@ -760,7 +786,6 @@ impl Tools for CoshTools {
         write_single_tool(out, &self.skills.description_read_asset, true);
         write_single_tool(out, &self.skills.description_match_skills, true);
         if let Some(lsp) = &self.lsp {
-            write_single_tool(out, &lsp.description_diagnostics, true);
             write_single_tool(out, &lsp.description_definitions, true);
             write_single_tool(out, &lsp.description_references, true);
             write_single_tool(out, &lsp.description_symbols, true);
@@ -802,7 +827,6 @@ impl Tools for CoshTools {
         v.push(self.skills.description_read_asset.clone());
         v.push(self.skills.description_match_skills.clone());
         if let Some(lsp) = &self.lsp {
-            v.push(lsp.description_diagnostics.clone());
             v.push(lsp.description_definitions.clone());
             v.push(lsp.description_references.clone());
             v.push(lsp.description_symbols.clone());
@@ -845,7 +869,6 @@ impl Tools for CoshTools {
         v.push(extract_schema(&self.skills.description_read_asset));
         v.push(extract_schema(&self.skills.description_match_skills));
         if let Some(lsp) = &self.lsp {
-            v.push(extract_schema(&lsp.description_diagnostics));
             v.push(extract_schema(&lsp.description_definitions));
             v.push(extract_schema(&lsp.description_references));
             v.push(extract_schema(&lsp.description_symbols));
@@ -941,11 +964,13 @@ impl Tools for CoshTools {
                 let targets: Vec<TargetFile> =
                     serde_json::from_value(args["targets"].clone()).map_err(|e| e.to_string())?;
                 let results = self.fs.write(targets).await?;
+                self.emit_lsp_notes("fs_write", results.iter().filter_map(|r| r.lsp_notes.as_ref()));
                 serde_json::to_string(&results).map_err(|e| e.to_string())
             }
 
             "fs_edit" => {
                 let results = self.fs.edit(args).await?;
+                self.emit_lsp_notes("fs_edit", results.iter().filter_map(|r| r.lsp_notes.as_ref()));
                 serde_json::to_string(&results).map_err(|e| e.to_string())
             }
 
@@ -953,6 +978,7 @@ impl Tools for CoshTools {
                 let input: FsRollbackInput =
                     serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let result = self.fs.rollback(&input.path, &input.hash).await?;
+                self.emit_lsp_notes("fs_rollback", result.lsp_notes.as_ref().into_iter());
                 serde_json::to_string(&result).map_err(|e| e.to_string())
             }
 
@@ -1181,15 +1207,6 @@ impl Tools for CoshTools {
                 serde_json::to_string(&output).map_err(|e| e.to_string())
             }
 
-            "lsp_diagnostics" => {
-                let Some(lsp) = &self.lsp else {
-                    return Err("LSP tooling is disabled".into());
-                };
-                let input: cosh_tools::lsp::types::DiagnosticsInput =
-                    serde_json::from_value(args).map_err(|e| e.to_string())?;
-                let output = lsp.diagnostics(&input).await.map_err(|e| e.to_string())?;
-                serde_json::to_string(&output).map_err(|e| e.to_string())
-            }
             "lsp_definitions" => {
                 let Some(lsp) = &self.lsp else {
                     return Err("LSP tooling is disabled".into());

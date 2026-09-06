@@ -364,28 +364,6 @@ fn build_lsp(cwd: &str) -> Option<Arc<Lsp>> {
     }
 }
 
-/// After a successful fs_write/fs_edit, drain errors-only diagnostics for the
-/// touched file and wrap them in a system-reminder block. `None` when LSP is
-/// unavailable or the file has nothing to report.
-async fn passive_lsp_note(lsp: &Arc<Lsp>, path: &str) -> Option<String> {
-    let input = cosh_tools::lsp::DiagnosticsInput {
-        file_path: Some(path.to_owned()),
-        severity: Some("errors".into()),
-        max_items: Some(20),
-        settle_ms: Some(2_000),
-    };
-    let out = lsp.diagnostics(&input).await.ok()?;
-    if out.formatted.is_empty() {
-        return None;
-    }
-    let reminder = format!(
-        "\n\n<system-reminder>\nLSP errors detected after writing {path}:\n{}\n</system-reminder>",
-        out.formatted
-    );
-    let guidance = "\nFix these using the \u{00B6}header from your last edit result — no need to re-read the file.";
-    Some(format!("{reminder}{guidance}"))
-}
-
 fn default_harness_tools() -> Vec<HarnessTool> {
     vec![HarnessTool {
         name: "stop_agent_loop".into(),
@@ -4354,42 +4332,6 @@ impl Harness {
             // model always sees the up-to-date plan.
             if tool_name.starts_with("plan_") {
                 self.sync_todo_context();
-            }
-
-            // LSP auto-discovery: touching a file starts the language server
-            // covering it, so the footer reflects the language and
-            // hover/diagnostics are ready without the model calling an lsp
-            // tool (mirrors opencode's lazy-per-file discovery).
-            let target_path = args_map
-                .get("targets")
-                .and_then(|t| t.get("targets"))
-                .and_then(|v| v.as_array())
-                .and_then(|arr| arr.first())
-                .and_then(|t| t.get("path"))
-                .and_then(|p| p.as_str())
-                .unwrap_or_default();
-
-            // Passive LSP feedback: after a successful write/edit, drain
-            // errors-only diagnostics for the touched file and append them as
-            // a system-reminder so the model can fix issues immediately.
-            if matches!(tool_name.as_str(), "fs_write" | "fs_edit")
-                && let Some(lsp) = &self.lsp
-                && !target_path.is_empty()
-                && let Some(note) = passive_lsp_note(lsp, target_path).await
-            {
-                return Ok(format!("{result}{note}"));
-            }
-
-            // Reading a file spawns its server (get-or-spawn) so the language
-            // shows up in the footer and diagnostics are primed.
-            if tool_name == "fs_read"
-                && let Some(lsp) = &self.lsp
-                && !target_path.is_empty()
-            {
-                let _ = lsp
-                    .manager()
-                    .ensure_for_file(std::path::Path::new(target_path))
-                    .await;
             }
 
             return Ok(result);

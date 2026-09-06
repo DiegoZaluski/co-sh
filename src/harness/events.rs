@@ -80,6 +80,16 @@ pub enum HarnessEvent {
         /// Whether this is the final chunk for this tool call.
         finished: bool,
     },
+    /// Passive LSP findings collected by an fs operation after it touched a
+    /// file. The model sees the same findings inline in the tool result; this
+    /// event carries the user-facing rendering signal: the TUI shows errors
+    /// in red and warnings in yellow below the tool's code/diff block.
+    ToolDiagnostics {
+        /// The fs tool that produced the findings (e.g. `fs_edit`).
+        tool: String,
+        /// Structured findings, already settled and severity-split.
+        notes: cosh_tools::fs::LspNotes,
+    },
     /// A fatal error occurred. The harness paths carry the context snapshot
     /// WITH the display-only error item already recorded
     /// ([`ContextManager::add_error`]) so the TUI can persist the styled
