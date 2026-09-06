@@ -23,6 +23,11 @@ pub struct EditResult {
     pub warnings: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diff: Option<String>,
+    /// Passive LSP feedback collected after the edit (errors by default,
+    /// warnings when the caller opted in). `None` when LSP is disabled or
+    /// nothing was found.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lsp_notes: Option<super::types::LspNotes>,
 }
 
 /// Failure of a multi-target [`edit`] batch.
@@ -174,6 +179,7 @@ async fn edit_target(target: EditTarget, metadata: &FsMetadata) -> Result<EditRe
         header: section.header,
         first_changed_line: section.first_changed_line,
         warnings: section.warnings,
+        lsp_notes: None,
         diff,
     })
 }

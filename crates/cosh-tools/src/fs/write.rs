@@ -38,6 +38,11 @@ pub struct WriteResult {
     pub file_hash: String,
     pub header: String,
     pub warnings: Option<String>,
+    /// Passive LSP feedback collected after the write (errors by default,
+    /// warnings when the caller opted in). `None` when LSP is disabled or
+    /// nothing was found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lsp_notes: Option<super::types::LspNotes>,
 }
 
 /// Strip hashline display prefixes (`[path#hash]` headers and `N:` line prefixes)
@@ -146,6 +151,7 @@ pub async fn write(metadata: FsMetadata, tg: FsWrite) -> Result<Vec<WriteResult>
                 header: String::new(),
                 path: target.path.clone(),
                 warnings: Some(warning),
+                lsp_notes: None,
             };
             result.push(res);
             continue;
@@ -165,6 +171,7 @@ pub async fn write(metadata: FsMetadata, tg: FsWrite) -> Result<Vec<WriteResult>
                         header: String::new(),
                         path: target.path.clone(),
                         warnings: Some(msg),
+                        lsp_notes: None,
                     };
                     result.push(res);
                     continue;
@@ -190,6 +197,7 @@ pub async fn write(metadata: FsMetadata, tg: FsWrite) -> Result<Vec<WriteResult>
                                      This ensures you know the current content before overwriting it.",
                                     target.path
                                 )),
+                                lsp_notes: None,
                             };
                             result.push(res);
                             continue;
@@ -212,6 +220,7 @@ pub async fn write(metadata: FsMetadata, tg: FsWrite) -> Result<Vec<WriteResult>
                                              2) Use the new `file_hash` from the read result.",
                                             target.path, expected_hash, actual_hash
                                         )),
+                                        lsp_notes: None,
                                     };
                                     result.push(res);
                                     continue;
@@ -232,6 +241,7 @@ pub async fn write(metadata: FsMetadata, tg: FsWrite) -> Result<Vec<WriteResult>
                         header: String::new(),
                         path: target.path.clone(),
                         warnings: Some(warning),
+                        lsp_notes: None,
                     };
                     result.push(res);
                     continue;
@@ -269,6 +279,7 @@ pub async fn write(metadata: FsMetadata, tg: FsWrite) -> Result<Vec<WriteResult>
                     } else {
                         Some(warnings.join("\n"))
                     },
+                    lsp_notes: None,
                 };
 
                 result.push(res);
@@ -288,6 +299,7 @@ pub async fn write(metadata: FsMetadata, tg: FsWrite) -> Result<Vec<WriteResult>
                     header: String::new(),
                     path: target.path.clone(),
                     warnings: Some(warning),
+                    lsp_notes: None,
                 };
                 result.push(res);
             }

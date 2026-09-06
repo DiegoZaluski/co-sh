@@ -26,6 +26,11 @@ pub struct RollbackResult {
     /// Non-fatal warning when an anomaly was detected but the restore still
     /// succeeded (e.g., the file was modified externally since the snapshot).
     pub warning: Option<String>,
+    /// Passive LSP feedback collected after the restore (errors by default,
+    /// warnings when the caller opted in). `None` when LSP is disabled or
+    /// nothing was found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lsp_notes: Option<super::types::LspNotes>,
 }
 
 /// Restore a file to a previously recorded version.
@@ -75,5 +80,6 @@ pub async fn rollback(
         header: out.header,
         replaced_hash: out.replaced_hash,
         warning: out.warning,
+        lsp_notes: None,
     })
 }

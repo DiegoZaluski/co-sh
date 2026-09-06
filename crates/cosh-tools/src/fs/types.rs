@@ -1,9 +1,33 @@
 use std::path::PathBuf;
 
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::util::path_guard::PathGuard;
+
+/// One passive LSP finding attached to an fs operation result.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct LspNote {
+    /// Workspace path of the file the finding refers to.
+    pub path: String,
+    /// 1-based line where the finding starts.
+    pub line: u32,
+    /// Human-readable diagnostic message.
+    pub message: String,
+    /// Emitting tool (e.g. `rustc`, `tsc`), when the server reports one.
+    pub source: Option<String>,
+}
+
+/// Structured LSP feedback for one fs operation, split by severity so the
+/// TUI can color errors and warnings differently and the model gets precise
+/// anchors. `None`/empty means the operation produced no findings.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct LspNotes {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<LspNote>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<LspNote>,
+}
 
 /// A single read specification.
 #[derive(Debug, Deserialize, JsonSchema)]

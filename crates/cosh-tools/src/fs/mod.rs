@@ -21,18 +21,24 @@ mod test;
 pub mod types;
 pub mod write;
 
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 pub use edit::{EditBatchError, EditResult, edit};
 pub use read::{ReadResult, read};
 pub use rollback::{RollbackResult, rollback};
 pub use types::{
     AstEditOp, EditTarget, FsAstEdit, FsEdit, FsMetadata, FsRead, FsRollback, FsRollbackInput,
-    FsWrite, Target, TargetFile,
+    FsWrite, LspNote, LspNotes, Target, TargetFile,
 };
 pub use write::{WriteResult, write};
 
-use crate::ToolDescription;
+use crate::{ToolDescription, lsp::Lsp};
+use cosh_sdk::lsp::lsp_types::DiagnosticSeverity;
+
+/// Quiet-period budget for passive LSP feedback after a mutation.
+const LSP_SETTLE: Duration = Duration::from_secs(2);
+/// Hard cap per severity in passive LSP feedback.
+const LSP_MAX_NOTES: usize = 20;
 
 /// Which edit engine [`Fs::edit`] dispatches to.
 ///
@@ -78,6 +84,11 @@ pub struct Fs {
     /// Engine selection used by [`Fs::edit`].
     edit_engine: EditEngine,
 
+    /// Language-server engine for passive diagnostics. Its presence is the
+    /// toggle: set once via [`Fs::with_lsp`], every mutating operation then
+    /// reports findings on the touched files.
+    lsp: Option<Arc<Lsp>>,
+
     /// MCP Tool description for `read`.
     pub description_read: ToolDescription,
     /// MCP Tool description for `write`.
@@ -107,6 +118,7 @@ impl Fs {
             read_allowlist: None,
             read_blocklist: None,
             edit_engine: EditEngine::Auto,
+            lsp: None,
             description_read: serde_json::json!({
                 "name": "fs_read",
                 "description": concat!(
@@ -242,6 +254,37 @@ impl Fs {
         }
     }
 
+    /// Attach the language-server engine. Its presence is the toggle: every
+    /// mutating operation (write/edit/rollback) then reports passive LSP
+    /// diagnostics on the touched files, and reads warm the servers up.
+    #[must_use]
+    pub fn with_lsp(mut self, lsp: Arc<Lsp>) -> Self {
+        self.lsp = Some(lsp);
+        self
+    }
+
+    /// Suppress passive LSP feedback for the chained call only — the `Fs`
+    /// keeps its default behavior for later calls.
+    #[must_use]
+    pub fn without_lsp(&self) -> FsCall<'_> {
+        FsCall {
+            fs: self,
+            lsp: None,
+            include_warnings: false,
+        }
+    }
+
+    /// Include warnings (not just errors) in the chained call's passive LSP
+    /// feedback only — the `Fs` keeps its default behavior for later calls.
+    #[must_use]
+    pub fn warnings(&self) -> FsCall<'_> {
+        FsCall {
+            fs: self,
+            lsp: self.lsp.as_ref(),
+            include_warnings: true,
+        }
+    }
+
     /// Set the project root directory (used for path-validation guards).
     #[must_use]
     pub fn cwd(mut self, path: impl Into<PathBuf>) -> Self {
@@ -306,8 +349,22 @@ impl Fs {
 
     /// Read one or more files / symbols.
     ///
-    /// See [`read`] for details.
+    /// See [`read`] for details. With [`Fs::with_lsp`] configured, each read
+    /// warms the file's language servers up (no diagnostics attached).
     pub async fn read(&self, targets: Vec<Target>) -> Vec<ReadResult> {
+        self.read_op(self.lsp.as_ref(), targets).await
+    }
+
+    async fn read_op(
+        &self,
+        lsp: Option<&Arc<Lsp>>,
+        targets: Vec<Target>,
+    ) -> Vec<ReadResult> {
+        if let Some(lsp) = lsp {
+            for t in &targets {
+                Self::warm_lsp(lsp, &self.root, &t.path).await;
+            }
+        }
         read(self.read_metadata(), FsRead { targets }).await
     }
 
@@ -319,7 +376,23 @@ impl Fs {
     ///
     /// Returns an error if the allowlist/blocklist configuration is invalid.
     pub async fn write(&self, targets: Vec<TargetFile>) -> Result<Vec<WriteResult>, String> {
-        write(self.metadata(), FsWrite { targets }).await
+        self.write_op(self.lsp.as_ref(), false, targets).await
+    }
+
+    async fn write_op(
+        &self,
+        lsp: Option<&Arc<Lsp>>,
+        include_warnings: bool,
+        targets: Vec<TargetFile>,
+    ) -> Result<Vec<WriteResult>, String> {
+        let mut results = write(self.metadata(), FsWrite { targets }).await?;
+        if let Some(lsp) = lsp {
+            for result in &mut results {
+                result.lsp_notes =
+                    Self::passive_notes(lsp, &self.root, &result.path, include_warnings).await;
+            }
+        }
+        Ok(results)
     }
 
     /// Apply file edits, dispatching to the appropriate engine.
@@ -360,12 +433,28 @@ impl Fs {
     /// Returns an error string when no/edit-engine arguments are invalid, a
     /// correction is needed, or an engine fails.
     pub async fn edit(&self, args: serde_json::Value) -> Result<Vec<EditResult>, String> {
+        self.edit_op(self.lsp.as_ref(), false, args).await
+    }
+
+    async fn edit_op(
+        &self,
+        lsp: Option<&Arc<Lsp>>,
+        include_warnings: bool,
+        args: serde_json::Value,
+    ) -> Result<Vec<EditResult>, String> {
         let metadata = self.metadata();
-        match self.edit_engine {
-            EditEngine::Replace => self.edit_replace(&metadata, &args).await,
-            EditEngine::Ast => self.edit_ast(&metadata, &args).await,
-            EditEngine::Auto => self.edit_auto(&metadata, &args).await,
+        let mut results = match self.edit_engine {
+            EditEngine::Replace => self.edit_replace(&metadata, &args).await?,
+            EditEngine::Ast => self.edit_ast(&metadata, &args).await?,
+            EditEngine::Auto => self.edit_auto(&metadata, &args).await?,
+        };
+        if let Some(lsp) = lsp {
+            for result in &mut results {
+                result.lsp_notes =
+                    Self::passive_notes(lsp, &self.root, &result.path, include_warnings).await;
+            }
         }
+        Ok(results)
     }
 
     /// Restrict [`edit`](Self::edit) to the hashline replace engine.
@@ -749,7 +838,91 @@ impl Fs {
     /// Returns an error if write permission is denied or the path has no
     /// rollback history.
     pub async fn rollback(&self, path: &str, hash: &str) -> Result<RollbackResult, String> {
-        rollback(&FsRollback, self.metadata(), path, hash).await
+        self.rollback_op(self.lsp.as_ref(), false, path, hash).await
+    }
+
+    async fn rollback_op(
+        &self,
+        lsp: Option<&Arc<Lsp>>,
+        include_warnings: bool,
+        path: &str,
+        hash: &str,
+    ) -> Result<RollbackResult, String> {
+        let mut result = rollback(&FsRollback, self.metadata(), path, hash).await?;
+        if let Some(lsp) = lsp {
+            result.lsp_notes =
+                Self::passive_notes(lsp, &self.root, &result.path, include_warnings).await;
+        }
+        Ok(result)
+    }
+
+    /// Ensure the servers covering `rel` are running and the file is open on
+    /// them. Passive best-effort: failures are logged, never surfaced.
+    async fn warm_lsp(lsp: &Lsp, root: &std::path::Path, rel: &str) {
+        let path = root.join(rel);
+        if let Ok(handles) = lsp.manager().ensure_for_file(&path).await {
+            for handle in &handles {
+                if let Err(err) = handle.touch_file(&path).await {
+                    log::debug!("lsp warm-up of `{}` failed: {err}", path.display());
+                }
+            }
+        }
+    }
+
+    /// Collect structured diagnostics for `rel` after a mutation: ensure the
+    /// file's servers are up, wait for the diagnostics to settle, then split
+    /// the snapshot by severity. Passive best-effort — any failure degrades
+    /// to `None` so the tool result is never rejected because of LSP.
+    async fn passive_notes(
+        lsp: &Lsp,
+        root: &std::path::Path,
+        rel: &str,
+        include_warnings: bool,
+    ) -> Option<LspNotes> {
+        let path = root.join(rel);
+        let display = std::path::Path::new(rel)
+            .strip_prefix(root)
+            .unwrap_or(std::path::Path::new(rel))
+            .display()
+            .to_string();
+
+        let Ok(handles) = lsp.manager().ensure_for_file(&path).await else {
+            return None;
+        };
+        for handle in &handles {
+            if let Err(err) = handle.touch_file(&path).await {
+                log::debug!(
+                    "passive diagnostics: could not open `{}` on {}: {err}",
+                    path.display(),
+                    handle.name()
+                );
+            }
+        }
+
+        let engine = lsp.diagnostics_engine();
+        engine.wait_for_settle(LSP_SETTLE).await;
+
+        let mut notes = LspNotes::default();
+        for diag in engine.snapshot_for(&path) {
+            let note = LspNote {
+                path: display.clone(),
+                line: diag.range.start.line + 1,
+                message: diag.message,
+                source: diag.source,
+            };
+            if diag.severity.is_none_or(|s| s <= DiagnosticSeverity::ERROR) {
+                if notes.errors.len() < LSP_MAX_NOTES {
+                    notes.errors.push(note);
+                }
+            } else if diag.severity == Some(DiagnosticSeverity::WARNING)
+                && include_warnings
+                && notes.warnings.len() < LSP_MAX_NOTES
+            {
+                notes.warnings.push(note);
+            }
+        }
+
+        (!notes.errors.is_empty() || !notes.warnings.is_empty()).then_some(notes)
     }
 
     /// Get the project root path.
@@ -794,6 +967,56 @@ impl Fs {
 }
 
 // Auto-dispatch schema-misuse detection
+
+/// Per-call policy guard returned by [`Fs::without_lsp`] and [`Fs::warnings`].
+///
+/// The guard carries the policy for exactly the calls made through it; the
+/// originating `Fs` keeps its default behavior for every later call.
+pub struct FsCall<'a> {
+    fs: &'a Fs,
+    lsp: Option<&'a Arc<Lsp>>,
+    include_warnings: bool,
+}
+
+impl FsCall<'_> {
+    /// See [`Fs::read`].
+    pub async fn read(&self, targets: Vec<Target>) -> Vec<ReadResult> {
+        self.fs.read_op(self.lsp, targets).await
+    }
+
+    /// See [`Fs::write`].
+    ///
+    /// # Errors
+    ///
+    /// Same conditions as [`Fs::write`].
+    pub async fn write(&self, targets: Vec<TargetFile>) -> Result<Vec<WriteResult>, String> {
+        self.fs
+            .write_op(self.lsp, self.include_warnings, targets)
+            .await
+    }
+
+    /// See [`Fs::edit`].
+    ///
+    /// # Errors
+    ///
+    /// Same conditions as [`Fs::edit`].
+    pub async fn edit(&self, args: serde_json::Value) -> Result<Vec<EditResult>, String> {
+        self.fs
+            .edit_op(self.lsp, self.include_warnings, args)
+            .await
+    }
+
+    /// See [`Fs::rollback`].
+    ///
+    /// # Errors
+    ///
+    /// Same conditions as [`Fs::rollback`].
+    pub async fn rollback(&self, path: &str, hash: &str) -> Result<RollbackResult, String> {
+        self.fs
+            .rollback_op(self.lsp, self.include_warnings, path, hash)
+            .await
+    }
+}
 
 /// True when a string uses ast-grep style metavariables (`$name` / `$$$name`).
 fn contains_metavar(s: &str) -> bool {

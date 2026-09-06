@@ -1,6 +1,8 @@
 //! Language-server tools built on the `cosh-sdk` LSP engine.
 //!
-//! - [`diagnostics::run_diagnostics`]: settle and render diagnostics.
+//! - [`diagnostics::run_diagnostics`]: settle and render diagnostics. Not
+//!   exposed to the agent as a tool; the fs wrapper consumes it directly to
+//!   attach passive findings to write/edit/rollback results.
 //! - [`definitions::run_definitions`]: go to definition (hybrid addressing).
 //! - [`references::run_references`]: find references grouped by file.
 //! - [`symbols::run_symbols`]: document symbols with hierarchy.
@@ -67,8 +69,6 @@ pub struct Lsp {
     request_timeout: Duration,
     settle_cap: Duration,
 
-    /// MCP Tool description for `lsp_diagnostics`.
-    pub description_diagnostics: ToolDescription,
     /// MCP Tool description for `lsp_definitions`.
     pub description_definitions: ToolDescription,
     /// MCP Tool description for `lsp_references`.
@@ -111,31 +111,6 @@ impl Lsp {
             guard: PathGuard::new(&root, None, None),
             request_timeout: Duration::from_secs(10),
             settle_cap: Duration::from_secs(5),
-            description_diagnostics: json_description(
-                "lsp_diagnostics",
-                concat!(
-                    "List compiler/language-server diagnostics for one file or ",
-                    "the whole workspace. Opens the file on its language server ",
-                    "and waits for results to settle before rendering.\n\n",
-                    "Use after edits to confirm code is clean, before committing, ",
-                    "or whenever you suspect type/borrow/import errors you cannot ",
-                    "see from source alone. Prefer this over compiling manually — ",
-                    "the language server is faster and incremental."
-                ),
-                &serde_json::json!({
-                    "file_path": {
-                        "type": "string",
-                        "description": "File to scope diagnostics to (workspace-relative or absolute). Omitted: report every tracked file in the workspace."
-                    },
-                    "severity": {
-                        "type": "string",
-                        "enum": ["errors", "warnings", "all"],
-                        "description": "Minimum severity to report. Default \"all\"."
-                    },
-                    "max_items": { "type": "integer", "minimum": 1, "description": "Maximum formatted lines. Default 50." },
-                    "settle_ms": { "type": "integer", "minimum": 0, "description": "How long to wait for diagnostics to settle after opening the file. Default 5000." }
-                }),
-            ),
             description_definitions: json_description(
                 "lsp_definitions",
                 concat!(
@@ -218,8 +193,9 @@ impl Lsp {
                     "preview lines — and changes nothing. Review it, then ",
                     "re-call with confirm=true to write.\n\n",
                     "Addressing matches definitions: position OR bare symbol ",
-                    "name. Always run lsp_diagnostics after applying to catch ",
-                    "fallout."
+                    "name. LSP errors on the touched files are reported ",
+                    "automatically after each fs write/edit, so rely on that ",
+                    "passive feedback to catch fallout."
                 ),
                 &{
                     let mut schema = location_schema();
