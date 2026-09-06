@@ -902,6 +902,8 @@ fn diff_context(
                 visible_from: requested.visible_from,
                 hidden: requested.hidden.clone(),
                 masked: requested.masked.clone(),
+                todo: requested.todo.clone(),
+                todo_after_item_id: Some(requested.items.back().map_or(0, ContextItem::id)),
             },
         });
         deltas.extend(requested.items.iter().cloned().map(|item| Delta::Context {
@@ -928,6 +930,14 @@ fn diff_context(
                 change: ContextDelta::ItemRemove { item_id: item.id() },
             });
         }
+    }
+    if !serialized_equal(&current.todo, &requested.todo) {
+        deltas.push(Delta::Context {
+            change: ContextDelta::Todo {
+                value: requested.todo.clone(),
+                after_item_id: Some(requested.items.back().map_or(0, ContextItem::id)),
+            },
+        });
     }
     if current.next_id != requested.next_id {
         deltas.push(Delta::Context {
@@ -1237,6 +1247,83 @@ mod tests {
     }
 
     /// Build a context snapshot with the given items.
+    #[test]
+    fn historical_selection_restores_plan_and_rollback_recovers_head_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+        let mut session = make_test_session("plan-parent", "Plan", vec![make_user_msg("m1", "first")]);
+        let mut context = make_context(vec![user_item(1, "first")]);
+        let plan = |title: &str| serde_json::from_value(serde_json::json!({"groups":[{
+            "title": title, "items": [], "tests_verified": false
+        }]})).unwrap();
+        context.todo = Some(plan("first plan"));
+        session.ctx_ids.insert("m1".into(), vec![1]);
+        store.save_session_with_context(&session, &context);
+        session.messages.push(make_assistant_msg("m2", "second"));
+        session.ctx_ids.insert("m2".into(), vec![2]);
+        context.items.push_back(assistant_item(2, "second"));
+        context.todo = Some(plan("future plan"));
+        store.save_session_with_context(&session, &context);
+        let path = store.file_path(&session.id);
+        let prefix = std::fs::read(&path).unwrap();
+        let mut child = session.clone();
+        child.id = "plan-child".into();
+        assert!(store.fork_session(&session.id, "m1", &child));
+        assert_eq!(store.load_context(&child.id).unwrap().todo.unwrap().groups[0].title, "first plan");
+        assert!(!store.file_path(&child.id).exists());
+        assert!(store.revert_session(&session.id, "m2"));
+        assert_eq!(store.load_context(&session.id).unwrap().todo.unwrap().groups[0].title, "first plan");
+        assert!(store.rollback_session(&session.id, "v1"));
+        assert_eq!(store.load_context(&session.id).unwrap().todo.unwrap().groups[0].title, "future plan");
+        assert!(std::fs::read(&path).unwrap().starts_with(&prefix));
+    }
+
+    #[test]
+    fn protected_plan_changes_are_replayed_from_append_only_deltas() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+        let session =
+            make_test_session("plan-history", "Plan", vec![make_user_msg("msg-0", "work")]);
+        let mut context = make_context(vec![user_item(1, "work")]);
+        store.save_session_with_context(&session, &context);
+        let path = store.file_path(&session.id);
+        let mut prefix = std::fs::read(&path).unwrap();
+        for status in ["Pending", "InProgress", "Completed"] {
+            context.todo = Some(
+                serde_json::from_value(serde_json::json!({"groups":[{
+                    "title":"Release", "tests_verified":true, "items":[{
+                        "id":"task-2", "description":"Verify compatibility", "status":status,
+                        "depends_on":["task-1"]
+                    }]
+                }]}))
+                .unwrap(),
+            );
+            store.save_session_with_context(&session, &context);
+            let bytes = std::fs::read(&path).unwrap();
+            assert!(bytes.starts_with(&prefix));
+            let appended = std::str::from_utf8(&bytes[prefix.len()..]).unwrap();
+            assert_eq!(appended.lines().count(), 1, "only the plan delta changed");
+            assert!(appended.contains("\"field\":\"todo\""));
+            assert_eq!(
+                serde_json::to_value(store.load_context(&session.id).unwrap().todo).unwrap(),
+                serde_json::to_value(&context.todo).unwrap()
+            );
+            prefix = bytes;
+        }
+        context.todo = Some(Default::default());
+        store.save_session_with_context(&session, &context);
+        assert!(std::fs::read(&path).unwrap().starts_with(&prefix));
+        assert!(
+            store
+                .load_context(&session.id)
+                .unwrap()
+                .todo
+                .unwrap()
+                .groups
+                .is_empty()
+        );
+    }
+
     fn make_context(items: Vec<ContextItem>) -> ContextManagerState {
         ContextManagerState {
             items: items.into_iter().collect(),
@@ -1248,6 +1335,7 @@ mod tests {
             visible_from: None,
             hidden: Default::default(),
             masked: Default::default(),
+            todo: None,
         }
     }
 
@@ -1735,6 +1823,7 @@ mod tests {
             visible_from: None,
             hidden: HashSet::new(),
             masked: HashSet::new(),
+            todo: None,
         };
         store.save_session_with_context(&session, &initial);
         let path = store.file_path(&session.id);

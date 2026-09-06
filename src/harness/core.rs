@@ -1767,6 +1767,7 @@ impl Harness {
             }
         };
         let mut summary = String::new();
+        let mut finish_reason = None;
         loop {
             let chunk = tokio::select! {
                 chunk = stream.next() => chunk,
@@ -1775,8 +1776,16 @@ impl Harness {
                 }
             };
             match chunk {
-                Some(Ok(chunk)) if chunk.is_reset() => summary.clear(),
-                Some(Ok(chunk)) => summary.push_str(chunk.token()),
+                Some(Ok(chunk)) if chunk.is_reset() => {
+                    summary.clear();
+                    finish_reason = None;
+                }
+                Some(Ok(chunk)) => {
+                    if let Some(reason) = chunk.finish_reason() {
+                        finish_reason = Some(reason.to_owned());
+                    }
+                    summary.push_str(chunk.token());
+                }
                 Some(Err(ConnectorError::ContextWindowExceeded { window_tokens, .. })) => {
                     return Err(CompactionErr::ContextWindow { window_tokens });
                 }
@@ -1793,6 +1802,7 @@ impl Harness {
                 reported_cost,
             });
         }
+        Self::validate_summary_completion(finish_reason.as_deref())?;
         (!summary.trim().is_empty())
             .then_some(summary)
             .ok_or_else(|| CompactionErr::Other("summarizer returned an empty response".into()))
@@ -2180,6 +2190,7 @@ impl Harness {
                 return Err(CompactionErr::Interrupted);
             }
         };
+        let mut finish_reason = None;
         loop {
             // Poll the stream with a periodic stop check (like the main loop's
             // streams), so a stalled provider stays interruptible by the user.
@@ -2211,8 +2222,12 @@ impl Harness {
                 return Err(CompactionErr::Interrupted);
             }
             if chunk.is_reset() {
+                finish_reason = None;
                 on_token(StreamEvent::Reset);
                 continue;
+            }
+            if let Some(reason) = chunk.finish_reason() {
+                finish_reason = Some(reason.to_owned());
             }
             let token = chunk.token();
             if !token.is_empty() {
@@ -2229,7 +2244,19 @@ impl Harness {
                 reported_cost: stream.reported_cost().await,
             });
         }
-        Ok(())
+        Self::validate_summary_completion(finish_reason.as_deref())
+    }
+
+    /// Only natural text completion can become checkpoint evidence. EOF or
+    /// a provider limit is not proof that the summary finished successfully.
+    fn validate_summary_completion(reason: Option<&str>) -> Result<(), CompactionErr> {
+        match reason {
+            Some("stop" | "STOP" | "end_turn") => Ok(()),
+            other => Err(CompactionErr::Other(format!(
+                "summarizer response is incomplete (finish reason: {})",
+                other.unwrap_or("missing")
+            ))),
+        }
     }
 
     /// Stream a chat completion using a proper messages array (native tool-call
@@ -3078,6 +3105,14 @@ impl Harness {
             .sync_model(self.connector.effective_model().unwrap_or("?"));
         self.compaction_generic_retries = 0;
 
+        // Rehydrate before dispatch. Restoring a point with no recorded plan
+        // must clear an existing tool projection, not resurrect future work.
+        if let Some(cosh) = &self.cosh_tools
+            && let Some(list) = self.context_manager.take_restored_todo_list()
+                .or_else(|| self.context_manager.todo_list().cloned())
+        {
+            cosh.restore_todo_list(list);
+        }
         // Mirror the tools' current TODO list into the dedicated protected
         // TODO block (a plan may already exist from a previous loop) so the
         // model sees it from the very first iteration.

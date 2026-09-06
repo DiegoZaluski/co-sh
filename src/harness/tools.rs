@@ -201,6 +201,14 @@ impl CoshTools {
         self.plan.lock().unwrap().list().clone()
     }
 
+    /// Restore the tool projection before dispatching tools in a resumed turn.
+    ///
+    /// # Panics
+    /// Panics if the internal plan mutex is poisoned.
+    pub fn restore_todo_list(&self, list: cosh_tools::plan::types::TodoList) {
+        self.plan.lock().unwrap().restore_list(list);
+    }
+
     /// Add a path to the file-system write allowlist.
     pub fn add_fs_allowlist_path(&mut self, path: std::path::PathBuf) {
         self.fs.add_allowlist_path(path);

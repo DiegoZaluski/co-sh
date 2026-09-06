@@ -28,7 +28,7 @@
 //! # Protection
 //!
 //! The block is NOT a [`ContextItem`](super::ContextItem): it is re-rendered
-//! live from the tools' authoritative `Plan` state on every
+//! from the structured plan projection on every
 //! [`ContextManager::build_messages`](super::ContextManager::build_messages)
 //! call, so it is structurally immune to every compaction phase:
 //!
@@ -65,8 +65,8 @@ use cosh_tools::plan::types::{TodoList, TodoStatus};
 /// the block. See the module docs for the protection and removal rules.
 #[derive(Debug, Clone, Default)]
 pub struct TodoContext {
-    /// The latest mirrored TODO list from the tools' `Plan` state. `None`
-    /// means the block is not rendered (nothing to show / plan over).
+    /// The latest structured plan. `None` means no plan has been recorded;
+    /// empty and completed lists are retained even when not rendered.
     list: Option<TodoList>,
     /// Memoized rendering of `list`: `Some(text)` = the block text, `None` =
     /// no block (fresh context, cleared mirror, or the plan is over). Kept
@@ -92,9 +92,12 @@ impl TodoContext {
         self.list = Some(list);
     }
 
-    /// Drop the mirror entirely. Used when a session is restored — the
-    /// harness re-syncs from the tools' `Plan` at the next loop start, so a
-    /// restored session never surfaces a stale block.
+    /// The structured projection persisted as session deltas, not its rendering.
+    pub(crate) fn list(&self) -> Option<&TodoList> {
+        self.list.as_ref()
+    }
+
+    /// Drop the mirror when loading a state with no recorded plan.
     pub fn clear(&mut self) {
         self.list = None;
         self.rendered = None;
@@ -460,7 +463,7 @@ mod tests {
     }
 
     #[test]
-    fn restore_state_clears_the_stale_todo_mirror() {
+    fn restore_state_preserves_the_protected_plan() {
         let mut m = cm(10_000);
         m.set_todo_list(list(vec![group(
             "Database",
@@ -471,12 +474,52 @@ mod tests {
         restored.restore_state(&state);
         let msgs = restored.build_messages("");
         assert!(
-            !msgs.iter().any(|msg| msg
+            msgs.iter().any(|msg| msg
                 .content
                 .as_deref()
                 .is_some_and(|c| c.contains("## Tool TODOs"))),
-            "a restored session must not surface a stale block — the harness \
-             re-syncs it at the next loop start"
+            "a restored session must preserve its protected plan"
         );
+    }
+
+    #[test]
+    fn empty_and_terminal_plans_restore_without_resurrecting_old_work() {
+        for plan in [
+            TodoList::default(),
+            list(vec![group(
+                "Done",
+                vec![item("task-1", TodoStatus::Completed)],
+            )]),
+        ] {
+            let mut source = cm(10_000);
+            source.set_todo_list(plan.clone());
+            let state = serde_json::from_str(&serde_json::to_string(&source.save_state()).unwrap())
+                .unwrap();
+            let mut restored = cm(10_000);
+            restored.set_todo_list(list(vec![group(
+                "Stale",
+                vec![item("old", TodoStatus::Pending)],
+            )]));
+            restored.restore_state(&state);
+            assert_eq!(
+                serde_json::to_value(restored.todo_list()).unwrap(),
+                serde_json::to_value(Some(plan)).unwrap()
+            );
+            assert!(restored.todo.text().is_none());
+        }
+    }
+
+    #[test]
+    fn legacy_state_without_plan_clears_the_previous_projection() {
+        let mut restored = cm(10_000);
+        restored.set_todo_list(list(vec![group(
+            "Stale",
+            vec![item("old", TodoStatus::Pending)],
+        )]));
+        let mut state = serde_json::to_value(restored.save_state()).unwrap();
+        state.as_object_mut().unwrap().remove("todo");
+        restored.restore_state(&serde_json::from_value(state).unwrap());
+        assert!(restored.todo_list().is_none());
+        assert!(restored.todo.text().is_none());
     }
 }

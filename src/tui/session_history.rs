@@ -7,6 +7,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use cosh::harness::context::{ContextItem, ContextManagerState, MapReduceState, SplitState};
+use cosh_tools::plan::types::TodoList;
 use serde::{Deserialize, Serialize};
 
 use crate::types::{Message, MessageRole, Part, Session};
@@ -170,6 +171,12 @@ pub(crate) enum ContextDelta {
         hidden: HashSet<u64>,
         #[serde(default)]
         masked: HashSet<u64>,
+        #[serde(default)]
+        todo: Option<TodoList>,
+        /// Last context item recorded with this plan (zero precedes all items).
+        /// Absent in older histories, which have no historical plan binding.
+        #[serde(default)]
+        todo_after_item_id: Option<u64>,
     },
     ItemUpsert {
         item: ContextItem,
@@ -192,6 +199,11 @@ pub(crate) enum ContextDelta {
     MapReduce {
         value: Box<Option<MapReduceState>>,
     },
+    Todo {
+        value: Option<TodoList>,
+        #[serde(default)]
+        after_item_id: Option<u64>,
+    },
     VisibleFrom {
         value: Option<u64>,
     },
@@ -213,6 +225,8 @@ pub(crate) struct BranchProjection {
     pub context: Option<ContextManagerState>,
     pub head_event_id: u64,
     pub deleted: bool,
+    /// Derived (context item boundary, plan event ID) references, not plan copies.
+    todo_points: Vec<(u64, u64)>,
 }
 
 impl BranchProjection {
@@ -233,6 +247,7 @@ impl BranchProjection {
             context: None,
             head_event_id,
             deleted: false,
+            todo_points: Vec::new(),
         }
     }
 
@@ -274,6 +289,8 @@ impl BranchProjection {
                     .copied()
             })
             .collect();
+        let last_kept_item = kept_ids.iter().copied().max().unwrap_or(0);
+        self.todo_points.retain(|(after_item_id, _)| *after_item_id <= last_kept_item);
         self.session.messages.truncate(split);
         let retained_messages: HashSet<&str> = self
             .session
@@ -306,6 +323,8 @@ pub(crate) struct HistoryProjection {
     pub branches: HashMap<String, BranchProjection>,
     event_states: HashMap<(String, u64), BranchProjection>,
     reference_targets: HashSet<(String, u64)>,
+    /// One derived value per plan event, shared by all branch references.
+    todo_values: HashMap<u64, Option<TodoList>>,
     pub snapshots: Vec<(String, String, Reference)>,
     pub reverts: Vec<RevertRecord>,
     pub last_event_id: u64,
@@ -458,7 +477,21 @@ impl HistoryProjection {
             | Delta::Rollback { .. } => {}
             Delta::Metadata { change } => apply_metadata(&mut state, change),
             Delta::Message { change } => apply_message(&mut state, change),
-            Delta::Context { change } => apply_context(&mut state, change),
+            Delta::Context { change } => {
+                let plan = match change {
+                    ContextDelta::Initialize { todo, todo_after_item_id, .. } => {
+                        state.todo_points.clear();
+                        Some((todo, todo_after_item_id))
+                    }
+                    ContextDelta::Todo { value, after_item_id } => Some((value, after_item_id)),
+                    _ => None,
+                };
+                if let Some((value, Some(after_item_id))) = plan {
+                    self.todo_values.insert(event.event_id, value.clone());
+                    state.todo_points.push((*after_item_id, event.event_id));
+                }
+                apply_context(&mut state, change);
+            }
             Delta::Snapshot { name, target } => {
                 self.snapshots
                     .push((event.branch_id.clone(), name.clone(), target.clone()))
@@ -488,6 +521,13 @@ impl HistoryProjection {
             repair_context_visibility(context);
         }
         state.apply_selection(&reference.selection)?;
+        if !matches!(reference.selection, Selection::AtEvent)
+            && let Some(context) = state.context.as_mut()
+        {
+            context.todo = state.todo_points.last()
+                .and_then(|(_, event_id)| self.todo_values.get(event_id))
+                .cloned().flatten();
+        }
         Ok(state)
     }
 }
@@ -564,6 +604,8 @@ fn apply_context(state: &mut BranchProjection, change: &ContextDelta) {
             visible_from,
             hidden,
             masked,
+            todo,
+            ..
         } => {
             state.context = Some(ContextManagerState {
                 items: VecDeque::new(),
@@ -575,6 +617,7 @@ fn apply_context(state: &mut BranchProjection, change: &ContextDelta) {
                 visible_from: *visible_from,
                 hidden: hidden.clone(),
                 masked: masked.clone(),
+                todo: todo.clone(),
             });
         }
         ContextDelta::ItemUpsert { item } => {
@@ -594,6 +637,7 @@ fn apply_context(state: &mut BranchProjection, change: &ContextDelta) {
             repair_context_visibility(context);
         }
         ContextDelta::NextId { value } => context_or_default(state).next_id = *value,
+        ContextDelta::Todo { value, .. } => context_or_default(state).todo = value.clone(),
         ContextDelta::MaxTokens { value } => context_or_default(state).max_tokens = *value,
         ContextDelta::OverflowModel { value } => {
             context_or_default(state).overflow_model = value.clone();
@@ -721,6 +765,7 @@ pub(crate) fn parse_jsonl(session_id: &str, contents: &str) -> ParsedHistory {
             context,
             head_event_id: LEGACY_HEAD_EVENT_ID,
             deleted: false,
+            todo_points: Vec::new(),
         });
     }
     parsed
@@ -775,6 +820,7 @@ impl LegacyContextBookkeeping {
             visible_from: self.visible_from,
             hidden: self.hidden,
             masked: self.masked,
+            todo: None,
         }
     }
 }
@@ -886,6 +932,8 @@ mod tests {
                         visible_from: None,
                         hidden: HashSet::new(),
                         masked: HashSet::new(),
+                        todo: None,
+                        todo_after_item_id: None,
                     },
                 },
             ),
@@ -1029,6 +1077,7 @@ mod tests {
             visible_from: Some(2),
             hidden: HashSet::from([1]),
             masked: HashSet::new(),
+            todo: None,
         });
         let projection = HistoryProjection::replay(
             Some(legacy),
@@ -1075,6 +1124,7 @@ mod tests {
             visible_from: None,
             hidden: HashSet::new(),
             masked: HashSet::new(),
+            todo: None,
         });
         let events = [
             HistoryEvent::new(

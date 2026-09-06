@@ -259,7 +259,7 @@ mod tests {
             assert!(body.get("tools").is_none());
             assert!(body.get("reasoning_effort").is_none());
             assert_eq!(body["max_tokens"], 400);
-            let response = "data: {\"choices\":[{\"delta\":{\"content\":\"Checkpoint: keep the API stable; run integration tests.\"}}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":12,\"total_tokens\":112}}\n\ndata: [DONE]\n\n";
+            let response = "data: {\"choices\":[{\"delta\":{\"content\":\"Checkpoint: keep the API stable; run integration tests.\"},\"finish_reason\":\"stop\"}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":12,\"total_tokens\":112}}\n\ndata: [DONE]\n\n";
             socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).as_bytes()).await.unwrap();
         });
         let mut harness = harness()

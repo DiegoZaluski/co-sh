@@ -244,3 +244,100 @@ conflict, and validate that decisions, constraints, and open work survived.
 - [x] Persistence scan: production session writes converge on `append_events` using `OpenOptions::append(true)`; source-range summaries and staging stay in the same delta history. Remaining session-store `fs::write` calls construct test fixtures. `truncate` changes only in-memory branch projections. `error_catalog.rs` atomically updates the separate provider-window catalog, not session data.
 - [x] The offline 24-turn trace starts at 29,337 estimated tokens: masking leaves 5,757; sequential and parallel MapReduce both leave 1,300 with eight maps, one reduction, and one audit. All five scripted task-state markers survive, stale content is excluded from the checkpoint view, and raw items remain intact.
 - [x] `docs/context-compaction.md` records the architecture, recovery limits, reproducible five-path comparison, and explicit limitations. Scripted retention and local mock timings do not establish real-model recall, quality superiority, cost, or provider latency. No paid/live-provider evaluation was performed; the document specifies a separate evaluation protocol.
+# Context review remediation
+
+The following phases address the remaining CM findings in `ISSUES.md`.
+Work on one phase at a time; reproduce confirmed defects before changing
+production behavior. Keep the immutable JSONL as the only source of truth.
+Do not run paid provider evaluations or introduce new semantic strategies
+without discussing them with the user. `ISSUES.md` stays uncommitted.
+
+## Review phase A — Protected state and checkpoint integrity (active)
+
+- [x] CM-01: Reproduce loss of protected plan on context and harness resume.
+- [x] Persist the structured plan through context deltas and restore both the
+  rendered view and tool projection, including empty and completed plans.
+- [ ] Cover legacy state loading and append-only replay across logical history
+  operations; do not infer unavailable plans from lossy summaries.
+- [x] Align historical-message selection: the user confirmed restoring the
+  plan at the selected historical point, not retaining the current head plan.
+- [ ] Bind plan deltas to their last recorded context item. Replay keeps only
+  lightweight plan-event references per branch, with plan values resolved from
+  the same event history. Preserve these references through nested selections.
+- [ ] Test changed/cleared plans through historical fork, revert, rollback,
+  checkpoint boundaries, independent child edits, and missing legacy bindings.
+- [ ] Ensure restoring a point with no plan also clears an existing tool plan
+  when the harness is reused; absence must not resurrect future work.
+- [x] CM-02: Trace provider termination signals and reproduce acceptance of
+  truncated summaries with local streaming fixtures.
+- [x] Preserve OpenAI `response.incomplete` when its reason is absent; the
+  adapter currently mislabels that terminal event as a successful `stop`.
+- [ ] Reject incomplete map, reduce, correction, and one-shot responses before
+  accepting staging or committing a checkpoint; retain raw history and usage.
+- [ ] Decide how to invalidate resumable staging produced before termination
+  checks existed; its accepted text has no completion evidence. Do not rewrite
+  history or present already-committed checkpoints as retrospectively verified.
+- [ ] Version unverified MapReduce staging for reconstruction from raw source;
+  retire unverified legacy split buffers without reusing their generated text.
+  Keep committed checkpoints and immutable source events unchanged.
+- [ ] Validate affected tools, SDK, harness, and TUI tests, formatting, and
+  strict Clippy. Record results before moving to the next phase.
+
+### Review phase A — Validation and handoff notes
+
+- `cargo test --lib --bin cosh --no-default-features --quiet`: library 295
+  passed, 1 ignored; TUI 445 passed, 16 ignored. No failures.
+- `cargo build --bin cosh --no-default-features --quiet` passed.
+- The initial protected-plan regression failed against the prior implementation.
+  The local SSE regression likewise reproduced acceptance of a `length` reply.
+- Head resume, absent legacy plans, terminal/empty plans, and fine-grained
+  append-only plan transitions have regression coverage. Historical-message
+  selection is deliberately not marked resolved while its semantics are open.
+- Both live summary consumers reject abnormal or missing termination after
+  reporting available usage; successful termination is covered for the three
+  provider conventions. OpenAI incomplete-without-details has an SDK regression.
+- `cargo test -p cosh-tools --no-default-features plan:: --quiet`: 69 passed.
+- `cargo test -p cosh-sdk --no-default-features connector::test::openai --quiet`:
+  13 passed; the separate incomplete-event filter also passed all four tests.
+- Production strict Clippy passed. Including `--tests` reports a pre-existing
+  `let_unit_value` warning at `src/harness/test/agent_loop_test.rs:1637`; that
+  unrelated file was preserved.
+- Targeted Rust formatting and `git diff --check` passed. No paid model calls,
+  history rewrites, commits, or new fallback providers were introduced.
+
+## Review phase B — Provider request correctness (pending)
+
+- [ ] CM-03: Test final wire budgets against preflight, including reasoning
+  reservations and provider-adjusted output limits; consult official docs.
+- [ ] Correct confirmed budget inconsistencies without changing the user's
+  authorized model chain or splitting semantic items.
+- [ ] CM-04: Trace and test reasoning/signature ownership across tool turns,
+  masking, compaction, resume, and model/provider switches.
+- [ ] Fix confirmed protocol violations and validate SDK/harness regressions.
+
+## Review phase C — Semantic handoff quality (pending)
+
+- [ ] CM-05: Add raw-source-backed adversarial fixtures for omitted decisions,
+  constraints, and open work; distinguish orchestration from model quality.
+- [ ] CM-06: Test chronological invalidation and cross-range contradictions.
+- [ ] CM-07: Reproduce correction overflow and test bounded recovery without
+  splitting logical items or silently changing providers.
+- [ ] Present any new audit/recovery strategy before implementing it; record
+  the agreed approach here, then implement and validate only that approach.
+
+## Review phase D — Persistence efficiency and durability (pending)
+
+- [ ] CM-08: Measure staging write amplification and design incremental
+  transitions preserving replay and previously appended bytes.
+- [ ] CM-09: Reproduce concurrent append and partial-tail recovery risks;
+  inspect locking and durability policy before proposing any behavioral change.
+- [ ] Implement agreed fixes with crash/replay and append-prefix regressions.
+
+## Review phase E — Acceptance (pending)
+
+- [ ] Run lifecycle regressions across resume, masking, checkpoint commit,
+  rollback, revert, and branches for all implemented fixes.
+- [ ] Run appropriate full offline suites, builds, lint, and feature checks;
+  document remaining issues and unrelated failures without hiding them.
+- [ ] Propose a separate explicitly authorized real-model evaluation; do not
+  claim full-window decision equivalence from scripted responses.

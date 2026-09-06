@@ -281,6 +281,11 @@ impl Plan {
         &self.list
     }
 
+    /// Restore the structured projection reconstructed from session history.
+    pub fn restore_list(&mut self, list: TodoList) {
+        self.list = list;
+    }
+
     /// Apply a mutation action and update internal state.
     /// See `todo_write` for available actions and error conditions.
     ///

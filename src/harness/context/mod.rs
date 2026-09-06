@@ -246,6 +246,10 @@ pub struct ContextManagerState {
     /// history, but whose model-facing projection is a small typed reference.
     #[serde(default)]
     pub masked: HashSet<u64>,
+    /// Structured protected plan reconstructed from session deltas. Absent
+    /// in legacy histories; empty and terminal plans remain explicit state.
+    #[serde(default)]
+    pub todo: Option<TodoList>,
 }
 
 impl Default for ContextManagerState {
@@ -260,6 +264,7 @@ impl Default for ContextManagerState {
             visible_from: None,
             hidden: HashSet::new(),
             masked: HashSet::new(),
+            todo: None,
         }
     }
 }
@@ -353,6 +358,8 @@ pub struct ContextManager {
     /// across `plan_*` re-renders. Never summarized — see [`todo_ctxt`] for
     /// the protection and removal rules.
     todo: TodoContext,
+    /// Transient rehydration signal, never authoritative or persisted state.
+    todo_restore_pending: bool,
     /// Running token total of `items` (excluding the TODO block), kept in sync
     /// by the few mutation primitives (`push_item`, `hide_at`,
     /// `apply_llm_summary`, `recompute_cached_tokens`) so `total_tokens()` is
@@ -438,6 +445,7 @@ impl ContextManager {
             masked: HashSet::new(),
             checkpoint_coverage: Vec::new(),
             todo: TodoContext::new(),
+            todo_restore_pending: false,
             cached_items_tokens: 0,
             manual_compaction: false,
         }
@@ -542,6 +550,17 @@ impl ContextManager {
     /// empties the plan).
     pub fn set_todo_list(&mut self, list: TodoList) {
         self.todo.sync(list);
+    }
+
+    /// The protected plan projection, including empty or completed plans.
+    pub fn todo_list(&self) -> Option<&TodoList> {
+        self.todo.list()
+    }
+
+    /// Consume a restore request, including an explicit reset for absent plans.
+    pub(crate) fn take_restored_todo_list(&mut self) -> Option<TodoList> {
+        std::mem::take(&mut self.todo_restore_pending)
+            .then(|| self.todo.list().cloned().unwrap_or_default())
     }
 
     // Ingestion
@@ -1409,6 +1428,7 @@ impl ContextManager {
             visible_from: self.visible_from,
             hidden: self.hidden.clone(),
             masked: self.masked.clone(),
+            todo: self.todo.list().cloned(),
         }
     }
 
@@ -1416,6 +1436,7 @@ impl ContextManager {
     /// the next 80% overflow triggers the LLM compaction exactly as in a fresh
     /// session.
     pub fn restore_state(&mut self, state: &ContextManagerState) {
+        self.todo_restore_pending = true;
         self.items = state.items.clone();
         self.next_id = state.next_id;
         self.max_tokens = state.max_tokens;
@@ -1437,11 +1458,10 @@ impl ContextManager {
             .collect();
         self.masked.retain(|id| live_results.contains(id));
         self.rebuild_checkpoint_coverage();
-        // The TODO block mirror is not persisted (the tools' Plan state is
-        // not part of the snapshot): clear it so a restored session never
-        // surfaces a stale block — the harness re-syncs it at the next loop
-        // start from the authoritative Plan.
-        self.todo.clear();
+        match &state.todo {
+            Some(list) => self.todo.sync(list.clone()),
+            None => self.todo.clear(),
+        }
         // The items were replaced wholesale — rebuild the cached total.
         self.recompute_cached_tokens();
     }

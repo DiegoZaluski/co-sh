@@ -226,6 +226,28 @@ async fn incomplete_maps_to_length() {
     assert!(chunks.iter().any(|c| c.finish_reason() == Some("length")));
 }
 
+/// Missing details must not turn an explicitly incomplete response into success.
+#[tokio::test]
+async fn incomplete_without_details_is_never_normal_completion() {
+    let sse = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n\
+               data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_1\",\"status\":\"incomplete\"}}\n\n";
+    let (port, _body, _raw, handle) = mock_server(sse, 200);
+    let stream = openai_connector(port).stream_chat("hi").await.unwrap();
+    handle.join().unwrap();
+    let chunks: Vec<_> = stream
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .map(Result::unwrap)
+        .collect();
+    assert!(
+        chunks
+            .iter()
+            .any(|c| c.finish_reason() == Some("incomplete"))
+    );
+    assert!(!chunks.iter().any(|c| c.finish_reason() == Some("stop")));
+}
+
 /// A Responses `error` event surfaces as a stream error.
 #[tokio::test]
 async fn error_event_surfaces() {

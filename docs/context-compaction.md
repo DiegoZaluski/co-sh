@@ -6,6 +6,13 @@ reconstructed by replaying deltas. A checkpoint is an appended derived summary,
 not a replacement transcript. Forks share the parent JSONL; revert and rollback
 append references and never modify previously written bytes.
 
+The protected tool plan is also structured session state. Plan changes append
+`ContextDelta::Todo` events; resuming the current head restores both the protected
+block and the tool's editable list before the first agent iteration. Empty and
+completed plans remain persisted even when their block is not displayed. Older
+histories without a recorded plan still load; a missing plan is not guessed from
+summary text. Historical-message plan selection is still under review.
+
 ## Model-view policy
 
 1. Deterministically mask old, reacted-to tool results, retaining their raw
@@ -69,6 +76,16 @@ unavailable the existing context-budget estimate is used until the provider
 reports a limit. Checkpoint commit still respects the agent's budget. This
 routing change does not resolve the finish-reason, provider-reasoning reservation,
 or semantic-recall findings tracked separately in `ISSUES.md`.
+
+### Completion integrity
+
+New summarization streams must report natural completion (`stop`, Gemini's
+`STOP`, or Claude's `end_turn`). Token limits, refusals, paused turns, unknown
+reasons, and missing termination signals reject the response before it becomes
+checkpoint evidence. A received usage report is still emitted for that rejected
+response. Existing bounded retries and explicitly configured fallback models
+apply; no extra model is selected. Resumable staging created before these checks
+does not contain completion evidence and remains a migration follow-up.
 
 ### Whole-item segments
 

@@ -568,7 +568,7 @@ fn process_sse_response(
                         {
                             Some("max_output_tokens") => "length",
                             Some(other) => other,
-                            None => "stop",
+                            None => "incomplete",
                         };
                         yield Ok(StreamChunk {
                             raw: data.clone(),

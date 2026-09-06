@@ -402,7 +402,7 @@ async fn real_map_stream_sends_an_intact_item_above_the_soft_target_and_reports_
                 .any(|message| { message["content"].as_str() == Some(expected_prompt.as_str()) })
         );
         assert!(expected_prompt.contains(&source));
-        let body = "data: {\"choices\":[{\"delta\":{\"content\":\"map result\"}}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3,\"total_tokens\":15,\"cost\":0.01}}\n\ndata: [DONE]\n\n";
+        let body = "data: {\"choices\":[{\"delta\":{\"content\":\"map result\"},\"finish_reason\":\"stop\"}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3,\"total_tokens\":15,\"cost\":0.01}}\n\ndata: [DONE]\n\n";
         socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
     });
     let connector = Connector::new("openrouter")
@@ -496,4 +496,173 @@ async fn whole_item_exceeding_the_actual_window_fails_without_slicing_or_committ
         serde_json::to_value(manager.save_state().items).unwrap()
     );
     assert_eq!(manager.map_progress(), (0, 1));
+}
+#[tokio::test]
+async fn resumed_plan_rehydrates_tools_before_the_first_loop() {
+    use cosh_tools::plan::types::TodoList;
+    let plan: TodoList = serde_json::from_value(serde_json::json!({"groups": [{
+        "title": "Release", "tests_verified": true, "items": [{
+            "id": "task-1", "description": "Keep API compatibility",
+            "status": "InProgress", "depends_on": []
+        }]
+    }]}))
+    .unwrap();
+    let mut harness = Harness::new_test().with_mock_stream(Ok(vec!["Ready"]));
+    harness.cosh_tools = Some(super::CoshTools::new("."));
+    harness.context_manager.set_todo_list(plan.clone());
+    let state = harness.context_manager.save_state();
+    harness.context_manager.restore_state(&state);
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    harness
+        .run_agent_loop(
+            "continue",
+            tx,
+            answer_rx,
+            perm_rx,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await;
+    assert_eq!(
+        serde_json::to_value(harness.cosh_tools.as_ref().unwrap().todo_list()).unwrap(),
+        serde_json::to_value(&plan).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(harness.context_manager.save_state().todo).unwrap(),
+        serde_json::to_value(Some(plan)).unwrap()
+    );
+
+    // Reuse the harness after reverting to a point before any plan existed.
+    let mut earlier = state;
+    earlier.todo = None;
+    harness.context_manager.restore_state(&earlier);
+    harness = harness.with_mock_stream(Ok(vec!["Ready again"]));
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    harness.run_agent_loop("continue", tx, answer_rx, perm_rx, Arc::new(AtomicBool::new(false))).await;
+    assert!(harness.cosh_tools.as_ref().unwrap().todo_list().groups.is_empty());
+}
+/// A real local SSE response exercises the SDK and both summarization consumers.
+async fn summary_fixture(reason: Option<&str>) -> (Connector, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let reason = reason.map(str::to_owned);
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut bytes = Vec::new();
+        loop {
+            let mut buffer = [0; 4096];
+            let n = socket.read(&mut buffer).await.unwrap();
+            assert!(n > 0);
+            bytes.extend_from_slice(&buffer[..n]);
+            if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&bytes[..end]).to_lowercase();
+                let length: usize = headers
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:")?.trim().parse().ok())
+                    .unwrap();
+                if bytes.len() >= end + 4 + length {
+                    break;
+                }
+            }
+        }
+        let chunk = serde_json::json!({"choices":[{"delta":{"content":"partial checkpoint"},"finish_reason":reason}]});
+        let body = format!(
+            "data: {chunk}\n\ndata: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":12,\"completion_tokens\":3,\"total_tokens\":15}}}}\n\ndata: [DONE]\n\n"
+        );
+        socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+    });
+    (
+        Connector::new("openrouter")
+            .unwrap()
+            .with_base_url(format!("http://{address}/v1"))
+            .with_api_key("test-only")
+            .with_model("test-model"),
+        server,
+    )
+}
+
+#[tokio::test]
+async fn incomplete_summary_streams_are_rejected_by_both_consumers() {
+    for reason in [
+        Some("length"),
+        Some("max_tokens"),
+        Some("MAX_TOKENS"),
+        Some("content_filter"),
+        Some("pause_turn"),
+        Some("incomplete"),
+        None,
+    ] {
+        let (connector, server) = summary_fixture(reason).await;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let result = Harness::summarize_map_with_connector(
+            connector,
+            "summarize".into(),
+            "source".into(),
+            None,
+            tx,
+            4_000,
+        )
+        .await;
+        server.await.unwrap();
+        assert!(result.is_err(), "accepted incomplete map: {reason:?}");
+        assert!(matches!(rx.try_recv(), Ok(HarnessEvent::Usage { .. })));
+
+        let (connector, server) = summary_fixture(reason).await;
+        let mut harness = Harness::new_test();
+        harness.connector = connector;
+        let result = harness
+            .stream_summarize_for_compaction("summarize", "source", |_| {})
+            .await;
+        server.await.unwrap();
+        assert!(result.is_err(), "accepted incomplete one-shot: {reason:?}");
+    }
+}
+
+#[tokio::test]
+async fn natural_summary_termination_is_accepted() {
+    for reason in ["stop", "STOP", "end_turn"] {
+        let (connector, server) = summary_fixture(Some(reason)).await;
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let result = Harness::summarize_map_with_connector(
+            connector,
+            "summarize".into(),
+            "source".into(),
+            None,
+            tx,
+            4_000,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, "partial checkpoint");
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn incomplete_one_shot_never_commits_or_hides_source() {
+    let (connector, server) = summary_fixture(Some("length")).await;
+    let mut harness = Harness::new_test();
+    harness.connector = connector.with_retry(false);
+    harness
+        .context_manager
+        .add_user("Never change the public API");
+    harness
+        .context_manager
+        .add_assistant("Integration tests remain open", true);
+    harness.context_manager.begin_manual_compaction();
+    let before = serde_json::to_value(harness.context_manager.save_state()).unwrap();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    assert!(!harness.llm_compact(&tx).await);
+    tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(harness.context_manager.save_state()).unwrap(),
+        before
+    );
 }
