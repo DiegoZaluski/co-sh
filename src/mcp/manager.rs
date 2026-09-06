@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::time::Duration;
+use std::process::Stdio;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, CallToolResult, Tool};
@@ -98,7 +99,7 @@ impl McpManager {
         let call_timeout = call_timeout_for(entry);
         let outcome = match &entry.transport {
             McpTransport::Stdio(stdio) => {
-                let transport = match spawn_stdio(stdio) {
+                let transport = match spawn_stdio(&entry.name, stdio) {
                     Ok(transport) => transport,
                     Err(err) => {
                         let err = McpError::Connect(entry.name.clone(), err.to_string());
@@ -305,7 +306,32 @@ fn call_timeout_for(entry: &McpServerEntry) -> Duration {
     }
 }
 
-fn spawn_stdio(stdio: &StdioTransport) -> std::io::Result<TokioChildProcess> {
+/// Open the stderr log for a stdio server: `<temp>/cosh/log/mcp_server_<label>_<ts>.log`.
+///
+/// The child's stderr would otherwise inherit the terminal and corrupt the
+/// TUI's alternate-screen buffer. The label is sanitized so a server name
+/// can never escape the log directory.
+fn stderr_log_path(label: &str) -> std::path::PathBuf {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let safe_label: String = label
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    crate::harness::truncate::scratch_log_dir()
+        .join("log")
+        .join(format!("mcp_server_{safe_label}_{timestamp}.log"))
+}
+
+fn spawn_stdio(label: &str, stdio: &StdioTransport) -> std::io::Result<TokioChildProcess> {
     let mut cmd = tokio::process::Command::new(&stdio.command);
     cmd.args(&stdio.args);
     for (key, value) in &stdio.env {
@@ -314,7 +340,20 @@ fn spawn_stdio(stdio: &StdioTransport) -> std::io::Result<TokioChildProcess> {
     if let Some(cwd) = &stdio.cwd {
         cmd.current_dir(cwd);
     }
-    TokioChildProcess::new(cmd)
+    let mut builder = TokioChildProcess::builder(cmd);
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(stderr_log_path(label))
+    {
+        Ok(file) => builder = builder.stderr(Stdio::from(file)),
+        Err(err) => {
+            log::warn!("mcp: cannot open stderr log for '{label}': {err}");
+            builder = builder.stderr(Stdio::null());
+        }
+    }
+    let (transport, _captured_stderr) = builder.spawn()?;
+    Ok(transport)
 }
 
 fn http_config(http: &HttpTransport) -> Result<StreamableHttpClientTransportConfig, InvalidHeader> {
@@ -346,6 +385,19 @@ impl std::error::Error for InvalidHeader {}
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn stderr_log_path_is_sanitized_and_inside_temp_cosh_log() {
+        let path = stderr_log_path("my server/v2");
+        let expected_dir = crate::harness::truncate::scratch_log_dir().join("log");
+        assert_eq!(path.parent(), Some(expected_dir.as_path()));
+        let name = path.file_name().unwrap().to_string_lossy();
+        assert!(
+            name.starts_with("mcp_server_my_server_v2_") && name.ends_with(".log"),
+            "unexpected file name: {name}"
+        );
+        assert!(!name.contains('/'));
+    }
 
     use rmcp::handler::server::ServerHandler;
     use rmcp::model::{
