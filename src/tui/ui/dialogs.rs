@@ -247,25 +247,16 @@ pub enum DialogType {
         input: String,
         cursor_pos: usize,
     },
-    /// MCP registration wizard, one single-field step at a time (same
-    /// mechanics as the API-key / server-URL inputs): name → endpoint →
-    /// timeout. The draft travels inside the variants; the final step
-    /// validates via `cosh::mcp::build_mcp_entry` and appends to setup.json.
-    McpNameInput {
-        input: String,
-        cursor_pos: usize,
-    },
-    /// Wizard step 2: `command args...` (stdio) or `https://host/mcp`.
-    McpEndpointInput {
-        name: String,
-        input: String,
-        cursor_pos: usize,
-    },
-    /// Wizard step 3: timeout in seconds, blank for the default.
-    McpTimeoutInput {
+    /// MCP registration form: name, endpoint and timeout on a single panel
+    /// with the hook form's mechanics (Up/Down switch fields, Enter saves,
+    /// Esc cancels, click focuses). Every field stays visible and editable
+    /// until the save — no step-by-step wizard.
+    McpForm {
         name: String,
         endpoint: String,
-        input: String,
+        timeout: String,
+        /// Active field: 0 name · 1 endpoint · 2 timeout.
+        field: usize,
         cursor_pos: usize,
     },
     /// Rename the current session: a text prompt prefilled with the current
@@ -734,10 +725,7 @@ impl DialogState {
             }
             DialogType::ApiKeyInput { .. }
             | DialogType::LocalUrlInput { .. }
-            | DialogType::CacheTtlInput { .. }
-            | DialogType::McpNameInput { .. }
-            | DialogType::McpEndpointInput { .. }
-            | DialogType::McpTimeoutInput { .. } => {
+            | DialogType::CacheTtlInput { .. } => {
                 // Click outside the dialog box → dismiss
                 let dialog_w = 50u16.min(area.width.saturating_sub(8)).max(30);
                 let dialog_h = 7;
@@ -768,28 +756,17 @@ impl DialogState {
                     command.as_str(),
                     timeout.as_str(),
                 ];
-                let (dialog_x, dialog_y, dialog_w, dialog_h, ..) = hook_input_metrics(area, values);
-                let inside = x >= dialog_x
-                    && x < dialog_x + dialog_w
-                    && y_click >= dialog_y
-                    && y_click < dialog_y + dialog_h;
-                if !inside {
-                    // Click outside the registration panel → dismiss (same
-                    // rule as the other text-input dialogs).
-                    return DialogAction::Dismissed;
-                }
-                // Inside: labels focus the field, value rows also move the
-                // insertion point; padding just consumes the click.
-                if let Some((clicked_field, char_idx)) =
-                    hook_input_hit_field(area, values, x, y_click)
-                {
-                    *field = clicked_field;
-                    *cursor_pos = match char_idx {
-                        Some(ci) => byte_at_char(values[clicked_field], ci),
-                        None => values[clicked_field].len(),
-                    };
-                }
-                DialogAction::Consumed
+                focus_form_field(area, x, y_click, &values, field, cursor_pos)
+            }
+            DialogType::McpForm {
+                name,
+                endpoint,
+                timeout,
+                field,
+                cursor_pos,
+            } => {
+                let values = [name.as_str(), endpoint.as_str(), timeout.as_str()];
+                focus_form_field(area, x, y_click, &values, field, cursor_pos)
             }
             DialogType::RenameSession { .. } => {
                 // Click outside the borderless prompt panel → dismiss
@@ -1588,52 +1565,6 @@ impl DialogState {
                     *cursor_pos,
                 );
             }
-            DialogType::McpNameInput { input, cursor_pos } => {
-                render_text_input_dialog(
-                    buf,
-                    area,
-                    theme,
-                    now,
-                    &instance.cursor,
-                    "MCP server name",
-                    "A short unique name, e.g. docs",
-                    false,
-                    input,
-                    *cursor_pos,
-                );
-            }
-            DialogType::McpEndpointInput {
-                input, cursor_pos, ..
-            } => {
-                render_text_input_dialog(
-                    buf,
-                    area,
-                    theme,
-                    now,
-                    &instance.cursor,
-                    "MCP endpoint",
-                    "npx -y package  ·  or  https://host/mcp",
-                    false,
-                    input,
-                    *cursor_pos,
-                );
-            }
-            DialogType::McpTimeoutInput {
-                input, cursor_pos, ..
-            } => {
-                render_text_input_dialog(
-                    buf,
-                    area,
-                    theme,
-                    now,
-                    &instance.cursor,
-                    "MCP timeout",
-                    "Seconds per tool call — blank for default",
-                    false,
-                    input,
-                    *cursor_pos,
-                );
-            }
             DialogType::HookInput {
                 event,
                 name,
@@ -1649,15 +1580,48 @@ impl DialogState {
                 } else {
                     "Add Hook"
                 };
-                render_hook_form_dialog(
+                let subtitle = if *event == "PostToolUse" {
+                    "PostToolUse · runs after each tool call"
+                } else {
+                    "PreToolUse · runs before each tool call"
+                };
+                let values = [name.as_str(), matcher.as_str(), command.as_str(), timeout.as_str()];
+                render_form_panel(
                     buf,
                     area,
                     theme,
                     now,
                     &instance.cursor,
                     title,
-                    event,
-                    [name, matcher, command, timeout],
+                    subtitle,
+                    hook_field_label,
+                    hook_field_hint,
+                    hook_field_placeholder,
+                    &values,
+                    *field,
+                    *cursor_pos,
+                );
+            }
+            DialogType::McpForm {
+                name,
+                endpoint,
+                timeout,
+                field,
+                cursor_pos,
+            } => {
+                let values = [name.as_str(), endpoint.as_str(), timeout.as_str()];
+                render_form_panel(
+                    buf,
+                    area,
+                    theme,
+                    now,
+                    &instance.cursor,
+                    "Add MCP server",
+                    "stdio or Streamable HTTP · Enter saves",
+                    mcp_field_label,
+                    mcp_field_hint,
+                    mcp_field_placeholder,
+                    &values,
                     *field,
                     *cursor_pos,
                 );
@@ -2885,9 +2849,41 @@ fn render_text_input_dialog(
         }
     }
 }
-// ── Hook registration panel ─────────────────────────────────────────────
+// ── Multi-field registration panel (hooks, MCP servers) ─────────────────
+// One shared panel: marker-highlighted labels, wrapped values, click to
+// focus. Forms differ only in title, subtitle and per-field label/hint
+// text, passed in by the caller — no per-form geometry or render code.
 
-const HOOK_FIELDS: usize = 4;
+fn mcp_field_label(field: usize) -> &'static str {
+    match field {
+        0 => "Name",
+        1 => "Endpoint",
+        _ => "Timeout",
+    }
+}
+
+fn mcp_field_hint(field: usize) -> &'static str {
+    match field {
+        0 => "local label shown in the footer · e.g. docs",
+        1 => "command args... · or https://host/mcp",
+        _ => "HTTP only · seconds per tool call · empty = 30",
+    }
+}
+
+/// Ghost text drawn while a field is empty. Short on purpose: it must fit
+/// the panel's single empty row without affecting geometry.
+fn mcp_field_placeholder(field: usize) -> &'static str {
+    match field {
+        0 => "e.g. docs",
+        1 => "e.g. server-cmd --args or https://host/mcp",
+        _ => "Optional, default 30s",
+    }
+}
+
+/// The hook form has no placeholders yet — empty fields render blank.
+fn hook_field_placeholder(_field: usize) -> &'static str {
+    ""
+}
 
 fn hook_field_label(field: usize) -> &'static str {
     match field {
@@ -2908,23 +2904,23 @@ fn hook_field_hint(field: usize) -> &'static str {
 }
 
 /// Panel width — matches the other text-input dialogs.
-pub(crate) fn hook_input_dialog_w(area: Rect) -> u16 {
+pub(crate) fn form_panel_dialog_w(area: Rect) -> u16 {
     56u16.min(area.width.saturating_sub(8)).max(30)
 }
 
-pub(crate) const fn hook_input_content_w(panel_w: u16) -> u16 {
+pub(crate) const fn form_panel_content_w(panel_w: u16) -> u16 {
     panel_w.saturating_sub(4)
 }
 
 /// Rows a value occupies when hard-wrapped at `cols` chars. Char-based on
 /// purpose: identical to `word_ops::move_visual_line`, so cursor math and
 /// rendering can never disagree.
-fn hook_field_row_count(value: &str, cols: usize) -> usize {
+fn form_field_row_count(value: &str, cols: usize) -> usize {
     value.chars().count().div_ceil(cols.max(1)).max(1)
 }
 
 /// Per-field vertical geometry, offsets relative to the panel top.
-pub(crate) struct HookFieldGeometry {
+pub(crate) struct FormFieldGeometry {
     /// Row of the highlighted label.
     pub(crate) label_y: u16,
     /// First row of the (possibly wrapped) value.
@@ -2933,17 +2929,17 @@ pub(crate) struct HookFieldGeometry {
     pub(crate) rows: usize,
 }
 
-pub(crate) fn hook_field_geometries(
+pub(crate) fn form_field_geometries(
     dialog_y: u16,
-    fields: [&str; HOOK_FIELDS],
+    fields: &[&str],
     cols: usize,
-) -> Vec<HookFieldGeometry> {
-    let mut out = Vec::with_capacity(HOOK_FIELDS);
+) -> Vec<FormFieldGeometry> {
+    let mut out = Vec::with_capacity(fields.len());
     let mut y = dialog_y + 4; // top pad · title · subtitle · gap
     for value in fields {
-        let rows = hook_field_row_count(value, cols);
+        let rows = form_field_row_count(value, cols);
         // label · margin · value… · margin (before the next label)
-        out.push(HookFieldGeometry {
+        out.push(FormFieldGeometry {
             label_y: y,
             value_y: y + 2,
             rows,
@@ -2953,17 +2949,17 @@ pub(crate) fn hook_field_geometries(
     out
 }
 
-/// Shared geometry for the hook registration panel:
-/// `(x, y, w, h, content_x, content_w)`. Mirrors [`render_hook_form_dialog`].
-pub(crate) fn hook_input_metrics(
+/// Shared geometry for a registration panel:
+/// `(x, y, w, h, content_x, content_w)`. Mirrors [`render_form_panel`].
+pub(crate) fn form_panel_metrics(
     area: Rect,
-    fields: [&str; HOOK_FIELDS],
+    fields: &[&str],
 ) -> (u16, u16, u16, u16, u16, usize) {
-    let w = hook_input_dialog_w(area);
-    let cols = hook_input_content_w(w) as usize;
+    let w = form_panel_dialog_w(area);
+    let cols = form_panel_content_w(w) as usize;
     let field_rows: u16 = fields
         .iter()
-        .map(|v| 3 + hook_field_row_count(v, cols) as u16) // label + margins + values
+        .map(|v| 3 + form_field_row_count(v, cols) as u16) // label + margins + values
         .sum();
     // top pad · title · subtitle · gap · fields · bottom pad (footer removed)
     let h = 5 + field_rows;
@@ -3000,20 +2996,20 @@ fn hook_marker_fg(theme: &Theme) -> Color {
 /// Map a click position to `(field, char index)` — labels focus the field,
 /// value rows also position the cursor. `None` when the click lands on
 /// padding inside the panel; the caller decides outside-panel dismissal.
-fn hook_input_hit_field(
+fn form_panel_hit_field(
     area: Rect,
-    fields: [&str; HOOK_FIELDS],
+    fields: &[&str],
     x: u16,
     y: u16,
 ) -> Option<(usize, Option<usize>)> {
     let (dialog_x, dialog_y, dialog_w, dialog_h, content_x, cols) =
-        hook_input_metrics(area, fields);
+        form_panel_metrics(area, fields);
     let inside_panel =
         x >= dialog_x && x < dialog_x + dialog_w && y >= dialog_y && y < dialog_y + dialog_h;
     if !inside_panel {
         return None;
     }
-    for (field, g) in hook_field_geometries(dialog_y, fields, cols)
+    for (field, g) in form_field_geometries(dialog_y, fields, cols)
         .into_iter()
         .enumerate()
     {
@@ -3038,29 +3034,63 @@ fn byte_at_char(value: &str, char_idx: usize) -> usize {
         .map_or(value.len(), |(i, _)| i)
 }
 
-/// Registration panel for creating/editing a PreToolUse hook — borderless,
+/// Click handling shared by the registration panels (hooks, MCP servers):
+/// outside the panel dismisses, inside focuses the clicked field (labels)
+/// and moves the insertion point (value rows); padding just consumes.
+fn focus_form_field(
+    area: Rect,
+    x: u16,
+    y_click: u16,
+    values: &[&str],
+    field: &mut usize,
+    cursor_pos: &mut usize,
+) -> DialogAction {
+    let (dialog_x, dialog_y, dialog_w, dialog_h, ..) = form_panel_metrics(area, values);
+    let inside = x >= dialog_x
+        && x < dialog_x + dialog_w
+        && y_click >= dialog_y
+        && y_click < dialog_y + dialog_h;
+    if !inside {
+        // Click outside the registration panel → dismiss (same
+        // rule as the other text-input dialogs).
+        return DialogAction::Dismissed;
+    }
+    if let Some((clicked_field, char_idx)) = form_panel_hit_field(area, values, x, y_click) {
+        *field = clicked_field;
+        *cursor_pos = match char_idx {
+            Some(ci) => byte_at_char(values[clicked_field], ci),
+            None => values[clicked_field].len(),
+        };
+    }
+    DialogAction::Consumed
+}
+
+/// Registration panel shared by the hook and MCP-server forms — borderless,
 /// filled with the sidebar's `background_panel` like the rename prompt.
 /// Every field label wears a primary-color marker highlight (text tone
 /// adapts to the theme), values keep breathing margins around them, wrap
 /// onto extra rows instead of running off-panel, and clicking a label or
 /// value focuses that field.
 #[allow(clippy::too_many_arguments)]
-fn render_hook_form_dialog(
+fn render_form_panel(
     buf: &mut Buffer,
     area: Rect,
     theme: &Theme,
     now: SystemTime,
     cursor: &Cursor,
     title: &str,
-    event: &'static str,
-    fields: [&str; HOOK_FIELDS],
+    subtitle: &str,
+    label: fn(usize) -> &'static str,
+    hint: fn(usize) -> &'static str,
+    placeholder: fn(usize) -> &'static str,
+    fields: &[&str],
     active_field: usize,
     cursor_pos: usize,
 ) {
     let (dialog_x, dialog_y, dialog_w, dialog_h, content_x, cols) =
-        hook_input_metrics(area, fields);
+        form_panel_metrics(area, fields);
     let content_w = cols as u16;
-    let geoms = hook_field_geometries(dialog_y, fields, cols);
+    let geoms = form_field_geometries(dialog_y, fields, cols);
 
     // Solid background panel — same color as the history sidebar, a bare
     // floating surface with no border characters (rename-prompt style).
@@ -3104,14 +3134,7 @@ fn render_hook_form_dialog(
     // Subtitle row (muted).
     draw_text_line(
         buf,
-        &format!(
-            "{event} · runs {} each tool call",
-            if event == "PostToolUse" {
-                "after"
-            } else {
-                "before"
-            }
-        ),
+        subtitle,
         content_x,
         dialog_y + 2,
         content_w,
@@ -3124,11 +3147,11 @@ fn render_hook_form_dialog(
     for (field, value) in fields.iter().enumerate() {
         let g = &geoms[field];
         let focused = field == active_field;
-        let label = hook_field_label(field);
+        let field_label = label(field);
 
         // Marker-highlighted label: " Name " drawn on the theme's primary —
         // focused fields go bold so the active one stands out.
-        let marked = format!(" {label} ");
+        let marked = format!(" {field_label} ");
         let mut mark_style = Style::default().fg(marker_fg).bg(rgba_color(theme.primary));
         if focused {
             mark_style = mark_style.add_modifier(Modifier::BOLD);
@@ -3146,7 +3169,7 @@ fn render_hook_form_dialog(
         let hint_x = content_x + marked.chars().count() as u16 + 1;
         draw_text_line(
             buf,
-            hook_field_hint(field),
+            hint(field),
             hint_x,
             g.label_y,
             content_w.saturating_sub(marked.chars().count() as u16 + 1),
@@ -3154,14 +3177,26 @@ fn render_hook_form_dialog(
         );
 
         // Wrapped value rows with the blinking block cursor on the line that
-        // holds the insertion point.
+        // holds the insertion point. Empty fields show their placeholder in
+        // the muted tone instead; geometry and hit-testing keep using the
+        // real (empty) value, so the panel never shifts while typing.
         let char_before = value[..cursor_pos.min(value.len())].chars().count();
-        let total_chars = value.chars().count();
+        let shown: &str = if value.is_empty() {
+            placeholder(field)
+        } else {
+            value
+        };
+        let shown_fg = if value.is_empty() {
+            rgba_color(theme.text_muted)
+        } else {
+            rgba_color(theme.text)
+        };
+        let total_chars = shown.chars().count();
         for r in 0..g.rows {
             let start_char = r * cols;
             let end_char = ((r + 1) * cols).min(total_chars);
             let row_y = g.value_y + r as u16;
-            let line: String = value
+            let line: String = shown
                 .chars()
                 .skip(start_char)
                 .take(end_char - start_char)
@@ -3173,7 +3208,7 @@ fn render_hook_form_dialog(
                 }
                 if let Some(cell) = buf.cell_mut((cx, row_y)) {
                     cell.set_char(ch);
-                    cell.set_style(Style::default().fg(rgba_color(theme.text)).bg(bg_color));
+                    cell.set_style(Style::default().fg(shown_fg).bg(bg_color));
                 }
             }
             if focused && char_before >= start_char && char_before <= end_char {
@@ -3242,23 +3277,23 @@ mod hook_panel_tests {
     fn hit_field_maps_labels_and_value_rows() {
         let area = Rect::new(0, 0, 80, 30);
         let values = ["block rm", "", "exit 2", ""];
-        let (dialog_x, dialog_y, _, _, content_x, cols) = hook_input_metrics(area, values);
-        let geoms = hook_field_geometries(dialog_y, values, cols);
+        let (dialog_x, dialog_y, _, _, content_x, cols) = form_panel_metrics(area, &values);
+        let geoms = form_field_geometries(dialog_y, &values, cols);
 
         // Label row focuses the field without moving the cursor.
         assert_eq!(
-            hook_input_hit_field(area, values, content_x + 2, geoms[0].label_y),
+            form_panel_hit_field(area, &values, content_x + 2, geoms[0].label_y),
             Some((0, None))
         );
         // Value row positions the cursor at the clicked character.
         let col_of_x = 3usize; // third char of "exit 2"
         assert_eq!(
-            hook_input_hit_field(area, values, content_x + col_of_x as u16, geoms[2].value_y),
+            form_panel_hit_field(area, &values, content_x + col_of_x as u16, geoms[2].value_y),
             Some((2, Some(col_of_x)))
         );
         // Padding inside the panel is not a field.
         assert_eq!(
-            hook_input_hit_field(area, values, dialog_x + 1, dialog_y + 1),
+            form_panel_hit_field(area, &values, dialog_x + 1, dialog_y + 1),
             None
         );
     }
@@ -3278,10 +3313,10 @@ mod hook_panel_tests {
         });
         let area = Rect::new(0, 0, 80, 30);
         let values = ["", "", "exit 2", ""];
-        let (_dialog_x, dialog_y, _, _, content_x, cols) = hook_input_metrics(area, values);
+        let (_dialog_x, dialog_y, _, _, content_x, cols) = form_panel_metrics(area, &values);
 
         // Click the Command value row at the 'i' column.
-        let cmd_geom_row = hook_field_geometries(dialog_y, values, cols)[2].value_y;
+        let cmd_geom_row = form_field_geometries(dialog_y, &values, cols)[2].value_y;
         let click = MouseEvent::new(
             MouseEventType::Down,
             MouseButton::Left,
@@ -3321,7 +3356,7 @@ mod hook_panel_tests {
     fn margins_and_wrap_grow_the_panel() {
         let area = Rect::new(0, 0, 80, 60);
         let single = ["", "", "", ""];
-        let (_, _, _, h_single, _, cols) = hook_input_metrics(area, single);
+        let (_, _, _, h_single, _, cols) = form_panel_metrics(area, &single);
 
         // Every field carries label + top/bottom margins.
         assert_eq!(h_single as usize, 5 + 4 * (3 + 1));
@@ -3329,8 +3364,76 @@ mod hook_panel_tests {
         // A value one char past `cols` adds exactly one wrapped row (+margin).
         let long = format!("a{}", "b".repeat(cols));
         let wrapped = ["", "", long.as_str(), ""];
-        let (_, _, _, h_wrapped, _, _) = hook_input_metrics(area, wrapped);
+        let (_, _, _, h_wrapped, _, _) = form_panel_metrics(area, &wrapped);
         assert_eq!(h_wrapped, h_single + 1);
+    }
+
+    #[test]
+    fn empty_fields_show_placeholders_until_typed() {
+        use std::time::SystemTime;
+        let theme = ThemeRegistry::new().default_theme().clone();
+        let area = Rect::new(0, 0, 80, 30);
+        let cursor = Cursor::new();
+        let now = SystemTime::now();
+        // Hints repeat placeholder-like words ("e.g. docs"), so assertions
+        // read the VALUE row of each field instead of the whole buffer.
+        let value_row_text = |buf: &Buffer, content_x: u16, y: u16| -> String {
+            (content_x..area.right())
+                .map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()).unwrap_or_default())
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        };
+        let render = |buf: &mut Buffer, values: &[&str], field: usize, cursor_pos: usize| {
+            render_form_panel(
+                buf,
+                area,
+                &theme,
+                now,
+                &cursor,
+                "Add MCP server",
+                "stdio or Streamable HTTP · Enter saves",
+                mcp_field_label,
+                mcp_field_hint,
+                mcp_field_placeholder,
+                values,
+                field,
+                cursor_pos,
+            );
+        };
+
+        // Each render focuses a different field: the focused one carries
+        // the cursor block over its first cell, so only unfocused rows are
+        // asserted character-exact.
+        let empty = ["", "", ""];
+        let (_, dialog_y, _, _, content_x, cols) = form_panel_metrics(area, &empty);
+        let geoms = form_field_geometries(dialog_y, &empty, cols);
+
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, &empty, 1, 0);
+        assert_eq!(
+            value_row_text(&buf, content_x, geoms[0].value_y),
+            "e.g. docs",
+            "unfocused empty name shows its placeholder"
+        );
+
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, &empty, 0, 0);
+        assert_eq!(
+            value_row_text(&buf, content_x, geoms[2].value_y),
+            "Optional, default 30s",
+            "unfocused empty timeout shows its placeholder"
+        );
+
+        // Typed values replace the ghost text entirely (focus the middle
+        // field so the asserted rows carry no cursor block).
+        let filled = ["docs", "my-server", "45"];
+        let (_, dialog_y, _, _, content_x, cols) = form_panel_metrics(area, &filled);
+        let geoms = form_field_geometries(dialog_y, &filled, cols);
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, &filled, 1, 0);
+        assert_eq!(value_row_text(&buf, content_x, geoms[0].value_y), "docs");
+        assert_eq!(value_row_text(&buf, content_x, geoms[2].value_y), "45");
     }
 
     fn entry(provider: &str, model: &str) -> ModelEntry {

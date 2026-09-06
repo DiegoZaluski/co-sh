@@ -1129,7 +1129,7 @@ impl App {
                         self.setup.save();
                     }
                     Some(crate::routes::settings::SettingsAction::OpenMcpForm) => {
-                        self.open_mcp_name_input();
+                        self.open_mcp_form();
                     }
                     None => {}
                 }

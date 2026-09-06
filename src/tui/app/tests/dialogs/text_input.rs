@@ -24,19 +24,19 @@ async fn hook_input_dialog_saves_valid_hook_and_rejects_invalid() {
     });
 
     // Invalid: no command yet → Enter keeps the dialog open.
-    assert!(app.handle_hook_input_key(key(KeyCode::Enter)));
+    assert!(app.handle_registration_form_key(key(KeyCode::Enter)));
     assert!(app.dialog.visible(), "missing command keeps the form open");
 
     // Fill Name, then jump to Command and fill it.
     for ch in "block rm".chars() {
-        app.handle_hook_input_key(key(KeyCode::Char(ch)));
+        app.handle_registration_form_key(key(KeyCode::Char(ch)));
     }
-    app.handle_hook_input_key(key(KeyCode::Down));
-    app.handle_hook_input_key(key(KeyCode::Down));
+    app.handle_registration_form_key(key(KeyCode::Down));
+    app.handle_registration_form_key(key(KeyCode::Down));
     for ch in "exit 2".chars() {
-        app.handle_hook_input_key(key(KeyCode::Char(ch)));
+        app.handle_registration_form_key(key(KeyCode::Char(ch)));
     }
-    app.handle_hook_input_key(key(KeyCode::Enter));
+    app.handle_registration_form_key(key(KeyCode::Enter));
 
     assert!(!app.dialog.visible(), "valid save closes the dialog");
     let hooks = &app.setup.hooks.events[crate::routes::settings::PRE_TOOL_USE_EVENT];
@@ -60,7 +60,7 @@ async fn hook_input_dialog_esc_discards() {
         field: 2,
         cursor_pos: 6,
     });
-    assert!(app.handle_hook_input_key(key(KeyCode::Esc)));
+    assert!(app.handle_registration_form_key(key(KeyCode::Esc)));
     assert!(!app.dialog.visible());
     assert!(
         !app.setup
@@ -140,9 +140,9 @@ async fn hook_input_click_positions_cursor() {
     // handling the click.
     let term = app.terminal_size();
     let values = ["", "", "exit 2", ""];
-    let (_, dialog_y, _, _, content_x, cols) = crate::ui::dialogs::hook_input_metrics(term, values);
+    let (_, dialog_y, _, _, content_x, cols) = crate::ui::dialogs::form_panel_metrics(term, &values);
     let cmd_value_row =
-        crate::ui::dialogs::hook_field_geometries(dialog_y, values, cols)[2].value_y;
+        crate::ui::dialogs::form_field_geometries(dialog_y, &values, cols)[2].value_y;
     use crossterm::event::{
         MouseButton as CrosstermMouseButton, MouseEvent as CrosstermMouseEvent, MouseEventKind,
     };
@@ -168,73 +168,135 @@ async fn hook_input_click_positions_cursor() {
     );
 }
 
-/// The MCP wizard walks name → endpoint → timeout, persisting only on the
-/// final valid save; each step validates before advancing.
+/// Type into whichever registration form is open (hook or MCP panel).
+fn type_text(app: &mut App, text: &str) {
+    for ch in text.chars() {
+        assert!(app.handle_registration_form_key(key(KeyCode::Char(ch))));
+    }
+}
+
+/// The MCP form shows name, endpoint and timeout on one panel and persists
+/// on Enter; a blank timeout means the default and the server starts
+/// enabled.
 #[tokio::test]
-async fn mcp_wizard_registers_server_end_to_end() {
+async fn mcp_form_registers_server_end_to_end() {
     let _guard = HOME_LOCK.lock();
     isolate_home();
     let mut app = App::new("/tmp".to_string());
-    app.dialog.show(DialogType::McpNameInput {
-        input: String::new(),
-        cursor_pos: 0,
-    });
+    app.open_mcp_form();
 
-    // Blank name keeps step 1 open.
-    assert!(app.handle_text_input_dialog_key(KeyCode::Enter));
-    assert!(app.dialog.visible(), "blank name stays on step 1");
+    type_text(&mut app, "docs");
+    assert!(app.handle_registration_form_key(key(KeyCode::Down)));
+    type_text(&mut app, "https://example.com/mcp");
+    assert!(app.handle_registration_form_key(key(KeyCode::Down)));
+    assert!(app.handle_registration_form_key(key(KeyCode::Enter)));
 
-    for ch in "docs".chars() {
-        assert!(app.handle_text_input_dialog_key(KeyCode::Char(ch)));
+    assert!(!app.dialog.visible(), "valid save closes the form");
+    assert_eq!(app.setup.mcp.servers.len(), 1);
+    let server = &app.setup.mcp.servers[0];
+    assert_eq!(server.name, "docs");
+    assert!(server.enabled);
+    match &server.transport {
+        cosh::mcp::McpTransport::Http(http) => {
+            assert_eq!(http.url, "https://example.com/mcp");
+            assert_eq!(http.timeout_ms, 30_000);
+        }
+        cosh::mcp::McpTransport::Stdio(_) => panic!("expected http transport"),
     }
-    assert!(app.handle_text_input_dialog_key(KeyCode::Enter));
+}
+
+/// An invalid endpoint keeps the panel open WITHOUT discarding the other
+/// fields — the user fixes the one line instead of restarting a wizard.
+#[tokio::test]
+async fn mcp_form_rejects_invalid_endpoint_and_keeps_edits() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.open_mcp_form();
+
+    type_text(&mut app, "docs");
+    assert!(app.handle_registration_form_key(key(KeyCode::Down)));
+    // Any non-blank line parses (URL → HTTP, otherwise `command args...`),
+    // so clear the endpoint to force the invalid state.
+    type_text(&mut app, "my-server");
+    for _ in 0.."my-server".len() {
+        assert!(app.handle_registration_form_key(key(KeyCode::Backspace)));
+    }
+    assert!(app.handle_registration_form_key(key(KeyCode::Enter)));
+    assert!(
+        app.dialog.visible(),
+        "blank endpoint keeps the panel open"
+    );
     assert!(
         matches!(
             app.dialog.current().map(|d| &d.dialog_type),
-            Some(DialogType::McpEndpointInput { .. })
+            Some(DialogType::McpForm { name, field, .. })
+                if name == "docs" && *field == 1
         ),
-        "valid name advances to step 2"
+        "the typed name and the active field survive the rejection"
     );
 
-    // Garbage endpoint is rejected without advancing.
-    for ch in "   ".chars() {
-        assert!(app.handle_text_input_dialog_key(KeyCode::Char(ch)));
-    }
-    assert!(app.handle_text_input_dialog_key(KeyCode::Enter));
-    assert!(
-        matches!(
-            app.dialog.current().map(|d| &d.dialog_type),
-            Some(DialogType::McpEndpointInput { .. })
-        ),
-        "blank endpoint stays on step 2"
-    );
-    for _ in 0..3 {
-        app.handle_text_input_dialog_key(KeyCode::Backspace);
-    }
-    for ch in "https://example.com/mcp".chars() {
-        assert!(app.handle_text_input_dialog_key(KeyCode::Char(ch)));
-    }
-    assert!(app.handle_text_input_dialog_key(KeyCode::Enter));
-    assert!(
-        matches!(
-            app.dialog.current().map(|d| &d.dialog_type),
-            Some(DialogType::McpTimeoutInput { .. })
-        ),
-        "valid endpoint advances to step 3"
-    );
-
-    // Bad timeout stays; blank means default and closes with a persist.
-    for ch in "abc".chars() {
-        assert!(app.handle_text_input_dialog_key(KeyCode::Char(ch)));
-    }
-    assert!(app.handle_text_input_dialog_key(KeyCode::Enter));
-    assert!(app.dialog.visible(), "bad timeout stays on step 3");
-    for _ in 0..3 {
-        app.handle_text_input_dialog_key(KeyCode::Backspace);
-    }
-    assert!(app.handle_text_input_dialog_key(KeyCode::Enter));
-    assert!(!app.dialog.visible(), "default timeout closes the wizard");
+    // Fix just the endpoint line and save.
+    type_text(&mut app, "my-server --flag");
+    assert!(app.handle_registration_form_key(key(KeyCode::Down)));
+    assert!(app.handle_registration_form_key(key(KeyCode::Enter)));
+    assert!(!app.dialog.visible(), "fixed form saves and closes");
     assert_eq!(app.setup.mcp.servers.len(), 1);
     assert_eq!(app.setup.mcp.servers[0].name, "docs");
-    assert!(app.setup.mcp.servers[0].enabled);
+}
+
+/// Duplicate names and bad timeouts are rejected with the panel (and every
+/// typed field) intact.
+#[tokio::test]
+async fn mcp_form_rejects_duplicate_name_and_bad_timeout() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.setup.mcp.servers.push(
+        cosh::mcp::build_mcp_entry("docs", "https://example.com/mcp", "").unwrap(),
+    );
+    app.open_mcp_form();
+
+    type_text(&mut app, "docs");
+    assert!(app.handle_registration_form_key(key(KeyCode::Down)));
+    type_text(&mut app, "https://other.example/mcp");
+    assert!(app.handle_registration_form_key(key(KeyCode::Down)));
+    assert!(app.handle_registration_form_key(key(KeyCode::Enter)));
+    assert!(app.dialog.visible(), "duplicate name stays open");
+    assert_eq!(app.setup.mcp.servers.len(), 1);
+
+    // Rename, then try a bad timeout.
+    assert!(app.handle_registration_form_key(key(KeyCode::Up)));
+    assert!(app.handle_registration_form_key(key(KeyCode::Up)));
+    type_text(&mut app, "-other");
+    assert!(app.handle_registration_form_key(key(KeyCode::Down)));
+    assert!(app.handle_registration_form_key(key(KeyCode::Down)));
+    type_text(&mut app, "abc");
+    assert!(app.handle_registration_form_key(key(KeyCode::Enter)));
+    assert!(app.dialog.visible(), "bad timeout stays open");
+    for _ in 0..3 {
+        assert!(app.handle_registration_form_key(key(KeyCode::Backspace)));
+    }
+    assert!(app.handle_registration_form_key(key(KeyCode::Enter)));
+    assert!(!app.dialog.visible(), "blank timeout saves with the default");
+    assert_eq!(app.setup.mcp.servers.len(), 2);
+    assert_eq!(app.setup.mcp.servers[1].name, "docs-other");
+}
+
+/// Esc discards the whole form without persisting anything.
+#[tokio::test]
+async fn mcp_form_esc_discards() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.open_mcp_form();
+    type_text(&mut app, "docs");
+    assert!(app.handle_registration_form_key(key(KeyCode::Down)));
+    type_text(&mut app, "https://example.com/mcp");
+    assert!(app.handle_registration_form_key(key(KeyCode::Esc)));
+    assert!(!app.dialog.visible());
+    assert!(
+        app.setup.mcp.servers.is_empty(),
+        "esc must not persist anything"
+    );
 }

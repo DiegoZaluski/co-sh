@@ -13,10 +13,7 @@ impl App {
                     DialogType::ApiKeyInput { .. }
                         | DialogType::LocalUrlInput { .. }
                         | DialogType::CacheTtlInput { .. }
-                        | DialogType::RenameSession { .. }
-                        | DialogType::McpNameInput { .. }
-                        | DialogType::McpEndpointInput { .. }
-                        | DialogType::McpTimeoutInput { .. },
+                        | DialogType::RenameSession { .. },
                 )
             )
     }
@@ -45,10 +42,7 @@ impl App {
                     && let DialogType::ApiKeyInput { cursor_pos, .. }
                     | DialogType::LocalUrlInput { cursor_pos, .. }
                     | DialogType::CacheTtlInput { cursor_pos, .. }
-                    | DialogType::RenameSession { cursor_pos, .. }
-                    | DialogType::McpNameInput { cursor_pos, .. }
-                    | DialogType::McpEndpointInput { cursor_pos, .. }
-                    | DialogType::McpTimeoutInput { cursor_pos, .. } = &mut d.dialog_type
+                    | DialogType::RenameSession { cursor_pos, .. } = &mut d.dialog_type
                     && *cursor_pos > 0
                 {
                     *cursor_pos -= 1;
@@ -68,15 +62,6 @@ impl App {
                     }
                     | DialogType::RenameSession {
                         input, cursor_pos, ..
-                    }
-                    | DialogType::McpNameInput {
-                        input, cursor_pos, ..
-                    }
-                    | DialogType::McpEndpointInput {
-                        input, cursor_pos, ..
-                    }
-                    | DialogType::McpTimeoutInput {
-                        input, cursor_pos, ..
                     } = &mut d.dialog_type
                     && *cursor_pos < input.len()
                 {
@@ -89,10 +74,7 @@ impl App {
                     && let DialogType::ApiKeyInput { cursor_pos, .. }
                     | DialogType::LocalUrlInput { cursor_pos, .. }
                     | DialogType::CacheTtlInput { cursor_pos, .. }
-                    | DialogType::RenameSession { cursor_pos, .. }
-                    | DialogType::McpNameInput { cursor_pos, .. }
-                    | DialogType::McpEndpointInput { cursor_pos, .. }
-                    | DialogType::McpTimeoutInput { cursor_pos, .. } = &mut d.dialog_type
+                    | DialogType::RenameSession { cursor_pos, .. } = &mut d.dialog_type
                 {
                     *cursor_pos = 0;
                 }
@@ -110,15 +92,6 @@ impl App {
                         input, cursor_pos, ..
                     }
                     | DialogType::RenameSession {
-                        input, cursor_pos, ..
-                    }
-                    | DialogType::McpNameInput {
-                        input, cursor_pos, ..
-                    }
-                    | DialogType::McpEndpointInput {
-                        input, cursor_pos, ..
-                    }
-                    | DialogType::McpTimeoutInput {
                         input, cursor_pos, ..
                     } = &mut d.dialog_type
                 {
@@ -138,15 +111,6 @@ impl App {
                         input, cursor_pos, ..
                     }
                     | DialogType::RenameSession {
-                        input, cursor_pos, ..
-                    }
-                    | DialogType::McpNameInput {
-                        input, cursor_pos, ..
-                    }
-                    | DialogType::McpEndpointInput {
-                        input, cursor_pos, ..
-                    }
-                    | DialogType::McpTimeoutInput {
                         input, cursor_pos, ..
                     } = &mut d.dialog_type
                     && *cursor_pos < input.len()
@@ -168,15 +132,6 @@ impl App {
                         input, cursor_pos, ..
                     }
                     | DialogType::RenameSession {
-                        input, cursor_pos, ..
-                    }
-                    | DialogType::McpNameInput {
-                        input, cursor_pos, ..
-                    }
-                    | DialogType::McpEndpointInput {
-                        input, cursor_pos, ..
-                    }
-                    | DialogType::McpTimeoutInput {
                         input, cursor_pos, ..
                     } = &mut d.dialog_type
                     && *cursor_pos > 0
@@ -200,15 +155,6 @@ impl App {
                     }
                     | DialogType::RenameSession {
                         input, cursor_pos, ..
-                    }
-                    | DialogType::McpNameInput {
-                        input, cursor_pos, ..
-                    }
-                    | DialogType::McpEndpointInput {
-                        input, cursor_pos, ..
-                    }
-                    | DialogType::McpTimeoutInput {
-                        input, cursor_pos, ..
                     } = &mut d.dialog_type
                 {
                     input.insert(*cursor_pos, ch);
@@ -220,21 +166,29 @@ impl App {
         }
     }
 
-    /// Editing keys for the hook registration box: the active field behaves
-    /// exactly like a single-line input; Up/Down move between fields.
-    pub(in crate::app) fn handle_hook_input_key(&mut self, key: KeyEvent) -> bool {
+    /// Editing keys shared by the multi-field registration forms (hook and
+    /// MCP panels): the active line behaves like a single-line input,
+    /// Up/Down move between visual lines first and only leave the field at
+    /// its first/last line, Enter saves (invalid input keeps the panel open
+    /// with an error toast), Esc discards. Returns whether the key was
+    /// consumed; with no form open every key is refused.
+    pub(in crate::app) fn handle_registration_form_key(&mut self, key: KeyEvent) -> bool {
         if !self.dialog.visible() {
+            return false;
+        }
+        let is_form = matches!(
+            self.dialog.current().map(|d| &d.dialog_type),
+            Some(DialogType::HookInput { .. }) | Some(DialogType::McpForm { .. })
+        );
+        if !is_form {
             return false;
         }
         if let Some(d) = self.dialog.current_mut() {
             d.cursor.note_activity();
         }
-
-        const LAST_FIELD: usize = 3;
-
         match key.code {
             KeyCode::Enter => {
-                if self.save_hook_input_dialog() {
+                if self.save_registration_form() {
                     self.dialog.pop();
                 }
                 true
@@ -243,223 +197,61 @@ impl App {
                 self.dialog.pop();
                 true
             }
-            KeyCode::Up | KeyCode::Down => {
-                let up = key.code == KeyCode::Up;
-                let cols = crate::ui::dialogs::hook_input_content_w(
-                    crate::ui::dialogs::hook_input_dialog_w(self.terminal_size()),
+            _ => {
+                let cols = crate::ui::dialogs::form_panel_content_w(
+                    crate::ui::dialogs::form_panel_dialog_w(self.terminal_size()),
                 ) as usize;
-                if let Some(d) = self.dialog.current_mut()
-                    && let DialogType::HookInput {
-                        name,
-                        matcher,
-                        command,
-                        timeout,
-                        field,
-                        cursor_pos,
-                        ..
-                    } = &mut d.dialog_type
-                {
-                    let lens = [name.len(), matcher.len(), command.len(), timeout.len()];
-                    // Inside a wrapped value: move between visual lines and
-                    // only leave the field at its first/last line.
-                    let moved = {
-                        let target = match *field {
-                            0 => name,
-                            1 => matcher,
-                            2 => command,
-                            _ => timeout,
-                        };
-                        crate::util::word_ops::move_visual_line(target, *cursor_pos, cols, up)
-                    };
-                    if moved != *cursor_pos {
-                        *cursor_pos = moved;
-                    } else {
-                        *field = if !up {
-                            (*field + 1).min(LAST_FIELD)
-                        } else {
-                            field.saturating_sub(1)
-                        };
-                        *cursor_pos = lens[*field];
+                if let Some(d) = self.dialog.current_mut() {
+                    match &mut d.dialog_type {
+                        DialogType::HookInput {
+                            name,
+                            matcher,
+                            command,
+                            timeout,
+                            field,
+                            cursor_pos,
+                            ..
+                        } => drive_form_edit(
+                            [name, matcher, command, timeout],
+                            field,
+                            cursor_pos,
+                            key,
+                            cols,
+                        ),
+                        DialogType::McpForm {
+                            name,
+                            endpoint,
+                            timeout,
+                            field,
+                            cursor_pos,
+                        } => {
+                            drive_form_edit([name, endpoint, timeout], field, cursor_pos, key, cols)
+                        }
+                        _ => false,
                     }
+                } else {
+                    false
                 }
-                true
             }
-            KeyCode::Left => {
-                let word_jump =
-                    key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Left;
-                if let Some(d) = self.dialog.current_mut()
-                    && let DialogType::HookInput {
-                        name,
-                        matcher,
-                        command,
-                        timeout,
-                        field,
-                        cursor_pos,
-                        ..
-                    } = &mut d.dialog_type
-                {
-                    let target = match *field {
-                        0 => name,
-                        1 => matcher,
-                        2 => command,
-                        _ => timeout,
-                    };
-                    if word_jump && *field != 3 {
-                        // Timeout is a plain number: words make no sense.
-                        *cursor_pos = crate::util::word_ops::find_word_start(target, *cursor_pos);
-                    } else if *cursor_pos > 0 {
-                        *cursor_pos = target.floor_char_boundary(*cursor_pos - 1);
-                    }
-                }
-                true
-            }
-            KeyCode::Right => {
-                let word_jump =
-                    key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Right;
-                if let Some(d) = self.dialog.current_mut()
-                    && let DialogType::HookInput {
-                        name,
-                        matcher,
-                        command,
-                        timeout,
-                        field,
-                        cursor_pos,
-                        ..
-                    } = &mut d.dialog_type
-                {
-                    let len = match *field {
-                        0 => name.len(),
-                        1 => matcher.len(),
-                        2 => command.len(),
-                        _ => timeout.len(),
-                    };
-                    let target = match *field {
-                        0 => name,
-                        1 => matcher,
-                        2 => command,
-                        _ => timeout,
-                    };
-                    if word_jump && *field != 3 {
-                        *cursor_pos = crate::util::word_ops::find_word_end(target, *cursor_pos);
-                    } else if *cursor_pos < len {
-                        let next = target.floor_char_boundary(*cursor_pos + 1).min(len);
-                        *cursor_pos = next;
-                    }
-                }
-                true
-            }
-            KeyCode::Home => {
-                if let Some(d) = self.dialog.current_mut()
-                    && let DialogType::HookInput { cursor_pos, .. } = &mut d.dialog_type
-                {
-                    *cursor_pos = 0;
-                }
-                true
-            }
-            KeyCode::End => {
-                if let Some(d) = self.dialog.current_mut()
-                    && let DialogType::HookInput {
-                        name,
-                        matcher,
-                        command,
-                        timeout,
-                        field,
-                        cursor_pos,
-                        ..
-                    } = &mut d.dialog_type
-                {
-                    *cursor_pos = match *field {
-                        0 => name.len(),
-                        1 => matcher.len(),
-                        2 => command.len(),
-                        _ => timeout.len(),
-                    };
-                }
-                true
-            }
-            KeyCode::Delete => {
-                if let Some(d) = self.dialog.current_mut()
-                    && let DialogType::HookInput {
-                        name,
-                        matcher,
-                        command,
-                        timeout,
-                        field,
-                        cursor_pos,
-                        ..
-                    } = &mut d.dialog_type
-                {
-                    let target = match *field {
-                        0 => name,
-                        1 => matcher,
-                        2 => command,
-                        _ => timeout,
-                    };
-                    let len = target.len();
-                    if *cursor_pos < len {
-                        let next = target.floor_char_boundary(*cursor_pos + 1).min(len);
-                        target.drain(*cursor_pos..next);
-                    }
-                }
-                true
-            }
-            KeyCode::Backspace => {
-                let delete_word =
-                    key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Backspace;
-                if let Some(d) = self.dialog.current_mut()
-                    && let DialogType::HookInput {
-                        name,
-                        matcher,
-                        command,
-                        timeout,
-                        field,
-                        cursor_pos,
-                        ..
-                    } = &mut d.dialog_type
-                    && *cursor_pos > 0
-                {
-                    let target = match *field {
-                        0 => name,
-                        1 => matcher,
-                        2 => command,
-                        _ => timeout,
-                    };
-                    if delete_word && *field != 3 {
-                        let start = crate::util::word_ops::find_word_start(target, *cursor_pos);
-                        target.drain(start..*cursor_pos);
-                        *cursor_pos = start;
-                    } else {
-                        let char_start = target.floor_char_boundary(*cursor_pos - 1);
-                        target.remove(char_start);
-                        *cursor_pos = char_start;
-                    }
-                }
-                true
-            }
-            KeyCode::Char(ch) => {
-                if let Some(d) = self.dialog.current_mut()
-                    && let DialogType::HookInput {
-                        name,
-                        matcher,
-                        command,
-                        timeout,
-                        field,
-                        cursor_pos,
-                        ..
-                    } = &mut d.dialog_type
-                {
-                    let target = match *field {
-                        0 => name,
-                        1 => matcher,
-                        2 => command,
-                        _ => timeout,
-                    };
-                    target.insert(*cursor_pos, ch);
-                    *cursor_pos += ch.len_utf8();
-                }
-                true
-            }
-            _ => false,
+        }
+    }
+
+    /// Validate and persist whichever registration form is open.
+    fn save_registration_form(&mut self) -> bool {
+        let is_hook = matches!(
+            self.dialog.current().map(|d| &d.dialog_type),
+            Some(DialogType::HookInput { .. })
+        );
+        let is_mcp = matches!(
+            self.dialog.current().map(|d| &d.dialog_type),
+            Some(DialogType::McpForm { .. })
+        );
+        if is_hook {
+            self.save_hook_input_dialog()
+        } else if is_mcp {
+            self.save_mcp_form_dialog()
+        } else {
+            false
         }
     }
 
@@ -669,105 +461,183 @@ impl App {
                 }
             }
             DialogType::HookInput { .. } => self.save_hook_input_dialog(),
-            DialogType::McpNameInput { input, .. } => {
-                // Wizard step 1 → 2: a name is required before asking for
-                // the endpoint; uniqueness is checked at the final save.
-                if input.trim().is_empty() {
-                    use crate::ui::toast::{ToastOptions, ToastVariant};
-                    self.toast_state.show(ToastOptions {
-                        title: Some("Server not saved".into()),
-                        message: "Server name is required.".to_string(),
-                        variant: ToastVariant::Error,
-                        duration_ms: 6000,
-                    });
-                    return false;
-                }
-                let name = input.trim().to_string();
-                // Advance the wizard: swap instead of pushing, and report
-                // "not done" so the Enter handler does not pop the new step.
-                self.dialog.replace(DialogType::McpEndpointInput {
-                    name,
-                    input: String::new(),
-                    cursor_pos: 0,
-                });
-                false
-            }
-            DialogType::McpEndpointInput { name, input, .. } => {
-                // Wizard step 2 → 3: fail fast on an unparsable endpoint so
-                // the user fixes it before typing the timeout.
-                if cosh::mcp::parse_mcp_endpoint(input).is_err() {
-                    use crate::ui::toast::{ToastOptions, ToastVariant};
-                    self.toast_state.show(ToastOptions {
-                        title: Some("Server not saved".into()),
-                        message: "Endpoint must be `command args...` or `http(s)://url`."
-                            .to_string(),
-                        variant: ToastVariant::Error,
-                        duration_ms: 6000,
-                    });
-                    return false;
-                }
-                let name = name.clone();
-                let endpoint = input.trim().to_string();
-                self.dialog.replace(DialogType::McpTimeoutInput {
-                    name,
-                    endpoint,
-                    input: String::new(),
-                    cursor_pos: 0,
-                });
-                false
-            }
-            DialogType::McpTimeoutInput {
-                name,
-                endpoint,
-                input,
-                ..
-            } => match cosh::mcp::build_mcp_entry(name, endpoint, input) {
-                Ok(entry) => {
-                    if self.setup.mcp.servers.iter().any(|s| s.name == entry.name) {
-                        use crate::ui::toast::{ToastOptions, ToastVariant};
-                        self.toast_state.show(ToastOptions {
-                            title: Some("Server not saved".into()),
-                            message: format!(
-                                "A server named “{}” is already registered.",
-                                entry.name
-                            ),
-                            variant: ToastVariant::Error,
-                            duration_ms: 6000,
-                        });
-                        return false;
-                    }
-                    let name = entry.name.clone();
-                    self.setup.mcp.servers.push(entry);
-                    self.setup.save();
-                    use crate::ui::toast::{ToastOptions, ToastVariant};
-                    self.toast_state.show(ToastOptions {
-                        title: Some("MCP server added".into()),
-                        message: format!("“{name}” connects on the next agent loop."),
-                        variant: ToastVariant::Success,
-                        duration_ms: 4000,
-                    });
-                    true
-                }
-                Err(message) => {
-                    use crate::ui::toast::{ToastOptions, ToastVariant};
-                    self.toast_state.show(ToastOptions {
-                        title: Some("Server not saved".into()),
-                        message,
-                        variant: ToastVariant::Error,
-                        duration_ms: 6000,
-                    });
-                    false
-                }
-            },
+            DialogType::McpForm { .. } => self.save_mcp_form_dialog(),
             _ => false,
         }
     }
 
-    /// Open the MCP registration wizard at step 1 (server name).
-    pub(in crate::app) fn open_mcp_name_input(&mut self) {
-        self.dialog.show(DialogType::McpNameInput {
-            input: String::new(),
+    /// Error toast shared by the registration-form saves.
+    fn toast_form_error(&mut self, title: &str, message: String) {
+        use crate::ui::toast::{ToastOptions, ToastVariant};
+        self.toast_state.show(ToastOptions {
+            title: Some(title.into()),
+            message,
+            variant: ToastVariant::Error,
+            duration_ms: 6000,
+        });
+    }
+
+    /// Success toast shared by the registration-form saves.
+    fn toast_form_success(&mut self, title: &str, message: String) {
+        use crate::ui::toast::{ToastOptions, ToastVariant};
+        self.toast_state.show(ToastOptions {
+            title: Some(title.into()),
+            message,
+            variant: ToastVariant::Success,
+            duration_ms: 4000,
+        });
+    }
+
+    /// Validate and persist the MCP registration form. `build_mcp_entry`
+    /// owns every rule (endpoint shape, timeout range, entry validation),
+    /// so the form only adds the duplicate-name check. Invalid input keeps
+    /// the panel open with an error toast.
+    pub(in crate::app) fn save_mcp_form_dialog(&mut self) -> bool {
+        let Some(d) = self.dialog.current() else {
+            return false;
+        };
+        let DialogType::McpForm {
+            name,
+            endpoint,
+            timeout,
+            ..
+        } = &d.dialog_type
+        else {
+            return false;
+        };
+        let entry = match cosh::mcp::build_mcp_entry(name, endpoint, timeout) {
+            Ok(entry) => entry,
+            Err(message) => {
+                self.toast_form_error("Server not saved", message);
+                return false;
+            }
+        };
+        if self.setup.mcp.servers.iter().any(|s| s.name == entry.name) {
+            self.toast_form_error(
+                "Server not saved",
+                format!("A server named “{}” is already registered.", entry.name),
+            );
+            return false;
+        }
+        let saved = entry.name.clone();
+        self.setup.mcp.servers.push(entry);
+        self.setup.save();
+        self.toast_form_success(
+            "MCP server added",
+            format!("“{saved}” connects on the next agent loop."),
+        );
+        true
+    }
+
+    /// Open the MCP registration form: all three fields on one panel, blank
+    /// for a new server.
+    pub(in crate::app) fn open_mcp_form(&mut self) {
+        self.dialog.show(DialogType::McpForm {
+            name: String::new(),
+            endpoint: String::new(),
+            timeout: String::new(),
+            field: 0,
             cursor_pos: 0,
         });
+    }
+}
+
+/// One editing step of a registration form's active line. `lines` are the
+/// field texts in field order, `field`/`cursor_pos` the active position
+/// (`cursor_pos` is a byte index into the active line). The last field is
+/// always the plain-number timeout, so Ctrl word jumps apply to every field
+/// but the last. Up/Down first move between the value's wrapped visual lines
+/// and only change fields at the first/last line. Returns whether the key
+/// was consumed.
+fn drive_form_edit<const N: usize>(
+    lines: [&mut String; N],
+    field: &mut usize,
+    cursor_pos: &mut usize,
+    key: KeyEvent,
+    cols: usize,
+) -> bool {
+    debug_assert!(N > 0, "a registration form always has fields");
+    let last = N - 1;
+    let word_ops = *field != last;
+    match key.code {
+        KeyCode::Up | KeyCode::Down => {
+            let up = key.code == KeyCode::Up;
+            // Inside a wrapped value: move between visual lines and
+            // only leave the field at its first/last line.
+            let moved = {
+                let target = &mut *lines[*field];
+                crate::util::word_ops::move_visual_line(target, *cursor_pos, cols, up)
+            };
+            if moved != *cursor_pos {
+                *cursor_pos = moved;
+            } else {
+                *field = if !up {
+                    (*field + 1).min(last)
+                } else {
+                    field.saturating_sub(1)
+                };
+                *cursor_pos = lines[*field].len();
+            }
+            true
+        }
+        KeyCode::Left => {
+            let target = &mut *lines[*field];
+            if key.modifiers.contains(KeyModifiers::CONTROL) && word_ops {
+                *cursor_pos = crate::util::word_ops::find_word_start(target, *cursor_pos);
+            } else if *cursor_pos > 0 {
+                *cursor_pos = target.floor_char_boundary(*cursor_pos - 1);
+            }
+            true
+        }
+        KeyCode::Right => {
+            let target = &mut *lines[*field];
+            if key.modifiers.contains(KeyModifiers::CONTROL) && word_ops {
+                *cursor_pos = crate::util::word_ops::find_word_end(target, *cursor_pos);
+            } else if *cursor_pos < target.len() {
+                let next = target.floor_char_boundary(*cursor_pos + 1).min(target.len());
+                *cursor_pos = next;
+            }
+            true
+        }
+        KeyCode::Home => {
+            *cursor_pos = 0;
+            true
+        }
+        KeyCode::End => {
+            *cursor_pos = lines[*field].len();
+            true
+        }
+        KeyCode::Delete => {
+            let target = &mut *lines[*field];
+            if *cursor_pos < target.len() {
+                let next = target
+                    .floor_char_boundary(*cursor_pos + 1)
+                    .min(target.len());
+                target.drain(*cursor_pos..next);
+            }
+            true
+        }
+        KeyCode::Backspace => {
+            let target = &mut *lines[*field];
+            if *cursor_pos > 0 {
+                if key.modifiers.contains(KeyModifiers::CONTROL) && word_ops {
+                    let start = crate::util::word_ops::find_word_start(target, *cursor_pos);
+                    target.drain(start..*cursor_pos);
+                    *cursor_pos = start;
+                } else {
+                    let char_start = target.floor_char_boundary(*cursor_pos - 1);
+                    target.remove(char_start);
+                    *cursor_pos = char_start;
+                }
+            }
+            true
+        }
+        KeyCode::Char(ch) => {
+            let target = &mut *lines[*field];
+            target.insert(*cursor_pos, ch);
+            *cursor_pos += ch.len_utf8();
+            true
+        }
+        _ => false,
     }
 }

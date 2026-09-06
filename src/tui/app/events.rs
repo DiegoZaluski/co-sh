@@ -77,15 +77,6 @@ impl App {
                         }
                         | DialogType::RenameSession {
                             input, cursor_pos, ..
-                        }
-                        | DialogType::McpNameInput {
-                            input, cursor_pos, ..
-                        }
-                        | DialogType::McpEndpointInput {
-                            input, cursor_pos, ..
-                        }
-                        | DialogType::McpTimeoutInput {
-                            input, cursor_pos, ..
                         } = &mut d.dialog_type
                     {
                         let cleaned: String =

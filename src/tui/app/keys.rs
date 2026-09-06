@@ -207,12 +207,12 @@ impl App {
                 }
             }
 
-            // Hook registration box: handled with the full key event
-            // so ctrl-combos (word jumps) reach it intact.
+            // Registration panels (hook, MCP server): handled with the full
+            // key event so ctrl-combos (word jumps) reach them intact.
             if matches!(
                 self.dialog.current().map(|d| &d.dialog_type),
-                Some(DialogType::HookInput { .. })
-            ) && self.handle_hook_input_key(key)
+                Some(DialogType::HookInput { .. }) | Some(DialogType::McpForm { .. })
+            ) && self.handle_registration_form_key(key)
             {
                 return Ok(false);
             }
@@ -519,7 +519,7 @@ impl App {
                                 self.setup.save();
                             }
                             Some(crate::routes::settings::SettingsAction::OpenMcpForm) => {
-                                self.open_mcp_name_input();
+                                self.open_mcp_form();
                             }
                             None => {}
                         }
