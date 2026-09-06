@@ -5,7 +5,23 @@ use crate::ui::dialogs::DialogType;
 use cosh::harness::HarnessEvent;
 
 impl App {
+    pub(in crate::app) fn open_summarization_model_dialog(&mut self, index: Option<usize>) {
+        self.open_model_dialog();
+        self.summarization_model_edit = Some(index);
+        self.model_dialog_original = None;
+        self.reasoning_dialog_original = None;
+        if let Some(d) = self.dialog.current_mut()
+            && let DialogType::ModelList {
+                models, current, ..
+            } = &mut d.dialog_type
+        {
+            models.retain(|entry| entry.model != "auto" && !entry.provider.is_empty());
+            current.clear();
+        }
+    }
+
     pub(in crate::app) fn open_model_dialog(&mut self) {
+        self.summarization_model_edit = None;
         use cosh::ModelEntry;
         use cosh_sdk::connector::Connector;
 
@@ -278,6 +294,28 @@ impl App {
     /// Apply a picked model — or, when the model supports configurable
     /// reasoning, push the reasoning sub-dialog on top of the model list.
     pub(in crate::app) fn confirm_model_entry(&mut self, model: &str, provider: &str) {
+        if let Some(index) = self.summarization_model_edit {
+            if model == "auto" || model.trim().is_empty() || provider.trim().is_empty() {
+                return;
+            }
+            let entry = crate::util::setup::FallbackEntry {
+                provider: provider.to_string(),
+                model: model.to_string(),
+            };
+            let list = &mut self.setup.routing.summarization_models;
+            if let Some(index) = index {
+                let Some(slot) = list.get_mut(index) else {
+                    return;
+                };
+                *slot = entry;
+            } else {
+                list.push(entry);
+            }
+            self.setup.save();
+            self.summarization_model_edit = None;
+            self.dialog.pop();
+            return;
+        }
         if model == "auto" {
             // Auto mode may land on ANY fallback model, so it offers the
             // standard effort set; the choice is re-mapped onto the closest
@@ -332,6 +370,7 @@ impl App {
 
     /// Restore the model + reasoning that were active when the dialog opened.
     pub(in crate::app) fn restore_model_dialog(&mut self) {
+        self.summarization_model_edit = None;
         if let Some(ref orig) = self.model_dialog_original {
             self.llm_config.model = if orig.is_empty() {
                 None

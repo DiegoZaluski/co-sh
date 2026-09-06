@@ -2471,6 +2471,90 @@ mod tests {
     }
 
     #[test]
+    fn legacy_fragment_restart_appends_whole_item_staging_without_rewriting_history() {
+        use cosh::harness::context::ContextManager;
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+        let session = make_test_session(
+            "legacy-fragments",
+            "Legacy fragment recovery",
+            vec![make_user_msg("msg-0", "immutable source")],
+        );
+        let mut manager = ContextManager::new(2_000);
+        for index in 0..12 {
+            manager.add_user(&format!("source {index}: {}", "evidence ".repeat(300)));
+            manager.add_assistant("acknowledged", true);
+        }
+        manager.add_assistant("recent raw tail", true);
+        let original_items = serde_json::to_value(manager.save_state().items).unwrap();
+        store.save_session_with_context(&session, &manager.save_state());
+        let path = store.file_path(&session.id);
+        let original_prefix = std::fs::read(&path).unwrap();
+        assert!(manager.begin_map_reduce(2_000));
+        let mut legacy = serde_json::to_value(manager.save_state()).unwrap();
+        legacy["map_reduce"]["version"] = serde_json::json!(1);
+        legacy["map_reduce"]
+            .as_object_mut()
+            .unwrap()
+            .remove("map_target_tokens");
+        for segment in legacy["map_reduce"]["segments"].as_array_mut().unwrap() {
+            let id = segment["item_ids"][0].as_u64().unwrap();
+            segment.as_object_mut().unwrap().remove("item_ids");
+            segment["slices"] = serde_json::json!([{
+                "item_id": id, "start_byte": 0, "end_byte": 5
+            }]);
+            segment["summary"] = serde_json::json!("legacy fragment summary");
+        }
+        store.save_session_with_context(&session, &serde_json::from_value(legacy).unwrap());
+        let legacy_prefix = std::fs::read(&path).unwrap();
+        assert!(legacy_prefix.starts_with(&original_prefix));
+
+        manager.restore_state(&store.load_context(&session.id).unwrap());
+        assert!(manager.begin_map_reduce(2_000));
+        let whole = manager.save_state();
+        assert_eq!(serde_json::to_value(&whole.items).unwrap(), original_items);
+        let staging = whole.map_reduce.as_ref().unwrap();
+        assert_eq!(staging.version, 2);
+        assert!(staging.segments.iter().all(|segment| {
+            !segment.item_ids.is_empty() && segment.slices.is_empty() && segment.summary.is_none()
+        }));
+        assert_eq!(
+            staging
+                .segments
+                .iter()
+                .flat_map(|segment| segment.item_ids.iter().copied())
+                .collect::<Vec<_>>(),
+            staging.source_item_ids
+        );
+        store.save_session_with_context(&session, &whole);
+        let whole_prefix = std::fs::read(&path).unwrap();
+        assert!(whole_prefix.starts_with(&legacy_prefix));
+        assert!(whole_prefix.len() > legacy_prefix.len());
+        assert_eq!(
+            serde_json::to_value(store.load_context(&session.id).unwrap()).unwrap(),
+            serde_json::to_value(&whole).unwrap()
+        );
+
+        let first = manager.pending_map_requests()[0].ordinal;
+        assert!(manager.accept_map_summary(first, "whole-item summary"));
+        store.save_session_with_context(&session, &manager.save_state());
+        assert!(std::fs::read(&path).unwrap().starts_with(&whole_prefix));
+        manager.restore_state(&store.load_context(&session.id).unwrap());
+        assert!(manager.begin_map_reduce(2_000));
+        assert_eq!(manager.map_progress().0, 1);
+        assert!(
+            manager
+                .pending_map_requests()
+                .iter()
+                .all(|request| request.ordinal != first)
+        );
+        assert_eq!(
+            serde_json::to_value(manager.save_state().items).unwrap(),
+            original_items
+        );
+    }
+
+    #[test]
     fn map_reduce_progress_checkpoint_and_branches_replay_from_one_immutable_history() {
         use cosh::harness::context::ContextManager;
         let dir = tempfile::tempdir().unwrap();

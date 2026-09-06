@@ -210,6 +210,13 @@ impl App {
         let base_url = self.base_url_for(&provider);
         let local_base_urls = self.configured_local_base_urls();
         let fallbacks = self.router_view.fallbacks.clone();
+        let summarization_models = self
+            .setup
+            .routing
+            .summarization_models
+            .iter()
+            .map(|entry| (entry.provider.clone(), entry.model.clone()))
+            .collect();
         // Auto-rotate: move the first working fallback to the front so the
         // next message tries the provider that actually worked before wasting
         // time on failing ones. Rotation is in-memory only (not persisted).
@@ -438,6 +445,7 @@ impl App {
                     let mut harness = Harness::new(connector, &cwd, disabled_tools)
                         .with_mode(mode)
                         .with_fallbacks(remaining)
+                        .with_summarization_models(summarization_models)
                         .with_local_base_urls(local_base_urls)
                         .with_mcp_config(mcp_config);
 

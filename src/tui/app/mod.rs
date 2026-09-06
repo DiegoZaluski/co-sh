@@ -181,6 +181,8 @@ pub struct App {
     pub add_provider_view: AddProviderView,
     pub show_add_provider: bool,
     pub settings_view: SettingsView,
+    /// None: agent picker; Some(None): add summarizer; Some(Some(i)): edit.
+    pub summarization_model_edit: Option<Option<usize>>,
     pub show_settings: bool,
     pub router_view: RouterView,
     pub show_router: bool,
@@ -445,6 +447,7 @@ impl App {
             add_provider_view: AddProviderView::new(),
             show_add_provider: false,
             settings_view: SettingsView::new(),
+            summarization_model_edit: None,
             show_settings: false,
             router_view: {
                 let mut rv = RouterView::new();

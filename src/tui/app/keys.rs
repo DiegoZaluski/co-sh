@@ -471,6 +471,21 @@ impl App {
             // Each matched arm returns early so unmatched keys fall through
             // to the keymap action dispatch (e.g. Ctrl+B, Ctrl+K).
             if matches!(self.mode(), AppMode::Settings) && !self.dialog.visible() {
+                let operation = match key.code {
+                    KeyCode::Delete => Some("remove"),
+                    KeyCode::Up if key.modifiers.contains(KeyModifiers::ALT) => Some("up"),
+                    KeyCode::Down if key.modifiers.contains(KeyModifiers::ALT) => Some("down"),
+                    _ => None,
+                };
+                if let Some(operation) = operation {
+                    if self
+                        .settings_view
+                        .change_summarizer(&mut self.setup, operation)
+                    {
+                        self.setup.save();
+                    }
+                    return Ok(false);
+                }
                 match key.code {
                     KeyCode::Up => {
                         self.settings_view.select_prev(20, &self.setup);
@@ -482,6 +497,13 @@ impl App {
                     }
                     KeyCode::Enter | KeyCode::Char(' ') => {
                         match self.settings_view.activate_selected(&mut self.setup) {
+                            Some(
+                                crate::routes::settings::SettingsAction::OpenSummarizationModel {
+                                    index,
+                                },
+                            ) => {
+                                self.open_summarization_model_dialog(index);
+                            }
                             Some(crate::routes::settings::SettingsAction::ToggleSaved) => {
                                 self.setup.save();
                             }

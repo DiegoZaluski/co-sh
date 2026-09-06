@@ -20,10 +20,11 @@ const MAX_REREAD_RANGES: usize = 3;
 const MAX_REPARTITIONS: u8 = 3;
 const MAX_REDUCTION_LEVELS: usize = 8;
 const MAX_CORRECTIONS: u8 = 2;
-const MAP_REDUCE_VERSION: u8 = 1;
+const MAP_REDUCE_VERSION: u8 = 2;
 
 const fn map_reduce_version() -> u8 {
-    MAP_REDUCE_VERSION
+    // Missing versions belong to legacy byte-sliced staging.
+    1
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -36,6 +37,11 @@ pub struct SegmentSlice {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MapSegment {
     pub ordinal: usize,
+    /// Whole source items, in projection order. New staging never uses slices.
+    #[serde(default)]
+    pub item_ids: Vec<u64>,
+    /// Read compatibility only: version-one staging is rebuilt before reuse.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub slices: Vec<SegmentSlice>,
     pub covered_ranges: Vec<ContextItemRange>,
     pub summary: Option<String>,
@@ -59,12 +65,15 @@ pub enum MapReducePhase {
 }
 
 /// Persisted, resumable MapReduce staging. All text fields are derived
-/// summaries; source content is addressed by item IDs and byte slices.
+/// summaries; source content is addressed by whole item IDs.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MapReduceState {
     #[serde(default = "map_reduce_version")]
     pub version: u8,
     pub window: usize,
+    /// Soft packing target, independent of the actual model request window.
+    #[serde(default)]
+    pub map_target_tokens: usize,
     #[serde(default)]
     pub model: Option<String>,
     pub source_item_ids: Vec<u64>,
@@ -96,8 +105,8 @@ pub struct MapReduceState {
     /// accepted and all remaining segments run sequentially on resume.
     #[serde(default)]
     pub parallel_disabled: bool,
-    /// Bounded number of times an overflowing map segment has been split more
-    /// finely. Persisting it prevents restart loops against a bad window.
+    /// Bounded number of whole-item regroupings after map overflow.
+    /// Persisting it prevents restart loops against a bad window.
     #[serde(default)]
     pub repartitions: u8,
     #[serde(default)]
@@ -177,6 +186,7 @@ impl ContextManager {
         self.map_reduce = Some(MapReduceState {
             version: MAP_REDUCE_VERSION,
             window,
+            map_target_tokens: call_payload_budget(window, MAP_CALL_OVERHEAD),
             model: None,
             source_item_ids,
             source_fingerprints,
@@ -200,6 +210,10 @@ impl ContextManager {
     fn map_reduce_source_valid(&self) -> bool {
         self.map_reduce.as_ref().is_some_and(|state| {
             state.version == MAP_REDUCE_VERSION
+                && state
+                    .segments
+                    .iter()
+                    .all(|segment| segment.slices.is_empty())
                 && state.source_item_ids.iter().all(|id| {
                     self.items
                         .iter()
@@ -223,6 +237,7 @@ impl ContextManager {
                 .is_some_and(|previous| previous != model)
             {
                 state.window = window;
+                state.map_target_tokens = call_payload_budget(window, MAP_CALL_OVERHEAD);
                 state.repartitions = 0;
                 state.parallel_disabled = false;
                 state.corrections = 0;
@@ -268,29 +283,36 @@ impl ContextManager {
         })
     }
 
-    /// Split every incomplete map segment against a smaller observed window.
+    /// Regroup incomplete maps at whole-item boundaries after an overflow.
     /// Completed summaries remain attached to their original ordered ranges.
     /// Returns false when the bounded repartition budget is exhausted or the
-    /// new partition cannot make any segment finer.
+    /// new partition cannot separate any more items. A singleton is never cut.
     pub fn repartition_incomplete_maps(&mut self, requested_window: Option<usize>) -> bool {
         let Some(mut state) = self.map_reduce.take() else {
             return false;
         };
-        if state.phase != MapReducePhase::Mapping || state.repartitions >= MAX_REPARTITIONS {
+        if state.version != MAP_REDUCE_VERSION
+            || state
+                .segments
+                .iter()
+                .any(|segment| !segment.slices.is_empty())
+            || state.phase != MapReducePhase::Mapping
+            || state.repartitions >= MAX_REPARTITIONS
+        {
             self.map_reduce = Some(state);
             return false;
         }
-        let next_window = requested_window
-            .filter(|window| *window < state.window)
-            .unwrap_or_else(|| state.window.saturating_mul(3) / 4)
-            .max(2);
-        let budget = call_payload_budget(next_window, MAP_CALL_OVERHEAD);
-        let old_slice_count: usize = state
-            .segments
-            .iter()
-            .filter(|segment| segment.summary.is_none())
-            .map(|segment| segment.slices.len())
-            .sum();
+        let next_window = requested_window.map_or(state.window, |window| window.min(state.window));
+        let current_target = if state.map_target_tokens == 0 {
+            call_payload_budget(state.window, MAP_CALL_OVERHEAD)
+        } else {
+            state.map_target_tokens
+        };
+        let budget = if next_window < state.window {
+            call_payload_budget(next_window, MAP_CALL_OVERHEAD).min(current_target)
+        } else {
+            (current_target.saturating_mul(3) / 4).max(1)
+        };
         let old_segment_count = state
             .segments
             .iter()
@@ -303,34 +325,22 @@ impl ContextManager {
                 rebuilt.push(segment);
                 continue;
             }
-            let slices = self.split_slices_to_budget(&segment.slices, budget);
-            let mut current = Vec::new();
-            let mut held = 0usize;
-            for slice in slices {
-                let tokens = self.slice_tokens(&slice);
-                if !current.is_empty() && held.saturating_add(tokens) > budget {
-                    rebuilt.push(new_segment(0, std::mem::take(&mut current)));
-                    held = 0;
-                }
-                held = held.saturating_add(tokens);
-                current.push(slice);
-            }
-            if !current.is_empty() {
-                rebuilt.push(new_segment(0, current));
+            let groups = self.group_map_items(&segment.item_ids, budget);
+            if groups.len() == 1 && segment.item_ids.len() > 1 {
+                // A small target reduction may leave the same overflowing
+                // group. Make progress between items, never inside an item.
+                let middle = segment.item_ids.len() / 2;
+                rebuilt.push(new_segment(0, segment.item_ids[..middle].to_vec()));
+                rebuilt.push(new_segment(0, segment.item_ids[middle..].to_vec()));
+            } else {
+                rebuilt.extend(groups);
             }
         }
-        let new_slice_count: usize = rebuilt
-            .iter()
-            .filter(|segment| segment.summary.is_none())
-            .map(|segment| segment.slices.len())
-            .sum();
         let new_segment_count = rebuilt
             .iter()
             .filter(|segment| segment.summary.is_none())
             .count();
-        if next_window >= state.window
-            || (new_slice_count <= old_slice_count && new_segment_count <= old_segment_count)
-        {
+        if new_segment_count <= old_segment_count {
             state.segments = original_segments;
             self.map_reduce = Some(state);
             return false;
@@ -349,6 +359,7 @@ impl ContextManager {
             segment.ordinal = next_ordinal + offset;
         }
         state.window = next_window;
+        state.map_target_tokens = budget;
         state.segments = rebuilt;
         state.repartitions += 1;
         self.map_reduce = Some(state);
@@ -696,66 +707,29 @@ impl ContextManager {
     }
 
     fn partition_map_segments(&self, source: &[usize], window: usize) -> Vec<MapSegment> {
-        let budget = call_payload_budget(window, MAP_CALL_OVERHEAD);
-        let mut slices = Vec::new();
-        for &idx in source {
-            let item = &self.items[idx];
-            let rendered = serialize_item(item);
-            if rendered.is_empty() {
-                continue;
-            }
-            let mut start = 0usize;
-            while start < rendered.len() {
-                let end = prefix_end_for_budget(&rendered, start, budget, self.encoding);
-                slices.push(SegmentSlice {
-                    item_id: item.id(),
-                    start_byte: start,
-                    end_byte: end,
-                });
-                start = end;
-            }
-        }
+        let ids: Vec<_> = source.iter().map(|&idx| self.items[idx].id()).collect();
+        self.group_map_items(&ids, call_payload_budget(window, MAP_CALL_OVERHEAD))
+    }
 
-        let mut segments: Vec<MapSegment> = Vec::new();
-        let mut current: Vec<SegmentSlice> = Vec::new();
+    fn group_map_items(&self, source: &[u64], budget: usize) -> Vec<MapSegment> {
+        let mut segments = Vec::new();
+        let mut current = Vec::new();
         let mut held = 0usize;
-        for slice in slices {
-            let tokens = self.slice_tokens(&slice);
+        for &id in source {
+            let tokens = self.item_map_tokens(id);
             if !current.is_empty() && held.saturating_add(tokens) > budget {
                 segments.push(new_segment(segments.len(), std::mem::take(&mut current)));
                 held = 0;
             }
+            // The first item may exceed the soft target. Keep it whole; the
+            // request preflight checks the actual window including overhead.
             held = held.saturating_add(tokens);
-            current.push(slice);
+            current.push(id);
         }
         if !current.is_empty() {
             segments.push(new_segment(segments.len(), current));
         }
         segments
-    }
-
-    fn split_slices_to_budget(&self, source: &[SegmentSlice], budget: usize) -> Vec<SegmentSlice> {
-        let mut slices = Vec::new();
-        for slice in source {
-            let Some(item) = self.items.iter().find(|item| item.id() == slice.item_id) else {
-                continue;
-            };
-            let rendered = serialize_item(item);
-            let Some(prefix) = rendered.get(..slice.end_byte) else {
-                continue;
-            };
-            let mut start = slice.start_byte;
-            while start < slice.end_byte {
-                let end = prefix_end_for_budget(prefix, start, budget, self.encoding);
-                slices.push(SegmentSlice {
-                    item_id: slice.item_id,
-                    start_byte: start,
-                    end_byte: end,
-                });
-                start = end;
-            }
-        }
-        slices
     }
 
     fn map_request(&self, segment: &MapSegment, window: usize) -> Option<MapRequest> {
@@ -774,27 +748,17 @@ impl ContextManager {
     }
 
     fn render_segment(&self, segment: &MapSegment) -> Option<String> {
+        if !segment.slices.is_empty() || segment.item_ids.is_empty() {
+            // Never send a legacy fragment, even before staging is restarted.
+            return None;
+        }
         let mut out = String::new();
-        for slice in &segment.slices {
-            let item = self.items.iter().find(|item| item.id() == slice.item_id)?;
-            let rendered = serialize_item(item);
-            if slice.end_byte > rendered.len()
-                || slice.start_byte >= slice.end_byte
-                || !rendered.is_char_boundary(slice.start_byte)
-                || !rendered.is_char_boundary(slice.end_byte)
-            {
-                return None;
-            }
+        for id in &segment.item_ids {
+            let item = self.items.iter().find(|item| item.id() == *id)?;
             if !out.is_empty() {
                 out.push_str("\n\n");
             }
-            out.push_str(&format!(
-                "[Context item #{} bytes {}..{}]\n{}",
-                slice.item_id,
-                slice.start_byte,
-                slice.end_byte,
-                &rendered[slice.start_byte..slice.end_byte]
-            ));
+            out.push_str(&format!("[Context item #{id}]\n{}", serialize_item(item)));
         }
         Some(out)
     }
@@ -824,17 +788,16 @@ impl ContextManager {
         ))
     }
 
-    fn slice_tokens(&self, slice: &SegmentSlice) -> usize {
+    fn item_map_tokens(&self, id: u64) -> usize {
         self.items
             .iter()
-            .find(|item| item.id() == slice.item_id)
-            .map(serialize_item)
-            .and_then(|rendered| {
-                rendered
-                    .get(slice.start_byte..slice.end_byte)
-                    .map(str::to_owned)
+            .find(|item| item.id() == id)
+            .map_or(0, |item| {
+                self.encoding.estimate(&format!(
+                    "[Context item #{id}]\n{}\n\n",
+                    serialize_item(item)
+                ))
             })
-            .map_or(0, |text| self.encoding.estimate(&text))
     }
 }
 
@@ -843,46 +806,15 @@ fn call_payload_budget(window: usize, overhead: usize) -> usize {
     window.saturating_sub(reserved).max(1)
 }
 
-fn prefix_end_for_budget(
-    text: &str,
-    start: usize,
-    budget: usize,
-    encoding: crate::util::TokenEncoding,
-) -> usize {
-    if encoding.estimate(&text[start..]) <= budget {
-        return text.len();
-    }
-    let mut low = start + 1;
-    let mut high = text.len();
-    let mut best = start;
-    while low <= high {
-        let mid = text.floor_char_boundary(low + (high - low) / 2);
-        if mid <= start {
-            low = low.saturating_add(1);
-            continue;
-        }
-        if encoding.estimate(&text[start..mid]) <= budget {
-            best = mid;
-            low = mid.saturating_add(1);
-        } else {
-            high = mid.saturating_sub(1);
-        }
-    }
-    if best > start {
-        best
-    } else {
-        text.ceil_char_boundary((start + 1).min(text.len()))
-    }
-}
-
-fn new_segment(ordinal: usize, slices: Vec<SegmentSlice>) -> MapSegment {
-    let mut ids: Vec<u64> = slices.iter().map(|slice| slice.item_id).collect();
+fn new_segment(ordinal: usize, item_ids: Vec<u64>) -> MapSegment {
+    let mut ids = item_ids.clone();
     ids.sort_unstable();
     ids.dedup();
     MapSegment {
         ordinal,
         covered_ranges: coalesce_ranges(&ids),
-        slices,
+        item_ids,
+        slices: Vec::new(),
         summary: None,
     }
 }
@@ -932,59 +864,150 @@ mod tests {
         manager
     }
 
+    fn multi_item_manager(window: usize) -> ContextManager {
+        let mut manager = ContextManager::new(window);
+        for index in 0..24 {
+            manager.add_user(&format!("item {index}: {}", "source áβ ".repeat(70)));
+            manager.add_assistant("acknowledged", true);
+        }
+        manager.add_assistant("recent raw tail", true);
+        manager
+    }
+
     #[test]
-    fn map_segments_are_independent_ordered_and_exactly_slice_oversized_items() {
+    fn packing_keeps_whole_items_and_resets_the_next_group_budget() {
+        let mut manager = ContextManager::new(8_000);
+        manager.add_user(&"first ".repeat(300));
+        manager.add_user(&"second ".repeat(300));
+        manager.add_user(&"third áβ ".repeat(600));
+        manager.add_user(&"fourth ".repeat(300));
+        manager.add_user(&"fifth ".repeat(300));
+        let ids: Vec<_> = manager.items.iter().map(ContextItem::id).collect();
+        let budget = manager.item_map_tokens(ids[0]) + manager.item_map_tokens(ids[1]);
+        assert!(manager.item_map_tokens(ids[2]) > budget);
+        let segments = manager.group_map_items(&ids, budget);
+        assert_eq!(segments.len(), 3);
+        assert_eq!(segments[0].item_ids, ids[..2]);
+        assert_eq!(segments[1].item_ids, ids[2..3]);
+        assert_eq!(segments[2].item_ids, ids[3..]);
+        for segment in &segments {
+            assert!(segment.slices.is_empty());
+            let rendered = manager.render_segment(segment).unwrap();
+            for id in &segment.item_ids {
+                let item = manager.items.iter().find(|item| item.id() == *id).unwrap();
+                assert!(rendered.contains(&serialize_item(item)));
+            }
+        }
+    }
+
+    #[test]
+    fn item_exceeding_remaining_space_moves_intact_to_the_next_group() {
+        let mut manager = ContextManager::new(8_000);
+        for label in ["first", "second", "third", "fourth"] {
+            manager.add_user(&format!("{label}: {}", "detail ".repeat(300)));
+        }
+        let ids: Vec<_> = manager.items.iter().map(ContextItem::id).collect();
+        let budget = manager.item_map_tokens(ids[0]) + manager.item_map_tokens(ids[1]) + 20;
+        let segments = manager.group_map_items(&ids, budget);
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].item_ids, ids[..2]);
+        assert_eq!(segments[1].item_ids, ids[2..]);
+        assert!(segments.iter().all(|segment| segment.slices.is_empty()));
+    }
+
+    #[test]
+    fn truly_oversized_singleton_is_never_sliced_or_retried_unchanged() {
         let mut manager = large_manager(1_000);
+        let before = serde_json::to_value(manager.save_state().items).unwrap();
         assert!(manager.begin_map_reduce(1_000));
+        let state = manager.map_reduce.as_ref().unwrap();
+        assert_eq!(state.segments.len(), 1);
+        assert_eq!(state.segments[0].item_ids, vec![1]);
+        let request = manager.pending_map_requests().remove(0);
+        assert!(request.prompt.contains(&serialize_item(&manager.items[0])));
+        assert!(manager.encoding.estimate(&request.prompt) > state.window);
+        for window in [None, Some(500), Some(1)] {
+            assert!(!manager.repartition_incomplete_maps(window));
+        }
+        assert_eq!(manager.map_reduce.as_ref().unwrap().repartitions, 0);
+        assert_eq!(
+            before,
+            serde_json::to_value(manager.save_state().items).unwrap()
+        );
+    }
+
+    #[test]
+    fn legacy_fragment_staging_restarts_from_whole_immutable_items() {
+        let mut manager = multi_item_manager(2_000);
+        assert!(manager.begin_map_reduce(2_000));
+        let before = serde_json::to_value(manager.save_state().items).unwrap();
+        let mut saved = serde_json::to_value(manager.save_state()).unwrap();
+        let legacy = &mut saved["map_reduce"];
+        legacy.as_object_mut().unwrap().remove("version");
+        legacy.as_object_mut().unwrap().remove("map_target_tokens");
+        for segment in legacy["segments"].as_array_mut().unwrap() {
+            let id = segment["item_ids"][0].as_u64().unwrap();
+            segment.as_object_mut().unwrap().remove("item_ids");
+            segment["slices"] = serde_json::json!([{
+                "item_id": id, "start_byte": 0, "end_byte": 5
+            }]);
+            segment["summary"] = serde_json::json!("unsafe fragment summary");
+        }
+        manager.restore_state(&serde_json::from_value(saved).unwrap());
+        assert!(!manager.map_reduce_source_valid());
+        assert!(manager.pending_map_requests().is_empty());
+        assert!(manager.begin_map_reduce(2_000));
         let state = manager.map_reduce.as_ref().unwrap();
         assert_eq!(state.version, MAP_REDUCE_VERSION);
         assert!(
-            state.segments.len() > 1,
-            "the oversized item is byte-sliced"
-        );
-        assert!(
             state
                 .segments
-                .windows(2)
-                .all(|pair| pair[0].ordinal + 1 == pair[1].ordinal)
-        );
-
-        let mut by_item = std::collections::HashMap::<u64, Vec<SegmentSlice>>::new();
-        for slice in state
-            .segments
-            .iter()
-            .flat_map(|segment| segment.slices.iter().cloned())
-        {
-            by_item.entry(slice.item_id).or_default().push(slice);
-        }
-        for slices in by_item.values_mut() {
-            slices.sort_unstable_by_key(|slice| slice.start_byte);
-            assert_eq!(slices[0].start_byte, 0);
-            assert!(
-                slices
-                    .windows(2)
-                    .all(|pair| pair[0].end_byte == pair[1].start_byte)
-            );
-            let item = manager
-                .items
                 .iter()
-                .find(|item| item.id() == slices[0].item_id)
-                .unwrap();
-            assert_eq!(slices.last().unwrap().end_byte, serialize_item(item).len());
-        }
+                .all(|s| s.summary.is_none() && s.slices.is_empty())
+        );
+        assert_eq!(
+            state
+                .segments
+                .iter()
+                .flat_map(|s| s.item_ids.iter().copied())
+                .collect::<Vec<_>>(),
+            state.source_item_ids
+        );
+        assert_eq!(
+            before,
+            serde_json::to_value(manager.save_state().items).unwrap()
+        );
+    }
 
-        let requests = manager.pending_map_requests();
-        assert_eq!(requests.len(), state.segments.len());
-        assert!(requests.iter().all(|request| {
-            request.prompt.contains("## Source Ranges")
-                && request.prompt.contains("## Open Work")
-                && !request.prompt.contains("Continuation context")
-        }));
+    #[test]
+    fn overflow_regroups_whole_items_without_shrinking_the_actual_window() {
+        let mut manager = multi_item_manager(8_000);
+        manager.begin_manual_compaction();
+        assert!(manager.begin_map_reduce(8_000));
+        let source = manager.map_reduce.as_ref().unwrap().source_item_ids.clone();
+        let first = manager.pending_map_requests()[0].ordinal;
+        assert!(manager.accept_map_summary(first, "accepted map"));
+        let accepted =
+            serde_json::to_value(&manager.map_reduce.as_ref().unwrap().segments[0]).unwrap();
+        assert!(manager.repartition_incomplete_maps(None));
+        let state = manager.map_reduce.as_ref().unwrap();
+        assert_eq!(state.window, 8_000);
+        assert!(state.map_target_tokens < call_payload_budget(8_000, MAP_CALL_OVERHEAD));
+        assert_eq!(serde_json::to_value(&state.segments[0]).unwrap(), accepted);
+        assert_eq!(
+            state
+                .segments
+                .iter()
+                .flat_map(|s| s.item_ids.iter().copied())
+                .collect::<Vec<_>>(),
+            source
+        );
+        assert!(state.segments.iter().all(|s| s.slices.is_empty()));
     }
 
     #[test]
     fn accepted_map_results_are_idempotent_and_resume_without_regeneration() {
-        let mut manager = large_manager(2_000);
+        let mut manager = multi_item_manager(2_000);
         assert!(manager.begin_map_reduce(2_000));
         let first = manager.pending_map_requests()[0].ordinal;
         assert!(manager.accept_map_summary(first, "first durable map summary"));
@@ -1008,7 +1031,7 @@ mod tests {
 
     #[test]
     fn reduction_recurses_over_every_ordered_map_summary() {
-        let mut manager = large_manager(1_000);
+        let mut manager = multi_item_manager(1_000);
         assert!(manager.begin_map_reduce(1_000));
         let ordinals: Vec<usize> = manager
             .pending_map_requests()
@@ -1220,7 +1243,7 @@ mod tests {
 
     #[test]
     fn replaced_source_invalidates_staging_and_new_model_resets_recovery_limits() {
-        let mut manager = large_manager(2_000);
+        let mut manager = multi_item_manager(2_000);
         assert!(manager.begin_map_reduce(2_000));
         manager.prepare_map_reduce_model("small", 2_000);
         assert!(manager.accept_map_summary(0, "stale fact"));
@@ -1278,7 +1301,7 @@ mod tests {
 
     #[test]
     fn reduction_limit_prevents_non_shrinking_model_output_loops() {
-        let mut manager = large_manager(1_000);
+        let mut manager = multi_item_manager(1_000);
         assert!(manager.begin_map_reduce(1_000));
         manager.prepare_map_reduce_model("small", 1_000);
         for request in manager.pending_map_requests() {

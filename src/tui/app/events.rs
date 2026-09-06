@@ -866,6 +866,10 @@ impl App {
                     };
                     let mut models_with_auto = vec![auto_entry];
                     models_with_auto.extend(models);
+                    if self.summarization_model_edit.is_some() {
+                        models_with_auto
+                            .retain(|entry| entry.model != "auto" && !entry.provider.is_empty());
+                    }
 
                     let auto_current = if current == "auto" {
                         current

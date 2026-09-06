@@ -103,11 +103,14 @@ impl Default for Tools {
 pub struct Routing {
     /// Ordered fallback entries (provider, model).
     pub fallbacks: Vec<FallbackEntry>,
+    /// Explicit summarization chain. Empty uses the active agent model only.
+    pub summarization_models: Vec<FallbackEntry>,
 }
 
 impl Default for Routing {
     fn default() -> Self {
         Self {
+            summarization_models: Vec::new(),
             fallbacks: crate::fallback::DEFAULT_FALLBACKS
                 .iter()
                 .map(|&(p, m)| FallbackEntry {
@@ -434,6 +437,27 @@ impl Setup {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn summarization_routing_defaults_to_agent_and_round_trips_in_order() {
+        let legacy: super::Setup = serde_json::from_str(r#"{"routing":{"fallbacks":[]}}"#).unwrap();
+        assert!(legacy.routing.summarization_models.is_empty());
+        let mut setup = legacy;
+        setup.routing.summarization_models = vec![
+            super::FallbackEntry {
+                provider: "ollama".into(),
+                model: "first".into(),
+            },
+            super::FallbackEntry {
+                provider: "openrouter".into(),
+                model: "second".into(),
+            },
+        ];
+        let restored: super::Setup =
+            serde_json::from_str(&serde_json::to_string(&setup).unwrap()).unwrap();
+        assert_eq!(restored.routing.summarization_models[0].model, "first");
+        assert_eq!(restored.routing.summarization_models[1].model, "second");
+        assert!(restored.routing.fallbacks.is_empty());
+    }
     use super::*;
 
     #[test]

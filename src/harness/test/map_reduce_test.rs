@@ -185,7 +185,12 @@ async fn offline_long_trace_compares_five_compaction_paths_without_claiming_mode
 fn staged_harness() -> Harness {
     let mut harness = Harness::new_test();
     harness.context_manager = ContextManager::new(2_000);
-    harness.context_manager.add_user(&"source ".repeat(2_000));
+    for index in 0..24 {
+        harness
+            .context_manager
+            .add_user(&format!("source {index}: {}", "detail ".repeat(100)));
+        harness.context_manager.add_assistant("acknowledged", true);
+    }
     harness
         .context_manager
         .add_assistant("recent raw answer", true);
@@ -344,8 +349,23 @@ async fn segment_overflow_repartitions_without_losing_accepted_maps() {
 }
 
 #[tokio::test]
-async fn real_map_stream_reports_usage_and_omits_tools() {
+async fn real_map_stream_sends_an_intact_item_above_the_soft_target_and_reports_usage() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut manager = ContextManager::new(4_000);
+    let source = format!("START_OF_ITEM {} END_OF_ITEM", "evidence áβ ".repeat(900));
+    manager.add_user(&source);
+    manager.add_assistant("recent raw tail", true);
+    assert!(manager.begin_map_reduce(4_000));
+    let staging = manager.save_state().map_reduce.unwrap();
+    assert_eq!(staging.segments.len(), 1);
+    assert_eq!(staging.segments[0].item_ids, vec![1]);
+    let request = manager.pending_map_requests().remove(0);
+    let encoding = crate::util::TokenEncoding::for_model(Some("test-model"));
+    assert!(encoding.estimate(&source) > staging.map_target_tokens);
+    assert!(
+        encoding.estimate(&request.system) + encoding.estimate(&request.prompt) + 64 + 400 < 4_000
+    );
+    let expected_prompt = request.prompt.clone();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -372,7 +392,16 @@ async fn real_map_stream_reports_usage_and_omits_tools() {
         }
         let request = String::from_utf8(bytes).unwrap();
         assert!(!request.contains("\"tools\":"));
-        assert!(request.contains("\"max_tokens\":1600"));
+        assert!(request.contains("\"max_tokens\":400"));
+        let (_, body) = request.split_once("\r\n\r\n").unwrap();
+        let body: serde_json::Value = serde_json::from_str(body).unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        assert!(
+            messages
+                .iter()
+                .any(|message| { message["content"].as_str() == Some(expected_prompt.as_str()) })
+        );
+        assert!(expected_prompt.contains(&source));
         let body = "data: {\"choices\":[{\"delta\":{\"content\":\"map result\"}}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3,\"total_tokens\":15,\"cost\":0.01}}\n\ndata: [DONE]\n\n";
         socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
     });
@@ -385,11 +414,11 @@ async fn real_map_stream_reports_usage_and_omits_tools() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let result = Harness::summarize_map_with_connector(
         connector,
-        "system".into(),
-        "prompt".into(),
+        request.system,
+        request.prompt,
         None,
         tx,
-        16_000,
+        4_000,
     )
     .await
     .unwrap();
@@ -424,4 +453,47 @@ async fn undersized_window_is_rejected_before_contacting_provider() {
         })
     ));
     assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn whole_item_exceeding_the_actual_window_fails_without_slicing_or_committing() {
+    let mut manager = ContextManager::new(4_000);
+    let source = "immutable evidence áβ ".repeat(4_000);
+    manager.add_user(&source);
+    manager.add_assistant("recent raw tail", true);
+    let before = serde_json::to_value(manager.save_state().items).unwrap();
+    assert!(manager.begin_map_reduce(4_000));
+    let requests = manager.pending_map_requests();
+    assert_eq!(requests.len(), 1);
+    let request = requests.into_iter().next().unwrap();
+    assert!(request.prompt.contains(&source));
+    let connector = Connector::new("openrouter")
+        .unwrap()
+        .with_base_url("http://127.0.0.1:1/v1")
+        .with_api_key("test-only")
+        .with_model("test-model");
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let result = Harness::summarize_map_with_connector(
+        connector,
+        request.system,
+        request.prompt,
+        None,
+        tx,
+        4_000,
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(CompactionErr::ContextWindow {
+            window_tokens: Some(4_000)
+        })
+    ));
+    assert!(rx.try_recv().is_err());
+    assert!(!manager.repartition_incomplete_maps(Some(4_000)));
+    assert!(!manager.commit_map_reduce());
+    assert_eq!(
+        before,
+        serde_json::to_value(manager.save_state().items).unwrap()
+    );
+    assert_eq!(manager.map_progress(), (0, 1));
 }

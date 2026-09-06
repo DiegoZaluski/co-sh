@@ -1113,7 +1113,15 @@ impl App {
                     .handle_mouse(&mouse, settings_area, &self.setup)
             {
                 self.settings_view.selection.selected_index = clicked_idx;
-                match self.settings_view.activate_selected(&mut self.setup) {
+                match self
+                    .settings_view
+                    .activate_mouse(&mouse, settings_area, &mut self.setup)
+                {
+                    Some(crate::routes::settings::SettingsAction::OpenSummarizationModel {
+                        index,
+                    }) => {
+                        self.open_summarization_model_dialog(index);
+                    }
                     Some(crate::routes::settings::SettingsAction::ToggleSaved) => {
                         self.setup.save();
                     }

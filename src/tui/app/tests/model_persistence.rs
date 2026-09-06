@@ -2,6 +2,97 @@ use super::{App, HOME_LOCK, isolate_home};
 use crate::ui::dialogs::DialogType;
 use crossterm::event::KeyCode;
 
+#[tokio::test]
+async fn summarizer_selection_and_cancel_never_change_the_agent_model() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".into());
+    app.llm_config.provider = "agent-provider".into();
+    app.llm_config.model = Some("agent-model".into());
+    app.llm_config.reasoning = Some("high".into());
+    let original = serde_json::to_value(&app.setup.model).unwrap();
+    app.summarization_model_edit = Some(None);
+    app.dialog.show(DialogType::ModelList {
+        models: vec![],
+        current: String::new(),
+        filter: String::new(),
+    });
+    app.event_tx
+        .send(cosh::harness::HarnessEvent::ModelsLoaded {
+            models: vec![cosh::ModelEntry {
+                provider: "summary-provider".into(),
+                model: "summary-model".into(),
+            }],
+            current: "auto".into(),
+        })
+        .unwrap();
+    app.poll_events();
+    if let DialogType::ModelList { models, .. } = &app.dialog.current().unwrap().dialog_type {
+        assert_eq!(models.len(), 1);
+        assert!(models.iter().all(|entry| entry.model != "auto"));
+    } else {
+        panic!("expected summary model picker");
+    }
+    app.confirm_model_entry("auto", "");
+    assert!(app.setup.routing.summarization_models.is_empty());
+    app.confirm_model_entry("summary-model", "summary-provider");
+    assert!(!app.dialog.visible());
+    assert_eq!(
+        app.setup.routing.summarization_models[0].model,
+        "summary-model"
+    );
+    app.summarization_model_edit = Some(Some(0));
+    app.dialog.show(DialogType::ModelList {
+        models: vec![],
+        current: String::new(),
+        filter: String::new(),
+    });
+    app.handle_model_dialog_key(KeyCode::Esc);
+    assert!(app.summarization_model_edit.is_none());
+    assert_eq!(app.llm_config.provider, "agent-provider");
+    assert_eq!(app.llm_config.model.as_deref(), Some("agent-model"));
+    assert_eq!(app.llm_config.reasoning.as_deref(), Some("high"));
+    assert_eq!(serde_json::to_value(&app.setup.model).unwrap(), original);
+    assert_eq!(
+        crate::util::setup::Setup::load()
+            .routing
+            .summarization_models[0]
+            .model,
+        "summary-model"
+    );
+}
+
+#[tokio::test]
+async fn manual_compaction_resolves_only_explicit_summary_models_or_the_auto_chain() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".into());
+    app.llm_config.model = Some("explicit-agent".into());
+    assert!(app.manual_summarization_models().is_empty());
+    app.router_view.fallbacks = vec![crate::util::setup::FallbackEntry {
+        provider: "local".into(),
+        model: "auto-choice".into(),
+    }];
+    app.llm_config.model = Some("auto".into());
+    assert_eq!(
+        app.manual_summarization_models(),
+        vec![("local".into(), "auto-choice".into())]
+    );
+    app.setup.routing.summarization_models = vec![crate::util::setup::FallbackEntry {
+        provider: "chosen".into(),
+        model: "summary".into(),
+    }];
+    assert_eq!(
+        app.manual_summarization_models(),
+        vec![("chosen".into(), "summary".into())]
+    );
+    app.llm_config.model = Some("explicit-agent".into());
+    assert_eq!(
+        app.manual_summarization_models(),
+        vec![("chosen".into(), "summary".into())]
+    );
+}
+
 fn new_cmd() -> crate::ui::slash_menu::SlashCommand {
     crate::ui::slash_menu::SlashCommand {
         name: "new".into(),

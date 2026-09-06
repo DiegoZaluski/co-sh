@@ -7,6 +7,21 @@ use crate::session_store::format_session_timestamp;
 use crate::ui::dialogs::DialogType;
 
 impl App {
+    /// Manual compaction has no running agent connector to inherit in auto
+    /// mode, so resolve only the user's auto chain (never the literal "auto").
+    pub(super) fn manual_summarization_models(&self) -> Vec<(String, String)> {
+        let entries = if !self.setup.routing.summarization_models.is_empty() {
+            &self.setup.routing.summarization_models
+        } else if self.llm_config.model.as_deref() == Some("auto") {
+            &self.router_view.fallbacks
+        } else {
+            return Vec::new();
+        };
+        entries
+            .iter()
+            .map(|entry| (entry.provider.clone(), entry.model.clone()))
+            .collect()
+    }
     /// Opens the bug-report page in the default browser and shows a toast.
     pub(super) fn open_bug_report_link(&mut self) {
         use crate::ui::toast::{ToastOptions, ToastVariant};
@@ -213,22 +228,65 @@ impl App {
         let provider = self.llm_config.provider.clone();
         let model = self.llm_config.model.clone();
         let base_url = self.base_url_for(&provider);
+        let summarization_models = self.manual_summarization_models();
+        let local_base_urls = self.configured_local_base_urls();
+        let anthropic_ttl = self.setup.anthropic_cache_ttl_1h();
+        let retention = self.setup.openai_cache_retention().map(String::from);
+        let reasoning = self.llm_config.reasoning.clone();
         let cwd = self.state.working_directory.clone();
         let stop_signal = self.stop_signal.clone();
         let event_tx = self.event_tx.clone();
         self.manual_compaction_active = true;
         self.tokio_handle.spawn(async move {
             use cosh::harness::{Harness, ManualCompactionOutcome};
-            let outcome = match cosh_sdk::connector::Connector::new(&provider) {
+            let base = if !summarization_models.is_empty() {
+                summarization_models
+                    .iter()
+                    .find_map(|(provider, model)| {
+                        if model.is_empty() || model == "auto" || provider.is_empty() {
+                            return None;
+                        }
+                        cosh_sdk::connector::Connector::new(provider)
+                            .ok()
+                            .map(|mut connector| {
+                                connector = connector.with_model(model);
+                                if let Some(url) = local_base_urls.get(provider) {
+                                    connector = connector.with_base_url(url.clone());
+                                }
+                                connector
+                            })
+                    })
+                    .ok_or_else(|| {
+                        "No configured summarization connector is available.".to_string()
+                    })
+            } else if model.as_deref() == Some("auto") {
+                Err("Auto has no configured models.".to_string())
+            } else {
+                cosh_sdk::connector::Connector::new(&provider).map_err(|error| error.to_string())
+            };
+            let outcome = match base {
                 Ok(mut connector) => {
-                    if let Some(ref m) = model {
-                        connector = connector.with_model(m);
+                    if summarization_models.is_empty() {
+                        if let Some(ref m) = model {
+                            connector = connector.with_model(m);
+                        }
+                        if let Some(ref url) = base_url {
+                            connector = connector.with_base_url(url.clone());
+                        }
+                        if let Some(effort) = reasoning {
+                            connector = connector.with_reasoning_effort(effort);
+                        }
                     }
-                    if let Some(ref url) = base_url {
-                        connector = connector.with_base_url(url.clone());
+                    connector = connector
+                        .with_prompt_cache_ttl_1h(anthropic_ttl)
+                        .with_prompt_cache_key(&id);
+                    if let Some(retention) = retention {
+                        connector = connector.with_prompt_cache_retention(retention);
                     }
                     let mut harness =
-                        Harness::new(connector, &cwd, std::collections::HashSet::new());
+                        Harness::new(connector, &cwd, std::collections::HashSet::new())
+                            .with_summarization_models(summarization_models)
+                            .with_local_base_urls(local_base_urls);
                     harness.context_manager.restore_state(&ctx_state);
                     harness.compact_on_demand(&event_tx, stop_signal).await
                 }

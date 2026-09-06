@@ -76,6 +76,12 @@ fn settings_items() -> &'static [SettingsItem] {
             description: "Run language servers for diagnostics, hover, symbols and related `lsp_*` tools",
             event: "",
         },
+        SettingsItem {
+            id: "summarization_models",
+            label: "Summarization models",
+            description: "Only these models, in order. Empty: use the agent model. Enter: edit; Delete: remove; Alt+Up/Down: reorder",
+            event: "",
+        },
     ]
 }
 
@@ -83,6 +89,11 @@ fn settings_items() -> &'static [SettingsItem] {
 /// switch symbol), or `None` for plain switches.
 fn cache_choice_value(id: &str, setup: &Setup) -> Option<String> {
     match id {
+        "summarization_models" => Some(if setup.routing.summarization_models.is_empty() {
+            "same as agent".into()
+        } else {
+            format!("{} configured", setup.routing.summarization_models.len())
+        }),
         "anthropic_cache_ttl" => Some(crate::util::setup::format_cache_duration(
             setup.cache.anthropic_ttl_min,
         )),
@@ -176,12 +187,19 @@ pub fn validate_hook(
 /// category is enabled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsRow {
+    SummarizationModel(usize),
+    AddSummarizationModel,
     /// Top-level setting (index into `settings_items()`).
     Category(usize),
     /// Configured hook of one event.
-    Hook { event: &'static str, index: usize },
+    Hook {
+        event: &'static str,
+        index: usize,
+    },
     /// Create a new hook for one event.
-    AddHook { event: &'static str },
+    AddHook {
+        event: &'static str,
+    },
     /// Registered MCP server (index into `setup.mcp.servers`).
     McpServer(usize),
     /// Register a new MCP server.
@@ -196,6 +214,8 @@ struct LayoutLine {
 }
 
 enum Line {
+    SummarizationModel(usize),
+    AddSummarizationModel,
     Title,
     Blank,
     Description(&'static str),
@@ -222,6 +242,8 @@ impl Line {
     /// Selectable rows in top-to-bottom order.
     fn row(&self) -> Option<SettingsRow> {
         match self {
+            Line::SummarizationModel(index) => Some(SettingsRow::SummarizationModel(*index)),
+            Line::AddSummarizationModel => Some(SettingsRow::AddSummarizationModel),
             Line::Category { item } => Some(SettingsRow::Category(*item)),
             Line::Hook { event, hook } => Some(SettingsRow::Hook {
                 event,
@@ -275,6 +297,20 @@ fn build_layout(setup: &Setup) -> Vec<LayoutLine> {
         // Only hook categories own sub-lists; standalone switches (empty
         // event) are a single toggle row.
         let manages_hooks = !settings_items()[item].event.is_empty();
+        if settings_items()[item].id == "summarization_models" {
+            for index in 0..setup.routing.summarization_models.len() {
+                lines.push(LayoutLine {
+                    y,
+                    line: Line::SummarizationModel(index),
+                });
+                y += 1;
+            }
+            lines.push(LayoutLine {
+                y,
+                line: Line::AddSummarizationModel,
+            });
+            y += 1;
+        }
         if manages_hooks && is_enabled(&settings_items()[item], setup) {
             lines.push(LayoutLine {
                 y,
@@ -368,6 +404,9 @@ fn content_height(setup: &Setup) -> u16 {
 /// What happened after the user activated a row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsAction {
+    OpenSummarizationModel {
+        index: Option<usize>,
+    },
     /// Persisted state changed; caller must `setup.save()`.
     ToggleSaved,
     /// The Zen free-gateway switch flipped; caller must `setup.save()` AND
@@ -390,7 +429,9 @@ pub enum SettingsAction {
     OpenMcpForm,
     /// Open the cache-duration input box for `setting` (a Settings-item id:
     /// "anthropic_cache_ttl" / "openai_cache_retention").
-    OpenCacheInput { setting: &'static str },
+    OpenCacheInput {
+        setting: &'static str,
+    },
 }
 
 // View
@@ -400,6 +441,79 @@ pub struct SettingsView {
 }
 
 impl SettingsView {
+    /// Shared by keyboard shortcuts and the inline mouse controls.
+    pub fn change_summarizer(&mut self, setup: &mut Setup, operation: &str) -> bool {
+        let rows = selectable_rows(setup);
+        let Some(SettingsRow::SummarizationModel(index)) = rows.get(self.selection.selected_index)
+        else {
+            return false;
+        };
+        let index = *index;
+        let list = &mut setup.routing.summarization_models;
+        let next = match operation {
+            "remove" => {
+                list.remove(index);
+                index.min(list.len().saturating_sub(1))
+            }
+            "up" if index > 0 => {
+                list.swap(index, index - 1);
+                index - 1
+            }
+            "down" if index + 1 < list.len() => {
+                list.swap(index, index + 1);
+                index + 1
+            }
+            _ => return false,
+        };
+        let rows = selectable_rows(setup);
+        self.selection.selected_index = rows
+            .iter()
+            .position(|row| *row == SettingsRow::SummarizationModel(next))
+            .or_else(|| {
+                rows.iter()
+                    .position(|row| *row == SettingsRow::AddSummarizationModel)
+            })
+            .unwrap_or(0);
+        self.selection.clamp(rows.len());
+        true
+    }
+
+    fn viewport_offset(&self, area: Rect, setup: &Setup) -> u16 {
+        let selected = selectable_rows(setup)
+            .get(self.selection.selected_index)
+            .copied();
+        build_layout(setup)
+            .iter()
+            .find(|line| line.line.row() == selected && selected.is_some())
+            .map_or(0, |line| {
+                line.y.saturating_sub(area.height.saturating_sub(1))
+            })
+    }
+
+    pub fn activate_mouse(
+        &mut self,
+        mouse: &MouseEvent,
+        area: Rect,
+        setup: &mut Setup,
+    ) -> Option<SettingsAction> {
+        if matches!(
+            selectable_rows(setup).get(self.selection.selected_index),
+            Some(SettingsRow::SummarizationModel(_))
+        ) {
+            let controls = area.right().saturating_sub(18).max(area.x);
+            if mouse.x >= controls {
+                let operation = match mouse.x - controls {
+                    0..=5 => "up",
+                    6..=11 => "down",
+                    _ => "remove",
+                };
+                return self
+                    .change_summarizer(setup, operation)
+                    .then_some(SettingsAction::ToggleSaved);
+            }
+        }
+        self.activate_selected(setup)
+    }
     pub const fn new() -> Self {
         Self {
             selection: ListSelection::new(),
@@ -424,8 +538,19 @@ impl SettingsView {
             .selected_index
             .min(rows.len().saturating_sub(1));
         match rows.get(idx)? {
+            SettingsRow::SummarizationModel(index) => {
+                Some(SettingsAction::OpenSummarizationModel {
+                    index: Some(*index),
+                })
+            }
+            SettingsRow::AddSummarizationModel => {
+                Some(SettingsAction::OpenSummarizationModel { index: None })
+            }
             SettingsRow::Category(i) => {
                 let item = &settings_items()[*i];
+                if item.id == "summarization_models" {
+                    return Some(SettingsAction::OpenSummarizationModel { index: None });
+                }
                 // Choice settings (cache TTL/retention) open a duration
                 // input box instead of toggling a switch — the value is a
                 // free-form user choice, not a hardcoded cycle.
@@ -487,14 +612,18 @@ impl SettingsView {
         }
         let row_x = area.x + (area.width.saturating_sub(max_row_w as u16)) / 2;
         // Only option/sub rows are clickable — never titles or descriptions.
-        let hit_x = mouse.x >= row_x && mouse.x < row_x + max_row_w as u16;
+        let hit_x = mouse.x >= row_x
+            && mouse.x < area.right()
+            && mouse.y >= area.y
+            && mouse.y < area.bottom();
         if !hit_x {
             return None;
         }
         let start_y = content_start_y(area, setup);
+        let offset = self.viewport_offset(area, setup);
         build_layout(setup)
             .iter()
-            .find(|l| l.y as u32 + start_y as u32 == mouse.y as u32)
+            .find(|l| l.y as u32 + start_y as u32 == mouse.y as u32 + offset as u32)
             .and_then(|l| l.line.row())
             .and_then(|row| selectable_rows(setup).iter().position(|r| r == &row))
     }
@@ -519,13 +648,44 @@ impl SettingsView {
         self.selection.set_visible_count(visible);
         self.selection.clamp(rows.len());
         let selected_idx = self.selection.selected_index;
+        let offset = self.viewport_offset(area, setup);
 
         for line in &layout {
-            let y = start_y + line.y;
+            let Some(y) = (start_y + line.y).checked_sub(offset) else {
+                continue;
+            };
+            if y < area.y {
+                continue;
+            }
             if y >= area.bottom() {
                 break;
             }
             match &line.line {
+                Line::SummarizationModel(index) => {
+                    let selected =
+                        rows.get(selected_idx) == Some(&SettingsRow::SummarizationModel(*index));
+                    let entry = &setup.routing.summarization_models[*index];
+                    let controls = area.right().saturating_sub(18).max(area.x);
+                    let text = truncate(
+                        &format!("  {}. {}/{}", index + 1, entry.provider, entry.model),
+                        controls.saturating_sub(row_x) as usize,
+                    );
+                    let style = Style::default().fg(if selected { primary } else { fg });
+                    draw_text(buf, &text, row_x, y, area, style);
+                    draw_text(buf, "[ ↑ ] [ ↓ ] [ × ]", controls, y, area, style);
+                }
+                Line::AddSummarizationModel => {
+                    let selected =
+                        rows.get(selected_idx) == Some(&SettingsRow::AddSummarizationModel);
+                    draw_text(
+                        buf,
+                        "+ Add summarization model",
+                        row_x + 2,
+                        y,
+                        area,
+                        Style::default().fg(if selected { primary } else { muted }),
+                    );
+                }
                 Line::Title => {
                     draw_text(buf, "Settings", row_x, y, area, Style::default().fg(muted));
                 }
@@ -542,7 +702,7 @@ impl SettingsView {
                         .iter()
                         .position(|r| matches!(r, SettingsRow::Category(ci) if ci == item));
                     let is_selected = idx == Some(selected_idx);
-                    let shown = in_window(idx, visible, self.selection.scroll_offset);
+                    let shown = true;
                     let item = &settings_items()[*item];
 
                     // Choice rows render "label: value" instead of the
@@ -579,9 +739,6 @@ impl SettingsView {
                         |r| matches!(r, SettingsRow::Hook { event: e, index: hi } if *e == *event && hi == hook),
                     );
                     let is_selected = idx == Some(selected_idx);
-                    if !in_window(idx, visible, self.selection.scroll_offset) {
-                        continue;
-                    }
                     let entry = &hook_entries(setup, event)[*hook];
                     let name_line = format!("• {}", hook_display_name(entry));
                     draw_text(
@@ -604,9 +761,6 @@ impl SettingsView {
                         |r| matches!(r, SettingsRow::AddHook { event: e } if *e == *event),
                     );
                     let is_selected = idx == Some(selected_idx);
-                    if !in_window(idx, visible, self.selection.scroll_offset) {
-                        continue;
-                    }
                     draw_text(
                         buf,
                         "+ Add hook",
@@ -752,6 +906,55 @@ fn draw_text(buf: &mut Buffer, text: &str, x: u16, y: u16, area: Rect, style: St
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn summarizer_list_reorders_edits_removes_to_default_and_scrolls_with_mouse_alignment() {
+        let mut setup = Setup::default();
+        setup.routing.summarization_models = (0..30)
+            .map(|index| crate::util::setup::FallbackEntry {
+                provider: "local".into(),
+                model: format!("model-{index}"),
+            })
+            .collect();
+        let mut view = SettingsView::new();
+        view.selection.selected_index = selectable_rows(&setup)
+            .iter()
+            .position(|row| *row == SettingsRow::SummarizationModel(29))
+            .unwrap();
+        let area = Rect::new(3, 2, 90, 12);
+        let mut buffer = Buffer::empty(area);
+        view.render(&mut buffer, area, &test_theme(), &setup);
+        let last_y = area.bottom() - 1;
+        assert!(line_text(&buffer, area, last_y).contains("model-29"));
+        let mouse = mouse_at(area.x + 5, last_y);
+        assert_eq!(
+            view.handle_mouse(&mouse, area, &setup),
+            Some(view.selection.selected_index)
+        );
+        assert_eq!(
+            view.activate_mouse(&mouse, area, &mut setup),
+            Some(SettingsAction::OpenSummarizationModel { index: Some(29) })
+        );
+        assert!(view.change_summarizer(&mut setup, "up"));
+        assert_eq!(setup.routing.summarization_models[28].model, "model-29");
+        assert!(view.change_summarizer(&mut setup, "down"));
+        assert_eq!(setup.routing.summarization_models[29].model, "model-29");
+        let remove = mouse_at(area.right() - 3, last_y);
+        assert_eq!(
+            view.activate_mouse(&remove, area, &mut setup),
+            Some(SettingsAction::ToggleSaved)
+        );
+        while !setup.routing.summarization_models.is_empty() {
+            assert!(view.change_summarizer(&mut setup, "remove"));
+        }
+        assert_eq!(
+            cache_choice_value("summarization_models", &setup).as_deref(),
+            Some("same as agent")
+        );
+        assert_eq!(
+            view.activate_selected(&mut setup),
+            Some(SettingsAction::OpenSummarizationModel { index: None })
+        );
+    }
     use crate::theme::ThemeRegistry;
     use cosh_tui::core::types::{MouseButton, MouseEventType, MouseModifiers};
 
@@ -825,6 +1028,8 @@ mod tests {
                 SettingsRow::Category(3),
                 SettingsRow::Category(4),
                 SettingsRow::Category(5),
+                SettingsRow::Category(6),
+                SettingsRow::AddSummarizationModel,
                 SettingsRow::AddMcpServer,
             ]
         );
@@ -853,6 +1058,8 @@ mod tests {
                 SettingsRow::Category(3),
                 SettingsRow::Category(4),
                 SettingsRow::Category(5),
+                SettingsRow::Category(6),
+                SettingsRow::AddSummarizationModel,
                 SettingsRow::AddMcpServer,
             ]
         );

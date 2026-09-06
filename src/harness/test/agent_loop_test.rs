@@ -886,17 +886,10 @@ async fn known_window_overflow_drives_map_reduce_and_commits_the_anchor() {
         ("assistant".into(), "a ".repeat(1100)),
     ]);
     h.context_manager.close_loop();
-    // The mock CHAT response is the SPLIT summarizer — every chunk call gets
-    // the same summary (the driver advances the cursor with each one); the
-    // mock STREAM is the loop's final answer.
+    // Two whole-item maps, a reduction, and an audit exercise orchestration.
+    // These mocks bypass the request-window preflight tested with transport fixtures.
     h = h
         .with_mock_chats(vec![
-            Ok("map"),
-            Ok("map"),
-            Ok("map"),
-            Ok("map"),
-            Ok("map"),
-            Ok("map"),
             Ok("map"),
             Ok("map"),
             Ok("## Objective\n- summarized chunk"),
@@ -1068,19 +1061,13 @@ async fn reactive_overflow_reports_window_and_drives_map_reduce_inside_llm_compa
     ]);
     h.context_manager.close_loop();
     // Mock CHAT queue: call 1 = the single-shot compaction summarizer, which
-    // reports a 600-token ContextWindow. Eight independent maps cover the two
-    // oversized source items, one reducer reconciles all maps, and a final
+    // reports a 600-token ContextWindow. Two whole-item maps cover the two
+    // source items (request preflight is mocked), one reducer reconciles all maps, and a final
     // validation passes. The in-flight "hi" stays in the recent raw tail.
     let overflow = format!("{CONTEXT_WINDOW_MARKER}:600");
     h = h
         .with_mock_chats(vec![
             Err(overflow.as_str()),
-            Ok("## Source Ranges\n- reactive map"),
-            Ok("## Source Ranges\n- reactive map"),
-            Ok("## Source Ranges\n- reactive map"),
-            Ok("## Source Ranges\n- reactive map"),
-            Ok("## Source Ranges\n- reactive map"),
-            Ok("## Source Ranges\n- reactive map"),
             Ok("## Source Ranges\n- reactive map"),
             Ok("## Source Ranges\n- reactive map"),
             Ok("## Objective\n- reactive final"),

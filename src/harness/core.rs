@@ -28,6 +28,8 @@ use tokio::time::Duration;
 #[cfg(test)]
 #[path = "test/map_reduce_test.rs"]
 mod map_reduce_test;
+#[path = "summarization.rs"]
+mod summarization;
 
 /// One event delivered to a streaming callback: a text token, or the reset
 /// marker the SDK emits when it retries a mid-stream failure (the consumer
@@ -491,6 +493,14 @@ pub struct Harness {
     /// Remaining fallback (provider, model) pairs to try if the current
     /// connector's API call fails.
     fallbacks: Vec<(String, String)>,
+    summarization_models: Vec<(String, String)>,
+    summarization_connector: Option<Connector>,
+    summarization_window: Option<usize>,
+    compaction_interrupted: bool,
+    #[cfg(test)]
+    mock_compaction_models: Vec<(String, String)>,
+    #[cfg(test)]
+    mock_summarization_windows: std::collections::HashMap<String, usize>,
 
     /// Configured base URLs for local providers (provider → URL), used when
     /// building fallback connectors so they hit the user's server.
@@ -615,6 +625,14 @@ impl Harness {
             agent_permissions: HashSet::new(),
             approved_paths: HashSet::new(),
             fallbacks: Vec::new(),
+            summarization_models: Vec::new(),
+            summarization_connector: None,
+            summarization_window: None,
+            compaction_interrupted: false,
+            #[cfg(test)]
+            mock_compaction_models: Vec::new(),
+            #[cfg(test)]
+            mock_summarization_windows: std::collections::HashMap::new(),
             local_base_urls: std::collections::HashMap::new(),
             last_context_window: None,
             discovered_window: None,
@@ -1086,7 +1104,7 @@ impl Harness {
     /// marked stuck for this provider and the user is notified. Generic
     /// errors are retried [`MAX_COMPACTION_RETRIES`] times with exponential
     /// backoff, then a TUI notification is surfaced.
-    async fn llm_compact(
+    async fn llm_compact_selected(
         &mut self,
         tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
     ) -> bool {
@@ -1094,7 +1112,7 @@ impl Harness {
         // The stuck state is keyed by MODEL: the constraint is the model's
         // context window, not the provider's API — a model switch inside the
         // same provider must get a fresh chance.
-        let model = self.connector.effective_model().unwrap_or("?").to_string();
+        let model = self.compaction_model_key();
         // The provider's window already overflowed and the split could not fit
         // the context: the summarizer call is doomed — skip it and re-surface
         // the notification (throttled) instead of burning a paid call per
@@ -1143,6 +1161,7 @@ impl Harness {
             {
                 Ok(()) => break CompactionOutcome::Applied,
                 Err(CompactionErr::Interrupted) => {
+                    self.compaction_interrupted = true;
                     self.compaction_generic_retries = 0;
                     break CompactionOutcome::Failed;
                 }
@@ -1213,6 +1232,9 @@ impl Harness {
     /// most precise) or the last successful discovery. `None` = unknown — the
     /// split is sized against the current token budget instead.
     fn known_checkpoint_window(&self) -> Option<usize> {
+        if self.summarization_connector.is_some() {
+            return self.summarization_window;
+        }
         self.last_context_window.or(self.discovered_window)
     }
 
@@ -1223,6 +1245,10 @@ impl Harness {
     /// provider-error catalog are delegated to the context manager, which owns
     /// that business logic.
     fn remember_error_window(&mut self, window: usize) {
+        if self.summarization_connector.is_some() {
+            self.summarization_window = Some(window);
+            return;
+        }
         self.last_context_window = Some(window);
         let model = self.connector.effective_model();
         self.context_manager.record_provider_window(model, window);
@@ -1249,6 +1275,7 @@ impl Harness {
         // Same wiring as a loop start: the shared stop flag reaches the
         // summarizer's stream loop and the TUI sees the summary streamed live.
         self.stop_signal = Some(stop_signal);
+        self.reasoning_tx = Some(tx.clone());
         self.context_manager
             .set_model(self.connector.effective_model());
 
@@ -1282,7 +1309,7 @@ impl Harness {
     /// Drive the active long-context contingency to completion. New work uses
     /// hierarchical MapReduce; persisted legacy split state keeps its original
     /// execution path so upgrades never strand an in-progress session.
-    async fn checkpoint_context(
+    async fn checkpoint_context_selected(
         &mut self,
         tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
     ) -> bool {
@@ -1303,7 +1330,7 @@ impl Harness {
     ) -> bool {
         use super::events::{HarnessEvent, LlmCompactionEvent, ToastVariant};
 
-        let model = self.connector.effective_model().unwrap_or("?").to_string();
+        let model = self.compaction_model_key();
         if self.context_manager.overflow_stuck(&model) {
             self.notify_context_overflow(tx);
             return false;
@@ -1337,7 +1364,8 @@ impl Harness {
                 self.context_manager.mark_overflow(&model);
                 self.notify_context_overflow(tx);
             }
-            Err(CompactionErr::Interrupted) | Ok(_) => {}
+            Err(CompactionErr::Interrupted) => self.compaction_interrupted = true,
+            Ok(_) => {}
         }
         let ok = result.is_ok_and(|committed| committed);
         let _ = tx.send(HarnessEvent::LlmCompaction {
@@ -1658,7 +1686,7 @@ impl Harness {
         request: MapRequest,
         tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
     ) {
-        let connector = self.connector.clone();
+        let connector = self.compaction_connector().clone();
         let stop_signal = self.stop_signal.clone();
         let event_tx = tx.clone();
         let window = self.context_manager.map_reduce_window();
@@ -1816,7 +1844,7 @@ impl Harness {
                 }
             } else {
                 Self::summarize_map_with_connector(
-                    self.connector.clone(),
+                    self.compaction_connector().clone(),
                     system.to_string(),
                     prompt.to_string(),
                     self.stop_signal.clone(),
@@ -1876,11 +1904,17 @@ impl Harness {
         tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
     ) -> bool {
         use super::events::{HarnessEvent, LlmCompactionEvent, ToastVariant};
-        let model = self.connector.effective_model().unwrap_or("?").to_string();
+        let model = self.compaction_model_key();
         // Resume an in-progress split without needing a fresh window (the
         // window is persisted in the staging). A fresh split sizes against the
         // known window, falling back to the current token budget when the
         // window is unknown.
+        if self.summarization_connector.is_some() && self.context_manager.split_active() {
+            let window = self
+                .known_checkpoint_window()
+                .unwrap_or_else(|| self.context_manager.max_tokens());
+            self.context_manager.begin_split(window);
+        }
         if !self.context_manager.split_active() {
             let window = self
                 .known_checkpoint_window()
@@ -1925,7 +1959,9 @@ impl Harness {
                     // cursor still advances) — treat it as a failure and
                     // abort, keeping the timeline exactly as it was.
                     if summary.trim().is_empty() {
-                        self.context_manager.abort_split();
+                        if self.summarization_connector.is_none() {
+                            self.context_manager.abort_split();
+                        }
                         break false;
                     }
                     generic_retries = 0;
@@ -1933,15 +1969,20 @@ impl Harness {
                         .advance_split(&summary, request.chunk_end);
                 }
                 Err(CompactionErr::Interrupted) => {
+                    self.compaction_interrupted = true;
                     // Atomicity: abort — the timeline stays exactly as it was.
-                    self.context_manager.abort_split();
+                    if self.summarization_connector.is_none() {
+                        self.context_manager.abort_split();
+                    }
                     break false;
                 }
                 Err(CompactionErr::ContextWindow { .. }) => {
                     // A chunk sized to the window should never overflow; the
                     // window guess was wrong — abort and mark the overflow
                     // stuck so the caller notifies the user.
-                    self.context_manager.abort_split();
+                    if self.summarization_connector.is_none() {
+                        self.context_manager.abort_split();
+                    }
                     self.context_manager.mark_overflow(&model);
                     self.notify_context_overflow(tx);
                     break false;
@@ -1949,7 +1990,9 @@ impl Harness {
                 Err(CompactionErr::Other(e)) => {
                     generic_retries += 1;
                     if generic_retries >= MAX_COMPACTION_RETRIES {
-                        self.context_manager.abort_split();
+                        if self.summarization_connector.is_none() {
+                            self.context_manager.abort_split();
+                        }
                         let _ = tx.send(HarnessEvent::Toast {
                             message: format!("LLM compaction failed: {e}"),
                             variant: ToastVariant::Error,
@@ -1983,6 +2026,10 @@ impl Harness {
         &mut self,
         tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
     ) {
+        if self.summarization_connector.is_some() {
+            // The explicit chain owns its fallback/exhaustion notification.
+            return;
+        }
         use super::events::{HarnessEvent, ToastVariant};
         let now = tokio::time::Instant::now();
         let cooldown_ok = match self.last_overflow_toast {
@@ -2085,8 +2132,25 @@ impl Harness {
         // The summarizer is a SEPARATE agent: its request carries NO tool
         // definitions (a dedicated connector call that clones the params with
         // tools cleared), so the model answers with prose, never a tool call.
+        let mut connector = self.compaction_connector().clone();
+        if let Some(window) = self.known_checkpoint_window() {
+            let encoding = crate::util::TokenEncoding::for_model(connector.effective_model());
+            let output = (window / 10).clamp(64, 2_000);
+            if encoding
+                .estimate(system)
+                .saturating_add(encoding.estimate(prompt))
+                .saturating_add(64)
+                .saturating_add(output)
+                >= window
+            {
+                return Err(CompactionErr::ContextWindow {
+                    window_tokens: Some(window),
+                });
+            }
+            connector = connector.with_max_tokens(output as u32);
+        }
         let mut stream = tokio::select! {
-            result = self.connector.stream_chat_with_system_no_tools(prompt, system) => {
+            result = connector.stream_chat_with_system_no_tools(prompt, system) => {
                 match result {
                     Ok(s) => s,
                     Err(e) => {
@@ -2155,7 +2219,16 @@ impl Harness {
                 on_token(StreamEvent::Token(token.to_string()));
             }
         }
-        self.emit_usage(&mut stream).await;
+        if let Some(usage) = stream.usage().await
+            && let Some(tx) = &self.reasoning_tx
+        {
+            let _ = tx.send(super::events::HarnessEvent::Usage {
+                usage,
+                provider: connector.provider_name().unwrap_or("unknown").to_string(),
+                model: connector.effective_model().unwrap_or("").to_string(),
+                reported_cost: stream.reported_cost().await,
+            });
+        }
         Ok(())
     }
 
@@ -4336,6 +4409,8 @@ impl Harness {
             .unwrap_or_else(|| ".".to_string());
         let connector = self.connector.clone();
         let fallbacks = self.fallbacks.clone();
+        let summarization_models = self.summarization_models.clone();
+        let local_base_urls = self.local_base_urls.clone();
         let parent_tx = self.cosh_tools.as_ref().and_then(|c| c.event_tx());
         let stop_signal = self
             .stop_signal
@@ -4369,15 +4444,17 @@ impl Harness {
                     let mut nested = Harness::new(connector, &cwd, disabled)
                         .with_mode(Mode::Yolo)
                         .with_instructions(INSTRUCTIONS_SUBAGENT)
-                        .with_fallbacks(fallbacks);
+                        .with_fallbacks(fallbacks)
+                        .with_summarization_models(summarization_models)
+                        .with_local_base_urls(local_base_urls);
                     // The header (instructions + tool list) is NOT built by
                     // run_agent_loop itself — the TUI does it before every
                     // loop. Build it here so the sub-agent sees its own
                     // prompt and its own (blocklisted) tool set.
                     nested.format_header_context();
 
-                    // Bridge: forward ONLY the sub-agent's text stream to
-                    // the TUI (as `ToolOutput` under the shared tool name).
+                    // Bridge: forward the sub-agent's text as ToolOutput,
+                    // usage, and explicit summarization routing notices.
                     // Tool calls/results, snapshots, compaction and Done are
                     // dropped; the loop's fatal Error (if any) is captured
                     // so a failure is surfaced instead of masked.
@@ -4388,6 +4465,9 @@ impl Harness {
                     let err_capture = last_error.clone();
                     let bridge = tokio::spawn(async move {
                         while let Some(event) = nested_rx.recv().await {
+                            if Harness::forward_nested_accounting(&event, bridge_tx.as_ref()) {
+                                continue;
+                            }
                             match event {
                                 super::events::HarnessEvent::Token { text }
                                 | super::events::HarnessEvent::Reasoning { text } => {
@@ -4510,6 +4590,12 @@ impl Harness {
             agent_permissions: HashSet::new(),
             approved_paths: HashSet::new(),
             fallbacks: Vec::new(),
+            summarization_models: Vec::new(),
+            summarization_connector: None,
+            summarization_window: None,
+            compaction_interrupted: false,
+            mock_compaction_models: Vec::new(),
+            mock_summarization_windows: std::collections::HashMap::new(),
             local_base_urls: std::collections::HashMap::new(),
             last_context_window: None,
             discovered_window: None,
@@ -4583,10 +4669,18 @@ impl Harness {
     /// present, else the single repeated [`Self::mock_chat_response`].
     #[cfg(test)]
     fn next_mock_chat(&mut self) -> Option<Result<String, String>> {
-        if let Some(r) = self.mock_chat_queue.pop_front() {
-            return Some(r);
+        let response = self
+            .mock_chat_queue
+            .pop_front()
+            .or_else(|| self.mock_chat_response.clone());
+        if response.is_some() {
+            let connector = self.compaction_connector();
+            self.mock_compaction_models.push((
+                connector.provider_name().unwrap_or("?").to_string(),
+                connector.effective_model().unwrap_or("?").to_string(),
+            ));
         }
-        self.mock_chat_response.clone()
+        response
     }
 
     /// Set the KNOWN context window of the active model, as if discovery had

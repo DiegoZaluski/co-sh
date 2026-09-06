@@ -30,15 +30,71 @@ commit budget is rejected without changing the committed view.
 
 ## MapReduce and recovery
 
-Each map has a stable ordinal, exact item ranges, and UTF-8 byte slices into the
-serialized source. The application, not the model, owns coverage metadata.
+### Summarization model selection
+
+Settings contains a **Summarization models** block, independent of Model Router.
+Use **Add summarization model** to open the searchable provider/model overlay;
+selecting a model closes it without changing the agent's model or reasoning.
+Enter on a numbered entry replaces it. Delete removes it; Alt+Up/Down reorders
+it. The inline up/down/remove controls provide the same actions with the mouse.
+Long lists scroll to keep the selected row visible.
+
+The ordered list is stored in `setup.json` as
+`routing.summarization_models`, using `{ "provider": "...", "model": "..." }`
+entries. Its default is `[]`:
+
+- Empty list: use the active agent connector, including its reasoning choices.
+- Nonempty list: try only those provider/model pairs, in order. Existing bounded
+  request retries run before advancing to the next configured model. Neither
+  the agent model nor the built-in auto chain is appended implicitly.
+- Cancellation stops the chain. Exhaustion reports failure and preserves the
+  source and accepted staging; it does not substitute an unselected model.
+- The pseudo-model `auto` is not offered in this list. During an agent loop,
+  empty-list auto mode inherits the concrete connector currently selected by
+  the agent's auto router. Between turns, `/compact` resolves the configured
+  auto chain because no live agent connector exists to inherit.
+
+The setting applies to one-shot summaries, all MapReduce stages (including
+audits/corrections/rereads), legacy split resumption, and internal subagent
+compaction. Changes apply to subsequently created harnesses, not an already
+running turn. Explicit summary models use provider-default reasoning; they do
+not inherit the main agent's effort setting. Configured local URLs and the
+session's applicable cache preferences are retained. Notifications identify
+each attempted summarizer, and usage is attributed to that provider/model.
+
+The summarizer has its own connector and known window. A summarizer overflow
+does not resize the agent's context budget or change its connector/fallback
+chain. Discovered/reported windows bound summary requests; when discovery is
+unavailable the existing context-budget estimate is used until the provider
+reports a limit. Checkpoint commit still respects the agent's budget. This
+routing change does not resolve the finish-reason, provider-reasoning reservation,
+or semantic-recall findings tracked separately in `ISSUES.md`.
+
+### Whole-item segments
+
+Each map has a stable ordinal, exact item ranges, and ordered whole-item IDs.
+The packing target is soft: if the next item exceeds the remaining space, move
+it intact to the next group and reset the group's accounting. An item larger
+than the target occupies its own group; it is never cut at byte or token offsets.
+The complete request, including instructions and reserved output, is checked
+against the actual model window before sending. An indivisible item that cannot
+fit that request fails explicitly with source and accepted progress intact.
+It does not trigger textual slicing or unchanged singleton retries.
+
+The application, not the model, owns coverage metadata.
 Accepted results survive interruption and restore. Source fingerprints prevent
-staging from being reused after a same-ID source replacement.
+staging from being reused after a same-ID source replacement. Version-one
+byte-sliced MapReduce staging is read for compatibility but restarted from the
+immutable source items; fragment-derived summaries are not reused. Saving the
+new staging appends deltas, leaving the legacy events and original source intact.
+Already committed checkpoints are not rewritten by this staging migration.
 
 Up to four map calls run concurrently. A provider failure stops new scheduling,
 drains successful in-flight calls, and persists sequential fallback for missing
-maps. Context overflow permits at most three repartitions of incomplete maps;
-accepted summaries are not regenerated.
+maps. Context overflow permits at most three whole-item repartitions of
+incomplete maps; accepted summaries are not regenerated. Reducing the packing
+target does not reduce the actual request window unless the provider reports
+a smaller window. Repartitioning stops when no further item boundaries exist.
 
 Reducers process all ordered summaries, recursively grouping them when needed.
 `REREAD: start-end,...` can request up to three raw ranges, including ranges
@@ -82,9 +138,10 @@ Both MapReduce modes retained all five scripted task-state markers, excluded the
 stale-content marker from the final view, and preserved every original item.
 This proves transport behavior for the supplied replies, **not model recall**.
 The legacy oracle deliberately supplies the complete answer in its first reply;
-its smaller output is not a quality result. Map prompts peaked at 4,080 estimated
-input tokens. Local mock orchestration took approximately 9.6 ms sequentially
-and 7.5 ms in parallel in this run; these are neither provider latency nor a
+its smaller output is not a quality result. After the whole-item correction,
+map prompts peaked at 4,017 estimated input tokens. Local mock orchestration
+took approximately 9.4 ms sequentially and 7.6 ms in parallel in this run;
+these are neither provider latency nor a
 reliable speedup benchmark.
 
 Separate tests exercise oversized items, repeated checkpoints, correction

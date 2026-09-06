@@ -1,5 +1,89 @@
 # Layered context compaction refactor
 
+## Summarization model settings
+
+Implement only explicit user-authorized summarization routing. The ordered
+`routing.summarization_models` list is independent of the agent's `auto` chain.
+An empty list uses the active agent model. A nonempty list never silently adds
+the agent model, built-in defaults, or an unselected provider as a fallback.
+The review backlog is in ISSUES.md and is not part of this implementation.
+
+### Phase 8 — Routing audit and implementation plan (complete)
+
+- [x] Record pending review findings by phase in ISSUES.md, excluding the resolved byte-slicing issue.
+- [x] Trace explicit versus auto selection, manual compaction, harness fallbacks, and internal subagents. No unrelated-model fallback was found for explicit TUI selections.
+- [x] Trace Settings layout, keyboard/mouse actions, the searchable model dialog, model discovery, setup persistence, and all compaction entry points.
+- [x] Record the manual-auto routing gap and include its resolution in the integration phase.
+
+### Phase 9 — Persisted setting and Settings UX (complete)
+
+- [x] Add a backward-compatible, empty-by-default ordered provider/model list.
+- [x] Add a Settings block showing default behavior or numbered models, with add/edit, remove, and reorder controls.
+- [x] Reuse searchable model discovery in an overlay without changing the agent selection or offering the `auto` pseudo-model.
+- [x] Keep keyboard/mouse behavior aligned and make long lists usable in small terminals.
+- [x] Test defaults, serialization, ordering, removal to empty, selection/cancellation, and agent-model isolation; TUI suite: 422 passed, 16 ignored.
+
+### Phase 10 — Isolated summarization routing (complete)
+
+- [x] Route automatic, manual, reactive-overflow, MapReduce map/reduce/audit/correction, legacy resume, and internal-subagent compaction through the configured list.
+- [x] Try only configured models in order, stop on cancellation, preserve accepted progress, and surface exhaustion without silently using the agent model.
+- [x] Keep the main agent connector, fallback chain, reasoning, and context-window accounting separate from the summarizer; size requests against the actual summarizer window while retaining the agent's checkpoint commit budget.
+- [x] Preserve applicable cache preferences and configured local provider URLs; expose the summarizer identity and fallback attempts in UI notifications/usage.
+- [x] Resolve manual `auto` via the user's auto chain when no summarizer is configured.
+- [x] Add regression tests for explicit/default/auto routing, fallback order/exhaustion, cancellation/resume, model windows, and no unexpected model calls. Ten routing tests and an additional reactive-overflow test passed, including real local HTTP request/usage verification. Full library/TUI run before the final reactive test: 252 + 423 passed, 17 ignored.
+
+### Phase 11 — Integration validation and handoff (complete)
+
+- [x] Close the nested-harness visibility gap found during integration: forward usage and summarizer-route notices through the existing subagent bridge, without forwarding its context snapshots or changing the parent model. Add a bridge regression test.
+- [x] Document the setting, ordering, defaults, failure behavior, and separation from agent auto routing.
+- [x] Run library/TUI suites, strict Clippy, build, targeted formatting, and append-only lifecycle tests.
+- [x] Record results and any remaining limitations; do not implement unrelated review issues or perform paid provider calls.
+
+### Summarization settings validation record — 2026-09-06
+
+- [x] Revalidated after the user's merges at `0e8b4ee`; preserved unrelated changes and the untracked session export.
+- [x] `cargo test --lib --bin cosh --no-default-features --quiet`: library 289 passed, 1 ignored; TUI 444 passed, 16 ignored. Total: 733 passed, no failures.
+- [x] `cargo clippy --lib --bin cosh --no-default-features -- -D warnings` and `cargo build --bin cosh --no-default-features` passed.
+- [x] `cargo check --lib --bin cosh --no-default-features --features cloud` passed. Heavy optional embedding/vector backends were not enabled.
+- [x] Targeted `rustfmt --edition 2024 --config skip_children=true --check` passed for all changed Rust files; `git diff --check` passed. No unrelated formatting was applied.
+- [x] Local HTTP verified the selected summarizer model and configured local URL, no tools or inherited agent reasoning, bounded output, and correct usage identity. All provider responses were scripted; no paid/live-model evaluation was performed.
+- [x] Regression coverage includes empty/default routing, explicit fallback order/exhaustion, cancellation, invalid/auto entries, reactive overflow, whole-item MapReduce fallback, retained accepted maps, correction/validation routing, legacy resume, manual-auto selection, and nested usage visibility.
+- [x] Settings tests cover backward-compatible defaults, ordered persistence, search-result refresh without `auto`, agent-selection isolation, cancellation, mouse/keyboard reordering/removal, and scrolling long lists.
+- [x] Existing session-store byte-prefix, checkpoint, fork, revert, rollback, and staging migration tests remain green. The global setting lives in setup.json; session histories are not rewritten.
+- [x] Remaining review findings stay in ISSUES.md. Explicit summary models use provider-default reasoning; unknown windows retain the existing estimate until a provider reports a limit. Settings changes apply to newly created harnesses, not an in-flight turn.
+
+## Correction — Semantic MapReduce boundaries
+
+The grouping target is a soft packing budget, not the model's request window.
+Never split an item to meet that target: move it intact to the next group,
+allow an oversized singleton, and reset accounting for following groups.
+Only a complete request exceeding the actual model window is an overflow.
+
+### Phase 6 — Whole-item partitioning and regression tests (complete)
+
+- [x] Replace byte slicing with ordered whole-item references and reset packing budgets at every group boundary.
+- [x] Repartition incomplete groups only between items; keep accepted summaries and distinguish a reduced grouping target from the actual request window.
+- [x] Version derived staging so legacy fragment summaries are rebuilt from immutable source, without rewriting history.
+- [x] Add regressions for target overflow, subsequent groups, multibyte content, true oversized singletons, recovery, and legacy staging.
+- [x] Update mock fixtures to use multiple intact items where multiple maps are required; validate focused tests before continuing. `cargo test --lib --no-default-features map_reduce -- --nocapture`: 26 passed.
+
+### Phase 7 — Persistence, request-budget, and integration validation (complete)
+
+- [x] Verify full map requests that exceed the grouping target still fit and are sent intact, and genuinely oversized requests fail without slicing or retry loops.
+- [x] Verify persisted whole-item staging and legacy restart preserve the JSONL byte prefix.
+- [x] Update compaction documentation to state the semantic-boundary policy and its true-window limitation.
+- [x] Run library/TUI regression suites, strict Clippy, targeted formatting, and whitespace checks; record results and limitations.
+
+### Correction validation record
+
+- [x] `cargo test --lib --bin cosh --no-default-features --quiet`: library 242 passed, 1 ignored; TUI 419 passed, 16 ignored. No failures.
+- [x] `cargo clippy --lib --bin cosh --no-default-features -- -D warnings` and `cargo build --bin cosh --no-default-features` passed.
+- [x] Targeted `rustfmt --check` on all four changed Rust files and `git diff --check` passed. Unrelated workspace formatting was not changed.
+- [x] Local HTTP transport verified exact full-prompt delivery for a whole item above the soft target and below the 4,000-token request window, including instructions and reserved output. An actually oversized item fails before network access, without slicing or committing.
+- [x] Persisted legacy-fragment restart, whole-item resume, and the existing checkpoint/fork/revert/rollback lifecycle all preserve the prior JSONL byte prefix.
+- [x] The repeated offline trace retains eight maps, ten scripted requests, and the same final view; peak map input is now 4,017 estimated tokens. No live-provider evaluation or model-recall guarantee is implied.
+- [x] Oversized indivisible requests fail explicitly; no new semantic splitter was introduced. Previously committed checkpoints are not retroactively rebuilt. This correction invalidates only legacy derived MapReduce staging.
+
 ## Goal
 
 Replace the greedy split-and-concatenate contingency with a recoverable layered
