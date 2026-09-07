@@ -4,9 +4,6 @@
 
 use std::sync::Arc;
 
-use cosh_sdk::lsp::lsp_types::{
-    Diagnostic as LspDiagnostic, DiagnosticSeverity, PublishDiagnosticsParams, Range, Position,
-};
 use cosh_sdk::lsp::test_support::{auto_respond, spawn_fake_server};
 use cosh_sdk::lsp::{ClientFactory, DiagnosticsEngine, LanguageServer, Manager, ManagerConfig, ServerSpec};
 use serde_json::json;
@@ -20,8 +17,27 @@ fn fake_factory() -> ClientFactory {
         Box::pin(async move {
             let (server, client_stream) = spawn_fake_server(32 * 1024);
             let (dead_stderr, _dead_peer) = tokio::io::duplex(1);
+            // The pull-diagnostics answer the fs passive feedback consumes.
+            let report = json!({
+                "kind": "full",
+                "items": [
+                    {
+                        "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 1 } },
+                        "severity": 1,
+                        "source": "fake",
+                        "message": "boom"
+                    },
+                    {
+                        "range": { "start": { "line": 1, "character": 0 }, "end": { "line": 1, "character": 1 } },
+                        "severity": 2,
+                        "source": "fake",
+                        "message": "meh"
+                    }
+                ]
+            });
             let table = vec![
                 ("initialize".to_owned(), json!({ "capabilities": {} })),
+                ("textDocument/diagnostic".to_owned(), report),
                 ("shutdown".to_owned(), serde_json::Value::Null),
             ];
             tokio::spawn(auto_respond(server, table));
@@ -34,9 +50,10 @@ fn fake_factory() -> ClientFactory {
     })
 }
 
-/// Workspace with a `.fake` file (the fake spec's extension) plus a
-/// diagnostics engine pre-loaded with one error and one warning.
-fn lsp_with_findings(dir: &std::path::Path, file: &std::path::Path) -> Lsp {
+/// Workspace with a `.fake` file; the fake server answers diagnostics
+/// pulls with one error (`boom`) and one warning (`meh`), so the fs
+/// passive feedback populates the engine through the real pull path.
+fn lsp_with_findings(dir: &std::path::Path, _file: &std::path::Path) -> Lsp {
     let mut config = ManagerConfig::new(dir.to_path_buf());
     config.resolves_binaries = false;
     let manager = Manager::build(
@@ -52,35 +69,7 @@ fn lsp_with_findings(dir: &std::path::Path, file: &std::path::Path) -> Lsp {
         fake_factory(),
     );
 
-    let engine = DiagnosticsEngine::new();
-    let uri = cosh_sdk::lsp::uri_from_path(file).unwrap();
-    let diag = |severity: DiagnosticSeverity, message: &str| LspDiagnostic {
-        range: Range {
-            start: Position { line: 0, character: 0 },
-            end: Position { line: 0, character: 1 },
-        },
-        severity: Some(severity),
-        code: None,
-        code_description: None,
-        source: Some("fake".into()),
-        message: message.to_owned(),
-        related_information: None,
-        tags: None,
-        data: None,
-    };
-    engine.ingest(
-        "fake",
-        &PublishDiagnosticsParams::new(
-            uri,
-            vec![
-                diag(DiagnosticSeverity::ERROR, "boom"),
-                diag(DiagnosticSeverity::WARNING, "meh"),
-            ],
-            None,
-        ),
-    );
-
-    Lsp::with_manager(Arc::new(manager), Arc::new(engine))
+    Lsp::with_manager(Arc::new(manager), Arc::new(DiagnosticsEngine::new()))
 }
 
 fn target(path: &str) -> TargetFile {

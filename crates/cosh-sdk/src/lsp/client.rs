@@ -569,6 +569,40 @@ impl LanguageServer {
             .collect()
     }
 
+    /// Notify the server that the on-disk document was saved
+    /// (`textDocument/didSave`).
+    ///
+    /// Servers key expensive post-save pipelines off this signal —
+    /// rust-analyzer reruns flycheck (cargo check) on save and never on
+    /// `didChange`, and its own file watcher may be unavailable, so without
+    /// this notification compile-error diagnostics never regenerate after
+    /// an out-of-band disk write. No-op when the document is not open.
+    pub fn save_file(&self, path: &Path) -> Result<(), LspError> {
+        use lsp_types::{DidSaveTextDocumentParams, TextDocumentIdentifier};
+
+        let open = self
+            .inner
+            .docs
+            .lock()
+            .expect("documents lock")
+            .get(path)
+            .is_some();
+        if !open {
+            return Ok(());
+        }
+        let uri = uri_from_path(path)?;
+        self.inner.transport.notify(
+            "textDocument/didSave",
+            Some(
+                serde_json::to_value(DidSaveTextDocumentParams {
+                    text_document: TextDocumentIdentifier::new(uri),
+                    text: None,
+                })
+                .expect("serializable"),
+            ),
+        )
+    }
+
     // ── Pull diagnostics (hybrid model; the push side is the dispatcher) ─
 
     /// Pull diagnostics for one document via `textDocument/diagnostic`.
@@ -578,8 +612,13 @@ impl LanguageServer {
     /// `MethodNotFound`, surfaced verbatim so callers fall back to the push
     /// stream. `Ok(None)` means the server answered "unchanged" or partial:
     /// there is nothing new to ingest.
-    #[allow(dead_code)] // consumed by the tools layer (phase 5)
-    pub(crate) async fn pull_diagnostics(
+    ///
+    /// This is not an optional refinement: servers that see the client
+    /// advertising the `diagnostic` capability (this client does) may go
+    /// entirely push-silent — rust-analyzer does exactly that — and answer
+    /// `workspace/diagnostic/refresh` nudges instead. The only reliable way
+    /// to observe their diagnostics is to pull.
+    pub async fn pull_diagnostics(
         &self,
         path: &Path,
         timeout: Duration,

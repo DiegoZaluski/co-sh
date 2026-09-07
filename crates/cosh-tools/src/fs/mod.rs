@@ -37,6 +37,11 @@ use cosh_sdk::lsp::lsp_types::DiagnosticSeverity;
 
 /// Quiet-period budget for passive LSP feedback after a mutation.
 const LSP_SETTLE: Duration = Duration::from_secs(2);
+/// Per-server deadline for the post-mutation diagnostics pull, covering
+/// `ServerCancelled` retries while the server is still analyzing.
+const LSP_REACTION: Duration = Duration::from_secs(15);
+/// Per-request timeout of a single diagnostics pull.
+const LSP_PULL_TIMEOUT_SECS: u64 = 10;
 /// Hard cap per severity in passive LSP feedback.
 const LSP_MAX_NOTES: usize = 20;
 
@@ -897,9 +902,68 @@ impl Fs {
                     handle.name()
                 );
             }
+            // The fs layer just wrote the file to disk: signal the save so
+            // servers with post-save pipelines (rust-analyzer's flycheck)
+            // regenerate compile-error diagnostics — didChange alone never
+            // triggers them, and the server's own watcher may be broken.
+            if let Err(err) = handle.save_file(&path) {
+                log::debug!(
+                    "passive diagnostics: could not save `{}` on {}: {err}",
+                    path.display(),
+                    handle.name()
+                );
+            }
         }
 
         let engine = lsp.diagnostics_engine();
+
+        // Pull the diagnostics instead of waiting for a push. Servers that
+        // see the client advertising the `diagnostic` capability — this one
+        // does — may never push (rust-analyzer answers with
+        // `workspace/diagnostic/refresh` nudges and goes silent), so the
+        // only reliable observation after a mutation is an explicit pull.
+        //
+        // A server mid-analysis answers `-32802 ServerCancelled`: per the
+        // pull contract that means "retry", so each server keeps re-pulling
+        // until it delivers, until the shared budget expires, or until it
+        // reports a definitive failure. Servers without pull support answer
+        // `MethodNotFound` and the push stream remains the source; both
+        // paths feed the same engine.
+        let pull_deadline = std::time::Instant::now() + LSP_REACTION;
+        for handle in &handles {
+            loop {
+                match handle
+                    .pull_diagnostics(&path, Duration::from_secs(LSP_PULL_TIMEOUT_SECS))
+                    .await
+                {
+                    Ok(Some(params)) => {
+                        // Ingest under a pull-scoped source: the same server
+                        // also pushes flycheck diagnostics (cargo check
+                        // errors), and the store replaces per source — a
+                        // bare-source ingest would let analysis hints wipe
+                        // freshly published compile errors.
+                        let pull_source = format!("{}/pull", handle.name());
+                        engine.ingest(&pull_source, &params);
+                        break;
+                    }
+                    Ok(None) => break,
+                    Err(cosh_sdk::lsp::LspError::Rpc { code: -32802, .. })
+                        if std::time::Instant::now() < pull_deadline =>
+                    {
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                    }
+                    Err(err) => {
+                        log::debug!(
+                            "passive diagnostics: pull from {} failed: {err}",
+                            handle.name()
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Give any push-driven burst a quiet window before snapshotting.
         engine.wait_for_settle(LSP_SETTLE).await;
 
         let mut notes = LspNotes::default();
