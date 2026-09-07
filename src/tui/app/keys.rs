@@ -1025,6 +1025,9 @@ impl App {
                 Some(crate::keymap::Action::ToggleThinking) => {
                     self.config.thinking_mode = !self.config.thinking_mode;
                 }
+                Some(crate::keymap::Action::ToggleDiagnostics) => {
+                    self.config.diagnostics_mode = !self.config.diagnostics_mode;
+                }
                 Some(crate::keymap::Action::ToggleToolDetails) => {
                     self.config.show_tool_details = !self.config.show_tool_details;
                 }

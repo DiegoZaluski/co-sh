@@ -17,6 +17,7 @@ pub enum Action {
     ToggleHelp,
     ToggleConceal,
     ToggleThinking,
+    ToggleDiagnostics,
     ToggleToolDetails,
     ToggleGenericToolOutput,
     Confirm,
@@ -116,6 +117,13 @@ impl KeyMap {
                     Action::ToggleToolDetails,
                     KeyBinding {
                         key: Char('d'),
+                        modifiers: KeyModifiers::CONTROL,
+                    },
+                ),
+                (
+                    Action::ToggleDiagnostics,
+                    KeyBinding {
+                        key: Char('e'),
                         modifiers: KeyModifiers::CONTROL,
                     },
                 ),

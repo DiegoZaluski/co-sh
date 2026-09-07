@@ -502,6 +502,9 @@ fn config_token(config: &TuiConfig) -> u64 {
     if config.thinking_mode {
         token |= 8;
     }
+    if config.diagnostics_mode {
+        token |= 16;
+    }
     token = token.wrapping_mul(31).wrapping_add(config.theme_gen);
     token
 }
@@ -1355,7 +1358,10 @@ impl SessionView {
                         && matches!(tool.status, ToolStatus::Completed)
                         && Self::lsp_notes_count(notes) > 0
                     {
-                        let expanded = tool_state.is_expanded(&Self::lsp_notes_id(tool));
+                        let expanded = tool_state.is_expanded_or(
+                            &Self::lsp_notes_id(tool),
+                            config.diagnostics_mode,
+                        );
                         let header = if expanded { "- Diagnostics" } else { "+ Diagnostics" };
                         let header_style = Style::default().fg(rgba_color(theme.error));
                         draw_text_line(buf, header, x, y, max_w, header_style);
@@ -1543,7 +1549,8 @@ impl SessionView {
                 // matches the drawn box even mid-loop (Running bash/glob with
                 // streamed output already draw their box).
                 let is_block = Self::tool_is_block(t);
-                let notes_h = Self::lsp_notes_height(t, tool_state);
+                let notes_h =
+                    Self::lsp_notes_height(t, tool_state, config.diagnostics_mode);
                 if is_block {
                     let output = t.output.as_deref().unwrap_or("").trim();
                     // Add 2 rows for the block's internal padding (top/bottom border lines),
@@ -1660,13 +1667,19 @@ impl SessionView {
     /// `+`/`- LSP` header, plus one clipped line per finding when expanded.
     /// Must stay in sync with the notes drawn at the end of the
     /// `Part::Tool` branch in `render_parts`.
-    fn lsp_notes_height(t: &ToolPart, tool_state: &ToolRenderState) -> u16 {
+    fn lsp_notes_height(
+        t: &ToolPart,
+        tool_state: &ToolRenderState,
+        default_expanded: bool,
+    ) -> u16 {
         match (&t.lsp_notes, &t.status) {
             (Some(n), ToolStatus::Completed) => {
                 let count = Self::lsp_notes_count(n);
                 if count == 0 {
                     0
-                } else if tool_state.is_expanded(&Self::lsp_notes_id(t)) {
+                } else if tool_state
+                    .is_expanded_or(&Self::lsp_notes_id(t), default_expanded)
+                {
                     1 + count
                 } else {
                     1
@@ -2120,12 +2133,19 @@ impl SessionView {
                                 || tool_render::tool_display(&tool.tool) != "generic")
                         {
                             let notes_rows =
-                                i32::from(Self::lsp_notes_height(tool, &self.tool_state));
+                                i32::from(Self::lsp_notes_height(
+                                    tool,
+                                    &self.tool_state,
+                                    config.diagnostics_mode,
+                                ));
                             if notes_rows > 0
                                 && click_y >= part_y + part_h - notes_rows
                             {
                                 let id = Self::lsp_notes_id(tool);
-                                self.tool_state.toggle_expanded(&id);
+                                self.tool_state.toggle_with_default(
+                                    &id,
+                                    config.diagnostics_mode,
+                                );
                                 return true;
                             }
                         }

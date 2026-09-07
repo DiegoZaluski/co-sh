@@ -6,6 +6,9 @@ pub struct TuiConfig {
     pub show_tool_details: bool,
     pub show_generic_tool_output: bool,
     pub thinking_mode: bool,
+    /// Default expansion for the passive diagnostics (`+ Diagnostics`)
+    /// blocks under tool outputs; flipped globally by Ctrl+E.
+    pub diagnostics_mode: bool,
     /// Monotonically increasing generation counter bumped on every theme change.
     /// Used as part of the message render cache key so cached cells with stale
     /// colors are invalidated when the user switches themes.
@@ -21,6 +24,7 @@ impl Default for TuiConfig {
             show_tool_details: true,
             show_generic_tool_output: true,
             thinking_mode: true,
+            diagnostics_mode: false,
             theme_gen: 0,
         }
     }
