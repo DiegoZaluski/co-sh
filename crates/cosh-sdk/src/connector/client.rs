@@ -76,6 +76,19 @@ impl Connector {
         self
     }
 
+    /// Output ceiling the adapter will send, including any reasoning floor.
+    /// `None` means the adapter delegates the default limit to the provider.
+    /// This is a reservation, not a prediction of actual billed output.
+    #[must_use]
+    pub fn effective_max_tokens(&self) -> Option<u32> {
+        match self.provider?.family {
+            Family::Claude => Some(claude::caller::request_max_tokens(
+                &self.params, self.effective_model()?,
+            )),
+            _ => self.params.max_tokens,
+        }
+    }
+
     /// Sampling temperature (0.0 – 2.0). Higher values make output more random.
     pub const fn with_temperature(mut self, v: f32) -> Self {
         self.params.temperature = Some(v);

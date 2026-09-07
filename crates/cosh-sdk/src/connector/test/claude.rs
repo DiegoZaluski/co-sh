@@ -369,6 +369,28 @@ async fn reasoning_effort_on_old_model_uses_manual_thinking() {
 /// otherwise). The floor is raised to `budget + headroom` when the caller did
 /// not set a larger max_tokens.
 #[tokio::test]
+async fn effective_output_reservation_matches_captured_wire_limits() {
+    for (model, effort, requested, expected) in [
+        ("claude-sonnet-4-5", "high", 2_000, 25_600),
+        ("claude-sonnet-4-5", "low", 2_000, 3_072),
+        ("claude-sonnet-4-6", "high", 2_000, 16_384),
+        ("claude-sonnet-4-6", "high", 32_000, 32_000),
+        ("claude-sonnet-4-6", "none", 2_000, 2_000),
+    ] {
+        let (port, captured, _raw, handle) = mock_server(
+            r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}"#, 200,
+        );
+        let connector = claude_connector(port).with_model(model)
+            .with_reasoning_effort(effort).with_max_tokens(requested);
+        assert_eq!(connector.effective_max_tokens(), Some(expected));
+        connector.chat("hello").await.unwrap();
+        handle.join().unwrap();
+        let body: serde_json::Value = serde_json::from_str(&captured.lock().unwrap().take().unwrap()).unwrap();
+        assert_eq!(body["max_tokens"], expected);
+    }
+}
+
+#[tokio::test]
 async fn manual_thinking_raises_max_tokens_above_budget() {
     let (port, captured, _raw, handle) = mock_server(
         r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}"#,
