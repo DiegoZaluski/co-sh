@@ -1,3 +1,4 @@
+
 use std::collections::BTreeMap;
 use std::time::SystemTime;
 
@@ -317,6 +318,17 @@ fn render_rename_session_dialog(
     );
 }
 
+/// Width for the shared Confirm dialog: the classic hardcoded 30 is the
+/// minimum, but the box grows to fit `message` (borders plus one cell of
+/// padding on each side), capped to the available area width.
+fn confirm_dialog_w(message: &str, area_width: u16) -> u16 {
+    let needed = message.len() as u16 + 4;
+    30u16
+        .max(needed)
+        .min(area_width.saturating_sub(4))
+        .max(16)
+}
+
 #[derive(Debug, Clone)]
 pub enum DialogType {
     Alert {
@@ -540,8 +552,8 @@ impl DialogState {
                 // Click anywhere on alert → dismiss
                 DialogAction::Dismissed
             }
-            DialogType::Confirm { message: _ } => {
-                let dialog_w = 30u16.min(area.width.saturating_sub(4)).max(16);
+            DialogType::Confirm { message } => {
+                let dialog_w = confirm_dialog_w(message, area.width);
                 let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
                 let dialog_h = 7;
                 let dialog_y = area.y + area.height.saturating_sub(dialog_h) / 2;
@@ -1170,8 +1182,10 @@ impl DialogState {
                 );
             }
             DialogType::Confirm { message } => {
-                // Box dimensions: border OUTER edge
-                let dialog_w = 30u16.min(area.width.saturating_sub(4)).max(16);
+                // Box dimensions: border OUTER edge. Minimum is the classic
+                // hardcoded 30; grows to fit the message so long confirms
+                // (e.g. provider key forget) are not truncated.
+                let dialog_w = confirm_dialog_w(message, area.width);
                 let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
                 let dialog_h = 7;
                 let dialog_y = area.y + area.height.saturating_sub(dialog_h) / 2;
@@ -3556,6 +3570,28 @@ fn render_form_panel(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod confirm_width_tests {
+    use super::confirm_dialog_w;
+
+    #[test]
+    fn confirm_width_stays_at_classic_minimum_for_short_messages() {
+        assert_eq!(confirm_dialog_w("Delete session?", 120), 30);
+    }
+
+    #[test]
+    fn confirm_width_grows_to_fit_long_message_with_padding() {
+        let msg = "Forget the API key for anthropic provider?";
+        assert_eq!(confirm_dialog_w(msg, 120), msg.len() as u16 + 4);
+    }
+
+    #[test]
+    fn confirm_width_is_capped_to_available_area() {
+        let msg = "Forget the API key for a very long provider name?";
+        assert_eq!(confirm_dialog_w(msg, 40), 36);
     }
 }
 
