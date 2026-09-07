@@ -28,6 +28,13 @@ impl App {
                 return Ok(false);
             }
 
+            // Same sovereignty for the provider-key forget/overwrite picker:
+            // while it is open nothing else may react to the keyboard.
+            if self.is_provider_key_choice_visible() {
+                self.handle_provider_key_choice_key(key.code);
+                return Ok(false);
+            }
+
             // ESC sovereign while an agent loop is running: whatever
             // incidental UI state is active (a prompt/field text selection,
             // the sidebar focus, the slash menu, the permission dialog, an

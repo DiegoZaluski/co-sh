@@ -45,6 +45,11 @@ impl App {
     fn resolve_confirm_dialog(&mut self) {
         let selected = self.dialog.current().map(|d| d.selected).unwrap_or(1);
         if selected == 0 {
+            // A Confirm stacked over the provider-key picker means "forget
+            // the API key" — it resolves (and pops) itself.
+            if self.resolve_forget_key_confirmation() {
+                return;
+            }
             if let Some(session_id) = self.pending_delete_session_id.take() {
                 self.state.remove_session(&session_id);
                 self.session_store.delete_session(&session_id);

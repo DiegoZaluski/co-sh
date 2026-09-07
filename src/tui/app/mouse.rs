@@ -607,6 +607,11 @@ impl App {
                 DialogAction::Confirmed if self.is_confirm_dialog_visible() => {
                     if let Some(d) = self.dialog.current() {
                         if d.selected == 0 {
+                            // Confirm stacked over the provider-key picker:
+                            // "forget key" resolves (and pops) itself.
+                            if self.resolve_forget_key_confirmation() {
+                                return Ok(true);
+                            }
                             if let Some(session_id) = self.pending_delete_session_id.take() {
                                 self.state.remove_session(&session_id);
                                 self.session_store.delete_session(&session_id);
@@ -701,6 +706,10 @@ impl App {
                                 if self.save_text_input_dialog() {
                                     self.dialog.pop();
                                 }
+                                return Ok(true);
+                            }
+                            DialogType::ProviderKeyChoice { .. } => {
+                                self.resolve_provider_key_choice();
                                 return Ok(true);
                             }
 

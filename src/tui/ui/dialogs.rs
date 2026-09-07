@@ -141,6 +141,69 @@ fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, styl
         }
     }
 }
+/// Message and option row of the [`DialogType::ProviderKeyChoice`] box,
+/// drawn inside the border the caller already painted (message at +2,
+/// "Forget key" / "Overwrite key" side by side at +4 — the selected option
+/// gets the primary color and bold, the other stays muted).
+#[allow(clippy::too_many_arguments)]
+fn draw_provider_key_choice_content(
+    buf: &mut Buffer,
+    theme: &Theme,
+    selected: usize,
+    message: &str,
+    dialog_x: u16,
+    dialog_y: u16,
+    dialog_w: u16,
+    opts_total: u16,
+    opt_forget: &str,
+    opt_overwrite: &str,
+    gap: u16,
+) {
+    let msg_x = dialog_x + (dialog_w.saturating_sub(message.len() as u16)) / 2;
+    draw_text_line(
+        buf,
+        message,
+        msg_x,
+        dialog_y + 2,
+        dialog_w.saturating_sub(2),
+        Style::default().fg(rgba_color(theme.text)),
+    );
+
+    let opts_x = dialog_x + dialog_w.saturating_sub(opts_total) / 2;
+    let opts_y = dialog_y + 4;
+
+    let forget_style = if selected == 0 {
+        Style::default()
+            .fg(rgba_color(theme.primary))
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(rgba_color(theme.text_muted))
+    };
+    draw_text_line(
+        buf,
+        opt_forget,
+        opts_x,
+        opts_y,
+        opt_forget.len() as u16,
+        forget_style,
+    );
+
+    let overwrite_style = if selected == 1 {
+        Style::default()
+            .fg(rgba_color(theme.primary))
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(rgba_color(theme.text_muted))
+    };
+    draw_text_line(
+        buf,
+        opt_overwrite,
+        opts_x + opt_forget.len() as u16 + gap,
+        opts_y,
+        opt_overwrite.len() as u16,
+        overwrite_style,
+    );
+}
 
 /// Borderless text prompt panel: bold title with an "esc" hint on the first
 /// content row, the input line with the blinking cursor, and an "enter
@@ -299,6 +362,14 @@ pub enum DialogType {
         provider: String,
         input: String,
         cursor_pos: usize,
+    },
+    /// Shown instead of the plain API-key input when the OS keyring already
+    /// holds a key for a cloud provider: pick between forgetting the saved
+    /// key (confirm-gated, like session delete) and overwriting it. `selected`
+    /// 0 = "Forget key", 1 = "Overwrite key" (the safe default).
+    ProviderKeyChoice {
+        provider: String,
+        env_var: String,
     },
     /// Cache duration entry for one prompt-cache setting (Settings screen).
     /// The user types a duration ("30m", "1h", "1h30m") or "default";
@@ -500,6 +571,47 @@ impl DialogState {
                     // Check No
                     let no_x = opts_x + opt_yes.len() as u16 + gap;
                     if x >= no_x && x < no_x + opt_no.len() as u16 {
+                        instance.selected = 1;
+                        return DialogAction::Confirmed;
+                    }
+                }
+
+                DialogAction::Consumed
+            }
+
+            DialogType::ProviderKeyChoice { .. } => {
+                let opt_forget = "Forget key";
+                let opt_overwrite = "Overwrite key";
+                let gap: u16 = 4;
+                let opts_total = opt_forget.len() as u16 + gap + opt_overwrite.len() as u16;
+                let dialog_w = (opts_total + 8)
+                    .max(34)
+                    .min(area.width.saturating_sub(4))
+                    .max(16);
+                let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
+                let dialog_h = 7;
+                let dialog_y = area.y + area.height.saturating_sub(dialog_h) / 2;
+                let opts_x = dialog_x + dialog_w.saturating_sub(opts_total) / 2;
+                let opts_y = dialog_y + 4;
+
+                // Check within dialog bounds
+                if x < dialog_x
+                    || x >= dialog_x + dialog_w
+                    || y_click < dialog_y
+                    || y_click >= dialog_y + dialog_h
+                {
+                    return DialogAction::Dismissed;
+                }
+
+                // Check Forget key
+                if y_click == opts_y {
+                    if x >= opts_x && x < opts_x + opt_forget.len() as u16 {
+                        instance.selected = 0;
+                        return DialogAction::Confirmed;
+                    }
+                    // Check Overwrite key
+                    let ow_x = opts_x + opt_forget.len() as u16 + gap;
+                    if x >= ow_x && x < ow_x + opt_overwrite.len() as u16 {
                         instance.selected = 1;
                         return DialogAction::Confirmed;
                     }
@@ -1177,6 +1289,104 @@ impl DialogState {
                     opts_y,
                     opt_no.len() as u16,
                     no_style,
+                );
+            }
+
+            DialogType::ProviderKeyChoice {
+                provider,
+                env_var: _,
+            } => {
+                // Same box language as Confirm: border OUTER edge, content
+                // inside with 1 row of padding, options row at +4.
+                let message = format!("An API key is already saved for {provider}");
+                let opt_forget = "Forget key";
+                let opt_overwrite = "Overwrite key";
+                let gap: u16 = 4;
+                let opts_total = opt_forget.len() as u16 + gap + opt_overwrite.len() as u16;
+                let dialog_w = (opts_total + 8)
+                    .max(message.len() as u16 + 6)
+                    .max(34)
+                    .min(area.width.saturating_sub(4))
+                    .max(16);
+                let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
+                let dialog_h = 7;
+                let dialog_y = area.y + area.height.saturating_sub(dialog_h) / 2;
+
+                // Fill interior with theme background
+                let bg_color = rgba_color(theme.background);
+                for y in dialog_y..dialog_y + dialog_h {
+                    for x in dialog_x..dialog_x + dialog_w {
+                        if let Some(cell) = buf.cell_mut((x, y)) {
+                            cell.set_char(' ');
+                            cell.set_style(
+                                Style::default()
+                                    .bg(bg_color)
+                                    .remove_modifier(Modifier::all()),
+                            );
+                            cell.set_diff_option(CellDiffOption::None);
+                        }
+                    }
+                }
+
+                // Draw border using theme color
+                let border_color = rgba_color(theme.border_active);
+                let max_x = dialog_x + dialog_w - 1;
+                let max_y = dialog_y + dialog_h - 1;
+
+                // Top & bottom horizontal lines
+                for x in (dialog_x + 1)..max_x {
+                    if let Some(cell) = buf.cell_mut((x, dialog_y)) {
+                        cell.set_char('\u{2500}');
+                        cell.set_style(Style::default().fg(border_color));
+                    }
+                    if let Some(cell) = buf.cell_mut((x, max_y)) {
+                        cell.set_char('\u{2500}');
+                        cell.set_style(Style::default().fg(border_color));
+                    }
+                }
+
+                // Left & right vertical lines
+                for y in (dialog_y + 1)..max_y {
+                    if let Some(cell) = buf.cell_mut((dialog_x, y)) {
+                        cell.set_char('\u{2502}');
+                        cell.set_style(Style::default().fg(border_color));
+                    }
+                    if let Some(cell) = buf.cell_mut((max_x, y)) {
+                        cell.set_char('\u{2502}');
+                        cell.set_style(Style::default().fg(border_color));
+                    }
+                }
+
+                // Corners (rounded)
+                if let Some(cell) = buf.cell_mut((dialog_x, dialog_y)) {
+                    cell.set_char('\u{256D}');
+                    cell.set_style(Style::default().fg(border_color));
+                }
+                if let Some(cell) = buf.cell_mut((max_x, dialog_y)) {
+                    cell.set_char('\u{256E}');
+                    cell.set_style(Style::default().fg(border_color));
+                }
+                if let Some(cell) = buf.cell_mut((dialog_x, max_y)) {
+                    cell.set_char('\u{2570}');
+                    cell.set_style(Style::default().fg(border_color));
+                }
+                if let Some(cell) = buf.cell_mut((max_x, max_y)) {
+                    cell.set_char('\u{256F}');
+                    cell.set_style(Style::default().fg(border_color));
+                }
+
+                draw_provider_key_choice_content(
+                    buf,
+                    theme,
+                    instance.selected,
+                    &message,
+                    dialog_x,
+                    dialog_y,
+                    dialog_w,
+                    opts_total,
+                    opt_forget,
+                    opt_overwrite,
+                    gap,
                 );
             }
 
