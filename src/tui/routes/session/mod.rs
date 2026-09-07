@@ -1348,12 +1348,21 @@ impl SessionView {
                         y += 1;
                     }
 
-                    // Passive LSP findings: errors red, warnings yellow, one
-                    // clipped line each, directly below the code/diff block.
+                    // Passive LSP findings: a "+"/"- LSP" affordance in the
+                    // Thought style, collapsed by default — a click expands
+                    // one clipped line per finding below the code/diff block.
                     if let Some(notes) = &tool.lsp_notes
                         && matches!(tool.status, ToolStatus::Completed)
+                        && Self::lsp_notes_count(notes) > 0
                     {
-                        y = Self::render_lsp_notes(buf, x, y, max_w, theme, notes);
+                        let expanded = tool_state.is_expanded(&Self::lsp_notes_id(tool));
+                        let header = if expanded { "- Diagnostics" } else { "+ Diagnostics" };
+                        let header_style = Style::default().fg(rgba_color(theme.error));
+                        draw_text_line(buf, header, x, y, max_w, header_style);
+                        y += 1;
+                        if expanded {
+                            y = Self::render_lsp_notes(buf, x, y, max_w, theme, notes);
+                        }
                     }
                 }
                 Part::Reasoning(r) => {
@@ -1534,7 +1543,7 @@ impl SessionView {
                 // matches the drawn box even mid-loop (Running bash/glob with
                 // streamed output already draw their box).
                 let is_block = Self::tool_is_block(t);
-                let notes_h = Self::lsp_notes_height(t);
+                let notes_h = Self::lsp_notes_height(t, tool_state);
                 if is_block {
                     let output = t.output.as_deref().unwrap_or("").trim();
                     // Add 2 rows for the block's internal padding (top/bottom border lines),
@@ -1647,16 +1656,34 @@ impl SessionView {
         }
     }
 
-    /// One clipped line per passive LSP finding, only for completed tools:
-    /// must stay in sync with the notes drawn at the end of the
+    /// Rows the passive LSP findings occupy for a completed tool: the
+    /// `+`/`- LSP` header, plus one clipped line per finding when expanded.
+    /// Must stay in sync with the notes drawn at the end of the
     /// `Part::Tool` branch in `render_parts`.
-    fn lsp_notes_height(t: &ToolPart) -> u16 {
+    fn lsp_notes_height(t: &ToolPart, tool_state: &ToolRenderState) -> u16 {
         match (&t.lsp_notes, &t.status) {
             (Some(n), ToolStatus::Completed) => {
-                (n.errors.len() + n.warnings.len()).min(u16::MAX as usize) as u16
+                let count = Self::lsp_notes_count(n);
+                if count == 0 {
+                    0
+                } else if tool_state.is_expanded(&Self::lsp_notes_id(t)) {
+                    1 + count
+                } else {
+                    1
+                }
             }
             _ => 0,
         }
+    }
+
+    /// Stable expansion key for a tool part's LSP block.
+    fn lsp_notes_id(t: &ToolPart) -> String {
+        format!("lsp:{}", t.tool_call_id.as_deref().unwrap_or(&t.tool))
+    }
+
+    /// Total findings across severities.
+    fn lsp_notes_count(n: &cosh_tools::fs::LspNotes) -> u16 {
+        (n.errors.len() + n.warnings.len()).min(u16::MAX as usize) as u16
     }
 
     /// Draw the passive LSP findings below a tool's output block: errors in
@@ -2080,6 +2107,29 @@ impl SessionView {
                     );
 
                     if click_y >= part_y && click_y < part_y + part_h {
+                        // Passive LSP findings: the last rows of the part
+                        // belong to the `+`/`- LSP` block — any click there
+                        // toggles it, ahead of the tool block's own toggle.
+                        // Mirrors the renderer's visibility gates so hidden
+                        // parts never claim clicks for absent rows.
+                        if let crate::types::Part::Tool(tool) = part
+                            && tool.lsp_notes.is_some()
+                            && matches!(tool.status, ToolStatus::Completed)
+                            && config.show_tool_details
+                            && (config.show_generic_tool_output
+                                || tool_render::tool_display(&tool.tool) != "generic")
+                        {
+                            let notes_rows =
+                                i32::from(Self::lsp_notes_height(tool, &self.tool_state));
+                            if notes_rows > 0
+                                && click_y >= part_y + part_h - notes_rows
+                            {
+                                let id = Self::lsp_notes_id(tool);
+                                self.tool_state.toggle_expanded(&id);
+                                return true;
+                            }
+                        }
+
                         if let crate::types::Part::Tool(tool) = part {
                             let display = tool_render::tool_display(&tool.tool);
                             if display == "bash" || display == "glob" || display == "read" {
