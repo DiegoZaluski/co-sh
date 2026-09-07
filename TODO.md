@@ -422,6 +422,17 @@ without discussing them with the user. `ISSUES.md` stays uncommitted.
   retried by the next save. Contention, timeout, and cooperative-appends
   regressions cover the behavior. fsync and duplicate-id recovery remain
   deferred.
+  IMPLEMENTED (Option A, agreed): every append now fdatasyncs the new bytes
+  and file size onto the device, closing the OS-crash durability gap while
+  keeping the ~1ms per-save cost. Replay heals stale-writer collisions
+  instead of failing the whole file: a non-monotonic event id is skipped
+  with a warning and the first writer's event wins, so files damaged before
+  the lock existed load again deterministically. Crash/replay regressions:
+  a killed lock holder releases the store with no visible contention
+  (process-group kill of the flock helper), a torn partial-JSON tail stays
+  preserved and skipped, single- and multi-event collision blocks heal
+  first-writer-wins, and the next save continues past the winning id with
+  every earlier byte intact.
 
 ## Review phase D — Persistence efficiency and durability (complete)
 

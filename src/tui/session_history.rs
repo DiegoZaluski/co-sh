@@ -344,6 +344,9 @@ pub(crate) struct HistoryProjection {
     pub snapshots: Vec<(String, String, Reference)>,
     pub reverts: Vec<RevertRecord>,
     pub last_event_id: u64,
+    /// Count of events skipped for having a non-monotonic id (stale-writer
+    /// collisions). Diagnostic only; the first writer's event always wins.
+    pub skipped_non_monotonic: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -399,7 +402,20 @@ impl HistoryProjection {
         }
 
         for event in events {
-            projection.apply_event(event)?;
+            match projection.apply_event(event) {
+                Ok(()) => {}
+                Err(ReplayError::NonMonotonicEvent { previous, next }) => {
+                    // A stale concurrent writer once produced colliding event
+                    // ids (two processes appending the same next id). The
+                    // store lock prevents new collisions, but files damaged
+                    // before it existed must still load: the first writer's
+                    // event wins, the duplicate is skipped, and every byte
+                    // stays on disk. Skipping keeps replay deterministic.
+                    log::warn!("session history skips non-monotonic event {next} after {previous}");
+                    projection.skipped_non_monotonic += 1;
+                }
+                Err(error) => return Err(error),
+            }
         }
         for branch in projection.branches.values_mut() {
             if let Some(context) = branch.context.as_mut() {

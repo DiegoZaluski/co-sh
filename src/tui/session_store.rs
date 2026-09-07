@@ -164,7 +164,7 @@ impl SessionStore {
         self
     }
 
-    // ── Public API ────────────────────────────────────────────────────────
+    // --- Public API ---
 
     /// Synchronize a display projection through the FIFO append writer and
     /// wait for its deltas to land. Context state is left untouched.
@@ -1232,7 +1232,12 @@ fn append_events(
         .create(true)
         .append(true)
         .open(path)?;
-    file.write_all(&bytes)
+    file.write_all(&bytes)?;
+    // Durability against an OS crash, not just a process crash: the kernel
+    // keeps appended data across a process death, but only an explicit sync
+    // orders it onto the storage device. fdatasync flushes the new bytes and
+    // the file size they depend on.
+    file.sync_data()
 }
 
 impl Default for SessionStore {
@@ -2064,7 +2069,7 @@ mod tests {
             manager.add_user(&format!("chunk source {turn}: {}", "detail ".repeat(300)));
             manager.add_assistant("acknowledged", false);
         }
-        let mut session = make_test_session("split-append", "Split Append", vec![]);
+        let session = make_test_session("split-append", "Split Append", vec![]);
         let path = store.file_path(&session.id);
         store.save_session_with_context(&session, &manager.save_state());
         manager.begin_split(2_000);
@@ -2100,7 +2105,7 @@ mod tests {
         );
     }
 
-    // ── CM-09: multi-process access to one session file ──────────────────
+    // multi-process access to one session file
 
     /// The cooperative case: a second process appends events with a FRESH
     /// view of the file (correct next event id). The first process replays
@@ -2172,11 +2177,11 @@ mod tests {
     }
 
     /// Two processes with STALE views both compute the same next event id and
-    /// both append. The non-monotonic-id guard fails the WHOLE file replay:
-    /// the session becomes unloadable and further saves are refused, though
-    /// every byte stays on disk for manual recovery.
+    /// both append. Replay heals deterministically: the first writer's event
+    /// wins, the duplicate is skipped with a warning, and every byte stays on
+    /// disk. The next save continues from the winning id without collision.
     #[test]
-    fn stale_concurrent_writers_collide_on_event_ids_and_freeze_replay() {
+    fn stale_concurrent_writer_collision_heals_first_writer_wins() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(&dir);
         let session = make_test_session("cm09-race", "Race", vec![make_user_msg("m1", "hi")]);
@@ -2214,17 +2219,37 @@ mod tests {
         assert!(append_events(&path, &after_b, &[writer_a]).is_ok());
         let collided = std::fs::read(&path).unwrap();
 
-        // Replay now fails wholesale: nothing loads, and saves are refused
-        // rather than appending onto an unreplayable history.
-        assert!(store.load_context(&session.id).is_none());
-        assert!(store.load_session(&session.id).is_none());
-        let mut context = make_context(vec![user_item(1, "hi")]);
-        context.items.push_back(assistant_item(2, "hello"));
-        store.save_session_with_context(&session, &context);
+        // First writer wins: B's title applies, A's duplicate is skipped.
+        let reloaded = store.load_session(&session.id).unwrap();
+        assert_eq!(reloaded.title, "process B");
+        assert!(
+            store.load_context(&session.id).is_none(),
+            "the skipped duplicate must not apply its change"
+        );
         assert_eq!(
             std::fs::read(&path).unwrap(),
             collided,
-            "a refused save must not touch the unreplayable file"
+            "healing must not rewrite history"
+        );
+
+        // The next save continues from the winning id without colliding.
+        let mut context = make_context(vec![user_item(1, "hi")]);
+        context.items.push_back(assistant_item(2, "hello"));
+        store.save_session_with_context(&session, &context);
+        assert!(std::fs::read(&path).unwrap().starts_with(&collided));
+        assert_eq!(store.load_context(&session.id).unwrap().items.len(), 2);
+        let tail_id: u64 = {
+            let contents = std::fs::read_to_string(&path).unwrap();
+            contents
+                .lines()
+                .rev()
+                .find_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .and_then(|event| event["event_id"].as_u64())
+                .unwrap_or(0)
+        };
+        assert!(
+            tail_id > last_id + 1,
+            "the recovery save must continue past the winning id: tail={tail_id}"
         );
     }
 
@@ -2289,9 +2314,24 @@ mod tests {
             .truncate(false)
             .open(&lock_path)
             .unwrap();
-        holder.try_lock().unwrap();
+        // The writer thread may still be releasing the baseline job's lock;
+        // poll briefly instead of failing on one scheduling overlap.
+        let mut waited = Duration::ZERO;
+        loop {
+            match holder.try_lock() {
+                Ok(()) => break,
+                Err(std::fs::TryLockError::WouldBlock) if waited < Duration::from_secs(2) => {
+                    std::thread::sleep(LOCK_POLL_INTERVAL);
+                    waited += LOCK_POLL_INTERVAL;
+                }
+                other => other.unwrap(),
+            }
+        }
+        // One second: long enough that the save's acquire is guaranteed to
+        // observe the contention even under a loaded writer queue, short
+        // enough to keep the test fast.
         let releaser = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(150));
+            std::thread::sleep(Duration::from_secs(1));
             drop(holder);
         });
 
@@ -2334,7 +2374,43 @@ mod tests {
             .truncate(false)
             .open(&lock_path)
             .unwrap();
-        holder.try_lock().unwrap();
+        // The writer thread may still be releasing the baseline job's lock;
+        // poll briefly instead of failing on one scheduling overlap.
+        let mut waited = Duration::ZERO;
+        loop {
+            match holder.try_lock() {
+                Ok(()) => break,
+                Err(std::fs::TryLockError::WouldBlock) if waited < Duration::from_secs(2) => {
+                    std::thread::sleep(LOCK_POLL_INTERVAL);
+                    waited += LOCK_POLL_INTERVAL;
+                }
+                other => other.unwrap(),
+            }
+        }
+
+        // Deterministic contention: wait until a fresh probe sees the test
+        // thread holding the lock, so the save below can never win the
+        // startup race by acquiring it first.
+        let mut probe_wait = Duration::ZERO;
+        loop {
+            let probe = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(false)
+                .open(&lock_path)
+                .unwrap();
+            match probe.try_lock() {
+                Err(std::fs::TryLockError::WouldBlock) => break,
+                Ok(()) => drop(probe),
+                Err(std::fs::TryLockError::Error(error)) => panic!("lock probe failed: {error}"),
+            }
+            assert!(
+                probe_wait < Duration::from_secs(5),
+                "holder never locked the store"
+            );
+            std::thread::sleep(LOCK_POLL_INTERVAL);
+            probe_wait += LOCK_POLL_INTERVAL;
+        }
 
         let mut context = make_context(vec![user_item(1, "hi")]);
         context.items.push_back(assistant_item(2, "hello"));
@@ -2368,6 +2444,147 @@ mod tests {
             }
         }
         assert!(saw_busy && saw_skipped);
+    }
+
+    /// Multi-event collision: two stale writers each append a multi-delta
+    /// block with the same starting id. Replay keeps the first block whole
+    /// and skips every duplicate that follows it.
+    #[test]
+    fn multi_event_collision_blocks_heal_with_first_writer_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+        let session = make_test_session("cm09-blocks", "Blocks", vec![make_user_msg("m1", "hi")]);
+        store.save_session(&session);
+        let path = store.file_path(&session.id);
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let last_id = contents
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|event| event["branch_id"] == "cm09-blocks")
+            .map(|event| event["event_id"].as_u64().unwrap_or(0))
+            .max()
+            .unwrap_or(0);
+
+        let block = |start: u64, marker: &str| {
+            [
+                HistoryEvent::new(
+                    start,
+                    "cm09-blocks",
+                    Delta::Metadata {
+                        change: MetadataDelta::Title {
+                            title: marker.into(),
+                            title_generated: true,
+                        },
+                    },
+                ),
+                HistoryEvent::new(
+                    start + 1,
+                    "cm09-blocks",
+                    Delta::Context {
+                        change: ContextDelta::MaxTokens { value: 42 },
+                    },
+                ),
+            ]
+        };
+        let writer_a = block(last_id + 1, "process A");
+        let writer_b = block(last_id + 1, "process B");
+        assert!(append_events(&path, &contents, &writer_a).is_ok());
+        let after_a = std::fs::read_to_string(&path).unwrap();
+        assert!(append_events(&path, &after_a, &writer_b).is_ok());
+
+        // A's whole block wins; both of B's duplicates are skipped.
+        let reloaded = store.load_session(&session.id).unwrap();
+        assert_eq!(reloaded.title, "process A");
+        assert_eq!(
+            store.load_context(&session.id).unwrap().max_tokens,
+            42,
+            "the second delta of A's block must still apply"
+        );
+    }
+
+    /// The lock is bound to the open file description: a holder KILLED while
+    /// holding it is cleaned up by the kernel, so the store writes straight
+    /// through with no orphan lockfile and no visible contention.
+    #[test]
+    fn killed_lock_holder_releases_the_store() {
+        use std::os::unix::process::CommandExt;
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let store = test_store(&dir)
+            .with_lock_wait(Duration::from_secs(10))
+            .with_test_notify(tx);
+        let session = make_test_session("cm09-kill", "Kill", vec![make_user_msg("m1", "hi")]);
+        store.save_session(&session);
+
+        // A foreign PROCESS locks the store directory (flock CLI), then is
+        // killed while holding it.
+        let lock_path = dir.path().join("testhash").join(LOCK_FILE_NAME);
+        let mut holder = std::process::Command::new("flock")
+            .arg(&lock_path)
+            .arg("sleep")
+            .arg("60")
+            .process_group(0)
+            .spawn()
+            .expect("flock helper must start");
+        // Poll with a FRESH handle each round: reusing one handle would
+        // let the first successful try_lock hold the lock itself.
+        let mut waited = Duration::ZERO;
+        loop {
+            let probe = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(false)
+                .open(&lock_path)
+                .unwrap();
+            match probe.try_lock() {
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    break;
+                }
+                Ok(()) => drop(probe),
+                Err(std::fs::TryLockError::Error(error)) => {
+                    let _ = std::process::Command::new("kill")
+                        .arg("-9")
+                        .arg("--")
+                        .arg(format!("-{}", holder.id()))
+                        .status();
+                    panic!("lock probe failed: {error}");
+                }
+            }
+            if waited > Duration::from_secs(5) {
+                let _ = std::process::Command::new("kill")
+                    .arg("-9")
+                    .arg(format!("-{}", holder.id()))
+                    .status();
+                panic!("flock helper never locked the store");
+            }
+            std::thread::sleep(LOCK_POLL_INTERVAL);
+            waited += LOCK_POLL_INTERVAL;
+        }
+        // flock(1) runs its command on an inherited lock fd, so killing the
+        // parent alone would leave the lock alive in the child. Kill the
+        // whole process group instead.
+        let _ = std::process::Command::new("kill")
+            .arg("-9")
+            .arg("--")
+            .arg(format!("-{}", holder.id()))
+            .status();
+        holder.wait().unwrap();
+
+        // The store writes straight through: the OS freed the lock.
+        let mut context = make_context(vec![user_item(1, "hi")]);
+        context.items.push_back(assistant_item(2, "hello"));
+        store.save_session_with_context(&session, &context);
+        assert_eq!(store.load_context(&session.id).unwrap().items.len(), 2);
+        let mut contention = false;
+        while let Ok(event) = rx.try_recv() {
+            if let HarnessEvent::Toast { .. } = event {
+                contention = true;
+            }
+        }
+        assert!(
+            !contention,
+            "a dead holder must not cause visible contention"
+        );
     }
 
     /// The full context projection — items, scalar state, and split staging —
@@ -3607,7 +3824,7 @@ mod tests {
             manager.add_user(&format!("turn {turn}: {}", "history ".repeat(600)));
             manager.add_assistant("acknowledged", false);
         }
-        let mut session = make_test_session("staging-amp", "Amplification", vec![]);
+        let session = make_test_session("staging-amp", "Amplification", Vec::new());
         let path = store.file_path(&session.id);
         let mut prefix = Vec::new();
         let mut stages: Vec<(&str, usize)> = Vec::new();
