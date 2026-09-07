@@ -73,6 +73,9 @@ impl Harness {
         &mut self,
         tx: &tokio::sync::mpsc::UnboundedSender<super::super::events::HarnessEvent>,
     ) -> bool {
+        if self.migrate_summary_staging(tx) {
+            return Box::pin(self.checkpoint_context(tx)).await;
+        }
         if self.summarization_connector.is_some() || self.summarization_models.is_empty() {
             self.llm_compact_selected(tx).await
         } else {
@@ -84,11 +87,28 @@ impl Harness {
         &mut self,
         tx: &tokio::sync::mpsc::UnboundedSender<super::super::events::HarnessEvent>,
     ) -> bool {
+        self.migrate_summary_staging(tx);
         if self.summarization_connector.is_some() || self.summarization_models.is_empty() {
             self.checkpoint_context_selected(tx).await
         } else {
             Box::pin(self.compact_with_selected_models(tx, true)).await
         }
+    }
+
+    fn migrate_summary_staging(
+        &mut self,
+        tx: &tokio::sync::mpsc::UnboundedSender<super::super::events::HarnessEvent>,
+    ) -> bool {
+        use super::super::events::{HarnessEvent, ToastVariant};
+        if !self.context_manager.discard_unverified_compaction_staging() {
+            return false;
+        }
+        self.emit_compaction_snapshot(tx);
+        let _ = tx.send(HarnessEvent::Toast {
+            message: "Summarization progress is being rebuilt: legacy responses have no completion verification.".into(),
+            variant: ToastVariant::Warning,
+        });
+        true
     }
 
     async fn compact_with_selected_models(
@@ -294,6 +314,85 @@ mod tests {
             }
         }
         assert!(usage_seen);
+    }
+
+    #[tokio::test]
+    async fn unverified_legacy_split_rebuilds_without_reusing_generated_text() {
+        let mut harness = harness().with_summarization_models(chain());
+        harness.context_manager.begin_split(4_000);
+        let request = harness.context_manager.split_next_chunk().unwrap();
+        harness
+            .context_manager
+            .advance_split("unverified legacy text", request.chunk_end);
+        let mut state = serde_json::to_value(harness.context_manager.save_state()).unwrap();
+        state["split"].as_object_mut().unwrap().remove("version");
+        harness
+            .context_manager
+            .restore_state(&serde_json::from_value(state).unwrap());
+        assert!(!harness.context_manager.commit_split());
+        harness.context_manager.begin_manual_compaction();
+        let source = serde_json::to_value(harness.context_manager.save_state().items).unwrap();
+        harness =
+            harness.with_mock_chats(vec![Ok("fresh map"), Ok("fresh checkpoint"), Ok("PASS")]);
+        harness
+            .mock_summarization_windows
+            .insert("summary-first".into(), 32_000);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(harness.checkpoint_context(&tx).await);
+        assert!(
+            harness
+                .mock_compaction_models
+                .iter()
+                .all(|model| *model == chain()[0])
+        );
+        let view = harness
+            .context_manager
+            .build_messages("")
+            .iter()
+            .filter_map(|m| m.content.as_deref())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(view.contains("fresh checkpoint"));
+        assert!(!view.contains("unverified legacy text"));
+        let first = rx.try_recv().unwrap();
+        match first {
+            super::super::super::events::HarnessEvent::ContextSnapshot { context } => {
+                assert!(context.split.is_none());
+                assert_eq!(serde_json::to_value(context.items).unwrap(), source);
+            }
+            other => panic!("migration must persist before model work: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn incomplete_evidence_at_each_checkpoint_stage_never_commits() {
+        for prefix in [
+            vec![],
+            vec![Ok("map")],
+            vec![Ok("map"), Ok("candidate")],
+            vec![Ok("map"), Ok("candidate"), Ok("missing constraint")],
+        ] {
+            let mut harness = harness().with_mock_chats(prefix).with_mock_chat(Err(
+                "summarizer response is incomplete (finish reason: length)",
+            ));
+            let before = serde_json::to_value(harness.context_manager.save_state().items).unwrap();
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            assert!(!harness.checkpoint_context(&tx).await);
+            assert_eq!(
+                serde_json::to_value(harness.context_manager.save_state().items).unwrap(),
+                before
+            );
+            assert!(!harness.context_manager.commit_map_reduce());
+            assert!(
+                harness
+                    .context_manager
+                    .save_state()
+                    .map_reduce
+                    .unwrap()
+                    .final_summary
+                    .is_none()
+            );
+        }
     }
 
     #[tokio::test]

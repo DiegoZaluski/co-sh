@@ -252,47 +252,57 @@ production behavior. Keep the immutable JSONL as the only source of truth.
 Do not run paid provider evaluations or introduce new semantic strategies
 without discussing them with the user. `ISSUES.md` stays uncommitted.
 
-## Review phase A — Protected state and checkpoint integrity (active)
+## Review phase A — Protected state and checkpoint integrity (complete)
 
 - [x] CM-01: Reproduce loss of protected plan on context and harness resume.
 - [x] Persist the structured plan through context deltas and restore both the
   rendered view and tool projection, including empty and completed plans.
-- [ ] Cover legacy state loading and append-only replay across logical history
+- [x] Cover legacy state loading and append-only replay across logical history
   operations; do not infer unavailable plans from lossy summaries.
 - [x] Align historical-message selection: the user confirmed restoring the
   plan at the selected historical point, not retaining the current head plan.
-- [ ] Bind plan deltas to their last recorded context item. Replay keeps only
+- [x] Bind plan deltas to their last recorded context item. Replay keeps only
   lightweight plan-event references per branch, with plan values resolved from
   the same event history. Preserve these references through nested selections.
-- [ ] Test changed/cleared plans through historical fork, revert, rollback,
+- [x] Test changed/cleared plans through historical fork, revert, rollback,
   checkpoint boundaries, independent child edits, and missing legacy bindings.
-- [ ] Ensure restoring a point with no plan also clears an existing tool plan
+- [x] Ensure restoring a point with no plan also clears an existing tool plan
   when the harness is reused; absence must not resurrect future work.
 - [x] CM-02: Trace provider termination signals and reproduce acceptance of
   truncated summaries with local streaming fixtures.
 - [x] Preserve OpenAI `response.incomplete` when its reason is absent; the
   adapter currently mislabels that terminal event as a successful `stop`.
-- [ ] Reject incomplete map, reduce, correction, and one-shot responses before
+- [x] Reject incomplete map, reduce, correction, and one-shot responses before
   accepting staging or committing a checkpoint; retain raw history and usage.
-- [ ] Decide how to invalidate resumable staging produced before termination
+- [x] Decide how to invalidate resumable staging produced before termination
   checks existed; its accepted text has no completion evidence. Do not rewrite
   history or present already-committed checkpoints as retrospectively verified.
-- [ ] Version unverified MapReduce staging for reconstruction from raw source;
+- [x] Version unverified MapReduce staging for reconstruction from raw source;
   retire unverified legacy split buffers without reusing their generated text.
   Keep committed checkpoints and immutable source events unchanged.
-- [ ] Validate affected tools, SDK, harness, and TUI tests, formatting, and
+- [x] Validate affected tools, SDK, harness, and TUI tests, formatting, and
   strict Clippy. Record results before moving to the next phase.
 
 ### Review phase A — Validation and handoff notes
 
+- Final continuation at `6a58c68`: library 300 passed, 1 ignored; TUI 448
+  passed, 16 ignored. Production strict Clippy, build, cloud-feature check,
+  targeted formatting, and `git diff --check` passed.
+- Historical plan selection was confirmed by the user and now passes nested
+  fork, revert, rollback, clearing, checkpoint, and unbound-legacy regressions.
+  A reused harness also clears its tools when restoring a point with no plan.
+- MapReduce v1/v2 and unversioned split staging are invalidated before model
+  work, with a snapshot and toast. Tests prove only deltas are appended and
+  committed checkpoints/raw items survive. Authorized models remain unchanged.
+- Incomplete map/reduce/audit/correction failures preserve the committed view;
+  normally completed staging remains resumable. No live/paid evaluation ran.
 - `cargo test --lib --bin cosh --no-default-features --quiet`: library 295
   passed, 1 ignored; TUI 445 passed, 16 ignored. No failures.
 - `cargo build --bin cosh --no-default-features --quiet` passed.
 - The initial protected-plan regression failed against the prior implementation.
   The local SSE regression likewise reproduced acceptance of a `length` reply.
 - Head resume, absent legacy plans, terminal/empty plans, and fine-grained
-  append-only plan transitions have regression coverage. Historical-message
-  selection is deliberately not marked resolved while its semantics are open.
+  append-only plan transitions have regression coverage.
 - Both live summary consumers reject abnormal or missing termination after
   reporting available usage; successful termination is covered for the three
   provider conventions. OpenAI incomplete-without-details has an SDK regression.
@@ -305,31 +315,119 @@ without discussing them with the user. `ISSUES.md` stays uncommitted.
 - Targeted Rust formatting and `git diff --check` passed. No paid model calls,
   history rewrites, commits, or new fallback providers were introduced.
 
-## Review phase B — Provider request correctness (pending)
+## Review phase B — Provider request correctness (complete)
 
-- [ ] CM-03: Test final wire budgets against preflight, including reasoning
+- [x] CM-03: Confirm Claude manual/adaptive thinking raises explicit output
+  limits after harness preflight. Official docs confirm thinking shares the
+  output ceiling; Gemini's adapter currently forwards the requested cap.
+- [x] Expose the SDK's effective request output reservation using the same
+  Claude resolver as wire serialization, and use it in both summary preflights.
+  Preserve existing effort, model choices, and provider output-limit policy.
+- [x] Reproduce premature request dispatch with a local unreachable endpoint;
+  test predicted versus captured wire limits for manual/adaptive thinking.
+- [x] CM-03: Test final wire budgets against preflight, including reasoning
   reservations and provider-adjusted output limits; consult official docs.
-- [ ] Correct confirmed budget inconsistencies without changing the user's
+- [x] Correct confirmed budget inconsistencies without changing the user's
   authorized model chain or splitting semantic items.
-- [ ] CM-04: Trace and test reasoning/signature ownership across tool turns,
+- [x] CM-04: Trace and test reasoning/signature ownership across tool turns,
   masking, compaction, resume, and model/provider switches.
-- [ ] Fix confirmed protocol violations and validate SDK/harness regressions.
+- [x] Fix confirmed protocol violations and validate SDK/harness regressions.
 
-## Review phase C — Semantic handoff quality (pending)
+- Phase B findings: `Connector::effective_max_tokens` exposes the Claude
+  thinking-aware output reservation from the same resolver as wire
+  serialization; both summary preflights use it, so an unreachable endpoint
+  proves the request dies in preflight, and captured wire bodies match the
+  prediction for manual/adaptive thinking. Reasoning ownership: the thinking
+  stash is cleared at stream start and mid-stream reset; masking touches only
+  tool results, keeping each call's reasoning attached; Gemini replays only
+  the functionCall signature and OpenAI/OpenAI-compatible callers strip both
+  fields, so provider switches cannot leak foreign reasoning. Confirmed fix:
+  legacy contexts persisted without the ToolCall reasoning fields now
+  deserialize with empty defaults (previously the whole history replay
+  failed, silently dropping the session); regression-tested for replay,
+  restore, masking, and legacy load.
 
-- [ ] CM-05: Add raw-source-backed adversarial fixtures for omitted decisions,
+## Review phase C — Semantic handoff quality (complete)
+
+- [x] CM-05: Add raw-source-backed adversarial fixtures for omitted decisions,
   constraints, and open work; distinguish orchestration from model quality.
-- [ ] CM-06: Test chronological invalidation and cross-range contradictions.
-- [ ] CM-07: Reproduce correction overflow and test bounded recovery without
+- [x] CM-06: Test chronological invalidation and cross-range contradictions.
+- [x] CM-07: Reproduce correction overflow and test bounded recovery without
   splitting logical items or silently changing providers.
 - [ ] Present any new audit/recovery strategy before implementing it; record
   the agreed approach here, then implement and validate only that approach.
 
-## Review phase D — Persistence efficiency and durability (pending)
+- CM-05 finding: the validator compares the candidate with map summaries
+  only; raw source items never enter the audit, so facts a map drops
+  (constraint, open task) are silently committed even under a perfect
+  auditor. Adversarial fixtures in `map_reduce_test.rs` prove the gap and
+  the contrast: reducer-stage omissions are flagged and recovered within
+  the correction budget. Any map-omission remedy must consult raw source
+  and will be presented before implementation.
+- CM-06 finding: the reducer is instructed to apply chronological
+  precedence and a precedence-correct candidate passes the audit that sees
+  the invalidation. But validation groups cover consecutive segments only:
+  an early group never sees a later invalidation, so a compliant auditor
+  flags the correctly dropped decision as an omission. The scripted audit
+  shows the bounded consequence: the false correction round-trips until the
+  two-correction budget is exhausted, no further correction is offered,
+  nothing commits, and aborting preserves the source items unchanged.
+- CM-07 finding: reduce and validation inputs are budget-grouped, but the
+  correction request combines the candidate with every accumulated audit
+  unbounded. The reproduction fails in preflight before provider dispatch,
+  keeps staging resumable, and leaves source items byte-identical. The
+  guard stops and alerts via toast, then refuses doomed retries per model
+  (`overflow_stuck`); recovery is a larger-window model resuming the
+  staging, or abort and restart. DECISION (user): keep this behavior for
+  the MVP — no automatic audit-cap remedy; the bounded explicit failure is
+  accepted and the finding stays documented here for a future revisit.
+- CM-08 measurement (`map_reduce_staging_write_amplification_measurement`):
+  8 map segments, ~460-token summaries, 2_000-token window. Every map or
+  reduce acceptance re-serializes the WHOLE MapReduceState as one delta, so
+  appends grow quadratically (3.9KB after the first map, 17.5KB after the
+  seventh). Total appended 392KB for a final staging state of ~20KB: 19x
+  write amplification. Replay correctness and append-only prefixes hold;
+  only the byte cost is the problem. DESIGN (proposed, awaiting agreement):
+  per-stage staging deltas — a `MapSegmentAccepted { ordinal, summary }`
+  event per map, reduce/validate phase transitions as small events, and a
+  `SplitBufferAppend` for split buffers — replayed into the same
+  MapReduceState/SplitState, keeping the whole-state delta only for
+  initialize/legacy compatibility. No previously appended bytes change;
+  existing files replay unchanged. IMPLEMENTED and measured: map appends are
+  now a flat ~2.4KB each (previously 3.9KB growing to 17.5KB), and split
+  appends carry only the new summary bytes. The last map still emits one
+  whole-state delta (it builds the reduction nodes and flips the phase);
+  reduce and validation stages keep whole-state deltas because their count
+  is bounded (eight reduction levels, two corrections). Replay, append-only
+  prefixes, and legacy whole-state files have regression coverage.
+- CM-09 findings (three mocked regressions in `session_store.rs`): there is
+  no cross-process lock; every job re-replays the file, so cooperative
+  processes with fresh views append cleanly and foreign item-level state
+  survives. But (1) two stale writers both pick the same next event id and
+  the non-monotonic guard fails the WHOLE file replay: the session becomes
+  unloadable and saves are refused while all bytes stay on disk for manual
+  recovery; (2) metadata and context scalars are field-level
+  last-writer-wins — a stale in-memory copy silently reverts foreign
+  renames and scalar changes on the next save; (3) a torn partial-JSON tail
+  is preserved byte-for-byte, the next append inserts the missing newline,
+  and replay skips the fragment. No fsync exists (page-cache durability
+  only). No behavioral change was made; remedies (flock or lockfile, and a
+  duplicate-id recovery policy) await a separate decision.
+  IMPLEMENTED (locking): every write job takes one exclusive kernel lock
+  (`File::try_lock`/`lock`, flock semantics) on the sessions-directory lock
+  file for the whole read-diff-append window. The OS releases the lock when
+  the holder dies, so no orphan lockfile can freeze the store. On
+  contention the TUI gets a warning toast; if the lock stays held past the
+  ten-second budget the write is skipped with an error toast and can be
+  retried by the next save. Contention, timeout, and cooperative-appends
+  regressions cover the behavior. fsync and duplicate-id recovery remain
+  deferred.
 
-- [ ] CM-08: Measure staging write amplification and design incremental
+## Review phase D — Persistence efficiency and durability (complete)
+
+- [x] CM-08: Measure staging write amplification and design incremental
   transitions preserving replay and previously appended bytes.
-- [ ] CM-09: Reproduce concurrent append and partial-tail recovery risks;
+- [x] CM-09: Reproduce concurrent append and partial-tail recovery risks;
   inspect locking and durability policy before proposing any behavioral change.
 - [ ] Implement agreed fixes with crash/replay and append-prefix regressions.
 

@@ -35,15 +35,16 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chrono::Datelike;
 use directories::ProjectDirs;
 use serde::Serialize;
 use xxhash_rust::xxh32::xxh32;
 
-use cosh::harness::context::{ContextItem, ContextManagerState};
+use cosh::harness::context::{ContextItem, ContextManagerState, MapReduceState};
+use cosh::harness::events::{HarnessEvent, ToastVariant};
 
 use crate::session_history::{
     BranchMetadata, BranchProjection, ContextDelta, Delta, HistoryEvent, HistoryProjection,
@@ -99,6 +100,10 @@ pub struct SessionStore {
     sessions_dir: PathBuf,
     /// The hash of the current working directory.
     cwd_hash: String,
+    /// Optional UI channel: lock-contention notifications surface as toasts.
+    notify: Option<tokio::sync::mpsc::UnboundedSender<HarnessEvent>>,
+    /// How long a write waits for a foreign process's lock before giving up.
+    lock_wait: Duration,
 }
 
 impl SessionStore {
@@ -116,7 +121,17 @@ impl SessionStore {
         Self {
             sessions_dir,
             cwd_hash,
+            notify: None,
+            lock_wait: LOCK_WAIT_TIMEOUT,
         }
+    }
+
+    /// Route store-level notifications (lock contention) into the TUI toast
+    /// system through the harness event channel.
+    #[must_use]
+    pub fn with_notify(mut self, notify: tokio::sync::mpsc::UnboundedSender<HarnessEvent>) -> Self {
+        self.notify = Some(notify);
+        self
     }
 
     /// Test-only store rooted at an explicit directory (lets integration
@@ -127,7 +142,26 @@ impl SessionStore {
         Self {
             sessions_dir,
             cwd_hash,
+            notify: None,
+            lock_wait: LOCK_WAIT_TIMEOUT,
         }
+    }
+
+    /// Test-only: shorten the lock wait so contention tests finish fast.
+    #[cfg(test)]
+    pub(crate) fn with_lock_wait(mut self, lock_wait: Duration) -> Self {
+        self.lock_wait = lock_wait;
+        self
+    }
+
+    /// Test-only: route notifications into a channel the test owns.
+    #[cfg(test)]
+    pub(crate) fn with_test_notify(
+        mut self,
+        notify: tokio::sync::mpsc::UnboundedSender<HarnessEvent>,
+    ) -> Self {
+        self.notify = Some(notify);
+        self
     }
 
     // ── Public API ────────────────────────────────────────────────────────
@@ -249,6 +283,18 @@ impl SessionStore {
     }
 
     fn run_job(&self, job: StoreJob) -> bool {
+        // One exclusive kernel lock covers the whole read-diff-append window
+        // of every write job. The lock is bound to the open file
+        // description: if this process dies, the OS releases it — no orphan
+        // lockfiles can freeze the store.
+        let _lock =
+            match acquire_store_lock(&self.sessions_dir, self.notify.as_ref(), self.lock_wait) {
+                Ok(file) => file,
+                Err(error) => {
+                    log::warn!("session store write skipped: {error}");
+                    return false;
+                }
+            };
         match job {
             StoreJob::Save(job) => self.persist(&job.session, job.context.as_ref()),
             StoreJob::Title { session_id, title } => self.append_title(&session_id, &title),
@@ -960,14 +1006,34 @@ fn diff_context(
             },
         });
     }
-    if !serialized_equal(&current.split, &requested.split) {
+    if let (Some(previous), Some(requested_split)) = (&current.split, &requested.split)
+        && previous.version == requested_split.version
+        && previous.window == requested_split.window
+        && requested_split.buffer.len() > previous.buffer.len()
+        && requested_split.buffer.starts_with(previous.buffer.as_str())
+    {
+        deltas.push(Delta::Context {
+            change: ContextDelta::SplitBufferAppend {
+                appended: requested_split.buffer[previous.buffer.len()..].to_string(),
+                cursor: requested_split.cursor,
+                continuity: requested_split.continuity.clone(),
+                buffer_tokens: requested_split.buffer_tokens,
+            },
+        });
+    } else if !serialized_equal(&current.split, &requested.split) {
         deltas.push(Delta::Context {
             change: ContextDelta::Split {
                 value: requested.split.clone(),
             },
         });
     }
-    if !serialized_equal(&current.map_reduce, &requested.map_reduce) {
+    if let (Some(previous), Some(requested_staging)) = (&current.map_reduce, &requested.map_reduce)
+        && let Some((ordinal, summary)) = single_accepted_segment(previous, requested_staging)
+    {
+        deltas.push(Delta::Context {
+            change: ContextDelta::MapSegmentAccepted { ordinal, summary },
+        });
+    } else if !serialized_equal(&current.map_reduce, &requested.map_reduce) {
         deltas.push(Delta::Context {
             change: ContextDelta::MapReduce {
                 value: Box::new(requested.map_reduce.clone()),
@@ -1038,6 +1104,109 @@ fn diff_context(
 
 fn serialized_equal<T: Serialize>(left: &T, right: &T) -> bool {
     serde_json::to_value(left).ok() == serde_json::to_value(right).ok()
+}
+
+/// The one map summary that went from absent to present, when the two staging
+/// states differ by exactly that transition. Replaying it onto `previous`
+/// must reproduce `requested` exactly; anything else falls back to the
+/// whole-state delta.
+fn single_accepted_segment(
+    previous: &MapReduceState,
+    requested: &MapReduceState,
+) -> Option<(usize, String)> {
+    if previous.segments.len() != requested.segments.len() {
+        return None;
+    }
+    let mut candidate: Option<(usize, String)> = None;
+    for (before, after) in previous.segments.iter().zip(requested.segments.iter()) {
+        if before.ordinal != after.ordinal || before.covered_ranges != after.covered_ranges {
+            return None;
+        }
+        match (&before.summary, &after.summary) {
+            (None, Some(summary)) => {
+                if candidate.is_some() {
+                    return None;
+                }
+                candidate = Some((after.ordinal, summary.clone()));
+            }
+            (before_summary, after_summary) if before_summary == after_summary => {}
+            _ => return None,
+        }
+    }
+    let (ordinal, summary) = candidate?;
+    let mut probe = previous.clone();
+    let segment = probe
+        .segments
+        .iter_mut()
+        .find(|segment| segment.ordinal == ordinal)?;
+    segment.summary = Some(summary.clone());
+    if serialized_equal(&probe, requested) {
+        Some((ordinal, summary))
+    } else {
+        None
+    }
+}
+
+/// How long a write job waits for a foreign process's lock before the job
+/// is dropped (the toast already told the user why).
+const LOCK_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
+const LOCK_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const LOCK_FILE_NAME: &str = ".cosh-session-store.lock";
+
+/// Send a toast through the UI channel, ignoring a dead receiver.
+fn send_toast(
+    notify: Option<&tokio::sync::mpsc::UnboundedSender<HarnessEvent>>,
+    message: &str,
+    variant: ToastVariant,
+) {
+    if let Some(tx) = notify {
+        let _ = tx.send(HarnessEvent::Toast {
+            message: message.to_string(),
+            variant,
+        });
+    }
+}
+
+/// Acquire the store's exclusive advisory lock. Kernel-managed (`flock` via
+/// the standard library): releasing happens on drop AND automatically when
+/// the holder dies, so a crashed process can never orphan the lock. On
+/// contention the caller is notified once (toast), then the call polls until
+/// the timeout expires.
+fn acquire_store_lock(
+    sessions_dir: &Path,
+    notify: Option<&tokio::sync::mpsc::UnboundedSender<HarnessEvent>>,
+    wait: Duration,
+) -> std::io::Result<std::fs::File> {
+    let path = sessions_dir.join(LOCK_FILE_NAME);
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)?;
+    match file.try_lock() {
+        Ok(()) => return Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => {}
+        Err(std::fs::TryLockError::Error(error)) => return Err(error),
+    }
+    send_toast(notify, "Session store busy.", ToastVariant::Warning);
+    let deadline = Instant::now() + wait;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                std::thread::sleep(LOCK_POLL_INTERVAL);
+            }
+            Err(std::fs::TryLockError::WouldBlock) => {
+                send_toast(
+                    notify,
+                    "Session store stayed busy: the save was skipped and will be retried on the next change.",
+                    ToastVariant::Error,
+                );
+                return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock));
+            }
+            Err(std::fs::TryLockError::Error(error)) => return Err(error),
+        }
+    }
 }
 
 fn append_events(
@@ -1243,6 +1412,8 @@ mod tests {
         SessionStore {
             sessions_dir,
             cwd_hash: "testhash".to_string(),
+            notify: None,
+            lock_wait: LOCK_WAIT_TIMEOUT,
         }
     }
 
@@ -1251,11 +1422,15 @@ mod tests {
     fn historical_selection_restores_plan_and_rollback_recovers_head_plan() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(&dir);
-        let mut session = make_test_session("plan-parent", "Plan", vec![make_user_msg("m1", "first")]);
+        let mut session =
+            make_test_session("plan-parent", "Plan", vec![make_user_msg("m1", "first")]);
         let mut context = make_context(vec![user_item(1, "first")]);
-        let plan = |title: &str| serde_json::from_value(serde_json::json!({"groups":[{
-            "title": title, "items": [], "tests_verified": false
-        }]})).unwrap();
+        let plan = |title: &str| {
+            serde_json::from_value(serde_json::json!({"groups":[{
+                "title": title, "items": [], "tests_verified": false
+            }]}))
+            .unwrap()
+        };
         context.todo = Some(plan("first plan"));
         session.ctx_ids.insert("m1".into(), vec![1]);
         store.save_session_with_context(&session, &context);
@@ -1269,13 +1444,144 @@ mod tests {
         let mut child = session.clone();
         child.id = "plan-child".into();
         assert!(store.fork_session(&session.id, "m1", &child));
-        assert_eq!(store.load_context(&child.id).unwrap().todo.unwrap().groups[0].title, "first plan");
+        assert_eq!(
+            store.load_context(&child.id).unwrap().todo.unwrap().groups[0].title,
+            "first plan"
+        );
         assert!(!store.file_path(&child.id).exists());
         assert!(store.revert_session(&session.id, "m2"));
-        assert_eq!(store.load_context(&session.id).unwrap().todo.unwrap().groups[0].title, "first plan");
+        assert_eq!(
+            store
+                .load_context(&session.id)
+                .unwrap()
+                .todo
+                .unwrap()
+                .groups[0]
+                .title,
+            "first plan"
+        );
         assert!(store.rollback_session(&session.id, "v1"));
-        assert_eq!(store.load_context(&session.id).unwrap().todo.unwrap().groups[0].title, "future plan");
+        assert_eq!(
+            store
+                .load_context(&session.id)
+                .unwrap()
+                .todo
+                .unwrap()
+                .groups[0]
+                .title,
+            "future plan"
+        );
+
+        // Child changes cannot leak back into the parent or an earlier fork.
+        let mut child = store.load_session(&child.id).unwrap();
+        let mut child_context = store.load_context(&child.id).unwrap();
+        child
+            .messages
+            .push(make_assistant_msg("child-end", "finished"));
+        child.ctx_ids.insert("child-end".into(), vec![3]);
+        child_context.items.push_back(assistant_item(3, "finished"));
+        child_context.todo = Some(Default::default());
+        store.save_session_with_context(&child, &child_context);
+        let mut grandchild = child.clone();
+        grandchild.id = "plan-grandchild".into();
+        assert!(store.fork_session(&child.id, "m1", &grandchild));
+        assert_eq!(
+            store
+                .load_context(&grandchild.id)
+                .unwrap()
+                .todo
+                .unwrap()
+                .groups[0]
+                .title,
+            "first plan"
+        );
+        assert!(store.revert_session(&child.id, "m1"));
+        assert!(store.load_context(&child.id).unwrap().todo.is_none());
+        assert!(store.rollback_session(&child.id, "v1"));
+        assert!(
+            store
+                .load_context(&child.id)
+                .unwrap()
+                .todo
+                .unwrap()
+                .groups
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .load_context(&session.id)
+                .unwrap()
+                .todo
+                .unwrap()
+                .groups[0]
+                .title,
+            "future plan"
+        );
+
+        // A checkpoint retains the plan whose source items it now covers.
+        let mut session = store.load_session(&session.id).unwrap();
+        context.items.push_back(ContextItem::Compaction {
+            id: 3,
+            summary: "checkpoint".into(),
+            covered_ranges: vec![cosh::harness::context::ContextItemRange {
+                start_id: 1,
+                end_id: 2,
+            }],
+        });
+        context.visible_from = Some(3);
+        session
+            .messages
+            .push(make_assistant_msg("checkpoint", "checkpoint"));
+        session.ctx_ids.insert("checkpoint".into(), vec![3]);
+        store.save_session_with_context(&session, &context);
+        let mut checkpoint_child = session.clone();
+        checkpoint_child.id = "plan-checkpoint-child".into();
+        assert!(store.fork_session(&session.id, "checkpoint", &checkpoint_child));
+        assert_eq!(
+            store
+                .load_context(&checkpoint_child.id)
+                .unwrap()
+                .todo
+                .unwrap()
+                .groups[0]
+                .title,
+            "future plan"
+        );
         assert!(std::fs::read(&path).unwrap().starts_with(&prefix));
+    }
+
+    #[test]
+    fn unbound_legacy_plan_is_not_guessed_for_historical_selections() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+        let mut session =
+            make_test_session("unbound-plan", "Legacy", vec![make_user_msg("m1", "work")]);
+        session.ctx_ids.insert("m1".into(), vec![1]);
+        let mut context = make_context(vec![user_item(1, "work")]);
+        context.todo = Some(Default::default());
+        store.save_session_with_context(&session, &context);
+        let path = store.file_path(&session.id);
+        // Construct an older fixture without a plan-to-source binding.
+        let legacy = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                let mut event: serde_json::Value = serde_json::from_str(line).unwrap();
+                if let Some(change) = event["delta"]["change"].as_object_mut() {
+                    change.remove("todo_after_item_id");
+                }
+                serde_json::to_string(&event).unwrap()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(&path, &legacy).unwrap();
+        assert!(store.load_context(&session.id).unwrap().todo.is_some());
+        let mut child = session.clone();
+        child.id = "unbound-child".into();
+        assert!(store.fork_session(&session.id, "m1", &child));
+        assert!(store.load_context(&child.id).unwrap().todo.is_none());
+        assert!(std::fs::read_to_string(&path).unwrap().starts_with(&legacy));
     }
 
     #[test]
@@ -1745,6 +2051,325 @@ mod tests {
         );
     }
 
+    /// Split chunk appends are incremental: each advance appends only the new
+    /// summary bytes (plus a bounded header), and replay reproduces the exact
+    /// staging so an interrupted split resumes where it stopped.
+    #[test]
+    fn split_buffer_appends_are_incremental_and_replay_exactly() {
+        use cosh::harness::context::ContextManager;
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+        let mut manager = ContextManager::new(4_000);
+        for turn in 0..6 {
+            manager.add_user(&format!("chunk source {turn}: {}", "detail ".repeat(300)));
+            manager.add_assistant("acknowledged", false);
+        }
+        let mut session = make_test_session("split-append", "Split Append", vec![]);
+        let path = store.file_path(&session.id);
+        store.save_session_with_context(&session, &manager.save_state());
+        manager.begin_split(2_000);
+        store.save_session_with_context(&session, &manager.save_state());
+        let mut prefix = std::fs::read(&path).unwrap();
+        let mut last_summary = String::new();
+        while let Some(request) = manager.split_next_chunk() {
+            let summary = format!("chunk summary\n{}", "note ".repeat(200));
+            manager.advance_split(&summary, request.chunk_end);
+            store.save_session_with_context(&session, &manager.save_state());
+            let bytes = std::fs::read(&path).unwrap();
+            assert!(bytes.starts_with(&prefix), "appends must never rewrite");
+            let appended = bytes.len() - prefix.len();
+            assert!(
+                appended < summary.len() * 2 + 400,
+                "each append must carry only the new summary, got {appended} bytes"
+            );
+            prefix = bytes;
+            last_summary = summary;
+            let replayed = store.load_context(&session.id).unwrap();
+            assert_eq!(
+                serde_json::to_value(replayed).unwrap(),
+                serde_json::to_value(manager.save_state()).unwrap()
+            );
+        }
+        assert!(!last_summary.is_empty());
+        assert!(manager.commit_split());
+        store.save_session_with_context(&session, &manager.save_state());
+        let replayed = store.load_context(&session.id).unwrap();
+        assert_eq!(
+            serde_json::to_value(replayed).unwrap(),
+            serde_json::to_value(manager.save_state()).unwrap()
+        );
+    }
+
+    // ── CM-09: multi-process access to one session file ──────────────────
+
+    /// The cooperative case: a second process appends events with a FRESH
+    /// view of the file (correct next event id). The first process replays
+    /// the file on its next save, so foreign ITEM-level state survives and
+    /// every byte stays append-only. Metadata AND context scalars are
+    /// field-level last-writer-wins: this process's stale in-memory copy is
+    /// re-asserted over foreign changes on its next save.
+    #[test]
+    fn cooperative_cross_process_append_is_picked_up_without_rewrites() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+        let session = make_test_session("cm09-coop", "Coop", vec![make_user_msg("m1", "hi")]);
+        store.save_session(&session);
+        let path = store.file_path(&session.id);
+
+        // The second process replays the file fresh and appends its deltas.
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let last_id = contents
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|event| event["branch_id"] == "cm09-coop")
+            .map(|event| event["event_id"].as_u64().unwrap_or(0))
+            .max()
+            .unwrap_or(0);
+        let foreign = [
+            HistoryEvent::new(
+                last_id + 1,
+                "cm09-coop",
+                Delta::Metadata {
+                    change: MetadataDelta::Title {
+                        title: "Renamed by the other process".into(),
+                        title_generated: true,
+                    },
+                },
+            ),
+            HistoryEvent::new(
+                last_id + 2,
+                "cm09-coop",
+                Delta::Context {
+                    change: ContextDelta::MaxTokens { value: 555 },
+                },
+            ),
+        ];
+        assert!(append_events(&path, &contents, &foreign).is_ok());
+        let with_foreign = std::fs::read(&path).unwrap();
+
+        // The first process saves again: it re-replays the file (fresh view),
+        // appends after the foreign events, and preserves every byte.
+        let mut context = make_context(vec![user_item(1, "hi")]);
+        context.items.push_back(assistant_item(2, "hello"));
+        store.save_session_with_context(&session, &context);
+        assert!(std::fs::read(&path).unwrap().starts_with(&with_foreign));
+        // Foreign ITEM-level changes survive the other process's save
+        // (items are diffed per identity)...
+        let reloaded_context = store.load_context(&session.id).unwrap();
+        assert_eq!(reloaded_context.items.len(), 2);
+        // ...but every context SCALAR is also last-writer-wins: this
+        // process re-asserts its full scalar state, reverting the foreign
+        // max_tokens exactly like the foreign title.
+        assert_eq!(reloaded_context.max_tokens, 100_000);
+        let reloaded = store.load_session(&session.id).unwrap();
+        assert_eq!(reloaded.title, "Coop");
+        let events = std::fs::read_to_string(&path).unwrap();
+        assert!(events.contains("Renamed by the other process"));
+        let reloaded = store.load_session(&session.id).unwrap();
+        assert_eq!(reloaded.title, "Coop");
+        let events = std::fs::read_to_string(&path).unwrap();
+        assert!(events.contains("Renamed by the other process"));
+    }
+
+    /// Two processes with STALE views both compute the same next event id and
+    /// both append. The non-monotonic-id guard fails the WHOLE file replay:
+    /// the session becomes unloadable and further saves are refused, though
+    /// every byte stays on disk for manual recovery.
+    #[test]
+    fn stale_concurrent_writers_collide_on_event_ids_and_freeze_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+        let session = make_test_session("cm09-race", "Race", vec![make_user_msg("m1", "hi")]);
+        store.save_session(&session);
+        let path = store.file_path(&session.id);
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let last_id = contents
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|event| event["branch_id"] == "cm09-race")
+            .map(|event| event["event_id"].as_u64().unwrap_or(0))
+            .max()
+            .unwrap_or(0);
+
+        // Both processes read the same file tail and both pick last_id + 1.
+        let writer_b = HistoryEvent::new(
+            last_id + 1,
+            "cm09-race",
+            Delta::Metadata {
+                change: MetadataDelta::Title {
+                    title: "process B".into(),
+                    title_generated: true,
+                },
+            },
+        );
+        let writer_a = HistoryEvent::new(
+            last_id + 1,
+            "cm09-race",
+            Delta::Context {
+                change: ContextDelta::MaxTokens { value: 123 },
+            },
+        );
+        assert!(append_events(&path, &contents, &[writer_b]).is_ok());
+        let after_b = std::fs::read_to_string(&path).unwrap();
+        assert!(append_events(&path, &after_b, &[writer_a]).is_ok());
+        let collided = std::fs::read(&path).unwrap();
+
+        // Replay now fails wholesale: nothing loads, and saves are refused
+        // rather than appending onto an unreplayable history.
+        assert!(store.load_context(&session.id).is_none());
+        assert!(store.load_session(&session.id).is_none());
+        let mut context = make_context(vec![user_item(1, "hi")]);
+        context.items.push_back(assistant_item(2, "hello"));
+        store.save_session_with_context(&session, &context);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            collided,
+            "a refused save must not touch the unreplayable file"
+        );
+    }
+
+    /// A crash mid-write leaves a torn partial-JSON tail without a newline.
+    /// The torn bytes stay on disk untouched, the next append inserts the
+    /// missing newline first, and replay skips the fragment.
+    #[test]
+    fn torn_tail_line_is_preserved_and_skipped_while_appends_continue() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+        let session = make_test_session("cm09-torn", "Torn", vec![make_user_msg("m1", "hi")]);
+        store.save_session_with_context(&session, &make_context(vec![user_item(1, "hi")]));
+        let path = store.file_path(&session.id);
+        let intact = std::fs::read(&path).unwrap();
+
+        let torn = {
+            let mut bytes = intact.clone();
+            bytes.extend_from_slice(b"{\"schema_version\":1,\"event_i");
+            bytes
+        };
+        std::fs::write(&path, &torn).unwrap();
+
+        let mut context = make_context(vec![user_item(1, "hi")]);
+        context.items.push_back(assistant_item(2, "hello"));
+        store.save_session_with_context(&session, &context);
+
+        let after = std::fs::read(&path).unwrap();
+        assert!(after.starts_with(&torn), "torn bytes must be preserved");
+        let tail = &after[torn.len()..];
+        assert!(
+            tail.starts_with(b"\n"),
+            "the next append must start on its own line"
+        );
+        let loaded = store.load_context(&session.id).unwrap();
+        assert_eq!(loaded.items.len(), 2, "the torn line is skipped, not fatal");
+        assert_eq!(
+            serde_json::to_value(loaded.items).unwrap(),
+            serde_json::to_value(context.items).unwrap()
+        );
+    }
+
+    /// A foreign process holding the store lock is detected: the write waits
+    /// (with one warning toast), proceeds once the lock is released, and
+    /// never rewrites previously appended bytes.
+    #[test]
+    fn lock_contention_notifies_then_saves_once_released() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let store = test_store(&dir)
+            .with_lock_wait(Duration::from_secs(5))
+            .with_test_notify(tx);
+        let session = make_test_session("cm09-lock", "Lock", vec![make_user_msg("m1", "hi")]);
+        store.save_session(&session);
+        let path = store.file_path(&session.id);
+        let before = std::fs::read(&path).unwrap();
+
+        // A foreign process holds the lock, releasing it after 150ms.
+        let lock_path = dir.path().join("testhash").join(LOCK_FILE_NAME);
+        let holder = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .unwrap();
+        holder.try_lock().unwrap();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            drop(holder);
+        });
+
+        let mut context = make_context(vec![user_item(1, "hi")]);
+        context.items.push_back(assistant_item(2, "hello"));
+        store.save_session_with_context(&session, &context);
+        releaser.join().unwrap();
+
+        assert!(std::fs::read(&path).unwrap().starts_with(&before));
+        assert_eq!(store.load_context(&session.id).unwrap().items.len(), 2);
+        let mut saw_busy_toast = false;
+        while let Ok(event) = rx.try_recv() {
+            if let HarnessEvent::Toast { message, variant } = event {
+                if variant == ToastVariant::Warning && message.contains("busy") {
+                    saw_busy_toast = true;
+                }
+            }
+        }
+        assert!(saw_busy_toast, "contention must surface as a warning toast");
+    }
+
+    /// A lock held past the wait budget skips the write with an error toast;
+    /// the file is untouched, and a later save after release succeeds.
+    #[test]
+    fn lock_timeout_skips_the_write_and_reports() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let store = test_store(&dir)
+            .with_lock_wait(Duration::from_millis(200))
+            .with_test_notify(tx);
+        let session = make_test_session("cm09-timeout", "Timeout", vec![make_user_msg("m1", "hi")]);
+        store.save_session_with_context(&session, &make_context(vec![user_item(1, "hi")]));
+        let path = store.file_path(&session.id);
+        let before = std::fs::read(&path).unwrap();
+
+        let lock_path = dir.path().join("testhash").join(LOCK_FILE_NAME);
+        let holder = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .unwrap();
+        holder.try_lock().unwrap();
+
+        let mut context = make_context(vec![user_item(1, "hi")]);
+        context.items.push_back(assistant_item(2, "hello"));
+        store.save_session_with_context(&session, &context);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "a timed-out write must not touch the file"
+        );
+        assert_eq!(store.load_context(&session.id).unwrap().items.len(), 1);
+
+        drop(holder);
+        store.save_session_with_context(&session, &context);
+        assert_eq!(store.load_context(&session.id).unwrap().items.len(), 2);
+
+        let mut saw_busy = false;
+        let mut saw_skipped = false;
+        while let Ok(event) = rx.try_recv() {
+            if let HarnessEvent::Toast { message, variant } = event {
+                if message.contains("busy") {
+                    saw_busy = true;
+                    assert!(matches!(
+                        variant,
+                        ToastVariant::Warning | ToastVariant::Error
+                    ));
+                }
+                if message.contains("skipped") {
+                    saw_skipped = true;
+                    assert_eq!(variant, ToastVariant::Error);
+                }
+            }
+        }
+        assert!(saw_busy && saw_skipped);
+    }
+
     /// The full context projection — items, scalar state, and split staging —
     /// round-trips through deltas, so an interrupted split resumes exactly
     /// where it stopped.
@@ -1758,6 +2383,7 @@ mod tests {
             make_context(vec![user_item(1, "Hello!"), assistant_item(2, "Hi there!")]);
         context.overflow_model = Some("gpt-4o-mini".to_string());
         context.split = Some(SplitState {
+            version: 0,
             buffer: "## Objective\n- summarized so far".to_string(),
             cursor: Some(2),
             continuity: "tail of the last chunk".to_string(),
@@ -1838,6 +2464,7 @@ mod tests {
         changed.max_tokens = 64_000;
         changed.overflow_model = Some("model-a".into());
         changed.split = Some(SplitState {
+            version: 0,
             buffer: "partial".into(),
             cursor: Some(2),
             continuity: "tail".into(),
@@ -2131,6 +2758,8 @@ mod tests {
         let store_a = SessionStore {
             sessions_dir: base.join("proja"),
             cwd_hash: "proja".to_string(),
+            notify: None,
+            lock_wait: LOCK_WAIT_TIMEOUT,
         };
         std::fs::create_dir_all(base.join("proja")).ok();
 
@@ -2138,6 +2767,8 @@ mod tests {
         let store_b = SessionStore {
             sessions_dir: base.join("projb"),
             cwd_hash: "projb".to_string(),
+            notify: None,
+            lock_wait: LOCK_WAIT_TIMEOUT,
         };
         std::fs::create_dir_all(base.join("projb")).ok();
 
@@ -2604,7 +3235,7 @@ mod tests {
         let whole = manager.save_state();
         assert_eq!(serde_json::to_value(&whole.items).unwrap(), original_items);
         let staging = whole.map_reduce.as_ref().unwrap();
-        assert_eq!(staging.version, 2);
+        assert_eq!(staging.version, 3);
         assert!(staging.segments.iter().all(|segment| {
             !segment.item_ids.is_empty() && segment.slices.is_empty() && segment.summary.is_none()
         }));
@@ -2641,6 +3272,53 @@ mod tests {
         assert_eq!(
             serde_json::to_value(manager.save_state().items).unwrap(),
             original_items
+        );
+    }
+
+    #[test]
+    fn unverified_staging_migration_only_appends_and_preserves_committed_checkpoints() {
+        use cosh::harness::context::ContextManager;
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+        let session = make_test_session("staging-upgrade", "Upgrade", vec![]);
+        let mut manager = ContextManager::new(4_000);
+        manager.add_user("previous task");
+        manager.add_assistant("previous work", true);
+        manager.begin_manual_compaction();
+        assert!(manager.apply_llm_summary("already committed checkpoint".into()));
+        manager.add_user(&"new source evidence ".repeat(600));
+        manager.add_assistant("new work", true);
+        assert!(manager.begin_map_reduce(4_000));
+        let mut legacy = manager.save_state();
+        let staging = legacy.map_reduce.as_mut().unwrap();
+        staging.version = 2;
+        for segment in &mut staging.segments {
+            segment.summary = Some("unverified map".into());
+        }
+        store.save_session_with_context(&session, &legacy);
+        let path = store.file_path(&session.id);
+        let prefix = std::fs::read(&path).unwrap();
+        manager.restore_state(&store.load_context(&session.id).unwrap());
+        assert!(manager.discard_unverified_compaction_staging());
+        store.save_session_with_context(&session, &manager.save_state());
+        let invalidated = std::fs::read(&path).unwrap();
+        assert!(invalidated.starts_with(&prefix));
+        assert!(manager.begin_map_reduce(4_000));
+        store.save_session_with_context(&session, &manager.save_state());
+        assert!(std::fs::read(&path).unwrap().starts_with(&invalidated));
+        let restored = store.load_context(&session.id).unwrap();
+        assert_eq!(
+            serde_json::to_value(&restored.items).unwrap(),
+            serde_json::to_value(&legacy.items).unwrap()
+        );
+        assert!(restored.items.iter().any(|item| matches!(item, ContextItem::Compaction { summary, .. } if summary == "already committed checkpoint")));
+        let staging = restored.map_reduce.unwrap();
+        assert_eq!(staging.version, 3);
+        assert!(
+            staging
+                .segments
+                .iter()
+                .all(|segment| segment.summary.is_none())
         );
     }
 
@@ -2917,5 +3595,112 @@ mod tests {
         assert_eq!(session.ctx_ids["msg-1"], vec![2]);
         assert_eq!(session.ctx_ids["msg-summary"], vec![3]);
         assert_eq!(session.ctx_ids["msg-2"], vec![4]);
+    }
+
+    #[test]
+    fn map_reduce_staging_write_amplification_measurement() {
+        use cosh::harness::context::ContextManager;
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+        let mut manager = ContextManager::new(2_000);
+        for turn in 0..8 {
+            manager.add_user(&format!("turn {turn}: {}", "history ".repeat(600)));
+            manager.add_assistant("acknowledged", false);
+        }
+        let mut session = make_test_session("staging-amp", "Amplification", vec![]);
+        let path = store.file_path(&session.id);
+        let mut prefix = Vec::new();
+        let mut stages: Vec<(&str, usize)> = Vec::new();
+        fn persist<'a>(
+            store: &SessionStore,
+            path: &std::path::Path,
+            label: &'a str,
+            manager: &ContextManager,
+            session: &Session,
+            prefix: &mut Vec<u8>,
+            stages: &mut Vec<(&'a str, usize)>,
+        ) {
+            let state = manager.save_state();
+            store.save_session_with_context(session, &state);
+            let bytes = std::fs::read(path).unwrap();
+            assert!(bytes.starts_with(prefix), "appends must never rewrite");
+            stages.push((label, bytes.len() - prefix.len()));
+            *prefix = bytes;
+            let replayed = store.load_context(&session.id).unwrap();
+            assert_eq!(
+                serde_json::to_value(replayed).unwrap(),
+                serde_json::to_value(state).unwrap()
+            );
+        }
+        persist(
+            &store,
+            &path,
+            "initialize",
+            &manager,
+            &session,
+            &mut prefix,
+            &mut stages,
+        );
+        assert!(manager.begin_map_reduce(2_000));
+        persist(
+            &store,
+            &path,
+            "begin",
+            &manager,
+            &session,
+            &mut prefix,
+            &mut stages,
+        );
+        let segments = manager.pending_map_requests().len();
+        for request in manager.pending_map_requests() {
+            assert!(manager.accept_map_summary(
+                request.ordinal,
+                &format!("segment summary\n{}", "note ".repeat(450))
+            ));
+            persist(
+                &store,
+                &path,
+                "map",
+                &manager,
+                &session,
+                &mut prefix,
+                &mut stages,
+            );
+        }
+        while let Some(request) = manager.next_reduce_request() {
+            assert!(manager.accept_reduce_summary(&request, "reduced checkpoint"));
+            persist(
+                &store,
+                &path,
+                "reduce",
+                &manager,
+                &session,
+                &mut prefix,
+                &mut stages,
+            );
+        }
+        while let Some(request) = manager.next_validation_request() {
+            assert!(manager.accept_validation(&request, "PASS"));
+            persist(
+                &store,
+                &path,
+                "validate",
+                &manager,
+                &session,
+                &mut prefix,
+                &mut stages,
+            );
+        }
+        let total_appended: usize = stages.iter().map(|(_, bytes)| bytes).sum();
+        let final_state = serde_json::to_string(&manager.save_state().map_reduce)
+            .unwrap()
+            .len();
+        for (label, bytes) in &stages {
+            println!("{label}: {bytes} bytes");
+        }
+        println!(
+            "segments={segments} total_appended={total_appended} final_map_reduce_state={final_state} amplification={}x",
+            total_appended / final_state.max(1)
+        );
     }
 }

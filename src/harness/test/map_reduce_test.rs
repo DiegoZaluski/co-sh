@@ -541,8 +541,24 @@ async fn resumed_plan_rehydrates_tools_before_the_first_loop() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
     let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
-    harness.run_agent_loop("continue", tx, answer_rx, perm_rx, Arc::new(AtomicBool::new(false))).await;
-    assert!(harness.cosh_tools.as_ref().unwrap().todo_list().groups.is_empty());
+    harness
+        .run_agent_loop(
+            "continue",
+            tx,
+            answer_rx,
+            perm_rx,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await;
+    assert!(
+        harness
+            .cosh_tools
+            .as_ref()
+            .unwrap()
+            .todo_list()
+            .groups
+            .is_empty()
+    );
 }
 /// A real local SSE response exercises the SDK and both summarization consumers.
 async fn summary_fixture(reason: Option<&str>) -> (Connector, tokio::task::JoinHandle<()>) {
@@ -643,6 +659,49 @@ async fn natural_summary_termination_is_accepted() {
 }
 
 #[tokio::test]
+async fn thinking_output_reservation_is_checked_before_summary_dispatch() {
+    for model in ["claude-sonnet-4-5", "claude-sonnet-4-6"] {
+        let connector = Connector::new("claude")
+            .unwrap()
+            .with_model(model)
+            .with_reasoning_effort("high")
+            .with_api_key("test-only")
+            .with_base_url("http://127.0.0.1:1")
+            .with_retry(false);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let result = Harness::summarize_map_with_connector(
+            connector.clone(),
+            "summarize".into(),
+            "source".into(),
+            None,
+            tx,
+            8_000,
+        )
+        .await;
+        assert!(
+            matches!(
+                result,
+                Err(CompactionErr::ContextWindow {
+                    window_tokens: Some(8_000)
+                })
+            ),
+            "request should fail preflight, not contact the provider: {result:?}"
+        );
+        let mut harness = Harness::new_test().with_discovered_window(8_000);
+        harness.connector = connector;
+        let result = harness
+            .stream_summarize_for_compaction("summarize", "source", |_| {})
+            .await;
+        assert!(matches!(
+            result,
+            Err(CompactionErr::ContextWindow {
+                window_tokens: Some(8_000)
+            })
+        ));
+    }
+}
+
+#[tokio::test]
 async fn incomplete_one_shot_never_commits_or_hides_source() {
     let (connector, server) = summary_fixture(Some("length")).await;
     let mut harness = Harness::new_test();
@@ -665,4 +724,308 @@ async fn incomplete_one_shot_never_commits_or_hides_source() {
         serde_json::to_value(harness.context_manager.save_state()).unwrap(),
         before
     );
+}
+
+// CM-05: adversarial omission fixtures. The scripted replies are an oracle
+// for ORCHESTRATION behavior only: they show what the pipeline can detect
+// with deterministic inputs, never what a real model would recall.
+#[tokio::test]
+async fn map_omissions_are_invisible_to_the_audit_and_silently_committed() {
+    let mut manager = long_trace();
+    assert!(manager.begin_map_reduce(8_000));
+    // Every map deliberately drops the constraint and the open task; the
+    // reducer stays consistent with what the maps reported.
+    for request in manager.pending_map_requests() {
+        let kept: Vec<_> = TRACE_FACTS
+            .iter()
+            .filter(|fact| **fact != TRACE_FACTS[0] && **fact != TRACE_FACTS[4])
+            .filter(|fact| request.prompt.contains(**fact))
+            .copied()
+            .collect();
+        let reply = if kept.is_empty() {
+            "Historical inspection; nothing to report.".to_string()
+        } else {
+            kept.join("\n")
+        };
+        assert!(
+            manager.accept_map_summary(request.ordinal, &reply),
+            "map {ordinal} reply must be accepted",
+            ordinal = request.ordinal
+        );
+    }
+    while let Some(request) = manager.next_reduce_request() {
+        let summary = format!(
+            "## Objective\nContinue safely\n## Important Details\n{}\n## Next Move\nReread old.rs",
+            [TRACE_FACTS[1], TRACE_FACTS[2], TRACE_FACTS[3]].join("\n")
+        );
+        assert!(manager.accept_reduce_summary(&request, &summary));
+    }
+    // The structural gap: the validator's inputs are the candidate and the
+    // map summaries only. The raw source items that hold the dropped facts
+    // never enter the comparison, so even a perfect auditor cannot flag
+    // what it never sees. This is the orchestration boundary CM-05 records.
+    let validation = manager.next_validation_request().unwrap();
+    assert!(
+        validation
+            .prompt
+            .contains("DECISION: use append-only history")
+    );
+    assert!(!validation.prompt.contains(TRACE_FACTS[0]));
+    assert!(!validation.prompt.contains(TRACE_FACTS[4]));
+    assert!(manager.accept_validation(&validation, "PASS"));
+    assert!(manager.commit_map_reduce());
+    let view = trace_view(&manager);
+    assert!(view.contains(TRACE_FACTS[1]));
+    assert!(!view.contains(TRACE_FACTS[0]), "dropped constraint is lost");
+    assert!(!view.contains(TRACE_FACTS[4]), "dropped open task is lost");
+}
+
+#[tokio::test]
+async fn audit_recovers_reducer_omissions_within_the_correction_budget() {
+    let mut harness = Harness::new_test();
+    harness.context_manager = long_trace();
+    assert!(harness.context_manager.begin_map_reduce(8_000));
+    // Every map keeps every fact it saw.
+    for request in harness.context_manager.pending_map_requests() {
+        let facts: Vec<_> = TRACE_FACTS
+            .iter()
+            .filter(|fact| request.prompt.contains(**fact))
+            .copied()
+            .collect();
+        let reply = if facts.is_empty() {
+            "Historical inspection; nothing to report.".to_string()
+        } else {
+            facts.join("\n")
+        };
+        harness.mock_chat_queue.push_back(Ok(reply));
+    }
+    // The reducer drops the constraint and the open task.
+    harness.mock_chat_queue.push_back(Ok(format!(
+        "## Objective\nContinue safely\n## Important Details\n{}\n## Next Move\nReread old.rs",
+        [TRACE_FACTS[1], TRACE_FACTS[2], TRACE_FACTS[3]].join("\n")
+    )));
+    // The audit compares against the map summaries and flags both losses.
+    harness.mock_chat_queue.push_back(Ok(format!(
+        "Restore the dropped constraint '{}' and the open task '{}'.",
+        TRACE_FACTS[0], TRACE_FACTS[4]
+    )));
+    // The correction rebuilds the full oracle and passes re-audit.
+    harness.mock_chat_queue.push_back(Ok(format!(
+        "## Objective\nContinue safely\n## Important Details\n{}\n## Next Move\nReread old.rs",
+        TRACE_FACTS.join("\n")
+    )));
+    harness.mock_chat_queue.push_back(Ok("PASS".into()));
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    assert!(harness.drive_map_reduce(&tx).await.unwrap());
+    assert!(harness.mock_chat_queue.is_empty());
+    let view = trace_view(&harness.context_manager);
+    for fact in TRACE_FACTS {
+        assert!(view.contains(fact), "correction must restore: {fact}");
+    }
+}
+
+// CM-06: chronological precedence and cross-range audit scope. Scripted
+// replies remain an orchestration oracle, never a model-quality claim.
+#[tokio::test]
+async fn late_invalidation_supersedes_earlier_state_in_the_reduction() {
+    let mut manager = long_trace();
+    assert!(manager.begin_map_reduce(8_000));
+    for request in manager.pending_map_requests() {
+        let facts: Vec<_> = TRACE_FACTS
+            .iter()
+            .filter(|fact| request.prompt.contains(**fact))
+            .copied()
+            .collect();
+        let reply = if facts.is_empty() {
+            "Historical inspection; nothing to report.".to_string()
+        } else {
+            facts.join("\n")
+        };
+        assert!(manager.accept_map_summary(request.ordinal, &reply));
+    }
+    // The reducer is explicitly instructed to apply chronological precedence.
+    let reduce = manager.next_reduce_request().unwrap();
+    assert!(reduce.prompt.contains("Preserve chronological precedence"));
+    let oracle = format!(
+        "## Objective\nContinue safely\n## Important Details\n{}\n## Next Move\nReread old.rs",
+        TRACE_FACTS.join("\n")
+    );
+    while let Some(request) = manager.next_reduce_request() {
+        assert!(manager.accept_reduce_summary(&request, &oracle));
+    }
+    while let Some(validation) = manager.next_validation_request() {
+        assert!(manager.accept_validation(&validation, "PASS"));
+    }
+    assert!(manager.commit_map_reduce());
+    let view = trace_view(&manager);
+    for fact in TRACE_FACTS {
+        assert!(view.contains(fact));
+    }
+    assert!(!view.contains("STALE_CONTENT:"));
+}
+
+#[tokio::test]
+async fn cross_group_audits_cannot_see_another_groups_invalidation() {
+    let mut manager = ContextManager::new(2_000);
+    for turn in 0..8 {
+        if turn < 4 {
+            manager.add_user(&format!(
+                "early turn {turn}: DECISION: use SQLite for storage. {}",
+                "history ".repeat(600)
+            ));
+        } else {
+            manager.add_user(&format!(
+                "late turn {turn}: INVALIDATION: SQLite replaced by Postgres. {}",
+                "history ".repeat(600)
+            ));
+        }
+        manager.add_assistant("acknowledged", false);
+    }
+    let source_before = serde_json::to_value(manager.save_state().items).unwrap();
+    assert!(manager.begin_map_reduce(2_000));
+    for request in manager.pending_map_requests() {
+        let reply = if request.prompt.contains("replaced by Postgres") {
+            format!(
+                "INVALIDATION: SQLite replaced by Postgres\n{}",
+                "note ".repeat(450)
+            )
+        } else if request.prompt.contains("use SQLite") {
+            format!("DECISION: use SQLite for storage\n{}", "note ".repeat(450))
+        } else {
+            format!("Historical inspection. {}", "note ".repeat(450))
+        };
+        assert!(manager.accept_map_summary(request.ordinal, &reply));
+    }
+    // The candidate correctly applies precedence: it keeps the invalidation
+    // and drops the superseded SQLite decision.
+    let candidate = "## Objective\n- continue on Postgres\n## Important Details\n\
+                     INVALIDATION: SQLite replaced by Postgres\n## Next Move\nmigrate the schema";
+    while let Some(request) = manager.next_reduce_request() {
+        assert!(manager.accept_reduce_summary(&request, candidate));
+    }
+    // The first audit group holds only the early summaries: it sees the stale
+    // decision but never the later invalidation that justifies dropping it.
+    // A compliant auditor must therefore flag the correct drop as an
+    // omission — cross-range context never reaches grouped audits.
+    let early = manager.next_validation_request().unwrap();
+    let early_summaries = early
+        .prompt
+        .split("[Map summaries to audit]")
+        .last()
+        .unwrap();
+    assert!(early_summaries.contains("DECISION: use SQLite for storage"));
+    assert!(
+        !early_summaries.contains("replaced by Postgres"),
+        "the early audit group must not see the later invalidation"
+    );
+    assert!(manager.accept_validation(
+        &early,
+        "Restore the SQLite decision; the candidate omits it."
+    ));
+    // Intermediate groups stay early-era; keep accepting them until a group
+    // carrying the invalidation arrives.
+    let mut saw_late_group = false;
+    while let Some(group) = manager.next_validation_request() {
+        let summaries = group
+            .prompt
+            .split("[Map summaries to audit]")
+            .last()
+            .unwrap();
+        if summaries.contains("replaced by Postgres") {
+            assert!(group.start > early.start);
+            saw_late_group = true;
+        }
+        assert!(manager.accept_validation(&group, "PASS"));
+    }
+    assert!(saw_late_group);
+    // The false correction round-trips until the bounded budget is exhausted:
+    // two corrections are the limit, then no further correction is offered
+    // and nothing commits — the source stays intact for retry or abort.
+    assert!(manager.correction_request().is_some());
+    assert!(manager.accept_correction(candidate));
+    assert!(manager.next_validation_request().unwrap().start == 0);
+    assert!(manager.accept_validation(
+        &manager.next_validation_request().unwrap(),
+        "Restore the SQLite decision; the candidate omits it."
+    ));
+    while let Some(late) = manager.next_validation_request() {
+        assert!(manager.accept_validation(&late, "PASS"));
+    }
+    assert!(manager.correction_request().is_some());
+    assert!(manager.accept_correction(candidate));
+    assert!(manager.correction_request().is_none());
+    assert!(!manager.commit_map_reduce());
+    manager.abort_map_reduce();
+    assert_eq!(
+        serde_json::to_value(manager.save_state().items).unwrap(),
+        source_before
+    );
+}
+
+// CM-07: the correction request combines the candidate with every audit from
+// every validation group. Unlike reduce and validation inputs, nothing bounds
+// that combination, so a many-group audit round can exceed the model window.
+#[tokio::test]
+async fn oversized_correction_input_fails_preflight_and_preserves_staging() {
+    let mut harness = Harness::new_test().with_discovered_window(2_000);
+    harness.context_manager = ContextManager::new(2_000);
+    for turn in 0..8 {
+        harness
+            .context_manager
+            .add_user(&format!("turn {turn}: {}", "history ".repeat(600)));
+        harness.context_manager.add_assistant("acknowledged", false);
+    }
+    let source_before = serde_json::to_value(harness.context_manager.save_state().items).unwrap();
+    assert!(harness.context_manager.begin_map_reduce(2_000));
+    for request in harness.context_manager.pending_map_requests() {
+        assert!(harness.context_manager.accept_map_summary(
+            request.ordinal,
+            &format!("inspection\n{}", "note ".repeat(450))
+        ));
+    }
+    let candidate = "## Objective\n- continue\n## Next Move\nwrap up";
+    while let Some(request) = harness.context_manager.next_reduce_request() {
+        assert!(
+            harness
+                .context_manager
+                .accept_reduce_summary(&request, candidate)
+        );
+    }
+    // Every validation group flags, so the audits accumulate unbounded.
+    let audit = format!("Restore the omitted details. {}", "audit ".repeat(600));
+    let mut groups = 0;
+    while let Some(validation) = harness.context_manager.next_validation_request() {
+        assert!(
+            harness
+                .context_manager
+                .accept_validation(&validation, &audit)
+        );
+        groups += 1;
+    }
+    assert!(groups > 1, "fixture needs several audit groups");
+    let correction = harness.context_manager.correction_request().unwrap();
+    let encoding = crate::util::TokenEncoding::for_model(None);
+    let input = encoding.estimate(&correction.system) + encoding.estimate(&correction.prompt) + 64;
+    assert!(
+        input + 2_00 >= 2_000,
+        "reproduced: correction input {input} plus the output reservation exceeds the window"
+    );
+    // The preflight rejects the dispatch before any provider contact.
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let result = harness.drive_map_reduce(&tx).await;
+    assert!(
+        matches!(&result, Err(CompactionErr::ContextWindow { .. })),
+        "correction overflow must fail in preflight, not dispatch: {result:?}"
+    );
+    assert_eq!(
+        serde_json::to_value(harness.context_manager.save_state().items).unwrap(),
+        source_before
+    );
+    assert!(
+        harness.context_manager.save_state().map_reduce.is_some(),
+        "staging stays resumable after the rejected correction"
+    );
+    harness.context_manager.abort_map_reduce();
+    assert!(harness.context_manager.begin_map_reduce(2_000));
+    assert!(!harness.context_manager.pending_map_requests().is_empty());
 }

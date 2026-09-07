@@ -1724,13 +1724,13 @@ impl Harness {
             .saturating_add(encoding.estimate(&prompt))
             .saturating_add(64);
         let output_tokens = (window / 10).clamp(64, 2_000);
+        let connector = connector.with_max_tokens(output_tokens as u32);
+        let output_tokens = connector.effective_max_tokens().unwrap_or(output_tokens as u32) as usize;
         if input_tokens.saturating_add(output_tokens) >= window {
             return Err(CompactionErr::ContextWindow {
                 window_tokens: Some(window),
             });
         }
-        let connector = connector.with_max_tokens(output_tokens as u32);
-
         let mut stream = tokio::select! {
             result = connector.stream_chat_with_system_no_tools(&prompt, &system) => {
                 result.map_err(|error| match error {
@@ -2124,6 +2124,8 @@ impl Harness {
         if let Some(window) = self.known_checkpoint_window() {
             let encoding = crate::util::TokenEncoding::for_model(connector.effective_model());
             let output = (window / 10).clamp(64, 2_000);
+            connector = connector.with_max_tokens(output as u32);
+            let output = connector.effective_max_tokens().unwrap_or(output as u32) as usize;
             if encoding
                 .estimate(system)
                 .saturating_add(encoding.estimate(prompt))
@@ -2135,7 +2137,6 @@ impl Harness {
                     window_tokens: Some(window),
                 });
             }
-            connector = connector.with_max_tokens(output as u32);
         }
         let mut stream = tokio::select! {
             result = connector.stream_chat_with_system_no_tools(prompt, system) => {
@@ -3087,7 +3088,9 @@ impl Harness {
         // Rehydrate before dispatch. Restoring a point with no recorded plan
         // must clear an existing tool projection, not resurrect future work.
         if let Some(cosh) = &self.cosh_tools
-            && let Some(list) = self.context_manager.take_restored_todo_list()
+            && let Some(list) = self
+                .context_manager
+                .take_restored_todo_list()
                 .or_else(|| self.context_manager.todo_list().cloned())
         {
             cosh.restore_todo_list(list);

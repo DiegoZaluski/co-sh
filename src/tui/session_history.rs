@@ -199,6 +199,21 @@ pub(crate) enum ContextDelta {
     MapReduce {
         value: Box<Option<MapReduceState>>,
     },
+    /// One accepted map summary appended incrementally. Replayed onto the
+    /// current staging; ignored when the structure no longer matches (the
+    /// next whole-state delta corrects the projection).
+    MapSegmentAccepted {
+        ordinal: usize,
+        summary: String,
+    },
+    /// Exact bytes appended to a split buffer, with the fields that changed
+    /// alongside. Replayed without re-serializing the whole buffer.
+    SplitBufferAppend {
+        appended: String,
+        cursor: Option<u64>,
+        continuity: String,
+        buffer_tokens: usize,
+    },
     Todo {
         value: Option<TodoList>,
         #[serde(default)]
@@ -290,7 +305,8 @@ impl BranchProjection {
             })
             .collect();
         let last_kept_item = kept_ids.iter().copied().max().unwrap_or(0);
-        self.todo_points.retain(|(after_item_id, _)| *after_item_id <= last_kept_item);
+        self.todo_points
+            .retain(|(after_item_id, _)| *after_item_id <= last_kept_item);
         self.session.messages.truncate(split);
         let retained_messages: HashSet<&str> = self
             .session
@@ -479,11 +495,18 @@ impl HistoryProjection {
             Delta::Message { change } => apply_message(&mut state, change),
             Delta::Context { change } => {
                 let plan = match change {
-                    ContextDelta::Initialize { todo, todo_after_item_id, .. } => {
+                    ContextDelta::Initialize {
+                        todo,
+                        todo_after_item_id,
+                        ..
+                    } => {
                         state.todo_points.clear();
                         Some((todo, todo_after_item_id))
                     }
-                    ContextDelta::Todo { value, after_item_id } => Some((value, after_item_id)),
+                    ContextDelta::Todo {
+                        value,
+                        after_item_id,
+                    } => Some((value, after_item_id)),
                     _ => None,
                 };
                 if let Some((value, Some(after_item_id))) = plan {
@@ -524,9 +547,12 @@ impl HistoryProjection {
         if !matches!(reference.selection, Selection::AtEvent)
             && let Some(context) = state.context.as_mut()
         {
-            context.todo = state.todo_points.last()
+            context.todo = state
+                .todo_points
+                .last()
                 .and_then(|(_, event_id)| self.todo_values.get(event_id))
-                .cloned().flatten();
+                .cloned()
+                .flatten();
         }
         Ok(state)
     }
@@ -645,6 +671,29 @@ fn apply_context(state: &mut BranchProjection, change: &ContextDelta) {
         ContextDelta::Split { value } => context_or_default(state).split = value.clone(),
         ContextDelta::MapReduce { value } => {
             context_or_default(state).map_reduce = value.as_ref().clone();
+        }
+        ContextDelta::MapSegmentAccepted { ordinal, summary } => {
+            if let Some(segment) = context_or_default(state)
+                .map_reduce
+                .as_mut()
+                .and_then(|staging| staging.segments.iter_mut().find(|s| s.ordinal == *ordinal))
+                && segment.summary.is_none()
+            {
+                segment.summary = Some(summary.clone());
+            }
+        }
+        ContextDelta::SplitBufferAppend {
+            appended,
+            cursor,
+            continuity,
+            buffer_tokens,
+        } => {
+            if let Some(split) = context_or_default(state).split.as_mut() {
+                split.buffer.push_str(appended);
+                split.cursor = *cursor;
+                split.continuity = continuity.clone();
+                split.buffer_tokens = *buffer_tokens;
+            }
         }
         ContextDelta::VisibleFrom { value } => context_or_default(state).visible_from = *value,
         ContextDelta::Hidden { item_ids, hidden } => {

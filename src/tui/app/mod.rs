@@ -345,15 +345,15 @@ impl App {
         let mut state = AppState::new();
         state.working_directory = cwd;
 
-        // Load session summaries derived from the immutable histories.
-        // Full sessions are loaded lazily into the LRU cache on demand.
-        let session_store = SessionStore::new();
-        state.session_summaries = session_store.list_sessions();
-
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (answer_tx, _answer_rx) = mpsc::unbounded_channel();
         let (perm_tx, _perm_rx) = mpsc::unbounded_channel();
         let (usage_cost_tx, usage_cost_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // Load session summaries derived from the immutable histories.
+        // Full sessions are loaded lazily into the LRU cache on demand.
+        let session_store = SessionStore::new().with_notify(event_tx.clone());
+        state.session_summaries = session_store.list_sessions();
 
         let theme_registry = ThemeRegistry::new();
         let setup = crate::util::setup::Setup::load();

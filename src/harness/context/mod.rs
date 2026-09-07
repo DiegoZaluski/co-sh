@@ -92,12 +92,15 @@ pub enum ContextItem {
         /// Gemini 3.x thought signature of the native `functionCall` —
         /// replayed verbatim in the next request's history (the API rejects
         /// the call without it). Empty for inline-JSON calls and for every
-        /// other provider.
+        /// other provider. Defaults for contexts persisted before this field.
+        #[serde(default)]
         thought_signature: String,
         /// Claude extended-thinking blocks that preceded this tool call in the
         /// original response — replayed VERBATIM (text + signature) at the
         /// start of the assistant message in the next request (the API rejects
         /// modified/missing blocks with 400). Empty for every other provider.
+        /// Defaults for contexts persisted before this field.
+        #[serde(default)]
         thinking_blocks: Vec<ClaudeThinkingBlock>,
     },
     /// A tool RESULT — structural, never prose-compressed. Renders as a

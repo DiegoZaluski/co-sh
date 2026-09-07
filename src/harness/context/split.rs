@@ -14,6 +14,8 @@ use super::summarize::{SPLIT_SUMMARIZER_SYSTEM, build_split_prompt, serialize_it
 use super::{ContextItem, ContextManager};
 use serde::{Deserialize, Serialize};
 
+pub(super) const VERIFIED_SPLIT_VERSION: u8 = 1;
+
 /// The final anchor buffer must stay at or below this fraction of the model's
 /// window (the "ceiling" — the max capacity of the concatenation buffer).
 const SPLIT_BUFFER_MAX_PCT: f64 = 0.40;
@@ -49,6 +51,9 @@ const SPLIT_CALL_OVERHEAD: usize = 8000;
 /// the split resumes exactly where it stopped.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SplitState {
+    /// Zero denotes legacy generated text with no completion verification.
+    #[serde(default)]
+    pub version: u8,
     /// Concatenated chunk summaries produced so far (the growing buffer).
     pub buffer: String,
     /// Id of the next item to summarize (`None` = the beginning of the
@@ -118,6 +123,7 @@ impl ContextManager {
             Some(split) => split.window = window,
             None => {
                 self.split = Some(SplitState {
+                    version: VERIFIED_SPLIT_VERSION,
                     buffer: String::new(),
                     cursor: None,
                     continuity: String::new(),
@@ -311,6 +317,13 @@ impl ContextManager {
     /// (the anchor is still too big) the timeline is left untouched and the
     /// caller records the provider as stuck and notifies.
     pub fn commit_split(&mut self) -> bool {
+        if self
+            .split
+            .as_ref()
+            .is_some_and(|s| s.version != VERIFIED_SPLIT_VERSION)
+        {
+            return false;
+        }
         let Some(split) = self.split.take() else {
             return false;
         };

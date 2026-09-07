@@ -8,4 +8,5 @@ pub(crate) mod internal_tool;
 pub(crate) mod loop_latency;
 pub(crate) mod manual_compaction;
 pub(crate) mod permission;
+pub(crate) mod reasoning_ownership;
 pub(crate) mod repro_compaction_loop;

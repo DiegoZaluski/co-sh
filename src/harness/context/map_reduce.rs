@@ -20,7 +20,8 @@ const MAX_REREAD_RANGES: usize = 3;
 const MAX_REPARTITIONS: u8 = 3;
 const MAX_REDUCTION_LEVELS: usize = 8;
 const MAX_CORRECTIONS: u8 = 2;
-const MAP_REDUCE_VERSION: u8 = 2;
+// Version three accepts generated evidence only after normal stream completion.
+const MAP_REDUCE_VERSION: u8 = 3;
 
 const fn map_reduce_version() -> u8 {
     // Missing versions belong to legacy byte-sliced staging.
@@ -150,6 +151,30 @@ impl ContextManager {
     #[must_use]
     pub fn compaction_staging_active(&self) -> bool {
         self.map_reduce_active() || self.split_active()
+    }
+
+    /// Discard only derived progress generated before completion checks existed.
+    /// Source events and committed checkpoints are never changed by migration.
+    pub fn discard_unverified_compaction_staging(&mut self) -> bool {
+        let old_map = self
+            .map_reduce
+            .as_ref()
+            .is_some_and(|s| s.version != MAP_REDUCE_VERSION);
+        let old_split = self
+            .split
+            .as_ref()
+            .is_some_and(|s| s.version != super::split::VERIFIED_SPLIT_VERSION);
+        if old_map {
+            self.map_reduce = None;
+        }
+        if old_split {
+            self.split = None;
+        }
+        if old_map || old_split {
+            // The new reconstruction path gets one bounded recovery attempt.
+            self.overflow_model = None;
+        }
+        old_map || old_split
     }
 
     /// Freeze the currently planned checkpoint source into range-only map
@@ -933,6 +958,28 @@ mod tests {
         assert_eq!(
             before,
             serde_json::to_value(manager.save_state().items).unwrap()
+        );
+    }
+
+    #[test]
+    fn unverified_version_two_checkpoint_cannot_commit_and_rebuilds_from_source() {
+        let mut manager = multi_item_manager(2_000);
+        assert!(manager.begin_map_reduce(2_000));
+        let before = serde_json::to_value(manager.save_state().items).unwrap();
+        let state = manager.map_reduce.as_mut().unwrap();
+        state.version = 2;
+        state.phase = MapReducePhase::Ready;
+        state.final_summary = Some("possibly truncated checkpoint".into());
+        for segment in &mut state.segments {
+            segment.summary = Some("possibly truncated map".into());
+        }
+        assert!(!manager.commit_map_reduce());
+        assert!(manager.begin_map_reduce(2_000));
+        assert_eq!(manager.map_progress().0, 0);
+        assert!(manager.map_reduce.as_ref().unwrap().final_summary.is_none());
+        assert_eq!(
+            serde_json::to_value(manager.save_state().items).unwrap(),
+            before
         );
     }
 

@@ -11,7 +11,12 @@ The protected tool plan is also structured session state. Plan changes append
 block and the tool's editable list before the first agent iteration. Empty and
 completed plans remain persisted even when their block is not displayed. Older
 histories without a recorded plan still load; a missing plan is not guessed from
-summary text. Historical-message plan selection is still under review.
+summary text. Each plan delta binds to its recorded context-item boundary.
+Historical fork/revert selections resolve the applicable plan event; rollback
+restores the exact prior head, including an empty or completed plan. Branches
+carry only derived event references, not duplicate plan histories. An older
+plan without a source binding is usable at its head but is not guessed for an
+earlier message selection.
 
 ## Model-view policy
 
@@ -27,7 +32,8 @@ summary text. Historical-message plan selection is still under review.
    files, and code anchors. Changed-file observations must be marked stale.
 4. When one-shot compaction cannot fit, build independent map summaries and
    hierarchically reduce them. There is no greedy continuation buffer for new
-   compactions. Previously persisted legacy split staging remains resumable.
+   compactions. Legacy staging without completion verification is rebuilt from
+   the immutable source, without reusing its generated text.
 
 Manual compaction preserves its existing whole-responded-history behavior.
 Unanswered or queued user messages remain verbatim when prior responded work
@@ -84,8 +90,9 @@ New summarization streams must report natural completion (`stop`, Gemini's
 reasons, and missing termination signals reject the response before it becomes
 checkpoint evidence. A received usage report is still emitted for that rejected
 response. Existing bounded retries and explicitly configured fallback models
-apply; no extra model is selected. Resumable staging created before these checks
-does not contain completion evidence and remains a migration follow-up.
+apply; no extra model is selected. On the next compaction attempt, staging
+created before these checks is invalidated with an appended projection update
+and a toast, then reconstructed from source through the authorized model chain.
 
 ### Whole-item segments
 
@@ -100,9 +107,10 @@ It does not trigger textual slicing or unchanged singleton retries.
 
 The application, not the model, owns coverage metadata.
 Accepted results survive interruption and restore. Source fingerprints prevent
-staging from being reused after a same-ID source replacement. Version-one
-byte-sliced MapReduce staging is read for compatibility but restarted from the
-immutable source items; fragment-derived summaries are not reused. Saving the
+staging from being reused after a same-ID source replacement. MapReduce versions
+one (byte-sliced) and two (without completion checks), and unversioned legacy
+split buffers, are read for compatibility but rebuilt from immutable source.
+Version three MapReduce staging retains normally completed responses. Saving the
 new staging appends deltas, leaving the legacy events and original source intact.
 Already committed checkpoints are not rewritten by this staging migration.
 
