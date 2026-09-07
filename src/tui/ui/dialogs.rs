@@ -50,6 +50,7 @@ const SHORTCUTS: &[ShortcutLine] = &[
     ShortcutLine::Key("Ctrl+C", "Copy selection / Quit cosh?"),
     ShortcutLine::Key("Ctrl+T", "Toggle thinking (show/hide reasoning)"),
     ShortcutLine::Key("Ctrl+D", "Toggle tool details (show/hide completed)"),
+    ShortcutLine::Key("Ctrl+E", "Toggle diagnostics (show/hide LSP findings)"),
     ShortcutLine::Key("Ctrl+G", "Toggle generic tool output"),
     ShortcutLine::Gap,
     ShortcutLine::Header("Session"),
@@ -66,6 +67,66 @@ const SHORTCUTS: &[ShortcutLine] = &[
     ShortcutLine::Key("Alt+\u{2190}/\u{2192}", "Switch agent queue"),
     ShortcutLine::Key("Shift+B / Shift+N", "Cycle agent queue (panel focused)"),
 ];
+
+/// Geometry of the shortcuts overlay, derived from its own rows: the widest
+/// key + description pair drives the width, so adding a shortcut never
+/// requires retuning hardcoded sizes. Two padding columns sit on each side
+/// of the content, and the key column fits the longest binding plus one gap
+/// column before the descriptions.
+struct ShortcutsLayout {
+    dialog_x: u16,
+    dialog_y: u16,
+    dialog_w: u16,
+    dialog_h: u16,
+    max_visible: usize,
+    key_col: u16,
+}
+
+fn shortcuts_layout(area: Rect) -> ShortcutsLayout {
+    let key_col = SHORTCUTS
+        .iter()
+        .filter_map(|e| match e {
+            ShortcutLine::Key(k, _) => Some(k.chars().count()),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0) as u16;
+
+    let content_w = SHORTCUTS
+        .iter()
+        .map(|e| match e {
+            ShortcutLine::Gap => 0,
+            ShortcutLine::Header(t) => t.chars().count() as u16,
+            ShortcutLine::Key(_, d) => key_col + 1 + d.chars().count() as u16,
+        })
+        .max()
+        .unwrap_or(0);
+
+    // 2 padding columns each side; keep the title band unclipped.
+    let dialog_w = (content_w + 4)
+        .max(24)
+        .min(area.width.saturating_sub(6))
+        .max(10);
+
+    let entries = SHORTCUTS.len();
+    let max_visible = (area.height.saturating_sub(4) as usize)
+        .min(entries)
+        .max(1)
+        .clamp(1, 20);
+    let list_h = max_visible as u16;
+    // Title row + gap row + list rows + padding top/bottom (no border).
+    let dialog_h = 1 + 1 + list_h + 2;
+    let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
+    let dialog_y = area.y + area.height.saturating_sub(dialog_h) / 2;
+    ShortcutsLayout {
+        dialog_x,
+        dialog_y,
+        dialog_w,
+        dialog_h,
+        max_visible,
+        key_col,
+    }
+}
 
 fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
     let right = x + max_w;
@@ -799,15 +860,15 @@ impl DialogState {
                 DialogAction::Consumed
             }
             DialogType::Shortcuts { scroll } => {
-                let max_w = 59u16.min(area.width.saturating_sub(6)).max(30);
-                let entries = SHORTCUTS.len();
-                let max_visible = (area.height.saturating_sub(4)) as usize;
-                let max_visible = max_visible.min(entries).max(1).clamp(1, 20);
-                let list_h = max_visible as u16;
-                let dialog_h = 1 + list_h + 2;
-                let dialog_w = max_w;
-                let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
-                let dialog_y = area.y + area.height.saturating_sub(dialog_h) / 2;
+                let layout = shortcuts_layout(area);
+                let ShortcutsLayout {
+                    dialog_x,
+                    dialog_y,
+                    dialog_w,
+                    dialog_h,
+                    max_visible,
+                    ..
+                } = layout;
 
                 // Click outside → dismiss
                 if x < dialog_x
@@ -818,8 +879,9 @@ impl DialogState {
                     return DialogAction::Dismissed;
                 }
 
-                // Scroll on click inside list area
-                let list_top = dialog_y + 2;
+                // Scroll on click inside list area (rows start after the
+                // title row and its gap row, matching the render)
+                let list_top = dialog_y + 3;
                 if y_click >= list_top {
                     let row = (y_click - list_top) as usize;
                     if row < max_visible {
@@ -827,7 +889,7 @@ impl DialogState {
                         if row <= max_visible / 2 {
                             *scroll = scroll.saturating_sub(1);
                         } else {
-                            let max_scroll = entries.saturating_sub(max_visible);
+                            let max_scroll = SHORTCUTS.len().saturating_sub(max_visible);
                             *scroll = (*scroll + 1).min(max_scroll);
                         }
                     }
@@ -1412,16 +1474,15 @@ impl DialogState {
             }
             DialogType::Shortcuts { scroll } => {
                 // Shortcuts overlay - scrollable list of keyboard shortcuts (no border)
-                let max_w = 59u16.min(area.width.saturating_sub(6)).max(30);
-                let entries = SHORTCUTS.len();
-                let max_visible = (area.height.saturating_sub(4)) as usize;
-                let max_visible = max_visible.min(entries).max(1).clamp(1, 20);
-                let list_h = max_visible as u16;
-                // Title row + gap row + list rows + padding top/bottom (no border)
-                let dialog_h = 1 + 1 + list_h + 2;
-                let dialog_w = max_w;
-                let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
-                let dialog_y = area.y + area.height.saturating_sub(dialog_h) / 2;
+                let layout = shortcuts_layout(area);
+                let ShortcutsLayout {
+                    dialog_x,
+                    dialog_y,
+                    dialog_w,
+                    dialog_h,
+                    max_visible,
+                    key_col,
+                } = layout;
 
                 // Fill background with the same panel color as the left
                 // sidebar, so the dialog matches the app's left panel.
@@ -1458,6 +1519,7 @@ impl DialogState {
                 );
 
                 // Ensure scroll is within bounds
+                let entries = SHORTCUTS.len();
                 let max_scroll = entries.saturating_sub(max_visible);
                 let scroll = (*scroll).min(max_scroll);
 
@@ -1486,9 +1548,10 @@ impl DialogState {
                             );
                         }
                         ShortcutLine::Key(key_str, desc) => {
-                            // Key column (left-aligned, accent color, fixed width)
+                            // Key column (left-aligned, accent color, sized to
+                            // the longest binding)
                             let key_x = dialog_x + 2;
-                            let key_w = 15u16;
+                            let key_w = key_col;
                             draw_text_line(
                                 buf,
                                 key_str,
@@ -1499,7 +1562,7 @@ impl DialogState {
                             );
 
                             // Description column
-                            let desc_x = key_x + key_w;
+                            let desc_x = key_x + key_w + 1;
                             let desc_w =
                                 dialog_w.saturating_sub(2).saturating_sub(desc_x - dialog_x);
                             draw_text_line(
