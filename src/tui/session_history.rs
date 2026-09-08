@@ -345,7 +345,10 @@ pub(crate) struct HistoryProjection {
     pub reverts: Vec<RevertRecord>,
     pub last_event_id: u64,
     /// Count of events skipped for having a non-monotonic id (stale-writer
-    /// collisions). Diagnostic only; the first writer's event always wins.
+    /// collisions). Per-id first-writer-wins is the finest sound granularity:
+    /// the log records no save boundaries, so when the first writer's block
+    /// was shorter, the stale writer's trailing deltas merge deterministically
+    /// (pinned by `unequal_collision_blocks_merge_deterministically`).
     pub skipped_non_monotonic: usize,
 }
 
@@ -416,6 +419,17 @@ impl HistoryProjection {
                 }
                 Err(error) => return Err(error),
             }
+        }
+        if projection.skipped_non_monotonic > 0 {
+            // The log records no save boundaries, so per-id first-writer-wins
+            // is the finest sound healing granularity: when the first
+            // writer's block was SHORTER than the stale writer's, the stale
+            // writer's trailing deltas merge deterministically on top of the
+            // first writer's state. Make that outcome visible, not silent.
+            log::warn!(
+                "session history healed {} stale-writer duplicate event(s); a shorter first-writer block lets the stale writer's trailing deltas merge (no save boundaries exist in the log)",
+                projection.skipped_non_monotonic
+            );
         }
         for branch in projection.branches.values_mut() {
             if let Some(context) = branch.context.as_mut() {

@@ -2502,6 +2502,103 @@ mod tests {
         );
     }
 
+    /// Unequal collision blocks: the first writer appends a ONE-event block,
+    /// the stale second writer a TWO-event block starting at the same id.
+    /// The log records no save boundaries, so replay cannot tell where the
+    /// stale writer's block ends — its trailing ids continue contiguously
+    /// exactly like the next healthy save's would. First-writer-wins
+    /// therefore holds per ID (B's rename is skipped), and B's trailing
+    /// deltas merge deterministically on top of the first writer's state.
+    /// Skipping the tail would mean guessing a boundary absent from the log;
+    /// the only sound alternative (skip to end of file) would drop possibly
+    /// healthy later saves. So the merge IS the healing semantics: no data
+    /// loss, no byte rewritten, and the next save continues cleanly.
+    #[test]
+    fn unequal_collision_blocks_merge_deterministically() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+        let session = make_test_session("cm09-unequal", "Unequal", vec![make_user_msg("m1", "hi")]);
+        store.save_session(&session);
+        let path = store.file_path(&session.id);
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let last_id = contents
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|event| event["branch_id"] == "cm09-unequal")
+            .map(|event| event["event_id"].as_u64().unwrap_or(0))
+            .max()
+            .unwrap_or(0);
+
+        // A saves one delta (a context scalar); B's stale view saves two
+        // deltas (a rename plus a different scalar) starting at the same id.
+        let writer_a = [HistoryEvent::new(
+            last_id + 1,
+            "cm09-unequal",
+            Delta::Context {
+                change: ContextDelta::MaxTokens { value: 123 },
+            },
+        )];
+        let writer_b = [
+            HistoryEvent::new(
+                last_id + 1,
+                "cm09-unequal",
+                Delta::Metadata {
+                    change: MetadataDelta::Title {
+                        title: "process B".into(),
+                        title_generated: true,
+                    },
+                },
+            ),
+            HistoryEvent::new(
+                last_id + 2,
+                "cm09-unequal",
+                Delta::Context {
+                    change: ContextDelta::MaxTokens { value: 999 },
+                },
+            ),
+        ];
+        assert!(append_events(&path, &contents, &writer_a).is_ok());
+        let after_a = std::fs::read_to_string(&path).unwrap();
+        assert!(append_events(&path, &after_a, &writer_b).is_ok());
+        let collided = std::fs::read(&path).unwrap();
+
+        // First writer wins the colliding ID: B's rename is skipped.
+        let reloaded = store.load_session(&session.id).unwrap();
+        assert_eq!(
+            reloaded.title, "Unequal",
+            "B's colliding rename must be skipped"
+        );
+        // B's trailing scalar merges on top of A's state — the deterministic,
+        // data-preserving outcome (see the test doc comment).
+        assert_eq!(
+            store.load_context(&session.id).unwrap().max_tokens,
+            999,
+            "the stale writer's trailing delta merges deterministically"
+        );
+        // Healing must not rewrite history.
+        assert_eq!(std::fs::read(&path).unwrap(), collided);
+
+        // The next save continues past the merged ids without colliding.
+        let mut context = make_context(vec![user_item(1, "hi")]);
+        context.items.push_back(assistant_item(2, "hello"));
+        store.save_session_with_context(&session, &context);
+        assert!(std::fs::read(&path).unwrap().starts_with(&collided));
+        assert_eq!(store.load_context(&session.id).unwrap().items.len(), 2);
+        let tail_id: u64 = {
+            let contents = std::fs::read_to_string(&path).unwrap();
+            contents
+                .lines()
+                .rev()
+                .find_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .and_then(|event| event["event_id"].as_u64())
+                .unwrap_or(0)
+        };
+        assert!(
+            tail_id >= last_id + 3,
+            "the recovery save must continue past the merged ids: tail={tail_id}"
+        );
+    }
+
     /// The lock is bound to the open file description: a holder KILLED while
     /// holding it is cleaned up by the kernel, so the store writes straight
     /// through with no orphan lockfile and no visible contention.

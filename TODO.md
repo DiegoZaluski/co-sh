@@ -433,6 +433,17 @@ without discussing them with the user. `ISSUES.md` stays uncommitted.
   preserved and skipped, single- and multi-event collision blocks heal
   first-writer-wins, and the next save continues past the winning id with
   every earlier byte intact.
+  CAVEAT (proven by regression, `unequal_collision_blocks_merge_deterministically`):
+  the log records no save boundaries, so per-id first-writer-wins is the
+  finest sound healing granularity. When the first writer's block was SHORTER
+  than the stale writer's, the stale writer's trailing deltas merge
+  deterministically on top of the first writer's state (first writer wins the
+  colliding id; the stale tail applies). Skipping the tail would require
+  guessing a boundary absent from the log — its ids continue contiguously
+  exactly like the next healthy save's — and the only sound alternative
+  (skip to end of file) would silently drop possibly-healthy later saves.
+  Replay logs a summary warning whenever duplicates were skipped, making the
+  merge visible instead of silent.
 
 ## Review phase D — Persistence efficiency and durability (complete)
 
