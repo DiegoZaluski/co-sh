@@ -255,10 +255,11 @@ pub struct App {
     /// may discard ONLY this message, and ONLY while its session is still on
     /// screen: the previous iteration's transcript (with its tool parts) must
     /// survive a provider retry, and a session switch must never make a
-    /// late reset reach another session's messages.
-    stream_msg_id: Option<(String, String)>,
+    /// late reset reach another session's messages. `pub(crate)`: cleared
+    /// by `routes::session::delete` when it stops a deleted session's loop.
+    pub(crate) stream_msg_id: Option<(String, String)>,
     terminal_focused: bool,
-    agent_spinner_bass: Option<AgentSpinnerBass>,
+    pub(crate) agent_spinner_bass: Option<AgentSpinnerBass>,
     /// Latest context manager info for the budget bar (None if no data yet).
     context_info: Option<cosh::harness::ContextDisplayInfo>,
     /// What the left panel shows (history vs dashboard) and its dashboard

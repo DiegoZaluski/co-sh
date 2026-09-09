@@ -7,6 +7,7 @@ use ratatui::style::Color;
 
 use super::{App, AppMode};
 use crate::component::spinner_highlight::HighlightSpinner;
+use crate::routes::session::delete::terminated_loop_save_target;
 use crate::routes::session::queue_choice::QueueTarget;
 use crate::session_store::is_valid_session;
 use crate::types::SessionStatus;
@@ -553,8 +554,17 @@ impl App {
                     // must not stay running (the stopwatch would tick forever).
                     self.finalize_stale_compaction_lines();
 
+                    // Persist the OWNING session (TUI-A), never the viewed
+                    // one. Owner gone (deleted mid-run) → skip save/title.
+                    let done_target = match self.active_loop_session_id.clone() {
+                        Some(owner) => terminated_loop_save_target(
+                            Some(owner.as_str()),
+                            |id| self.state.session_cache.contains(id),
+                        ),
+                        None => self.state.current_session_id.clone(),
+                    };
                     // Persist session to disk if it has valid dialog
-                    if let Some(id) = self.state.current_session_id.clone()
+                    if let Some(id) = done_target
                         && let Some(session) = self.state.session_cache.get_mut(&id)
                         && is_valid_session(session)
                     {
@@ -703,15 +713,30 @@ impl App {
                     // Session-scoped servers (see the Done handler): keep the
                     // last LSP snapshot; the next turn refreshes it.
                     self.finalize_stale_compaction_lines();
-                    self.toast_state.show(ToastOptions {
-                        title: Some("Interrupted".into()),
-                        message: "Agent loop was stopped.".into(),
-                        variant: ToastVariant::Warning,
-                        duration_ms: 3000,
-                    });
+                    // Route the save by loop owner, never by the viewed
+                    // session (TUI-A): deleting background owner A while
+                    // viewing B must not write A's context into B. When the
+                    // owner is gone (deleted mid-run) skip save + toast.
+                    // `None` owner = legacy path without owner tracking:
+                    // fall back to the current session to preserve behavior.
+                    let save_target = match self.active_loop_session_id.clone() {
+                        Some(owner) => terminated_loop_save_target(
+                            Some(owner.as_str()),
+                            |id| self.state.session_cache.contains(id),
+                        ),
+                        None => self.state.current_session_id.clone(),
+                    };
+                    if save_target.is_some() {
+                        self.toast_state.show(ToastOptions {
+                            title: Some("Interrupted".into()),
+                            message: "Agent loop was stopped.".into(),
+                            variant: ToastVariant::Warning,
+                            duration_ms: 3000,
+                        });
+                    }
 
                     // Persist session to disk even when stopped (partial dialog is still valuable)
-                    if let Some(id) = self.state.current_session_id.clone()
+                    if let Some(id) = save_target
                         && let Some(session) = self.state.session_cache.get_mut(&id)
                         && is_valid_session(session)
                     {

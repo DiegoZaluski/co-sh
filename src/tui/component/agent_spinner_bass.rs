@@ -135,7 +135,9 @@ fn seeded_rng(seed: u64) -> impl Iterator<Item = u64> {
 /// SplitMix64-style hash collapsed to `[0.0, 1.0)`. Drives the random
 /// updraft targets so surges are unpredictable per bar and segment while
 /// staying fully deterministic (pure function of the seed, column and
-/// segment index).
+/// segment index). NOTE: `(h >> 11) as f32` carries only ~24-bit mantissa
+/// resolution — fine visually; the `[0,1)` range promise is about bounds,
+/// not precision.
 #[allow(clippy::cast_precision_loss)]
 fn noise01(seed: u64, col: u64, seg: u64) -> f32 {
     let mut h = seed
@@ -226,6 +228,8 @@ impl AgentSpinnerBass {
     }
 
     /// Advance the animation by one frame. Call once per rendered frame.
+    /// NOTE: animation speed is frame-rate dependent (`TIME_STEP` assumes
+    /// ~30fps); acceptable for a spinner, same as the previous component.
     pub fn advance(&mut self) {
         self.frames_elapsed = self.frames_elapsed.saturating_add(1);
 
@@ -250,7 +254,8 @@ impl AgentSpinnerBass {
         self.initialized = false;
     }
 
-    /// Change the label text (width is recomputed).
+    /// Change the label text (width is recomputed). Seed/birth rhythm is
+    /// intentionally preserved across label changes (no visual restart).
     pub fn set_label(&mut self, label: &str) {
         self.label = label.to_string();
         self.label_width = label.chars().count();
@@ -279,6 +284,17 @@ impl AgentSpinnerBass {
     /// Whether the birth animation is still playing.
     pub const fn is_initialized(&self) -> bool {
         self.initialized
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ellipsis_frame(&self) -> &'static str {
+        let idx = (self.ellipsis_step / ELLIPSIS_ANIM_SPEED) as usize % ELLIPSIS_FRAMES.len();
+        ELLIPSIS_FRAMES[idx]
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ellipsis_x_for_test(&self) -> u16 {
+        self.bar_count as u16 + 1 + self.label_width as u16
     }
 
     // ── Waveform ────────────────────────────────────────────────────────
@@ -322,7 +338,7 @@ impl AgentSpinnerBass {
     fn updraft(&self, col: usize, frame: u32) -> f32 {
         let interval = UPDRAFT_INTERVAL;
         let phase = (noise01(self.seed, col as u64, u64::MAX) * interval as f32) as u32;
-        let shifted = frame + phase;
+        let shifted = frame.saturating_add(phase);
         let seg = shifted / interval;
         #[allow(clippy::cast_precision_loss)]
         let t = (shifted % interval) as f32 / interval as f32;
@@ -413,7 +429,7 @@ impl AgentSpinnerBass {
 
         // 1. Equalizer bars (block glyphs shaded by their current height)
         for col in 0..self.bar_count {
-            let cell_x = x + col as u16;
+            let cell_x = x.saturating_add(col as u16);
             let style = Style::default().fg(rgba_color(self.bar_color(col, frame)));
 
             if let Some(cell) = buf.cell_mut((cell_x, y)) {
@@ -422,9 +438,13 @@ impl AgentSpinnerBass {
             }
         }
 
-        // 2. Gap between equalizer and label
+        // 2. Gap between equalizer and label. All `x` offsets use
+        // `saturating_add` (terminal coords are `u16`; `x` near `MAX` must
+        // clamp, never wrap). Out-of-bounds cells are safely clipped by
+        // `cell_mut` returning `None` — narrow terminals truncate, never
+        // panic. `width()` is advisory for layout; `render` itself clips.
         if self.label_width > 0 {
-            let gap_x = x + self.bar_count as u16;
+            let gap_x = x.saturating_add(self.bar_count as u16);
             if let Some(cell) = buf.cell_mut((gap_x, y)) {
                 cell.set_char(' ');
                 cell.set_style(Style::default());
@@ -433,10 +453,10 @@ impl AgentSpinnerBass {
 
         // 3. Label text
         if self.label_width > 0 {
-            let label_x = x + self.bar_count as u16 + 1;
+            let label_x = x.saturating_add(self.bar_count as u16).saturating_add(1);
             let label_style = Style::default().fg(rgba_color(self.label_color));
             for (i, ch) in self.label.chars().enumerate() {
-                let cell_x = label_x + i as u16;
+                let cell_x = label_x.saturating_add(i as u16);
                 if let Some(cell) = buf.cell_mut((cell_x, y)) {
                     cell.set_char(ch);
                     cell.set_style(label_style);
@@ -444,18 +464,33 @@ impl AgentSpinnerBass {
             }
         }
 
-        // 4. Animated ellipsis (only after birth animation is complete)
+        // 4. Animated ellipsis (only after birth animation is complete).
+        // The slot is always padded to the widest frame (TUI-C): shrinking
+        // `...` → `""` must clear stale dots instead of ghosting them.
         if self.initialized && self.label_width > 0 {
             let ellipsis_idx =
                 (self.ellipsis_step / ELLIPSIS_ANIM_SPEED) as usize % ELLIPSIS_FRAMES.len();
             let ellipsis_text = ELLIPSIS_FRAMES[ellipsis_idx];
-            let ellipsis_x = x + self.bar_count as u16 + 1 + self.label_width as u16;
+            let ellipsis_max = ELLIPSIS_FRAMES.iter().map(|f| f.chars().count()).max().unwrap_or(0);
+            let ellipsis_x = x
+                .saturating_add(self.bar_count as u16)
+                .saturating_add(1)
+                .saturating_add(self.label_width as u16);
             let ellipsis_style = Style::default().fg(rgba_color(self.label_color));
+            let mut written = 0usize;
             for (i, ch) in ellipsis_text.chars().enumerate() {
-                let cell_x = ellipsis_x + i as u16;
+                let cell_x = ellipsis_x.saturating_add(i as u16);
                 if let Some(cell) = buf.cell_mut((cell_x, y)) {
                     cell.set_char(ch);
                     cell.set_style(ellipsis_style);
+                }
+                written += 1;
+            }
+            for i in written..ellipsis_max {
+                let cell_x = ellipsis_x.saturating_add(i as u16);
+                if let Some(cell) = buf.cell_mut((cell_x, y)) {
+                    cell.set_char(' ');
+                    cell.set_style(Style::default());
                 }
             }
         }
@@ -745,6 +780,60 @@ mod tests {
             }
         }
         assert!(comparisons > 0, "no bar ever reached both extremes");
+    }
+
+    #[test]
+    fn repro_c_ellipsis_shrink_clears_stale_dots() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        let registry = crate::theme::ThemeRegistry::new();
+        let theme = registry.get("opencode").cloned().unwrap();
+        let mut spinner = AgentSpinnerBass::new("W", &theme);
+        // Force birth complete so the ellipsis renders.
+        for _ in 0..(BIRTH_DELAY_MAX + BIRTH_GROW_FRAMES + 10) {
+            spinner.advance();
+        }
+        while spinner.ellipsis_frame() != "..." {
+            spinner.advance();
+        }
+        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 1));
+        spinner.render(&mut buf, 0, 0);
+        let ex = spinner.ellipsis_x_for_test();
+        assert_eq!(buf[(ex, 0)].symbol(), ".");
+        assert_eq!(buf[(ex + 2, 0)].symbol(), ".");
+        // Shrink to the empty frame: stale dots must be cleared to spaces.
+        while spinner.ellipsis_frame() != "" {
+            spinner.advance();
+        }
+        spinner.render(&mut buf, 0, 0);
+        assert_eq!(
+            buf[(ex, 0)].symbol(),
+            " ",
+            "BUG TUI-C: ellipsis ghosting — '...'→'' leaves stale dots"
+        );
+        assert_eq!(
+            buf[(ex + 2, 0)].symbol(),
+            " ",
+            "BUG TUI-C: ellipsis ghosting — trailing slot not padded"
+        );
+    }
+
+    #[test]
+    fn narrow_terminal_clips_without_panic() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        let registry = crate::theme::ThemeRegistry::new();
+        let theme = registry.get("opencode").cloned().unwrap();
+        let mut spinner = AgentSpinnerBass::new("Working", &theme);
+        for _ in 0..60 {
+            spinner.advance();
+        }
+        // Far narrower than `width()`: must truncate via `cell_mut`, never panic.
+        let mut buf = Buffer::empty(Rect::new(0, 0, 10, 1));
+        spinner.render(&mut buf, 0, 0);
+        // Full width still renders the ellipsis slot.
+        let mut full = Buffer::empty(Rect::new(0, 0, 40, 1));
+        spinner.render(&mut full, 0, 0);
     }
 
     #[test]

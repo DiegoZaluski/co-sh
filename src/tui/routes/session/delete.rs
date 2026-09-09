@@ -31,17 +31,36 @@ use crate::types::SessionStatus;
 ///
 /// The stop fires only when the deleted session owns the live loop: it is
 /// the recorded loop owner (`active_loop_session_id`) and the app is
-/// actually inside a run (`Working` or `Retry` status — `Retry` matters
-/// because an Error event can flip the status while a loop is still
-/// winding down). Any other combination — no running loop, or a loop owned
-/// by a different session — deletes without touching the shared stop
-/// signal.
+/// actually inside a run (`loop_running`). Only `Working` counts as
+/// running — `Retry` is terminal (the `Error` handler already ran
+/// `handle_loop_end` and the harness thread exited), so raising the stop
+/// signal for it would stop a dead loop. Any other combination — no running
+/// loop, or a loop owned by a different session — deletes without touching
+/// the shared stop signal.
 pub fn deletion_stops_running_loop(
     active_loop_session_id: Option<&str>,
     session_id: &str,
     loop_running: bool,
 ) -> bool {
     loop_running && active_loop_session_id == Some(session_id)
+}
+
+/// Save target for a terminated loop event (`Stopped`/`Done`).
+///
+/// Returns the owning session id when it still exists in `session_cache`,
+/// otherwise `None` (owner deleted while the harness wound down — the
+/// caller must skip the save AND the toast, never fall back to the
+/// currently viewed session).
+pub fn terminated_loop_save_target(
+    active_loop_session_id: Option<&str>,
+    session_cache_contains: impl Fn(&str) -> bool,
+) -> Option<String> {
+    let owner = active_loop_session_id?;
+    if session_cache_contains(owner) {
+        Some(owner.to_string())
+    } else {
+        None
+    }
 }
 
 impl App {
@@ -53,12 +72,14 @@ impl App {
     /// them. The loop is stopped with the shared stop signal; the harness's
     /// terminal `Stopped` event performs the remaining cleanup (status,
     /// spinner, stream reset, queue parking, MCP shutdown), so this method
-    /// only has to raise the flag and drop the loop-owned senders.
+    /// raises the flag, drops the loop-owned senders, and clears the owner
+    /// record plus the in-flight stream marker so late harness events can
+    /// detect the owner is gone instead of touching the viewed session.
     pub fn delete_session(&mut self, session_id: &str) {
-        let loop_running = matches!(
-            self.state.status,
-            SessionStatus::Working | SessionStatus::Retry { .. }
-        );
+        // Only a live `Working` loop can be stopped. `Retry` is the terminal
+        // state left by `HarnessEvent::Error` (thread already exited via
+        // `handle_loop_end(false)`), so it must not raise the stop signal.
+        let loop_running = matches!(self.state.status, SessionStatus::Working);
         if deletion_stops_running_loop(
             self.active_loop_session_id.as_deref(),
             session_id,
@@ -75,6 +96,16 @@ impl App {
             self.next_request_in_flight = false;
             self.queue_actions_deferred_start = false;
             self.hovered_queue_row = None;
+            // Clear the owner record (TUI-B): a dangling id would let
+            // `pump_queued_messages` and `UserMessageInjected` act for a
+            // dead session, and would hide the "owner gone" signal the
+            // `Stopped` handler needs (TUI-A).
+            self.active_loop_session_id = None;
+            // Snapshot/clear the in-flight stream marker (TUI-G): late
+            // `Streaming`/`Question` events keyed by the old id must not
+            // append to whatever session is viewed next.
+            self.stream_msg_id = None;
+            self.agent_spinner_bass = None;
             if self
                 .edit_requeue_hint
                 .as_ref()
@@ -198,6 +229,113 @@ mod tests {
         assert!(!deletion_stops_running_loop(Some("s"), "other", true));
         assert!(!deletion_stops_running_loop(Some("s"), "s", false));
         assert!(!deletion_stops_running_loop(None, "s", true));
+    }
+
+    // ── Reproducers for Major review findings (must fail before fix) ──
+
+    /// TUI-B: deleting the loop owner must clear `active_loop_session_id`,
+    /// otherwise it dangles at the deleted id until the next start.
+    #[tokio::test]
+    async fn repro_b_owner_cleared_when_its_loop_is_stopped() {
+        let mut app = app_with_running_loop_on("loop-owner");
+        app.delete_session("loop-owner");
+        assert_eq!(
+            app.active_loop_session_id, None,
+            "BUG TUI-B: active_loop_session_id dangles at deleted session"
+        );
+    }
+
+    /// TUI-B (background delete): deleting background owner A while viewing
+    /// B must also clear the owner record so a late `Stopped` can detect
+    /// the owner is gone instead of saving A's context into B.
+    #[tokio::test]
+    async fn repro_a_background_delete_clears_owner_so_stopped_skips_save() {
+        let mut app = app_with_running_loop_on("owner-a");
+        app.state.add_empty_session("viewer-b".into(), "t".into(), 0);
+        app.state.current_session_id = Some("viewer-b".to_string());
+        app.delete_session("owner-a");
+        assert_eq!(
+            app.active_loop_session_id, None,
+            "BUG TUI-A/B: owner still points at deleted session; Stopped would save into viewer-b"
+        );
+        assert_eq!(
+            app.state.current_session_id.as_deref(),
+            Some("viewer-b"),
+            "viewed session must survive a background delete"
+        );
+    }
+
+    /// TUI-G: stopping a loop must snapshot/clear `stream_msg_id` so late
+    /// `Streaming` events cannot append to the wrong session.
+    #[tokio::test]
+    async fn repro_g_stream_msg_cleared_when_loop_stopped_by_delete() {
+        let mut app = app_with_running_loop_on("loop-owner");
+        app.stream_msg_id = Some(("loop-owner".to_string(), "msg-1".to_string()));
+        app.delete_session("loop-owner");
+        assert!(
+            app.stream_msg_id.is_none(),
+            "BUG TUI-G: stream_msg_id survives delete; late events can hit wrong session"
+        );
+    }
+
+    #[tokio::test]
+    async fn double_delete_is_safe() {
+        let mut app = app_with_running_loop_on("loop-owner");
+        app.delete_session("loop-owner");
+        // Second delete of the same (now gone) id must not panic or
+        // resurrect state.
+        app.delete_session("loop-owner");
+        assert!(app.state.current_session_id.is_none());
+        assert_eq!(app.active_loop_session_id, None);
+    }
+
+    #[tokio::test]
+    async fn deleting_unrelated_session_preserves_other_sessions_hint_state() {
+        let mut app = app_with_running_loop_on("loop-owner");
+        app.state.add_empty_session("bystander".into(), "t".into(), 0);
+        app.queue_actions_deferred_start = true;
+        app.delete_session("bystander");
+        // Unrelated delete must not touch the running loop's deferred start.
+        assert!(app.queue_actions_deferred_start);
+        assert_eq!(app.active_loop_session_id.as_deref(), Some("loop-owner"));
+    }
+
+    #[test]
+    fn terminated_loop_save_target_routes_by_owner() {
+        use super::terminated_loop_save_target;
+        // Owner present → save owner.
+        assert_eq!(
+            terminated_loop_save_target(Some("a"), |id| id == "a"),
+            Some("a".to_string())
+        );
+        // Owner deleted → skip (never fall back to viewed session).
+        assert_eq!(
+            terminated_loop_save_target(Some("a"), |_| false),
+            None
+        );
+        // No owner tracking → caller falls back to current (handled outside).
+        assert_eq!(terminated_loop_save_target(None, |_| true), None);
+    }
+
+    /// TUI-D: after `Error` the harness thread has exited (`Retry` status,
+    /// spinner cleared). Deleting the session then must NOT raise the stop
+    /// signal for a dead loop.
+    #[tokio::test]
+    async fn repro_d_retry_after_error_is_not_a_running_loop() {
+        let mut app = App::new("/tmp".to_string());
+        app.state.add_empty_session("err-one".into(), "t".into(), 0);
+        app.state.current_session_id = Some("err-one".into());
+        app.state.status = SessionStatus::Retry {
+            message: "boom".into(),
+            action: None,
+        };
+        app.active_loop_session_id = Some("err-one".into());
+        app.stop_signal.store(false, Ordering::Relaxed);
+        app.delete_session("err-one");
+        assert!(
+            !app.stop_signal.load(Ordering::Relaxed),
+            "BUG TUI-D: stop_signal raised for Retry after Error (loop already exited)"
+        );
     }
 }
 
