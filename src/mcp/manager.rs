@@ -2,9 +2,10 @@ use std::collections::HashMap;
 use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, CallToolResult, Tool};
-use rmcp::service::{RoleClient, RunningService};
+use rmcp::service::{
+    ClientInitializeError, ClientLifecycleMode, ClientServiceExt, RoleClient, RunningService,
+};
 use rmcp::transport::{
     IntoTransport, StreamableHttpClientTransport, TokioChildProcess,
     streamable_http_client::StreamableHttpClientTransportConfig,
@@ -14,11 +15,45 @@ use super::bridge::{is_tool_error, result_to_text};
 use super::config::{HttpTransport, McpConfig, McpServerEntry, McpTransport, StdioTransport};
 use super::error::McpError;
 use super::types::ServerSnapshot;
-use super::{validate_mcp_config, validate_mcp_entry};
+use super::{era, validate_mcp_config, validate_mcp_entry};
 
 /// Handshake budget (spawn + `initialize` + first `tools/list`). Cold `npx`
 /// downloads can be slow, so this is generous on purpose.
 const HANDSHAKE_TIMEOUT_MS: u64 = 60_000;
+
+/// How an unknown server's modern probe may fail before the other era is
+/// tried, and whether a probe timeout counts as era evidence.
+///
+/// Per the spec's transport bindings (versioning page, "Backward
+/// Compatibility"): on stdio, "the probe returns a non-modern error **or
+/// times out**" — a silent legacy server is a legitimate legacy signal. On
+/// Streamable HTTP, only the 4xx-body classification identifies legacy; a
+/// network timeout says nothing about the era, so HTTP never flips on
+/// timeout (the client would otherwise retry legacy against an unreachable
+/// or overloaded remote for every request).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ProbePolicy {
+    /// Budget for the open-ended modern probe of an unknown server.
+    pub(crate) timeout: Duration,
+    /// Whether a probe timeout is era evidence (stdio: yes, HTTP: no).
+    pub(crate) flip_on_timeout: bool,
+}
+
+impl ProbePolicy {
+    /// stdio servers boot slowly (cold `npx`), and a silent server is a
+    /// legitimate legacy signal per the spec's stdio binding.
+    pub(crate) const STDIO: Self = Self {
+        timeout: era::PROBE_TIMEOUT,
+        flip_on_timeout: true,
+    };
+
+    /// A network timeout is not era evidence on HTTP; the spec classifies
+    /// legacy there by response body only.
+    pub(crate) const HTTP: Self = Self {
+        timeout: era::PROBE_TIMEOUT,
+        flip_on_timeout: false,
+    };
+}
 
 /// Per-call budget for stdio servers. Local tools often shell out to builds
 /// and searches, so this is a backstop against hangs, not a latency target.
@@ -42,6 +77,12 @@ pub struct McpManager {
     entries: Vec<McpServerEntry>,
     running: HashMap<String, RunningServer>,
     failures: HashMap<String, String>,
+    /// Cached protocol era per server (see `era`). The spec says era is a
+    /// property of the server (stdio process or HTTP origin), not of a
+    /// connection: a reconnect must not re-probe. In-memory only, so an app
+    /// restart re-probes once — deliberately trading a probe for never
+    /// serving from stale on-disk state.
+    eras: HashMap<String, era::Era>,
 }
 
 impl McpManager {
@@ -99,15 +140,13 @@ impl McpManager {
         let call_timeout = call_timeout_for(entry);
         let outcome = match &entry.transport {
             McpTransport::Stdio(stdio) => {
-                let transport = match spawn_stdio(&entry.name, stdio) {
-                    Ok(transport) => transport,
-                    Err(err) => {
-                        let err = McpError::Connect(entry.name.clone(), err.to_string());
-                        self.failures.insert(entry.name.clone(), err.to_string());
-                        return Err(err);
-                    }
+                let name = entry.name.clone();
+                let transport = move || {
+                    spawn_stdio(&name, stdio)
+                        .map_err(|err| McpError::Connect(name.clone(), err.to_string()))
                 };
-                self.register(&entry.name, transport, call_timeout).await
+                self.register_with_retry(&entry.name, transport, call_timeout, ProbePolicy::STDIO)
+                    .await
             }
             McpTransport::Http(http) => {
                 let config = match http_config(http) {
@@ -118,8 +157,10 @@ impl McpManager {
                         return Err(err);
                     }
                 };
-                let transport = StreamableHttpClientTransport::from_config(config);
-                self.register(&entry.name, transport, call_timeout).await
+                let transport =
+                    move || Ok(StreamableHttpClientTransport::from_config(config.clone()));
+                self.register_with_retry(&entry.name, transport, call_timeout, ProbePolicy::HTTP)
+                    .await
             }
         };
         // A standalone `connect_one` must leave a `Failed` snapshot behind,
@@ -147,6 +188,13 @@ impl McpManager {
             self.disconnect(&name).await;
         }
         self.failures.clear();
+    }
+
+    /// The era the server last settled in, for tests and diagnostics.
+    /// `None` when never connected in this manager's lifetime.
+    #[cfg(test)]
+    pub(crate) fn era_of(&self, name: &str) -> Option<era::Era> {
+        self.eras.get(name).copied()
     }
 
     /// Footer view: one snapshot per registered server, in config order.
@@ -237,39 +285,66 @@ impl McpManager {
         }
     }
 
-    /// Handshake a transport and publish its tools under `entry_name`.
-    /// Shared by [`Self::connect_one`] and the harness test hook; generic
-    /// over transports so tests can inject in-memory duplex pairs.
-    pub(crate) async fn register<T, E, A>(
+    /// Connect a transport and publish its tools under `entry_name`.
+    ///
+    /// One connection attempt in a known era.
+    ///
+    /// - `Modern`: rmcp's `Discover` lifecycle — a `server/discover` round
+    ///   trip negotiates the version, then every request carries per-request
+    ///   metadata.
+    /// - `Legacy`: rmcp's `Initialize` lifecycle — the classic handshake.
+    ///
+    /// A correlated JSON-RPC rejection while dialing is mapped to
+    /// [`McpError::EraStale`] (flip evidence); see `map_initialize_error`.
+    /// On success the settled era is read back from `peer_info` and cached.
+    async fn connect_in_era<T, E, A>(
         &mut self,
         entry_name: &str,
         transport: T,
         call_timeout: Duration,
+        budget: Duration,
+        era: era::Era,
     ) -> Result<(), McpError>
     where
         T: IntoTransport<RoleClient, E, A>,
         E: std::error::Error + Send + Sync + 'static,
     {
+        let lifecycle = match era {
+            era::Era::Modern => ClientLifecycleMode::Discover {
+                preferred_versions: era::preferred_versions(),
+            },
+            era::Era::Legacy => ClientLifecycleMode::Initialize,
+        };
+        log::debug!("mcp: dialing '{entry_name}' in {}", era.label());
+
         let connect = async {
-            let client = ().serve(transport).await.map_err(|err| {
-                McpError::Connect(entry_name.to_string(), err.to_string())
-            })?;
+            let client = ()
+                .serve_with_lifecycle(transport, lifecycle)
+                .await
+                .map_err(map_initialize_error(entry_name, era))?;
             let tools = client
                 .list_all_tools()
                 .await
                 .map_err(|err| McpError::ListTools(entry_name.to_string(), err.to_string()))?;
             Ok::<_, McpError>((client, tools))
         };
-        // The configured per-call budget also bounds the handshake from
-        // below: a server allowed slow calls gets a slow handshake too.
-        // Transport-internal knobs (rmcp control/session timeouts) stay at
-        // their defaults — only the outer budget is ours.
-        let handshake = call_timeout.max(Duration::from_millis(HANDSHAKE_TIMEOUT_MS));
-        let (client, tools) = tokio::time::timeout(handshake, connect)
-            .await
-            .map_err(|_| {
+        let (client, tools) = tokio::time::timeout(budget, connect).await.map_err(|_| {
+            // A modern-mode dial that gets no answer in time is a typed
+            // outcome: the caller decides per transport policy whether
+            // silence means "legacy" or "unreachable". A legacy dial
+            // timing out is a plain failure — a legacy server answers
+            // `initialize` or it is down.
+            if era == era::Era::Modern {
+                McpError::ProbeTimedOut(entry_name.to_string(), budget.as_millis() as u64)
+            } else {
                 McpError::Connect(entry_name.to_string(), "handshake timed out".to_string())
-            })??;
+            }
+        })??;
+
+        // Read the era back rather than trusting the assumption: if the SDK
+        // ever settles differently than the lifecycle we dialed, the cache
+        // records what the server actually speaks.
+        let settled = era::era_of(client.peer_info().as_deref());
         self.failures.remove(entry_name);
         self.running.insert(
             entry_name.to_string(),
@@ -279,7 +354,149 @@ impl McpManager {
                 call_timeout,
             },
         );
+        self.eras.insert(entry_name.to_string(), settled);
+        log::debug!("mcp: '{entry_name}' settled in {}", settled.label());
         Ok(())
+    }
+
+    /// Connect with era detection and the cached-assumption retry.
+    ///
+    /// Implements the spec's dual-era mechanics (versioning page,
+    /// "Backward Compatibility") with explicit dials instead of rmcp's
+    /// `Auto` lifecycle: `Auto` falls back to `initialize` on the *same*
+    /// transport session, but rmcp servers stick a modern opener marker on
+    /// a session whose first message was `discover`, so a same-transport
+    /// fallback gets every later legacy request rejected. Dialing fresh per
+    /// attempt sidesteps that and keeps each attempt's session era-pure.
+    ///
+    /// - Unknown server: dial modern (`server/discover` probe). A correlated
+    ///   non-modern rejection — the legacy signature — falls back to one
+    ///   legacy dial. On stdio, a silent server (probe timeout) does the
+    ///   same, per the spec's stdio binding. A modern-identified rejection
+    ///   (reserved -3202x codes, no compatible version) is a hard failure:
+    ///   the server *is* modern, there is nothing to fall back to.
+    /// - Cached era: dial directly in it. A correlated rejection
+    ///   ([`McpError::EraStale`]) refutes the assumption, so retry once in
+    ///   the other era — the spec's "re-probe if the cached assumption later
+    ///   fails". Transport failures and timeouts carry no era evidence and
+    ///   keep the cache.
+    ///
+    /// `transport` is a factory because a consumed transport (a stdio child
+    /// process, a duplex pair) cannot be reused for the second dial. The
+    /// whole cycle shares one budget, `max(call_timeout, HANDSHAKE)`.
+    pub(crate) async fn register_with_retry<T, E, A, F>(
+        &mut self,
+        entry_name: &str,
+        mut transport: F,
+        call_timeout: Duration,
+        probe_policy: ProbePolicy,
+    ) -> Result<(), McpError>
+    where
+        F: FnMut() -> Result<T, McpError>,
+        T: IntoTransport<RoleClient, E, A>,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        let budget = call_timeout.max(Duration::from_millis(HANDSHAKE_TIMEOUT_MS));
+        let deadline = tokio::time::Instant::now() + budget;
+        let remaining = || deadline.saturating_duration_since(tokio::time::Instant::now());
+
+        let first = match self.eras.get(entry_name).copied() {
+            Some(cached) => cached,
+            None => era::Era::Modern,
+        };
+        // An unknown server's open-ended probe gets the policy budget; a
+        // cached-era dial is a direct negotiation, not a search.
+        let probing = !self.eras.contains_key(entry_name);
+        let first_budget = if probing {
+            probe_policy.timeout
+        } else {
+            remaining()
+        };
+        log::debug!(
+            "mcp: probing '{entry_name}' ({}): era={}, probe_budget={}ms, flip_on_timeout={} (-{} cache)",
+            if probing { "unknown" } else { "cached" },
+            first.label(),
+            first_budget.as_millis(),
+            probe_policy.flip_on_timeout,
+            if probing { "no" } else { "yes" }
+        );
+
+        let first_transport = transport()?;
+        let first_err = match self
+            .connect_in_era(entry_name, first_transport, call_timeout, first_budget, first)
+            .await
+        {
+            Ok(()) => return Ok(()),
+            Err(err) => err,
+        };
+
+        let flip = match (&first_err, first) {
+            // Correlated rejection: the assumed era was refused. During a
+            // probe this is the legacy signature; on a cached era it is the
+            // spec's refuted assumption. Either way, the other era is next.
+            (McpError::EraStale(..), assumed) => Some(assumed.other()),
+            // Probe timeout on a stdio server: silence is a legitimate
+            // legacy signal there (a silent legacy binary ignores discover
+            // entirely). It also heals a stale Modern cache pointing at a
+            // server that was replaced by a silent legacy one; if the
+            // server is merely hung, the legacy dial fails too and the
+            // cache is cleared — one extra dial, same outcome. HTTP never
+            // flips on a timeout: a network timeout says nothing about
+            // which dialect the remote speaks.
+            (McpError::ProbeTimedOut(..), era::Era::Modern) if probe_policy.flip_on_timeout => {
+                log::debug!(
+                    "mcp: '{entry_name}' probe timed out after {}ms; stdio policy treats silence as a legacy signal",
+                    probe_policy.timeout.as_millis()
+                );
+                Some(era::Era::Legacy)
+            }
+            // Modern-identified rejections (reserved codes, no compatible
+            // version) prove the server *is* modern — no fall-back mechanism
+            // exists per the spec. HTTP probe timeouts and transport
+            // failures carry no era evidence at all.
+            _ => None,
+        };
+        let Some(next) = flip else {
+            log::debug!(
+                "mcp: '{entry_name}' failed in {} without era evidence: {first_err}",
+                first.label()
+            );
+            self.failures.insert(entry_name.to_string(), first_err.to_string());
+            return Err(first_err);
+        };
+        log::info!(
+            "mcp: '{entry_name}' refused {}; falling back to {}",
+            first.label(),
+            next.label()
+        );
+        self.eras.insert(entry_name.to_string(), next);
+
+        // Spawn failure on the retry dial: the era evidence stands, so the
+        // cache keeps `next`, but there is nothing to report but the cause.
+        let second_transport = transport()?;
+        match self
+            .connect_in_era(entry_name, second_transport, call_timeout, remaining(), next)
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(second) => {
+                self.failures
+                    .insert(entry_name.to_string(), second.to_string());
+                // The cycle ended without a working era and the original
+                // assumption was refuted: nothing valid is known anymore,
+                // so the next reconnect starts from a fresh probe.
+                self.eras.remove(entry_name);
+                log::debug!(
+                    "mcp: '{entry_name}' failed in {} too; era cache cleared, next reconnect re-probes",
+                    next.label()
+                );
+                if matches!(second, McpError::EraStale(..)) {
+                    Err(era_loop_failed(entry_name, next, second))
+                } else {
+                    Err(second)
+                }
+            }
+        }
     }
 
     fn upsert_entry(&mut self, entry: &McpServerEntry) {
@@ -292,7 +509,7 @@ impl McpManager {
 
     /// Register a placeholder entry for a test-injected transport. The entry
     /// only keys snapshots and routing order; the tools come from the live
-    /// handshake in [`Self::register`].
+    /// handshake in [`Self::register_with_retry`].
     #[cfg(test)]
     pub(crate) fn insert_test_entry(&mut self, entry: McpServerEntry) {
         self.upsert_entry(&entry);
@@ -304,6 +521,59 @@ fn call_timeout_for(entry: &McpServerEntry) -> Duration {
         McpTransport::Stdio(_) => Duration::from_millis(STDIO_CALL_TIMEOUT_MS),
         McpTransport::Http(http) => Duration::from_millis(http.timeout_ms),
     }
+}
+
+/// Map rmcp's client initialization error to our `McpError`.
+///
+/// A correlated JSON-RPC rejection while dialing an assumed era carries
+/// flip evidence: a non-modern code against a modern assumption is the
+/// legacy signature; a modern-reserved code against a legacy assumption
+/// proves the server modern. The inverse combinations are plain failures
+/// (a modern probe rejected with modern codes means version mismatch, not
+/// a legacy server). Transport errors, timeouts, and closing handshakes
+/// carry no era evidence and stay [`McpError::Connect`].
+fn map_initialize_error(entry_name: &str, assumed: era::Era) -> impl Fn(ClientInitializeError) -> McpError + '_ {
+    move |err| match err {
+        ClientInitializeError::JsonRpcError(data) => match assumed {
+            // Modern dial refused with a modern-reserved code: the server
+            // *is* modern but rejected this dial (version mismatch, missing
+            // capabilities). Not a legacy signal — there is nothing to
+            // fall back to.
+            era::Era::Modern if era::is_modern_error(&data) => {
+                McpError::Connect(entry_name.to_string(), data.to_string())
+            }
+            // Modern dial refused with any other correlated error: the
+            // legacy signature (spec: "fall back on any error that is not
+            // a recognized modern error").
+            era::Era::Modern => {
+                McpError::EraStale(entry_name.to_string(), assumed.label(), data.to_string())
+            }
+            // Legacy dial refused at all — with any correlated error: a
+            // legacy server accepts `initialize` from a legacy-revision
+            // client, so a rejection identifies a modern server. This
+            // includes UnsupportedProtocolVersionError, which is how a
+            // modern-only server answers an initialize naming an old
+            // version (no fall-forward exists, so flip instead).
+            era::Era::Legacy => {
+                McpError::EraStale(entry_name.to_string(), assumed.label(), data.to_string())
+            }
+        },
+        _ => McpError::Connect(entry_name.to_string(), err.to_string()),
+    }
+}
+
+/// A retry in the freshly assumed era also failed: both eras were rejected
+/// in one connection cycle. Report the retried era and its cause so the
+/// user sees why neither dialect connected.
+fn era_loop_failed(entry_name: &str, retried: era::Era, second: McpError) -> McpError {
+    McpError::Connect(
+        entry_name.to_string(),
+        format!(
+            "neither protocol era is accepted: {} was refused first, and the {} retry also failed ({second})",
+            retried.other().label(),
+            retried.label()
+        ),
+    )
 }
 
 /// Open the stderr log for a stdio server: `<temp>/cosh/log/mcp_server_<label>_<ts>.log`.
@@ -385,6 +655,7 @@ impl std::error::Error for InvalidHeader {}
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn stderr_log_path_is_sanitized_and_inside_temp_cosh_log() {
@@ -401,9 +672,10 @@ mod tests {
 
     use rmcp::handler::server::ServerHandler;
     use rmcp::model::{
-        CallToolResponse, CallToolResult, ContentBlock, ListToolsResult, PaginatedRequestParams,
-        ServerCapabilities, ServerInfo,
+        CallToolResponse, CallToolResult, ContentBlock, DiscoverResult, ListToolsResult,
+        PaginatedRequestParams, ServerCapabilities, ServerInfo,
     };
+    use super::super::ServerStatus;
     use rmcp::service::{MaybeSendFuture, RequestContext, RoleServer};
     use rmcp::{ErrorData as McpErrorData, ServiceExt};
 
@@ -412,11 +684,37 @@ mod tests {
         tool: String,
         delay_ms: u64,
         fail: bool,
+        /// Counts `server/discover` probes so tests can assert era behavior.
+        probe_requests: Arc<AtomicUsize>,
+    }
+
+    fn ok_server(tool: &str, delay_ms: u64, fail: bool) -> (OkServer, Arc<AtomicUsize>) {
+        let probe_requests = Arc::new(AtomicUsize::new(0));
+        let server = OkServer {
+            tool: tool.into(),
+            delay_ms,
+            fail,
+            probe_requests: Arc::clone(&probe_requests),
+        };
+        (server, probe_requests)
     }
 
     impl ServerHandler for OkServer {
         fn get_info(&self) -> ServerInfo {
             ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        }
+
+        fn discover(
+            &self,
+            _context: RequestContext<RoleServer>,
+        ) -> impl std::future::Future<Output = Result<DiscoverResult, McpErrorData>>
+        + MaybeSendFuture
+        + '_ {
+            self.probe_requests.fetch_add(1, Ordering::Relaxed);
+            std::future::ready(Ok(DiscoverResult::from_server_info(
+                self.supported_protocol_versions().into_owned(),
+                self.get_info(),
+            )))
         }
 
         async fn call_tool(
@@ -463,15 +761,35 @@ mod tests {
         delay_ms: u64,
         fail: bool,
     ) {
-        let (server_io, client_io) = tokio::io::duplex(4096);
-        let handler = OkServer {
-            tool: tool.into(),
-            delay_ms,
-            fail,
-        };
-        tokio::spawn(async move {
-            let _ = handler.serve(server_io).await.unwrap().waiting().await;
-        });
+        let (server, _probes) = ok_server(tool, delay_ms, fail);
+        attach_server(manager, name, server).await;
+    }
+
+    /// Spawn `handler` on a duplex pair and register the client end under
+    /// `name` through the production retry path.
+    async fn attach_server<H>(manager: &mut McpManager, name: &str, handler: H)
+    where
+        H: ServerHandler + Clone + Send + Sync + 'static,
+    {
+        attach_server_full(manager, name, handler, ProbePolicy::STDIO, era::PROBE_TIMEOUT)
+            .await
+            .unwrap();
+    }
+
+    /// [`attach_server`] with an explicit probe policy and budget, for the
+    /// silent-server and version-mismatch matrix tests (a real 10 s probe
+    /// budget would slow the suite for nothing). Returns the connect
+    /// outcome so failure-path tests can assert on it.
+    async fn attach_server_full<H>(
+        manager: &mut McpManager,
+        name: &str,
+        handler: H,
+        policy: ProbePolicy,
+        probe_timeout: Duration,
+    ) -> Result<(), McpError>
+    where
+        H: ServerHandler + Clone + Send + Sync + 'static,
+    {
         // Mirror `connect_one` hygiene: one entry per name, stale client
         // dropped before the new one registers.
         manager.disconnect(name).await;
@@ -489,10 +807,28 @@ mod tests {
                 enabled: true,
             });
         }
+        // A duplex transport is consumed by a connection attempt, so the
+        // factory dials a fresh pair (and a fresh server instance) each time
+        // — exactly what an era retry needs.
+        let factory = move || {
+            let (server_io, client_io) = tokio::io::duplex(4096);
+            let handler = handler.clone();
+            tokio::spawn(async move {
+                let _ = handler.serve(server_io).await.unwrap().waiting().await;
+            });
+            Ok::<_, McpError>(client_io)
+        };
         manager
-            .register(name, client_io, Duration::from_millis(200))
+            .register_with_retry(
+                name,
+                factory,
+                Duration::from_millis(200),
+                ProbePolicy {
+                    timeout: probe_timeout,
+                    ..policy
+                },
+            )
             .await
-            .unwrap();
     }
 
     fn http_entry(name: &str, url: &str) -> McpServerEntry {
@@ -505,6 +841,47 @@ mod tests {
             }),
             enabled: true,
         }
+    }
+
+    /// Live end-to-end connect against the official MCP test server over a
+    /// real stdio child. Ignored by default — run explicitly with
+    /// `cargo test --lib -- --ignored live_connects`: needs `npx` on PATH
+    /// and downloads the package on first run. Exercises the exact
+    /// production path (`connect_all` → `spawn_stdio` → era probe), which
+    /// the duplex-based tests above never touch.
+    #[tokio::test]
+    #[ignore = "live: spawns npx and downloads @modelcontextprotocol/server-everything"]
+    async fn live_connects_server_everything_over_stdio() {
+        let mut manager = McpManager::new();
+        let config = McpConfig {
+            servers: vec![McpServerEntry {
+                name: "everything".into(),
+                transport: McpTransport::Stdio(StdioTransport {
+                    command: "npx".into(),
+                    args: vec![
+                        "-y".into(),
+                        "@modelcontextprotocol/server-everything".into(),
+                    ],
+                    env: HashMap::new(),
+                    cwd: None,
+                }),
+                enabled: true,
+            }],
+        };
+        manager.connect_all(&config).await.unwrap();
+        let snaps = manager.status_snapshots();
+        assert_eq!(snaps.len(), 1, "{snaps:?}");
+        assert_eq!(snaps[0].status, ServerStatus::Ready, "{snaps:?}");
+        assert!(snaps[0].tool_count > 0, "{snaps:?}");
+        // The npm-published server (pre-July TS SDK) does not implement
+        // `server/discover`, so the probe is rejected and the fallback
+        // settles legacy — exactly the dual-era path this client exists
+        // for. Pin only that the connect itself is healthy.
+        assert_eq!(
+            manager.era_of("everything"),
+            Some(era::Era::Legacy),
+            "{snaps:?}"
+        );
     }
 
     #[tokio::test]
@@ -597,6 +974,340 @@ mod tests {
             snapshots[0].status,
             super::super::ServerStatus::Connecting
         ));
+    }
+
+    /// Legacy-era server: `initialize` works, but `server/discover` is
+    /// rejected with an implementation-defined method error — a correlated
+    /// JSON-RPC rejection, per the era tests' probe expectations.
+    #[derive(Clone)]
+    struct LegacyOnlyServer {
+        tool: String,
+    }
+
+    impl ServerHandler for LegacyOnlyServer {
+        fn get_info(&self) -> ServerInfo {
+            ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        }
+
+        fn discover(
+            &self,
+            _context: RequestContext<RoleServer>,
+        ) -> impl std::future::Future<Output = Result<DiscoverResult, McpErrorData>>
+        + MaybeSendFuture
+        + '_ {
+            std::future::ready(Err(McpErrorData::new(
+                rmcp::model::ErrorCode::METHOD_NOT_FOUND,
+                "unknown method: server/discover",
+                None,
+            )))
+        }
+
+        fn list_tools(
+            &self,
+            _request: Option<PaginatedRequestParams>,
+            _context: RequestContext<RoleServer>,
+        ) -> impl std::future::Future<Output = Result<ListToolsResult, McpErrorData>>
+        + MaybeSendFuture
+        + '_ {
+            let mut tool = Tool::default();
+            tool.name = self.tool.clone().into();
+            tool.input_schema = Arc::new(serde_json::Map::new());
+            async move {
+                Ok(ListToolsResult {
+                    tools: vec![tool],
+                    ..Default::default()
+                })
+            }
+        }
+    }
+
+    /// Modern-era server: answers `server/discover` but rejects the legacy
+    /// `initialize` handshake with a correlated JSON-RPC error.
+    #[derive(Clone)]
+    struct ModernOnlyServer {
+        tool: String,
+    }
+
+    impl ServerHandler for ModernOnlyServer {
+        fn get_info(&self) -> ServerInfo {
+            ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        }
+
+        fn supported_protocol_versions(&self) -> std::borrow::Cow<'static, [rmcp::model::ProtocolVersion]> {
+            std::borrow::Cow::Borrowed(&[rmcp::model::ProtocolVersion::V_2026_07_28])
+        }
+
+        fn initialize(
+            &self,
+            _request: rmcp::model::InitializeRequestParams,
+            _context: RequestContext<RoleServer>,
+        ) -> impl std::future::Future<Output = Result<rmcp::model::InitializeResult, McpErrorData>>
+        + MaybeSendFuture
+        + '_ {
+            std::future::ready(Err(McpErrorData::new(
+                rmcp::model::ErrorCode::METHOD_NOT_FOUND,
+                "unknown method: initialize",
+                None,
+            )))
+        }
+
+        fn list_tools(
+            &self,
+            _request: Option<PaginatedRequestParams>,
+            _context: RequestContext<RoleServer>,
+        ) -> impl std::future::Future<Output = Result<ListToolsResult, McpErrorData>>
+        + MaybeSendFuture
+        + '_ {
+            let mut tool = Tool::default();
+            tool.name = self.tool.clone().into();
+            tool.input_schema = Arc::new(serde_json::Map::new());
+            async move {
+                Ok(ListToolsResult {
+                    tools: vec![tool],
+                    ..Default::default()
+                })
+            }
+        }
+    }
+
+    /// A pre-discover-era stdio server: it never answers
+    /// `server/discover` (the method postdates it), but handshakes and
+    /// serves tools over the legacy protocol just fine.
+    #[derive(Clone)]
+    struct SilentServer {
+        tool: String,
+    }
+
+    impl ServerHandler for SilentServer {
+        fn get_info(&self) -> ServerInfo {
+            ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        }
+
+        async fn discover(
+            &self,
+            _context: RequestContext<RoleServer>,
+        ) -> Result<DiscoverResult, McpErrorData> {
+            std::future::pending().await
+        }
+
+        fn list_tools(
+            &self,
+            _request: Option<PaginatedRequestParams>,
+            _context: RequestContext<RoleServer>,
+        ) -> impl std::future::Future<Output = Result<ListToolsResult, McpErrorData>>
+        + MaybeSendFuture
+        + '_ {
+            let mut tool = Tool::default();
+            tool.name = self.tool.clone().into();
+            tool.input_schema = Arc::new(serde_json::Map::new());
+            async move {
+                Ok(ListToolsResult {
+                    tools: vec![tool],
+                    ..Default::default()
+                })
+            }
+        }
+    }
+
+    /// A modern server that supports a protocol revision we do not offer:
+    /// discovery succeeds, but every version it lists is foreign.
+    #[derive(Clone)]
+    struct OldVersionServer {
+        tool: String,
+    }
+
+    impl ServerHandler for OldVersionServer {
+        fn get_info(&self) -> ServerInfo {
+            ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        }
+
+        fn discover(
+            &self,
+            _context: RequestContext<RoleServer>,
+        ) -> impl std::future::Future<Output = Result<DiscoverResult, McpErrorData>>
+        + MaybeSendFuture
+        + '_ {
+            std::future::ready(Ok(DiscoverResult::new(
+                vec![rmcp::model::ProtocolVersion::V_2025_11_25],
+                ServerCapabilities::default(),
+            )))
+        }
+
+        fn list_tools(
+            &self,
+            _request: Option<PaginatedRequestParams>,
+            _context: RequestContext<RoleServer>,
+        ) -> impl std::future::Future<Output = Result<ListToolsResult, McpErrorData>>
+        + MaybeSendFuture
+        + '_ {
+            let mut tool = Tool::default();
+            tool.name = self.tool.clone().into();
+            tool.input_schema = Arc::new(serde_json::Map::new());
+            async move {
+                Ok(ListToolsResult {
+                    tools: vec![tool],
+                    ..Default::default()
+                })
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_server_probes_then_caches_modern_era() {
+        let mut manager = McpManager::new();
+        let (server, probes) = ok_server("alpha.tool", 0, false);
+        attach_server(&mut manager, "a", server).await;
+
+        assert_eq!(manager.era_of("a"), Some(super::super::era::Era::Modern));
+        assert_eq!(probes.load(Ordering::Relaxed), 1, "first connect must probe");
+
+        // Reconnect the same name: the cached era dials `Discover` directly,
+        // skipping the open-ended probe. The one discover round trip left is
+        // the lifecycle's own version negotiation, not era detection.
+        let (server, probes) = ok_server("alpha.tool", 0, false);
+        attach_server(&mut manager, "a", server).await;
+        assert_eq!(
+            probes.load(Ordering::Relaxed),
+            1,
+            "cached era dials Discover directly (single negotiation round)"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_server_falls_back_to_initialize() {
+        let mut manager = McpManager::new();
+        attach_server(&mut manager, "l", LegacyOnlyServer { tool: "legacy.tool".into() }).await;
+
+        assert_eq!(manager.era_of("l"), Some(super::super::era::Era::Legacy));
+        assert_eq!(manager.owner_of("legacy.tool"), Some("l"));
+    }
+
+    #[tokio::test]
+    async fn stale_legacy_cache_recovers_as_modern() {
+        let mut manager = McpManager::new();
+        attach_server(&mut manager, "s", LegacyOnlyServer { tool: "old.tool".into() }).await;
+        assert_eq!(manager.era_of("s"), Some(super::super::era::Era::Legacy));
+
+        // The server was modernized between reconnects: the cached legacy
+        // era is rejected (`initialize` is unknown there) and the retry
+        // connects modern.
+        attach_server(&mut manager, "s", ModernOnlyServer { tool: "new.tool".into() }).await;
+        assert_eq!(manager.era_of("s"), Some(super::super::era::Era::Modern));
+        assert_eq!(manager.owner_of("new.tool"), Some("s"));
+    }
+
+    #[tokio::test]
+    async fn stale_modern_cache_recovers_as_legacy() {
+        let mut manager = McpManager::new();
+        attach_server(&mut manager, "m", ModernOnlyServer { tool: "new.tool".into() }).await;
+        assert_eq!(manager.era_of("m"), Some(super::super::era::Era::Modern));
+
+        // The server was downgraded between reconnects: the cached modern
+        // era is rejected (`discover` unknown there) and the retry handshakes
+        // legacy.
+        attach_server(&mut manager, "m", LegacyOnlyServer { tool: "old.tool".into() }).await;
+        assert_eq!(manager.era_of("m"), Some(super::super::era::Era::Legacy));
+        assert_eq!(manager.owner_of("old.tool"), Some("m"));
+    }
+
+    #[tokio::test]
+    async fn transport_failure_keeps_cached_era() {
+        let mut manager = McpManager::new();
+        attach_server(&mut manager, "t", LegacyOnlyServer { tool: "t.tool".into() }).await;
+        assert_eq!(manager.era_of("t"), Some(super::super::era::Era::Legacy));
+
+        // A dead transport produces no correlated JSON-RPC rejection, so
+        // the era cache must survive the failed connect untouched.
+        let entry = http_entry("t", "http://127.0.0.1:1/mcp");
+        assert!(manager.connect_one(&entry).await.is_err());
+        assert_eq!(manager.era_of("t"), Some(super::super::era::Era::Legacy));
+    }
+
+    #[tokio::test]
+    async fn silent_stdio_server_falls_back_to_legacy() {
+        let mut manager = McpManager::new();
+        attach_server_full(
+            &mut manager,
+            "silent",
+            SilentServer {
+                tool: "quiet.tool".into(),
+            },
+            ProbePolicy::STDIO,
+            Duration::from_millis(150),
+        )
+        .await
+        .unwrap();
+
+        // Spec, stdio binding: "the probe returns a non-modern error or
+        // times out, and the client falls back to initialize".
+        assert_eq!(manager.era_of("silent"), Some(era::Era::Legacy));
+        assert_eq!(manager.owner_of("quiet.tool"), Some("silent"));
+    }
+
+    #[tokio::test]
+    async fn silent_probe_never_flips_without_stdio_policy() {
+        let mut manager = McpManager::new();
+        let outcome = attach_server_full(
+            &mut manager,
+            "hush",
+            SilentServer {
+                tool: "quiet.tool".into(),
+            },
+            // The HTTP policy treats a probe timeout as unreachable, not
+            // legacy — a silent stdio binary must not be classified by it.
+            ProbePolicy::HTTP,
+            Duration::from_millis(150),
+        )
+        .await;
+        assert!(
+            matches!(outcome, Err(McpError::ProbeTimedOut(_, 150))),
+            "expected a typed probe timeout, got {outcome:?}"
+        );
+
+        assert_eq!(manager.era_of("hush"), None);
+        assert_eq!(manager.owner_of("quiet.tool"), None);
+        let snapshots = manager.status_snapshots();
+        let snapshot = snapshots.iter().find(|s| s.name == "hush").unwrap();
+        assert!(
+            matches!(snapshot.status, ServerStatus::Failed),
+            "expected Failed, got {snapshot:?}"
+        );
+        assert!(snapshot.last_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn modern_server_without_shared_version_is_typed_failure() {
+        let mut manager = McpManager::new();
+        let outcome = attach_server_full(
+            &mut manager,
+            "fut",
+            OldVersionServer {
+                tool: "old.tool".into(),
+            },
+            ProbePolicy::STDIO,
+            Duration::from_millis(150),
+        )
+        .await;
+        assert!(
+            matches!(
+                &outcome,
+                Err(McpError::Connect(_, text)) if text.contains("compatible protocol version")
+            ),
+            "expected a version-mismatch diagnostic, got {outcome:?}"
+        );
+
+        // Discovery answered, so the server is modern; a version mismatch
+        // there is terminal (no fall-forward exists), not a fallback signal.
+        assert_eq!(manager.era_of("fut"), None);
+        assert_eq!(manager.owner_of("old.tool"), None);
+        let snapshots = manager.status_snapshots();
+        let snapshot = snapshots.iter().find(|s| s.name == "fut").unwrap();
+        assert!(matches!(snapshot.status, ServerStatus::Failed));
+        let error = snapshot.last_error.as_deref().unwrap_or_default();
+        assert!(
+            error.contains("compatible protocol version"),
+            "expected a version-mismatch diagnostic, got: {error}"
+        );
     }
 
     #[tokio::test]

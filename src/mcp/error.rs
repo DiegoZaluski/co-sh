@@ -26,4 +26,19 @@ pub enum McpError {
 
     #[error("MCP server '{0}' timed out after {1}ms")]
     Timeout(String, u64),
+
+    /// The cached protocol-era assumption for this server broke: a connection
+    /// attempt in the assumed era was refused with era evidence, so the
+    /// caller retries once in the other era. Only surfaces to the user when
+    /// the retry fails too (see `era_loop_failed` in the manager) or via a
+    /// failure snapshot.
+    #[error("MCP server '{0}' rejected a {1} connection: {2}")]
+    EraStale(String, &'static str, String),
+
+    /// The server never answered the era probe (`server/discover`) within
+    /// the probe budget. Whether this means "legacy server" is a per-transport
+    /// policy: the spec's stdio binding treats a probe timeout as a legacy
+    /// signal, the HTTP binding does not.
+    #[error("MCP server '{0}' did not answer the protocol probe within {1}ms")]
+    ProbeTimedOut(String, u64),
 }

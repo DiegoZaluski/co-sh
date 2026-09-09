@@ -742,8 +742,20 @@ impl Harness {
             }),
             enabled: true,
         });
+        // A duplex transport serves exactly one dial, so hand it out once;
+        // an era flip on a test hook is not a scenario worth simulating.
+        let mut transport = Some(transport);
         self.mcp
-            .register(name, transport, std::time::Duration::from_millis(200))
+            .register_with_retry(
+                name,
+                || {
+                    transport
+                        .take()
+                        .ok_or_else(|| crate::mcp::McpError::Connect(name.to_string(), "test transport already consumed".to_string()))
+                },
+                std::time::Duration::from_millis(200),
+                crate::mcp::manager::ProbePolicy::STDIO,
+            )
             .await
             .map_err(|err| err.to_string())
     }
