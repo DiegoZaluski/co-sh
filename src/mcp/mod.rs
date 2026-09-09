@@ -45,6 +45,9 @@ pub mod error;
 pub mod manager;
 pub mod types;
 
+#[cfg(test)]
+mod test;
+
 pub use bridge::{
     expand_resource_template, is_tool_error, match_resource_template, prompt_to_info,
     prompt_to_text, resource_to_info, resource_to_text, result_to_text, template_to_info,
