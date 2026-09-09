@@ -2,7 +2,10 @@ use std::collections::HashMap;
 use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rmcp::model::{CallToolRequestParams, CallToolResult, Tool};
+use rmcp::model::{
+    CallToolRequestParams, CallToolResult, GetPromptRequestParams, GetPromptResult, Prompt,
+    ReadResourceRequestParams, ReadResourceResult, Resource, ResourceTemplate, Tool,
+};
 use rmcp::service::{
     ClientInitializeError, ClientLifecycleMode, ClientServiceExt, RoleClient, RunningService,
 };
@@ -11,7 +14,10 @@ use rmcp::transport::{
     streamable_http_client::StreamableHttpClientTransportConfig,
 };
 
-use super::bridge::{is_tool_error, result_to_text};
+use super::bridge::{
+    is_tool_error, match_resource_template, prompt_to_info, resource_to_info, result_to_text,
+    template_to_info, PromptInfo, ResourceInfo,
+};
 use super::config::{HttpTransport, McpConfig, McpServerEntry, McpTransport, StdioTransport};
 use super::error::McpError;
 use super::types::ServerSnapshot;
@@ -62,6 +68,16 @@ const STDIO_CALL_TIMEOUT_MS: u64 = 120_000;
 /// One connected server: its tools plus the client scoped to them.
 struct RunningServer {
     tools: Vec<Tool>,
+    /// Resources and RFC 6570 templates advertised at connect time, in the
+    /// server's own order. Snapshots only: re-listing on every read would
+    /// double the round trips, and change notifications are a follow-up.
+    /// Empty when the server lacks the resources capability (lists are
+    /// skipped for it — calling `resources/list` unrequested is a spec
+    /// violation on our side).
+    resources: Vec<Resource>,
+    resource_templates: Vec<ResourceTemplate>,
+    /// Same contract as `resources`, for the prompts capability.
+    prompts: Vec<Prompt>,
     client: RunningService<RoleClient, ()>,
     call_timeout: Duration,
 }
@@ -98,7 +114,11 @@ impl McpManager {
     pub async fn connect_all(&mut self, config: &McpConfig) -> Result<(), McpError> {
         validate_mcp_config(config)?;
         // Reconcile first: clients absent from the new config are dropped so
-        // no orphan serves tools invisible to snapshots and routing.
+        // no orphan serves tools invisible to snapshots and routing. Their
+        // cached eras are evicted too — a reused name with a different
+        // URL/transport must re-probe instead of inheriting a stale era.
+        // (Plain `disconnect` keeps the era: `connect_one` calls it before
+        // every reconnect, where the cache is load-bearing.)
         let wanted: std::collections::HashSet<&str> =
             config.servers.iter().map(|e| e.name.as_str()).collect();
         for name in self
@@ -109,6 +129,20 @@ impl McpManager {
             .collect::<Vec<_>>()
         {
             self.disconnect(&name).await;
+            self.eras.remove(&name);
+            self.failures.remove(&name);
+        }
+        // Evict eras for names that vanished from the config entirely (never
+        // connected, only cached/failed).
+        for name in self
+            .eras
+            .keys()
+            .filter(|name| !wanted.contains(name.as_str()))
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            self.eras.remove(&name);
+            self.failures.remove(&name);
         }
         self.entries = config.servers.clone();
         for entry in &self.entries.clone() {
@@ -174,11 +208,22 @@ impl McpManager {
 
     /// Drop a server's client and clear its failure, if any. Cancellation is
     /// bounded so a hung transport cannot stall reconnects or shutdown.
+    /// The cached era is KEPT: `connect_one` disconnects before every
+    /// reconnect, where re-probing each time would defeat the cache. Use
+    /// [`Self::evict`] (or config reconciliation in `connect_all`) to drop
+    /// a server entirely.
     pub async fn disconnect(&mut self, name: &str) {
         if let Some(server) = self.running.remove(name) {
             let _ = tokio::time::timeout(Duration::from_secs(5), server.client.cancel()).await;
         }
         self.failures.remove(name);
+    }
+
+    /// Drop a server entirely: client + failure + cached era. Use when the
+    /// server is removed from config or its transport identity changed.
+    pub async fn evict(&mut self, name: &str) {
+        self.disconnect(name).await;
+        self.eras.remove(name);
     }
 
     /// Drop every client. No async `Drop` exists, so shutdown is explicit:
@@ -241,16 +286,23 @@ impl McpManager {
 
     /// Registered name of the server providing `tool`, if any. First match
     /// in config order wins, so duplicate tool names resolve deterministically.
+    /// A duplicate logs a `warn!` (once per call — call sites are infrequent)
+    /// because shadowing is almost always a config mistake.
     pub fn owner_of(&self, tool: &str) -> Option<&str> {
-        self.entries
-            .iter()
-            .filter(|entry| {
-                self.running.get(&entry.name).is_some_and(|server| {
-                    server.tools.iter().any(|candidate| candidate.name == tool)
-                })
+        let mut owners = self.entries.iter().filter(|entry| {
+            self.running.get(&entry.name).is_some_and(|server| {
+                server.tools.iter().any(|candidate| candidate.name == tool)
             })
-            .map(|entry| entry.name.as_str())
-            .next()
+        });
+        let first = owners.next();
+        if let Some(second) = owners.next() {
+            log::warn!(
+                "mcp: tool '{tool}' provided by multiple servers; '{}' wins (config order), '{}' shadowed",
+                first.map(|e| e.name.as_str()).unwrap_or("?"),
+                second.name.as_str()
+            );
+        }
+        first.map(|entry| entry.name.as_str())
     }
 
     /// Call one tool on its owning server. Unknown tools and timeouts are
@@ -273,14 +325,140 @@ impl McpManager {
         let timeout = server.call_timeout;
         let result = tokio::time::timeout(timeout, server.client.call_tool(params)).await;
         match result {
-            Err(_) => Err(McpError::Timeout(
-                name.to_string(),
-                timeout.as_millis() as u64,
-            )),
+            Err(_) => Err(McpError::Timeout(name.to_string(), millis_u64(timeout))),
             Ok(Err(err)) => Err(McpError::Call(tool.to_string(), err.to_string())),
             Ok(Ok(result)) if is_tool_error(&result) => {
                 Err(McpError::Call(tool.to_string(), result_to_text(&result)))
             }
+            Ok(Ok(result)) => Ok(result),
+        }
+    }
+
+    /// Every resource and template of every connected server, in config
+    /// order (concretes before templates within each server).
+    /// Templates carry their raw RFC 6570 `uri` with `is_template: true` —
+    /// expand before reading; they are listed uniformly so the TUI can
+    /// offer completion, not because they are directly readable.
+    pub fn all_resources(&self) -> Vec<ResourceInfo> {
+        self.entries
+            .iter()
+            .filter_map(|entry| self.running.get(&entry.name))
+            .flat_map(|server| {
+                server
+                    .resources
+                    .iter()
+                    .map(resource_to_info)
+                    .chain(server.resource_templates.iter().map(template_to_info))
+            })
+            .collect()
+    }
+
+    /// Registered name of the server advertising `uri`, if any. First match
+    /// in config order wins (duplicates warn, like [`Self::owner_of`]:
+    /// URIs are global identifiers, so shadowing is even more likely a
+    /// config mistake). Concrete URIs match exactly; expanded URIs
+    /// (e.g. `file:///docs/42`) match a server whose template
+    /// (`file:///docs/{id}`) covers them via [`match_resource_template`].
+    /// Raw templates match only themselves — expand with
+    /// [`super::bridge::expand_resource_template`] before reading.
+    pub fn resource_owner_of(&self, uri: &str) -> Option<&str> {
+        let mut owners = self.entries.iter().filter(|entry| {
+            self.running.get(&entry.name).is_some_and(|server| {
+                server.resources.iter().any(|r| r.uri == uri)
+                    || server
+                        .resource_templates
+                        .iter()
+                        .any(|t| t.uri_template == uri || match_resource_template(&t.uri_template, uri))
+            })
+        });
+        let first = owners.next();
+        if let Some(second) = owners.next() {
+            log::warn!(
+                "mcp: resource '{uri}' advertised by multiple servers; '{}' wins (config order), '{}' shadowed",
+                first.map(|e| e.name.as_str()).unwrap_or("?"),
+                second.name.as_str()
+            );
+        }
+        first.map(|entry| entry.name.as_str())
+    }
+
+    /// Every prompt of every connected server, in config order.
+    pub fn all_prompts(&self) -> Vec<PromptInfo> {
+        self.entries
+            .iter()
+            .filter_map(|entry| self.running.get(&entry.name))
+            .flat_map(|server| server.prompts.iter().map(prompt_to_info))
+            .collect()
+    }
+
+    /// Registered name of the server offering `name`, if any. First match
+    /// in config order wins (duplicates warn, like [`Self::owner_of`]).
+    pub fn prompt_owner_of(&self, name: &str) -> Option<&str> {
+        let mut owners = self.entries.iter().filter(|entry| {
+            self.running.get(&entry.name).is_some_and(|server| {
+                server.prompts.iter().any(|p| p.name == name)
+            })
+        });
+        let first = owners.next();
+        if let Some(second) = owners.next() {
+            log::warn!(
+                "mcp: prompt '{name}' offered by multiple servers; '{}' wins (config order), '{}' shadowed",
+                first.map(|e| e.name.as_str()).unwrap_or("?"),
+                second.name.as_str()
+            );
+        }
+        first.map(|entry| entry.name.as_str())
+    }
+
+    /// Read one resource on its owning server. `uri` must be concrete:
+    /// expand templates with [`super::bridge::expand_resource_template`]
+    /// first — a raw `{var}` URI is rejected as `UnknownResource` without
+    /// an RPC (no server resolves the literal placeholder). Expanded URIs
+    /// route via template match (see [`Self::resource_owner_of`]).
+    /// Snapshots are connect-time only (no live re-list); a resource added
+    /// after connect is unreadable until reconnect. Unknown resources and
+    /// timeouts are typed errors, mirroring [`Self::call_tool`]; binary
+    /// (blob) contents are caller-visible via [`bridge::resource_to_text`]
+    /// filtering.
+    pub async fn read_resource(&self, uri: &str) -> Result<ReadResourceResult, McpError> {
+        let owner = self.resource_owner_of(uri);
+        let server = owner.and_then(|name| self.running.get(name));
+        let (name, server) = match (owner, server) {
+            (Some(name), Some(server)) => (name, server),
+            _ => return Err(McpError::UnknownResource(uri.to_string())),
+        };
+        let params = ReadResourceRequestParams::new(uri);
+        let timeout = server.call_timeout;
+        let result = tokio::time::timeout(timeout, server.client.read_resource(params)).await;
+        match result {
+            Err(_) => Err(McpError::Timeout(name.to_string(), millis_u64(timeout))),
+            Ok(Err(err)) => Err(McpError::ReadResource(uri.to_string(), err.to_string())),
+            Ok(Ok(result)) => Ok(result),
+        }
+    }
+
+    /// Fetch one prompt on its owning server with `arguments` as the fill-in
+    /// values. Unknown prompts and timeouts are typed errors, mirroring
+    /// [`Self::call_tool`]. Required arguments are NOT validated client-side
+    /// (the `required` flags in [`PromptInfo`] are hints for the TUI form);
+    /// the server rejects missing values.
+    pub async fn get_prompt(
+        &self,
+        prompt: &str,
+        arguments: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<GetPromptResult, McpError> {
+        let owner = self.prompt_owner_of(prompt);
+        let server = owner.and_then(|name| self.running.get(name));
+        let (name, server) = match (owner, server) {
+            (Some(name), Some(server)) => (name, server),
+            _ => return Err(McpError::UnknownPrompt(prompt.to_string())),
+        };
+        let params = GetPromptRequestParams::new(prompt.to_string()).with_arguments(arguments);
+        let timeout = server.call_timeout;
+        let result = tokio::time::timeout(timeout, server.client.get_prompt(params)).await;
+        match result {
+            Err(_) => Err(McpError::Timeout(name.to_string(), millis_u64(timeout))),
+            Ok(Err(err)) => Err(McpError::GetPrompt(prompt.to_string(), err.to_string())),
             Ok(Ok(result)) => Ok(result),
         }
     }
@@ -317,29 +495,98 @@ impl McpManager {
         };
         log::debug!("mcp: dialing '{entry_name}' in {}", era.label());
 
-        let connect = async {
-            let client = ()
-                .serve_with_lifecycle(transport, lifecycle)
+        // Phase 1: handshake/discover only, under the probe budget. A slow
+        // `tools/list` must never be misclassified as probe silence (B1).
+        let client = tokio::time::timeout(budget, async {
+            ().serve_with_lifecycle(transport, lifecycle)
                 .await
-                .map_err(map_initialize_error(entry_name, era))?;
-            let tools = client
-                .list_all_tools()
-                .await
-                .map_err(|err| McpError::ListTools(entry_name.to_string(), err.to_string()))?;
-            Ok::<_, McpError>((client, tools))
-        };
-        let (client, tools) = tokio::time::timeout(budget, connect).await.map_err(|_| {
+                .map_err(map_initialize_error(entry_name, era))
+        })
+        .await
+        .map_err(|_| {
             // A modern-mode dial that gets no answer in time is a typed
             // outcome: the caller decides per transport policy whether
             // silence means "legacy" or "unreachable". A legacy dial
             // timing out is a plain failure — a legacy server answers
             // `initialize` or it is down.
             if era == era::Era::Modern {
-                McpError::ProbeTimedOut(entry_name.to_string(), budget.as_millis() as u64)
+                McpError::ProbeTimedOut(entry_name.to_string(), millis_u64(budget))
             } else {
                 McpError::Connect(entry_name.to_string(), "handshake timed out".to_string())
             }
         })??;
+        // Phase 2: catalog lists under the per-call budget (not the probe
+        // budget): cold-booted servers already answered the probe, and large
+        // catalogs must not flip eras or report probe timeouts.
+        let catalog = async {
+            let tools = client
+                .list_all_tools()
+                .await
+                .map_err(|err| McpError::ListTools(entry_name.to_string(), err.to_string()))?;
+            // Optional capabilities are listed only when declared: calling
+            // resources/list on a legacy tool-only server is a protocol
+            // violation, and a method-not-found error would be pure noise.
+            let (has_resources, has_prompts) = match client.peer_info().as_deref() {
+                Some(info) => (
+                    info.capabilities.resources.is_some(),
+                    info.capabilities.prompts.is_some(),
+                ),
+                // No peer info ⇒ legacy dial that settled without one;
+                // the old protocol advertised nothing readable here.
+                None => (false, false),
+            };
+            let (resources, resource_templates) = if has_resources {
+                match client.list_all_resources().await {
+                    Ok(resources) => match client.list_all_resource_templates().await {
+                        Ok(templates) => (resources, templates),
+                        // Same policy as a failed resources/list: a template
+                        // failure is a server bug, not worth losing tools
+                        // over. Keep the concrete resources and surface an
+                        // empty template catalog.
+                        Err(err) => {
+                            log::warn!(
+                                "mcp: '{entry_name}' declares resources but listing templates failed: {err}"
+                            );
+                            (resources, Vec::new())
+                        }
+                    },
+                    // A capability flag without a working list is a server
+                    // bug, but not worth losing the connection over: keep
+                    // the tools and surface the empty catalog.
+                    Err(err) => {
+                        log::warn!(
+                            "mcp: '{entry_name}' declares resources but listing failed: {err}"
+                        );
+                        (Vec::new(), Vec::new())
+                    }
+                }
+            } else {
+                (Vec::new(), Vec::new())
+            };
+            let prompts = if has_prompts {
+                match client.list_all_prompts().await {
+                    Ok(prompts) => prompts,
+                    Err(err) => {
+                        log::warn!(
+                            "mcp: '{entry_name}' declares prompts but listing failed: {err}"
+                        );
+                        Vec::new()
+                    }
+                }
+            } else {
+                Vec::new()
+            };
+            Ok::<_, McpError>((tools, resources, resource_templates, prompts))
+        };
+        let (tools, resources, resource_templates, prompts) =
+            tokio::time::timeout(call_timeout, catalog)
+                .await
+                .map_err(|_| {
+                    McpError::Connect(
+                        entry_name.to_string(),
+                        "catalog listing timed out".to_string(),
+                    )
+                })??;
 
         // Read the era back rather than trusting the assumption: if the SDK
         // ever settles differently than the lifecycle we dialed, the cache
@@ -350,6 +597,9 @@ impl McpManager {
             entry_name.to_string(),
             RunningServer {
                 tools,
+                resources,
+                resource_templates,
+                prompts,
                 client,
                 call_timeout,
             },
@@ -413,7 +663,7 @@ impl McpManager {
             remaining()
         };
         log::debug!(
-            "mcp: probing '{entry_name}' ({}): era={}, probe_budget={}ms, flip_on_timeout={} (-{} cache)",
+            "mcp: probing '{entry_name}' ({}): era={}, probe_budget={}ms, flip_on_timeout={} (cache: {})",
             if probing { "unknown" } else { "cached" },
             first.label(),
             first_budget.as_millis(),
@@ -469,11 +719,26 @@ impl McpManager {
             first.label(),
             next.label()
         );
+        if remaining().is_zero() {
+            // The first dial consumed the whole shared budget: a second
+            // spawn would instantly time out. Report the first failure and
+            // leave the cache alone (the refuted assumption was never
+            // disproven by a second dial).
+            self.failures.insert(entry_name.to_string(), first_err.to_string());
+            return Err(first_err);
+        }
+        // Build the retry transport BEFORE publishing the speculative era:
+        // a factory failure (missing binary, consumed test transport) must
+        // not leak an unproven cache entry.
+        let second_transport = match transport() {
+            Ok(t) => t,
+            Err(err) => {
+                self.failures.insert(entry_name.to_string(), err.to_string());
+                return Err(err);
+            }
+        };
         self.eras.insert(entry_name.to_string(), next);
 
-        // Spawn failure on the retry dial: the era evidence stands, so the
-        // cache keeps `next`, but there is nothing to report but the cause.
-        let second_transport = transport()?;
         match self
             .connect_in_era(entry_name, second_transport, call_timeout, remaining(), next)
             .await
@@ -491,7 +756,7 @@ impl McpManager {
                     next.label()
                 );
                 if matches!(second, McpError::EraStale(..)) {
-                    Err(era_loop_failed(entry_name, next, second))
+                    Err(era_loop_failed(entry_name, next, &first_err, second))
                 } else {
                     Err(second)
                 }
@@ -521,6 +786,13 @@ fn call_timeout_for(entry: &McpServerEntry) -> Duration {
         McpTransport::Stdio(_) => Duration::from_millis(STDIO_CALL_TIMEOUT_MS),
         McpTransport::Http(http) => Duration::from_millis(http.timeout_ms),
     }
+}
+
+/// Milliseconds as `u64` for error payloads. Saturates instead of wrapping:
+/// real budgets are seconds, far below `u64::MAX`, but a debug `as` cast
+/// would silently truncate absurd durations.
+fn millis_u64(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Map rmcp's client initialization error to our `McpError`.
@@ -554,6 +826,10 @@ fn map_initialize_error(entry_name: &str, assumed: era::Era) -> impl Fn(ClientIn
             // includes UnsupportedProtocolVersionError, which is how a
             // modern-only server answers an initialize naming an old
             // version (no fall-forward exists, so flip instead).
+            // NOTE (MCP-B6, accepted): this is deliberately over-broad —
+            // a permanently-broken legacy server rejecting `initialize`
+            // with e.g. InvalidParams costs one extra modern dial before
+            // the cache clears. Narrowing risks missing real upgrades.
             era::Era::Legacy => {
                 McpError::EraStale(entry_name.to_string(), assumed.label(), data.to_string())
             }
@@ -563,13 +839,18 @@ fn map_initialize_error(entry_name: &str, assumed: era::Era) -> impl Fn(ClientIn
 }
 
 /// A retry in the freshly assumed era also failed: both eras were rejected
-/// in one connection cycle. Report the retried era and its cause so the
-/// user sees why neither dialect connected.
-fn era_loop_failed(entry_name: &str, retried: era::Era, second: McpError) -> McpError {
+/// in one connection cycle. Report both causes so the user sees why neither
+/// dialect connected (previously only the second was shown).
+fn era_loop_failed(
+    entry_name: &str,
+    retried: era::Era,
+    first: &McpError,
+    second: McpError,
+) -> McpError {
     McpError::Connect(
         entry_name.to_string(),
         format!(
-            "neither protocol era is accepted: {} was refused first, and the {} retry also failed ({second})",
+            "neither protocol era is accepted: {} was refused first ({first}), and the {} retry also failed ({second})",
             retried.other().label(),
             retried.label()
         ),
@@ -672,8 +953,12 @@ mod tests {
 
     use rmcp::handler::server::ServerHandler;
     use rmcp::model::{
-        CallToolResponse, CallToolResult, ContentBlock, DiscoverResult, ListToolsResult,
-        PaginatedRequestParams, ServerCapabilities, ServerInfo,
+        CallToolResponse, CallToolResult, ContentBlock, DiscoverResult, ErrorCode,
+        GetPromptRequestParams, GetPromptResponse, GetPromptResult, ListPromptsResult,
+        ListResourcesResult, ListResourceTemplatesResult, ListToolsResult, PaginatedRequestParams,
+        Prompt, PromptArgument, PromptMessage, ReadResourceRequestParams, ReadResourceResponse,
+        ReadResourceResult, Resource, ResourceContents, ResourceTemplate, Role,
+        ServerCapabilities, ServerInfo,
     };
     use super::super::ServerStatus;
     use rmcp::service::{MaybeSendFuture, RequestContext, RoleServer};
@@ -841,6 +1126,246 @@ mod tests {
             }),
             enabled: true,
         }
+    }
+
+    /// A server with resources and prompts capabilities: one text resource,
+    /// one template, one prompt with a required argument.
+    #[derive(Clone)]
+    struct CatalogServer {
+        tool: String,
+    }
+
+    impl ServerHandler for CatalogServer {
+        fn get_info(&self) -> ServerInfo {
+            ServerInfo::new(
+                ServerCapabilities::builder()
+                    .enable_tools()
+                    .enable_resources()
+                    .enable_prompts()
+                    .build(),
+            )
+        }
+
+        fn list_resources(
+            &self,
+            _request: Option<PaginatedRequestParams>,
+            _context: RequestContext<RoleServer>,
+        ) -> impl std::future::Future<Output = Result<ListResourcesResult, McpErrorData>>
+        + MaybeSendFuture
+        + '_ {
+            std::future::ready(Ok(ListResourcesResult {
+                resources: vec![Resource::new("file:///notes.txt", "notes")
+                    .with_description("Text notes")
+                    .with_mime_type("text/plain")],
+                ..Default::default()
+            }))
+        }
+
+        fn list_resource_templates(
+            &self,
+            _request: Option<PaginatedRequestParams>,
+            _context: RequestContext<RoleServer>,
+        ) -> impl std::future::Future<Output = Result<ListResourceTemplatesResult, McpErrorData>>
+        + MaybeSendFuture
+        + '_ {
+            std::future::ready(Ok(ListResourceTemplatesResult {
+                resource_templates: vec![ResourceTemplate::new(
+                    "file:///docs/{id}",
+                    "doc-by-id",
+                )],
+                ..Default::default()
+            }))
+        }
+
+        fn read_resource(
+            &self,
+            request: ReadResourceRequestParams,
+            _context: RequestContext<RoleServer>,
+        ) -> impl std::future::Future<Output = Result<ReadResourceResponse, McpErrorData>>
+        + MaybeSendFuture
+        + '_ {
+            std::future::ready(if request.uri == "file:///notes.txt" {
+                Ok(ReadResourceResponse::Complete(ReadResourceResult::new(
+                    vec![ResourceContents::text("hello notes", &request.uri)],
+                )))
+            } else {
+                Err(McpErrorData::new(
+                    ErrorCode::RESOURCE_NOT_FOUND,
+                    "no such resource",
+                    None,
+                ))
+            })
+        }
+
+        fn list_prompts(
+            &self,
+            _request: Option<PaginatedRequestParams>,
+            _context: RequestContext<RoleServer>,
+        ) -> impl std::future::Future<Output = Result<ListPromptsResult, McpErrorData>>
+        + MaybeSendFuture
+        + '_ {
+            std::future::ready(Ok(ListPromptsResult {
+                prompts: vec![Prompt::new(
+                    "greet",
+                    Some("Greets someone"),
+                    Some(vec![PromptArgument::new("who").with_required(true)]),
+                )],
+                ..Default::default()
+            }))
+        }
+
+        fn get_prompt(
+            &self,
+            request: GetPromptRequestParams,
+            _context: RequestContext<RoleServer>,
+        ) -> impl std::future::Future<Output = Result<GetPromptResponse, McpErrorData>>
+        + MaybeSendFuture
+        + '_ {
+            std::future::ready(if request.name == "greet" {
+                let who = request
+                    .arguments
+                    .and_then(|a| a.get("who").and_then(|v| v.as_str()).map(str::to_owned))
+                    .unwrap_or_default();
+                let mut result = GetPromptResult::default();
+                result.messages = vec![PromptMessage::new_text(
+                    Role::User,
+                    format!("Say hello to {who}"),
+                )];
+                Ok(GetPromptResponse::Complete(result))
+            } else {
+                Err(McpErrorData::new(
+                    ErrorCode::INVALID_PARAMS,
+                    "no such prompt",
+                    None,
+                ))
+            })
+        }
+
+        fn list_tools(
+            &self,
+            _request: Option<PaginatedRequestParams>,
+            _context: RequestContext<RoleServer>,
+        ) -> impl std::future::Future<Output = Result<ListToolsResult, McpErrorData>>
+        + MaybeSendFuture
+        + '_ {
+            let mut tool = Tool::default();
+            tool.name = self.tool.clone().into();
+            tool.input_schema = Arc::new(serde_json::Map::new());
+            std::future::ready(Ok(ListToolsResult {
+                tools: vec![tool],
+                ..Default::default()
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn resources_and_prompts_listed_when_capable() {
+        let mut manager = McpManager::new();
+        attach_server(&mut manager, "cat", CatalogServer { tool: "cat.tool".into() }).await;
+
+        let resources = manager.all_resources();
+        assert_eq!(resources.len(), 2, "{resources:?}");
+        assert_eq!(resources[0].uri, "file:///notes.txt");
+        assert!(!resources[0].is_template);
+        assert_eq!(resources[0].mime_type.as_deref(), Some("text/plain"));
+        assert_eq!(resources[1].uri, "file:///docs/{id}"); // template, raw RFC 6570
+        assert!(resources[1].is_template);
+
+        let prompts = manager.all_prompts();
+        assert_eq!(prompts.len(), 1, "{prompts:?}");
+        assert_eq!(prompts[0].name, "greet");
+        assert_eq!(prompts[0].arguments.len(), 1);
+        assert!(prompts[0].arguments[0].required);
+
+        assert_eq!(manager.resource_owner_of("file:///notes.txt"), Some("cat"));
+        // Expanded URIs route via template match (P1 fix).
+        assert_eq!(manager.resource_owner_of("file:///docs/42"), Some("cat"));
+        assert_eq!(manager.resource_owner_of("file:///docs/{id}"), Some("cat"));
+        assert_eq!(manager.resource_owner_of("file:///other.txt"), None);
+        assert_eq!(manager.prompt_owner_of("greet"), Some("cat"));
+    }
+
+    #[tokio::test]
+    async fn read_resource_roundtrip_and_unknown() {
+        let mut manager = McpManager::new();
+        attach_server(&mut manager, "cat", CatalogServer { tool: "cat.tool".into() }).await;
+
+        let read = manager.read_resource("file:///notes.txt").await.unwrap();
+        assert_eq!(crate::mcp::bridge::resource_to_text(&read), "hello notes");
+
+        let missing = manager.read_resource("file:///absent.txt").await.unwrap_err();
+        assert!(matches!(missing, McpError::UnknownResource(_)), "{missing:?}");
+    }
+
+    #[tokio::test]
+    async fn get_prompt_roundtrip_and_unknown() {
+        let mut manager = McpManager::new();
+        attach_server(&mut manager, "cat", CatalogServer { tool: "cat.tool".into() }).await;
+
+        let args = serde_json::from_str::<serde_json::Map<_, _>>(r#"{"who": "Ada"}"#).unwrap();
+        let result = manager.get_prompt("greet", args).await.unwrap();
+        assert_eq!(
+            crate::mcp::bridge::prompt_to_text(&result),
+            "user: Say hello to Ada"
+        );
+
+        let missing = manager.get_prompt("nope", Default::default()).await.unwrap_err();
+        assert!(matches!(missing, McpError::UnknownPrompt(_)), "{missing:?}");
+    }
+
+    #[test]
+    fn era_loop_failed_reports_both_causes() {
+        let first = McpError::EraStale(
+            "s".into(),
+            super::super::era::Era::Modern.label(),
+            "modern refused".into(),
+        );
+        let second = McpError::EraStale(
+            "s".into(),
+            super::super::era::Era::Legacy.label(),
+            "legacy refused".into(),
+        );
+        let err = super::era_loop_failed("s", super::super::era::Era::Legacy, &first, second);
+        let text = err.to_string();
+        assert!(text.contains("modern refused"), "{text}");
+        assert!(text.contains("legacy refused"), "{text}");
+        assert!(text.contains("neither protocol era"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn evict_clears_cached_era() {
+        let mut manager = McpManager::new();
+        attach_server(&mut manager, "cat", CatalogServer { tool: "cat.tool".into() }).await;
+        assert!(manager.era_of("cat").is_some());
+        manager.evict("cat").await;
+        assert_eq!(manager.era_of("cat"), None);
+        assert!(manager.all_resources().is_empty());
+    }
+
+    #[tokio::test]
+    async fn duplicate_resource_uris_resolve_in_config_order() {
+        let mut manager = McpManager::new();
+        attach_server(&mut manager, "first", CatalogServer { tool: "dup.tool".into() }).await;
+        attach_server(&mut manager, "second", CatalogServer { tool: "dup.tool".into() }).await;
+        // Both advertise `file:///notes.txt`; config order wins.
+        assert_eq!(manager.resource_owner_of("file:///notes.txt"), Some("first"));
+        assert_eq!(manager.prompt_owner_of("greet"), Some("first"));
+        assert_eq!(manager.owner_of("dup.tool"), Some("first"));
+    }
+
+    #[tokio::test]
+    async fn capability_less_server_skips_resource_and_prompt_calls() {
+        let mut manager = McpManager::new();
+        attach_server(&mut manager, "bare", LegacyOnlyServer { tool: "bare.tool".into() }).await;
+
+        // The doubles never got asked: an uncalled resources/list on a
+        // server without the capability would be a protocol violation.
+        assert!(manager.all_resources().is_empty());
+        assert!(manager.all_prompts().is_empty());
+        let resource_err = manager.read_resource("file:///x").await.unwrap_err();
+        assert!(matches!(resource_err, McpError::UnknownResource(_)), "{resource_err:?}");
+        let prompt_err = manager.get_prompt("p", Default::default()).await.unwrap_err();
+        assert!(matches!(prompt_err, McpError::UnknownPrompt(_)), "{prompt_err:?}");
     }
 
     /// Live end-to-end connect against the official MCP test server over a

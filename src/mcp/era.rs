@@ -71,7 +71,9 @@ pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 ///
 /// Pinned on purpose: `ProtocolVersion::LATEST` still equals
 /// `V_2025_11_25` in rmcp 3.2.0, so an unpinned preference would silently
-/// negotiate the legacy revision.
+/// negotiate the legacy revision. Allocates one tiny `Vec` per dial —
+/// negligible next to spawning a transport; kept as `Vec` to match the
+/// `ClientLifecycleMode::Discover` signature.
 pub(crate) fn preferred_versions() -> Vec<ProtocolVersion> {
     vec![ProtocolVersion::V_2026_07_28]
 }
@@ -82,7 +84,9 @@ pub(crate) fn preferred_versions() -> Vec<ProtocolVersion> {
 /// (`from_discover_result`); a legacy handshake stamps the initialize
 /// result. Everything below `V_2026_07_28` is legacy by definition. A
 /// missing peer info is treated as legacy: only the legacy handshake can
-/// complete without one being stamped.
+/// complete without one being stamped. `>=` assumes `ProtocolVersion: Ord`
+/// is date-ordered; a future `2030-01-01` must compare greater than
+/// `V_2026_07_28` (covered by `era_readback_treats_future_versions_as_modern`).
 pub(crate) fn era_of(peer_info: Option<&ServerPeerInfo>) -> Era {
     match peer_info {
         Some(info) if info.protocol_version >= ProtocolVersion::V_2026_07_28 => Era::Modern,
@@ -93,10 +97,14 @@ pub(crate) fn era_of(peer_info: Option<&ServerPeerInfo>) -> Era {
 /// Whether a JSON-RPC error identifies a *modern* server rejecting our
 /// request, versus a legacy server that simply does not know the method.
 ///
-/// The reserved modern-era codes (-32022/-32021/-32020) can only originate
-/// from a server speaking the 2026-07-28 protocol; anything else
-/// (method-not-found, parse errors, implementation codes) is a legacy
-/// signal. The manager folds this into flip evidence per dial direction —
+/// The reserved modern-era codes (-32022/-32021/-32020, i.e.
+/// `UNSUPPORTED_PROTOCOL_VERSION` / `MISSING_REQUIRED_CLIENT_CAPABILITY` /
+/// `HEADER_MISMATCH` per the MCP 2026-07-28 versioning table "Backward
+/// Compatibility") can only originate from a server speaking the 2026-07-28
+/// protocol; anything else (method-not-found, parse errors, implementation
+/// codes) is a legacy signal. A future reserved modern code added by a
+/// later spec revision would misclassify as legacy until added here.
+/// The manager folds this into flip evidence per dial direction —
 /// see `map_initialize_error` there.
 pub(crate) fn is_modern_error(error: &ErrorData) -> bool {
     matches!(
@@ -167,6 +175,12 @@ mod tests {
         let future: ProtocolVersion = serde_json::from_str("\"2030-01-01\"").unwrap();
         assert_eq!(select_protocol_version(&preferred_versions(), &[future]), None);
         assert_eq!(select_protocol_version(&preferred_versions(), &[]), None);
+    }
+
+    #[test]
+    fn era_readback_treats_future_versions_as_modern() {
+        let future: ProtocolVersion = serde_json::from_str("\"2030-01-01\"").unwrap();
+        assert_eq!(era_of(Some(&peer_info(future))), Era::Modern);
     }
 
     #[test]

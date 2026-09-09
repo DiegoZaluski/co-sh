@@ -21,8 +21,20 @@ pub enum McpError {
     #[error("No MCP server provides tool '{0}'")]
     UnknownTool(String),
 
+    #[error("No MCP server provides resource '{0}'")]
+    UnknownResource(String),
+
+    #[error("No MCP server provides prompt '{0}'")]
+    UnknownPrompt(String),
+
     #[error("MCP tool '{0}' failed: {1}")]
     Call(String, String),
+
+    #[error("MCP resource '{0}' failed: {1}")]
+    ReadResource(String, String),
+
+    #[error("MCP prompt '{0}' failed: {1}")]
+    GetPrompt(String, String),
 
     #[error("MCP server '{0}' timed out after {1}ms")]
     Timeout(String, u64),
