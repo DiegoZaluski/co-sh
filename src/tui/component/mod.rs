@@ -1,4 +1,5 @@
 pub mod agent_spinner;
+pub mod agent_spinner_bass;
 pub mod cursor;
 pub mod prompt;
 pub mod rag_input;

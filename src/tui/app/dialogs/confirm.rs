@@ -51,8 +51,7 @@ impl App {
                 return;
             }
             if let Some(session_id) = self.pending_delete_session_id.take() {
-                self.state.remove_session(&session_id);
-                self.session_store.delete_session(&session_id);
+                self.delete_session(&session_id);
                 self.dialog.pop();
             } else if self.handle_rag_confirm_delete() {
                 // handled (pops the dialog itself)

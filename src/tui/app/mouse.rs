@@ -613,8 +613,7 @@ impl App {
                                 return Ok(true);
                             }
                             if let Some(session_id) = self.pending_delete_session_id.take() {
-                                self.state.remove_session(&session_id);
-                                self.session_store.delete_session(&session_id);
+                                self.delete_session(&session_id);
                             } else if self.handle_rag_confirm_delete() {
                             } else {
                                 self.should_quit = true;
