@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use super::App;
-use crate::component::agent_spinner::AgentSpinner;
+use crate::component::agent_spinner_bass::AgentSpinnerBass;
 use crate::routes::session::queue_choice::QueueTarget;
 use crate::session_store::generate_session_id;
 use crate::types::SessionStatus;
@@ -200,7 +200,7 @@ impl App {
 
         self.stop_signal.store(false, Ordering::Relaxed);
         self.state.status = crate::types::SessionStatus::Working;
-        self.agent_spinner = Some(AgentSpinner::new("Working", &self.theme));
+        self.agent_spinner_bass = Some(AgentSpinnerBass::new("Working", &self.theme));
 
         let event_tx = self.event_tx.clone();
         let provider = self.llm_config.provider.clone();

@@ -543,7 +543,7 @@ impl App {
 
                 HarnessEvent::Done { context } => {
                     self.state.status = SessionStatus::Idle;
-                    self.agent_spinner = None;
+                    self.agent_spinner_bass = None;
                     self.stream_msg_id = None;
                     // opencode model: the LSP engine is session-scoped (the
                     // process-wide singleton keeps servers alive between
@@ -698,7 +698,7 @@ impl App {
 
                 HarnessEvent::Stopped { context } => {
                     self.state.status = SessionStatus::Idle;
-                    self.agent_spinner = None;
+                    self.agent_spinner_bass = None;
                     self.stream_msg_id = None;
                     // Session-scoped servers (see the Done handler): keep the
                     // last LSP snapshot; the next turn refreshes it.
@@ -812,7 +812,7 @@ impl App {
                         message: message.clone(),
                         action: None,
                     };
-                    self.agent_spinner = None;
+                    self.agent_spinner_bass = None;
                     self.stream_msg_id = None;
 
                     // Push error as an assistant message so it appears inline in the chat

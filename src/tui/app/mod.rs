@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use cosh::harness::HarnessEvent;
 use cosh_tui::core::lib::rgba::RGBA;
 
-use crate::component::agent_spinner::AgentSpinner;
+use crate::component::agent_spinner_bass::AgentSpinnerBass;
 use crate::component::prompt::PromptView;
 use crate::config::{LlmConfig, TuiConfig};
 use crate::fallback;
@@ -258,7 +258,7 @@ pub struct App {
     /// late reset reach another session's messages.
     stream_msg_id: Option<(String, String)>,
     terminal_focused: bool,
-    agent_spinner: Option<AgentSpinner>,
+    agent_spinner_bass: Option<AgentSpinnerBass>,
     /// Latest context manager info for the budget bar (None if no data yet).
     context_info: Option<cosh::harness::ContextDisplayInfo>,
     /// What the left panel shows (history vs dashboard) and its dashboard
@@ -515,7 +515,7 @@ impl App {
             llm_config,
             stop_signal: Arc::new(AtomicBool::new(false)),
             terminal_focused: true,
-            agent_spinner: None,
+            agent_spinner_bass: None,
             context_info: None,
             left_panel: LeftPanelMode::default(),
             usage_period: crate::usage::UsagePeriod::default(),
@@ -567,7 +567,7 @@ impl App {
         self.theme = self.themed(t);
         self.config.theme_gen += 1;
         // Update the active spinner's colours to reflect the new theme
-        if let Some(spinner) = &mut self.agent_spinner {
+        if let Some(spinner) = &mut self.agent_spinner_bass {
             spinner.update_theme(&self.theme);
         }
     }
@@ -921,7 +921,7 @@ impl App {
         };
         let spinner_h = u16::from(
             matches!(self.state.status, SessionStatus::Working)
-                && self.agent_spinner.is_some()
+                && self.agent_spinner_bass.is_some()
                 && !self.question_dialog.visible,
         );
         let prompt_area_y = footer_y.saturating_sub(prompt_h);

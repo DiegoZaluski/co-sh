@@ -368,7 +368,7 @@ impl App {
                 is_session
                     && !hide_prompt_and_spinner
                     && self.state.status == crate::types::SessionStatus::Working
-                    && self.agent_spinner.is_some(),
+                    && self.agent_spinner_bass.is_some(),
             );
 
             // The pending region and the dialogs grow upward from the prompt;
@@ -539,7 +539,7 @@ impl App {
 
                     // Advance the agent spinner when working
                     if self.state.status == crate::types::SessionStatus::Working
-                        && let Some(spinner) = &mut self.agent_spinner
+                        && let Some(spinner) = &mut self.agent_spinner_bass
                     {
                         spinner.advance();
                     }
@@ -584,7 +584,7 @@ impl App {
                         && !self.queue_choice_dialog.visible
                     {
                         // Agent spinner rendered above the prompt when the loop is active
-                        if let Some(spinner) = &self.agent_spinner
+                        if let Some(spinner) = &self.agent_spinner_bass
                             && self.state.status == crate::types::SessionStatus::Working
                         {
                             spinner.render(buf, spinner_area.x + 1, spinner_area.y);
