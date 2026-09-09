@@ -204,10 +204,15 @@ pub struct App {
     perm_tx: mpsc::UnboundedSender<cosh::harness::PermissionAction>,
     /// Sender for user messages queued for the NEXT REQUEST of the running
     /// agent loop (the "next request" queue). `None` while no loop runs.
-    queued_input_tx: Option<mpsc::UnboundedSender<String>>,
+    /// `pub(crate)`: the session route's deletion lifecycle
+    /// (`routes::session::delete`) drops it when it stops a deleted
+    /// session's loop.
+    pub(crate) queued_input_tx: Option<mpsc::UnboundedSender<String>>,
     /// Session id that owns the currently running agent loop — guards the
-    /// queue auto-start against mid-run session switches.
-    active_loop_session_id: Option<String>,
+    /// queue auto-start against mid-run session switches. `pub(crate)`: read
+    /// by `routes::session::delete` to decide whether a deleted session
+    /// owns the running loop.
+    pub(crate) active_loop_session_id: Option<String>,
     /// Pending-queue row (render order: next-loop rows first, then
     /// next-request rows) currently under the mouse cursor — drives the
     /// opencode-style hover highlight above the prompt.
@@ -219,13 +224,15 @@ pub struct App {
     pub(super) queue_actions_grace_until: Option<Instant>,
     /// Set when a loop ended cleanly with a next-loop message waiting but its
     /// start was deferred by the queue-actions hold. Consumed by
-    /// [`App::pump_queued_messages`] once the hold expires.
-    queue_actions_deferred_start: bool,
+    /// [`App::pump_queued_messages`] once the hold expires. `pub(crate)`:
+    /// reset by `routes::session::delete` when it stops a loop.
+    pub(crate) queue_actions_deferred_start: bool,
     /// True while the head of `next_request` has been handed to the running
     /// loop's channel but not yet acknowledged via `UserMessageInjected`.
     /// The deque entry is only retired on acknowledgment so the message can
-    /// never be lost if the loop ends before injecting it.
-    next_request_in_flight: bool,
+    /// never be lost if the loop ends before injecting it. `pub(crate)`:
+    /// reset by `routes::session::delete` when it stops a loop.
+    pub(crate) next_request_in_flight: bool,
     /// Origin of an edited queued message: the owning session, its queue and
     /// the original position. Re-submitting into the SAME queue re-inserts at
     /// that (tracked) position; choosing the other queue appends at the end
@@ -235,7 +242,10 @@ pub struct App {
     /// actions from a box left open across a session switch are rejected.
     active_queue_actions_session: Option<String>,
     llm_config: LlmConfig,
-    stop_signal: Arc<AtomicBool>,
+    /// Shared stop flag handed to the running agent loop. `pub(crate)`:
+    /// raised by `routes::session::delete` when the loop's session is
+    /// deleted (same mechanism as the ESC stop).
+    pub(crate) stop_signal: Arc<AtomicBool>,
     /// Re-entry guard for the user-triggered `/compact`: true while the
     /// one-off compaction task runs (there is no loop status to read —
     /// between loops the app is Idle). Cleared by the CompactOnDemand event.
@@ -279,8 +289,9 @@ pub struct App {
     /// Structured user preferences (theme, tools, routing) persisted in
     /// `~/.config/cosh/setup.json`.
     setup: crate::util::setup::Setup,
-    /// Session persistence store (JSONL files on disk).
-    session_store: SessionStore,
+    /// Session persistence store (JSONL files on disk). `pub(crate)`: the
+    /// session route's deletion lifecycle removes the session file from it.
+    pub(crate) session_store: SessionStore,
     /// When set, the current Confirm dialog is asking about deleting a session.
     pending_delete_session_id: Option<String>,
     /// Message captured while the one-time Zen free-gateway prompt was open;
