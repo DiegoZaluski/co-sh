@@ -285,7 +285,10 @@ fn test_reasoning_body_is_dimmed() {
     );
 }
 
-/// An expanded Think block must render in full, not clamped to 10 lines.
+/// An expanded Think block must render in full, not clamped to 10 lines,
+/// and its height estimate must come from the SAME wrap-aware layout the
+/// markdown renderer uses (a long paragraph wraps into extra rows — the old
+/// `lines().count()` estimate clipped the body and desynced copy regions).
 #[test]
 fn test_reasoning_renders_more_than_ten_lines() {
     let theme = test_theme();
@@ -302,21 +305,135 @@ fn test_reasoning_renders_more_than_ten_lines() {
     let mut line_h = 0u16;
     super::SessionView::render_reasoning(&mut buf, 0, 0, &mut line_h, 80, &part, true, &theme);
 
-    let expected = text.lines().count() as u16 + 2;
-    assert_eq!(
-        line_h, expected,
-        "expanded reasoning must render all lines, not clamp to 10"
-    );
+    // Every source line must be on screen — nothing clipped to 10.
+    for i in 0..25 {
+        assert!(
+            buffer_text(&buf).contains(&format!("reasoning line {i}")),
+            "expanded reasoning must render line {i} in full"
+        );
+    }
 
     // The height estimate must agree so scrolling stays consistent.
     let est = SessionView::estimate_part_height(
-        &Part::Reasoning(part),
+        &Part::Reasoning(ReasoningPart {
+            text,
+            collapsed: false,
+        }),
         80,
         &config,
         &MessageRole::Assistant,
         &super::tool_render::ToolRenderState::new(),
     );
     assert_eq!(est, line_h, "estimate_part_height must match render height");
+}
+
+/// Regression: selecting a word inside a wrapped Thought paragraph must copy
+/// exactly the text visible on that row. The old copy regions mapped one
+/// region per raw SOURCE line, so continuation rows of a wrapped paragraph
+/// had no region (empty copy) or sliced the raw line at screen columns
+/// (truncated/wrong copy).
+#[test]
+fn test_reasoning_copy_matches_wrapped_visual_row() {
+    let theme = test_theme();
+    let config = test_config();
+
+    // One long paragraph: the markdown renderer word-wraps it, pushing the
+    // distinctive token onto a continuation visual row (> row 0 of the body).
+    let mut words: Vec<String> = (0..40).map(|i| format!("word{i}")).collect();
+    words[30] = "zebra".to_string();
+    let part = ReasoningPart {
+        text: words.join(" "),
+        collapsed: false,
+    };
+    let msg = Message {
+        id: "msg-thought-wrap".into(),
+        role: MessageRole::Assistant,
+        parts: vec![Part::Reasoning(part)],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let mut state = test_state(msg);
+    state.status = SessionStatus::Idle;
+    let mut view = SessionView::new();
+
+    let area = Rect::new(0, 0, 80, 60);
+    let mut buf = Buffer::empty(Rect::new(0, 0, 80, 60));
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+    // Locate the visual row and column of the token on screen.
+    let mut target: Option<(u16, u16)> = None;
+    'outer: for row in 0..area.height {
+        for col in 0..area.width.saturating_sub(5) {
+            let slice: String = (col..col + 5)
+                .filter_map(|cx| buf.cell((cx, row)))
+                .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                .collect();
+            if slice == "zebra" {
+                target = Some((col, row));
+                break 'outer;
+            }
+        }
+    }
+    let (col, row) = target.expect("'zebra' must be visible in the wrapped Thought body");
+
+    // A small single-row drag over exactly that word must copy it verbatim.
+    let selected = view.get_text_in_region(col, row, col + 5, row);
+    assert_eq!(
+        selected, "zebra",
+        "small selection in a Thought must copy the visible slice"
+    );
+}
+
+/// Regression: blank lines inside a Thought must keep copy regions aligned
+/// with the screen. The old builder skipped blank source lines, shifting every
+/// following region up one row, so words below the blank line copied the
+/// wrong slice (or nothing).
+#[test]
+fn test_reasoning_copy_survives_blank_lines() {
+    let theme = test_theme();
+    let config = test_config();
+
+    let part = ReasoningPart {
+        text: "first paragraph\n\nsecond paragraph with markerword here".to_string(),
+        collapsed: false,
+    };
+    let msg = Message {
+        id: "msg-thought-blank".into(),
+        role: MessageRole::Assistant,
+        parts: vec![Part::Reasoning(part)],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let mut state = test_state(msg);
+    state.status = SessionStatus::Idle;
+    let mut view = SessionView::new();
+
+    let area = Rect::new(0, 0, 80, 60);
+    let mut buf = Buffer::empty(Rect::new(0, 0, 80, 60));
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+    let mut target: Option<(u16, u16)> = None;
+    'outer: for row in 0..area.height {
+        for col in 0..area.width.saturating_sub(10) {
+            let slice: String = (col..col + 10)
+                .filter_map(|cx| buf.cell((cx, row)))
+                .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                .collect();
+            if slice == "markerword" {
+                target = Some((col, row));
+                break 'outer;
+            }
+        }
+    }
+    let (col, row) = target.expect("'markerword' must be visible below the blank line");
+
+    let selected = view.get_text_in_region(col, row, col + 10, row);
+    assert_eq!(
+        selected, "markerword",
+        "selection below a blank Thought line must copy the visible slice"
+    );
 }
 
 /// Test rendering with progressively larger messages to check for

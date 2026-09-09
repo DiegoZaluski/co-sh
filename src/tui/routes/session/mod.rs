@@ -878,12 +878,20 @@ impl SessionView {
         *line_h = 1;
 
         if expanded && !part.text.is_empty() {
-            let md_h = part.text.lines().count() as u16 + 1;
-            let md_area = Rect::new(x + 2, y + 1, max_w.saturating_sub(2), md_h);
+            // The body is markdown (word-wrapped) at width `max_w - 2`; its
+            // row count must come from the renderer's own layout algorithm
+            // (`estimate_height`), not from the source line count: a long
+            // paragraph wraps into several visual rows, and underestimating
+            // the height clipped the body on screen and desynced the copy
+            // regions from what is displayed.
+            let body_w = max_w.saturating_sub(2).max(1);
             // Sanitize before the markdown renderer so control chars can't
             // reach buffer cells (ratatui cell_width panic). `\n` is kept —
-            // the markdown renderer handles line breaks itself.
+            // the markdown renderer handles line breaks itself. The height
+            // is measured on the sanitized text so it matches the render.
             let content = sanitize_text(&part.text);
+            let md_h = estimate_height(&content, body_w).max(1);
+            let md_area = Rect::new(x + 2, y + 1, body_w, md_h);
             let mut md =
                 cosh_tui::core::renderables::markdown::MarkdownRenderable::new(Some(content));
             md.set_fg(Some(ColorInput::RGBA(theme.text_muted)));
@@ -1639,7 +1647,12 @@ impl SessionView {
                         config.thinking_mode,
                     );
                     if expanded {
-                        (r.text.lines().count() as u16) + 2
+                        // Header row + the wrap-aware markdown body height —
+                        // the same estimate render_reasoning lays out with,
+                        // so the cached height matches the drawn block even
+                        // when long paragraphs wrap into extra rows.
+                        let body_w = max_w.saturating_sub(2).max(1);
+                        1u16.saturating_add(estimate_height(&sanitize_text(&r.text), body_w).max(1))
                     } else {
                         // Collapsed: just the "+ Thought" header row.
                         1
@@ -3212,23 +3225,66 @@ impl SessionView {
                                     });
                                 }
                                 if expanded && !r.text.is_empty() {
-                                    let screen_line_start = (p_top.max(vp_top) + 1) as u16;
-                                    let screen_end = p_bottom.min(vp_bottom) as u16;
-                                    let truncated =
-                                        r.text.lines().take(10).collect::<Vec<_>>().join("\n");
-                                    let mut screen_line_y = screen_line_start;
-                                    for line in truncated.lines() {
-                                        if screen_line_y < screen_end && !line.is_empty() {
-                                            let cy = (screen_line_y as i32) - vp_top + scroll;
-                                            text_regions.push(TextRegion {
-                                                y1: cy,
-                                                y2: cy + 1,
-                                                x1: x_off + 2,
-                                                x2: x_off + max_w,
-                                                text: line.to_string(),
-                                            });
-                                            screen_line_y += 1;
+                                    // The body is drawn through the SAME
+                                    // markdown pipeline as the screen
+                                    // (render_reasoning): word-wrapped, so
+                                    // VISUAL rows — not source lines — are
+                                    // what a selection must map to. Render
+                                    // into the scratch buffer and scan one
+                                    // region per visual row, exactly like
+                                    // the Summarizing body below. The old
+                                    // per-source-line mapping (capped at 10
+                                    // lines, blank lines skipped) desynced
+                                    // copy regions from the screen, so a
+                                    // small selection inside a Thought
+                                    // copied nothing or the wrong slice.
+                                    let body_w = max_w.saturating_sub(2).max(1);
+                                    let content = sanitize_text(&r.text);
+                                    let body_h = estimate_height(&content, body_w).max(1);
+                                    let scan_area = Rect::new(0, 0, body_w, body_h);
+                                    let temp = scratch.get_or_insert_with(|| {
+                                        ratatui::buffer::Buffer::empty(scan_area)
+                                    });
+                                    if *temp.area() != scan_area {
+                                        temp.resize(scan_area);
+                                    }
+                                    let mut md = cosh_tui::core::renderables::markdown::
+                                        MarkdownRenderable::new(Some(content));
+                                    md.set_fg(Some(ColorInput::RGBA(theme.text_muted)));
+                                    md.set_bg(Some(ColorInput::RGBA(theme.background)));
+                                    crate::util::markdown::apply_theme(&mut md, theme);
+                                    md.render_self(temp, scan_area);
+
+                                    // Body rows start one row below the
+                                    // "+ Thought" header. A part may straddle
+                                    // the viewport top: skip the rows scrolled
+                                    // off above instead of mapping body line 0
+                                    // onto the first visible row (that offset
+                                    // made small selections near the viewport
+                                    // top copy from the wrong line).
+                                    let body_top = p_top + 1;
+                                    let row_start = (vp_top - body_top).max(0);
+                                    let row_end = (p_bottom.min(vp_bottom) - body_top)
+                                        .max(0)
+                                        .min(i32::from(body_h));
+                                    for k in row_start..row_end {
+                                        let mut line_text = String::new();
+                                        for tx in 0..body_w {
+                                            if let Some(cell) = temp.cell((tx, k as u16)) {
+                                                line_text.push(
+                                                    cell.symbol().chars().next().unwrap_or(' '),
+                                                );
+                                            }
                                         }
+                                        let trimmed = line_text.trim_end().to_string();
+                                        let cy = body_top + k - vp_top + scroll;
+                                        text_regions.push(TextRegion {
+                                            y1: cy,
+                                            y2: cy + 1,
+                                            x1: x_off + 2,
+                                            x2: x_off + max_w,
+                                            text: trimmed,
+                                        });
                                     }
                                 }
                             }
