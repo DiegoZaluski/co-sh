@@ -742,8 +742,12 @@ impl Harness {
             }),
             enabled: true,
         });
-        // A duplex transport serves exactly one dial, so hand it out once;
-        // an era flip on a test hook is not a scenario worth simulating.
+        // A duplex transport serves exactly one dial, so hand it out once.
+        // A second dial (era flip/retry) fails here with
+        // `Connect("test transport already consumed")`, which carries no
+        // era evidence and replaces the original `EraStale` — test-only
+        // masking, never hit in production where factories spawn fresh
+        // transports per dial.
         let mut transport = Some(transport);
         self.mcp
             .register_with_retry(
