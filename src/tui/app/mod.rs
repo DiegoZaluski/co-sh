@@ -542,11 +542,21 @@ impl App {
         }
     }
 
+    /// Welcome toast, shown only the first time the TUI runs: a marker
+    /// file in the local data dir (`~/.local/share/cosh/welcome`) records
+    /// that it has already been displayed.
     pub fn show_welcome_toast(&mut self) {
         use crate::ui::toast::{ToastOptions, ToastVariant};
+        use directories::BaseDirs;
+        let marker = BaseDirs::new().map(|d| d.data_local_dir().join("cosh/welcome"));
+        let Some(marker) = marker.filter(|m| !m.exists()) else {
+            return;
+        };
+        let _ = std::fs::create_dir_all(marker.parent().unwrap_or(&marker));
+        let _ = std::fs::write(&marker, b"");
         self.toast_state.show(ToastOptions {
             title: Some("cosh".to_string()),
-            message: "Welcome! Press Ctrl+P for commands.".to_string(),
+            message: "Welcome!".to_string(),
             variant: ToastVariant::Info,
             duration_ms: 5000,
         });
@@ -645,6 +655,15 @@ impl App {
             let delta = now.duration_since(self.last_frame_time);
             self.last_frame_time = now;
             let delta_secs = delta.as_secs_f64();
+
+            // Tick time-based UI with the REAL frame delta. Toast
+            // auto-dismiss must track wall-clock time, not input events:
+            // during the agent loop `handle_events()` is only reached when
+            // input events are pending, so a fixed 50 ms tick there let
+            // toasts outlive their programmed duration while streaming
+            // (no input -> no ticks). Ticking on the measured delta keeps
+            // the lifetime exact at any frame rate.
+            self.toast_state.tick(delta.as_millis() as u64);
 
             terminal.draw(|frame| {
                 self.render(frame, delta_secs);

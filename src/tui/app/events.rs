@@ -17,7 +17,12 @@ use cosh::harness::context::ContextManagerState;
 
 impl App {
     pub(super) fn handle_events(&mut self) -> io::Result<bool> {
-        self.toast_state.tick(50);
+        // NOTE: no toast tick here. `handle_events()` is only reached when
+        // input events are pending (during the agent loop it can be skipped
+        // for whole seconds while the user watches the stream), so a tick
+        // with a fixed step would let toasts outlive their programmed
+        // duration. The tick runs once per frame in `run()` using the real
+        // measured frame delta instead.
 
         // Block briefly for the FIRST event, then drain everything already
         // buffered. Input events (mouse drag during a copy selection, mouse
