@@ -7,11 +7,6 @@ pub enum ConnectorError {
     UnknownProvider(String),
     /// No API key was found for the provider (neither explicit nor in env vars).
     MissingApiKey(String),
-    /// An anonymous OpenCode Zen request (sentinel `public` bearer) named a
-    /// model outside the gateway's free tier. Fails fast client-side with a
-    /// clear message instead of a bare 401 from the server; the fix is
-    /// connecting a Zen API key or picking a `-free` model.
-    AnonymousModelBlocked(String),
     /// The upstream API returned a non-2xx HTTP status.
     HttpError {
         /// HTTP status code (e.g., 401, 500).
@@ -197,10 +192,6 @@ impl fmt::Display for ConnectorError {
         match self {
             Self::UnknownProvider(p) => write!(f, "Unknown provider: {p}"),
             Self::MissingApiKey(p) => write!(f, "API key not set for provider: {p}"),
-            Self::AnonymousModelBlocked(m) => write!(
-                f,
-                "Model '{m}' needs an OpenCode Zen API key — without one only the free models are served"
-            ),
             Self::HttpError { status, body, .. } => write!(f, "HTTP {status} - {body}"),
             Self::ContextWindowExceeded { status, body, .. } => {
                 write!(f, "HTTP {status} - {body}")

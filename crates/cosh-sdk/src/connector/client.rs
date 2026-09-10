@@ -2,9 +2,7 @@ use super::TokenUsage;
 use super::error::ConnectorError;
 use super::output::{ChatOutput, ChatStream, LsOutput};
 use super::params::{ChatMessage, Parameters, ResponseFormat, ToolCallMode, ToolDefinition};
-use super::provider::{
-    Family, ProviderConfig, ZEN_PROVIDER, get_api_key, get_provider, zen_public_tier_enabled,
-};
+use super::provider::{Family, ProviderConfig, get_provider};
 
 use super::claude;
 use super::gemini;
@@ -46,7 +44,7 @@ impl Connector {
     /// Supported providers: `claude`, `openai`, `groq`, `mistral`, `together`, `openrouter`,
     /// `xai`, `deepseek`, `perplexity`, `fireworks`, `cohere`, `huggingface`,
     /// `sambanova`, `poe`, `cerebras`, `nvidia`, `anyscale`, `vercel`, `cloudflare`,
-    /// `azure`, `ollama`, `lmstudio`, `vllm`, `llamacpp`, `gemini`, `zai`, `opencode`,
+    /// `azure`, `ollama`, `lmstudio`, `vllm`, `llamacpp`, `gemini`, `zai`,
     /// `zen`, `opencode-go`.
     ///
     /// # Errors
@@ -198,40 +196,6 @@ impl Connector {
     pub fn with_api_key(mut self, v: impl Into<String>) -> Self {
         self.params.api_key = Some(v.into());
         self
-    }
-
-    /// OpenCode Zen anonymous entry point only (`opencode` provider): permit
-    /// the free tier when no account key resolves. Requests then carry the
-    /// sentinel `Bearer public` and are restricted to the gateway's
-    /// zero-cost models
-    /// ([`ZEN_FREE_MODELS`](super::provider::ZEN_FREE_MODELS)); any other
-    /// model fails fast with
-    /// [`AnonymousModelBlocked`](ConnectorError::AnonymousModelBlocked).
-    ///
-    /// Off by default — callers enable it only after an explicit user opt-in,
-    /// and a resolved account key always wins over the sentinel. The
-    /// documented `zen` and `opencode-go` gateways are key-based (Zen's own
-    /// catalog already includes the free models), so this flag is a no-op
-    /// for them.
-    pub fn with_zen_public_tier(mut self, enabled: bool) -> Self {
-        self.params.zen_public_tier = enabled;
-        self
-    }
-
-    /// Whether this connector's requests go out on the OpenCode Zen anonymous
-    /// tier: no explicit key, none resolvable from keyring/environment, and
-    /// the free tier opted in (per-connector flag or the process-wide
-    /// switch). Anonymous sessions send the sentinel `public` bearer and may
-    /// only request free models.
-    #[must_use]
-    pub fn is_anonymous(&self) -> bool {
-        let Some(cfg) = self.provider else {
-            return false;
-        };
-        cfg.name == ZEN_PROVIDER
-            && self.params.api_key.is_none()
-            && (self.params.zen_public_tier || zen_public_tier_enabled())
-            && get_api_key(cfg.name, self.params.service_keyring.as_deref()).is_none()
     }
 
     /// Set an opaque session identifier sent as `x-session-id` /

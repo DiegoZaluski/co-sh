@@ -198,11 +198,9 @@ pub(crate) fn apply_session_headers(
 /// Build the provider-extra headers for the given provider — shared by the
 /// plain send paths and the retry wrapper. Two concerns live here:
 /// - OpenRouter's required `HTTP-Referer` / `X-Title` identification;
-/// - the OpenCode gateways' honest `User-Agent` (anonymous alternative,
-///   documented Zen, Go): co-sh identifies itself as the calling client and
-///   keeps whatever (stricter) rate-limit bucket that earns — imitating the
-///   official client to obtain its limits would circumvent the provider's
-///   access rules.
+/// - the OpenCode gateways' honest `User-Agent` (documented Zen, Go):
+///   co-sh identifies itself as the calling client instead of imitating
+///   another client's identity.
 pub(crate) fn apply_provider_headers(
     request_builder: reqwest::RequestBuilder,
     config: &ProviderConfig,
