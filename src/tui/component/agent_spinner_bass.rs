@@ -8,14 +8,16 @@
 //!
 //! The animation is fully deterministic: two spinners started at the same
 //! frame produce byte-identical output. Bars appear one-by-one during a
-//! staggered birth animation, then pulse on two superposed travelling waves
-//! (a slow "bass" wave plus a faster shimmer) with an independently detuned
-//! wobble on top whose amplitude grows with the bar's height — so the bars
-//! in the upper range dance out of sync while the floor stays calm. Each
-//! bar also receives random updrafts: unpredictable, snappy surges upward
-//! followed by gentle sinks, drawn from deterministic hash noise so the
-//! animation stays fully reproducible. Each bar's tone is shaded darker as
-//! it rises and lighter as it falls, so the colour breathes with the rhythm.
+//! staggered birth animation, then pulse on two travelling waves (a slow
+//! "bass" wave plus a faster shimmer) whose phase is randomly detuned per
+//! bar from hash noise, so no two bars share a rise/fall pattern. Each bar
+//! also receives random updrafts: unpredictable, snappy surges upward
+//! followed by gentle sinks. On top of that, random *floor holds* pin a
+//! single bar — or a whole group of adjacent bars — dead still at the floor
+//! for 1 to 7 full wave loops at a time, the way a real bass line leaves
+//! most of the band resting while one note punches through. Each bar's
+//! tone is shaded darker as it rises and lighter as it falls, so the colour
+//! breathes with the rhythm.
 
 use cosh_tui::core::lib::rgba::RGBA;
 use ratatui::buffer::Buffer;
@@ -103,6 +105,53 @@ const ELLIPSIS_ANIM_SPEED: u32 = 8;
 /// Ellipsis animation frames.
 const ELLIPSIS_FRAMES: &[&str] = &[".", "..", "...", ""];
 
+// ── Floor holds ────────────────────────────────────────────────────────────
+// Random rounds in which a bar — or a group of adjacent bars — is pinned
+// dead still at the floor, the way a bass line rests between notes.
+
+/// Frames in one full loop ("rodada") of the slow bass wave
+/// (`2π / (BASS_WAVE_FREQUENCY * TIME_STEP)` ≈ 45 frames ≈ 1.5 s at 30 fps).
+/// Hold durations are counted in these loops.
+const LOOP_FRAMES: u32 = 45;
+
+/// Minimum number of loops a held bar (or group) stays pinned at the floor.
+const HOLD_LOOPS_MIN: u32 = 1;
+
+/// Maximum number of loops a held bar (or group) stays pinned at the floor.
+const HOLD_LOOPS_MAX: u32 = 7;
+
+/// Probability (`0.0`–`1.0`) that an epoch (a block of `HOLD_LOOPS_MAX`
+/// loop-rounds) draws a floor hold at all. Holds are clipped to their own
+/// epoch and never abut the previous one, so this bounds how often the row
+/// dips into a rest.
+const HOLD_EPOCH_PROBABILITY: f32 = 0.55;
+
+/// Widest group of adjacent bars a single hold can pin to the floor
+/// (1 → a lone bar rests; larger → a whole group drops out together).
+const HOLD_GROUP_MAX: usize = 4;
+
+/// Height a held bar is pinned to — just above the floor glyph so the bar
+/// stays visible but clearly silent.
+const HOLD_FLOOR_HEIGHT: f32 = 0.05;
+
+/// Extra per-bar variation added to the pin height within one hold, so a
+/// held group rests at slightly different floor levels (`▁`/`▂`) instead of
+/// one dead-flat row. Each bar's level is fixed for the whole hold.
+const HOLD_FLOOR_VARIANCE: f32 = 0.07;
+
+// ── Wave phase detune ─────────────────────────────────────────────────────
+
+/// Spread (radians) of the per-bar random phase offset applied to both
+/// waves. Each bar draws its own offset from hash noise once, so the row no
+/// longer rises and falls as one neat travelling pattern.
+const WAVE_PHASE_DETUNE: f32 = std::f32::consts::TAU;
+
+/// Seed tags that keep the different noise streams (hold draws, hold pin
+/// levels, wave phase offsets) independent of one another.
+const HOLD_SEED_TAG: u64 = 0xD00D_CAFE;
+const PIN_SEED_TAG: u64 = 0x5EED_BA55;
+const PHASE_SEED_TAG: u64 = 0x0F11_2E1F;
+
 // ── Colour helpers ─────────────────────────────────────────────────────────
 
 /// Linear interpolation between two RGBA colours in RGB space.
@@ -155,16 +204,31 @@ fn noise01(seed: u64, col: u64, seg: u64) -> f32 {
 
 // ── AgentSpinnerBass ───────────────────────────────────────────────────────
 
+/// A floor hold scheduled inside one epoch of loop-rounds: it pins
+/// `width` adjacent bars starting at `start_col` to the floor, beginning
+/// `offset` loop-rounds into the epoch and lasting `rounds` loops
+/// (always between `HOLD_LOOPS_MIN` and `HOLD_LOOPS_MAX`).
+#[derive(Debug, Clone, Copy)]
+struct HoldDraw {
+    start_col: usize,
+    width: usize,
+    offset: u32,
+    rounds: u32,
+}
+
 /// An animated spinner shaped like a music equalizer: a row of vertical
 /// bars rising and falling on a bass rhythm, followed by a label and an
 /// animated ellipsis.
 ///
 /// Features:
 /// - **Birth animation**: bars appear one-by-one and ease up to full motion
-/// - **Bass rhythm**: two superposed travelling waves plus an independently
-///   detuned wobble that grows with height, so upper bars move out of sync
+/// - **Bass rhythm**: two travelling waves with a per-bar random phase
+///   detune, plus a detuned wobble that grows with height, so bars move
+///   independently instead of in lockstep
 /// - **Random updrafts**: snappy, unpredictable surges upward and gentle
 ///   sinks, drawn from deterministic hash noise
+/// - **Floor holds**: random rounds pin a bar or an adjacent group dead
+///   still at the floor for 1–7 full wave loops, like a resting bass line
 /// - **Height-shaded colour**: darker as bars rise, lighter as they fall
 /// - **Deterministic**: two identical spinners produce byte-identical frames
 pub struct AgentSpinnerBass {
@@ -304,17 +368,101 @@ impl AgentSpinnerBass {
     ///
     /// Two travelling waves are superposed: a slow bass wave (large
     /// amplitude, moving left→right) and a faster shimmer wave (small
-    /// amplitude, moving right→left). The sum stays in `[0, 1]` and is
-    /// deterministic in `frame`, so identical spinners render identically.
+    /// amplitude, moving right→left). Each bar also carries a random phase
+    /// offset drawn once from hash noise, so bars rise and fall out of step
+    /// with one another instead of as one shared travelling pattern. The
+    /// sum stays in `[0, 1]` and is deterministic in `frame`, so identical
+    /// spinners render identically.
     fn bar_base_height(&self, col: usize, frame: u32) -> f32 {
         #[allow(clippy::cast_precision_loss)]
         let t = frame as f32 * TIME_STEP;
         #[allow(clippy::cast_precision_loss)]
         let i = col as f32;
-        let bass = BASS_AMPLITUDE * (t * BASS_WAVE_FREQUENCY - i * BASS_WAVE_PHASE_STEP).sin();
-        let shimmer =
-            SHIMMER_AMPLITUDE * (t * SHIMMER_WAVE_FREQUENCY + i * SHIMMER_WAVE_PHASE_STEP).sin();
+        let detune = self.wave_phase_offset(col);
+        let bass = BASS_AMPLITUDE
+            * (t * BASS_WAVE_FREQUENCY - i * BASS_WAVE_PHASE_STEP + detune).sin();
+        let shimmer = SHIMMER_AMPLITUDE
+            * (t * SHIMMER_WAVE_FREQUENCY + i * SHIMMER_WAVE_PHASE_STEP + detune).sin();
         (0.5 + bass + shimmer).clamp(0.0, 1.0)
+    }
+
+    /// Random phase offset (radians) for bar `col`, drawn once from hash
+    /// noise. Pure: the same bar always gets the same offset.
+    #[allow(clippy::cast_precision_loss)]
+    fn wave_phase_offset(&self, col: usize) -> f32 {
+        WAVE_PHASE_DETUNE * noise01(self.seed ^ PHASE_SEED_TAG, col as u64, 0)
+    }
+
+    /// Raw floor-hold draw for epoch `epoch` (a block of `HOLD_LOOPS_MAX`
+    /// loop-rounds): if the dice give this epoch a hold, return its column
+    /// span and its `(offset, rounds)` position inside the epoch, clipped so
+    /// the hold always ends within its own epoch. Pure hash noise —
+    /// unpredictable per epoch, yet reproducible.
+    fn hold_draw(&self, epoch: u32) -> Option<HoldDraw> {
+        let tag = self.seed ^ HOLD_SEED_TAG;
+        let e = u64::from(epoch);
+        #[allow(clippy::cast_precision_loss)]
+        let roll = noise01(tag, e, 0);
+        if roll >= HOLD_EPOCH_PROBABILITY {
+            return None;
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let offset = ((noise01(tag, e, 1) * HOLD_LOOPS_MAX as f32) as u32)
+            .min(HOLD_LOOPS_MAX - HOLD_LOOPS_MIN);
+        #[allow(clippy::cast_precision_loss)]
+        let rounds = HOLD_LOOPS_MIN
+            + (noise01(tag, e, 2) * (HOLD_LOOPS_MAX - HOLD_LOOPS_MIN + 1) as f32) as u32;
+        // Clip: a hold never spills out of its own epoch, which is what
+        // keeps two rests from chaining into one longer stretch.
+        let rounds = rounds.min(HOLD_LOOPS_MAX - offset);
+        #[allow(clippy::cast_precision_loss)]
+        let width = 1 + (noise01(tag, e, 3) * HOLD_GROUP_MAX as f32) as usize;
+        let width = width.min(HOLD_GROUP_MAX).min(NUM_BARS);
+        #[allow(clippy::cast_precision_loss)]
+        let start_col = (noise01(tag, e, 4) * (NUM_BARS - width + 1) as f32) as usize;
+        let start_col = start_col.min(NUM_BARS - width);
+        Some(HoldDraw {
+            start_col,
+            width,
+            offset,
+            rounds,
+        })
+    }
+
+    /// The hold in force for epoch `epoch`, if any: the raw draw, suppressed
+    /// when it would abut the previous epoch's hold — a hold starting at the
+    /// epoch's first round right after one that ran to the epoch's last
+    /// round. Together with the per-epoch clipping in `hold_draw` this
+    /// guarantees no rest ever outlasts `HOLD_LOOPS_MAX` loops.
+    fn epoch_hold(&self, epoch: u32) -> Option<HoldDraw> {
+        let draw = self.hold_draw(epoch)?;
+        if draw.offset == 0
+            && epoch > 0
+            && self
+                .hold_draw(epoch - 1)
+                .is_some_and(|prev| prev.offset + prev.rounds >= HOLD_LOOPS_MAX)
+        {
+            return None;
+        }
+        Some(draw)
+    }
+
+    /// If bar `col` is floor-held at `frame`, returns the loop-round the
+    /// hold started at, so the pin height can be drawn deterministically
+    /// per hold. Holds live entirely inside their own epoch, so only one
+    /// epoch ever needs checking.
+    fn hold_start_round(&self, col: usize, frame: u32) -> Option<u32> {
+        let round = frame / LOOP_FRAMES;
+        let epoch = round / HOLD_LOOPS_MAX;
+        let draw = self.epoch_hold(epoch)?;
+        let start = epoch * HOLD_LOOPS_MAX + draw.offset;
+        if round < start || round >= start + draw.rounds {
+            return None;
+        }
+        if col < draw.start_col || col >= draw.start_col + draw.width {
+            return None;
+        }
+        Some(start)
     }
 
     /// Random updraft lift target for bar `col` in updraft segment `seg`, in
@@ -356,13 +504,21 @@ impl AgentSpinnerBass {
 
     /// Normalized height of bar `col` at frame `frame`, in `[0.0, 1.0]`.
     ///
-    /// On top of the shared travelling waves each bar carries an
-    /// independently detuned wobble whose amplitude grows with the bar's
-    /// height, so the bars in the upper range rise and fall out of sync
-    /// while the floor stays calm. A random updraft is added on top: snappy,
-    /// unpredictable surges upward (also scaled by height) so upward moves
-    /// never settle into a fixed rhythm.
+    /// When the bar is floor-held it is pinned dead still just above the
+    /// floor glyph (its exact level is drawn once per hold, so a held group
+    /// rests at slightly staggered floor levels). Otherwise it plays the
+    /// shared waves — phase-detuned per bar — plus an independently detuned
+    /// wobble whose amplitude grows with the bar's height, and a random
+    /// updraft on top: snappy, unpredictable surges upward (also scaled by
+    /// height) so upward moves never settle into a fixed rhythm.
     fn bar_height(&self, col: usize, frame: u32) -> f32 {
+        if let Some(hold_round) = self.hold_start_round(col, frame) {
+            #[allow(clippy::cast_precision_loss)]
+            let pin = HOLD_FLOOR_HEIGHT
+                + HOLD_FLOOR_VARIANCE
+                    * noise01(self.seed ^ PIN_SEED_TAG, col as u64, u64::from(hold_round));
+            return pin;
+        }
         let base = self.bar_base_height(col, frame);
         #[allow(clippy::cast_precision_loss)]
         let t = frame as f32 * TIME_STEP;
@@ -638,11 +794,16 @@ mod tests {
         // Wobble and updraft both scale with the bar's base height, so a
         // bar near the floor barely deviates from the shared wave while a
         // tall bar deviates visibly — i.e. the upper group moves
-        // independently.
+        // independently. Floor-held bars are skipped: they are pinned by
+        // design, so their deviation from the wave says nothing about the
+        // wobble.
         let max_low_deviation = (WOBBLE_AMPLITUDE + UPDRAFT_AMPLITUDE) * 0.25;
         let mut saw_big_deviation = false;
         for frame in 0..600u32 {
             for col in 0..NUM_BARS {
+                if spinner.hold_start_round(col, frame).is_some() {
+                    continue;
+                }
                 let base = spinner.bar_base_height(col, frame);
                 let deviation = (spinner.bar_height(col, frame) - base).abs();
                 if base < 0.25 {
@@ -705,6 +866,101 @@ mod tests {
     }
 
     #[test]
+    fn floor_holds_last_one_to_seven_loops_and_occur() {
+        let registry = crate::theme::ThemeRegistry::new();
+        let theme = registry.get("opencode").cloned().unwrap();
+        let spinner = AgentSpinnerBass::new("Working", &theme);
+
+        // Sample every loop-round at its midpoint and measure each maximal
+        // stretch of consecutive held rounds per bar: every stretch must
+        // span between HOLD_LOOPS_MIN and HOLD_LOOPS_MAX loops.
+        let total_rounds = 120u32;
+        let held_at = |round: u32, col: usize| -> bool {
+            let frame = round * LOOP_FRAMES + LOOP_FRAMES / 2;
+            spinner.hold_start_round(col, frame).is_some()
+        };
+
+        let mut saw_hold = false;
+        for col in 0..NUM_BARS {
+            let mut run_start: Option<u32> = None;
+            for round in 0..=total_rounds {
+                let held = round < total_rounds && held_at(round, col);
+                match (run_start, held) {
+                    (None, true) => run_start = Some(round),
+                    (Some(start), false) => {
+                        let len = round - start;
+                        assert!(
+                            (HOLD_LOOPS_MIN..=HOLD_LOOPS_MAX).contains(&len),
+                            "bar {col} hold ran for {len} loops (start {start})"
+                        );
+                        saw_hold = true;
+                        run_start = None;
+                    }
+                    (None, false) | (Some(_), true) => {}
+                }
+            }
+        }
+        assert!(saw_hold, "no bar was ever floor-held");
+
+        // While held, a bar must sit pinned at its per-hold floor level —
+        // dead still, not following the waves.
+        for col in 0..NUM_BARS {
+            for round in 0..total_rounds {
+                let frame = round * LOOP_FRAMES + LOOP_FRAMES / 2;
+                if let Some(start) = spinner.hold_start_round(col, frame) {
+                    #[allow(clippy::cast_precision_loss)]
+                    let expected = HOLD_FLOOR_HEIGHT
+                        + HOLD_FLOOR_VARIANCE
+                            * noise01(spinner.seed ^ PIN_SEED_TAG, col as u64, u64::from(start));
+                    let height = spinner.bar_height(col, frame);
+                    assert!(
+                        (height - expected).abs() < 1e-4,
+                        "held bar {col} at frame {frame}: {height} != pinned {expected}"
+                    );
+                    assert!(
+                        BLOCK_CHARS[..=1].contains(&spinner.bar_char(col, frame)),
+                        "held bar {col} not resting at a floor glyph"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn floor_holds_hit_single_bars_and_groups() {
+        let registry = crate::theme::ThemeRegistry::new();
+        let theme = registry.get("opencode").cloned().unwrap();
+        let spinner = AgentSpinnerBass::new("Working", &theme);
+
+        // Over a long window the hold draws must produce both lone-bar
+        // holds (width 1) and group holds (width ≥ 2), so the row mixes
+        // single resting bars with whole groups dropping out together.
+        // Durations must always stay inside [HOLD_LOOPS_MIN, HOLD_LOOPS_MAX].
+        let total_epochs = 60u32;
+        let mut saw_single = false;
+        let mut saw_group = false;
+        for epoch in 0..total_epochs {
+            if let Some(draw) = spinner.epoch_hold(epoch) {
+                assert!(
+                    (HOLD_LOOPS_MIN..=HOLD_LOOPS_MAX).contains(&draw.rounds),
+                    "epoch {epoch} hold lasts {rounds} loops",
+                    rounds = draw.rounds
+                );
+                if draw.width == 1 {
+                    saw_single = true;
+                } else {
+                    saw_group = true;
+                }
+            }
+        }
+        assert!(saw_single, "no lone bar was ever floor-held");
+        assert!(
+            saw_group,
+            "no group of adjacent bars was ever floor-held together"
+        );
+    }
+
+    #[test]
     fn adjacent_bars_do_not_move_in_lockstep() {
         let registry = crate::theme::ThemeRegistry::new();
         let theme = registry.get("opencode").cloned().unwrap();
@@ -738,6 +994,8 @@ mod tests {
             "bars move nearly in lockstep: {same} same vs {opposite} opposite"
         );
     }
+
+
 
     #[test]
     fn bar_color_darkens_as_it_rises() {
