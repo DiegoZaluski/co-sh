@@ -56,6 +56,22 @@ mod tests;
 
 use terminal::{init_terminal, restore_terminal};
 
+/// Derive the opaque cache-affinity session id sent as `x-session-id` /
+/// `x-session-affinity` on every LLM request of the chat session.
+///
+/// Gateways that load-balance across backends (e.g. Charm Hyper) use these
+/// headers to pin a session's requests — and the backend prompt-cache
+/// entries they created — to one node. Without affinity, each turn's full
+/// context resend can land on a cache-cold node and bill uncached input.
+///
+/// The chat session id is hashed (XXH64, same family as Crush's XXH3
+/// `session.HashID`) so the header value is deterministic AND opaque: it
+/// never exposes raw session data, satisfying the SDK's
+/// `with_session_id` contract ("never raw user data").
+pub(crate) fn session_affinity_id(session_id: &str) -> String {
+    format!("{:016x}", xxhash_rust::xxh64::xxh64(session_id.as_bytes(), 0))
+}
+
 /// The editable prompt text of a message: its non-synthetic text parts
 /// joined by a space (mirrors opencode's Revert/Copy text reconstruction).
 pub(crate) fn message_prompt_text(msg: &crate::types::Message) -> String {

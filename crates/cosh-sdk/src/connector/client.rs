@@ -207,6 +207,17 @@ impl Connector {
         self
     }
 
+    /// The opaque cache-affinity session id set via
+    /// [`with_session_id`](Self::with_session_id).
+    ///
+    /// Lets callers (e.g. the harness) re-apply the same affinity routing
+    /// when a connector is rebuilt for a fallback provider or for
+    /// summarization — the value belongs to the SESSION, not the model.
+    #[must_use]
+    pub fn session_id(&self) -> Option<&str> {
+        self.params.session_id.as_deref()
+    }
+
     pub fn with_service_keyring(mut self, v: impl Into<String>) -> Self {
         self.params.service_keyring = Some(v.into());
         self

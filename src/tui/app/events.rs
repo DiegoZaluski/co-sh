@@ -616,6 +616,14 @@ impl App {
                                     if let Some(ref url) = base_url {
                                         connector = connector.with_base_url(url.clone());
                                     }
+                                    // Cache-affinity routing: the title call
+                                    // belongs to this session, so it carries
+                                    // the same opaque affinity hash as the
+                                    // main loop (pins it to the warm backend).
+                                    connector = connector
+                                        .with_session_id(super::session_affinity_id(
+                                            &session_id,
+                                        ));
                                     // Disable tools and retry for the title call —
                                     // it is a simple chat completion.
                                     connector = connector

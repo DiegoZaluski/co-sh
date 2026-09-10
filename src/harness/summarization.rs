@@ -64,6 +64,13 @@ impl Harness {
         if let Some(retention) = self.connector.prompt_cache_retention() {
             connector = connector.with_prompt_cache_retention(retention);
         }
+        // Carry the session-affinity routing: summarization requests belong
+        // to the same session, so they must reach the same cache-warm
+        // backend as the main loop (like Crush, which sends
+        // `x-session-affinity` on its summarization calls too).
+        if let Some(sid) = self.connector.session_id() {
+            connector = connector.with_session_id(sid);
+        }
         // Explicit summary models use their provider defaults for reasoning;
         // the agent's effort setting belongs to the agent, not this chain.
         Ok(connector)

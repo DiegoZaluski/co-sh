@@ -279,7 +279,11 @@ impl App {
                     }
                     connector = connector
                         .with_prompt_cache_ttl_1h(anthropic_ttl)
-                        .with_prompt_cache_key(&id);
+                        .with_prompt_cache_key(&id)
+                        // Same session-affinity routing as the main loop:
+                        // compaction requests carry the session's opaque
+                        // hash so they reach the same cache-warm backend.
+                        .with_session_id(super::session_affinity_id(&id));
                     if let Some(retention) = retention {
                         connector = connector.with_prompt_cache_retention(retention);
                     }

@@ -323,15 +323,22 @@ impl App {
                     let connector;
                     let mut remaining: Vec<(String, String)> = Vec::new();
                     // Apply the session-level prompt-cache settings to every
-                    // connector this loop builds: TTL/retention choices and
-                    // the cache-affinity key. Each field is only read by the
-                    // caller that implements it (Claude TTL, OpenAI
-                    // key/retention), so applying them unconditionally is
-                    // safe across fallback families.
+                    // connector this loop builds: TTL/retention choices,
+                    // the cache-affinity key, the retention choice and the
+                    // session-affinity headers. Each field is only read by
+                    // the caller that implements it (Claude TTL, OpenAI
+                    // key/retention, `x-session-affinity` routing), so
+                    // applying them unconditionally is safe across fallback
+                    // families. The session-affinity headers pin the whole
+                    // session to one cache-warm backend (Charm Hyper et al.).
                     let apply_cache = |c: Connector| {
                         let c = c.with_prompt_cache_ttl_1h(anthropic_ttl_1h);
                         let c = match &cache_key {
                             Some(id) => c.with_prompt_cache_key(id),
+                            None => c,
+                        };
+                        let c = match &cache_key {
+                            Some(id) => c.with_session_id(super::session_affinity_id(id)),
                             None => c,
                         };
                         match &openai_cache_retention {

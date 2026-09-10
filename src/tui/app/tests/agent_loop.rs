@@ -1,5 +1,34 @@
 use super::App;
+use crate::app::session_affinity_id;
 use crate::session_store::generate_session_id;
+
+/// The affinity id derived from a chat session id must be opaque,
+/// deterministic and non-identifying: the same session always produces the
+/// same `x-session-id` / `x-session-affinity` value (that's what keeps the
+/// session pinned to one cache-warm backend), different sessions hash to
+/// different values, and the raw session id never appears in the header.
+#[test]
+fn session_affinity_id_is_deterministic_opaque_hash() {
+    let id = generate_session_id();
+    let affinity = session_affinity_id(&id);
+
+    // Deterministic: rebuilding for a fallback / summarization connector
+    // must yield the identical routing value.
+    assert_eq!(affinity, session_affinity_id(&id));
+
+    // Opaque: the raw session id is never sent on the wire.
+    assert!(!affinity.contains(&id));
+    assert_ne!(affinity, id);
+
+    // Distinct sessions get distinct routing values (fixed-width hex).
+    // `generate_session_id()` is a millisecond timestamp, so brief sleep
+    // guarantees the two ids differ (no same-millisecond collision).
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let other = session_affinity_id(&generate_session_id());
+    assert_ne!(affinity, other);
+    assert_eq!(affinity.len(), 16);
+    assert!(affinity.chars().all(|c| c.is_ascii_hexdigit()));
+}
 
 /// When the agent loop ends (Done/Stopped) before a "next request" message
 /// was consumed, it must be promoted to the "next agent loop" queue so it

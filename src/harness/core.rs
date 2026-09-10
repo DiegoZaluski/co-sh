@@ -3310,6 +3310,14 @@ impl Harness {
                             if let Some(retention) = self.connector.prompt_cache_retention() {
                                 c = c.with_prompt_cache_retention(retention);
                             }
+                            // Re-apply the session-affinity routing: like the
+                            // cache settings above, the affinity headers
+                            // belong to the SESSION — a fallback switch must
+                            // not drop them or the session's requests would
+                            // fan out across cache-cold backends.
+                            if let Some(sid) = self.connector.session_id() {
+                                c = c.with_session_id(sid);
+                            }
                             let mut c = c
                                 // Re-apply the tool-call mode: the fallback
                                 // connector is built from scratch and would
