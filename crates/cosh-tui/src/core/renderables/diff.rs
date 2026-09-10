@@ -8,6 +8,9 @@ use ratatui::style::{Color, Modifier, Style};
 use crate::core::lib::unicode_util;
 use crate::core::renderable::Renderable;
 use crate::core::rgba::RGBA;
+use cosh_sdk::tree_sitter::highlight::{HighlightCategory, highlight};
+
+use super::markdown::SyntaxColors;
 
 static NEXT_DIFF_NUM: AtomicU64 = AtomicU64::new(1);
 
@@ -73,6 +76,14 @@ pub struct DiffRenderable {
     added_line_number_bg: RGBA,
     removed_line_number_bg: RGBA,
     show_line_numbers: bool,
+    /// Tree-sitter language for syntax-highlighting the code body of
+    /// added/removed/context lines (e.g. `"rust"`). `None` disables it.
+    code_lang: Option<String>,
+    /// Theme syntax colors — the same palette `MarkdownRenderable` uses for
+    /// fenced code blocks, so diffs and codeblocks share one coloration.
+    syntax_colors: SyntaxColors,
+    /// Fallback foreground for code without a highlight category.
+    code_default_fg: RGBA,
 }
 
 const fn rgba_color(c: RGBA) -> Color {
@@ -109,6 +120,9 @@ impl DiffRenderable {
             added_line_number_bg: RGBA::from_ints(0, 0, 0, 0),
             removed_line_number_bg: RGBA::from_ints(0, 0, 0, 0),
             show_line_numbers: true,
+            code_lang: None,
+            syntax_colors: SyntaxColors::default(),
+            code_default_fg: RGBA::from_ints(255, 255, 255, 255),
         }
     }
 
@@ -147,6 +161,69 @@ impl DiffRenderable {
     }
     pub const fn set_show_line_numbers(&mut self, value: bool) {
         self.show_line_numbers = value;
+    }
+    pub fn set_code_lang(&mut self, value: Option<String>) {
+        self.code_lang = value;
+    }
+    pub fn set_syntax_colors(&mut self, value: SyntaxColors) {
+        self.syntax_colors = value;
+    }
+    pub const fn set_code_default_fg(&mut self, value: RGBA) {
+        self.code_default_fg = value;
+    }
+
+    /// Resolve a tree-sitter category through the codeblock syntax palette,
+    /// falling back to the default code foreground.
+    fn syntax_fg(&self, cat: Option<HighlightCategory>) -> RGBA {
+        let s = &self.syntax_colors;
+        let opt = match cat {
+            Some(HighlightCategory::Comment) => s.comment,
+            Some(HighlightCategory::Keyword) => s.keyword,
+            Some(HighlightCategory::Function) => s.function,
+            Some(HighlightCategory::String) => s.string,
+            Some(HighlightCategory::Number) => s.number,
+            Some(HighlightCategory::Type) => s.r#type,
+            Some(HighlightCategory::Builtin) => s.builtin,
+            None => None,
+        };
+        opt.unwrap_or(self.code_default_fg)
+    }
+
+    /// Byte-to-category map for one code fragment, or `None` when no
+    /// language is set / the language is unsupported. Mirrors how
+    /// `MarkdownRenderable` highlights fenced code blocks.
+    fn highlight_cats(&self, text: &str) -> Option<Vec<Option<HighlightCategory>>> {
+        let lang = self.code_lang.as_deref()?;
+        if lang.is_empty() || text.is_empty() {
+            return None;
+        }
+        let spans = highlight(text, lang)?;
+        let mut cats: Vec<Option<HighlightCategory>> = vec![None; text.len()];
+        for span in &spans {
+            let end = span.end.min(text.len());
+            if span.start >= end {
+                continue;
+            }
+            for item in &mut cats[span.start..end] {
+                *item = Some(span.category);
+            }
+        }
+        Some(cats)
+    }
+
+    /// Per-grapheme style for a code fragment: syntax foreground on the
+    /// diff background. `cats` is the [`Self::highlight_cats`] map for
+    /// `text`; `byte_pos` is the byte offset of the grapheme in `text`.
+    fn code_style(
+        &self,
+        cats: Option<&[Option<HighlightCategory>]>,
+        byte_pos: usize,
+        bg: Color,
+    ) -> Style {
+        let cat = cats.and_then(|c| c.get(byte_pos).copied().flatten());
+        Style::default()
+            .bg(bg)
+            .fg(rgba_color(self.syntax_fg(cat)))
     }
 
     fn classify_line(line: &str) -> DiffLineType {
@@ -475,21 +552,57 @@ impl DiffRenderable {
             x += 1;
         }
 
-        // Content (truncated to panel width, no wrapping)
+        // Content (truncated to panel width, no wrapping), syntax-highlighted
+        // with the codeblock palette when the line carries code.
         if let Some(li) = line {
             let content = Self::content_part(&li.content, li.line_type);
+            let is_code = matches!(
+                li.line_type,
+                DiffLineType::Add | DiffLineType::Remove | DiffLineType::Context
+            );
+            let cats = if is_code {
+                self.highlight_cats(content)
+            } else {
+                None
+            };
+            let mut byte_pos = 0usize;
             // Skip control characters (e.g. \t in diffs): writing them into
             // buffer cells makes ratatui's buffer diff panic
             // ("control character passed to cell_width without filtering").
-            for ch in content.chars().filter(|c| !c.is_control()) {
-                if x >= max_x_panel {
+            for (grapheme, w) in unicode_util::graphemes_with_width(content) {
+                let len = grapheme.len();
+                let is_control = grapheme.chars().any(char::is_control);
+                let cat_pos = byte_pos;
+                byte_pos += len;
+                if is_control {
+                    continue;
+                }
+                if x + w > max_x_panel {
                     break;
                 }
+                let style = if is_code {
+                    self.code_style(cats.as_deref(), cat_pos, default_bg)
+                } else {
+                    content_style
+                };
                 if let Some(cell) = buf.cell_mut((x, y)) {
-                    cell.set_char(ch);
-                    cell.set_style(content_style);
+                    if grapheme.len() == 1 {
+                        if let Some(c) = grapheme.chars().next() {
+                            cell.set_char(c);
+                        }
+                    } else {
+                        cell.set_symbol(grapheme);
+                    }
+                    cell.set_style(style);
                 }
-                x += 1;
+                if w > 1 {
+                    for dx in 1..w {
+                        if let Some(cell) = buf.cell_mut((x + dx, y)) {
+                            cell.set_diff_option(CellDiffOption::Skip);
+                        }
+                    }
+                }
+                x += w;
             }
         }
 
@@ -695,6 +808,11 @@ impl DiffRenderable {
             }
 
             let wrapped = unicode_util::word_wrap(content_w, content_max_w);
+            let is_code = matches!(
+                li.line_type,
+                DiffLineType::Add | DiffLineType::Remove | DiffLineType::Context
+            );
+            let content_bg = content_style.bg.unwrap_or(Color::Reset);
 
             for (wl_idx, wl) in wrapped.iter().enumerate() {
                 if y >= max_y {
@@ -748,15 +866,33 @@ impl DiffRenderable {
                     }
                 }
 
-                // Render content
+                // Render content, syntax-highlighted with the codeblock
+                // palette when the line carries code. Each wrapped chunk is
+                // highlighted on its own so grapheme byte offsets line up
+                // with the highlight map.
+                let cats = if is_code {
+                    self.highlight_cats(wl)
+                } else {
+                    None
+                };
+                let mut byte_pos = 0usize;
                 for (grapheme, w) in unicode_util::graphemes_with_width(wl) {
+                    let len = grapheme.len();
                     // Skip control characters (e.g. \t in diffs) — see above.
-                    if grapheme.chars().any(char::is_control) {
+                    let is_control = grapheme.chars().any(char::is_control);
+                    let cat_pos = byte_pos;
+                    byte_pos += len;
+                    if is_control {
                         continue;
                     }
                     if x + w > max_x {
                         break;
                     }
+                    let style = if is_code {
+                        self.code_style(cats.as_deref(), cat_pos, content_bg)
+                    } else {
+                        content_style
+                    };
                     if let Some(cell) = buf.cell_mut((x, y)) {
                         if grapheme.len() == 1 {
                             if let Some(c) = grapheme.chars().next() {
@@ -765,7 +901,7 @@ impl DiffRenderable {
                         } else {
                             cell.set_symbol(grapheme);
                         }
-                        cell.set_style(content_style);
+                        cell.set_style(style);
                     }
                     if w > 1 {
                         for dx in 1..w {

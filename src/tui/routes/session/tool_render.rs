@@ -136,36 +136,50 @@ fn draw_link_row(
     }
 }
 
+/// Map a file path to the tree-sitter language name used by [`highlight`]
+/// (and by the markdown codeblock renderer), so tool boxes share the exact
+/// same highlighting coverage as chat codeblocks.
 fn lang_name_from_path(filepath: &str) -> Option<&'static str> {
     let ext = Path::new(filepath)
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("");
+    let ext = ext.to_ascii_lowercase();
 
-    Some(match ext {
+    Some(match ext.as_str() {
         "rs" => "rust",
         "py" => "python",
-        "js" | "jsx" | "mjs" | "cjs" => "javascript",
-        "cs" => "csharp",
+        "js" | "jsx" | "mjs" | "cjs" | "json" | "ts" | "tsx" | "mts" | "cts" | "php"
+        | "lua" | "dart" => "javascript",
+        "cs" | "c" | "h" | "cpp" | "c++" | "cxx" | "hpp" | "m" | "mm" | "objc"
+        | "objectivec" => "csharp",
         "go" => "go",
-        "java" => "java",
+        "java" | "scala" | "groovy" => "java",
         "hs" | "lhs" => "haskell",
         "swift" => "swift",
         "zig" | "zon" => "zig",
-        "kt" | "kts" => "kotlin",
+        "kt" | "kts" | "kotlin" => "kotlin",
         _ => return None,
     })
 }
 
-fn code_highlight_style(cat: Option<HighlightCategory>, default_fg: Color) -> Style {
+/// Syntax style for tool code boxes, resolved through the active [`Theme`]
+/// exactly like markdown codeblocks are (see `syntax_colors`): theme colors
+/// win, anything unset falls back to the surrounding text color.
+fn code_highlight_style(
+    cat: Option<HighlightCategory>,
+    default_fg: Color,
+    theme: &Theme,
+) -> Style {
     let fg = match cat {
-        Some(HighlightCategory::Keyword) => Color::Rgb(255, 180, 100),
-        Some(HighlightCategory::String) => Color::Rgb(150, 200, 150),
-        Some(HighlightCategory::Comment) => Color::Rgb(130, 130, 140),
-        Some(HighlightCategory::Type) => Color::Rgb(100, 180, 255),
-        Some(HighlightCategory::Function) => Color::Rgb(200, 180, 255),
-        Some(HighlightCategory::Number) => Color::Rgb(255, 200, 100),
-        Some(HighlightCategory::Builtin) => Color::Rgb(100, 200, 255),
+        Some(HighlightCategory::Keyword) => rgba_color(theme.syntax_keyword),
+        Some(HighlightCategory::String) => rgba_color(theme.syntax_string),
+        Some(HighlightCategory::Comment) => rgba_color(theme.syntax_comment),
+        Some(HighlightCategory::Type) => rgba_color(theme.syntax_type),
+        Some(HighlightCategory::Function) => rgba_color(theme.syntax_function),
+        Some(HighlightCategory::Number) => rgba_color(theme.syntax_number),
+        // Codeblocks map `Builtin` onto the operator accent.
+        Some(HighlightCategory::Builtin) => rgba_color(theme.syntax_operator),
         None => default_fg,
     };
     Style::default().fg(fg)
@@ -711,6 +725,7 @@ struct CodeBlockSpec<'a> {
     default_fg: Color,
     ln_fg: Color,
     max_lines: u16,
+    theme: &'a Theme,
 }
 
 /// Draw a code block with line numbers (matching opencode's `<line_number>` wrapper).
@@ -727,6 +742,7 @@ fn draw_highlighted_code_with_ln(
         default_fg,
         ln_fg,
         max_lines,
+        theme,
     } = spec;
     let ln_count = content.lines().count().min(max_lines as usize);
     if ln_count == 0 {
@@ -808,7 +824,7 @@ fn draw_highlighted_code_with_ln(
             }
             let byte_pos = byte_offset + ci;
             let cat = cat_map.get(byte_pos).copied().flatten();
-            let style = code_highlight_style(cat, default_fg);
+            let style = code_highlight_style(cat, default_fg, theme);
             if let Some(cell) = buf.cell_mut((x_pos, y_pos)) {
                 cell.set_char(ch);
                 cell.set_style(style);
@@ -895,6 +911,7 @@ pub fn render_write(ctx: &mut ToolRenderCtx, part: &ToolPart) {
                 default_fg,
                 ln_fg,
                 max_lines,
+                theme: ctx.theme,
             },
         );
     } else {
@@ -972,6 +989,11 @@ pub fn render_edit(ctx: &mut ToolRenderCtx, part: &ToolPart) {
         diff.set_line_number_fg(ctx.theme.diff_line_number);
         diff.set_added_line_number_bg(ctx.theme.diff_added_line_number_bg);
         diff.set_removed_line_number_bg(ctx.theme.diff_removed_line_number_bg);
+        // Syntax-highlight the code body with the same palette chat
+        // codeblocks use; the language comes from the edited file path.
+        diff.set_code_lang(lang_name_from_path(&filepath).map(str::to_string));
+        diff.set_syntax_colors(crate::util::markdown::syntax_colors(ctx.theme));
+        diff.set_code_default_fg(ctx.theme.text);
         if ctx.max_w >= 100 {
             diff.set_view_mode(DiffViewMode::Split);
         }
@@ -1403,6 +1425,7 @@ pub fn render_read(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
                 default_fg,
                 ln_fg,
                 max_lines: content_lines,
+                theme: ctx.theme,
             },
         );
         if collapsed.overflow {
