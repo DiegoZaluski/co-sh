@@ -1481,17 +1481,21 @@ impl SessionView {
     /// inline single-line label. Mirrors what the renderers actually draw so
     /// the height estimate and the render agree on the box's external margins:
     /// `render_shell` boxes any bash with output (Running or Completed),
-    /// `render_glob` boxes any glob with listable output, `render_write` /
-    /// `render_edit` box only completed tools, `render_read` boxes any
-    /// completed read with parseable content, `render_todo` boxes any
-    /// non-running tool with listable output (Completed and Failed both draw).
+    /// `render_glob` boxes any glob with listable output, `render_write`
+    /// boxes a completed write with non-empty input content and no warnings
+    /// (its output is a short receipt — size comes from the input),
+    /// `render_edit` boxes a completed edit with an extractable diff,
+    /// `render_read` boxes any completed read with parseable content,
+    /// `render_todo` boxes any non-running tool with listable output
+    /// (Completed and Failed both draw).
     fn tool_is_block(part: &ToolPart) -> bool {
         let display = tool_render::tool_display(&part.tool);
         let has_output = part.output.as_deref().is_some_and(|o| !o.trim().is_empty());
         match display {
             "bash" => has_output,
             "glob" => tool_render::glob_block_text(part).is_some(),
-            "write" | "edit" => has_output && matches!(part.status, ToolStatus::Completed),
+            "write" => tool_render::write_box_lines(part).is_some(),
+            "edit" => tool_render::edit_diff_content(part).is_some(),
             "read" => {
                 has_output
                     && matches!(part.status, ToolStatus::Completed)
@@ -1587,20 +1591,27 @@ impl SessionView {
                         let lines = formatted.len().max(1) as u16;
                         lines + 4
                     } else if tool_render::tool_display(&t.tool) == "edit" {
-                        // Extract diff from JSON (same logic as render_edit) to get
-                        // an accurate line count for height estimation.
-                        let diff_content = if tool_render::looks_like_unified_diff(output) {
-                            Some(output.to_string())
-                        } else {
-                            tool_render::extract_diff_from_json(output)
-                        };
-                        let diff_lines = diff_content
+                        // Same extraction as render_edit (shared helper) so the
+                        // line count matches the drawn diff exactly.
+                        let diff_lines = tool_render::edit_diff_content(t)
                             .as_deref()
                             .map(|d| d.lines().count().min(30) as u16)
                             .unwrap_or(0);
                         // line_h = diff_lines + 3 (padding + title + gap)
                         // + 2 for external margins (top + bottom)
                         diff_lines + 5
+                    } else if tool_render::tool_display(&t.tool) == "write" {
+                        // Same source as render_write (shared helper): the box
+                        // previews `input.content` (capped at 20 rows), NOT the
+                        // short JSON receipt in `output`. Using `output` here
+                        // underestimated the box by up to ~19 rows, so the walk
+                        // started the next part inside the box and the cached
+                        // height clipped it.
+                        let display_lines =
+                            tool_render::write_box_lines(t).unwrap_or(0);
+                        // Internal box: top padding (1) + title + content +
+                        // bottom padding (1) = lines + 3; +2 external margins.
+                        display_lines + 5
                     } else if tool_render::tool_display(&t.tool) == "read" {
                         // Read block: preview collapsed to a few lines, full
                         // code when expanded (mirrors render_read).

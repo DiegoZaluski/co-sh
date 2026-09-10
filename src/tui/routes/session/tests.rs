@@ -4874,3 +4874,162 @@ fn completed_question_label_is_not_copyable() {
     assert!(question_markdown(&part).is_some());
     assert_eq!(tool_inline_text(&part), "Asking questions");
 }
+
+/// Regressão: o box de `write` estima altura a partir do `input.content`
+/// (o que `render_write` desenha), nunca do `output` (receipt JSON curto).
+/// Antes a estimativa media o `output`, então era menor que o desenho real
+/// (ex.: 6 vs 20): o walk posicionava a próxima parte (Thought/codeblock)
+/// DENTRO do box e o `visible_h` derivado do cache cortava o box.
+#[test]
+fn proof_write_estimate_vs_render_mismatch() {
+    use super::tool_render::{ToolRenderCtx, ToolRenderState, dispatch_tool};
+
+    let theme = test_theme();
+    let config = test_config();
+    let max_w: u16 = 80;
+
+    // Conteúdo longo no INPUT (o que o render_write desenha), output curto.
+    let content: String = (0..15).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+    let part = ToolPart {
+        tool: "fs_write".into(),
+        input: serde_json::json!({"filePath": "src/main.rs", "content": content}),
+        // Output típico de sucesso: curto (1 linha), bem menor que o content.
+        output: Some(r#"[{"ok": true}]"#.to_string()),
+        status: ToolStatus::Completed,
+        tool_call_id: Some("w1".into()),
+        is_start: true,
+        is_streaming: false,
+        cached_line_count: None,
+        lsp_notes: None,
+    };
+
+    let est = SessionView::estimate_part_height(
+        &Part::Tool(part.clone()),
+        max_w,
+        &config,
+        &MessageRole::Assistant,
+        &ToolRenderState::new(),
+    );
+
+    let mut buf = Buffer::empty(Rect::new(0, 0, max_w + 3, 60));
+    let mut state = ToolRenderState::new();
+    let mut line_h = 0u16;
+    {
+        let mut ctx = ToolRenderCtx {
+            buf: &mut buf,
+            x: 0,
+            y: 0,
+            line_h: &mut line_h,
+            max_w,
+            state: &mut state,
+            theme: &theme,
+        };
+        dispatch_tool(&mut ctx, &part, 0);
+    }
+    let is_block = SessionView::tool_is_block(&part);
+    let actual = line_h + if is_block { 2 } else { 0 };
+
+    eprintln!("[PROOF] write est={est} actual(line_h+margin)={actual} is_block={is_block} line_h={line_h}");
+    assert_eq!(
+        est, actual,
+        "MISMATCH PROVADO: estimate ({est}) != render real ({actual}). \
+         O cache manda o walk cortar o box e a próxima parte começa dentro dele."
+    );
+}
+
+/// Regressão: estimativa do `write`/`edit` deve espelhar o render em todos os
+/// estados (output vazio, warnings, running, diff inválido). Cada variante
+/// compara `estimate_part_height` com `dispatch_tool` + margens do walk.
+#[test]
+fn write_edit_estimate_matches_render_in_all_states() {
+    use super::tool_render::{ToolRenderCtx, ToolRenderState, dispatch_tool};
+
+    let theme = test_theme();
+    let config = test_config();
+    let max_w: u16 = 80;
+
+    let content: String = (0..15).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+    let mk_write = |output: Option<String>, status: ToolStatus| ToolPart {
+        tool: "fs_write".into(),
+        input: serde_json::json!({"filePath": "src/main.rs", "content": content.clone()}),
+        output,
+        status,
+        tool_call_id: Some("w1".into()),
+        is_start: true,
+        is_streaming: false,
+        cached_line_count: None,
+        lsp_notes: None,
+    };
+    let mk_edit = |output: Option<String>| ToolPart {
+        tool: "fs_edit".into(),
+        input: serde_json::json!({"filePath": "src/main.rs"}),
+        output,
+        status: ToolStatus::Completed,
+        tool_call_id: Some("e1".into()),
+        is_start: true,
+        is_streaming: false,
+        cached_line_count: None,
+        lsp_notes: None,
+    };
+
+    let cases: Vec<(&str, ToolPart)> = vec![
+        // Output vazio: antes `tool_is_block` era false (est=1) mas o render
+        // desenhava o box cheio — o pior overlap.
+        ("write_empty_output", mk_write(None, ToolStatus::Completed)),
+        // Warnings: write NÃO modificou o arquivo → label inline (1 linha).
+        (
+            "write_warnings",
+            mk_write(
+                Some(r#"[{"warnings": "hash mismatch"}]"#.to_string()),
+                ToolStatus::Completed,
+            ),
+        ),
+        // Running: ainda inline, sem box.
+        (
+            "write_running",
+            mk_write(Some(r#"[{"ok": true}]"#.to_string()), ToolStatus::Running),
+        ),
+        // Edit com output não-diff: inline (antes estimava 5 vs real 3).
+        (
+            "edit_non_diff",
+            mk_edit(Some(r#"{"ok": true}"#.to_string())),
+        ),
+        // Edit com diff real: box com altura do diff.
+        (
+            "edit_diff",
+            mk_edit(Some(
+                "--- a/foo\n+++ b/foo\n@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            )),
+        ),
+    ];
+
+    for (name, part) in cases {
+        let est = SessionView::estimate_part_height(
+            &Part::Tool(part.clone()),
+            max_w,
+            &config,
+            &MessageRole::Assistant,
+            &ToolRenderState::new(),
+        );
+        let mut buf = Buffer::empty(Rect::new(0, 0, max_w + 3, 60));
+        let mut state = ToolRenderState::new();
+        let mut line_h = 0u16;
+        {
+            let mut ctx = ToolRenderCtx {
+                buf: &mut buf,
+                x: 0,
+                y: 0,
+                line_h: &mut line_h,
+                max_w,
+                state: &mut state,
+                theme: &theme,
+            };
+            dispatch_tool(&mut ctx, &part, 0);
+        }
+        let actual = line_h + if SessionView::tool_is_block(&part) { 2 } else { 0 };
+        assert_eq!(
+            est, actual,
+            "case {name}: estimate ({est}) != render real ({actual})"
+        );
+    }
+}

@@ -492,7 +492,7 @@ pub(crate) fn input_filepath(input: &serde_json::Value) -> Option<String> {
 
 /// Extract content from tool input, supporting both opencode-style
 /// ({"content": "..."}) and cosh-style ({"targets": [{"text": "...", ...}]}).
-fn input_content(input: &serde_json::Value) -> Option<String> {
+pub(crate) fn input_content(input: &serde_json::Value) -> Option<String> {
     if let Some(c) = input_value(input, "content") {
         return Some(c);
     }
@@ -501,6 +501,59 @@ fn input_content(input: &serde_json::Value) -> Option<String> {
         .and_then(|t| t.as_array())
         .and_then(|a| a.first())
         .and_then(|t| input_value(t, "text"))
+}
+
+/// True when a completed write carries warnings (e.g. missing file_hash or
+/// hash mismatch). In that case the write did NOT modify the file and the
+/// renderer falls back to the label-only view — shared by the renderer,
+/// the height estimate and `tool_is_block` so all three agree.
+pub(crate) fn write_has_warnings(part: &ToolPart) -> bool {
+    part.output
+        .as_deref()
+        .and_then(|o| serde_json::from_str::<serde_json::Value>(o).ok())
+        .and_then(|v| {
+            v.as_array()?
+                .first()?
+                .get("warnings")?
+                .as_str()
+                .map(|_| ())
+        })
+        .is_some()
+}
+
+/// Number of content rows the write box draws, or `None` when `render_write`
+/// falls back to the inline label. Mirrors the renderer's predicate exactly:
+/// completed + no warnings + non-empty `input.content` (NOT `output` — the
+/// output of a successful write is a short JSON receipt, unrelated in size
+/// to the previewed content).
+pub(crate) fn write_box_lines(part: &ToolPart) -> Option<u16> {
+    if !matches!(part.status, ToolStatus::Completed) || write_has_warnings(part) {
+        return None;
+    }
+    let content = input_content(&part.input).unwrap_or_default();
+    if content.is_empty() {
+        return None;
+    }
+    const MAX_LINES: usize = 20;
+    Some(content.lines().count().min(MAX_LINES) as u16)
+}
+
+/// The unified diff `render_edit` draws for a completed edit, or `None` when
+/// it falls back to the inline label. Shared by the renderer, the height
+/// estimate and `tool_is_block` so all three agree.
+pub(crate) fn edit_diff_content(part: &ToolPart) -> Option<String> {
+    if !matches!(part.status, ToolStatus::Completed) {
+        return None;
+    }
+    let raw_output = part.output.as_deref().unwrap_or("");
+    if raw_output.is_empty() {
+        return None;
+    }
+    if looks_like_unified_diff(raw_output) {
+        Some(raw_output.to_string())
+    } else {
+        extract_diff_from_json(raw_output)
+    }
 }
 
 /// Heuristic: does the output string look like a unified diff?
@@ -779,27 +832,9 @@ fn draw_highlighted_code_with_ln(
 pub fn render_write(ctx: &mut ToolRenderCtx, part: &ToolPart) {
     let filepath = input_filepath(&part.input).unwrap_or_default();
     let content = input_content(&part.input).unwrap_or_default();
-    let is_completed = matches!(part.status, ToolStatus::Completed);
 
-    // Check if the write produced warnings (e.g. missing file_hash for an
-    // existing file, or hash mismatch).  When warnings exist the write did
-    // NOT modify the file, so we show the warning instead of the content
-    // preview to avoid misleading the user.
-    let has_warnings = part
-        .output
-        .as_deref()
-        .and_then(|o| serde_json::from_str::<serde_json::Value>(o).ok())
-        .and_then(|v| {
-            v.as_array()?
-                .first()?
-                .get("warnings")?
-                .as_str()
-                .map(String::from)
-        });
-
-    if has_warnings.is_none() && is_completed && !content.is_empty() {
+    if let Some(display_lines) = write_box_lines(part) {
         let max_lines = 20u16;
-        let display_lines = content.lines().count().min(max_lines as usize) as u16;
         // 1 blank row of internal padding above the title (the bottom-padding
         // row is the last row of the box), matching the Glob box.
         let area = Rect::new(
@@ -872,17 +907,8 @@ pub fn render_write(ctx: &mut ToolRenderCtx, part: &ToolPart) {
 
 pub fn render_edit(ctx: &mut ToolRenderCtx, part: &ToolPart) {
     let filepath = input_filepath(&part.input).unwrap_or_default();
-    let raw_output = part.output.as_deref().unwrap_or("").to_string();
-    let is_completed = matches!(part.status, ToolStatus::Completed);
 
-    let diff_content =
-        if is_completed && !raw_output.is_empty() && looks_like_unified_diff(&raw_output) {
-            Some(raw_output)
-        } else if is_completed && !raw_output.is_empty() {
-            extract_diff_from_json(&raw_output)
-        } else {
-            None
-        };
+    let diff_content = edit_diff_content(part);
 
     if let Some(ref diff_content) = diff_content {
         let diff_lines = diff_content.lines().count() as u16;
@@ -1599,19 +1625,9 @@ pub fn tool_copy_text(part: &ToolPart) -> Option<String> {
         "write" => {
             // The screen shows the content from the tool *input*, not the
             // output; a warnings payload means nothing was written and the
-            // renderer falls back to the label-only view.
-            let has_warnings = serde_json::from_str::<serde_json::Value>(output)
-                .ok()
-                .and_then(|v| {
-                    v.as_array()?
-                        .first()?
-                        .get("warnings")?
-                        .as_str()
-                        .map(String::from)
-                });
-            if has_warnings.is_some() || !matches!(part.status, ToolStatus::Completed) {
-                return None;
-            }
+            // renderer falls back to the label-only view (same predicate as
+            // the renderer via `write_box_lines`).
+            write_box_lines(part)?;
             let content = input_content(&part.input).unwrap_or_default();
             (!content.is_empty()).then(|| content.lines().take(20).collect::<Vec<_>>().join("\n"))
         }
