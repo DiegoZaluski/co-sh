@@ -53,12 +53,6 @@ fn settings_items() -> &'static [SettingsItem] {
             event: POST_TOOL_USE_EVENT,
         },
         SettingsItem {
-            id: "zen_free_gateway",
-            label: "OpenCode Zen free gateway",
-            description: "Use OpenCode's free models without login when no API key is set",
-            event: "",
-        },
-        SettingsItem {
             id: "anthropic_cache_ttl",
             label: "Anthropic cache TTL",
             description: "How long Anthropic's prompt cache survives between turns (1h costs 2x per write but rides out long tool calls)",
@@ -106,12 +100,10 @@ fn cache_choice_value(id: &str, setup: &Setup) -> Option<String> {
 
 /// Each category owns its own switch, so toggling one never leaks into the
 /// other event. Items WITHOUT an event (empty string) are standalone
-/// switches — currently only the OpenCode Zen free gateway, which reads its
-/// state from the persisted one-time prompt answer.
+/// switches.
 fn is_enabled(item: &SettingsItem, setup: &Setup) -> bool {
     if item.event.is_empty() {
         return match item.id {
-            "zen_free_gateway" => setup.zen_public_opt_in() == Some(true),
             "lsp" => setup.lsp,
             _ => false,
         };
@@ -257,9 +249,6 @@ impl Line {
     }
 }
 
-/// Terms shown under the Zen free-gateway description.
-const ZEN_TERMS_LINK: &str = "https://opencode.ai/legal/terms-of-service";
-
 /// Description of the trailing MCP section. Servers are registered through
 /// the Add box (name + `command args...` or `http(s)://` endpoint); removal
 /// of a misconfigured entry is a setup.json edit, disabling covers runtime.
@@ -280,15 +269,6 @@ fn build_layout(setup: &Setup) -> Vec<LayoutLine> {
             line: Line::Description(settings_items()[item].description),
         });
         y += 1;
-        // The Zen free gateway carries its terms right below the
-        // description, above the toggle.
-        if settings_items()[item].id == "zen_free_gateway" {
-            lines.push(LayoutLine {
-                y,
-                line: Line::Link(ZEN_TERMS_LINK),
-            });
-            y += 1;
-        }
         lines.push(LayoutLine {
             y,
             line: Line::Category { item },
@@ -409,11 +389,6 @@ pub enum SettingsAction {
     },
     /// Persisted state changed; caller must `setup.save()`.
     ToggleSaved,
-    /// The Zen free-gateway switch flipped; caller must `setup.save()` AND
-    /// resync the SDK's process-wide tier flag
-    /// ([`cosh_sdk::connector::set_zen_public_tier_enabled`]) so connectors
-    /// built from now on honor the new state.
-    ZenGatewayToggled,
     /// The LSP switch flipped; caller must `setup.save()`, flip the harness's
     /// process-wide LSP flag, and resync the app's `lsp_available` state.
     LspToggled,
@@ -559,12 +534,6 @@ impl SettingsView {
                 }
                 // Standalone switches (no hook sub-list) flip their own
                 // persisted field.
-                if item.event.is_empty() && item.id == "zen_free_gateway" {
-                    let enabled = setup.zen_public_opt_in() == Some(true);
-                    setup.providers.zen_public_opt_in = Some(!enabled);
-                    self.selection.clamp(selectable_rows(setup).len());
-                    return Some(SettingsAction::ZenGatewayToggled);
-                }
                 if item.event.is_empty() && item.id == "lsp" {
                     setup.lsp = !setup.lsp;
                     self.selection.clamp(selectable_rows(setup).len());
@@ -849,9 +818,6 @@ fn max_row_width(setup: &Setup) -> usize {
             if let Some(v) = cache_choice_value(item.id, setup) {
                 len = len.max(2 + item.label.len() + 2 + v.len());
             }
-            if item.id == "zen_free_gateway" {
-                len = len.max(ZEN_TERMS_LINK.len());
-            }
             len
         })
         .max()
@@ -1028,7 +994,6 @@ mod tests {
                 SettingsRow::Category(3),
                 SettingsRow::Category(4),
                 SettingsRow::Category(5),
-                SettingsRow::Category(6),
                 SettingsRow::AddSummarizationModel,
                 SettingsRow::AddMcpServer,
             ]
@@ -1058,7 +1023,6 @@ mod tests {
                 SettingsRow::Category(3),
                 SettingsRow::Category(4),
                 SettingsRow::Category(5),
-                SettingsRow::Category(6),
                 SettingsRow::AddSummarizationModel,
                 SettingsRow::AddMcpServer,
             ]
@@ -1127,7 +1091,7 @@ mod tests {
         let mut view = SettingsView::new();
         view.selection.selected_index = selectable_rows(&setup)
             .iter()
-            .position(|r| matches!(r, SettingsRow::Category(3)))
+            .position(|r| matches!(r, SettingsRow::Category(2)))
             .unwrap();
         assert_eq!(
             view.activate_selected(&mut setup),
@@ -1140,7 +1104,7 @@ mod tests {
 
         view.selection.selected_index = selectable_rows(&setup)
             .iter()
-            .position(|r| matches!(r, SettingsRow::Category(4)))
+            .position(|r| matches!(r, SettingsRow::Category(3)))
             .unwrap();
         assert_eq!(
             view.activate_selected(&mut setup),
@@ -1173,41 +1137,6 @@ mod tests {
         assert!(!all.contains("✗ Anthropic cache TTL"));
     }
 
-    /// The Zen free-gateway row flips the persisted answer BOTH ways from
-    /// the settings screen — unlike the one-time prompt, this is the manual
-    /// control — and reports the dedicated action so callers resync the SDK.
-    #[test]
-    fn zen_free_gateway_toggle_round_trip() {
-        let mut setup = Setup::default();
-        assert_eq!(setup.zen_public_opt_in(), None);
-        let mut view = SettingsView::new();
-
-        // Find the row wherever it sits in the selectable order.
-        let zen_row = |setup: &Setup| {
-            selectable_rows(setup)
-                .iter()
-                .position(|r| matches!(r, SettingsRow::Category(2)))
-                .expect("zen gateway category row exists")
-        };
-
-        view.selection.selected_index = zen_row(&setup);
-        assert_eq!(
-            view.activate_selected(&mut setup),
-            Some(SettingsAction::ZenGatewayToggled)
-        );
-        assert_eq!(setup.zen_public_opt_in(), Some(true));
-        assert!(is_enabled(&settings_items()[2], &setup));
-
-        // Second activation turns it OFF (manual override of any answer).
-        view.selection.selected_index = zen_row(&setup);
-        assert_eq!(
-            view.activate_selected(&mut setup),
-            Some(SettingsAction::ZenGatewayToggled)
-        );
-        assert_eq!(setup.zen_public_opt_in(), Some(false));
-        assert!(!is_enabled(&settings_items()[2], &setup));
-    }
-
     /// The LSP row is a standalone switch: activating it flips
     /// `setup.lsp` and reports the dedicated action so callers resync
     /// the harness's process-wide LSP flag.
@@ -1220,7 +1149,7 @@ mod tests {
         let lsp_row = |setup: &Setup| {
             selectable_rows(setup)
                 .iter()
-                .position(|r| matches!(r, SettingsRow::Category(5)))
+                .position(|r| matches!(r, SettingsRow::Category(4)))
                 .expect("lsp category row exists")
         };
 
@@ -1230,7 +1159,7 @@ mod tests {
             Some(SettingsAction::LspToggled)
         );
         assert!(!setup.lsp);
-        assert!(!is_enabled(&settings_items()[5], &setup));
+        assert!(!is_enabled(&settings_items()[4], &setup));
 
         view.selection.selected_index = lsp_row(&setup);
         assert_eq!(
@@ -1238,7 +1167,7 @@ mod tests {
             Some(SettingsAction::LspToggled)
         );
         assert!(setup.lsp);
-        assert!(is_enabled(&settings_items()[5], &setup));
+        assert!(is_enabled(&settings_items()[4], &setup));
     }
 
     #[test]
@@ -1380,9 +1309,6 @@ mod tests {
             .collect();
         assert!(all.contains("✗ PreToolUse hooks"));
         assert!(all.contains("✗ PostToolUse hooks"));
-        // The Zen gateway row carries its terms link under the description.
-        assert!(all.contains("✗ OpenCode Zen free gateway"));
-        assert!(all.contains("https://opencode.ai/legal/terms-of-service"));
         assert!(!all.contains("• hidden"));
         assert!(!all.contains("+ Add hook"));
 

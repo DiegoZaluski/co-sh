@@ -357,39 +357,3 @@ async fn reasoning_dialog_enter_commits_selection() {
     );
     assert_eq!(app.setup.model.reasoning.as_deref(), Some("high"));
 }
-
-/// The free-gateway reroute (opt into Zen after a keyless failure): the
-/// routed model becomes the session's model so switching back restores a
-/// working config, and the write is SESSION-scoped — the global slot is not
-/// overwritten, so brand-new sessions still start on the user's selection.
-#[tokio::test]
-async fn gateway_reroute_records_free_model_on_session_only() {
-    let _guard = HOME_LOCK.lock();
-    isolate_home();
-    let mut app = App::new("/tmp".to_string());
-    app.run_slash_command(&new_cmd());
-    let session = app.state.current_session().unwrap();
-    let session_id = session.id.clone();
-
-    // The current selection failed (no key) and the user opts into the free
-    // gateway (option 0). No parked message, so no agent loop is replayed.
-    app.free_gateway_dialog.selected = 0;
-    app.commit_gateway_choice();
-
-    assert_eq!(app.llm_config.provider, cosh_sdk::connector::ZEN_PROVIDER);
-    assert_eq!(app.llm_config.model.as_deref(), Some("hy3-free"));
-    assert_eq!(app.llm_config.reasoning, None);
-    let session = app.state.current_session().unwrap();
-    assert_eq!(session.id, session_id);
-    assert_eq!(
-        session.provider.as_deref(),
-        Some(cosh_sdk::connector::ZEN_PROVIDER)
-    );
-    assert_eq!(session.model.as_deref(), Some("hy3-free"));
-    assert_eq!(session.reasoning, None);
-
-    // The opt-in persists (setup.json), but the GLOBAL model slot is NOT
-    // overwritten by the reroute.
-    assert_eq!(app.setup.persisted_model(), None);
-    assert_eq!(app.setup.zen_public_opt_in(), Some(true));
-}

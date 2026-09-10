@@ -48,14 +48,7 @@ impl App {
 
         let mut active: Vec<&'static str> = Vec::new();
         for (provider, _) in known_providers_with_env() {
-            // The Zen gateway also qualifies WITHOUT a key once the user
-            // opted in to its anonymous free tier — the picker then shows
-            // exactly the gateway's free models (filtered by the SDK).
-            let zen_free_usable = provider == cosh_sdk::connector::ZEN_PROVIDER
-                && self.setup.zen_public_opt_in() == Some(true);
-            if !is_local_provider(provider)
-                && (cosh_sdk::connector::has_api_key(provider) || zen_free_usable)
-            {
+            if !is_local_provider(provider) && cosh_sdk::connector::has_api_key(provider) {
                 active.push(provider);
             }
         }

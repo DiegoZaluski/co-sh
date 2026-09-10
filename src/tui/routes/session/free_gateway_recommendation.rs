@@ -27,18 +27,22 @@ pub struct GatewayRecommendationContent {
     pub stream_text: &'static str,
 }
 
-/// OpenCode Zen free gateway recommendation content.
-pub const ZEN: GatewayRecommendationContent = GatewayRecommendationContent {
-    title: "Use the OpenCode Zen free gateway?",
-    stream_text: "You don't have an API key set up yet.\n\n\
-        I can connect you to the **OpenCode Zen** free gateway — \
-        chat with models like `Hy3` and `Big Pickle` \
-        without an account or API key.\n\n\
-        *Note: co-sh is an independent project with no affiliation to \
-        Anomaly/OpenCode. Requests go from your machine straight to \
-        opencode.ai and follow their [terms](https://opencode.ai/legal/terms-of-service). \
-        Some free models may use your data for training while they are free — \
-        see [opencode.ai/docs/zen](https://opencode.ai/docs/zen) for details.*",
+/// Placeholder for future free-gateway recommendations.
+///
+/// The dialog itself is generic — to recommend a new gateway, define a
+/// `GatewayRecommendationContent` const here (title + markdown body) and
+/// return it from `App::gateway_recommendation_content()`.
+///
+/// Example:
+/// ```ignore
+/// pub const EXAMPLE: GatewayRecommendationContent = GatewayRecommendationContent {
+///     title: "Use the Example free gateway?",
+///     stream_text: "Description shown while streaming…",
+/// };
+/// ```
+pub const PLACEHOLDER: GatewayRecommendationContent = GatewayRecommendationContent {
+    title: "",
+    stream_text: "",
 };
 
 // Layout constants
@@ -109,7 +113,7 @@ impl FreeGatewayRecommendationDialog {
             visible: false,
             selected: 0,
             submitted: false,
-            content: &ZEN, // placeholder, overwritten by `show()`
+            content: &PLACEHOLDER, // placeholder, overwritten by `show()`
             phase: Phase::Streaming,
             stream_chars: 0,
             last_frame: Instant::now(),
@@ -507,6 +511,14 @@ fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, styl
 mod tests {
     use super::*;
 
+    /// Sample content for exercising the generic dialog (the shipped
+    /// `PLACEHOLDER` is intentionally empty).
+    const SAMPLE: GatewayRecommendationContent = GatewayRecommendationContent {
+        title: "Use the sample free gateway?",
+        stream_text: "Sample recommendation body used to exercise the generic dialog. \
+            It spans several sentences so streaming advances over multiple frames.",
+    };
+
     #[test]
     fn hidden_dialog_has_zero_height() {
         let d = FreeGatewayRecommendationDialog::new();
@@ -516,7 +528,7 @@ mod tests {
     #[test]
     fn streaming_height_includes_cursor() {
         let mut d = FreeGatewayRecommendationDialog::new();
-        d.show(&ZEN);
+        d.show(&SAMPLE);
         assert!(d.visible);
         let h = d.required_height(80);
         assert!(h >= MIN_HEIGHT + 2); // text(1+) + cursor(1) + padding(2)
@@ -525,7 +537,7 @@ mod tests {
     #[test]
     fn response_height_includes_options_and_footer() {
         let mut d = FreeGatewayRecommendationDialog::new();
-        d.show(&ZEN);
+        d.show(&SAMPLE);
         // Force streaming complete
         d.phase = Phase::WaitingForResponse;
         d.stream_chars = d.content.stream_text.chars().count();
@@ -537,7 +549,7 @@ mod tests {
     #[test]
     fn advance_stream_progresses_offset() {
         let mut d = FreeGatewayRecommendationDialog::new();
-        d.show(&ZEN);
+        d.show(&SAMPLE);
         assert_eq!(d.stream_chars, 0);
         // Simulate some time passing
         d.last_frame = Instant::now() - std::time::Duration::from_millis(500);
@@ -549,7 +561,7 @@ mod tests {
     #[test]
     fn advance_stream_completes_after_enough_time() {
         let mut d = FreeGatewayRecommendationDialog::new();
-        d.show(&ZEN);
+        d.show(&SAMPLE);
         let total = d.content.stream_text.chars().count();
         // Simulate enough time for all characters
         let secs = total as f64 / CHARS_PER_SECOND + 0.1;
@@ -562,7 +574,7 @@ mod tests {
     #[test]
     fn enter_submits_and_esc_dismisses() {
         let mut d = FreeGatewayRecommendationDialog::new();
-        d.show(&ZEN);
+        d.show(&SAMPLE);
         d.phase = Phase::WaitingForResponse;
         d.stream_chars = d.content.stream_text.chars().count();
 
@@ -571,7 +583,7 @@ mod tests {
         assert!(d.submitted);
 
         let mut d2 = FreeGatewayRecommendationDialog::new();
-        d2.show(&ZEN);
+        d2.show(&SAMPLE);
         d2.phase = Phase::WaitingForResponse;
         d2.stream_chars = d2.content.stream_text.chars().count();
         d2.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));

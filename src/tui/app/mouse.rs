@@ -1133,14 +1133,6 @@ impl App {
                     Some(crate::routes::settings::SettingsAction::ToggleSaved) => {
                         self.setup.save();
                     }
-                    Some(crate::routes::settings::SettingsAction::ZenGatewayToggled) => {
-                        // Keep the process-wide anonymous-tier flag in sync
-                        // so every new connector honors the switch.
-                        cosh_sdk::connector::set_zen_public_tier_enabled(
-                            self.setup.zen_public_opt_in() == Some(true),
-                        );
-                        self.setup.save();
-                    }
                     Some(crate::routes::settings::SettingsAction::LspToggled) => {
                         cosh::harness::lsp::set_lsp_enabled(self.setup.lsp);
                         self.state.lsp_available = self.setup.lsp;

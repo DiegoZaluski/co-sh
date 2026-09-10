@@ -153,7 +153,7 @@ impl App {
         // gateway. The message is parked and only replayed on opt-in;
         // Esc closes without recording anything.
         if self.needs_gateway_recommendation() {
-            self.pending_zen_message = Some(msg);
+            self.pending_gateway_message = Some(msg);
             if let Some(content) = self.gateway_recommendation_content() {
                 self.free_gateway_dialog.show(content);
             }
