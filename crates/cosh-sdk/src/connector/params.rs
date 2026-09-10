@@ -343,14 +343,6 @@ pub struct Parameters {
     #[zeroize(skip)]
     pub(crate) base_url: Option<String>,
 
-    /// OpenCode Zen only: permit the anonymous free tier when no account key
-    /// resolves. Requests then carry the sentinel `Bearer public` and are
-    /// restricted to [`crate::connector::provider::ZEN_FREE_MODELS`]. Off by
-    /// default — the TUI enables it only after the user's one-time opt-in,
-    /// and a real key always wins over the sentinel.
-    #[zeroize(skip)]
-    pub(crate) zen_public_tier: bool,
-
     pub(crate) service_keyring: Option<String>,
     pub(crate) api_key: Option<String>,
 }
@@ -382,7 +374,6 @@ impl Default for Parameters {
             session_id: None,
             user: None,
             base_url: None,
-            zen_public_tier: false,
             // Default to the canonical cosh keyring service so callers only
             // need `with_service_keyring` when they want to override it.
             service_keyring: Some(COSH_SERVICE.to_string()),

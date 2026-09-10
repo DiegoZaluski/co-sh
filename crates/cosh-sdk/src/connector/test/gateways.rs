@@ -2,16 +2,12 @@
 //! ([`OPENCODE_ZEN_PROVIDER`]) and `opencode-go`
 //! ([`OPENCODE_GO_PROVIDER`]).
 //!
-//! Covers: key-based chat on both gateways (with cosh's honest User-Agent),
-//! the Go shared-account key fallback (`OPENCODE_GO_API_KEY` →
-//! `OPENCODE_API_KEY`), and the invalidation of the anonymous free-tier
-//! alternative in the Zen scenario — the `public` sentinel never goes out
-//! and the opt-in flags are no-ops there.
+//! Covers: key-based chat on both gateways (with cosh's honest User-Agent)
+//! and the Go shared-account key fallback (`OPENCODE_GO_API_KEY` →
+//! `OPENCODE_API_KEY`). Both gateways always require an API key.
 
-use super::super::{
-    Connector, OPENCODE_GO_PROVIDER, OPENCODE_ZEN_PROVIDER, ZEN_PUBLIC_KEY, get_provider,
-    get_provider_env_var, set_zen_public_tier_enabled,
-};
+use super::super::{Connector, OPENCODE_GO_PROVIDER, OPENCODE_ZEN_PROVIDER, get_provider,
+    get_provider_env_var};
 use super::common::{ENV_LOCK, EnvGuard, mock_server};
 
 const CHAT_OK: &str = r#"{"choices":[{"message":{"content":"ok"}}]}"#;
@@ -40,8 +36,8 @@ fn gateway_registry_entries() {
     );
 }
 
-/// Zen gateway chat goes out under the account key — never the anonymous
-/// sentinel — and carries cosh's honest User-Agent.
+/// Zen gateway chat goes out under the account key and carries cosh's
+/// honest User-Agent.
 #[tokio::test]
 async fn zen_gateway_sends_account_key() {
     let _lock = ENV_LOCK.lock().await;
@@ -62,31 +58,24 @@ async fn zen_gateway_sends_account_key() {
         "account key missing from request"
     );
     assert!(
-        !req.contains(&format!("bearer {ZEN_PUBLIC_KEY}")),
-        "anonymous sentinel must never ride a Zen gateway request"
-    );
-    assert!(
         req.contains("user-agent: cosh/"),
         "co-sh User-Agent missing from request"
     );
 }
 
-/// INVALIDATION: even with the process-wide anonymous opt-in ON, the
-/// documented Zen gateway has no anonymous tier — the sentinel is never
-/// sent and a missing key fails with the plain missing-key error.
+/// Without a key the documented Zen gateway fails with the plain
+/// missing-key error.
 #[tokio::test]
-async fn zen_gateway_invalidates_anonymous_alternative() {
+async fn zen_gateway_requires_key() {
     let _lock = ENV_LOCK.lock().await;
     let _guard = EnvGuard::remove("OPENCODE_API_KEY");
-    set_zen_public_tier_enabled(true);
     let err = Connector::new(OPENCODE_ZEN_PROVIDER)
         .unwrap()
         .with_base_url("http://127.0.0.1:1/v1")
-        .with_zen_public_tier(true)
+        .with_service_keyring("cosh-tests-no-key")
         .chat("hello")
         .await
         .unwrap_err();
-    set_zen_public_tier_enabled(false);
     assert!(
         err.to_string()
             .contains("API key not set for provider: zen"),
@@ -115,10 +104,6 @@ async fn go_gateway_sends_account_key() {
     assert!(
         req.contains("authorization: bearer sk-go-account"),
         "account key missing from request"
-    );
-    assert!(
-        !req.contains(&format!("bearer {ZEN_PUBLIC_KEY}")),
-        "Go has no anonymous tier — sentinel must never appear"
     );
     assert!(
         req.contains("user-agent: cosh/"),
@@ -177,22 +162,20 @@ async fn go_gateway_prefers_its_own_env_var() {
     );
 }
 
-/// Go has no anonymous tier: with the opt-in ON and no key anywhere, the
-/// request fails fast with the missing-key error (no sentinel, no network).
+/// Without a key anywhere the Go gateway fails fast with the missing-key
+/// error.
 #[tokio::test]
-async fn go_gateway_requires_key_even_with_opt_in() {
+async fn go_gateway_requires_key() {
     let _lock = ENV_LOCK.lock().await;
     let _guard = EnvGuard::remove("OPENCODE_GO_API_KEY");
     let _guard2 = EnvGuard::remove("OPENCODE_API_KEY");
-    set_zen_public_tier_enabled(true);
     let err = Connector::new(OPENCODE_GO_PROVIDER)
         .unwrap()
         .with_base_url("http://127.0.0.1:1/v1")
-        .with_zen_public_tier(true)
+        .with_service_keyring("cosh-tests-no-key")
         .chat("hello")
         .await
         .unwrap_err();
-    set_zen_public_tier_enabled(false);
     assert!(
         err.to_string()
             .contains("API key not set for provider: opencode-go"),

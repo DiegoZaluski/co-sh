@@ -297,7 +297,7 @@ pub struct App {
     pending_delete_session_id: Option<String>,
     /// Message captured while the one-time Zen free-gateway prompt was open;
     /// replayed through `start_agent_loop` when the user opts in.
-    pending_zen_message: Option<String>,
+    pending_gateway_message: Option<String>,
     /// Whether a title has already been generated for the current session.
     /// Set to `false` when a new session is created; set to `true` after
     /// the async title generation task is spawned.
@@ -411,11 +411,6 @@ impl App {
             llm_config.reasoning = setup.model.reasoning.clone();
         }
 
-        // Propagate the persisted Zen free-gateway opt-in to every connector
-        // built in this process (harness fallback chains, compaction, session
-        // titles) without each construction site needing the setup file.
-        cosh_sdk::connector::set_zen_public_tier_enabled(setup.zen_public_opt_in() == Some(true));
-
         // Propagate the persisted LSP switch to the process-wide flag the
         // harness consults when building language servers, and seed the app
         // state so the prompt footer reflects it even before the first agent
@@ -489,7 +484,7 @@ impl App {
             setup,
             session_store,
             pending_delete_session_id: None,
-            pending_zen_message: None,
+            pending_gateway_message: None,
             title_generated: false,
             manual_compaction_active: false,
             stream_msg_id: None,

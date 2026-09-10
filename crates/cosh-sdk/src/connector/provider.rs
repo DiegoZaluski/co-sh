@@ -15,31 +15,12 @@ use zeroize::Zeroizing;
 /// service: [`Connector::with_service_keyring`](crate::connector::Connector::with_service_keyring).
 pub const COSH_SERVICE: &str = "cosh";
 
-/// Provider name of the UNDOCUMENTED anonymous entry point into the OpenCode
-/// Zen gateway (`https://opencode.ai/zen/v1`).
-///
-/// The gateway deliberately serves an anonymous free tier: requests carrying
-/// [`ZEN_PUBLIC_KEY`] are answered only for models flagged `allowAnonymous`
-/// server-side and are rate-limited per IP (billing source `"anonymous"` in
-/// the gateway's own code). The official OpenCode client sends the same
-/// sentinel whenever no account key is configured.
-///
-/// Compliance rules baked into cosh's use of it:
-/// - a real account key ALWAYS wins over the sentinel;
-/// - the anonymous tier is used only after an explicit one-time opt-in;
-/// - we identify ourselves with our own User-Agent and never imitate the
-///   official client's headers to obtain its rate-limit bucket.
-pub const ZEN_PROVIDER: &str = "opencode";
-
 /// Provider name of the DOCUMENTED OpenCode Zen gateway
 /// (`https://opencode.ai/zen/v1`, `https://opencode.ai/docs/zen`).
 ///
 /// Key-based access to the full Zen catalog: an account key from
-/// `opencode.ai/auth` unlocks every model, including the `-free` ones, so
-/// the anonymous free-tier alternative ([`ZEN_PROVIDER`]) is INVALIDATED in
-/// this scenario — connectors built for this provider never send the
-/// `public` sentinel and the `zen_public_tier` opt-in has no effect on
-/// them. A missing key fails with [`ConnectorError::MissingApiKey`].
+/// `opencode.ai/auth` unlocks every model. A missing key fails with
+/// [`ConnectorError::MissingApiKey`].
 pub const OPENCODE_ZEN_PROVIDER: &str = "zen";
 
 /// Provider name of the OpenCode Go gateway
@@ -54,72 +35,18 @@ pub const OPENCODE_ZEN_PROVIDER: &str = "zen";
 /// tier: a key is always required.
 pub const OPENCODE_GO_PROVIDER: &str = "opencode-go";
 
-/// Sentinel bearer token accepted by the Zen gateway for ANONYMOUS access:
-/// only zero-cost models are served and per-IP limits apply. Never sent when
-/// an account key resolved from keyring/environment.
-pub const ZEN_PUBLIC_KEY: &str = "public";
-
-/// Model IDs served on the Zen anonymous (free) tier at the time of writing,
-/// enforced client-side so a keyless session can never request a billed
-/// model (the gateway independently rejects those anyway). Callers should
-/// intersect this list with the live `/models` catalog: models rotate as
-/// their free periods end.
-///
-/// Deliberately excludes `muse-spark-1.2-contributor-free`, whose data
-/// policy grants training rights on prompts/completions.
-pub const ZEN_FREE_MODELS: &[&str] = &[
-    "big-pickle",
-    "x-preview-f-free",
-    "mimo-v2.5-free",
-    "hy3-free",
-    "nemotron-3-ultra-free",
-    "nemotron-3.5-lightning-free",
-];
-
-/// Honest `User-Agent` for OpenCode Zen requests: identifies co-sh as the
-/// calling client. Anonymous traffic earns the gateway's stricter public
-/// rate-limit bucket; keeping that bucket instead of imitating another
-/// client's identity is a hard compliance requirement.
+/// Honest `User-Agent` for OpenCode gateway requests: identifies co-sh as
+/// the calling client instead of imitating another client's identity.
 pub const ZEN_USER_AGENT: &str = concat!("cosh/", env!("CARGO_PKG_VERSION"));
 
-/// Whether `model` is served on the Zen anonymous (free) tier.
-#[must_use]
-pub fn is_zen_free_model(model: &str) -> bool {
-    ZEN_FREE_MODELS.contains(&model)
-}
-
 /// Whether the provider is hosted on the OpenCode gateway infrastructure
-/// (`opencode.ai/zen/...`): the anonymous free alternative
-/// ([`ZEN_PROVIDER`]), the documented Zen gateway
+/// (`opencode.ai/zen/...`): the documented Zen gateway
 /// ([`OPENCODE_ZEN_PROVIDER`]) and the Go subscription gateway
-/// ([`OPENCODE_GO_PROVIDER`]). All of them identify themselves with the
+/// ([`OPENCODE_GO_PROVIDER`]). Both identify themselves with the
 /// honest [`ZEN_USER_AGENT`].
 #[must_use]
 pub fn is_opencode_gateway(name: &str) -> bool {
-    matches!(
-        name,
-        ZEN_PROVIDER | OPENCODE_ZEN_PROVIDER | OPENCODE_GO_PROVIDER
-    )
-}
-
-/// Process-wide opt-in state for the Zen anonymous free tier.
-static ZEN_PUBLIC_TIER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Enable/disable the Zen anonymous free tier for EVERY connector in this
-/// process. The UI sets this once from its persisted opt-in so connectors
-/// built deep inside consumers (harness fallback chains, compaction,
-/// session titles) inherit the user's answer without each construction site
-/// needing to thread it through. Per-connector
-/// [`Connector::with_zen_public_tier`](crate::connector::Connector::with_zen_public_tier)
-/// overrides remain independent for tests and special cases.
-pub fn set_zen_public_tier_enabled(enabled: bool) {
-    ZEN_PUBLIC_TIER.store(enabled, std::sync::atomic::Ordering::Relaxed);
-}
-
-/// Whether the process-wide Zen free-tier opt-in is currently enabled.
-#[must_use]
-pub fn zen_public_tier_enabled() -> bool {
-    ZEN_PUBLIC_TIER.load(std::sync::atomic::Ordering::Relaxed)
+    matches!(name, OPENCODE_ZEN_PROVIDER | OPENCODE_GO_PROVIDER)
 }
 
 /// Process-lifetime cache mapping `(service, env_var)` to the resolved key.
@@ -462,19 +389,8 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
             "",
         ),
     ),
-    (
-        "opencode",
-        ProviderConfig::cloud(
-            "opencode",
-            Family::OpenAICompatible,
-            "https://opencode.ai/zen/v1",
-            "x-preview-f-free",
-        ),
-    ),
-    // Documented OpenCode Zen gateway: same base URL as the anonymous
-    // entry point above, but strictly key-based — the full catalog
-    // (including the free models) is served to the account key, so the
-    // anonymous alternative is invalidated for this provider.
+    // Documented OpenCode Zen gateway: strictly key-based — the full
+    // catalog is served to the account key from `opencode.ai/auth`.
     (
         "zen",
         ProviderConfig::cloud(
@@ -575,7 +491,6 @@ const API_KEY_ENVS: &[(&str, &str)] = &[
     ("claude", "ANTHROPIC_API_KEY"),
     ("zai", "ZAI_API_KEY"),
     ("charm", "CHARM_API_KEY"),
-    ("opencode", "OPENCODE_API_KEY"),
     ("zen", "OPENCODE_API_KEY"),
     ("opencode-go", "OPENCODE_GO_API_KEY"),
 ];
