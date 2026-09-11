@@ -201,6 +201,12 @@ impl App {
                 let new_id = forked.id.clone();
                 self.state.add_session(forked);
                 self.finalize_stale_compaction_lines();
+                // The fork branches the CONVERSATION, not the panel: the
+                // right panel is app-level ephemera (todos, PTY/subagent
+                // history, focus) that lives on AppState, so a fork must
+                // start clean like every other session-selection path.
+                self.state.right_panel =
+                    crate::routes::session::right_panel::types::RightPanelState::new();
                 self.state.switch_to_session(new_id, &self.session_store);
                 self.session_view.hovered_msg_idx = None;
                 self.toast_state.show(ToastOptions {

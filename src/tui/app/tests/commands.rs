@@ -114,6 +114,65 @@ async fn slash_new_creates_and_selects_a_fresh_session() {
     );
 }
 
+/// REGRESSION: `/new` must start the fresh session with a CLEAN right
+/// panel. The panel lives on AppState (not inside the Session model), so
+/// without the reset in `start_new_session` the old session's todos,
+/// PTY/subagent sessions, panel focus and scroll state leaked into the new
+/// session (the sidebar/Esc switch paths already reset it — this path
+/// didn't).
+#[tokio::test]
+async fn slash_new_resets_right_panel_state() {
+    let mut app = App::new("/tmp".to_string());
+    // Simulate a used panel from the "old" session: todos, a PTY session,
+    // panel focus and a manually scrolled-away flag.
+    app.state
+        .right_panel
+        .set_todos(vec![crate::routes::session::right_panel::types::TodoItem {
+            status: "pending".into(),
+            content: "old session todo".into(),
+        }]);
+    app.state
+        .right_panel
+        .start_pty("echo old".to_string(), None);
+    app.state
+        .right_panel
+        .complete_last_pty("old output".to_string());
+    app.state.right_panel.panel_focus =
+        Some(crate::routes::session::right_panel::types::PanelFocus::Bash);
+    app.state.right_panel.user_scrolled_away = true;
+    assert!(app.state.right_panel.has_content());
+    let cmd = crate::ui::slash_menu::SlashCommand {
+        name: "new".into(),
+        desc: String::new(),
+    };
+    app.run_slash_command(&cmd);
+    assert!(
+        app.state.current_session_id.is_some(),
+        "a session was selected"
+    );
+    let panel = &app.state.right_panel;
+    assert!(
+        !panel.has_content(),
+        "todos and PTY sessions from the old session must not leak"
+    );
+    assert!(
+        panel.pty_sessions.is_empty() && panel.todos.is_empty(),
+        "no old-session entries survive the /new reset"
+    );
+    assert!(
+        panel.panel_focus.is_none(),
+        "panel focus from the old session must not leak"
+    );
+    assert!(
+        !panel.user_scrolled_away,
+        "scroll state from the old session must not leak"
+    );
+    assert!(
+        !panel.bash_history_mode,
+        "bash history mode from the old session must not leak"
+    );
+}
+
 /// `/new` while the agent loop is working is refused with a toast —
 /// selecting a different session mid-run would route the running loop's
 /// events into it.

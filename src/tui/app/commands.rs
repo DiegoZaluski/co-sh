@@ -63,6 +63,13 @@ impl App {
         let title = format_session_timestamp(now_ms);
         self.state.add_empty_session(id.clone(), title, now_ms);
         self.state.current_session_id = Some(id);
+        // A fresh session starts with a CLEAN right panel: the panel lives
+        // on AppState (not inside the Session model), so without this reset
+        // the previous session's todos, PTY/subagent sessions, panel focus,
+        // scroll offsets and history-navigation state would leak into the
+        // new session — the same reset every other session-switch path
+        // (sidebar keyboard/mouse switch, Esc back to Home) performs.
+        self.state.right_panel = crate::routes::session::right_panel::types::RightPanelState::new();
         // A new session is restored with the globally persisted model (the
         // last one the user selected), recorded on the session so its history
         // carries it as metadata deltas.

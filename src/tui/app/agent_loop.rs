@@ -172,6 +172,12 @@ impl App {
                     .as_millis() as u64,
             );
             self.state.current_session_id = Some(id);
+            // First message from Home/after a deletion: the fresh session
+            // starts with a CLEAN right panel, like every other session-
+            // selection path (deleting the previous session left a stale,
+            // populated panel behind on AppState).
+            self.state.right_panel =
+                crate::routes::session::right_panel::types::RightPanelState::new();
             // The session inherits the ACTIVE model config. Forcing the global
             // slot here would clobber a selection from the just-fired gateway
             // reroute (the replayed first message must go out on the free
