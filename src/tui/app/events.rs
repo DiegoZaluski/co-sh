@@ -13,6 +13,7 @@ use crate::session_store::is_valid_session;
 use crate::types::SessionStatus;
 use crate::ui::dialogs::DialogType;
 use cosh::harness::HarnessEvent;
+use crate::notification;
 use cosh::harness::context::ContextManagerState;
 
 impl App {
@@ -659,6 +660,9 @@ impl App {
                     let started_new_loop = self.handle_loop_end(true);
                     if !started_new_loop {
                         self.trigger_bell();
+                        // Send a desktop notification if the terminal
+                        // window is not focused (user switched away).
+                        notification::notify_done(self.terminal_focused);
                     }
                 }
 
@@ -758,7 +762,12 @@ impl App {
                         self.state.ensure_session_summary(&id);
                     }
 
-                    self.handle_loop_end(true);
+                    let started_new_loop = self.handle_loop_end(true);
+                    if !started_new_loop {
+                        // Send a desktop notification if the terminal
+                        // window is not focused (user switched away).
+                        notification::notify_stopped(self.terminal_focused);
+                    }
                 }
                 HarnessEvent::ContextInfo { info } => {
                     self.context_info = Some(info);

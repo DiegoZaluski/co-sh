@@ -115,6 +115,8 @@ features = []
 
 [dependencies.open]
 version = "5"
+[dependencies.notify-rust]
+version = "4"
 
 [dependencies.pulldown-cmark]
 version = "0.13"

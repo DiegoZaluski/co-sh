@@ -8,6 +8,7 @@ mod keymap;
 mod logo;
 mod lsp_colors;
 mod routes;
+mod notification;
 mod session_history;
 mod session_store;
 mod state;
