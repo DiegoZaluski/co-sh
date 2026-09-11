@@ -712,3 +712,82 @@ fn native_call_preserves_thought_signature() {
         other => panic!("expected ToolCall, got {other:?}"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Failure messages carry the tool name, rejection reason, and raw payload
+// ---------------------------------------------------------------------------
+
+#[test]
+fn batch_schema_mismatch_names_tool_and_reason() {
+    let mut ex = make_extractor();
+    let text = r#"{"name": "fs.read", "arguments": {}}"#;
+    let result = ex.extract_batch(text);
+    assert_eq!(result.items.len(), 1);
+    match &result.items[0] {
+        Item::Text(t) => {
+            assert!(t.contains("Tool call failure"), "label: {t:?}");
+            assert!(t.contains("invalid arguments for tool `fs.read`"), "{t:?}");
+            assert!(t.contains("Rejected call"), "{t:?}");
+        }
+        other => panic!("expected Text, got {other:?}"),
+    }
+}
+
+#[test]
+fn batch_unknown_tool_reports_tool_unavailable() {
+    let mut ex = make_extractor();
+    let text = r#"{"name": "bash_run", "arguments": {"command": "ls"}}"#;
+    let result = ex.extract_batch(text);
+    assert_eq!(result.items.len(), 1);
+    match &result.items[0] {
+        Item::Text(t) => {
+            assert!(
+                t.contains("tool `bash_run` is not available in this mode"),
+                "{t:?}"
+            );
+        }
+        other => panic!("expected Text, got {other:?}"),
+    }
+}
+
+#[test]
+fn native_call_unknown_tool_reports_tool_unavailable() {
+    let mut ex = make_extractor();
+    let call = NativeToolCall {
+        id: "call_1".into(),
+        name: "bash_run".into(),
+        arguments: r#"{}"#.into(),
+        thought_signature: String::new(),
+    };
+    match ex.register_native_call(&call) {
+        StreamAction::Text(t) => {
+            assert!(
+                t.contains("tool `bash_run` is not available in this mode"),
+                "{t:?}"
+            );
+        }
+        other => panic!("expected failure text, got {other:?}"),
+    }
+    assert_eq!(ex.take_tool_failures(), 1);
+}
+
+#[test]
+fn batch_failure_truncates_long_payloads() {
+    let mut ex = make_extractor();
+    let long_value = "x".repeat(1000);
+    // `path` is the wrong type, so the call fails schema validation while the
+    // offending raw payload carries a very long field.
+    let text = format!(r#"{{"name": "fs.read", "arguments": {{"path": 123, "extra": "{long_value}"}}}}"#);
+    let result = ex.extract_batch(&text);
+    match &result.items[0] {
+        Item::Text(t) => {
+            // The collapsed payload must be bounded, not the full 1000 chars.
+            let x_count = t.chars().filter(|&c| c == 'x').count();
+            assert!(
+                x_count < 500,
+                "payload was not truncated (saw {x_count} 'x' chars): {t:?}"
+            );
+        }
+        other => panic!("expected Text, got {other:?}"),
+    }
+}

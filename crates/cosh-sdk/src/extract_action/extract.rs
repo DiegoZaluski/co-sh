@@ -66,6 +66,54 @@ pub enum Item {
     ToolCall(ToolCallData),
 }
 
+/// Why a candidate tool call was rejected during validation.
+///
+/// Carried in the failure message so the model learns *what* went wrong
+/// (which tool, which part of the envelope, and whether the tool even exists
+/// in the current mode) instead of only "something failed".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolCallRejection {
+    /// The candidate was not a JSON object at the top level.
+    NotAnObject,
+    /// The tool name is present but not registered: unknown, disabled, or not
+    /// exposed in the current mode.
+    UnknownTool { name: String },
+    /// A recognized tool name but no `arguments` / `input` / `args` /
+    /// `parameters` field was found.
+    MissingArguments { name: String },
+    /// A recognized tool name but the parsed arguments do not satisfy the
+    /// tool's input schema.
+    SchemaMismatch { name: String },
+    /// No name, and the bare-arguments fallback matched zero or many tools.
+    NoToolMatch,
+    /// The candidate text could not be parsed as JSON at all.
+    ParseError,
+    /// The object is well-formed but does not look like a tool call (e.g. an
+    /// unrecognized top-level key aborted streaming buffering).
+    NotAToolCall,
+}
+
+impl ToolCallRejection {
+    /// Human-readable, model-facing description of this rejection.
+    fn describe(&self) -> String {
+        match self {
+            Self::NotAnObject => "the tool call is not a JSON object".to_string(),
+            Self::UnknownTool { name } => {
+                format!("tool `{name}` is not available in this mode")
+            }
+            Self::MissingArguments { name } => {
+                format!("tool `{name}` is missing its `arguments` block")
+            }
+            Self::SchemaMismatch { name } => {
+                format!("invalid arguments for tool `{name}`")
+            }
+            Self::NoToolMatch => "could not tell which tool was meant".to_string(),
+            Self::ParseError => "could not parse the tool call".to_string(),
+            Self::NotAToolCall => "the object does not look like a tool call".to_string(),
+        }
+    }
+}
+
 /// Result of a batch extraction.
 #[derive(Debug)]
 pub struct BatchResult {
@@ -180,7 +228,7 @@ impl ExtractAction {
             tools: Vec::new(),
             tool_keys: Vec::new(),
             state: StreamState::default(),
-            tool_failure_message: "\n\n> ⚠ Tool call failure\n\n".to_string(),
+            tool_failure_message: "\n\n> ⚠ Tool call failure".to_string(),
             tool_failure_count: 0,
             last_failed_raw: String::new(),
         }
@@ -195,7 +243,9 @@ impl ExtractAction {
         self
     }
 
-    /// Set the message emitted when a tool call is detected but fails validation.
+    /// Set the failure label emitted when a tool call is detected but fails
+    /// validation. The rejection reason and the offending raw payload are
+    /// always appended to this label.
     #[must_use]
     pub fn with_tool_failure_message<S: Into<String>>(mut self, msg: S) -> Self {
         self.tool_failure_message = msg.into();
@@ -209,7 +259,9 @@ impl ExtractAction {
         self.tools.push(schema);
     }
 
-    /// Set the message emitted when a tool call is detected but fails validation.
+    /// Set the failure label emitted when a tool call is detected but fails
+    /// validation. The rejection reason and the offending raw payload are
+    /// always appended to this label.
     pub fn set_tool_failure_message<S: Into<String>>(&mut self, msg: S) {
         self.tool_failure_message = msg.into();
     }
@@ -233,6 +285,19 @@ impl ExtractAction {
     #[must_use]
     pub fn take_last_failed_raw(&mut self) -> String {
         std::mem::take(&mut self.last_failed_raw)
+    }
+
+    /// Render the failure warning for a rejected tool call: the configured
+    /// label, the human-readable rejection reason, and the truncated offending
+    /// raw payload. Every failure path (batch, streaming, and native) funnels
+    /// through this so the model always sees *what* failed and *why*.
+    fn failure_message(&self, reason: &ToolCallRejection, raw: &str) -> String {
+        let mut out = format!("{}: {}\n", self.tool_failure_message, reason.describe());
+        if !raw.is_empty() {
+            out.push_str(&format!("> Rejected call: `{}`\n", truncate_payload(raw)));
+        }
+        out.push('\n');
+        out
     }
 
     /// Process a complete text and extract all embedded tool calls.
@@ -263,13 +328,16 @@ impl ExtractAction {
                 items.push(Item::Text(candidate.to_string()));
                 last_end = end + 1;
                 continue;
-            } else if let Some(tool_call) = self.parse_and_validate(candidate) {
-                items.push(Item::ToolCall(tool_call));
             } else {
-                // Invalid unfenced JSON — suppress, show warning instead
-                self.tool_failure_count += 1;
-                self.last_failed_raw = candidate.to_string();
-                items.push(Item::Text(self.tool_failure_message.clone()));
+                match self.parse_and_validate(candidate) {
+                    Ok(tool_call) => items.push(Item::ToolCall(tool_call)),
+                    Err(reason) => {
+                        // Invalid unfenced JSON — suppress, show warning instead
+                        self.tool_failure_count += 1;
+                        self.last_failed_raw = candidate.to_string();
+                        items.push(Item::Text(self.failure_message(&reason, candidate)));
+                    }
+                }
             }
 
             last_end = end + 1;
@@ -318,11 +386,11 @@ impl ExtractAction {
         }
         let envelope = JsonValue::Object(obj);
         match validate_tool_call(&envelope, &self.tools) {
-            Some(tc) => StreamAction::ToolCall(tc),
-            None => {
+            Ok(tc) => StreamAction::ToolCall(tc),
+            Err(reason) => {
                 self.tool_failure_count += 1;
                 self.last_failed_raw = envelope.to_string();
-                StreamAction::Text(self.tool_failure_message.clone())
+                StreamAction::Text(self.failure_message(&reason, &self.last_failed_raw))
             }
         }
     }
@@ -359,23 +427,30 @@ impl ExtractAction {
                     self.state = StreamState::default();
 
                     let next = i + ch.len_utf8();
-                    if let Some(call) = self.parse_and_validate(&buffer) {
-                        if next < input.len() {
-                            self.state.deferred_tail = input[next..].to_string();
+                    match self.parse_and_validate(&buffer) {
+                        Ok(call) => {
+                            if next < input.len() {
+                                self.state.deferred_tail = input[next..].to_string();
+                            }
+                            if output.is_empty() {
+                                return StreamAction::ToolCall(call);
+                            }
+                            self.state.pending_tool_call = Some(call);
+                            return StreamAction::Text(std::mem::take(&mut output));
                         }
-                        if output.is_empty() {
-                            return StreamAction::ToolCall(call);
+                        Err(reason) => {
+                            self.tool_failure_count += 1;
+                            self.last_failed_raw = buffer;
+                            output.push_str(&self.failure_message(&reason, &self.last_failed_raw));
                         }
-                        self.state.pending_tool_call = Some(call);
-                        return StreamAction::Text(std::mem::take(&mut output));
                     }
-                    self.tool_failure_count += 1;
-                    self.last_failed_raw = buffer;
-                    output.push_str(&self.tool_failure_message);
                 } else if self.check_early_exit() {
                     self.tool_failure_count += 1;
                     self.last_failed_raw = std::mem::take(&mut self.state.buffer);
-                    output.push_str(&self.tool_failure_message);
+                    output.push_str(&self.failure_message(
+                        &ToolCallRejection::NotAToolCall,
+                        &self.last_failed_raw,
+                    ));
                     self.state = StreamState::default();
                 }
             } else if ch == '`' {
@@ -500,21 +575,36 @@ impl ExtractAction {
         std::mem::replace(&mut self.state.early_exit, false)
     }
 
-    fn parse_and_validate(&self, candidate: &str) -> Option<ToolCallData> {
-        if let Ok(value) = serde_json::from_str::<JsonValue>(candidate)
-            && let Some(call) = validate_tool_call(&value, &self.tools)
-        {
-            return Some(call);
+    fn parse_and_validate(&self, candidate: &str) -> Result<ToolCallData, ToolCallRejection> {
+        // Parse strictly first, then leniently: a well-formed JSON object that
+        // only fails a schema check must surface that rejection (not a
+        // misleading parse error), so the model learns the actual reason.
+        let mut parsed = false;
+        let mut last_rejection = ToolCallRejection::ParseError;
+
+        if let Ok(value) = serde_json::from_str::<JsonValue>(candidate) {
+            parsed = true;
+            match validate_tool_call(&value, &self.tools) {
+                ok @ Ok(_) => return ok,
+                Err(reason) => last_rejection = reason,
+            }
         }
 
         if let Ok(value) = jsonish::parse(candidate, ParseOptions::default(), true)
             && let Some(json) = jsonish_value_to_json(&value)
-            && let Some(call) = validate_tool_call(&json, &self.tools)
         {
-            return Some(call);
+            parsed = true;
+            match validate_tool_call(&json, &self.tools) {
+                ok @ Ok(_) => return ok,
+                Err(reason) => last_rejection = reason,
+            }
         }
 
-        None
+        if parsed {
+            Err(last_rejection)
+        } else {
+            Err(ToolCallRejection::ParseError)
+        }
     }
 }
 
@@ -606,8 +696,11 @@ fn jsonish_value_to_json(value: &jsonish::Value) -> Option<JsonValue> {
     }
 }
 
-fn validate_tool_call(value: &JsonValue, tools: &[ToolSchema]) -> Option<ToolCallData> {
-    let obj = value.as_object()?;
+fn validate_tool_call(
+    value: &JsonValue,
+    tools: &[ToolSchema],
+) -> Result<ToolCallData, ToolCallRejection> {
+    let obj = value.as_object().ok_or(ToolCallRejection::NotAnObject)?;
 
     // Extract the tool call ID (from API's native mechanism or synthetic).
     let id = obj
@@ -631,13 +724,24 @@ fn validate_tool_call(value: &JsonValue, tools: &[ToolSchema]) -> Option<ToolCal
         .or_else(|| obj.get("function"))
         .and_then(|v| v.as_str())
     {
-        let tool = tools.iter().find(|t| t.name == name)?;
+        // A recognized name that is not registered (unknown / disabled / not
+        // exposed in the current mode) gets its own rejection so the model can
+        // tell "tool unavailable" apart from "invalid arguments".
+        let tool = tools
+            .iter()
+            .find(|t| t.name == name)
+            .ok_or_else(|| ToolCallRejection::UnknownTool {
+                name: name.to_string(),
+            })?;
 
         let args_ref = obj
             .get("arguments")
             .or_else(|| obj.get("input"))
             .or_else(|| obj.get("args"))
-            .or_else(|| obj.get("parameters"))?;
+            .or_else(|| obj.get("parameters"))
+            .ok_or_else(|| ToolCallRejection::MissingArguments {
+                name: name.to_string(),
+            })?;
 
         // Many LLMs output arguments as a JSON-encoded string (OpenAI-style).
         // Try to parse it as JSON so we can validate the actual object.
@@ -647,10 +751,12 @@ fn validate_tool_call(value: &JsonValue, tools: &[ToolSchema]) -> Option<ToolCal
         };
 
         if !validate_against_schema(&args, &tool.input_schema) {
-            return None;
+            return Err(ToolCallRejection::SchemaMismatch {
+                name: name.to_string(),
+            });
         }
 
-        return Some(ToolCallData {
+        return Ok(ToolCallData {
             id,
             name: name.to_string(),
             arguments: args,
@@ -669,7 +775,7 @@ fn validate_tool_call(value: &JsonValue, tools: &[ToolSchema]) -> Option<ToolCal
         }
     }
     if matches.len() == 1 {
-        return Some(ToolCallData {
+        return Ok(ToolCallData {
             id,
             name: matches[0].name.clone(),
             arguments: value.clone(),
@@ -677,7 +783,7 @@ fn validate_tool_call(value: &JsonValue, tools: &[ToolSchema]) -> Option<ToolCal
         });
     }
 
-    None
+    Err(ToolCallRejection::NoToolMatch)
 }
 
 fn validate_against_schema(value: &JsonValue, schema: &JsonValue) -> bool {
@@ -753,6 +859,28 @@ fn is_in_code_block(text: &str, byte_pos: usize) -> bool {
         }
     }
     in_block
+}
+
+/// Maximum number of characters of the offending raw payload included in a
+/// failure message. Long enough to identify the call, short enough to not
+/// flood the context during a failure streak.
+const FAILURE_PAYLOAD_MAX_CHARS: usize = 240;
+
+/// Collapse newlines/tabs to single spaces and truncate to
+/// [`FAILURE_PAYLOAD_MAX_CHARS`] so the failure message stays on one readable
+/// blockquote line and never swallows the whole context with a huge payload.
+fn truncate_payload(raw: &str) -> String {
+    let collapsed: String = raw
+        .chars()
+        .map(|c| if c == '\n' || c == '\r' || c == '\t' { ' ' } else { c })
+        .collect();
+    let chars: Vec<char> = collapsed.chars().collect();
+    if chars.len() <= FAILURE_PAYLOAD_MAX_CHARS {
+        collapsed
+    } else {
+        let head: String = chars[..FAILURE_PAYLOAD_MAX_CHARS].iter().collect();
+        format!("{head}...")
+    }
 }
 
 fn value_type_matches(value: &JsonValue, expected_type: &str) -> bool {

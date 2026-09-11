@@ -5,7 +5,7 @@ pub mod jsonish;
 pub mod test;
 
 pub use extract::{
-    BatchResult, ExtractAction, Item, NativeToolCall, StreamAction, ToolCallData, ToolSchema,
-    find_json_objects,
+    BatchResult, ExtractAction, Item, NativeToolCall, StreamAction, ToolCallData,
+    ToolCallRejection, ToolSchema, find_json_objects,
 };
 pub use jsonish::*;
