@@ -197,8 +197,10 @@ fn apply_to_resolves_block_and_matches_replace() {
     )
     .unwrap();
 
-    let block_result = block_section.apply_to(text, Some(stub_resolver as BlockResolver));
-    let replace_result = replace_section.apply_to(text, None);
+    let block_result = block_section
+        .apply_to(text, Some(stub_resolver as BlockResolver))
+        .expect("apply_to should succeed");
+    let replace_result = replace_section.apply_to(text, None).expect("apply_to should succeed");
 
     assert_eq!(
         block_result.text,
@@ -234,7 +236,9 @@ fn apply_partial_to_drops_unresolvable_block_edit() {
     )
     .unwrap();
     // No resolver → drop. The lone block edit vanishes, so the text is unchanged.
-    let result = section.apply_partial_to(text, None);
+    let result = section
+        .apply_partial_to(text, None)
+        .expect("apply_partial_to should succeed");
     assert_eq!(result.text, text);
 }
 
@@ -393,7 +397,9 @@ fn apply_to_deletes_resolved_block_span() {
     )
     .unwrap();
     // stub span [2,3] → drop "  if (y) {" and "  }".
-    let result = section.apply_to(text, Some(stub_resolver as BlockResolver));
+    let result = section
+        .apply_to(text, Some(stub_resolver as BlockResolver))
+        .expect("apply_to should succeed");
     assert_eq!(result.text, "function x() {\n}\n");
 }
 
@@ -405,7 +411,9 @@ fn apply_partial_to_drops_unresolvable_delete_block_edit() {
         &SplitOptions::default(),
     )
     .unwrap();
-    let result = section.apply_partial_to(text, None);
+    let result = section
+        .apply_partial_to(text, None)
+        .expect("apply_partial_to should succeed");
     assert_eq!(result.text, text);
 }
 

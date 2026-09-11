@@ -134,3 +134,150 @@ pub fn missing_snapshot_tag_message(section_path: &str) -> String {
          a new file, use the write tool."
     )
 }
+
+/// Replacement body indentation was aligned from unchanged structural rows.
+pub const REPLACEMENT_INDENT_AUTO_SHIFT_WARNING: &str =
+    "Auto-indented a replacement body to match unchanged structural rows in its source range.";
+
+/// Exact-text boundary rows were removed because the remaining payload covers
+/// the selected range and the same rows already survive immediately outside it.
+#[must_use]
+pub fn textual_boundary_echo_warning(start_line: u32, leading: u32, trailing: u32) -> String {
+    let mut parts = Vec::new();
+    if leading > 0 {
+        parts.push(format!("{leading} leading"));
+    }
+    if trailing > 0 {
+        parts.push(format!("{trailing} trailing"));
+    }
+    let joined = parts.join(" and ");
+    format!(
+        "Auto-repaired a replacement boundary echo at line {start_line}: dropped {joined} body \
+         line(s) already present outside the range. Issue the body as final content for the \
+         selected range only."
+    )
+}
+
+/// A boundary variant repair fired: a syntax-essential selected boundary row
+/// was retained, or exact body echoes of surviving outside rows were removed.
+/// The authored result did not parse and the selected result does.
+#[must_use]
+pub fn boundary_variant_repair_warning(start_line: u32, kept: u32, dropped: u32) -> String {
+    let kept_part = if kept == 0 {
+        None
+    } else {
+        Some(format!(
+            "retained {kept} syntax-essential source boundary row(s) selected by the range"
+        ))
+    };
+    let dropped_part = if dropped == 0 {
+        None
+    } else {
+        Some(format!(
+            "dropped {dropped} body row(s) duplicated just outside the range"
+        ))
+    };
+    let actions: Vec<String> = kept_part.into_iter().chain(dropped_part).collect();
+    let action = actions.join(" and ");
+    format!(
+        "Auto-repaired replacement boundaries at line {start_line}: {action}. The result was \
+         verified by the syntax probe — re-issue with the range covering exactly the changed \
+         lines and the body as their complete final content."
+    )
+}
+
+/// Which boundary side an ambiguous echo appeared on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoundarySide {
+    Leading,
+    Trailing,
+}
+
+/// A one-sided exact boundary echo cannot cover the selected range.
+///
+/// After the duplicated body rows are removed, applying or dropping it would
+/// lose distinct range content, so the edit is rejected unless a
+/// parse-restoring boundary combination proves another reading.
+#[must_use]
+pub fn ambiguous_boundary_echo_message(
+    start_line: u32,
+    end_line: u32,
+    side: BoundarySide,
+    count: u32,
+) -> String {
+    let where_clause = match side {
+        BoundarySide::Leading => {
+            format!("opens by restating the {count} line(s) just above the range")
+        },
+        BoundarySide::Trailing => {
+            format!("ends by restating the {count} line(s) just below the range")
+        },
+    };
+    format!(
+        "`replace {start_line}..{end_line}:` rejected: the body {where_clause}, but is too \
+         short to be the full final content of the selected range. Re-issue with the range \
+         covering exactly the lines that change and the body as their complete final content."
+    )
+}
+
+/// A syntax-essential selected edge can be retained on either side of the
+/// payload, but indentation does not establish which placement was intended.
+#[must_use]
+pub fn ambiguous_boundary_placement_message(start_line: u32, end_line: u32) -> String {
+    format!(
+        "`replace {start_line}..{end_line}:` rejected: a selected boundary row is required \
+         for the file to parse, but the body indentation does not establish whether it belongs \
+         before or after that row. Re-read the region and re-issue with a range that excludes \
+         every unchanged boundary row."
+    )
+}
+
+/// The applied result no longer parses while the pre-edit content did.
+///
+/// The patch introduced a syntax error. Advisory, never a rejection — the
+/// applier honors the authored edit — but the breakage is machine-confirmed
+/// by tree-sitter and surfaced in the same response instead of waiting for a
+/// compiler pass.
+#[must_use]
+pub fn edit_broke_parse_warning(first_changed_line: Option<u32>) -> String {
+    let at = match first_changed_line {
+        Some(line) => format!(" near line {line}"),
+        None => String::new(),
+    };
+    format!(
+        "This edit introduced a syntax error{at}: the file parsed before the patch and no \
+         longer does. It was applied exactly as written, so a line number or range endpoint \
+         is likely wrong — re-read the touched region and re-issue a correcting edit."
+    )
+}
+
+/// `insert after N:` body indented shallower than the anchor: the landing
+/// moved forward past trailing closer lines — the common "anchored on the
+/// last line I read instead of after the block" mistake.
+#[must_use]
+pub fn after_insert_landing_shift_warning(
+    anchor_line: u32,
+    landing_line: u32,
+    crossed: u32,
+) -> String {
+    let s = if crossed == 1 { "" } else { "s" };
+    format!(
+        "insert after {anchor_line}: body indented shallower than the anchor, so the landing \
+         moved past {crossed} closing line{s} to after line {landing_line}. For the deeper \
+         position inside the block, re-issue with the body indented to match."
+    )
+}
+
+/// Plain `insert after N:` anchored on a block-opener line with a shallower
+/// body. The landing was moved past the whole block — anchoring on an opener
+/// places the body between the opener and its first statement, a position a
+/// body at the opener's depth or above never intends.
+#[must_use]
+pub fn after_insert_opener_escape_warning(anchor_line: u32, landing_line: u32) -> String {
+    format!(
+        "insert after {anchor_line}: line {anchor_line} opens a block, and the body's \
+         indentation claims a position outside it, so the body was landed after line \
+         {landing_line} (verified by the syntax probe). To insert after a whole construct, \
+         anchor on its closing line."
+    )
+}

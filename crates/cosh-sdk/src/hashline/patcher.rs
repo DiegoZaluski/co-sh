@@ -155,6 +155,12 @@ fn merge_warnings(sources: &[Option<&[String]>]) -> Vec<String> {
     out
 }
 
+/// Adapt an authored-input `String` error (from the parser/applier) to the
+/// patcher's boxed error type.
+fn boxed_msg(e: String) -> Box<dyn std::error::Error + Send + Sync> {
+    e.into()
+}
+
 fn assert_unique_canonical_paths(prepared: &[PreparedSection]) -> Result<(), String> {
     let mut seen = std::collections::HashMap::<String, String>::new();
     for entry in prepared {
@@ -513,19 +519,22 @@ impl<F: Filesystem, S: SnapshotStore> Patcher<F, S> {
         };
 
         if expected.is_none() {
-            return Ok(apply_edits(normalized, &resolved));
+            return apply_edits(normalized, &resolved, Some(canonical_path))
+                .map_err(boxed_msg);
         }
         // Whole-file unchanged → the tag still names the live content, so an
         // edit anchored at ANY line (displayed or not) is safe to apply.
         if live_matches {
-            return Ok(apply_edits(normalized, &resolved));
+            return apply_edits(normalized, &resolved, Some(canonical_path))
+                .map_err(boxed_msg);
         }
         // Head/tail-only inserts are position-stable: "start"/"end" cannot move
         // with content drift, so a stale tag is non-fatal. Apply onto the live
         // content and warn instead of hard-failing — unlike an anchored
         // mismatch, which cannot be safely relocated and must reject.
         if !has_anchor_scoped_edit(&resolved) {
-            let mut result = apply_edits(normalized, &resolved);
+            let mut result = apply_edits(normalized, &resolved, Some(canonical_path))
+                .map_err(boxed_msg)?;
             let mut warnings = vec![HEADTAIL_DRIFT_WARNING.to_string()];
             warnings.extend(result.warnings);
             result.warnings = warnings;

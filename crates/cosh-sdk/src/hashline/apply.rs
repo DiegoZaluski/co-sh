@@ -1,74 +1,66 @@
-//! Apply a parsed list of [`Edit`]s to a text body and return the
-//! post-edit lines plus any diagnostic warnings. Pure function: no FS, no
-//! mutation of the input.
+//! Edit application with boundary repair — a direct port of upstream
+//! oh-my-pi's hashline applier (`packages/hashline/src/apply.ts`, now
+//! `crates/pi-edit/src/modes/hashline/apply.rs`).
 //!
-//! Replacement groups are first normalized by [`repair_boundary_balance`],
-//! which fixes the common model mistake of a payload that duplicates or drops
-//! the closing delimiter bordering the range (balance-validated; see below).
-use super::messages::UNRESOLVED_BLOCK_INTERNAL;
-use super::types::{Anchor, ApplyResult, Cursor, Edit, Replacement};
+//! Architecture (identical to upstream):
+//!
+//! 1. [`validate_bounds`] — anchors must exist in the file.
+//! 2. [`repair_indentation`] — a replacement body that uniformly omitted the
+//!    base indent of unchanged structural rows is re-indented.
+//! 3. [`repair_landings`] — an `insert after` body indented shallower than
+//!    its anchor slides past trailing closer lines (or escapes an opener).
+//! 4. [`normalize_echoes`] — exact duplicated boundary rows already present
+//!    just outside the range are dropped; under-determined echoes are
+//!    reported as ambiguities.
+//! 5. The authored result is materialized. When it parses cleanly it is
+//!    applied as-is (ambiguities reject). Otherwise [`repair_boundaries`]
+//!    searches keep/drop boundary variants — every candidate must parse —
+//!    and ambiguity between distinct valid candidates rejects. When nothing
+//!    restores a parse, the authored edit is honored and a machine-confirmed
+//!    `edit_broke_parse_warning` is surfaced instead: the engine never
+//!    silently rewrites content it does not understand, and never guesses
+//!    which closer is semantically correct.
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::LazyLock;
+
 use regex::Regex;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum LineOrigin {
-    Original,
-    Insert,
-    Replacement,
-}
+use super::messages::{
+    BoundarySide, REPLACEMENT_INDENT_AUTO_SHIFT_WARNING, UNRESOLVED_BLOCK_INTERNAL,
+    after_insert_landing_shift_warning, after_insert_opener_escape_warning,
+    ambiguous_boundary_echo_message, ambiguous_boundary_placement_message,
+    boundary_variant_repair_warning, edit_broke_parse_warning, textual_boundary_echo_warning,
+};
+use super::syntax::{enclosing_boundaries, node_chain, parses_cleanly};
+use super::types::{Anchor, ApplyResult, Cursor, Edit, Replacement};
 
-#[derive(Clone)]
-struct IndexedEdit {
-    edit: Edit,
-    idx: usize,
-}
+/// A line containing only closing delimiters and an optional trailing
+/// separator.
+static STRUCTURAL_CLOSER_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\s*[)\]}]+[;,]?\s*$").expect("valid structural-closer regex"));
 
-#[allow(clippy::unwrap_used)]
-static STRUCTURAL_CLOSER_RE: std::sync::LazyLock<Regex> =
-    std::sync::LazyLock::new(|| Regex::new(r"^\s*[)\]}]+[;,]?\s*$").unwrap());
-
-const fn is_replacement_insert(edit: &Edit) -> bool {
-    matches!(
-        edit,
-        Edit::Insert {
-            mode: Some(Replacement::Replacement),
-            ..
+/// Decision trace for behavioral-parity runs against upstream. Off by
+/// default; enable with `COSH_HASHLINE_TRACE=1`.
+macro_rules! trace {
+    ($($arg:tt)*) => {
+        if std::env::var_os("COSH_HASHLINE_TRACE").is_some_and(|v| !v.is_empty()) {
+            eprintln!("[hashline] {}", format_args!($($arg)*));
         }
-    )
-}
-
-fn get_cursor_anchors(cursor: &Cursor) -> Vec<Anchor> {
-    match cursor {
-        Cursor::BeforeAnchor(a) | Cursor::AfterAnchor(a) => vec![*a],
-        _ => vec![],
-    }
+    };
 }
 
 fn get_edit_anchors(edit: &Edit) -> Vec<Anchor> {
     match edit {
         Edit::Delete { anchor, .. } => vec![*anchor],
-        _ => get_cursor_anchors(match edit {
-            Edit::Insert { cursor, .. } => cursor,
-            _ => return vec![],
-        }),
+        Edit::Insert {
+            cursor: Cursor::BeforeAnchor(a) | Cursor::AfterAnchor(a),
+            ..
+        } => vec![*a],
+        _ => vec![],
     }
 }
 
-fn validate_line_bounds(edits: &[Edit], file_lines: &[String]) -> Result<(), String> {
-    for edit in edits {
-        for anchor in get_edit_anchors(edit) {
-            if anchor.line < 1 || anchor.line as usize > file_lines.len() {
-                return Err(format!(
-                    "Line {} does not exist (file has {} lines)",
-                    anchor.line,
-                    file_lines.len()
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn clone_applied_edit(edit: &Edit, index: u32) -> Edit {
+fn with_index(edit: &Edit, index: u32) -> Edit {
     match edit {
         Edit::Insert {
             cursor,
@@ -94,194 +86,42 @@ fn clone_applied_edit(edit: &Edit, index: u32) -> Edit {
             index,
             old_assertion: old_assertion.clone(),
         },
-        Edit::Block { .. } => unreachable!(),
+        Edit::Block { .. } => edit.clone(),
     }
 }
 
-fn insert_at_start(
-    file_lines: &mut Vec<String>,
-    line_origins: &mut Vec<LineOrigin>,
-    lines: &[String],
-) {
-    if lines.is_empty() {
-        return;
-    }
-    let origins: Vec<LineOrigin> = lines.iter().map(|_| LineOrigin::Insert).collect();
-    if file_lines.len() == 1 && file_lines[0].is_empty() {
-        file_lines.splice(0..1, lines.iter().cloned());
-        line_origins.splice(0..1, origins);
-        return;
-    }
-    file_lines.splice(0..0, lines.iter().cloned());
-    line_origins.splice(0..0, origins);
+fn phantom_line(lines: &[String]) -> Option<u32> {
+    (lines.len() > 1 && lines.last().is_some_and(String::is_empty))
+        .then_some(u32::try_from(lines.len()).unwrap_or(u32::MAX))
 }
 
-fn insert_at_end(
-    file_lines: &mut Vec<String>,
-    line_origins: &mut Vec<LineOrigin>,
-    lines: &[String],
-) -> Option<u32> {
-    if lines.is_empty() {
-        return None;
-    }
-    let origins: Vec<LineOrigin> = lines.iter().map(|_| LineOrigin::Insert).collect();
-    if file_lines.len() == 1 && file_lines[0].is_empty() {
-        file_lines.splice(0..1, lines.iter().cloned());
-        line_origins.splice(0..1, origins);
-        return Some(1);
-    }
-    let has_trailing_newline =
-        !file_lines.is_empty() && file_lines[file_lines.len() - 1].is_empty();
-    let insert_index = if has_trailing_newline {
-        file_lines.len() - 1
-    } else {
-        file_lines.len()
-    };
-    file_lines.splice(insert_index..insert_index, lines.iter().cloned());
-    line_origins.splice(insert_index..insert_index, origins);
-    Some(u32::try_from(insert_index).ok()? + 1)
-}
-
-fn bucket_anchor_edits_by_line(
-    edits: &[IndexedEdit],
-) -> std::collections::HashMap<u32, Vec<IndexedEdit>> {
-    let mut by_line: std::collections::HashMap<u32, Vec<IndexedEdit>> =
-        std::collections::HashMap::new();
-    for entry in edits {
-        let line = match &entry.edit {
-            Edit::Delete { anchor, .. } => anchor.line,
-            Edit::Insert {
-                cursor: Cursor::BeforeAnchor(a) | Cursor::AfterAnchor(a),
-                ..
-            } => a.line,
-            _ => 0,
-        };
-        by_line.entry(line).or_default().push(IndexedEdit {
-            edit: entry.edit.clone(),
-            idx: entry.idx,
-        });
-    }
-    by_line
-}
-
-// Boundary-balance repair
-//
-// Models routinely miscount a replacement range's edges. The payload either
-// re-states a closing delimiter that still lives just outside the range
-// (producing a DUPLICATE `}` / `);` / `]`) or the range deletes a closer the
-// payload never restates (DROPPING it). Both are the same defect — a
-// replacement whose payload does not preserve the deleted region's delimiter
-// balance — and both leave the file syntactically broken.
-//
-// A repair fires only when (a) the group's payload balance differs from the
-// deleted region's balance and (b) one boundary operation drives that
-// difference to exactly zero while leaving the surrounding text byte-identical.
-// The operation only ever drops an exact multi-line boundary echo or a single
-// pure structural-closer line, or spares a deleted pure structural-closer line,
-// so content lines are never moved or lost. Balance-preserving edits are left
-// strictly alone.
-
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-struct DelimiterBalance {
-    paren: i32,
-    bracket: i32,
-    brace: i32,
-}
-
-fn compute_delimiter_balance(lines: &[String]) -> DelimiterBalance {
-    let mut balance = DelimiterBalance::default();
-    let mut in_block_comment = false;
-    let mut quote = '\0';
-    for line in lines {
-        let line_bytes = line.as_bytes();
-        let mut i = 0;
-        while i < line.len() {
-            let ch = line_bytes[i] as char;
-            if in_block_comment {
-                if ch == '*' && i + 1 < line.len() && line_bytes[i + 1] == b'/' {
-                    in_block_comment = false;
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-                continue;
+fn validate_bounds(edits: &[Edit], lines: &[String]) -> Result<(), String> {
+    for edit in edits {
+        for anchor in get_edit_anchors(edit) {
+            if anchor.line < 1 || anchor.line as usize > lines.len() {
+                return Err(format!(
+                    "Line {} does not exist (file has {} lines)",
+                    anchor.line,
+                    lines.len()
+                ));
             }
-            if quote != '\0' {
-                if ch == '\\' {
-                    i += 2;
-                    continue;
-                } else if ch == quote {
-                    quote = '\0';
-                }
-                i += 1;
-                continue;
-            }
-            if ch == '"' || ch == '\'' || ch == '`' {
-                quote = ch;
-                i += 1;
-                continue;
-            }
-            if ch == '/' && i + 1 < line.len() && line_bytes[i + 1] == b'/' {
-                break;
-            }
-            if ch == '/' && i + 1 < line.len() && line_bytes[i + 1] == b'*' {
-                in_block_comment = true;
-                i += 2;
-                continue;
-            }
-            match ch {
-                '(' => balance.paren += 1_i32,
-                ')' => balance.paren -= 1_i32,
-                '[' => balance.bracket += 1_i32,
-                ']' => balance.bracket -= 1_i32,
-                '{' => balance.brace += 1_i32,
-                '}' => balance.brace -= 1_i32,
-                _ => {}
-            }
-            i += 1;
-        }
-        if quote == '"' || quote == '\'' {
-            quote = '\0';
         }
     }
-    balance
+    Ok(())
 }
 
-const fn balance_delta(a: DelimiterBalance, b: DelimiterBalance) -> DelimiterBalance {
-    DelimiterBalance {
-        paren: a.paren - b.paren,
-        bracket: a.bracket - b.bracket,
-        brace: a.brace - b.brace,
-    }
-}
-
-const fn balance_negate(a: DelimiterBalance) -> DelimiterBalance {
-    DelimiterBalance {
-        paren: -a.paren,
-        bracket: -a.bracket,
-        brace: -a.brace,
-    }
-}
-
-const fn balance_equal(a: DelimiterBalance, b: DelimiterBalance) -> bool {
-    a.paren == b.paren && a.bracket == b.bracket && a.brace == b.brace
-}
-
-const fn balance_is_zero(a: DelimiterBalance) -> bool {
-    a.paren == 0 && a.bracket == 0 && a.brace == 0
-}
-
+#[derive(Clone)]
 struct ReplacementGroup {
     insert_indices: Vec<usize>,
     delete_indices: Vec<usize>,
     payload: Vec<String>,
-    start_line: u32,
-    end_line: u32,
+    start: u32,
+    end: u32,
 }
 
-fn find_replacement_group(edits: &[Edit], start: usize) -> Option<ReplacementGroup> {
+fn replacement_group(edits: &[Edit], start: usize) -> Option<ReplacementGroup> {
     let first = edits.get(start)?;
-    let (line_num, cursor_anchor_line) = match first {
+    let (line_num, anchor_line) = match first {
         Edit::Insert {
             cursor: Cursor::BeforeAnchor(a),
             line_num,
@@ -290,412 +130,1075 @@ fn find_replacement_group(edits: &[Edit], start: usize) -> Option<ReplacementGro
         } => (*line_num, a.line),
         _ => return None,
     };
-    let anchor_line = cursor_anchor_line;
-    let mut insert_indices: Vec<usize> = Vec::new();
-    let mut payload: Vec<String> = Vec::new();
+    let mut insert_indices = Vec::new();
+    let mut payload = Vec::new();
     let mut i = start;
-    while i < edits.len() {
-        match &edits[i] {
-            Edit::Insert {
-                cursor: Cursor::BeforeAnchor(a),
-                line_num: ln,
-                mode: Some(Replacement::Replacement),
-                text,
-                ..
-            } if *ln == line_num && a.line == anchor_line => {
-                insert_indices.push(i);
-                payload.push(text.clone());
-                i += 1;
-            }
-            _ => break,
+    while let Some(Edit::Insert {
+        cursor: Cursor::BeforeAnchor(a),
+        text,
+        line_num: ln,
+        mode: Some(Replacement::Replacement),
+        ..
+    }) = edits.get(i)
+    {
+        if a.line != anchor_line || *ln != line_num {
+            break;
         }
+        insert_indices.push(i);
+        payload.push(text.clone());
+        i += 1;
     }
-    let mut delete_indices: Vec<usize> = Vec::new();
-    let mut expected_line = anchor_line;
-    while i < edits.len() {
-        match &edits[i] {
-            Edit::Delete {
-                anchor,
-                line_num: ln,
-                ..
-            } if *ln == line_num && anchor.line == expected_line => {
-                delete_indices.push(i);
-                expected_line += 1;
-                i += 1;
-            }
-            _ => break,
+    let mut delete_indices = Vec::new();
+    let mut expected = anchor_line;
+    while let Some(Edit::Delete {
+        anchor,
+        line_num: ln,
+        ..
+    }) = edits.get(i)
+    {
+        if anchor.line != expected || *ln != line_num {
+            break;
         }
+        delete_indices.push(i);
+        expected += 1;
+        i += 1;
     }
     if delete_indices.is_empty() {
         return None;
     }
-
-    let total_deletes = u32::try_from(delete_indices.len()).unwrap_or(u32::MAX);
-
     Some(ReplacementGroup {
         insert_indices,
         delete_indices,
         payload,
-        start_line: anchor_line,
-        end_line: anchor_line + total_deletes - 1,
+        start: anchor_line,
+        end: expected - 1,
     })
 }
 
-fn find_duplicate_suffix(
-    group: &ReplacementGroup,
-    file_lines: &[String],
-    delta: DelimiterBalance,
-) -> usize {
-    let end_line = group.end_line as usize;
-    let max_k = std::cmp::min(group.payload.len(), file_lines.len() - end_line);
-    for k in (1..=max_k).rev() {
-        let mut matches = true;
-        for t in 0..k {
-            if group.payload[group.payload.len() - k + t] != file_lines[end_line + t] {
-                matches = false;
+fn leading_indent(line: &str) -> &str {
+    let end = line
+        .bytes()
+        .take_while(|byte| matches!(byte, b' ' | b'\t'))
+        .count();
+    &line[..end]
+}
+
+fn indent_deeper(deeper: &str, shallower: &str) -> bool {
+    deeper.len() > shallower.len() && deeper.starts_with(shallower)
+}
+
+fn has_content(text: &str) -> bool {
+    text.bytes().any(|byte| !matches!(byte, 9..=13 | 32))
+}
+
+fn repair_indentation(edits: &mut [Edit], lines: &[String]) -> Vec<String> {
+    let mut repaired = false;
+    let mut start = 0;
+    while start < edits.len() {
+        let Some(group) = replacement_group(edits, start) else {
+            start += 1;
+            continue;
+        };
+        start = group.delete_indices.last().copied().unwrap_or(start) + 1;
+        if group.payload.len() != group.delete_indices.len() {
+            continue;
+        }
+        let preceding = lines
+            .get(group.start.saturating_sub(2) as usize)
+            .map_or("", String::as_str);
+        let source_first = lines
+            .get((group.start - 1) as usize)
+            .map_or("", String::as_str);
+        let payload_first = group.payload.first().map_or("", String::as_str);
+        if !preceding.trim_end().ends_with('{')
+            || !indent_deeper(leading_indent(source_first), leading_indent(preceding))
+            || indent_deeper(leading_indent(payload_first), leading_indent(preceding))
+        {
+            continue;
+        }
+        let mut shift: Option<&str> = None;
+        let mut matches = 0;
+        let mut consistent = true;
+        for (offset, payload) in group.payload.iter().enumerate() {
+            let source = lines
+                .get((group.start - 1) as usize + offset)
+                .map_or("", String::as_str);
+            if source.trim().is_empty() || source.trim_start() != payload.trim_start() {
+                continue;
+            }
+            let source_indent = leading_indent(source);
+            let payload_indent = leading_indent(payload);
+            if !source_indent.ends_with(payload_indent) {
+                consistent = false;
                 break;
             }
-        }
-        if !matches {
-            continue;
-        }
-        if k == 1 && !STRUCTURAL_CLOSER_RE.is_match(&group.payload[group.payload.len() - 1]) {
-            continue;
-        }
-        let payload_slice: Vec<String> = group.payload[group.payload.len() - k..].to_vec();
-        if balance_equal(compute_delimiter_balance(&payload_slice), delta) {
-            return k;
-        }
-    }
-    0
-}
-
-fn find_duplicate_prefix(
-    group: &ReplacementGroup,
-    file_lines: &[String],
-    delta: DelimiterBalance,
-) -> usize {
-    let start_line = group.start_line as usize;
-    let max_j = std::cmp::min(group.payload.len(), start_line - 1);
-    for j in (1..=max_j).rev() {
-        let mut matches = true;
-        for t in 0..j {
-            if group.payload[t] != file_lines[start_line - 1 - j + t] {
-                matches = false;
+            let candidate = &source_indent[..source_indent.len() - payload_indent.len()];
+            if shift.is_some_and(|old| old != candidate) {
+                consistent = false;
                 break;
             }
+            shift = Some(candidate);
+            matches += 1;
         }
-        if !matches {
+        let Some(shift) = shift else { continue };
+        if !consistent || shift.is_empty() || matches < 2 || matches * 2 <= group.payload.len() {
             continue;
         }
-        if j == 1 && !STRUCTURAL_CLOSER_RE.is_match(&group.payload[0]) {
-            continue;
+        for &index in &group.insert_indices {
+            if let Edit::Insert { text, .. } = &mut edits[index]
+                && !text.trim().is_empty()
+            {
+                text.insert_str(0, shift);
+            }
         }
-        let payload_slice: Vec<String> = group.payload[..j].to_vec();
-        if balance_equal(compute_delimiter_balance(&payload_slice), delta) {
-            return j;
+        repaired = true;
+    }
+    if repaired {
+        vec![REPLACEMENT_INDENT_AUTO_SHIFT_WARNING.to_owned()]
+    } else {
+        Vec::new()
+    }
+}
+
+fn duplicate_leading(group: &ReplacementGroup, lines: &[String]) -> usize {
+    let max = group
+        .payload
+        .len()
+        .min(group.start.saturating_sub(1) as usize);
+    for count in (1..=max).rev() {
+        let source_start = group.start as usize - 1 - count;
+        let candidate = &group.payload[..count];
+        if candidate
+            .iter()
+            .zip(&lines[source_start..source_start + count])
+            .all(|(a, b)| a == b)
+            && candidate.iter().any(|line| has_content(line))
+        {
+            return count;
         }
     }
     0
 }
 
-fn find_dropped_suffix_closers(
-    group: &ReplacementGroup,
-    file_lines: &[String],
-    delta: DelimiterBalance,
-) -> usize {
-    let wanted = balance_negate(delta);
-    let max_m = group.delete_indices.len();
-    let end_line = group.end_line as usize;
-    for m in 1..=max_m {
-        let closer_line = &file_lines[group.end_line as usize - m];
-        if !STRUCTURAL_CLOSER_RE.is_match(closer_line) {
-            break;
-        }
-        let slice = &file_lines[end_line - m..end_line];
-        if balance_equal(compute_delimiter_balance(slice), wanted) {
-            return m;
+fn duplicate_trailing(group: &ReplacementGroup, lines: &[String]) -> usize {
+    let max = group
+        .payload
+        .len()
+        .min(lines.len().saturating_sub(group.end as usize));
+    for count in (1..=max).rev() {
+        let payload = &group.payload[group.payload.len() - count..];
+        let source = &lines[group.end as usize..group.end as usize + count];
+        if payload.iter().zip(source).all(|(a, b)| a == b)
+            && payload.iter().any(|line| has_content(line))
+        {
+            return count;
         }
     }
     0
 }
 
-fn describe_boundary_repair(group: &ReplacementGroup, action: &str) -> String {
-    format!(
-        "Auto-repaired a delimiter-balance mismatch in the replacement at line {}: {}. \
-         Issue the payload as the final desired content only — never restate or omit a closing bracket bordering the range.",
-        group.start_line, action
-    )
+fn group_inserts(group: &ReplacementGroup, edits: &[Edit]) -> Vec<Edit> {
+    group
+        .insert_indices
+        .iter()
+        .map(|&i| edits[i].clone())
+        .collect()
 }
 
-fn repair_boundary_balance(edits: &[Edit], file_lines: &[String]) -> (Vec<Edit>, Vec<String>) {
-    let mut out: Vec<Edit> = Vec::new();
-    let mut warnings: Vec<String> = Vec::new();
+fn group_deletes(group: &ReplacementGroup, edits: &[Edit]) -> Vec<Edit> {
+    group
+        .delete_indices
+        .iter()
+        .map(|&i| edits[i].clone())
+        .collect()
+}
+
+fn annotation_echo(lines: &[String], path: Option<&str>, first: u32, last: u32) -> bool {
+    let Some(path) = path else {
+        return false;
+    };
+    (first..=last).all(|line| {
+        node_chain(lines, path, line).iter().any(|node| {
+            node.start_line == line
+                && node.end_line == line
+                && matches!(
+                    node.kind.as_str(),
+                    "attribute_item"
+                        | "inner_attribute_item"
+                        | "decorator"
+                        | "annotation"
+                        | "marker_annotation"
+                        | "attribute_list"
+                )
+        })
+    })
+}
+
+#[derive(Clone, Copy)]
+struct Ambiguity {
+    start: u32,
+    end: u32,
+    side: BoundarySide,
+    count: u32,
+}
+
+fn normalize_echoes(
+    edits: &[Edit],
+    lines: &[String],
+    path: Option<&str>,
+) -> (Vec<Edit>, Vec<String>, Vec<Ambiguity>) {
+    let mut out = Vec::new();
+    let mut warnings = Vec::new();
+    let mut ambiguities = Vec::new();
     let mut i = 0;
     while i < edits.len() {
-        let Some(group) = find_replacement_group(edits, i) else {
-            out.push(edits[i].clone());
+        let Some(group) = replacement_group(edits, i) else {
+            out.push(with_index(&edits[i], u32::try_from(i).unwrap_or(u32::MAX)));
             i += 1;
             continue;
         };
-        let inserts: Vec<&Edit> = group
-            .insert_indices
+        let leading = duplicate_leading(&group, lines);
+        let trailing = duplicate_trailing(&group, lines);
+        let range_len = group.delete_indices.len();
+        let (mut drop_l, mut drop_t) = (0, 0);
+        if leading > 0 && trailing > 0 {
+            if group.payload.len().saturating_sub(leading + trailing) == range_len {
+                drop_l = leading;
+                drop_t = trailing;
+            }
+        } else if leading > 0
+            && (range_len > 1
+                || annotation_echo(lines, path, group.start - leading as u32, group.start - 1))
+        {
+            if group.payload.len().saturating_sub(leading) >= range_len {
+                drop_l = leading;
+            } else {
+                ambiguities.push(Ambiguity {
+                    start: group.start,
+                    end: group.end,
+                    side: BoundarySide::Leading,
+                    count: leading as u32,
+                });
+            }
+        } else if trailing > 0
+            && (range_len > 1
+                || annotation_echo(lines, path, group.end + 1, group.end + trailing as u32))
+        {
+            if group.payload.len().saturating_sub(trailing) >= range_len {
+                drop_t = trailing;
+            } else {
+                ambiguities.push(Ambiguity {
+                    start: group.start,
+                    end: group.end,
+                    side: BoundarySide::Trailing,
+                    count: trailing as u32,
+                });
+            }
+        }
+        if drop_l > 0 || drop_t > 0 {
+            let inserts = group_inserts(&group, edits);
+            out.extend(inserts[drop_l..inserts.len() - drop_t].iter().cloned());
+            out.extend(group_deletes(&group, edits));
+            warnings.push(textual_boundary_echo_warning(
+                group.start,
+                drop_l as u32,
+                drop_t as u32,
+            ));
+        } else {
+            out.extend(
+                group
+                    .insert_indices
+                    .iter()
+                    .chain(&group.delete_indices)
+                    .map(|&idx| with_index(&edits[idx], u32::try_from(idx).unwrap_or(u32::MAX))),
+            );
+        }
+        i = group.delete_indices.last().copied().unwrap_or(i) + 1;
+    }
+    (out, warnings, ambiguities)
+}
+
+fn indent_columns(line: &str) -> usize {
+    let mut column = 0;
+    for byte in line.bytes() {
+        match byte {
+            b' ' => column += 1,
+            b'\t' => column += 4 - column % 4,
+            _ => break,
+        }
+    }
+    column
+}
+
+fn nearest_content(lines: &[String], start: isize, step: isize) -> Option<&str> {
+    let mut index = start;
+    while index >= 0 && (index as usize) < lines.len() {
+        if has_content(&lines[index as usize]) {
+            return Some(&lines[index as usize]);
+        }
+        index += step;
+    }
+    None
+}
+
+fn payload_edge(payload: &[String], leading: bool) -> Option<&str> {
+    if leading {
+        payload
             .iter()
-            .map(|idx| &edits[*idx])
-            .collect();
-        let deletes: Vec<&Edit> = group
-            .delete_indices
+            .find(|line| has_content(line))
+            .map(String::as_str)
+    } else {
+        payload
             .iter()
-            .map(|idx| &edits[*idx])
+            .rev()
+            .find(|line| has_content(line))
+            .map(String::as_str)
+    }
+}
+
+fn source_deleted(edits: &[Edit], line: u32) -> bool {
+    edits
+        .iter()
+        .any(|edit| matches!(edit, Edit::Delete { anchor, .. } if anchor.line == line))
+}
+
+fn effective_trailing(group: &ReplacementGroup, edits: &[Edit], lines: &[String]) -> u32 {
+    let mut line = group.end;
+    let mut survivor = group.end + 1;
+    while line > group.start
+        && survivor as usize <= lines.len()
+        && !source_deleted(edits, survivor)
+        && lines[(line - 1) as usize] == lines[(survivor - 1) as usize]
+    {
+        line -= 1;
+        survivor += 1;
+    }
+    line
+}
+
+fn essential(lines: &[String], path: &str, line: u32, baseline: bool) -> bool {
+    if !baseline {
+        return true;
+    }
+    let without = lines[..(line - 1) as usize]
+        .iter()
+        .chain(&lines[line as usize..])
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    !parses_cleanly(Some(path), &without)
+}
+
+#[derive(Clone)]
+struct Variant {
+    edits: Vec<Edit>,
+    kept: usize,
+    dropped: usize,
+}
+
+fn group_variants(
+    group: &ReplacementGroup,
+    edits: &[Edit],
+    lines: &[String],
+    path: &str,
+    baseline: bool,
+) -> (Vec<Variant>, bool) {
+    let inserts = group_inserts(group, edits);
+    let deletes = group_deletes(group, edits);
+    let trailing = effective_trailing(group, edits, lines);
+    let first_essential = essential(lines, path, group.start, baseline);
+    let last_essential = if trailing == group.start {
+        first_essential
+    } else {
+        essential(lines, path, trailing, baseline)
+    };
+    let inner_start = group.start + 1;
+    let leading_structure = baseline
+        && inner_start <= trailing
+        && enclosing_boundaries(lines, path, inner_start, trailing).contains(&group.start);
+    let drop_j = duplicate_leading(group, lines);
+    let drop_k = duplicate_trailing(group, lines);
+    let leading_drops: Vec<_> = if drop_j > 0 { vec![0, drop_j] } else { vec![0] };
+    let trailing_drops: Vec<_> = if drop_k > 0 { vec![0, drop_k] } else { vec![0] };
+    let mut variants = Vec::new();
+    let mut ambiguous = false;
+    for drop_l in leading_drops {
+        for &drop_t in &trailing_drops {
+            let dropped = drop_l + drop_t;
+            if dropped >= inserts.len() {
+                continue;
+            }
+            let payload = &group.payload[drop_l..group.payload.len() - drop_t];
+            let Some(lead) = payload_edge(payload, true) else {
+                continue;
+            };
+            let Some(trail) = payload_edge(payload, false) else {
+                continue;
+            };
+            let first = lines
+                .get((group.start - 1) as usize)
+                .map_or("", String::as_str);
+            let last = lines
+                .get((trailing - 1) as usize)
+                .map_or("", String::as_str);
+            let mut plans: Vec<(Option<u32>, Option<u32>, usize)> = vec![(None, None, 0)];
+            if group.start == trailing {
+                let previous = nearest_content(lines, group.start as isize - 2, -1);
+                let fits = previous.is_none_or(|line| indent_columns(line) == indent_columns(trail));
+                if first_essential && fits && indent_columns(trail) > indent_columns(first) {
+                    plans.push((None, Some(group.start), 1));
+                } else if baseline
+                    && first_essential
+                    && indent_columns(trail) == indent_columns(first)
+                {
+                    ambiguous = true;
+                }
+            } else {
+                let next = nearest_content(lines, group.start as isize, 1);
+                let previous = nearest_content(lines, trailing as isize - 2, -1);
+                let before_first = nearest_content(lines, group.start as isize - 2, -1);
+                let selected_boundary = enclosing_boundaries(lines, path, group.start + 1, group.end)
+                    .contains(&group.start);
+                let structural_edge = STRUCTURAL_CLOSER_RE.is_match(first.trim())
+                    && indent_columns(first) == indent_columns(lead)
+                    && indent_columns(first)
+                        == indent_columns(
+                            lines
+                                .get((group.end - 1) as usize)
+                                .map_or("", String::as_str),
+                        );
+                let underfilled =
+                    trailing < group.end && payload.len() < (group.end - group.start + 1) as usize;
+                let keeps_leading = first_essential
+                    && (leading_structure || selected_boundary || structural_edge || underfilled)
+                    && next.is_none_or(|line| {
+                        if structural_edge {
+                            indent_columns(lead) >= indent_columns(first)
+                        } else {
+                            indent_columns(line) == indent_columns(lead)
+                        }
+                    });
+                let keeps_trailing = (last_essential || underfilled)
+                    && !keeps_leading
+                    && indent_columns(trail) > indent_columns(last)
+                    && previous.is_none_or(|line| indent_columns(line) == indent_columns(trail));
+                if keeps_leading {
+                    plans.push((Some(group.start), None, 1));
+                }
+                if keeps_trailing {
+                    plans.push((None, Some(trailing), 1));
+                }
+                if baseline
+                    && first_essential
+                    && before_first.is_some_and(|line| {
+                        indent_columns(first) < indent_columns(line)
+                    })
+                    && indent_columns(lead) > indent_columns(first)
+                {
+                    ambiguous = true;
+                }
+            }
+            for (before, after, kept) in plans {
+                if kept == 0 && dropped == 0 {
+                    continue;
+                }
+                if kept > 0
+                    && group.delete_indices.len() > 1
+                    && payload.len() > group.delete_indices.len()
+                {
+                    continue;
+                }
+                let mut kept_inserts = inserts[drop_l..inserts.len() - drop_t].to_vec();
+                if let Some(line) = before {
+                    let cursor = if line as usize >= lines.len() {
+                        Cursor::Eof
+                    } else {
+                        Cursor::BeforeAnchor(Anchor { line: line + 1 })
+                    };
+                    for edit in &mut kept_inserts {
+                        if let Edit::Insert { cursor: target, .. } = edit {
+                            *target = cursor.clone();
+                        }
+                    }
+                }
+                let mut result = kept_inserts;
+                result.extend(
+                    deletes
+                        .iter()
+                        .filter(|edit| {
+                            !matches!(edit, Edit::Delete { anchor, .. }
+                                if Some(anchor.line) == before || Some(anchor.line) == after)
+                        })
+                        .cloned(),
+                );
+                variants.push(Variant {
+                    edits: result,
+                    kept,
+                    dropped,
+                });
+            }
+        }
+    }
+    variants.sort_by_key(|variant| (variant.kept, variant.dropped));
+    (variants, ambiguous)
+}
+
+fn splice_variants(
+    edits: &[Edit],
+    groups: &[(ReplacementGroup, Vec<Variant>)],
+    choices: &[Option<usize>],
+) -> Vec<Edit> {
+    let chosen: HashMap<usize, &Variant> = groups
+        .iter()
+        .zip(choices)
+        .filter_map(|((group, variants), choice)| {
+            choice.map(|i| (group.insert_indices[0], &variants[i]))
+        })
+        .collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < edits.len() {
+        let Some(group) = replacement_group(edits, i) else {
+            out.push(with_index(&edits[i], u32::try_from(i).unwrap_or(u32::MAX)));
+            i += 1;
+            continue;
+        };
+        if let Some(variant) = chosen.get(&group.insert_indices[0]) {
+            out.extend(variant.edits.clone());
+        } else {
+            out.extend(
+                group
+                    .insert_indices
+                    .iter()
+                    .chain(&group.delete_indices)
+                    .map(|&idx| with_index(&edits[idx], u32::try_from(idx).unwrap_or(u32::MAX))),
+            );
+        }
+        i = group.delete_indices.last().copied().unwrap_or(i) + 1;
+    }
+    out
+}
+
+type RepairedEdits = (Vec<Edit>, Vec<String>);
+
+fn repair_boundaries(
+    edits: &[Edit],
+    lines: &[String],
+    path: Option<&str>,
+    baseline: bool,
+) -> Result<Option<RepairedEdits>, String> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let mut groups = Vec::new();
+    let mut ambiguous = None;
+    let mut i = 0;
+    while i < edits.len() {
+        if let Some(group) = replacement_group(edits, i) {
+            let (variants, is_ambiguous) = group_variants(&group, edits, lines, path, baseline);
+            if is_ambiguous && ambiguous.is_none() {
+                ambiguous = Some((group.start, group.end));
+            }
+            if !variants.is_empty() {
+                groups.push((group.clone(), variants));
+            }
+            i = group.delete_indices.last().copied().unwrap_or(i) + 1;
+        } else {
+            i += 1;
+        }
+    }
+    if groups.is_empty() {
+        if let Some((start, end)) = ambiguous {
+            return Err(ambiguous_boundary_placement_message(start, end));
+        }
+        return Ok(None);
+    }
+    #[derive(Clone)]
+    struct Combo {
+        choices: Vec<Option<usize>>,
+        touched: usize,
+        kept: usize,
+        dropped: usize,
+    }
+    let mut combos = vec![Combo {
+        choices: Vec::new(),
+        touched: 0,
+        kept: 0,
+        dropped: 0,
+    }];
+    for (_, variants) in &groups {
+        let mut next = Vec::new();
+        for combo in &combos {
+            let mut none = combo.clone();
+            none.choices.push(None);
+            next.push(none);
+            for (index, variant) in variants.iter().enumerate() {
+                let mut one = combo.clone();
+                one.choices.push(Some(index));
+                one.touched += 1;
+                one.kept += variant.kept;
+                one.dropped += variant.dropped;
+                next.push(one);
+            }
+        }
+        next.sort_by_key(|combo| (combo.touched, combo.kept, combo.dropped));
+        next.truncate(512);
+        combos = next;
+    }
+    let authored = materialize(lines, edits).0;
+    combos.retain(|combo| combo.touched > 0);
+    combos.sort_by_key(|combo| (combo.touched, combo.kept, combo.dropped));
+    let mut best: Option<(Combo, String)> = None;
+    for combo in combos {
+        if best
+            .as_ref()
+            .is_some_and(|(value, _)| {
+                (combo.touched, combo.kept, combo.dropped) > (value.touched, value.kept, value.dropped)
+            })
+        {
+            break;
+        }
+        let candidate = splice_variants(edits, &groups, &combo.choices);
+        let text = materialize(lines, &candidate).0;
+        if text == authored || !parses_cleanly(Some(path), &text) {
+            continue;
+        }
+        trace!(
+            "repair candidate group-combo touched={} kept={} dropped={} parses=true",
+            combo.touched, combo.kept, combo.dropped
+        );
+        if let Some((_, best_text)) = &best {
+            if *best_text != text {
+                trace!("repair ambiguous: two distinct valid candidates");
+                if let Some((start, end)) = ambiguous {
+                    return Err(ambiguous_boundary_placement_message(start, end));
+                }
+                return Ok(None);
+            }
+        } else {
+            best = Some((combo, text));
+        }
+    }
+    let Some((combo, _)) = best else {
+        if let Some((start, end)) = ambiguous {
+            return Err(ambiguous_boundary_placement_message(start, end));
+        }
+        return Ok(None);
+    };
+    let warnings = groups
+        .iter()
+        .zip(&combo.choices)
+        .filter_map(|((group, variants), choice)| {
+            choice.map(|index| {
+                let variant = &variants[index];
+                boundary_variant_repair_warning(group.start, variant.kept as u32, variant.dropped as u32)
+            })
+        })
+        .collect();
+    Ok(Some((splice_variants(edits, &groups, &combo.choices), warnings)))
+}
+
+#[derive(Clone)]
+struct InsertGroup {
+    anchor: u32,
+    members: Vec<usize>,
+}
+
+fn body_indent(rows: &[&str]) -> Option<String> {
+    let non_blank: Vec<_> = rows
+        .iter()
+        .copied()
+        .filter(|row| has_content(row))
+        .collect();
+    if non_blank.is_empty()
+        || non_blank
+            .iter()
+            .all(|row| STRUCTURAL_CLOSER_RE.is_match(row))
+    {
+        return None;
+    }
+    let mut target = leading_indent(non_blank[0]).to_owned();
+    for row in non_blank {
+        let indent = leading_indent(row);
+        if indent.starts_with(&target) {
+        } else if target.starts_with(indent) {
+            indent.clone_into(&mut target);
+        } else {
+            return None;
+        }
+    }
+    Some(target)
+}
+
+fn body_relocatable(rows: &[&str], path: &str) -> bool {
+    let Some(last) = rows
+        .iter()
+        .rposition(|row| has_content(row))
+        .map(|index| index + 1)
+    else {
+        return false;
+    };
+    let owned: Vec<_> = rows.iter().map(|row| (*row).to_owned()).collect();
+    let mut line = 1_usize;
+    while line <= last {
+        if !has_content(rows[line - 1]) {
+            line += 1;
+            continue;
+        }
+        let end = node_chain(&owned, path, line as u32)
+            .into_iter()
+            .filter(|span| span.start_line == line as u32)
+            .map(|span| span.end_line)
+            .max()
+            .unwrap_or(0) as usize;
+        if end == 0 {
+            return false;
+        }
+        if end >= last {
+            return end > line;
+        }
+        line = end + 1;
+    }
+    false
+}
+
+fn repair_landings(edits: &[Edit], lines: &[String], path: Option<&str>) -> (Vec<Edit>, Vec<String>) {
+    let mut groups: Vec<((u32, u32), InsertGroup)> = Vec::new();
+    for (index, edit) in edits.iter().enumerate() {
+        if let Edit::Insert {
+            cursor: Cursor::AfterAnchor(anchor),
+            line_num,
+            ..
+        } = edit
+        {
+            let key = (anchor.line, *line_num);
+            if let Some((_, group)) = groups.iter_mut().find(|(candidate, _)| *candidate == key) {
+                group.members.push(index);
+            } else {
+                groups.push((
+                    key,
+                    InsertGroup {
+                        anchor: anchor.line,
+                        members: vec![index],
+                    },
+                ));
+            }
+        }
+    }
+    let targeted: HashSet<u32> = edits
+        .iter()
+        .flat_map(get_edit_anchors)
+        .map(|anchor| anchor.line)
+        .collect();
+    let mut out = edits.to_vec();
+    let mut warnings = Vec::new();
+    for (_, group) in &groups {
+        let rows: Vec<_> = group
+            .members
+            .iter()
+            .filter_map(|&index| {
+                if let Edit::Insert { text, .. } = &edits[index] {
+                    Some(text.as_str())
+                } else {
+                    None
+                }
+            })
             .collect();
-        i = group.delete_indices[group.delete_indices.len() - 1] + 1;
-
-        let payload_balance = compute_delimiter_balance(&group.payload);
-        let deleted_slice: Vec<String> =
-            file_lines[group.start_line as usize - 1..group.end_line as usize].to_vec();
-        let deleted_balance = compute_delimiter_balance(&deleted_slice);
-        let delta = balance_delta(payload_balance, deleted_balance);
-
-        if balance_is_zero(delta) {
-            out.extend(inserts.into_iter().cloned());
-            out.extend(deletes.into_iter().cloned());
+        let Some(target) = body_indent(&rows) else {
             continue;
-        }
-
-        let dup_suffix = find_duplicate_suffix(&group, file_lines, delta);
-        if dup_suffix > 0 {
-            warnings.push(describe_boundary_repair(
-                &group,
-                &format!(
-                    "dropped {dup_suffix} duplicated trailing payload line(s) already present below the range",
-                ),
-            ));
-            let keep = group.insert_indices.len() - dup_suffix;
-            for idx in &group.insert_indices[..keep] {
-                out.push(edits[*idx].clone());
+        };
+        let anchor_text = lines
+            .get((group.anchor - 1) as usize)
+            .map_or("", String::as_str);
+        let mut outward = None;
+        if has_content(anchor_text) && indent_deeper(leading_indent(anchor_text), &target) {
+            let mut landing = group.anchor;
+            let mut crossed = 0;
+            let mut blocked = false;
+            for line in group.anchor + 1..=lines.len() as u32 {
+                let text = &lines[(line - 1) as usize];
+                if !has_content(text) {
+                    continue;
+                }
+                if !STRUCTURAL_CLOSER_RE.is_match(text) || !leading_indent(text).starts_with(&target)
+                {
+                    break;
+                }
+                if targeted.contains(&line) {
+                    blocked = true;
+                    break;
+                }
+                landing = line;
+                crossed += 1;
+                if leading_indent(text).len() == target.len() {
+                    break;
+                }
             }
-            out.extend(deletes.into_iter().cloned());
-            continue;
-        }
-
-        let dup_prefix = find_duplicate_prefix(&group, file_lines, delta);
-        if dup_prefix > 0 {
-            warnings.push(describe_boundary_repair(
-                &group,
-                &format!(
-                    "dropped {dup_prefix} duplicated leading payload line(s) already present above the range",
-                ),
-            ));
-            for idx in &group.insert_indices[dup_prefix..] {
-                out.push(edits[*idx].clone());
+            if !blocked && landing != group.anchor {
+                outward = Some((landing, crossed));
             }
-            out.extend(deletes.into_iter().cloned());
-            continue;
         }
-
-        let dropped_closers = find_dropped_suffix_closers(&group, file_lines, delta);
-        if dropped_closers > 0 {
-            warnings.push(describe_boundary_repair(
-                &group,
-                &format!(
-                    "kept {dropped_closers} structural closing line(s) the range deleted without restating",
-                ),
-            ));
-            out.extend(inserts.into_iter().cloned());
-            let keep = group.delete_indices.len() - dropped_closers;
-            for idx in &group.delete_indices[..keep] {
-                out.push(edits[*idx].clone());
+        if let Some((landing, crossed)) = outward {
+            for &index in &group.members {
+                if let Edit::Insert { cursor, .. } = &mut out[index] {
+                    *cursor = Cursor::AfterAnchor(Anchor { line: landing });
+                }
             }
-            continue;
+            warnings.push(after_insert_landing_shift_warning(
+                group.anchor,
+                landing,
+                crossed,
+            ));
+            trace!(
+                "landing shift: anchor {} -> {} (crossed {crossed})",
+                group.anchor, landing
+            );
+        } else if let Some(path) = path {
+            let target_cols = indent_columns(&target);
+            if target_cols < indent_columns(anchor_text) {
+                let chain = node_chain(lines, path, group.anchor);
+                if chain
+                    .iter()
+                    .any(|node| node.start_line == group.anchor && node.end_line > group.anchor)
+                    && body_relocatable(&rows, path)
+                {
+                    let mut candidates: Vec<_> = chain
+                        .into_iter()
+                        .filter(|node| {
+                            node.end_line > group.anchor
+                                && indent_columns(
+                                    &lines[(node.start_line - 1) as usize],
+                                ) <= target_cols
+                        })
+                        .map(|node| node.end_line)
+                        .collect();
+                    candidates.sort_unstable();
+                    candidates.dedup();
+                    for landing in candidates {
+                        if targeted
+                            .iter()
+                            .any(|line| *line > group.anchor && *line <= landing)
+                        {
+                            break;
+                        }
+                        let mut trial = out.clone();
+                        for &index in &group.members {
+                            if let Edit::Insert { cursor, .. } = &mut trial[index] {
+                                *cursor = Cursor::AfterAnchor(Anchor { line: landing });
+                            }
+                        }
+                        if parses_cleanly(Some(path), &materialize(lines, &trial).0) {
+                            out = trial;
+                            warnings.push(after_insert_opener_escape_warning(
+                                group.anchor,
+                                landing,
+                            ));
+                            trace!(
+                                "opener escape: anchor {} -> {landing}",
+                                group.anchor
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
         }
-
-        out.extend(inserts.into_iter().cloned());
-        out.extend(deletes.into_iter().cloned());
     }
     (out, warnings)
 }
 
-/// Apply a parsed list of edits to a text body. Pure function — no I/O.
-///
-/// Returns the post-edit text and the first changed line number (1-indexed).
-/// Returns an error if an anchor is out of bounds.
-///
-/// # Panics
-///
-/// Panics if any edit is an unresolved `Edit::Block` variant or an anchor is out of bounds.
-#[allow(clippy::too_many_lines, clippy::unwrap_used, clippy::panic)]
-#[must_use]
-pub fn apply_edits(text: &str, edits: &[Edit]) -> ApplyResult {
-    if edits.is_empty() {
-        return ApplyResult {
-            text: text.to_string(),
-            first_changed_line: None,
-            warnings: vec![],
-        };
-    }
-
-    for edit in edits {
-        if matches!(edit, Edit::Block { .. }) {
-            panic!("{}", UNRESOLVED_BLOCK_INTERNAL);
-        }
-    }
-
-    let mut file_lines: Vec<String> = text.split('\n').map(ToString::to_string).collect();
-    let mut line_origins: Vec<LineOrigin> = (0..file_lines.len())
-        .map(|_| LineOrigin::Original)
-        .collect();
-
-    let mut first_changed_line: Option<u32> = None;
-    let track_first_changed = |fcl: &mut Option<u32>, line: u32| {
-        if fcl.is_none() || line < fcl.unwrap() {
-            *fcl = Some(line);
-        }
-    };
-
-    let target_edits: Vec<Edit> = edits
-        .iter()
-        .enumerate()
-        .map(|(i, e)| clone_applied_edit(e, u32::try_from(i).unwrap()))
-        .collect();
-    if let Err(msg) = validate_line_bounds(&target_edits, &file_lines) {
-        panic!("{}", msg);
-    }
-    let (repaired, warnings) = repair_boundary_balance(&target_edits, &file_lines);
-
-    let mut bof_lines: Vec<String> = Vec::new();
-    let mut eof_lines: Vec<String> = Vec::new();
-    let mut anchor_edits: Vec<IndexedEdit> = Vec::new();
-    for (idx, edit) in repaired.iter().enumerate() {
+fn materialize(original: &[String], edits: &[Edit]) -> (String, Option<u32>) {
+    let mut lines = original.to_vec();
+    let mut first = None;
+    let mut bof = Vec::new();
+    let mut eof = Vec::new();
+    let mut buckets: BTreeMap<u32, Vec<(usize, Edit)>> = BTreeMap::new();
+    for (index, edit) in edits.iter().enumerate() {
         match edit {
             Edit::Insert {
                 cursor: Cursor::Bof,
                 text,
                 ..
-            } => {
-                bof_lines.push(text.clone());
-            }
+            } => bof.push(text.clone()),
             Edit::Insert {
                 cursor: Cursor::Eof,
                 text,
                 ..
-            } => {
-                eof_lines.push(text.clone());
-            }
-            _ => {
-                anchor_edits.push(IndexedEdit {
-                    edit: edit.clone(),
-                    idx,
-                });
-            }
+            } => eof.push(text.clone()),
+            Edit::Insert {
+                cursor: Cursor::BeforeAnchor(anchor) | Cursor::AfterAnchor(anchor),
+                ..
+            } => buckets
+                .entry(anchor.line)
+                .or_default()
+                .push((index, edit.clone())),
+            Edit::Delete { anchor, .. } => buckets
+                .entry(anchor.line)
+                .or_default()
+                .push((index, edit.clone())),
+            Edit::Block { .. } => {},
         }
     }
-
-    let by_line = bucket_anchor_edits_by_line(&anchor_edits);
-    let mut line_keys: Vec<u32> = by_line.keys().copied().collect();
-    line_keys.sort_by(|a, b| b.cmp(a));
-
-    for line in line_keys {
-        let bucket = match by_line.get(&line) {
-            Some(b) => b.clone(),
-            None => continue,
-        };
-        let mut bucket = bucket;
-        bucket.sort_by_key(|a| a.idx);
-
-        let idx = (line - 1) as usize;
-        let current_line = file_lines.get(idx).cloned().unwrap_or_default();
-        let mut before_insert_lines: Vec<String> = Vec::new();
-        let mut after_insert_lines: Vec<String> = Vec::new();
-        let mut replacement_lines: Vec<String> = Vec::new();
-        let mut delete_line = false;
-
-        for entry in bucket {
-            if is_replacement_insert(&entry.edit) {
-                if let Edit::Insert { text, .. } = &entry.edit {
-                    replacement_lines.push(text.clone());
-                }
-            } else if matches!(
-                &entry.edit,
+    for (line, mut bucket) in buckets.into_iter().rev() {
+        bucket.sort_by_key(|(index, _)| *index);
+        let index = (line - 1) as usize;
+        let current = lines.get(index).cloned().unwrap_or_default();
+        let mut before = Vec::new();
+        let mut replacements = Vec::new();
+        let mut after = Vec::new();
+        let mut delete = false;
+        for (_, edit) in bucket {
+            match edit {
                 Edit::Insert {
                     cursor: Cursor::AfterAnchor(_),
+                    text,
                     ..
-                }
-            ) {
-                if let Edit::Insert { text, .. } = &entry.edit {
-                    after_insert_lines.push(text.clone());
-                }
-            } else if matches!(&entry.edit, Edit::Insert { .. }) {
-                if let Edit::Insert { text, .. } = &entry.edit {
-                    before_insert_lines.push(text.clone());
-                }
-            } else if matches!(&entry.edit, Edit::Delete { .. }) {
-                delete_line = true;
+                } => after.push(text),
+                Edit::Insert {
+                    text,
+                    mode: Some(Replacement::Replacement),
+                    ..
+                } => replacements.push(text),
+                Edit::Insert { text, .. } => before.push(text),
+                Edit::Delete { .. } => delete = true,
+                Edit::Block { .. } => {},
             }
         }
-
-        if before_insert_lines.is_empty()
-            && replacement_lines.is_empty()
-            && after_insert_lines.is_empty()
-            && !delete_line
-        {
+        if before.is_empty() && replacements.is_empty() && after.is_empty() && !delete {
             continue;
         }
-
-        let replacement: Vec<String> = if delete_line {
-            [
-                before_insert_lines.as_slice(),
-                replacement_lines.as_slice(),
-                after_insert_lines.as_slice(),
-            ]
-            .concat()
-        } else {
-            [
-                before_insert_lines.as_slice(),
-                replacement_lines.as_slice(),
-                &[current_line],
-                after_insert_lines.as_slice(),
-            ]
-            .concat()
-        };
-        let mut origins: Vec<LineOrigin> = Vec::new();
-        for _ in 0..before_insert_lines.len() {
-            origins.push(LineOrigin::Insert);
+        let mut replacement = before;
+        replacement.extend(replacements);
+        if !delete {
+            replacement.push(current);
         }
-        for _ in 0..replacement_lines.len() {
-            origins.push(if delete_line {
-                LineOrigin::Replacement
+        replacement.extend(after);
+        lines.splice(index..=index, replacement);
+        first = Some(first.map_or(line, |old: u32| old.min(line)));
+    }
+    if !bof.is_empty() {
+        if lines.len() == 1 && lines[0].is_empty() {
+            lines = bof;
+        } else {
+            lines.splice(0..0, bof);
+        }
+        first = Some(1);
+    }
+    if !eof.is_empty() {
+        let at: u32 = if lines.len() == 1 && lines[0].is_empty() {
+            lines = eof;
+            1
+        } else {
+            let index = if lines.last().is_some_and(String::is_empty) {
+                lines.len() - 1
             } else {
-                LineOrigin::Insert
-            });
-        }
-        if !delete_line {
-            origins.push(line_origins[idx]);
-        }
-        for _ in 0..after_insert_lines.len() {
-            origins.push(LineOrigin::Insert);
-        }
+                lines.len()
+            };
+            lines.splice(index..index, eof);
+            u32::try_from(index + 1).unwrap_or(u32::MAX)
+        };
+        first = Some(first.map_or(at, |old: u32| old.min(at)));
+    }
+    (lines.join("\n"), first)
+}
 
-        file_lines.splice(idx..=idx, replacement);
-        line_origins.splice(idx..=idx, origins);
-        track_first_changed(&mut first_changed_line, line);
+/// Apply a parsed list of edits to a text body. Pure function — no I/O.
+///
+/// `path` is the file's display path used to infer the syntax language for
+/// the boundary probes; `None` disables every syntax-aware stage (the edits
+/// are then applied exactly as authored, matching upstream's behavior for
+/// unknown file types).
+///
+/// # Errors
+///
+/// Returns an error when an anchor is out of bounds, an unresolved
+/// `Edit::Block` variant reached the applier (a wiring bug), or a boundary
+/// echo cannot be placed without ambiguity.
+pub fn apply_edits(
+    text: &str,
+    edits: &[Edit],
+    path: Option<&str>,
+) -> Result<ApplyResult, String> {
+    if edits.is_empty() {
+        return Ok(ApplyResult {
+            text: text.to_string(),
+            first_changed_line: None,
+            warnings: vec![],
+        });
     }
-
-    if !bof_lines.is_empty() {
-        insert_at_start(&mut file_lines, &mut line_origins, &bof_lines);
-        track_first_changed(&mut first_changed_line, 1);
+    let lines: Vec<String> = text.split('\n').map(ToString::to_string).collect();
+    let mut target = Vec::new();
+    for edit in edits {
+        if matches!(edit, Edit::Block { .. }) {
+            return Err(UNRESOLVED_BLOCK_INTERNAL.to_string());
+        }
+        target.push(edit.clone());
     }
-    let eof_changed_line = insert_at_end(&mut file_lines, &mut line_origins, &eof_lines);
-    if let Some(l) = eof_changed_line {
-        track_first_changed(&mut first_changed_line, l);
+    if let Some(phantom) = phantom_line(&lines) {
+        target.retain(
+            |edit| !matches!(edit, Edit::Delete { anchor, .. } if anchor.line == phantom),
+        );
     }
-
-    ApplyResult {
-        text: file_lines.join("\n"),
-        first_changed_line,
-        warnings: if warnings.is_empty() {
-            vec![]
-        } else {
-            warnings
-        },
+    for (index, edit) in target.clone().iter().enumerate() {
+        target[index] = with_index(edit, u32::try_from(index).unwrap_or(u32::MAX));
     }
+    validate_bounds(&target, &lines)?;
+    let indentation_warnings = repair_indentation(&mut target, &lines);
+    let (landed, landing_warnings) = repair_landings(&target, &lines, path);
+    let (normalized, echo_warnings, ambiguities) = normalize_echoes(&landed, &lines, path);
+    let mut leading = indentation_warnings;
+    leading.extend(landing_warnings);
+    leading.extend(echo_warnings);
+    let authored = materialize(&lines, &normalized);
+    let baseline = parses_cleanly(path, text);
+    let authored_parses = parses_cleanly(path, &authored.0);
+    trace!(
+        "path={path:?} baseline_parses={baseline} authored_parses={authored_parses} ambiguities={}",
+        ambiguities.len()
+    );
+    let finish = |result: (String, Option<u32>), mut warnings: Vec<String>| {
+        if !parses_cleanly(path, &result.0) && baseline {
+            warnings.push(edit_broke_parse_warning(result.1));
+        }
+        ApplyResult {
+            text: result.0,
+            first_changed_line: result.1,
+            warnings,
+        }
+    };
+    if authored_parses {
+        if let Some(ambiguity) = ambiguities.first() {
+            trace!("reject: ambiguous echo at {}..{}", ambiguity.start, ambiguity.end);
+            return Err(ambiguous_boundary_echo_message(
+                ambiguity.start,
+                ambiguity.end,
+                ambiguity.side,
+                ambiguity.count,
+            ));
+        }
+        trace!("final: authored applied cleanly");
+        return Ok(finish(authored, leading));
+    }
+    if let Some((repaired, warnings)) = repair_boundaries(&normalized, &lines, path, baseline)? {
+        let result = materialize(&lines, &repaired);
+        if parses_cleanly(path, &result.0) {
+            trace!("final: parse-restoring boundary repair applied");
+            leading.extend(warnings);
+            return Ok(finish(result, leading));
+        }
+    }
+    if let Some(ambiguity) = ambiguities.first() {
+        trace!(
+            "reject: ambiguous echo at {}..{} (post-repair)",
+            ambiguity.start, ambiguity.end
+        );
+        return Err(ambiguous_boundary_echo_message(
+            ambiguity.start,
+            ambiguity.end,
+            ambiguity.side,
+            ambiguity.count,
+        ));
+    }
+    trace!("final: authored applied with parse-broken warning");
+    Ok(finish(authored, leading))
 }

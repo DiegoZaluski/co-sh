@@ -380,7 +380,17 @@ impl PatchSection {
     ///
     /// `block_resolver` resolves any `replace block N:` edits against `text`; an
     /// unresolvable block throws (this is the final, authoritative preview path).
-    pub fn apply_to(&self, text: &str, block_resolver: Option<BlockResolver>) -> ApplyResult {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the resolved edits are malformed (unresolved block,
+    /// out-of-bounds anchor) or a boundary echo cannot be placed without
+    /// ambiguity — such an edit is never applied.
+    pub fn apply_to(
+        &self,
+        text: &str,
+        block_resolver: Option<BlockResolver>,
+    ) -> Result<ApplyResult, String> {
         let (edits, warnings) = self.parse().clone();
         let resolved = resolve_block_edits(
             &edits,
@@ -391,7 +401,7 @@ impl PatchSection {
                 on_unresolved: ResolveAction::Throw,
             }),
         );
-        let mut result = apply_edits(text, &resolved);
+        let mut result = apply_edits(text, &resolved, Some(&self.path))?;
         // Preserve parse warnings so consumers don't need to call `parse()`
         // separately.
         if !warnings.is_empty() {
@@ -402,7 +412,7 @@ impl PatchSection {
                 .collect();
             result.warnings = merged;
         }
-        result
+        Ok(result)
     }
 
     /// Streaming-tolerant counterpart to [`apply_to`]. Uses
@@ -414,11 +424,16 @@ impl PatchSection {
     /// `block_resolver` resolves any `replace block N:` edits against `text`; an
     /// unresolvable block is silently dropped so a half-written file does not
     /// throw mid-stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the resolved edits are malformed or a boundary
+    /// echo cannot be placed without ambiguity (same contract as [`apply_to`]).
     pub fn apply_partial_to(
         &self,
         text: &str,
         block_resolver: Option<BlockResolver>,
-    ) -> ApplyResult {
+    ) -> Result<ApplyResult, String> {
         let (edits, warnings) = parse_patch_streaming(&self.diff);
         let resolved = resolve_block_edits(
             &edits,
@@ -429,7 +444,7 @@ impl PatchSection {
                 on_unresolved: ResolveAction::Drop,
             }),
         );
-        let mut result = apply_edits(text, &resolved);
+        let mut result = apply_edits(text, &resolved, Some(&self.path))?;
         if !warnings.is_empty() {
             let merged: Vec<String> = warnings
                 .iter()
@@ -438,7 +453,7 @@ impl PatchSection {
                 .collect();
             result.warnings = merged;
         }
-        result
+        Ok(result)
     }
 }
 

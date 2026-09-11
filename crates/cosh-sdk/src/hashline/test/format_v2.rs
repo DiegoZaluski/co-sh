@@ -1,12 +1,9 @@
-use std::panic::AssertUnwindSafe;
-use std::panic::catch_unwind;
-
 use super::super::apply::apply_edits;
 use super::super::parser::{parse_patch, parse_patch_streaming};
 
 fn apply_patch(text: &str, diff: &str) -> String {
     let (edits, _) = parse_patch(diff).unwrap();
-    apply_edits(text, &edits).text
+    apply_edits(text, &edits, None).expect("apply_edits should succeed").text
 }
 
 #[test]
@@ -75,13 +72,7 @@ fn auto_pipes_bare_body_rows_as_literal_text() {
 #[test]
 fn validates_insert_anchors_against_file_bounds() {
     let (edits, _) = parse_patch("insert before 4:\n+x").unwrap();
-    let result = catch_unwind(AssertUnwindSafe(|| apply_edits("a\nb", &edits)));
-    assert!(result.is_err());
-    let msg = result
-        .unwrap_err()
-        .downcast_ref::<String>()
-        .cloned()
-        .unwrap_or_else(|| "".to_string());
+    let msg = apply_edits("a\nb", &edits, None).unwrap_err();
     assert!(msg.contains("Line 4 does not exist"));
 }
 

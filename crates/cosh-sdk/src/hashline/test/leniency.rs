@@ -3,7 +3,7 @@ use super::super::parser::parse_patch;
 
 fn apply_patch(text: &str, diff: &str) -> String {
     let (edits, _) = parse_patch(diff).unwrap();
-    apply_edits(text, &edits).text
+    apply_edits(text, &edits, None).expect("apply_edits should succeed").text
 }
 
 const FILE: &str = "a\nb\nc\nd\ne";
@@ -58,7 +58,7 @@ fn accepts_missing_colon_on_insert_headers() {
 #[test]
 fn auto_pipes_bare_body_row_while_warning() {
     let result = parse_patch("replace 2..2:\n  hello").unwrap();
-    assert_eq!(apply_edits(FILE, &result.0).text, "a\n  hello\nc\nd\ne");
+    assert_eq!(apply_edits(FILE, &result.0, None).expect("apply_edits should succeed").text, "a\n  hello\nc\nd\ne");
     assert!(
         result
             .1

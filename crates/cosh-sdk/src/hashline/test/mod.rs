@@ -5,3 +5,6 @@ mod leniency;
 mod patcher;
 mod recovery_session_chain;
 mod snapshots;
+mod parity_driver;
+mod parity_guarantee;
+mod parity_edge;

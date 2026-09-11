@@ -83,7 +83,9 @@ insert tail:
         &SplitOptions::default(),
     )
     .unwrap();
-    let result = single.apply_to(LIB_RS, None);
+    let result = single
+        .apply_to(LIB_RS, None)
+        .expect("balanced replacement should apply");
     println!(
         "  first changed line: {:?} (warnings: {})",
         result.first_changed_line,

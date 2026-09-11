@@ -38,11 +38,13 @@ fn apply_edits_to_snapshot(
     previous_text: &str,
     current_text: &str,
     edits: &[Edit],
+    path: &str,
     recovery_warning: &str,
 ) -> Option<RecoveryResult> {
     let applied = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        apply_edits(previous_text, edits)
+        apply_edits(previous_text, edits, Some(path))
     }))
+    .ok()?
     .ok()?;
 
     if applied.text == previous_text {
@@ -118,6 +120,7 @@ fn replay_session_chain_on_current(
     previous_text: &str,
     current_text: &str,
     edits: &[Edit],
+    path: &str,
 ) -> Option<RecoveryResult> {
     // Two guards narrow the corruption window. Neither alone is sufficient,
     // and even together they don't fully prove correctness — replay is the
@@ -140,8 +143,9 @@ fn replay_session_chain_on_current(
     }
 
     let applied = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        apply_edits(current_text, edits)
+        apply_edits(current_text, edits, Some(path))
     }))
+    .ok()?
     .ok()?;
 
     if applied.text == current_text {
@@ -218,6 +222,7 @@ impl<S: SnapshotStore> Recovery<S> {
             &snapshot.text,
             &args.current_text,
             &args.edits,
+            &args.path,
             recovery_warning,
         );
         if recovered.is_none() && !is_head {
@@ -225,8 +230,12 @@ impl<S: SnapshotStore> Recovery<S> {
             // Replay onto current is gated by line-count equality AND
             // anchor-content alignment — see `replay_session_chain_on_current`
             // for why both guards together still don't fully prove correctness.
-            recovered =
-                replay_session_chain_on_current(&snapshot.text, &args.current_text, &args.edits);
+            recovered = replay_session_chain_on_current(
+                &snapshot.text,
+                &args.current_text,
+                &args.edits,
+                &args.path,
+            );
         }
 
         let mut result = recovered?;
