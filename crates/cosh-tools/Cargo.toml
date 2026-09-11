@@ -47,11 +47,13 @@ embed = ["cosh-recall/lancedb"]
 
 [dependencies.cosh-recall]
 path = "../cosh-recall"
+version = "0.1.0"
 optional = true
 features = ["lancedb"]
 
 [dependencies.cosh-sdk]
 path = "../cosh-sdk"
+version = "0.1.0"
 
 [dependencies.ast-grep-core]
 version = "0.39"
