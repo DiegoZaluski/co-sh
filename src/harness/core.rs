@@ -875,6 +875,14 @@ impl Harness {
             let _ = write!(out, "## System: {}\n{}\n\n", prompt.title, prompt.text);
         }
 
+        // The plan tools are only exposed in Build/Yolo modes. Teach the
+        // agent the Markdown plan workflow (PLAN_WRITE) so it plans the full
+        // TODO list up front via `plan_load_from_md` instead of adding one
+        // task per `plan_todo_write` call.
+        if !matches!(self.mode, Mode::Ask) {
+            let _ = write!(out, "## System: Plan\n{}\n\n", cosh_tools::plan::PLAN_WRITE);
+        }
+
         let _ = write!(out, "## Tools\n\n");
         let _ = write!(out, "### Harness Tools\n\n");
         for tool in &self.harness_tools {

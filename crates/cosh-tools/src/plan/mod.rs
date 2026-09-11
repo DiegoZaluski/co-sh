@@ -45,7 +45,7 @@ Rules:
 3. `depends:` goes on a sub-bullet indented under the task (2 spaces + `- depends: task-1, task-3`).
 4. No nesting deeper than one sub-level. Blockquotes, code fences, and regular paragraphs are ignored.
 5. IDs are assigned sequentially (`task-1`, `task-2`, …) in the order tasks appear.
-6. Save the plan file with `fs.write`. After saving, use `todo_read` to verify the parsed result and `todo_write` / `todo_cross_off` / `todo_edit` to update tasks during execution.
+6. Save the plan file with `fs_write`. After saving, use `plan_todo_read` to verify the parsed result and `plan_todo_write` / `plan_todo_cross_off` / `plan_todo_edit` to update tasks during execution.
 7. When all tasks in a group are completed, use `VerifyGroup` to confirm tests were run before moving to the next group.
 
 Example:
@@ -98,7 +98,9 @@ impl Plan {
                     "or verifying tasks. Supports adding new tasks with optional ",
                     "dependencies, marking tasks as in-progress, removing tasks, ",
                     "cleaning completed tasks, and verifying that all tasks in a ",
-                    "group have been tested."
+                    "group have been tested. To create the full plan up front, ",
+                    "write a Markdown plan file and load it with `plan_load_from_md` ",
+                    "instead of adding tasks one at a time."
                 ),
                 "inputSchema": {
                     "type": "object",
