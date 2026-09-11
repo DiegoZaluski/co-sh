@@ -568,3 +568,32 @@ fn build_header_teaches_plan_workflow_but_ask_header_does_not() {
         "Ask header must not include the PLAN_WRITE workflow"
     );
 }
+
+#[test]
+fn header_notifies_when_available_tool_set_changes_between_turns() {
+    use std::collections::HashSet;
+
+    use super::super::core::Mode;
+    use cosh_sdk::connector::Connector;
+
+    // A fresh turn never warns: there is no previous tool set to compare.
+    let mut fresh = Harness::new(Connector::new("openai").unwrap(), ".", HashSet::new());
+    assert!(!fresh.format_header_context().contains("Tool Availability Changed"));
+
+    // First turn in Build mode records the full tool set in the context
+    // manager, which travels with the persisted turn state.
+    let mut build = Harness::new(Connector::new("openai").unwrap(), ".", HashSet::new());
+    build.format_header_context();
+    let state = build.context_manager.save_state();
+    assert!(state.last_tool_set.is_some());
+
+    // Second turn in Ask mode restores that state: the effective tool set
+    // shrank to read-only, so the header must tell the model which tools
+    // disappeared instead of letting it re-call them and fail.
+    let mut ask = Harness::new(Connector::new("openai").unwrap(), ".", HashSet::new())
+        .with_mode(Mode::Ask);
+    ask.context_manager.restore_state(&state);
+    let header = ask.format_header_context();
+    assert!(header.contains("Tool Availability Changed"), "header: {header}");
+    assert!(header.contains("No longer available"), "header: {header}");
+}

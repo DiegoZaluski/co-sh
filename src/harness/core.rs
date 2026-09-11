@@ -945,6 +945,43 @@ impl Harness {
             }
         }
 
+        // Notify the model when the effective tool set changed since its last
+        // turn (mode switch, disabled-tool change, or MCP server drift): it
+        // would otherwise keep calling tools from its previous repertoire
+        // and accumulate confusing failures.
+        let current = self.effective_tool_names();
+        if let Some(prior) = self
+            .context_manager
+            .last_tool_set()
+            .map(<[String]>::to_vec)
+        {
+            let removed: Vec<&String> = prior.iter().filter(|n| !current.contains(n)).collect();
+            let added: Vec<&String> = current.iter().filter(|n| !prior.contains(n)).collect();
+            if !removed.is_empty() || !added.is_empty() {
+                let _ = write!(out, "\n## Tool Availability Changed\n\n");
+                if !removed.is_empty() {
+                    let list = removed
+                        .iter()
+                        .map(|n| format!("`{n}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let _ = write!(
+                        out,
+                        "- No longer available; do not call: {list}.\n"
+                    );
+                }
+                if !added.is_empty() {
+                    let list = added
+                        .iter()
+                        .map(|n| format!("`{n}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let _ = write!(out, "- Now available: {list}.\n");
+                }
+            }
+        }
+        self.context_manager.set_last_tool_set(current);
+
         self.header_context = out;
         &self.header_context
     }
@@ -990,6 +1027,42 @@ impl Harness {
             extractor.add_tool(ts.clone());
         }
         extractor
+    }
+
+    /// The sorted, deduplicated names of every tool the model is allowed to
+    /// call in the current mode: harness + cosh + MCP, minus disabled, with
+    /// MCP hidden in Ask mode. Mirrors [`Self::build_extractor`] so the two
+    /// stay in lockstep.
+    fn effective_tool_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        for tool in &self.harness_tools {
+            if !self.disabled_tools.contains(&tool.name) {
+                names.push(tool.name.clone());
+            }
+        }
+        if let Some(ref cosh) = self.cosh_tools {
+            let schemas = match self.mode {
+                Mode::Build | Mode::Yolo => cosh.schemas_enabled(&self.disabled_tools),
+                Mode::Ask => cosh.schemas_filtered(&self.disabled_tools),
+            };
+            for schema in schemas {
+                names.push(schema.name);
+            }
+        }
+        if !matches!(self.mode, Mode::Ask) {
+            for tool in self.mcp.all_tools() {
+                if !self.disabled_tools.contains(tool.name.as_ref()) {
+                    names.push(tool.name.to_string());
+                }
+            }
+        }
+        #[cfg(test)]
+        for ts in &self.test_tools {
+            names.push(ts.name.clone());
+        }
+        names.sort_unstable();
+        names.dedup();
+        names
     }
 
     /// Handle a harness tool call immediately, returning `Some` when the call

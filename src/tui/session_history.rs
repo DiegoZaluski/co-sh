@@ -177,6 +177,15 @@ pub(crate) enum ContextDelta {
         /// Absent in older histories, which have no historical plan binding.
         #[serde(default)]
         todo_after_item_id: Option<u64>,
+        /// The effective tool set first recorded by the harness. Absent in
+        /// older histories (no tool-set drift tracking).
+        #[serde(default)]
+        last_tool_set: Option<Vec<String>>,
+    },
+    /// The effective tool set the model was offered changed between turns
+    /// (mode switch, disabled-tool change, or MCP server drift).
+    LastToolSet {
+        value: Option<Vec<String>>,
     },
     ItemUpsert {
         item: ContextItem,
@@ -661,6 +670,7 @@ fn apply_context(state: &mut BranchProjection, change: &ContextDelta) {
             hidden,
             masked,
             todo,
+            last_tool_set,
             ..
         } => {
             state.context = Some(ContextManagerState {
@@ -674,7 +684,11 @@ fn apply_context(state: &mut BranchProjection, change: &ContextDelta) {
                 hidden: hidden.clone(),
                 masked: masked.clone(),
                 todo: todo.clone(),
+                last_tool_set: last_tool_set.clone(),
             });
+        }
+        ContextDelta::LastToolSet { value } => {
+            context_or_default(state).last_tool_set = value.clone();
         }
         ContextDelta::ItemUpsert { item } => {
             let context = context_or_default(state);
@@ -900,6 +914,7 @@ impl LegacyContextBookkeeping {
             hidden: self.hidden,
             masked: self.masked,
             todo: None,
+            last_tool_set: None,
         }
     }
 }
@@ -1013,6 +1028,7 @@ mod tests {
                         masked: HashSet::new(),
                         todo: None,
                         todo_after_item_id: None,
+                        last_tool_set: None,
                     },
                 },
             ),
@@ -1157,6 +1173,7 @@ mod tests {
             hidden: HashSet::from([1]),
             masked: HashSet::new(),
             todo: None,
+            last_tool_set: None,
         });
         let projection = HistoryProjection::replay(
             Some(legacy),
@@ -1204,6 +1221,7 @@ mod tests {
             hidden: HashSet::new(),
             masked: HashSet::new(),
             todo: None,
+            last_tool_set: None,
         });
         let events = [
             HistoryEvent::new(

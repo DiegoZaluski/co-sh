@@ -146,6 +146,7 @@ pub(crate) fn realistic_context(rounds: usize) -> cosh::harness::context::Contex
         hidden: Default::default(),
         masked: Default::default(),
         todo: None,
+        last_tool_set: None,
     }
 }
 

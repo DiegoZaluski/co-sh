@@ -253,6 +253,12 @@ pub struct ContextManagerState {
     /// in legacy histories; empty and terminal plans remain explicit state.
     #[serde(default)]
     pub todo: Option<TodoList>,
+    /// The effective tool set the model was last offered (sorted, deduplicated
+    /// names). Persisted across turns so the harness can notify the model when
+    /// the available tools change (mode switch, disabled-tool change, MCP
+    /// server drift). `None` when the session has never recorded a tool set.
+    #[serde(default)]
+    pub last_tool_set: Option<Vec<String>>,
 }
 
 impl Default for ContextManagerState {
@@ -268,6 +274,7 @@ impl Default for ContextManagerState {
             hidden: HashSet::new(),
             masked: HashSet::new(),
             todo: None,
+            last_tool_set: None,
         }
     }
 }
@@ -380,6 +387,10 @@ pub struct ContextManager {
     /// the whole manual pass with
     /// `begin_manual_compaction`/`end_manual_compaction`.
     manual_compaction: bool,
+    /// The effective tool set the model was last offered (sorted,
+    /// deduplicated names). Set by the harness at header build; read back on
+    /// the next turn to detect tool-set drift. `None` on a brand-new session.
+    last_tool_set: Option<Vec<String>>,
 }
 
 /// Build a plain assistant text message (no tool calls).
@@ -451,6 +462,7 @@ impl ContextManager {
             todo_restore_pending: false,
             cached_items_tokens: 0,
             manual_compaction: false,
+            last_tool_set: None,
         }
     }
 
@@ -1420,6 +1432,19 @@ impl ContextManager {
     /// Serializable transport projection for persistence. The session store
     /// converts differences into immutable deltas; this clone is not a second
     /// source of truth.
+    /// The effective tool set the model was last offered, if any. `None` on a
+    /// brand-new session (no previous turn recorded one).
+    pub fn last_tool_set(&self) -> Option<&[String]> {
+        self.last_tool_set.as_deref()
+    }
+
+    /// Record the effective tool set the model is being offered this turn.
+    pub fn set_last_tool_set(&mut self, mut tool_set: Vec<String>) {
+        tool_set.sort_unstable();
+        tool_set.dedup();
+        self.last_tool_set = Some(tool_set);
+    }
+
     pub fn save_state(&self) -> ContextManagerState {
         ContextManagerState {
             items: self.items.clone(),
@@ -1432,6 +1457,7 @@ impl ContextManager {
             hidden: self.hidden.clone(),
             masked: self.masked.clone(),
             todo: self.todo.list().cloned(),
+            last_tool_set: self.last_tool_set.clone(),
         }
     }
 
@@ -1465,6 +1491,7 @@ impl ContextManager {
             Some(list) => self.todo.sync(list.clone()),
             None => self.todo.clear(),
         }
+        self.last_tool_set = state.last_tool_set.clone();
         // The items were replaced wholesale — rebuild the cached total.
         self.recompute_cached_tokens();
     }

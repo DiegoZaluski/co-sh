@@ -950,6 +950,7 @@ fn diff_context(
                 masked: requested.masked.clone(),
                 todo: requested.todo.clone(),
                 todo_after_item_id: Some(requested.items.back().map_or(0, ContextItem::id)),
+                last_tool_set: requested.last_tool_set.clone(),
             },
         });
         deltas.extend(requested.items.iter().cloned().map(|item| Delta::Context {
@@ -1096,6 +1097,13 @@ fn diff_context(
             change: ContextDelta::Masked {
                 item_ids: unmasked,
                 masked: false,
+            },
+        });
+    }
+    if !serialized_equal(&current.last_tool_set, &requested.last_tool_set) {
+        deltas.push(Delta::Context {
+            change: ContextDelta::LastToolSet {
+                value: requested.last_tool_set.clone(),
             },
         });
     }
@@ -1647,6 +1655,7 @@ mod tests {
             hidden: Default::default(),
             masked: Default::default(),
             todo: None,
+            last_tool_set: None,
         }
     }
 
@@ -2764,6 +2773,7 @@ mod tests {
             hidden: HashSet::new(),
             masked: HashSet::new(),
             todo: None,
+            last_tool_set: None,
         };
         store.save_session_with_context(&session, &initial);
         let path = store.file_path(&session.id);
