@@ -565,7 +565,34 @@ impl SessionStore {
             log::warn!("failed to append deletion for session {session_id}: {error}");
             return false;
         }
+        self.remove_file_when_fully_deleted(&path);
         true
+    }
+
+    /// Physically remove a history file once NONE of its branches is active
+    /// anymore. Tombstones are a soft deletion while any branch (parent,
+    /// fork, or sibling fork) still refers to the same JSONL; once the last
+    /// active branch is tombstoned the file would be permanently invisible
+    /// in the TUI, so keeping it on disk would only accumulate garbage.
+    /// A reload failure is conservative: the file stays on disk.
+    fn remove_file_when_fully_deleted(&self, path: &std::path::Path) {
+        let Some((_, projection)) = self.load_history_path(path) else {
+            return;
+        };
+        if projection.branches.is_empty()
+            || !projection
+                .branches
+                .values()
+                .all(|branch| branch.deleted)
+        {
+            return;
+        }
+        if let Err(error) = std::fs::remove_file(path) {
+            log::warn!(
+                "failed to remove fully deleted session history {}: {error}",
+                path.display()
+            );
+        }
     }
 
     fn append_revert(&self, session_id: &str, message_id: &str) -> bool {
@@ -882,7 +909,9 @@ impl SessionStore {
         )
     }
 
-    /// Append a logical deletion event. The immutable history stays on disk.
+    /// Append a logical deletion event. The history stays on disk while any
+    /// other branch of the same JSONL file is still active; when the deleted
+    /// branch was the last active one, the file is removed from disk.
     pub fn delete_session(&self, session_id: &str) {
         self.enqueue_job(
             StoreJob::Tombstone {
@@ -1840,9 +1869,10 @@ mod tests {
         assert!(after_bookkeeping.starts_with(&after_model));
 
         store.delete_session(&session.id);
-        let after_delete = std::fs::read(&path).unwrap();
-        assert!(after_delete.starts_with(&after_bookkeeping));
         assert!(!store.has_session(&session.id));
+        // The deleted branch was the file's only branch: the tombstone makes
+        // it the last active one, so the history file is physically removed.
+        assert!(!path.exists());
     }
 
     #[test]
@@ -3027,11 +3057,155 @@ mod tests {
         assert!(store.has_session("12345"));
 
         let path = store.file_path("12345");
-        let prefix = std::fs::read(&path).unwrap();
-        // Deleting the session appends a tombstone and preserves its history.
+        assert!(path.exists());
+        // Deleting the session appends a tombstone; because it was the file's
+        // only active branch, the history file is removed from disk.
         store.delete_session("12345");
         assert!(!store.has_session("12345"));
-        assert!(std::fs::read(&path).unwrap().starts_with(&prefix));
+        assert!(!path.exists());
+    }
+
+    /// A fork shares its parent's JSONL. Deleting the parent while the fork
+    /// is still active must keep the file on disk: the fork depends on it.
+    #[test]
+    fn deleting_a_parent_with_an_active_fork_keeps_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+
+        let parent = make_test_session(
+            "6000",
+            "Parent",
+            vec![
+                make_user_msg("msg-0", "one"),
+                make_assistant_msg("msg-1", "two"),
+            ],
+        );
+        store.save_session(&parent);
+        let mut fork = parent.clone();
+        fork.id = "6000-fork".into();
+        fork.messages.truncate(1);
+        assert!(store.fork_session("6000", "msg-1", &fork));
+
+        let path = store.file_path("6000");
+        store.delete_session("6000");
+
+        assert!(!store.has_session("6000"), "the parent is tombstoned");
+        assert!(path.exists(), "the file must survive while its fork is active");
+        assert!(
+            store.has_session("6000-fork"),
+            "the fork must remain loadable"
+        );
+        assert!(
+            store
+                .list_sessions()
+                .iter()
+                .any(|summary| summary.session_id == "6000-fork"),
+            "the fork stays visible in the sidebar"
+        );
+    }
+
+    /// Deleting a fork while its parent is still active keeps the shared
+    /// file on disk: only the fork branch is tombstoned.
+    #[test]
+    fn deleting_a_fork_with_an_active_parent_keeps_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+
+        let parent = make_test_session(
+            "6100",
+            "Parent",
+            vec![
+                make_user_msg("msg-0", "one"),
+                make_assistant_msg("msg-1", "two"),
+            ],
+        );
+        store.save_session(&parent);
+        let mut fork = parent.clone();
+        fork.id = "6100-fork".into();
+        fork.messages.truncate(1);
+        assert!(store.fork_session("6100", "msg-1", &fork));
+
+        let path = store.file_path("6100");
+        store.delete_session("6100-fork");
+
+        assert!(!store.has_session("6100-fork"), "the fork is tombstoned");
+        assert!(path.exists(), "the file must survive while its parent is active");
+        assert!(store.has_session("6100"), "the parent must remain loadable");
+    }
+
+    /// Deleting one fork keeps sibling forks (and the parent) active, so the
+    /// file stays; only when the LAST branch of the file is deleted is the
+    /// file physically removed.
+    #[test]
+    fn deleting_the_last_active_branch_removes_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+
+        let parent = make_test_session(
+            "6200",
+            "Parent",
+            vec![
+                make_user_msg("msg-0", "one"),
+                make_assistant_msg("msg-1", "two"),
+            ],
+        );
+        store.save_session(&parent);
+        let mut fork_a = parent.clone();
+        fork_a.id = "6200-fork-a".into();
+        fork_a.messages.truncate(1);
+        assert!(store.fork_session("6200", "msg-1", &fork_a));
+        let mut fork_b = parent.clone();
+        fork_b.id = "6200-fork-b".into();
+        fork_b.messages.truncate(1);
+        assert!(store.fork_session("6200", "msg-1", &fork_b));
+
+        let path = store.file_path("6200");
+
+        // First branch dies: file and the surviving branches remain.
+        store.delete_session("6200-fork-a");
+        assert!(path.exists(), "sibling fork and parent still need the file");
+        assert!(store.has_session("6200"));
+        assert!(store.has_session("6200-fork-b"));
+
+        // Second branch dies: the parent still keeps the file alive.
+        store.delete_session("6200-fork-b");
+        assert!(path.exists(), "the parent still needs the file");
+        assert!(store.has_session("6200"));
+
+        // Last branch dies: nothing active depends on the file anymore.
+        store.delete_session("6200");
+        assert!(!path.exists(), "the fully deleted history must be removed");
+        assert!(store.list_sessions().is_empty());
+    }
+
+    /// A fork whose parent was already deleted can still be the file's last
+    /// active branch; deleting it removes the file too.
+    #[test]
+    fn deleting_the_last_surviving_fork_after_its_parent_removes_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+
+        let parent = make_test_session(
+            "6300",
+            "Parent",
+            vec![
+                make_user_msg("msg-0", "one"),
+                make_assistant_msg("msg-1", "two"),
+            ],
+        );
+        store.save_session(&parent);
+        let mut fork = parent.clone();
+        fork.id = "6300-fork".into();
+        fork.messages.truncate(1);
+        assert!(store.fork_session("6300", "msg-1", &fork));
+
+        let path = store.file_path("6300");
+        store.delete_session("6300");
+        assert!(path.exists());
+        store.delete_session("6300-fork");
+        assert!(!path.exists(), "no active branch remains: the file goes");
+        assert!(store.load_session("6300-fork").is_none());
+        assert!(store.load_session("6300").is_none());
     }
 
     #[test]
