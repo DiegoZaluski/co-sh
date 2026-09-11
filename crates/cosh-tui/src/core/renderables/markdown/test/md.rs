@@ -728,26 +728,59 @@ fn test_heading_level_color_distinction() {
 }
 
 #[test]
-fn test_warning_blockquote_yellow_background() {
-    // Warning text (starting with ⚠) inside a blockquote should get
-    // yellow background + black fg + bold.
+fn test_warning_blockquote_yellow_text() {
+    // Warning text (starting with ⚠) inside a blockquote should render
+    // as yellow fg with no background fill.
     let md = make_md("> ⚠ Tool call failure");
     let mut buf = Buffer::empty(Rect::new(0, 0, 40, 5));
     md.render_self(&mut buf, Rect::new(0, 0, 40, 5));
 
-    // Warning text at column 2 (indent) should have black fg (for contrast on yellow bg)
+    // Warning text at column 2 (indent) should be yellow with no bg
+    let style = buf.cell((2, 0)).unwrap().style();
     assert_eq!(
-        buf.cell((2, 0)).unwrap().style().fg,
-        Some(Color::Rgb(0, 0, 0)),
-        "Warning blockquote text should be black on yellow bg"
+        style.fg,
+        Some(Color::Rgb(238, 241, 112)),
+        "Warning blockquote text should be yellow"
     );
-    assert!(
-        buf.cell((2, 0))
-            .unwrap()
-            .style()
-            .add_modifier
-            .contains(Modifier::BOLD),
-        "Warning blockquote text should be bold"
+    assert_eq!(
+        style.bg,
+        Some(Color::Rgb(0, 0, 0)),
+        "warning should keep the base background"
+    );
+}
+
+#[test]
+fn test_warning_blockquote_inline_code_keeps_warning_style() {
+    // Inline code inside a warning quote must not apply its own
+    // inline-code colors: they would mix with the warning coloring.
+    let md = make_md("> ⚠ Tool `fs.read` failed");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 5));
+    md.render_self(&mut buf, Rect::new(0, 0, 40, 5));
+
+    let text = buf.cell((2, 0)).unwrap().style();
+    assert_eq!(
+        text.fg,
+        Some(Color::Rgb(238, 241, 112)),
+        "warning row should use the yellow warning fg"
+    );
+    assert_eq!(
+        text.bg,
+        Some(Color::Rgb(0, 0, 0)),
+        "warning row should keep the base background"
+    );
+
+    // Find a cell inside the `fs.read` code span: "⚠ Tool " ends at
+    // column 8, so the code text starts at column 9.
+    let code_cell = buf.cell((10, 0)).unwrap().style();
+    assert_eq!(
+        code_cell.fg,
+        Some(Color::Rgb(238, 241, 112)),
+        "inline code inside a warning quote must use the warning fg"
+    );
+    assert_eq!(
+        code_cell.bg,
+        Some(Color::Rgb(0, 0, 0)),
+        "inline code must keep the base background"
     );
 }
 
@@ -1179,25 +1212,21 @@ fn test_nested_quote_double_bar() {
 fn test_warning_theme_configurable_prefix_and_colors() {
     use ratatui::style::Color;
     let mut md = make_md("> ! danger zone");
-    md.set_warning_theme(
-        "!",
-        RGBA::from_ints(180, 30, 30, 255),
-        RGBA::from_ints(255, 255, 255, 255),
-    );
+    md.set_warning_theme("!", RGBA::from_ints(180, 30, 30, 255));
     let mut buf = Buffer::empty(Rect::new(0, 0, 40, 5));
     md.render_self(&mut buf, Rect::new(0, 0, 40, 5));
 
     let cell = buf.cell((2, 0)).unwrap();
     assert_eq!(cell.symbol(), "!");
     assert_eq!(
-        cell.style().bg,
+        cell.style().fg,
         Some(Color::Rgb(180, 30, 30)),
-        "custom warning bg"
+        "custom warning fg"
     );
     assert_eq!(
-        cell.style().fg,
-        Some(Color::Rgb(255, 255, 255)),
-        "custom warning fg"
+        cell.style().bg,
+        Some(Color::Rgb(0, 0, 0)),
+        "warning should keep the base background"
     );
 }
 

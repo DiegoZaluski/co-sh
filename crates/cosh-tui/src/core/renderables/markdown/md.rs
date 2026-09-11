@@ -325,7 +325,6 @@ pub struct ActiveLink {
 #[derive(Debug, Clone)]
 pub struct WarningTheme {
     pub prefix: String,
-    pub bg: RGBA,
     pub fg: RGBA,
 }
 
@@ -566,12 +565,11 @@ impl MarkdownRenderable {
     }
 
     /// Customize the warning-quote theme: a quote whose body starts with
-    /// `prefix` (default "⚠") renders filled with `bg` and bold `fg` text.
-    /// An empty prefix disables warning styling entirely.
-    pub fn set_warning_theme(&mut self, prefix: impl Into<String>, bg: RGBA, fg: RGBA) {
+    /// `prefix` (default "⚠") renders its text in `fg` (default yellow,
+    /// no background). An empty prefix disables warning styling entirely.
+    pub fn set_warning_theme(&mut self, prefix: impl Into<String>, fg: RGBA) {
         self.warning_theme = Some(WarningTheme {
             prefix: prefix.into(),
-            bg,
             fg,
         });
     }
@@ -645,10 +643,8 @@ impl MarkdownRenderable {
         match &self.warning_theme {
             Some(theme) => {
                 theme.prefix.hash(&mut hasher);
-                let (r, g, b, _) = theme.bg.to_ints();
-                (true, r, g, b).hash(&mut hasher);
                 let (r, g, b, _) = theme.fg.to_ints();
-                (r, g, b).hash(&mut hasher);
+                (true, r, g, b).hash(&mut hasher);
             }
             None => false.hash(&mut hasher),
         }
@@ -674,7 +670,7 @@ impl MarkdownRenderable {
             palette.set_syntax_colors(syntax.clone());
         }
         if let Some(theme) = &self.warning_theme {
-            palette.set_warning_theme(theme.prefix.clone(), theme.bg, theme.fg);
+            palette.set_warning_theme(theme.prefix.clone(), theme.fg);
         }
         palette
     }
@@ -966,6 +962,13 @@ impl MarkdownRenderable {
                 cell.set_char(' ');
             }
         }
+    }
+
+    /// Style for warning-quote content: warning fg, no background. Used
+    /// for every inline span inside a warning quote so no other element
+    /// styling mixes with it.
+    fn warning_style(palette: &MarkdownPalette) -> Style {
+        Style::default().fg(rgba_to_color(palette.warning_fg_color()))
     }
 
     /// Derive a syntax-highlighted style from a category. Theme-supplied
@@ -1819,15 +1822,10 @@ impl MarkdownRenderable {
                             };
                         let bq_indent = effective_indent(&list_stack);
                         if pass.warning {
-                            // Palette-driven warning theme: fill the row with
-                            // the warning background and force the warning
-                            // fg/bold (configurable via MarkdownPalette).
-                            let warning_bg = rgba_to_color(palette.warning_bg_color());
-                            Self::fill_row(buf, area_x, y, max_x, Style::default().bg(warning_bg));
-                            style = Style::default()
-                                .fg(rgba_to_color(palette.warning_fg_color()))
-                                .bg(warning_bg)
-                                .add_modifier(Modifier::BOLD);
+                            // Palette-driven warning theme: colored text only,
+                            // no background fill (configurable via
+                            // MarkdownPalette).
+                            style = Self::warning_style(palette);
                         }
                         let link_dest = ctx.link_dest();
                         let link = (!link_dest.is_empty()).then_some(link_dest);
@@ -1840,7 +1838,14 @@ impl MarkdownRenderable {
 
                 // ── Inline code ─────────────────────────────────
                 Event::Code(text) => {
-                    let style = palette.style_for(Some(MarkdownElement::InlineCode), None);
+                    // Inside a warning quote, inline code must not carry its
+                    // own inline-code colors: they would break the solid
+                    // warning background, so reuse the warning style.
+                    let style = if pass.warning {
+                        Self::warning_style(palette)
+                    } else {
+                        palette.style_for(Some(MarkdownElement::InlineCode), None)
+                    };
                     let link_dest = ctx.link_dest();
                     let link = (!link_dest.is_empty()).then_some(link_dest);
                     Self::render_text(

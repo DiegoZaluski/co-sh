@@ -86,7 +86,6 @@ pub struct MarkdownPalette {
     /// A quote whose body starts with this marker renders with the warning
     /// style below. Empty prefix disables the feature.
     warning_prefix: String,
-    warning_bg: RGBA,
     warning_fg: RGBA,
 }
 
@@ -191,8 +190,7 @@ impl MarkdownPalette {
             accents: MarkdownAccentColors::default(),
             syntax: SyntaxColors::default(),
             warning_prefix: "\u{26A0}".to_string(), // ⚠
-            warning_bg: RGBA::from_ints(238, 241, 112, 255),
-            warning_fg: RGBA::from_ints(0, 0, 0, 255),
+            warning_fg: RGBA::from_ints(238, 241, 112, 255),
         }
     }
 
@@ -250,22 +248,17 @@ impl MarkdownPalette {
     // ── Warning theme ──────────────────────────────────────────
 
     /// Customize the warning-quote theme: a quote whose body starts with
-    /// `prefix` renders with `bg`/`fg` instead of the defaults (⚠ / yellow /
-    /// black). An empty prefix disables warning styling entirely.
-    pub fn set_warning_theme(&mut self, prefix: impl Into<String>, bg: RGBA, fg: RGBA) {
+    /// `prefix` renders its text in `fg` instead of the defaults (⚠ /
+    /// yellow text, no background). An empty prefix disables warning
+    /// styling entirely.
+    pub fn set_warning_theme(&mut self, prefix: impl Into<String>, fg: RGBA) {
         self.warning_prefix = prefix.into();
-        self.warning_bg = bg;
         self.warning_fg = fg;
     }
 
     #[must_use]
     pub fn warning_prefix(&self) -> &str {
         &self.warning_prefix
-    }
-
-    #[must_use]
-    pub const fn warning_bg_color(&self) -> RGBA {
-        self.warning_bg
     }
 
     #[must_use]
