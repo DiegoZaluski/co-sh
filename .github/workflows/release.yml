@@ -1,0 +1,232 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Least privilege: only the `release` job needs `contents: write`.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}-${{ matrix.arch }} (${{ matrix.variant }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # Two variants per platform, matching what download.sh/download.ps1 expect:
+        #   base  -> cosh-v<VERSION>-<OS>-<ARCH>.tar.gz|.zip
+        #   embed -> cosh-v<VERSION>-<OS>-<ARCH>-embed.tar.gz|.zip (workspace `embed` feature)
+        variant: [base, embed]
+
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            platform: linux
+            arch: x64
+          # macos-15-intel is the x64 runner; macos-latest is arm64-only nowadays.
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            platform: darwin
+            arch: x64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            platform: darwin
+            arch: arm64
+          # Windows only ships x64 (matching download.ps1).
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            platform: win32
+            arch: x64
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux build dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libssl-dev
+
+      - name: Package variables
+        id: vars
+        shell: bash
+        run: |
+          if [ "${{ matrix.variant }}" = "embed" ]; then
+            echo "variant_suffix=-embed" >> $GITHUB_OUTPUT
+            echo "features=--features embed" >> $GITHUB_OUTPUT
+          else
+            echo "variant_suffix=" >> $GITHUB_OUTPUT
+            echo "features=" >> $GITHUB_OUTPUT
+          fi
+
+      # The `embed` variant enables the workspace `embed` feature
+      # (cosh-tools/embed + fastembed). fastembed pulls the ONNX Runtime
+      # shared library as a build-time download, so this job is slower.
+      # Only the `cosh` binary is shipped; `highlight-demo` is a dev-only target.
+      - name: Build cosh (${{ matrix.variant }})
+        shell: bash
+        run: cargo build --release --locked --bin cosh --target ${{ matrix.target }} ${{ steps.vars.outputs.features }}
+
+      - name: Package GitHub Release asset
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          EXT="${{ matrix.platform == 'win32' && '.exe' || '' }}"
+          SUFFIX="${{ steps.vars.outputs.variant_suffix }}"
+          ASSET="cosh-v${VERSION}-${{ matrix.platform }}-${{ matrix.arch }}${SUFFIX}"
+
+          cd "target/${{ matrix.target }}/release"
+
+          if [ "${{ matrix.platform }}" = "win32" ]; then
+            ASSET_FILE="${ASSET}.zip"
+            powershell -NoProfile -Command "Compress-Archive -Path 'cosh${EXT}' -DestinationPath '${ASSET_FILE}' -Force"
+          else
+            ASSET_FILE="${ASSET}.tar.gz"
+            tar czf "${ASSET_FILE}" "cosh${EXT}"
+          fi
+
+          if [ "${{ matrix.platform }}" = "win32" ]; then
+            powershell -NoProfile -Command "(Get-FileHash '${ASSET_FILE}' -Algorithm SHA256).Hash.ToLower()" > "${ASSET_FILE}.sha256"
+          else
+            sha256sum "${ASSET_FILE}" | cut -d' ' -f1 > "${ASSET_FILE}.sha256"
+          fi
+
+          mv "${ASSET_FILE}" "${ASSET_FILE}.sha256" "${GITHUB_WORKSPACE}/"
+
+      - name: Upload GitHub Release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-${{ matrix.platform }}-${{ matrix.arch }}${{ steps.vars.outputs.variant_suffix }}
+          path: |
+            cosh-*.tar.gz
+            cosh-*.zip
+            cosh-*.sha256
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: release-assets-*
+          merge-multiple: true
+
+      - name: Delete existing release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release delete "${GITHUB_REF_NAME}" -y 2>/dev/null || true
+
+      - name: Create Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          gh release create "${VERSION}" \
+            --title "${VERSION}" \
+            --notes "See the [changelog](https://github.com/DiegoZaluski/cosh/blob/main/CHANGELOG.md) for details." \
+            --verify-tag
+
+      - name: Upload assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.sha256" \) -exec gh release upload "${GITHUB_REF_NAME}" {} \;
+
+  publish-cratesio:
+    name: Publish crates to crates.io
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Guard: the tag version must match the crate versions being published,
+      # otherwise assets and crates.io releases silently disagree.
+      - name: Verify tag matches crate versions
+        shell: bash
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          for manifest in \
+            crates/cosh-sdk/Cargo.toml \
+            crates/cosh-recall/Cargo.toml \
+            crates/cosh-tools/Cargo.toml \
+            crates/cosh-tui/Cargo.toml
+          do
+            crate_version="$(grep -m1 '^version = ' "$manifest" | cut -d'"' -f2)"
+            if [ "$crate_version" != "$TAG_VERSION" ]; then
+              echo "Version mismatch: $manifest has $crate_version but tag is $TAG_VERSION"
+              exit 1
+            fi
+          done
+
+      # cargo publish fails when a crate declares `readme = "README.md"` and
+      # the file doesn't exist. Replace the placeholders with real READMEs;
+      # this step becomes a no-op once they are committed.
+      - name: Ensure declared READMEs exist
+        shell: bash
+        run: |
+          for readme in \
+            crates/cosh-recall/README.md \
+            crates/cosh-sdk/README.md \
+            crates/cosh-tools/README.md \
+            crates/cosh-tui/README.md
+          do
+            if [ ! -f "$readme" ]; then
+              echo "Creating placeholder $readme"
+              printf '# cosh\n\nA coding agent for the terminal.\n' > "$readme"
+            fi
+          done
+
+      # Publish in dependency order: sdk -> recall -> tools -> tui.
+      # Only the library crates are published; the root `cosh` app package
+      # is distributed via the GitHub Release binaries instead.
+      - name: Publish crates
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          for crate in \
+            cosh-sdk \
+            cosh-recall \
+            cosh-tools \
+            cosh-tui
+          do
+            echo "Publishing $crate..."
+            # 101 is cargo's GENERIC error code, not specifically
+            # "already published" — only treat it as a skip when the log
+            # confirms the crate already exists on the registry.
+            set +e
+            cargo publish -p "$crate" 2>&1 | tee "/tmp/publish-$crate.log"
+            rc=${PIPESTATUS[0]}
+            set -e
+            if [ "$rc" -eq 101 ] && grep -q "already exists\|is already uploaded" "/tmp/publish-$crate.log"; then
+              echo "$crate already published, skipping"
+            elif [ "$rc" -ne 0 ]; then
+              echo "Failed to publish $crate (exit code $rc)"
+              exit "$rc"
+            fi
+            echo ""
+          done

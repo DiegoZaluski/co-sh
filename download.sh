@@ -18,13 +18,8 @@ set -eu
 #   COSH_VARIANT  - Package variant: "base" (default) or "embed" (includes fastembed/embed support)
 #   INSTALL_OS    - Override OS detection: "linux", "darwin", or "win32"
 #
-# TODO(release): this script expects release artifacts named
-#   cosh-v<VERSION>-<OS>-<ARCH>[<SUFFIX>].tar.gz (linux/darwin)
-#   cosh-v<VERSION>-<OS>-<ARCH>[<SUFFIX>].zip   (win32)
-# published at github.com/DiegoZaluski/cosh/releases. There is no release
-# workflow in this repo yet (no .github/workflows/release.yml) — wire one up
-# (cargo build --release + archive + gh release upload) before announcing
-# these install commands.
+# Release artifacts are produced by .github/workflows/release.yml on tag push
+# (v*) and published at github.com/DiegoZaluski/cosh/releases.
 
 REPO="DiegoZaluski/cosh"
 OUT_FILE="cosh"
@@ -97,10 +92,9 @@ if [ "$OS" = "win32" ] && [ "$ARCH" != "x64" ]; then
   exit 1
 fi
 
-# TODO(variant): only "base" and "embed" are planned. "embed" should build with
-# the workspace `embed` feature (cosh-tools/embed + fastembed) but there is no
-# release pipeline producing that artifact yet. Until then only "base" will
-# resolve against published releases.
+# Variant note: "embed" builds with the workspace `embed` feature
+# (cosh-tools/embed + fastembed) and is produced by the release workflow
+# alongside the "base" variant.
 case "$COSH_VARIANT" in
   base|embed) ;;
   *) echo "Error: Unsupported COSH_VARIANT '$COSH_VARIANT'. Expected 'base' or 'embed'."; exit 1 ;;

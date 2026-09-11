@@ -13,11 +13,8 @@
 #   $env:COSH_VERSION  - Specific version to install (e.g., "v0.1.0" or "0.1.0")
 #   $env:COSH_VARIANT  - Package variant: "base" (default) or "embed" (includes fastembed/embed support)
 #
-# TODO(release): this script expects release artifacts named
-#   cosh-v<VERSION>-<OS>-<ARCH>[<SUFFIX>].zip published at
-#   github.com/DiegoZaluski/cosh/releases. There is no release workflow in this
-#   repo yet (no .github/workflows/release.yml) — wire one up before
-#   announcing these install commands.
+# Release artifacts are produced by .github/workflows/release.yml on tag push
+# (v*) and published at github.com/DiegoZaluski/cosh/releases.
 
 $ErrorActionPreference = "Stop"
 
@@ -60,10 +57,9 @@ if ($ARCH -eq "AMD64") {
     exit 1
 }
 
-# TODO(variant): only "base" and "embed" are planned. "embed" should build with
-# the workspace `embed` feature (cosh-tools/embed + fastembed) but there is no
-# release pipeline producing that artifact yet. Until then only "base" will
-# resolve against published releases.
+# Variant note: "embed" builds with the workspace `embed` feature
+# (cosh-tools/embed + fastembed) and is produced by the release workflow
+# alongside the "base" variant.
 if ($COSH_VARIANT -ne "base" -and $COSH_VARIANT -ne "embed") {
     Write-Error "Unsupported COSH_VARIANT '$COSH_VARIANT'. Expected 'base' or 'embed'."
     exit 1
