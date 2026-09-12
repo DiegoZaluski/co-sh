@@ -60,7 +60,17 @@ jobs:
           sudo apt-get install -y \
             build-essential \
             pkg-config \
-            libssl-dev
+            libssl-dev \
+            protobuf-compiler
+
+      # `protoc` is required by the `lance-encoding` build script (via
+      # prost-build) when the `embed` variant pulls in lancedb. Windows
+      # runners do not ship protoc, so install it on every platform.
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "29.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Package variables
         id: vars
