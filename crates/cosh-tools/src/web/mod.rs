@@ -56,8 +56,7 @@ impl Web {
                 "description": concat!(
                     "Fetch a URL and return its content as clean, readable markdown. ",
                     "Strips navigation, scripts, and boilerplate HTML to produce ",
-                    "LLM-friendly text. Falls back through multiple extraction ",
-                    "methods if the primary one fails."
+                    "LLM-friendly text."
                 ),
                 "inputSchema": {
                     "type": "object",

@@ -64,15 +64,12 @@ impl Bash {
             description_run: serde_json::json!({
                 "name": "bash_run",
                 "description": concat!(
-                    "Execute a bash command and return its output as an async stream. ",
-                    "Supports configurable timeout, environment variables, and ",
-                    "pseudo-terminal (PTY) mode. PTY mode multiplexes stdout and ",
-                    "stderr for colored output and interactive prompts. ",
-                    "Security validation blocks dangerous patterns like rm -rf /, ",
-                    "fork bombs, and remote execution. Outputs above the token ",
-                    "budget are head/tail-truncated: the middle is saved to a log ",
-                    "file (path given in the truncation notice) that you can read ",
-                    "back in parts with fs_read (line_range) or find_grep."
+                    "Execute a bash command and return its output. ",
+                    "Outputs above the token budget are head/tail-truncated: the ",
+                    "middle is saved to a log file (path given in the truncation ",
+                    "notice) that you can read back in parts with fs_read ",
+                    "(line_range) or find_grep. Timeout, environment variables, ",
+                    "and PTY mode are not accepted as call arguments."
                 ),
                 "inputSchema": {
                     "type": "object",

@@ -105,7 +105,7 @@ impl SubAgent {
         let installed = call::detect_installed();
 
         // The note lands as the tail of the FIRST paragraph, so it reads as
-        // part of the instructions ("...headless operation. When the `agent`
+        // part of the instructions ("...return its output. When the `agent`
         // argument is omitted or empty, ...") instead of a prepended notice.
         // An empty note reproduces the original text exactly.
         let note = if note.is_empty() {
@@ -115,9 +115,7 @@ impl SubAgent {
         };
         let common = format!(
             "Call a supported agent CLI with the given input message and \
-             return its output. The agent runs as a child process; output \
-             is streamed in real time. All agents are configured with \
-             auto-approval flags for headless operation.{note}\n\
+             return its output.{note}\n\
              `input` is optional: if omitted, the last message sent to a \
              sub-agent in this session is reused automatically, so a failed \
              call can be retried without re-writing the prompt. If no \
@@ -187,7 +185,7 @@ impl SubAgent {
                 "properties": {
                     "agent": {
                         "type": "string",
-                        "description": "The agent CLI to call. Optional: if omitted (or empty), an internal agent runs the task instead — a fresh nested harness with an empty context, in auto-approve mode, that persists nothing and returns only its final report.",
+                        "description": "The agent CLI to call. Optional: if omitted (or empty), an internal agent with an empty context runs the task instead and returns only its final report.",
                         "enum": enum_values,
                     },
                     "input": {
@@ -343,10 +341,10 @@ mod tests {
         let after = sub.description_call["description"].as_str().unwrap();
 
         // Interpolated as the tail of the FIRST paragraph: right after the
-        // headless-operation sentence and BEFORE the `input` paragraph — not
-        // prepended at the top.
+        // opening sentence and BEFORE the `input` paragraph — not prepended
+        // at the top.
         assert!(after.contains(
-            "headless operation. When the `agent` argument is omitted or \
+            "return its output. When the `agent` argument is omitted or \
              empty, an internal agent runs the task instead.\n`input` is \
              optional"
         ));

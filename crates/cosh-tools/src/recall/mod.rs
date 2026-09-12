@@ -76,9 +76,8 @@ const DEFAULT_DESCRIPTION: &str = concat!(
     "Search an active knowledge base for entries semantically similar to your query. ",
     "Returns matching entries with their IDs and content. ",
     "Read-only — never writes to the database. ",
-    "Use this to retrieve relevant context from stored knowledge.\n",
-    "The query will be automatically embedded using the target database's configured ",
-    "embedding model. Only the database name and query text are needed."
+    "Use this to retrieve relevant context from stored knowledge. ",
+    "Only the database name and query text are needed."
 );
 
 impl Recall {
@@ -141,11 +140,11 @@ impl Recall {
                 "properties": {
                     "db_name": {
                         "type": "string",
-                        "description": "Name of the database to search (must be one of the active databases listed above)"
+                        "description": "Name of the active database to search (e.g. one listed in the session's knowledge-base context, if provided)"
                     },
                     "query": {
                         "type": "string",
-                        "description": "The search query text — will be automatically embedded using the DB's configured model"
+                        "description": "The search query text"
                     },
                     "limit": {
                         "type": "integer",

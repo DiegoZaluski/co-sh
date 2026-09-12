@@ -175,7 +175,8 @@ impl Lsp {
                     "queries timing out, or stale completions after config ",
                     "changes.\n\n",
                     "Scoped restarts re-open the touched file immediately; ",
-                    "workspace-wide restarts respawn lazily on next touch."
+                    "workspace-wide restarts take effect the next time a file ",
+                    "is touched."
                 ),
                 &serde_json::json!({
                     "type": "object",

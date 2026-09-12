@@ -195,8 +195,7 @@ impl Fs {
                 "name": "fs_write",
                 "description": concat!(
                     "Write content to one or more files. Creates new files or ",
-                    "overwrites existing ones entirely. Paths are validated against ",
-                    "the project root, allowlist, and blocklist guards before writing.\n\n",
+                    "overwrites existing ones entirely.\n\n",
                     "IMPORTANT: When overwriting an existing file, you MUST include the ",
                     "`file_hash` from a previous `fs_read` call. This proves you have ",
                     "read the file before overwriting it. If you omit `file_hash` on an ",
@@ -223,9 +222,10 @@ impl Fs {
                                     "file_hash": {
                                         "type": ["string", "null"],
                                         "description": concat!(
-                                            "The hash from `fs_read` of this file. REQUIRED when overwriting ",
-                                            "an existing file to prove you have read its current content. ",
-                                            "Omit or set to null for new files."
+                                            "4-hex content hash tag from `fs_read` OR a previous ",
+                                            "fs_edit result (the \u{00B6}path#TAG header). REQUIRED when ",
+                                            "overwriting an existing file to prove you have read its ",
+                                            "current content. Omit or set to null for new files."
                                         )
                                     }
                                 },
@@ -240,10 +240,13 @@ impl Fs {
             description_rollback: serde_json::json!({
                 "name": "fs_rollback",
                 "description": concat!(
-                    "Roll back a file to a previously recorded session version. ",
-                    "Uses the session's rollback history to restore the file to the ",
-                    "state identified by the given hash. Returns an error if the ",
-                    "path has no rollback history."
+                    "Roll back a file to a previously recorded session version: ",
+                    "restore the state identified by the given `hash` (a 4-hex tag ",
+                    "from an earlier fs_read/fs_edit/rollback result for that path). ",
+                    "Pass an empty `hash` to restore the version immediately ",
+                    "preceding the current content. Returns an error if the path ",
+                    "has no rollback history, if the `hash` is not found in it, or ",
+                    "if the file was modified externally since the snapshot."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -539,10 +542,9 @@ impl Fs {
             "name": "fs_edit",
             "description": concat!(
                 "Apply targeted line/block edits to one or more files. Edits are ",
-                "anchored by the file's content hash for safety — if the file changed ",
-                "since it was read, the tool attempts automatic 3-way merge recovery. ",
+                "anchored by the file's content hash for safety. ",
                 "Supports replace, delete, insert (before/after/head/tail), and ",
-                "tree-sitter block operations. Successful edits return the ",
+                "syntactic block operations. Successful edits return the ",
                 "updated \u{00B6}path#TAG header — use it directly for follow-up ",
                 "edits on the same file without re-reading."
             ),
@@ -689,9 +691,9 @@ impl Fs {
                 "Apply targeted edits to one or more files. Three mutually exclusive ",
                 "engines are available; provide exactly one of the three optional ",
                 "arguments. `targets` uses the hashline replace engine (line/block ",
-                "edits anchored by the file's content hash, with 3-way merge ",
-                "recovery; supports replace, delete, insert before/after/head/tail, ",
-                "and tree-sitter block operations). `ast` uses the AST structural ",
+                "edits anchored by the file's content hash; supports replace, ",
+                "delete, insert before/after/head/tail, and syntactic block ",
+                "operations). `ast` uses the AST structural ",
                 "engine: it matches a syntax-tree pattern (`pat`) that may use ",
                 "metavariables `$NAME` (one node) and `$$$NAME` (a list, e.g. an ",
                 "argument list) and rewrites each match to the template (`out`), ",
@@ -764,7 +766,10 @@ impl Fs {
                         "description": concat!(
                             "AST structural engine argument. Rewrites syntax-tree ",
                             "matches of `ops[].pat` to `ops[].out` across `paths`. ",
-                            "Mutually exclusive with `targets` and `edits`."
+                            "Mutually exclusive with `targets` and `edits`. Example:\n",
+                            "  {\"ast\": {\"ops\": [{\"pat\": \"console.log(\\\"\u{24}M\\\")\", ",
+                            "\"out\": \"console.log([\\\"\u{24}M\\\"])\"}], ",
+                            "\"paths\": [\"src/app.js\"]}}"
                         ),
                         "properties": {
                             "ops": {
