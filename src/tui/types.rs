@@ -295,6 +295,96 @@ mod tests {
     }
 
     #[test]
+    fn ensure_tool_call_ids_fills_blanks_keeps_real_and_is_deterministic() {
+        let mut session = Session {
+            id: "s1".into(),
+            title: "t".into(),
+            created_at: 0,
+            title_generated: false,
+            provider: None,
+            model: None,
+            reasoning: None,
+            ctx_ids: Default::default(),
+            messages: vec![
+                Message {
+                    id: "msg-0".into(),
+                    role: MessageRole::Assistant,
+                    parts: vec![
+                        text("hi"),
+                        tool(), // no id → must be derived
+                        tool(), // no id → must be derived, distinct from above
+                    ],
+                    created_at: 0,
+                    agent: None,
+                    model: None,
+                },
+                Message {
+                    id: "msg-1".into(),
+                    role: MessageRole::Assistant,
+                    parts: vec![
+                        Part::Tool(ToolPart {
+                            tool: "read".into(),
+                            input: serde_json::json!({}),
+                            output: None,
+                            status: ToolStatus::Completed,
+                            tool_call_id: Some("call-42".into()),
+                            is_start: true,
+                            is_streaming: false,
+                            cached_line_count: None,
+                            lsp_notes: None,
+                        }),
+                        Part::Tool(ToolPart {
+                            tool: "read".into(),
+                            input: serde_json::json!({}),
+                            output: None,
+                            status: ToolStatus::Completed,
+                            tool_call_id: Some("   ".into()),
+                            is_start: true,
+                            is_streaming: false,
+                            cached_line_count: None,
+                            lsp_notes: None,
+                        }),
+                    ],
+                    created_at: 0,
+                    agent: None,
+                    model: None,
+                },
+            ],
+        };
+
+        session.ensure_tool_call_ids();
+
+        let ids = |s: &Session| {
+            s.messages
+                .iter()
+                .flat_map(|m| m.parts.iter())
+                .filter_map(|p| match p {
+                    Part::Tool(t) => t.tool_call_id.clone(),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // Deterministic tc-{msg.id}-{pi} for blanks; existing id untouched;
+        // whitespace-only id rescued; siblings never share a key.
+        assert_eq!(
+            ids(&session),
+            vec![
+                "tc-msg-0-1".to_string(),
+                "tc-msg-0-2".to_string(),
+                "call-42".to_string(),
+                "tc-msg-1-1".to_string(),
+            ]
+        );
+
+        // Idempotent: a second pass (e.g. re-loading a session) must not
+        // renumber or overwrite anything.
+        let before = ids(&session);
+        session.ensure_tool_call_ids();
+        assert_eq!(ids(&session), before);
+    }
+
+    #[test]
     fn reasoning_after_answer_folds_back_into_prior_thought() {
         let mut m = msg();
         m.push_reasoning("R1");

@@ -17,8 +17,9 @@ use crate::notification;
 use cosh::harness::context::ContextManagerState;
 
 /// Process-wide sequence for live-created tool parts' `tool_call_id`s. The
-/// id is the identity every per-box UI state (expand/collapse, LSP-notes
-/// toggle, spinners) is keyed by — unique per part, stable once assigned.
+/// id is the identity per-box UI state (expand/collapse, LSP-notes toggle)
+/// is keyed by — unique per part, stable once assigned. (Spinner text is
+/// still keyed by `{tool}_{part_idx}`; see the temp_part below.)
 static TOOL_CALL_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl App {
