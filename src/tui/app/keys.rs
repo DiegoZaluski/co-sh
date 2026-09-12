@@ -372,6 +372,9 @@ impl App {
                             // Returning to a session restores the last model
                             // used there.
                             self.restore_current_session_model();
+                            // The panel content belongs to the session: rebuild
+                            // it from the newly selected session's history.
+                            self.rehydrate_right_panel();
                             self.session_view.hovered_msg_idx = None;
                             self.title_generated = true;
                             self.finalize_stale_compaction_lines();
@@ -786,7 +789,7 @@ impl App {
                         && self.terminal_size().width >= super::MIN_WIDTH_FOR_LEFT_PANEL
                     {
                         self.sidebar.select_prev(self.state.session_summaries.len());
-                    } else if Self::is_in_right_panel(self.last_mouse_x, self.terminal_size()) {
+                    } else if self.is_in_right_panel(self.last_mouse_x) {
                         self.state.right_panel.scroll_up_at(self.last_mouse_y, 3);
                     } else {
                         let vh = self.session_view.visible_height.max(1);
@@ -801,7 +804,7 @@ impl App {
                         && self.terminal_size().width >= super::MIN_WIDTH_FOR_LEFT_PANEL
                     {
                         self.sidebar.select_next(self.state.session_summaries.len());
-                    } else if Self::is_in_right_panel(self.last_mouse_x, self.terminal_size()) {
+                    } else if self.is_in_right_panel(self.last_mouse_x) {
                         self.state.right_panel.scroll_down_at(self.last_mouse_y, 3);
                     } else {
                         let vh = self.session_view.visible_height.max(1);
@@ -817,7 +820,7 @@ impl App {
                     {
                         self.sidebar
                             .select_first(self.state.session_summaries.len());
-                    } else if Self::is_in_right_panel(self.last_mouse_x, self.terminal_size()) {
+                    } else if self.is_in_right_panel(self.last_mouse_x) {
                         let vh = self.state.right_panel.visible_height.max(1);
                         self.state
                             .right_panel
@@ -835,7 +838,7 @@ impl App {
                         && self.terminal_size().width >= super::MIN_WIDTH_FOR_LEFT_PANEL
                     {
                         self.sidebar.select_last(self.state.session_summaries.len());
-                    } else if Self::is_in_right_panel(self.last_mouse_x, self.terminal_size()) {
+                    } else if self.is_in_right_panel(self.last_mouse_x) {
                         let vh = self.state.right_panel.visible_height.max(1);
                         self.state
                             .right_panel
@@ -850,6 +853,14 @@ impl App {
                 Some(crate::keymap::Action::ToggleSidebar) => {
                     // Ctrl+B: toggle the left panel open/closed.
                     self.sidebar.open = !self.sidebar.open;
+                }
+                Some(crate::keymap::Action::ToggleRightPanel) => {
+                    // Ctrl+P: toggle the right panel open/closed.
+                    self.state.right_panel.toggle_hidden();
+                    if self.state.right_panel.user_hidden {
+                        // A hidden panel cannot hold keyboard focus.
+                        self.state.right_panel.panel_focus = None;
+                    }
                 }
                 Some(crate::keymap::Action::ToggleUsage) => {
                     // Ctrl+U: always open the left panel showing the dashboard.
@@ -1003,14 +1014,14 @@ impl App {
                     }
                 }
                 Some(crate::keymap::Action::ScrollToTop) => {
-                    if Self::is_in_right_panel(self.last_mouse_x, self.terminal_size()) {
+                    if self.is_in_right_panel(self.last_mouse_x) {
                         self.state.right_panel.reset_scroll();
                     } else {
                         self.session_view.scroll_to(0);
                     }
                 }
                 Some(crate::keymap::Action::ScrollToBottom) => {
-                    if Self::is_in_right_panel(self.last_mouse_x, self.terminal_size()) {
+                    if self.is_in_right_panel(self.last_mouse_x) {
                         self.state.right_panel.scroll_to_bottom();
                     } else {
                         self.session_view.scroll_to_bottom();
@@ -1145,10 +1156,7 @@ impl App {
                                             self.prompt_view.input_text_width.get().max(1),
                                         );
                                     }
-                                } else if Self::is_in_right_panel(
-                                    self.last_mouse_x,
-                                    self.terminal_size(),
-                                ) {
+                                } else if self.is_in_right_panel(self.last_mouse_x) {
                                     self.state.right_panel.scroll_up_at(self.last_mouse_y, 3);
                                 } else {
                                     let vh = self.session_view.visible_height.max(1);
@@ -1174,10 +1182,7 @@ impl App {
                                             self.prompt_view.input_text_width.get().max(1),
                                         );
                                     }
-                                } else if Self::is_in_right_panel(
-                                    self.last_mouse_x,
-                                    self.terminal_size(),
-                                ) {
+                                } else if self.is_in_right_panel(self.last_mouse_x) {
                                     self.state.right_panel.scroll_down_at(self.last_mouse_y, 3);
                                 } else {
                                     let vh = self.session_view.visible_height.max(1);
@@ -1235,7 +1240,7 @@ impl App {
                                 self.prompt_view.delete();
                             }
                             KeyCode::PageUp => {
-                                if Self::is_in_right_panel(self.last_mouse_x, self.terminal_size())
+                                if self.is_in_right_panel(self.last_mouse_x)
                                 {
                                     let vh = self.state.right_panel.visible_height.max(1);
                                     self.state
@@ -1249,7 +1254,7 @@ impl App {
                                 }
                             }
                             KeyCode::PageDown => {
-                                if Self::is_in_right_panel(self.last_mouse_x, self.terminal_size())
+                                if self.is_in_right_panel(self.last_mouse_x)
                                 {
                                     let vh = self.state.right_panel.visible_height.max(1);
                                     self.state

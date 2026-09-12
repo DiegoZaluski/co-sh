@@ -74,6 +74,11 @@ fn subagent_theme_key(theme: &Theme) -> u64 {
 
 /// Determine whether the right panel should be visible based on terminal width and content.
 pub fn should_show_right_panel(terminal_width: u16, state: &RightPanelState) -> bool {
+    // Manual override first (Ctrl+P): the user's explicit hide wins over
+    // content and terminal size.
+    if state.user_hidden {
+        return false;
+    }
     if terminal_width < 100 {
         return false;
     }
