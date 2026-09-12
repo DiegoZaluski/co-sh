@@ -130,3 +130,76 @@ writes a small source file, reads it back to capture its hashline tag, then
 applies a multi-operation edit and prints the resulting diff.
 
 Next: [ast_edit — the AST structural engine](ast_edit.md).
+
+---
+
+## Dry run — preview before applying
+
+Both `targets` and `edits` accept `"dry_run": true` at the top level of the
+arguments. The edit is then applied **in memory only**: the response carries
+the unified `diff`, the fresh `¶path#TAG` header the real edit would produce,
+and the syntax probe's verdict — including the
+*"This edit introduced a syntax error near line N"* advisory when the result
+would no longer parse. Nothing is written: no file changes, no rollback
+record, no passive LSP pull. The result's warnings end with
+*"Dry run: nothing was written — reissue without `dry_run` to apply"* and the
+`dry_run: true` marker is set on the result so a preview can never be
+mistaken for an applied edit.
+
+The intended loop for risky line-range edits: preview first, read the diff +
+advisory, fix the range if needed, then re-issue the same arguments without
+`dry_run`.
+
+---
+
+## The `edits` argument — the content replace engine
+
+`targets` addresses lines; **`edits` addresses content**. Each edit replaces an
+exact `old_string` with `new_string`:
+
+```rust,ignore
+let args = serde_json::json!({
+    "edits": [{
+        "path": "src/main.rs",
+        "file_hash": "3C4D",              // same ¶path#TAG anchor as targets
+        "old_string": "old_computation(x)",
+        "new_string": "new_computation(x)"
+    }]
+});
+let results = fs.edit(args).await?;
+```
+
+Rules and behavior:
+
+- **Exact, unique match.** `old_string` must match the file verbatim — all
+  whitespace and newlines included — and must occur exactly once, unless
+  `replace_all: true` is set. Use the smallest snippet that is unique; add
+  surrounding context to disambiguate.
+- **Still hash-anchored.** `file_hash` is required (for the first edit of each
+  file in the call; follow-up edits to the same file in the same call may omit
+  it and chain on the previous edit's fresh tag). The match runs against the
+  tagged snapshot and the change is applied through the same pipeline as
+  `targets`, so stale-hash detection, 3-way merge recovery, diffs, and passive
+  LSP feedback behave identically.
+- **Line-granular translation.** A partial-line match keeps its surrounding
+  context (`prefix + replacement + suffix` on the affected lines); empty
+  `new_string` deletes the matched text. After applying, the result is
+  verified against the exact character-level replacement — if the hashline
+  engine's boundary/indent repair would alter it, the edit is rejected
+  (nothing is written) and the model is pointed at `targets`.
+- **Line-terminator boundaries.** A match ending with a newline followed by
+  `new_string` without one joins the replacement with the next line (exact
+  character semantics); when there is no following line (the file's final
+  newline), only a whole-line deletion is expressible — anything else is
+  rejected with a diagnostic instead of silently dropping the trailing
+  newline.
+- **Rejections teach.** Zero matches run a fuzzy closest-match search over
+  the file (whitespace/typo-tolerant similarity, ported from oh-my-pi) and
+  report the nearest region: similarity %, line, and the first differing
+  line as `-`/`+` — or the preview windows of every occurrence when the text
+  is ambiguous. The fuzzy result is advisory only: it NEVER substitutes
+  anything; the model re-issues with the corrected exact text.
+
+Choose `edits` when the text itself identifies the location and computing line
+numbers would be busywork; choose `targets` when you already know the line
+positions, and `ast` for structural rewrites.

@@ -1188,3 +1188,55 @@ fn an_error_survives_a_state_roundtrip() {
     let items = restored.items_snapshot();
     assert!(matches!(items.last(), Some(ContextItem::Error { .. })));
 }
+
+// ── summary annotator hook (handoff/tool-set consistency check) ───────────
+
+#[test]
+fn summary_annotator_runs_on_every_commit_path_and_never_accumulates() {
+    let mut manager = cm(10_000);
+    manager.add_user(&prose_copies(200));
+    manager.set_summary_annotator(Box::new(|summary| {
+        crate::harness::core::annotate_summary_tool_set(summary, &["fs_edit".to_string()])
+    }));
+
+    // First compaction: the summary references a removed tool → one notice.
+    let summary = "## Objective\n- use plan_todo_cross_off next".to_string();
+    assert!(manager.apply_llm_summary(summary));
+    let committed = manager
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            ContextItem::Compaction { summary, .. } => Some(summary.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        committed.contains("[Tool set notice]") && committed.contains("plan_todo_cross_off"),
+        "the committed handoff carries the notice: {committed}"
+    );
+
+    // Re-compaction in update mode: the summarizer carries the old notice
+    // line into the new summary — the annotator must strip it and append
+    // exactly one fresh notice instead of stacking.
+    let carried = format!("{committed}\n\nmore context");
+    assert!(manager.apply_llm_summary(carried));
+    let latest = manager
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            ContextItem::Compaction { summary, .. } => Some(summary.clone()),
+            _ => None,
+        })
+        .next_back()
+        .expect("a compaction item exists");
+    assert_eq!(
+        latest.matches("[Tool set notice]").count(),
+        1,
+        "the newest checkpoint carries exactly one notice: {latest}"
+    );
+    assert!(
+        latest.contains("more context"),
+        "the new content survives: {latest}"
+    );
+}

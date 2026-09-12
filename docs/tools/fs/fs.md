@@ -164,13 +164,13 @@ default for granting read-only visibility.
 
 ---
 
-## The two edit engines
+## The three edit engines
 
-`Fs::edit` is the interesting one: it is a *dispatcher* over two independent
+`Fs::edit` is the interesting one: it is a *dispatcher* over three independent
 editing engines that solve different problems. Which engine runs is controlled
 by the `EditEngine` enum:
 
-> See [`edit.md`](edit.md) for the hashline replace engine and [`ast_edit.md`](ast_edit.md) for the AST structural engine.
+> See [`edit.md`](edit.md) for the hashline replace engine, [`ast_edit.md`](ast_edit.md) for the AST structural engine, and [the `edits` argument](edit.md#the-edits-argument--the-content-replace-engine) for the content replace engine.
 
 | Variant | Behavior |
 |---|---|
@@ -197,15 +197,18 @@ In `Auto` mode, `Fs::edit` looks at the `serde_json::Value` it received:
 - If it contains a **non-empty `targets` array**, the hashline replace engine
   runs.
 - If it contains an **`ast` object**, the AST structural engine runs.
-- Providing **both** is an error; providing **neither** returns a correction
-  prompt.
+- If it contains a **non-empty `edits` array**, the content replace engine
+  runs.
+- Providing **several** of these is an error; providing **none** returns a
+  correction prompt.
 
-`Auto` also detects when the agent filled an argument with the *other* engine's
-schema — for example, AST metavariables like `$NAME` inside `targets[].ops`, or
-a `file_hash` inside `ast`. It returns a descriptive correction prompt instead
-of failing silently or, worse, applying the wrong engine.
+`Auto` also detects when the agent filled an argument with the *wrong* engine's
+schema — for example, AST metavariables like `$NAME` inside `targets[].ops`, a
+`file_hash` inside `ast`, or `old_string`/`new_string` inside `targets`. It
+returns a descriptive correction prompt instead of failing silently or, worse,
+applying the wrong engine.
 
-The two engines are described in depth on their own pages:
+The three engines are described in depth on their own pages:
 [`edit` — the hashline replace engine](edit.md) and
 [`ast_edit` — the AST structural engine](ast_edit.md). The short version:
 
@@ -216,10 +219,14 @@ The two engines are described in depth on their own pages:
 - **AST** matches tree-sitter patterns (`pat`) and rewrites each match to a
   template (`out`), using metavariables `$NAME` / `$$$NAME`. Files are resolved
   from paths, directories, or globs and processed in sorted order.
+- **Content replace** (`edits`) addresses its location by content: an exact,
+  unique `old_string` is replaced by `new_string` (or every occurrence with
+  `replace_all`). It is translated into the same hashline ops as the replace
+  engine, so hash anchoring, recovery, and diffs behave identically.
 
 ### Failure semantics differ by engine
 
-When a multi-target batch fails, the two engines report the failure
+When a multi-target batch fails, the engines report the failure
 differently, because *order* means different things to them:
 
 - **Replace** applies targets in your order, so target N may depend on targets
@@ -227,6 +234,11 @@ differently, because *order* means different things to them:
   are returned with their fresh hash tags in `EditBatchError::applied`), and
   targets after N are deliberately skipped (`EditBatchError::skipped`) as a
   *consequence* of N failing — never reported as independent failures.
+- **Content replace** (`edits`) has the same order-carries-intention semantics
+  as Replace: edits are applied in your order, and a failure stops the batch
+  with the same applied/skipped report. Successive edits to the same file in
+  one call chain on the fresh tag the previous edit produced, so only the
+  first edit of each file needs a `file_hash`.
 - **AST** processes files in sorted, deduplicated order, so there is no
   caller-intended order to preserve. A failure therefore aborts with a plain
   error string naming the failing file.

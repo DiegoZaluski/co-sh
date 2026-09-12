@@ -288,16 +288,58 @@ impl ExtractAction {
     }
 
     /// Render the failure warning for a rejected tool call: the configured
-    /// label, the human-readable rejection reason, and the truncated offending
-    /// raw payload. Every failure path (batch, streaming, and native) funnels
-    /// through this so the model always sees *what* failed and *why*.
+    /// label, the human-readable rejection reason, the truncated offending
+    /// raw payload, and — for schema-shaped rejections — the expected argument
+    /// shape (or the available tool set, for unknown-tool calls). Every
+    /// failure path (batch, streaming, and native) funnels through this so
+    /// the model always sees *what* failed, *why*, and what to send instead.
     fn failure_message(&self, reason: &ToolCallRejection, raw: &str) -> String {
         let mut out = format!("{}: {}\n", self.tool_failure_message, reason.describe());
         if !raw.is_empty() {
             out.push_str(&format!("> Rejected call: `{}`\n", truncate_payload(raw)));
         }
-        out.push('\n');
+        let hint = self.schema_hint_line(reason);
+        if hint.is_empty() {
+            out.push('\n');
+        } else {
+            out.push_str(&hint);
+        }
         out
+    }
+
+    /// The "teach the shape" line for a rejection: the tool's minimal
+    /// argument example for schema failures, the registered tool set for
+    /// unknown-tool calls. Empty when there is nothing to teach.
+    fn schema_hint_line(&self, reason: &ToolCallRejection) -> String {
+        match reason {
+            ToolCallRejection::SchemaMismatch { name }
+            | ToolCallRejection::MissingArguments { name } => self
+                .tools
+                .iter()
+                .find(|t| &t.name == name)
+                .map(|t| {
+                    format!(
+                        "> Expected `{}` arguments — minimal shape: {}\n",
+                        t.name,
+                        super::skeleton::schema_skeleton(&t.input_schema)
+                    )
+                })
+                .unwrap_or_default(),
+            ToolCallRejection::UnknownTool { .. } if !self.tools.is_empty() => {
+                const MAX_LISTED: usize = 15;
+                let names: Vec<&str> = self.tools.iter().map(|t| t.name.as_str()).collect();
+                let (shown, more) = if names.len() > MAX_LISTED {
+                    (
+                        &names[..MAX_LISTED],
+                        format!(" (+{} more)", names.len() - MAX_LISTED),
+                    )
+                } else {
+                    (&names[..], String::new())
+                };
+                format!("> Available tools: {}{more}\n", shown.join(", "))
+            }
+            _ => String::new(),
+        }
     }
 
     /// Process a complete text and extract all embedded tool calls.
@@ -447,10 +489,12 @@ impl ExtractAction {
                 } else if self.check_early_exit() {
                     self.tool_failure_count += 1;
                     self.last_failed_raw = std::mem::take(&mut self.state.buffer);
-                    output.push_str(&self.failure_message(
-                        &ToolCallRejection::NotAToolCall,
-                        &self.last_failed_raw,
-                    ));
+                    output.push_str(
+                        &self.failure_message(
+                            &ToolCallRejection::NotAToolCall,
+                            &self.last_failed_raw,
+                        ),
+                    );
                     self.state = StreamState::default();
                 }
             } else if ch == '`' {
@@ -727,12 +771,11 @@ fn validate_tool_call(
         // A recognized name that is not registered (unknown / disabled / not
         // exposed in the current mode) gets its own rejection so the model can
         // tell "tool unavailable" apart from "invalid arguments".
-        let tool = tools
-            .iter()
-            .find(|t| t.name == name)
-            .ok_or_else(|| ToolCallRejection::UnknownTool {
+        let tool = tools.iter().find(|t| t.name == name).ok_or_else(|| {
+            ToolCallRejection::UnknownTool {
                 name: name.to_string(),
-            })?;
+            }
+        })?;
 
         let args_ref = obj
             .get("arguments")
@@ -872,7 +915,13 @@ const FAILURE_PAYLOAD_MAX_CHARS: usize = 240;
 fn truncate_payload(raw: &str) -> String {
     let collapsed: String = raw
         .chars()
-        .map(|c| if c == '\n' || c == '\r' || c == '\t' { ' ' } else { c })
+        .map(|c| {
+            if c == '\n' || c == '\r' || c == '\t' {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect();
     let chars: Vec<char> = collapsed.chars().collect();
     if chars.len() <= FAILURE_PAYLOAD_MAX_CHARS {

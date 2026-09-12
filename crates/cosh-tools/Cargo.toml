@@ -124,3 +124,10 @@ path = "examples/question/question.rs"
 name = "recall"
 path = "examples/recall/recall.rs"
 required-features = ["embed"]
+
+[dev-dependencies.criterion]
+version = "0.7"
+
+[[bench]]
+name = "fuzzy"
+harness = false

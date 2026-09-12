@@ -14,8 +14,12 @@
 
 pub mod ast_edit;
 pub mod edit;
+pub mod fuzzy;
 pub mod read;
+pub mod replace;
 pub mod rollback;
+#[cfg(test)]
+mod fuzzy_equivalence;
 #[cfg(test)]
 mod test;
 pub mod types;
@@ -27,8 +31,8 @@ pub use edit::{EditBatchError, EditResult, edit};
 pub use read::{ReadResult, read};
 pub use rollback::{RollbackResult, rollback};
 pub use types::{
-    AstEditOp, EditTarget, FsAstEdit, FsEdit, FsMetadata, FsRead, FsRollback, FsRollbackInput,
-    FsWrite, LspNote, LspNotes, Target, TargetFile,
+    AstEditOp, EditTarget, FsAstEdit, FsContentEdit, FsEdit, FsMetadata, FsRead, FsRollback,
+    FsRollbackInput, FsWrite, LspNote, LspNotes, ReplaceEdit, Target, TargetFile,
 };
 pub use write::{WriteResult, write};
 
@@ -48,9 +52,9 @@ const LSP_MAX_NOTES: usize = 20;
 /// Which edit engine [`Fs::edit`] dispatches to.
 ///
 /// - [`Auto`](EditEngine::Auto) (default) lets the tool arguments decide: the
-///   agent populates exactly one of the two optional arguments (`targets` for
-///   the hashline replace engine, `ast` for the AST engine). A misused
-///   argument (e.g. AST metavariables inside `targets`) is rejected with a
+///   agent populates exactly one of the three optional arguments (`targets`
+///   for the hashline replace engine, `ast` for the AST engine, `edits` for
+///   the content replace engine). A misused argument is rejected with a
 ///   correction prompt.
 /// - [`Replace`](EditEngine::Replace) forces the hashline replace engine.
 /// - [`Ast`](EditEngine::Ast) forces the AST structural engine.
@@ -360,11 +364,7 @@ impl Fs {
         self.read_op(self.lsp.as_ref(), targets).await
     }
 
-    async fn read_op(
-        &self,
-        lsp: Option<&Arc<Lsp>>,
-        targets: Vec<Target>,
-    ) -> Vec<ReadResult> {
+    async fn read_op(&self, lsp: Option<&Arc<Lsp>>, targets: Vec<Target>) -> Vec<ReadResult> {
         if let Some(lsp) = lsp {
             for t in &targets {
                 Self::warm_lsp(lsp, &self.root, &t.path).await;
@@ -405,11 +405,12 @@ impl Fs {
     /// The exact engine depends on [`EditEngine`] (see [`only_ast`](Self::only_ast)
     /// and [`only_replace`](Self::only_replace)):
     ///
-    /// - [`Auto`](EditEngine::Auto) (default) inspects the two optional tool
+    /// - [`Auto`](EditEngine::Auto) (default) inspects the three optional tool
     ///   arguments. Populating `targets` runs the hashline replace engine;
-    ///   populating `ast` runs the AST structural engine. Providing neither or
-    ///   both, or filling an argument with the *other* engine's schema, returns
-    ///   a correction prompt instead of a silent failure.
+    ///   populating `ast` runs the AST structural engine; populating `edits`
+    ///   runs the content replace engine. Providing none, several, or filling
+    ///   an argument with the *wrong* engine's schema returns a correction
+    ///   prompt instead of a silent failure.
     /// - [`Replace`](EditEngine::Replace) runs only [`edit`].
     /// - [`Ast`](EditEngine::Ast) runs only [`ast_edit`].
     ///
@@ -453,6 +454,43 @@ impl Fs {
             EditEngine::Ast => self.edit_ast(&metadata, &args).await?,
             EditEngine::Auto => self.edit_auto(&metadata, &args).await?,
         };
+        if let Some(lsp) = lsp {
+            for result in &mut results {
+                // Previews never wrote anything: the diagnostics would
+                // describe the UNCHANGED on-disk file, not the edit.
+                if result.dry_run == Some(true) {
+                    continue;
+                }
+                result.lsp_notes =
+                    Self::passive_notes(lsp, &self.root, &result.path, include_warnings).await;
+            }
+        }
+        Ok(results)
+    }
+
+    /// Apply content-anchored replacements (the typed form of the `edits`
+    /// argument of [`edit`](Self::edit)). Each edit replaces an exact,
+    /// uniquely-matching `old_string` with `new_string`, anchored on the
+    /// file's content-hash snapshot tag.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a tag is missing/unknown, `old_string` does not
+    /// match exactly or is ambiguous, or the underlying edit fails.
+    pub async fn replace_edits(&self, edits: Vec<ReplaceEdit>) -> Result<Vec<EditResult>, String> {
+        self.replace_edits_op(self.lsp.as_ref(), false, edits).await
+    }
+
+    async fn replace_edits_op(
+        &self,
+        lsp: Option<&Arc<Lsp>>,
+        include_warnings: bool,
+        edits: Vec<ReplaceEdit>,
+    ) -> Result<Vec<EditResult>, String> {
+        let metadata = self.metadata();
+        let mut results = replace::content_edit(&metadata, &edits, false)
+            .await
+            .map_err(|e| e.to_string())?;
         if let Some(lsp) = lsp {
             for result in &mut results {
                 result.lsp_notes =
@@ -555,6 +593,15 @@ impl Fs {
                             },
                             "required": ["path", "file_hash", "ops"]
                         }
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": concat!(
+                            "Preview mode: the edit is applied in memory only and the ",
+                            "result carries the unified diff plus the syntax-probe ",
+                            "verdict without writing anything. Re-issue without dry_run ",
+                            "to apply the exact same edit."
+                        )
                     }
                 },
                 "required": ["targets"]
@@ -632,14 +679,15 @@ impl Fs {
 
     /// MCP `fs` tool description for the default auto-dispatch mode.
     ///
-    /// Both engines are exposed here (and only here): the agent populates
-    /// exactly one of `targets` / `ast` and the tool routes accordingly.
+    /// All three engines are exposed here (and only here): the agent
+    /// populates exactly one of `targets` / `ast` / `edits` and the tool
+    /// routes accordingly.
     fn description_edit_auto() -> ToolDescription {
         serde_json::json!({
             "name": "fs_edit",
             "description": concat!(
-                "Apply targeted edits to one or more files. Two mutually exclusive ",
-                "engines are available; provide exactly one of the two optional ",
+                "Apply targeted edits to one or more files. Three mutually exclusive ",
+                "engines are available; provide exactly one of the three optional ",
                 "arguments. `targets` uses the hashline replace engine (line/block ",
                 "edits anchored by the file's content hash, with 3-way merge ",
                 "recovery; supports replace, delete, insert before/after/head/tail, ",
@@ -652,9 +700,13 @@ impl Fs {
                 "a metavariable captures a whole node (never a substring inside a ",
                 "literal) — to change a string's text, match the whole literal, ",
                 "e.g. `pat` `console.log(\"$M\")` for `out` `console.log(\"[$M]\")`. ",
-                "If you only need to replace literal text (no restructuring), prefer ",
-                "`targets`. If a populated argument is filled with the other ",
-                "engine's schema, a correction is returned. ",
+                "`edits` uses the content replace engine: it replaces an exact ",
+                "`old_string` (which must occur exactly once, unless `replace_all`) ",
+                "with `new_string` — use it when the text itself identifies the ",
+                "location, with the smallest unique snippet, instead of computing ",
+                "line numbers. If you only need to replace literal text with known ",
+                "line positions, prefer `targets`; if a populated argument is filled ",
+                "with another engine's schema, a correction is returned. ",
                 "Successful edits return the updated \u{00B6}path#TAG header — ",
                 "use it directly for follow-up edits on the same file without ",
                 "re-reading."
@@ -664,7 +716,7 @@ impl Fs {
                 "properties": {
                     "targets": {
                         "type": "array",
-                        "description": "Hashline replace engine argument. List of edit targets. Mutually exclusive with `ast`.",
+                        "description": "Hashline replace engine argument. List of edit targets. Mutually exclusive with `ast` and `edits`.",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -712,7 +764,7 @@ impl Fs {
                         "description": concat!(
                             "AST structural engine argument. Rewrites syntax-tree ",
                             "matches of `ops[].pat` to `ops[].out` across `paths`. ",
-                            "Mutually exclusive with `targets`."
+                            "Mutually exclusive with `targets` and `edits`."
                         ),
                         "properties": {
                             "ops": {
@@ -748,6 +800,67 @@ impl Fs {
                             }
                         },
                         "required": ["ops", "paths"]
+                    },
+                    "edits": {
+                        "type": "array",
+                        "description": concat!(
+                            "Content replace engine argument. Replaces an exact ",
+                            "old_string with new_string (unique match required unless ",
+                            "replace_all). Mutually exclusive with `targets` and `ast`. ",
+                            "Example:\n",
+                            "  {\"edits\": [{\"path\": \"src/main.rs\", ",
+                            "\"file_hash\": \"3C4D\", ",
+                            "\"old_string\": \"old_computation(x)\", ",
+                            "\"new_string\": \"new_computation(x)\"}]}"
+                        ),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": {
+                                    "type": "string",
+                                    "description": "Path to the file to edit, relative to the project root"
+                                },
+                                "file_hash": {
+                                    "type": "string",
+                                    "description": concat!(
+                                        "4-hex content hash tag: the \u{00B6}path#TAG anchor ",
+                                        "from your last read of this file (or a previous ",
+                                        "fs_edit result). Required for the first edit of ",
+                                        "each file in the call; omit it on follow-up edits ",
+                                        "to the same file in the same call to chain from ",
+                                        "the previous edit's fresh tag. Copy verbatim."
+                                    )
+                                },
+                                "old_string": {
+                                    "type": "string",
+                                    "description": concat!(
+                                        "Exact text to replace, copied verbatim including ",
+                                        "whitespace and newlines. Must occur exactly once ",
+                                        "unless replace_all is true; use the smallest ",
+                                        "snippet that is unique."
+                                    )
+                                },
+                                "new_string": {
+                                    "type": "string",
+                                    "description": "Replacement text. Empty deletes the matched text."
+                                },
+                                "replace_all": {
+                                    "type": "boolean",
+                                    "description": "Replace every occurrence instead of requiring a unique match (default false)"
+                                }
+                            },
+                            "required": ["path", "old_string", "new_string"]
+                        }
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": concat!(
+                            "Preview mode: the edit is applied in memory only and the ",
+                            "result carries the unified diff plus the syntax-probe ",
+                            "verdict (a warning when the edit would break parsing) ",
+                            "without writing anything. Re-issue without dry_run to ",
+                            "apply the exact same edit."
+                        )
                     }
                 },
                 "required": []
@@ -768,7 +881,11 @@ impl Fs {
         };
         let targets: Vec<EditTarget> = serde_json::from_value(targets_value.clone())
             .map_err(|e| format!("invalid `targets` for the replace engine: {e}"))?;
-        edit(metadata.clone(), FsEdit { targets })
+        let dry_run = args
+            .get("dry_run")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        edit(metadata.clone(), FsEdit { targets, dry_run })
             .await
             .map_err(|e| e.to_string())
     }
@@ -789,6 +906,28 @@ impl Fs {
         crate::fs::ast_edit::ast_edit(metadata.clone(), fs_ast).await
     }
 
+    async fn edit_content(
+        &self,
+        metadata: &FsMetadata,
+        args: &serde_json::Value,
+    ) -> Result<Vec<EditResult>, String> {
+        let Some(edits_value) = args.get("edits") else {
+            return Err("no `edits` argument was provided; pass 'edits': \
+                 [{path, file_hash, old_string, new_string, replace_all?}]"
+                .to_string());
+        };
+        if !edits_value.is_array() {
+            return Err("invalid `edits` argument: expected an array of \
+                 {path, file_hash, old_string, new_string, replace_all?}"
+                .to_string());
+        }
+        let fs_edits: FsContentEdit = serde_json::from_value(args.clone())
+            .map_err(|e| format!("invalid `edits` for the content replace engine: {e}"))?;
+        replace::content_edit(metadata, &fs_edits.edits, fs_edits.dry_run)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     async fn edit_auto(
         &self,
         metadata: &FsMetadata,
@@ -799,37 +938,57 @@ impl Fs {
             .and_then(serde_json::Value::as_array)
             .is_some_and(|a| !a.is_empty());
         let has_ast = args.get("ast").is_some_and(|v| v.is_object());
+        let has_edits = args
+            .get("edits")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|a| !a.is_empty());
 
-        match (has_targets, has_ast) {
-            (true, false) => {
+        let selected = [has_targets, has_ast, has_edits]
+            .into_iter()
+            .filter(|has| *has)
+            .count();
+        match selected {
+            0 => Err(Self::edit_usage_prompt()),
+            1 if has_targets => {
                 if let Some(correction) = ast_schema_in_targets(args) {
+                    return Err(correction);
+                }
+                if let Some(correction) = content_schema_in_targets(args) {
                     return Err(correction);
                 }
                 self.edit_replace(metadata, args).await
             }
-            (false, true) => {
+            1 if has_ast => {
                 if let Some(correction) = replace_schema_in_ast(args) {
                     return Err(correction);
                 }
                 self.edit_ast(metadata, args).await
             }
-            (true, true) => Err(
-                "both `targets` and `ast` were provided; pick exactly one engine per call: \
-                 use `targets` (replace) OR `ast` (AST), not both."
+            1 => {
+                if let Some(correction) = hashline_schema_in_edits(args) {
+                    return Err(correction);
+                }
+                self.edit_content(metadata, args).await
+            }
+            _ => Err(
+                "multiple edit engine arguments were provided; pick exactly one engine per \
+                 call: use `targets` (hashline), `ast` (AST), or `edits` (content replace), \
+                 not several."
                     .to_string(),
             ),
-            (false, false) => Err(Self::edit_usage_prompt()),
         }
     }
 
-    /// Correction prompt listing the edit tool's two optional arguments.
+    /// Correction prompt listing the edit tool's three optional arguments.
     fn edit_usage_prompt() -> String {
-        "No edit engine arguments were provided. `edit` accepts exactly one of two \
+        "No edit engine arguments were provided. `edit` accepts exactly one of three \
          optional arguments — each selects an engine:\n\
          • `targets` (array of {path, file_hash, ops}) — hashline replace engine \
          (line/block edits, hash-anchored).\n\
          • `ast` (object {ops: [{pat, out}], paths: [...]}) — AST structural engine \
          (master metavariable rewrites).\n\
+         • `edits` (array of {path, file_hash, old_string, new_string, replace_all?}) — \
+         content replace engine (exact unique old_string → new_string).\n\
          Provide whichever matches the edit you intend."
             .to_string()
     }
@@ -1065,9 +1224,7 @@ impl FsCall<'_> {
     ///
     /// Same conditions as [`Fs::edit`].
     pub async fn edit(&self, args: serde_json::Value) -> Result<Vec<EditResult>, String> {
-        self.fs
-            .edit_op(self.lsp, self.include_warnings, args)
-            .await
+        self.fs.edit_op(self.lsp, self.include_warnings, args).await
     }
 
     /// See [`Fs::rollback`].
@@ -1080,6 +1237,45 @@ impl FsCall<'_> {
             .rollback_op(self.lsp, self.include_warnings, path, hash)
             .await
     }
+}
+
+/// Detect when the agent filled the replace `targets` argument with the
+/// content replace engine's schema. Returns a correction prompt, or `None`
+/// when the arguments look like a legitimate replace request.
+fn content_schema_in_targets(args: &serde_json::Value) -> Option<String> {
+    let arr = args.get("targets")?.as_array()?;
+    for target in arr {
+        let obj = target.as_object()?;
+        if obj.contains_key("old_string") || obj.contains_key("new_string") {
+            return Some(
+                "The `targets` argument was populated with the content replace engine \
+                 schema (found `old_string`/`new_string`). Content edits belong in the \
+                 `edits` argument: 'edits': \
+                 [{path, file_hash, old_string, new_string, replace_all?}]."
+                    .to_string(),
+            );
+        }
+    }
+    None
+}
+
+/// Detect when the agent filled the content `edits` argument with the
+/// hashline replace engine's schema. Returns a correction prompt, or `None`
+/// when the arguments look like a legitimate content replace request.
+fn hashline_schema_in_edits(args: &serde_json::Value) -> Option<String> {
+    let arr = args.get("edits")?.as_array()?;
+    for edit in arr {
+        let obj = edit.as_object()?;
+        if obj.contains_key("ops") {
+            return Some(
+                "The `edits` argument was populated with hashline replace ops \
+                 (found `ops`). Hashline edits belong in the `targets` argument: \
+                 'targets': [{path, file_hash, ops}]."
+                    .to_string(),
+            );
+        }
+    }
+    None
 }
 
 /// True when a string uses ast-grep style metavariables (`$name` / `$$$name`).

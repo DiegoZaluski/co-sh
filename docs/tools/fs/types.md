@@ -123,6 +123,7 @@ pub struct EditTarget {
 
 pub struct FsEdit {
     pub targets: Vec<EditTarget>,
+    pub dry_run: bool, // preview: in-memory only, nothing is written
 }
 ```
 
@@ -142,6 +143,29 @@ insert after 15:
 
 Order carries intention: targets are applied in the order listed, and a batch
 aborts at the first failure (see [`EditBatchError`](#editbatcherror)).
+
+### `ReplaceEdit` and `FsContentEdit` — the content-engine `edit` input
+
+```rust
+pub struct ReplaceEdit {
+    pub path: String,               // path to edit, relative to the project root
+    pub file_hash: Option<String>,  // 4-hex tag; required for the first edit of each file
+    pub old_string: String,         // exact text to replace (unique unless replace_all)
+    pub new_string: String,         // replacement text; empty deletes the match
+    pub replace_all: bool,          // replace every occurrence (default false)
+}
+
+pub struct FsContentEdit {
+    pub edits: Vec<ReplaceEdit>,
+    pub dry_run: bool, // preview: in-memory only, nothing is written
+}
+```
+
+`old_string` is a content address: it must match the tagged snapshot verbatim
+and uniquely (unless `replace_all`). The edit is translated into the same
+hashline ops as [`EditTarget`](#edittarget-and-fsedit--the-replace-engine-edit-input),
+so tags, recovery, and diffs behave identically. See
+[the `edits` argument](edit.md#the-edits-argument--the-content-replace-engine).
 
 ### `AstEditOp` and `FsAstEdit` — the AST-engine `edit` input
 

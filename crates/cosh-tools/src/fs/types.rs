@@ -85,6 +85,49 @@ pub struct EditTarget {
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct FsEdit {
     pub targets: Vec<EditTarget>,
+    /// Preview mode: apply in memory only, returning the diff and the
+    /// syntax-probe verdict without writing anything. Re-issue without
+    /// `dry_run` to apply for real.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// One content-anchored replacement for the content edit engine.
+///
+/// `old_string` is a content address: it must match the file exactly (the
+/// match must be unique unless [`Self::replace_all`] is set). The edit is
+/// still bound to a hashline snapshot tag, so drift between read and edit
+/// keeps being detected — the match runs against the tagged snapshot and the
+/// result flows through the same hashline apply pipeline as `targets`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct ReplaceEdit {
+    pub path: String,
+    /// 4-hex content hash tag: the `¶path#TAG` anchor from your last read
+    /// (or a previous edit result). Required for the first edit of each file
+    /// in the call; follow-up edits to the same file in the same call may
+    /// omit it — they chain on the fresh tag produced by the previous edit.
+    #[serde(default)]
+    pub file_hash: Option<String>,
+    /// Exact text to replace, copied verbatim including whitespace and
+    /// newlines. Must occur exactly once unless [`Self::replace_all`] is set;
+    /// use the smallest snippet that is unique.
+    pub old_string: String,
+    /// Replacement text. Empty deletes the matched text.
+    pub new_string: String,
+    /// Replace every occurrence instead of requiring a unique match.
+    #[serde(default)]
+    pub replace_all: bool,
+}
+
+/// Arguments for the content edit engine (the `edits` argument).
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct FsContentEdit {
+    pub edits: Vec<ReplaceEdit>,
+    /// Preview mode: apply in memory only, returning the diff and the
+    /// syntax-probe verdict without writing anything. Re-issue without
+    /// `dry_run` to apply for real.
+    #[serde(default)]
+    pub dry_run: bool,
 }
 
 // ---------------------------------------------------------------------------

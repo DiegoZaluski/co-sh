@@ -220,9 +220,103 @@ const COMPACTION_RETRY_BACKOFF_BASE: Duration = Duration::from_millis(250);
 /// every dispatch iteration.
 const OVERFLOW_TOAST_COOLDOWN: Duration = Duration::from_secs(15);
 
+/// Handoff/tool-set consistency check: a compaction summary IS the handoff
+/// to a fresh agent, and one produced from an older build's transcript (or
+/// naming a tool the transcript shows being called) can prime the model into
+/// calling a tool that no longer exists — the failure then compounds when
+/// the model invents an argument schema for the removed tool.
+///
+/// Tool-name shape: an identifier with one of this project's tool-family
+/// prefixes (`fs_`, `plan_`, `bash_`, ...). Argument fields (`file_hash`),
+/// commands, and prose never carry those prefixes, so the false-positive
+/// surface collapses to names that ARE current tools — which the membership
+/// check filters out. Known gap (accepted): MCP tool names are server-defined
+/// (often dotted, e.g. `acme.deploy`) and are NOT matched — a summary from a
+/// session with a since-disconnected MCP server sails through; the dispatch
+/// layer's unknown-tool rejection (which echoes the current tool set) is the
+/// backstop for that case. Any `[Tool set notice]` paragraph already present
+/// (the summary is re-serialized as `[Previous summary]` on later
+/// compactions) is stripped first, so exactly one fresh notice exists.
+pub(crate) fn annotate_summary_tool_set(summary: &str, current: &[String]) -> String {
+    static TOOL_LIKE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let tool_like = TOOL_LIKE.get_or_init(|| {
+        #[allow(clippy::unwrap_used)]
+        regex::Regex::new(r"\b((?:fs|plan|web|bash|lsp|find|recall|skills|subagent)_[a-z0-9_]+)\b")
+            .unwrap()
+    });
+    // Drop notice paragraphs from earlier compactions (and the blank line
+    // that separated them) so notices never accumulate across update-mode
+    // re-compactions.
+    let mut lines: Vec<&str> = summary
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("[Tool set notice]:"))
+        .collect();
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+    let summary = lines.join("\n");
+
+    let mut stale: Vec<String> = Vec::new();
+    for capture in tool_like.captures_iter(&summary) {
+        let name = capture[1].to_string();
+        if !current.iter().any(|tool| tool == &name) && !stale.contains(&name) {
+            stale.push(name);
+        }
+    }
+    if stale.is_empty() {
+        return summary;
+    }
+    const MAX_LISTED: usize = 8;
+    let more = if stale.len() > MAX_LISTED {
+        format!(" (+{} more)", stale.len() - MAX_LISTED)
+    } else {
+        String::new()
+    };
+    stale.truncate(MAX_LISTED);
+    format!(
+        "{summary}\n\n[Tool set notice]: the notes above reference tools that are \
+         no longer available in this session (removed, renamed, disabled, or \
+         hidden by the current mode): {}{more}. Do not call them; use the \
+         current tool set only.",
+        stale.join(", ")
+    )
+}
+
 /// Backoff after the `attempt`-th failed summarizer attempt (1-based).
 fn compaction_retry_backoff(attempt: usize) -> Duration {
     COMPACTION_RETRY_BACKOFF_BASE.saturating_mul(1u32 << attempt.min(4))
+}
+
+/// Whether an error string smells like an argument-validation failure
+/// (missing/ill-typed arguments, schema corrections) rather than a runtime
+/// failure — the trigger for echoing the tool's argument schema back.
+/// The patterns are deliberately narrow so runtime and content errors do
+/// not match: "must be a" (never bare "must", which content rules like
+/// `old_string must be unique` use), "missing field" (serde) / "missing '"
+/// (hand-written arms) but never bare "missing" (would catch "Missing
+/// hashline snapshot tag", a runtime staleness error), "invalid type" /
+/// "invalid `" (serde type mismatches and shape corrections) but never bare
+/// "invalid" (remote web bodies can contain it), "expected a"/"expected one
+/// of" (serde), "was provided", "failed to parse", "did not match".
+/// Self-teaching correction prompts (which already say what to do) and
+/// runtime failures (file not found, permission denied, timeouts) match
+/// none of these.
+fn looks_like_argument_error(err: &str) -> bool {
+    let lowered = err.to_ascii_lowercase();
+    [
+        "missing field",
+        "missing '",
+        "invalid type",
+        "invalid `",
+        "expected a",
+        "expected one of",
+        "must be a",
+        "was provided",
+        "failed to parse",
+        "did not match",
+    ]
+    .iter()
+    .any(|pattern| lowered.contains(pattern))
 }
 
 async fn wait_for_stop_signal(stop_signal: Option<Arc<AtomicBool>>) {
@@ -607,7 +701,7 @@ impl Harness {
         // tool description BEFORE the header is built: omitting `agent`
         // routes the call to an internal agent instead of an external CLI.
         cosh_tools.set_subagent_note(SUBAGENT_INTERNAL_NOTE);
-        Self {
+        let mut harness = Self {
             connector,
             mcp: McpManager::new(),
             mcp_config: McpConfig::default(),
@@ -667,7 +761,9 @@ impl Harness {
             mock_stream_resets: VecDeque::new(),
             #[cfg(test)]
             test_tools: Vec::new(),
-        }
+        };
+        harness.install_summary_annotator();
+        harness
     }
 
     /// Load previous conversation turns into the context manager (the single
@@ -1068,7 +1164,7 @@ impl Harness {
     /// call in the current mode: harness + cosh + MCP, minus disabled, with
     /// MCP hidden in Ask mode. Mirrors [`Self::build_extractor`] so the two
     /// stay in lockstep.
-    fn effective_tool_names(&self) -> Vec<String> {
+    pub(crate) fn effective_tool_names(&self) -> Vec<String> {
         let mut names: Vec<String> = Vec::new();
         for tool in &self.harness_tools {
             if !self.disabled_tools.contains(&tool.name) {
@@ -1348,6 +1444,20 @@ impl Harness {
             },
         });
         ok
+    }
+
+    /// Install the summary annotator on the context manager so EVERY
+    /// compaction commit path (single-shot, MapReduce contingency, legacy
+    /// split) gets the same handoff/tool-set consistency check: the closure
+    /// captures a snapshot of the current tool set — compaction runs are
+    /// short-lived and the harness re-installs the annotator on
+    /// construction, so the snapshot is fresh for every handoff.
+    fn install_summary_annotator(&mut self) {
+        let current = self.effective_tool_names();
+        self.context_manager
+            .set_summary_annotator(Box::new(move |summary| {
+                annotate_summary_tool_set(summary, &current)
+            }));
     }
 
     /// The ACTIVE model's known context window for the hierarchical MapReduce
@@ -4440,8 +4550,12 @@ impl Harness {
                 .ok_or_else(|| "no pending tool calls".to_string())?;
 
             let serde_json::Value::Object(ref args_map) = tc.arguments else {
+                let name = tc.name.clone();
                 self.tool_issuer.pop_front();
-                return Err("tool arguments must be a JSON object".to_string());
+                return Err(self.enrich_with_schema_hint(
+                    &name,
+                    "tool arguments must be a JSON object".to_string(),
+                ));
             };
 
             (tc.name.clone(), args_map.clone())
@@ -4506,7 +4620,7 @@ impl Harness {
                 Err(err) if err.starts_with("unknown cosh tool") => {}
                 Err(err) => {
                     self.tool_issuer.pop_front();
-                    return Err(err);
+                    return Err(self.enrich_with_schema_hint(&tool_name, err));
                 }
             }
         }
@@ -4532,14 +4646,79 @@ impl Harness {
             return match self.mcp.call_tool(&tool_name, args_map).await {
                 Ok(result) => Ok(crate::mcp::result_to_text(&result)),
                 Err(crate::mcp::McpError::UnknownTool(_)) => {
-                    Err(format!("no server found for tool '{tool_name}'"))
+                    Err(self.unknown_tool_message(&tool_name))
                 }
-                Err(err) => Err(err.to_string()),
+                Err(err) => Err(self.enrich_with_schema_hint(&tool_name, err.to_string())),
             };
         }
 
         self.tool_issuer.pop_front();
-        Err(format!("no server found for tool '{tool_name}'"))
+        Err(self.unknown_tool_message(&tool_name))
+    }
+
+    /// Enrich an argument-shaped rejection with the tool's expected argument
+    /// shape (a minimal example rendered from its input schema). Runtime
+    /// failures (file not found, permission denied, timeouts) pass through
+    /// untouched — echoing the schema there would be noise.
+    fn enrich_with_schema_hint(&self, tool_name: &str, err: String) -> String {
+        if !looks_like_argument_error(&err) {
+            return err;
+        }
+        match self.schema_input(tool_name) {
+            Some(schema) => format!(
+                "{err}\nExpected `{tool_name}` arguments — minimal shape: {}",
+                cosh_sdk::extract_action::schema_skeleton(&schema)
+            ),
+            None => err,
+        }
+    }
+
+    /// Rejection for a tool nothing serves. The model may be following stale
+    /// handoff context (naming a tool that no longer exists), so the reply
+    /// echoes the CURRENT available tool set — the same mode-filtered,
+    /// deduplicated set the model was registered with — instead of leaving
+    /// it to re-derive from memory (which may name removed tools).
+    fn unknown_tool_message(&self, tool_name: &str) -> String {
+        const MAX_LISTED: usize = 15;
+        let mut names = self.effective_tool_names();
+        if names.is_empty() {
+            return format!("no server found for tool '{tool_name}'");
+        }
+        let more = if names.len() > MAX_LISTED {
+            format!(" (+{} more)", names.len() - MAX_LISTED)
+        } else {
+            String::new()
+        };
+        names.truncate(MAX_LISTED);
+        format!(
+            "no server found for tool '{tool_name}'. Available tools: {}{more}",
+            names.join(", ")
+        )
+    }
+
+    /// The tool's input schema, from the same mode-filtered, disabled-aware
+    /// set the model was registered with (never a hidden tool's schema).
+    fn schema_input(&self, tool_name: &str) -> Option<serde_json::Value> {
+        if let Some(cosh) = &self.cosh_tools {
+            let schemas = match self.mode {
+                Mode::Build | Mode::Yolo => cosh.schemas_enabled(&self.disabled_tools),
+                Mode::Ask => cosh.schemas_filtered(&self.disabled_tools),
+            };
+            for schema in schemas {
+                if schema.name == tool_name {
+                    return Some(schema.input_schema);
+                }
+            }
+        }
+        if matches!(self.mode, Mode::Ask) {
+            return None;
+        }
+        self.mcp
+            .all_tools()
+            .into_iter()
+            .find(|tool| tool.name.as_ref() == tool_name)
+            .filter(|tool| !self.disabled_tools.contains(tool.name.as_ref()))
+            .map(|tool| serde_json::Value::Object((*tool.input_schema).clone()))
     }
 
     /// Run the INTERNAL sub-agent path of the merged `subagent_call` tool:

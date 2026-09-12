@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use super::super::core::Harness;
+use super::super::core::{Harness, annotate_summary_tool_set};
 use cosh_sdk::extract_action::ToolCallData;
 use rmcp::ErrorData as McpError;
 use rmcp::ServiceExt;
@@ -560,8 +560,8 @@ fn build_header_teaches_plan_workflow_but_ask_header_does_not() {
 
     // Ask mode is read-only for planning: it exposes only todo_read, so the
     // mutation workflow instructions must stay out.
-    let mut h = Harness::new(Connector::new("openai").unwrap(), ".", HashSet::new())
-        .with_mode(Mode::Ask);
+    let mut h =
+        Harness::new(Connector::new("openai").unwrap(), ".", HashSet::new()).with_mode(Mode::Ask);
     let header = h.format_header_context();
     assert!(
         !header.contains("## System: Plan"),
@@ -578,7 +578,11 @@ fn header_notifies_when_available_tool_set_changes_between_turns() {
 
     // A fresh turn never warns: there is no previous tool set to compare.
     let mut fresh = Harness::new(Connector::new("openai").unwrap(), ".", HashSet::new());
-    assert!(!fresh.format_header_context().contains("Tool Availability Changed"));
+    assert!(
+        !fresh
+            .format_header_context()
+            .contains("Tool Availability Changed")
+    );
 
     // First turn in Build mode records the full tool set in the context
     // manager, which travels with the persisted turn state.
@@ -590,10 +594,149 @@ fn header_notifies_when_available_tool_set_changes_between_turns() {
     // Second turn in Ask mode restores that state: the effective tool set
     // shrank to read-only, so the header must tell the model which tools
     // disappeared instead of letting it re-call them and fail.
-    let mut ask = Harness::new(Connector::new("openai").unwrap(), ".", HashSet::new())
-        .with_mode(Mode::Ask);
+    let mut ask =
+        Harness::new(Connector::new("openai").unwrap(), ".", HashSet::new()).with_mode(Mode::Ask);
     ask.context_manager.restore_state(&state);
     let header = ask.format_header_context();
-    assert!(header.contains("Tool Availability Changed"), "header: {header}");
+    assert!(
+        header.contains("Tool Availability Changed"),
+        "header: {header}"
+    );
     assert!(header.contains("No longer available"), "header: {header}");
+}
+
+// ── schema echo on rejection ──────────────────────────────────────────────
+
+#[tokio::test]
+async fn argument_rejection_echoes_the_expected_schema_shape() {
+    use cosh_sdk::connector::Connector;
+
+    let mut h = Harness::new(Connector::new("openai").unwrap(), ".", HashSet::new());
+    h.push_tool_call(ToolCallData {
+        id: String::new(),
+        name: "fs_write".into(),
+        arguments: json!({}),
+        thought_signature: String::new(),
+    });
+    let err = h.dispatch_next().await.unwrap_err();
+    assert!(
+        err.contains("expected a sequence"),
+        "serde error surfaces: {err}"
+    );
+    assert!(
+        err.contains("Expected `fs_write` arguments — minimal shape:"),
+        "rejection must teach the shape: {err}"
+    );
+    assert!(
+        err.contains("<array of"),
+        "shape renders nested schemas: {err}"
+    );
+}
+
+#[tokio::test]
+async fn runtime_failure_is_not_schema_enriched() {
+    use cosh_sdk::connector::Connector;
+
+    let mut h = Harness::new(Connector::new("openai").unwrap(), ".", HashSet::new());
+    h.push_tool_call(ToolCallData {
+        id: String::new(),
+        name: "fs_edit".into(),
+        arguments: json!({
+            "targets": [{
+                "path": "/nonexistent/cosh_test_missing.rs",
+                "file_hash": "0000",
+                "ops": "replace 1:\n+x"
+            }]
+        }),
+        thought_signature: String::new(),
+    });
+    let err = h.dispatch_next().await.unwrap_err();
+    assert!(
+        !err.contains("minimal shape"),
+        "runtime failures must not echo schemas: {err}"
+    );
+}
+
+#[tokio::test]
+async fn unknown_tool_error_echoes_the_available_tool_set() {
+    let mut h = make_harness();
+    let server_handle = attach_ok(&mut h, "test-server", "known.tool").await;
+
+    // A stale handoff primes a call to a tool that no longer exists; the
+    // rejection must show the CURRENT tool set, not leave the model guessing.
+    h.push_tool_call(ToolCallData {
+        id: String::new(),
+        name: "plan_todo_edit".into(),
+        arguments: json!({}),
+        thought_signature: String::new(),
+    });
+    let err = h.dispatch_next().await.unwrap_err();
+    assert!(err.contains("no server found for tool"), "got: {err}");
+    assert!(err.contains("Available tools:"), "got: {err}");
+    assert!(
+        err.contains("known.tool"),
+        "registered MCP tools are listed: {err}"
+    );
+
+    drop(h);
+    let _ = server_handle.await;
+}
+
+// ── handoff/tool-set consistency check ────────────────────────────────────
+
+#[test]
+fn handoff_summary_referencing_removed_tool_gets_a_notice() {
+    use cosh_sdk::connector::Connector;
+
+    let h = Harness::new(Connector::new("openai").unwrap(), ".", HashSet::new());
+    let summary = "## Next Move\n1. Call `plan_removed_cross_off` to cross off the task.";
+    let annotated = annotate_summary_tool_set(summary, &h.effective_tool_names());
+    assert!(
+        annotated.contains("[Tool set notice]") && annotated.contains("plan_removed_cross_off"),
+        "removed-tool reference must be flagged: {annotated}"
+    );
+    assert!(
+        annotated.starts_with(summary),
+        "the summary itself stays untouched"
+    );
+}
+
+#[test]
+fn handoff_summary_referencing_current_tools_stays_untouched() {
+    use cosh_sdk::connector::Connector;
+
+    let h = Harness::new(Connector::new("openai").unwrap(), ".", HashSet::new());
+    let summary = "## Next Move\n1. Use `fs_edit` with the ops DSL, then `bash_run` cargo test. \
+                   The field `file_hash` anchors the edit. See plan_todo_edit for the tracker.";
+    let annotated = annotate_summary_tool_set(summary, &h.effective_tool_names());
+    assert_eq!(
+        annotated, summary,
+        "current tools and argument fields must never be flagged"
+    );
+}
+
+#[test]
+fn handoff_notice_lists_each_stale_tool_once() {
+    use cosh_sdk::connector::Connector;
+
+    let h = Harness::new(Connector::new("openai").unwrap(), ".", HashSet::new());
+    let summary = "plan_todo_removed_helper then plan_old_cross_off, again plan_todo_removed_helper. \
+                   plan_todo_edit still exists and must not appear in the notice.";
+    let annotated = annotate_summary_tool_set(summary, &h.effective_tool_names());
+    let notice = annotated
+        .split("[Tool set notice]")
+        .nth(1)
+        .unwrap_or_default();
+    assert!(
+        !notice.is_empty(),
+        "stale tools must be flagged: {annotated}"
+    );
+    assert!(
+        notice.contains("plan_todo_removed_helper, plan_old_cross_off"),
+        "stable order, deduplicated: {notice}"
+    );
+    assert!(
+        !notice.contains("plan_todo_edit"),
+        "current tools are never listed as stale: {notice}"
+    );
 }

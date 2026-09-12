@@ -368,6 +368,7 @@ pub async fn ast_edit(metadata: FsMetadata, tg: FsAstEdit) -> Result<Vec<EditRes
                 first_changed_line: outcome.first_changed_line,
                 warnings: outcome.warnings,
                 lsp_notes: None,
+                dry_run: None,
                 diff: outcome.diff,
             });
         }
@@ -384,6 +385,7 @@ pub async fn ast_edit(metadata: FsMetadata, tg: FsAstEdit) -> Result<Vec<EditRes
                 first_changed_line: None,
                 warnings: vec![note],
                 lsp_notes: None,
+                dry_run: None,
                 diff: None,
             }),
         }

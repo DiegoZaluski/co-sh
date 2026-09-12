@@ -27,6 +27,7 @@ pub use map_reduce::{
 pub use split::{SplitChunkRequest, SplitState};
 use summarize::{SUMMARIZER_SYSTEM, build_llm_prompt, serialize_item};
 #[cfg(test)]
+#[cfg(test)]
 mod test;
 mod todo_ctxt;
 
@@ -319,6 +320,11 @@ pub struct LlmCompactionRequest {
     pub prompt: String,
 }
 
+/// The handoff/tool-set consistency hook a harness installs on its context
+/// manager: rewrites a compaction summary before it is committed (see
+/// `annotate_summary_tool_set` in the harness core).
+type SummaryAnnotator = dyn Fn(&str) -> String + Send + Sync;
+
 /// Orchestrates the single-owner conversation timeline: the useless tool-chain
 /// sweep, the `Closure` promotion of each finished agent loop, and the 80%
 /// budget trigger. The LLM compaction is requested via
@@ -388,6 +394,12 @@ pub struct ContextManager {
     correction_block_tokens: usize,
     /// Transient rehydration signal, never authoritative or persisted state.
     todo_restore_pending: bool,
+    /// Handoff/tool-set consistency check: applied to every summary at
+    /// commit time (single-shot, MapReduce, and legacy split paths all
+    /// funnel through [`Self::commit_summary_to_source`]). The harness owns
+    /// the tool-set knowledge and re-installs a closure capturing a fresh
+    /// snapshot; `None` leaves summaries untouched.
+    summary_annotator: Option<Box<SummaryAnnotator>>,
     /// Running token total of `items` (excluding the TODO block), kept in sync
     /// by the few mutation primitives (`push_item`, `hide_at`,
     /// `apply_llm_summary`, `recompute_cached_tokens`) so `total_tokens()` is
@@ -480,6 +492,7 @@ impl ContextManager {
             correction_block: None,
             correction_block_tokens: 0,
             todo_restore_pending: false,
+            summary_annotator: None,
             cached_items_tokens: 0,
             manual_compaction: false,
             last_tool_set: None,
@@ -1271,8 +1284,19 @@ impl ContextManager {
         true
     }
 
+    /// Install the summary annotator used by every compaction commit path.
+    /// See the field docs for the ownership split (harness owns the tool
+    /// set; the manager owns the single commit funnel).
+    pub fn set_summary_annotator(&mut self, annotator: Box<dyn Fn(&str) -> String + Send + Sync>) {
+        self.summary_annotator = Some(annotator);
+    }
+
     fn commit_summary_to_source(&mut self, summary: String, source: &[usize]) {
         let direct_ids: Vec<u64> = source.iter().map(|&idx| self.items[idx].id()).collect();
+        let summary = match &self.summary_annotator {
+            Some(annotate) => annotate(&summary),
+            None => summary,
+        };
         let mut all_ranges = coalesce_ranges(&direct_ids);
         for &idx in source {
             if let ContextItem::Compaction {

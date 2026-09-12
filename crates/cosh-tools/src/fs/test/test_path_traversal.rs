@@ -312,6 +312,7 @@ async fn edit_gap_symlink_escape() {
                 file_hash: hash,
                 ops: "replace 1..1:\n+EDITED".to_string(),
             }],
+            dry_run: false,
         },
     )
     .await;
@@ -358,6 +359,7 @@ async fn edit_traversal_via_dotdot_resolves_inside_root_and_succeeds() {
                 file_hash: hash,
                 ops: "replace 1..1:\n+EDITED".to_string(),
             }],
+            dry_run: false,
         },
     )
     .await;
@@ -393,6 +395,7 @@ async fn edit_traversal_escape_via_dotdot_is_denied() {
                 file_hash: "".to_string(),
                 ops: "replace 1..1:\n+EDITED".to_string(),
             }],
+            dry_run: false,
         },
     )
     .await;

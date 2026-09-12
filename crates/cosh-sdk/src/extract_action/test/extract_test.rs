@@ -777,7 +777,8 @@ fn batch_failure_truncates_long_payloads() {
     let long_value = "x".repeat(1000);
     // `path` is the wrong type, so the call fails schema validation while the
     // offending raw payload carries a very long field.
-    let text = format!(r#"{{"name": "fs.read", "arguments": {{"path": 123, "extra": "{long_value}"}}}}"#);
+    let text =
+        format!(r#"{{"name": "fs.read", "arguments": {{"path": 123, "extra": "{long_value}"}}}}"#);
     let result = ex.extract_batch(&text);
     match &result.items[0] {
         Item::Text(t) => {
@@ -790,4 +791,139 @@ fn batch_failure_truncates_long_payloads() {
         }
         other => panic!("expected Text, got {other:?}"),
     }
+}
+
+#[test]
+fn schema_mismatch_failure_echoes_the_expected_argument_shape() {
+    let mut ex = make_extractor();
+    let call = NativeToolCall {
+        id: "call_1".into(),
+        name: "fs.read".into(),
+        arguments: r#"{}"#.into(),
+        thought_signature: String::new(),
+    };
+    match ex.register_native_call(&call) {
+        StreamAction::Text(t) => {
+            assert!(
+                t.contains("Expected `fs.read` arguments — minimal shape: { path: <string> }"),
+                "rejection must teach the shape, got: {t:?}"
+            );
+        }
+        other => panic!("expected failure text, got {other:?}"),
+    }
+}
+
+#[test]
+fn unknown_tool_failure_lists_the_available_tools() {
+    let mut ex = make_extractor();
+    let call = NativeToolCall {
+        id: "call_1".into(),
+        name: "plan_todo_edit".into(),
+        arguments: r#"{}"#.into(),
+        thought_signature: String::new(),
+    };
+    match ex.register_native_call(&call) {
+        StreamAction::Text(t) => {
+            assert!(
+                t.contains("Available tools:") && t.contains("expand_namespace"),
+                "unknown-tool rejection must echo the registered tool set, got: {t:?}"
+            );
+        }
+        other => panic!("expected failure text, got {other:?}"),
+    }
+}
+
+#[test]
+fn skeleton_marks_optional_fields_and_caps_width() {
+    use crate::extract_action::schema_skeleton;
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "a": {"type": "string"},
+            "b": {"type": "integer"},
+            "c": {"type": "boolean"}
+        },
+        "required": ["a"]
+    });
+    assert_eq!(
+        schema_skeleton(&schema),
+        "{ a: <string>, b?: <number>, c?: <bool> }"
+    );
+
+    let enum_schema = serde_json::json!({
+        "type": "object",
+        "properties": {"mode": {"type": "string", "enum": ["fast", "slow"]}},
+        "required": ["mode"]
+    });
+    assert_eq!(schema_skeleton(&enum_schema), "{ mode: <fast|slow> }");
+
+    let deep = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "targets": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"]
+                }
+            }
+        },
+        "required": ["targets"]
+    });
+    assert_eq!(
+        schema_skeleton(&deep),
+        "{ targets: <array of { path: <string> }> }"
+    );
+}
+
+#[test]
+fn oneof_schemas_render_as_a_union_not_an_empty_object() {
+    use crate::extract_action::schema_skeleton;
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "object",
+                "oneOf": [
+                    {"type": "object", "properties": {"kind": {"type": "string", "const": "A"}}, "required": ["kind"]},
+                    {"type": "object", "properties": {"kind": {"type": "string", "const": "B"}}, "required": ["kind"]}
+                ]
+            }
+        },
+        "required": ["action"]
+    });
+    let rendered = schema_skeleton(&schema);
+    assert!(
+        rendered.contains("kind: <A>") || rendered.contains("kind: <B>"),
+        "union branches must be rendered, got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("{  }"),
+        "no empty-object degradation: {rendered}"
+    );
+}
+
+#[test]
+fn skeleton_is_stable_on_degenerate_schemas() {
+    use crate::extract_action::schema_skeleton;
+    assert_eq!(
+        schema_skeleton(&serde_json::json!({"type": "object", "properties": {}})),
+        "{}"
+    );
+    assert_eq!(
+        schema_skeleton(&serde_json::json!({"type": "array"})),
+        "<array>"
+    );
+    assert_eq!(
+        schema_skeleton(&serde_json::json!({"type": "integer", "enum": [1, 2]})),
+        "<number>"
+    );
+    assert_eq!(schema_skeleton(&serde_json::json!({"oneOf": []})), "<any>");
+    let deep = serde_json::json!({
+        "type": "object",
+        "properties": {"a": {"type": "object", "properties": {"b": {"type": "object", "properties": {"c": {"type": "object", "properties": {"d": {"type": "string"}}}}}}}},
+        "required": ["a"]
+    });
+    assert!(schema_skeleton(&deep).contains("<...>"), "depth is capped");
 }

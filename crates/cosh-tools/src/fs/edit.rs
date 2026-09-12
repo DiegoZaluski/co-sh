@@ -1,9 +1,9 @@
 use cosh_sdk::hashline::{
     diff::structured_patch,
-    format::HL_FILE_PREFIX,
+    format::{HL_FILE_PREFIX, compute_file_hash, format_hashline_header},
     fs::DiskFilesystem,
     input::Patch,
-    patcher::Patcher,
+    patcher::{Patcher, merge_warnings},
     types::{BlockResolver, BlockResolverRequest, BlockSpan, SplitOptions},
 };
 use cosh_sdk::rollback;
@@ -13,6 +13,11 @@ use crate::util::path_guard::assert_editable_file;
 use serde::Serialize;
 use std::fmt;
 use std::path::Path;
+
+/// Marker appended to a dry-run result's warnings so the model cannot
+/// mistake a preview for an applied edit.
+const DRY_RUN_WARNING: &str = "Dry run: nothing was written — reissue without \
+     `dry_run` to apply this exact edit.";
 
 #[derive(Debug, Serialize)]
 pub struct EditResult {
@@ -28,6 +33,10 @@ pub struct EditResult {
     /// nothing was found.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lsp_notes: Option<super::types::LspNotes>,
+    /// `Some(true)` when the result came from a preview (`dry_run`) — the
+    /// edit was validated in memory but NOT written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
 }
 
 /// Failure of a multi-target [`edit`] batch.
@@ -105,7 +114,7 @@ pub async fn edit(metadata: FsMetadata, tg: FsEdit) -> Result<Vec<EditResult>, E
     let mut results = Vec::new();
 
     for (i, target) in tg.targets.iter().enumerate() {
-        match edit_target(target.clone(), &metadata).await {
+        match edit_target(target.clone(), &metadata, None, tg.dry_run).await {
             Ok(result) => results.push(result),
             Err(cause) => {
                 let skipped = tg.targets[i + 1..].iter().map(|t| t.path.clone()).collect();
@@ -122,7 +131,12 @@ pub async fn edit(metadata: FsMetadata, tg: FsEdit) -> Result<Vec<EditResult>, E
     Ok(results)
 }
 
-async fn edit_target(target: EditTarget, metadata: &FsMetadata) -> Result<EditResult, String> {
+pub(crate) async fn edit_target(
+    target: EditTarget,
+    metadata: &FsMetadata,
+    expected_after: Option<&str>,
+    dry_run: bool,
+) -> Result<EditResult, String> {
     let validated_path = metadata.fs_guard(&target.path)?;
 
     let path_str = validated_path.to_string_lossy().to_string();
@@ -158,6 +172,56 @@ async fn edit_target(target: EditTarget, metadata: &FsMetadata) -> Result<EditRe
         .await
         .map_err(|e| e.to_string())?;
 
+    // Content-anchored callers pass the exact post-edit text they expect.
+    // The hashline engine's boundary-echo and indent-repair heuristics may
+    // legitimately rewrite a hand-authored `ops` payload, but for an exact
+    // replacement they would silently corrupt the contract — reject instead,
+    // before anything is written (prepare is in-memory only).
+    if let Some(expected) = expected_after
+        && prepared.apply_result.text != expected
+    {
+        return Err(format!(
+            "content replace for `{}` deviated from the exact replacement: the \
+             hashline engine's boundary/indent repair altered the payload. \
+             Re-read the touched region and reissue with the `targets` engine \
+             if the repaired form is acceptable.",
+            target.path
+        ));
+    }
+
+    // Dry run: stop after the in-memory apply. The model gets the diff and
+    // the syntax-probe verdict (the applier pushes `edit_broke_parse_warning`
+    // into the warnings when the result no longer parses) without anything
+    // touching the disk — no commit, no rollback record, no LSP pull. The
+    // warnings merge mirrors `commit` (parse warnings + apply warnings) so
+    // the preview reports exactly what the real edit would.
+    if dry_run {
+        let after = &prepared.apply_result.text;
+        let mut warnings = merge_warnings(&[
+            Some(&prepared.parse_warnings),
+            Some(&prepared.apply_result.warnings),
+        ]);
+        warnings.push(DRY_RUN_WARNING.to_string());
+        let hash = compute_file_hash(after);
+        return Ok(EditResult {
+            path: target.path.clone(),
+            file_hash: hash.clone(),
+            header: format_hashline_header(&target.path, &hash),
+            first_changed_line: prepared.apply_result.first_changed_line,
+            warnings,
+            lsp_notes: None,
+            dry_run: Some(true),
+            diff: if *after == prepared.normalized {
+                None
+            } else {
+                Some(
+                    structured_patch(&prepared.normalized, after, 3)
+                        .to_unified_diff(&target.path, &target.path),
+                )
+            },
+        });
+    }
+
     let _ = rollback::record(&path_str, &prepared.normalized);
 
     let section = patcher.commit(prepared).await.map_err(|e| e.to_string())?;
@@ -180,6 +244,7 @@ async fn edit_target(target: EditTarget, metadata: &FsMetadata) -> Result<EditRe
         first_changed_line: section.first_changed_line,
         warnings: section.warnings,
         lsp_notes: None,
+        dry_run: None,
         diff,
     })
 }

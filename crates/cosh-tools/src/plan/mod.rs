@@ -69,7 +69,20 @@ impl Plan {
                     "properties": {
                         "action": {
                             "type": "object",
-                            "description": "The mutation action to perform",
+                            "description": concat!(
+                                "The mutation action to perform — a plain JSON object ",
+                                "(one action per call). Example — create the full plan in ",
+                                "one ReplaceList call:\n",
+                                "{\"action\": {\"type\": \"ReplaceList\", \"groups\": [",
+                                "{\"title\": \"Setup\", \"items\": [",
+                                "{\"description\": \"install deps\", \"key\": \"deps\"}, ",
+                                "{\"description\": \"write tests\", \"depends_on\": [\"deps\"]}]}]}}\n",
+                                "Other actions are smaller: ",
+                                "{\"action\": {\"type\": \"Add\", \"group\": \"Setup\", ",
+                                "\"description\": \"install deps\"}}, ",
+                                "{\"action\": {\"type\": \"Start\", \"id\": \"task-2\"}}, ",
+                                "{\"action\": {\"type\": \"Clean\", \"keep_pending\": false}}."
+                            ),
                             "oneOf": [
                                 {
                                     "type": "object",

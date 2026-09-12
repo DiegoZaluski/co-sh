@@ -30,6 +30,7 @@ async fn edit_replaces_single_line_in_file() {
                 file_hash,
                 ops: "replace 2..2:\n+REPLACED".to_string(),
             }],
+            dry_run: false,
         },
     )
     .await;
@@ -57,6 +58,7 @@ async fn edit_replaces_multi_line_range() {
                 file_hash,
                 ops: "replace 2..4:\n+X\n+Y".to_string(),
             }],
+            dry_run: false,
         },
     )
     .await;
@@ -83,6 +85,7 @@ async fn edit_inserts_before_and_after_anchor() {
                 file_hash,
                 ops: ops.to_string(),
             }],
+            dry_run: false,
         },
     )
     .await;
@@ -109,6 +112,7 @@ async fn edit_inserts_at_head_and_tail() {
                 file_hash,
                 ops: ops.to_string(),
             }],
+            dry_run: false,
         },
     )
     .await;
@@ -133,6 +137,7 @@ async fn edit_deletes_range_of_lines() {
                 file_hash,
                 ops: "delete 2..3".to_string(),
             }],
+            dry_run: false,
         },
     )
     .await;
@@ -157,6 +162,7 @@ async fn edit_replaces_syntactic_block_in_rust_file() {
                 file_hash,
                 ops: "replace block 1:\n+fn main() {\n+    println!(\"hello\");\n+}".to_string(),
             }],
+            dry_run: false,
         },
     )
     .await;
@@ -191,6 +197,7 @@ async fn edit_processes_multiple_files_in_single_call() {
                     ops: "replace 1..1:\n+BETA".to_string(),
                 },
             ],
+            dry_run: false,
         },
     )
     .await;
@@ -217,6 +224,7 @@ async fn edit_returns_error_on_hash_mismatch() {
                 file_hash: "BEEF".to_string(),
                 ops: "replace 1..1:\n+changed".to_string(),
             }],
+            dry_run: false,
         },
     )
     .await;
@@ -246,6 +254,7 @@ async fn edit_refuses_auto_generated_file() {
                 file_hash,
                 ops: "replace 2..2:\n+fn main() { println!(\"hi\"); }".to_string(),
             }],
+            dry_run: false,
         },
     )
     .await;
@@ -273,6 +282,7 @@ async fn edit_returns_error_when_file_not_found() {
                 file_hash: "BEEF".to_string(),
                 ops: "replace 1..1:\n+anything".to_string(),
             }],
+            dry_run: false,
         },
     )
     .await;
@@ -315,6 +325,7 @@ async fn edit_stops_at_failed_target_keeps_applied_and_skips_the_rest() {
                     ops: "replace 1..1:\n+GAMMA".to_string(),
                 },
             ],
+            dry_run: false,
         },
     )
     .await;
@@ -386,6 +397,7 @@ async fn edit_first_target_failure_applies_nothing_and_skips_all_rest() {
                     ops: "replace 1..1:\n+GAMMA".to_string(),
                 },
             ],
+            dry_run: false,
         },
     )
     .await;
@@ -443,6 +455,7 @@ async fn edit_last_target_failure_keeps_everything_before_it() {
                     ops: "replace 1..1:\n+GAMMA".to_string(),
                 },
             ],
+            dry_run: false,
         },
     )
     .await;
