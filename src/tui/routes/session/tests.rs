@@ -1187,7 +1187,6 @@ fn test_bash_output_collapse_shrinks_without_scroll_gap() {
     let mut buf = Buffer::empty(area);
 
     view.render(&mut buf, area, &state, &theme, &config, 0.016);
-    let collapsed_scroll_y = view.scroll_y;
     let text_h = view.part_heights_cache[0][0];
     let bash_top = area.y + text_h;
     let expand_click = MouseEvent::new(
@@ -1201,8 +1200,16 @@ fn test_bash_output_collapse_shrinks_without_scroll_gap() {
     view.render(&mut buf, area, &state, &theme, &config, 0.016);
 
     assert!(view.tool_state.is_expanded("bash-1"));
-    assert_eq!(view.scroll_y, collapsed_scroll_y);
-    assert!(view.has_manual_scroll);
+    // Sticky-bottom is preserved through the toggle (the old behavior
+    // poisoned `has_manual_scroll` here and stranded the view mid-history):
+    // the viewport must follow the grown content to its new bottom.
+    let expanded_max_scroll = (view.actual_total_height - view.visible_height).max(0);
+    assert_eq!(
+        view.scroll_y, expanded_max_scroll,
+        "sticky bottom must follow the expanded height"
+    );
+    assert!(!view.has_manual_scroll);
+    assert!(view.is_sticky_bottom);
 
     view.scroll_to_bottom();
     let expanded_scroll_y = view.scroll_y;
@@ -1222,6 +1229,280 @@ fn test_bash_output_collapse_shrinks_without_scroll_gap() {
     assert!(view.scroll_y < expanded_scroll_y);
     assert!(view.scroll_y <= (view.actual_total_height - view.visible_height).max(0));
     assert!(!buffer_text(&buf).contains("line 119"));
+}
+
+// ── Regression tests: per-box expansion isolation + viewport stability ────
+
+/// Two boxes of the same tool type in one session must toggle independently.
+/// Regression: live parts used to be created without a `tool_call_id`, so
+/// every box of a tool type fell back to one shared expansion key and
+/// expanded/collapsed together.
+#[test]
+fn test_expansion_state_isolated_between_two_bash_boxes() {
+    use cosh_tui::core::types::{MouseButton, MouseEvent, MouseEventType, MouseModifiers};
+
+    let msg = Message {
+        id: "msg-two-bash".into(),
+        role: MessageRole::Assistant,
+        parts: vec![
+            bash_part("bash-a", 30, ToolStatus::Completed),
+            bash_part("bash-b", 30, ToolStatus::Completed),
+        ],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let state = test_state(msg);
+    let mut view = SessionView::new();
+    let theme = test_theme();
+    let config = test_config();
+
+    let area = Rect::new(0, 0, 80, 60);
+    let mut buf = Buffer::empty(area);
+
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+    assert!(!view.tool_state.is_expanded("bash-a"));
+    assert!(!view.tool_state.is_expanded("bash-b"));
+
+    // Click the first box.
+    let click_a = MouseEvent::new(
+        MouseEventType::Up,
+        MouseButton::Left,
+        area.x + 10,
+        area.y + 2,
+        MouseModifiers::none(),
+    );
+    assert!(view.handle_mouse(&click_a, area, &state, &config));
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+    assert!(view.tool_state.is_expanded("bash-a"));
+    assert!(
+        !view.tool_state.is_expanded("bash-b"),
+        "expanding box A must NOT expand box B (shared-key regression)"
+    );
+
+    // Click the second box (its top sits right below the now-expanded first).
+    let b_top = area.y + view.part_heights_cache[0][0];
+    let click_b = MouseEvent::new(
+        MouseEventType::Up,
+        MouseButton::Left,
+        area.x + 10,
+        b_top + 2,
+        MouseModifiers::none(),
+    );
+    assert!(view.handle_mouse(&click_b, area, &state, &config));
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+    assert!(
+        view.tool_state.is_expanded("bash-a"),
+        "box A must keep its state when box B is toggled"
+    );
+    assert!(view.tool_state.is_expanded("bash-b"));
+}
+
+/// Same isolation guarantee across tool types: toggling a read box must not
+/// touch a glob box in the same session, and vice versa.
+#[test]
+fn test_expansion_state_isolated_across_tool_types() {
+    use cosh_tui::core::types::{MouseButton, MouseEvent, MouseEventType, MouseModifiers};
+
+    let msg = Message {
+        id: "msg-read-glob".into(),
+        role: MessageRole::Assistant,
+        parts: vec![
+            read_part("read-1", 30, ToolStatus::Completed),
+            glob_part("glob-1", 30, ToolStatus::Completed),
+        ],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let state = test_state(msg);
+    let mut view = SessionView::new();
+    let theme = test_theme();
+    let config = test_config();
+
+    let area = Rect::new(0, 0, 80, 60);
+    let mut buf = Buffer::empty(area);
+
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+    // Toggle the read box.
+    let click_read = MouseEvent::new(
+        MouseEventType::Up,
+        MouseButton::Left,
+        area.x + 10,
+        area.y + 2,
+        MouseModifiers::none(),
+    );
+    assert!(view.handle_mouse(&click_read, area, &state, &config));
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+    assert!(view.tool_state.is_expanded("read-1"));
+    assert!(
+        !view.tool_state.is_expanded("glob-1"),
+        "expanding the read box must NOT expand the glob box"
+    );
+
+    // Toggle the glob box below it.
+    let glob_top = area.y + view.part_heights_cache[0][0];
+    let click_glob = MouseEvent::new(
+        MouseEventType::Up,
+        MouseButton::Left,
+        area.x + 10,
+        glob_top + 2,
+        MouseModifiers::none(),
+    );
+    assert!(view.handle_mouse(&click_glob, area, &state, &config));
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+    assert!(
+        view.tool_state.is_expanded("read-1"),
+        "read box must keep its state when the glob box is toggled"
+    );
+    assert!(view.tool_state.is_expanded("glob-1"));
+}
+
+/// Collapse→expand cycles must not strand the viewport: a sticky-bottom user
+/// stays glued through BOTH directions, so a full cycle restores the exact
+/// scroll position. Regression: the old toggle path poisoned
+/// `has_manual_scroll` and left the view mid-history after one toggle.
+#[test]
+fn test_sticky_expand_collapse_cycle_restores_scroll() {
+    use cosh_tui::core::types::{MouseButton, MouseEvent, MouseEventType, MouseModifiers};
+
+    let msg = Message {
+        id: "msg-cycle".into(),
+        role: MessageRole::Assistant,
+        parts: vec![bash_part("bash-1", 120, ToolStatus::Completed)],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let mut state = test_state(msg);
+    state.status = SessionStatus::Idle;
+    let mut view = SessionView::new();
+    let theme = test_theme();
+    let config = test_config();
+
+    let area = Rect::new(0, 0, 80, 30);
+    let mut buf = Buffer::empty(area);
+
+    // Collapsed: the preview fits, viewport at the top.
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+    // Expand → sticky bottom follows the grown content.
+    let expand_click = MouseEvent::new(
+        MouseEventType::Up,
+        MouseButton::Left,
+        area.x + 10,
+        area.y + 2,
+        MouseModifiers::none(),
+    );
+    assert!(view.handle_mouse(&expand_click, area, &state, &config));
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+    assert!(view.tool_state.is_expanded("bash-1"));
+    let expanded_scroll = view.scroll_y;
+    assert!(
+        expanded_scroll > 0,
+        "expanded content must overflow the viewport"
+    );
+    assert!(view.is_sticky_bottom, "expand must keep sticky bottom");
+    assert!(
+        !view.has_manual_scroll,
+        "expand must not flag manual scroll"
+    );
+
+    // Collapse → sticky bottom follows the shrunk content back to the top.
+    let collapse_click = MouseEvent::new(
+        MouseEventType::Up,
+        MouseButton::Left,
+        area.x + 10,
+        area.y + 5,
+        MouseModifiers::none(),
+    );
+    assert!(view.handle_mouse(&collapse_click, area, &state, &config));
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+    assert!(!view.tool_state.is_expanded("bash-1"));
+    assert_eq!(
+        view.scroll_y, 0,
+        "collapse must return the sticky viewport to the collapsed top"
+    );
+    assert!(view.is_sticky_bottom);
+    assert!(!view.has_manual_scroll);
+
+    // Expand again → the cycle must restore the exact pre-collapse position.
+    assert!(view.handle_mouse(&expand_click, area, &state, &config));
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+    assert_eq!(
+        view.scroll_y, expanded_scroll,
+        "expand→collapse→expand must restore the exact scroll position"
+    );
+    assert!(view.is_sticky_bottom);
+    assert!(!view.has_manual_scroll);
+}
+
+/// A manually-scrolled user must be untouched by a toggle below the viewport
+/// top: raw `scroll_y` anchors the viewport because content above the clicked
+/// box is unmoved (only the clicked box's height changes).
+#[test]
+fn test_manual_scroll_viewport_anchored_while_toggling() {
+    use cosh_tui::core::types::{MouseButton, MouseEvent, MouseEventType, MouseModifiers};
+
+    let msg = Message {
+        id: "msg-manual".into(),
+        role: MessageRole::Assistant,
+        parts: vec![
+            Part::Text(TextPart {
+                text: "intro".into(),
+                synthetic: false,
+            }),
+            bash_part("bash-1", 120, ToolStatus::Completed),
+        ],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let mut state = test_state(msg);
+    state.status = SessionStatus::Idle;
+    let mut view = SessionView::new();
+    let theme = test_theme();
+    let config = test_config();
+
+    let area = Rect::new(0, 0, 80, 30);
+    let mut buf = Buffer::empty(area);
+
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+    // Simulate a user who scrolled up manually away from the bottom.
+    view.scroll_y = 5;
+    view.has_manual_scroll = true;
+    view.is_sticky_bottom = false;
+
+    // Click inside the bash box (content rows text_h..34 are on screen).
+    let text_h = view.part_heights_cache[0][0];
+    let click = MouseEvent::new(
+        MouseEventType::Up,
+        MouseButton::Left,
+        area.x + 10,
+        text_h + 4,
+        MouseModifiers::none(),
+    );
+    assert!(view.handle_mouse(&click, area, &state, &config));
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+    assert!(view.tool_state.is_expanded("bash-1"));
+    assert_eq!(
+        view.scroll_y, 5,
+        "a manual scroller's viewport must not move when a box toggles"
+    );
+    assert!(
+        view.has_manual_scroll,
+        "toggling a box must not re-engage sticky mode for a manual scroller"
+    );
 }
 
 #[test]
@@ -4889,7 +5170,10 @@ fn proof_write_estimate_vs_render_mismatch() {
     let max_w: u16 = 80;
 
     // Conteúdo longo no INPUT (o que o render_write desenha), output curto.
-    let content: String = (0..15).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+    let content: String = (0..15)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     let part = ToolPart {
         tool: "fs_write".into(),
         input: serde_json::json!({"filePath": "src/main.rs", "content": content}),
@@ -4929,7 +5213,9 @@ fn proof_write_estimate_vs_render_mismatch() {
     let is_block = SessionView::tool_is_block(&part);
     let actual = line_h + if is_block { 2 } else { 0 };
 
-    eprintln!("[PROOF] write est={est} actual(line_h+margin)={actual} is_block={is_block} line_h={line_h}");
+    eprintln!(
+        "[PROOF] write est={est} actual(line_h+margin)={actual} is_block={is_block} line_h={line_h}"
+    );
     assert_eq!(
         est, actual,
         "MISMATCH PROVADO: estimate ({est}) != render real ({actual}). \
@@ -4948,7 +5234,10 @@ fn write_edit_estimate_matches_render_in_all_states() {
     let config = test_config();
     let max_w: u16 = 80;
 
-    let content: String = (0..15).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+    let content: String = (0..15)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     let mk_write = |output: Option<String>, status: ToolStatus| ToolPart {
         tool: "fs_write".into(),
         input: serde_json::json!({"filePath": "src/main.rs", "content": content.clone()}),
@@ -5026,7 +5315,12 @@ fn write_edit_estimate_matches_render_in_all_states() {
             };
             dispatch_tool(&mut ctx, &part, 0);
         }
-        let actual = line_h + if SessionView::tool_is_block(&part) { 2 } else { 0 };
+        let actual = line_h
+            + if SessionView::tool_is_block(&part) {
+                2
+            } else {
+                0
+            };
         assert_eq!(
             est, actual,
             "case {name}: estimate ({est}) != render real ({actual})"
