@@ -1,6 +1,6 @@
 # `todo_write` — mutating the list
 
-`todo_write` is the workhorse: five mutation actions under one function. All
+`todo_write` is the workhorse: six mutation actions under one function. All
 of them follow the same shape — take the current [`TodoList`](types.md#todolist),
 apply the action, and return the full new list plus any nags:
 
@@ -17,6 +17,40 @@ rejections](plan.md#1-nags-are-advice-errors-are-rejections)).
 The [`Plan`](plan.md#the-plan-wrapper) wrapper method
 `Plan::todo_write(&mut self, action)` applies the returned list to its
 internal state automatically.
+
+## `ReplaceList` — create the whole plan in one call
+
+```rust,ignore
+TodoWriteAction::ReplaceList {
+    groups: vec![ReplaceGroup {
+        title: "Database".into(),
+        items: vec![
+            ReplaceItem { key: Some("schema".into()), description: "Design schema".into(), depends_on: None },
+            ReplaceItem { key: None, description: "Write migrations".into(), depends_on: Some(vec!["schema".into()]) },
+        ],
+    }],
+}
+```
+
+Replaces the entire list with the given groups — the canonical way to create
+a complete plan in a single call instead of adding tasks one at a time.
+
+- The current list is discarded; the replacement gets `task-1..N` ids in
+  listed order across all groups, all `Pending`, `tests_verified: false`.
+- If the previous list was not empty, the output nags
+  `"Replaced the existing TODO list (N tasks). Previous tasks are gone."`
+- The optional per-item `key` is an alias other tasks **in the same call**
+  may reference in `depends_on`; the tool resolves each alias to the real
+  `task-N` id. Keys must not look like task ids (`task-<number>`): they are
+  rejected to avoid silently shadowing the ids assigned by the same call.
+
+**Errors:** an empty group list (`"ReplaceList requires at least one group..."`),
+an empty description anywhere, or a duplicate `key`
+(`"Duplicate key 'x' in ReplaceList; keys must be unique."`).
+
+**Nags:** unknown dependency references (neither a sibling key nor an existing
+id), self-references, and circular dependency chains are reported but the
+list is still created.
 
 ---
 

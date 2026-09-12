@@ -458,7 +458,6 @@ pub(crate) fn tool_inline_text(part: &ToolPart) -> String {
                     "plan_todo_edit" => "\u{270F} TODO Edit".to_string(),
                     "plan_todo_cross_off" => "\u{2713} TODO Cross Off".to_string(),
                     "plan_todo_read" => "\u{2630} TODO Read".to_string(),
-                    "plan_load_from_md" => "\u{1F4C2} TODO Load".to_string(),
                     _ => "\u{2630} TODO".to_string(),
                 }
             }

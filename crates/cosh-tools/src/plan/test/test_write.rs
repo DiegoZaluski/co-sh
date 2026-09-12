@@ -450,3 +450,221 @@ fn verify_group_persists_after_add() {
         "adding a task should not unverify the group"
     );
 }
+
+// ReplaceList
+
+fn replace_groups() -> Vec<crate::plan::ReplaceGroup> {
+    serde_json::from_value(serde_json::json!([
+        {
+            "title": "Database",
+            "items": [
+                { "key": "schema", "description": "Design schema" },
+                { "key": "migrations", "description": "Write migrations", "depends_on": ["schema"] }
+            ]
+        },
+        {
+            "title": "API",
+            "items": [
+                { "description": "User endpoints", "depends_on": ["migrations"] }
+            ]
+        }
+    ]))
+    .unwrap()
+}
+
+#[test]
+fn replace_list_creates_full_plan_on_empty_list() {
+    let list = TodoList::default();
+    let output = todo_write(
+        &list,
+        &TodoWriteAction::ReplaceList {
+            groups: replace_groups(),
+        },
+    )
+    .unwrap();
+    assert_eq!(output.list.groups.len(), 2);
+    assert_eq!(output.list.groups[0].items.len(), 2);
+    assert_eq!(output.list.groups[1].items.len(), 1);
+    // No overwrite nag on an empty list.
+    assert!(output.nags.is_empty(), "no nags expected: {:?}", output.nags);
+}
+
+#[test]
+fn replace_list_assigns_sequential_ids_in_order() {
+    let list = TodoList::default();
+    let output = todo_write(
+        &list,
+        &TodoWriteAction::ReplaceList {
+            groups: replace_groups(),
+        },
+    )
+    .unwrap();
+    assert_eq!(output.list.groups[0].items[0].id, "task-1");
+    assert_eq!(output.list.groups[0].items[1].id, "task-2");
+    assert_eq!(output.list.groups[1].items[0].id, "task-3");
+}
+
+#[test]
+fn replace_list_resolves_keys_to_ids() {
+    let list = TodoList::default();
+    let output = todo_write(
+        &list,
+        &TodoWriteAction::ReplaceList {
+            groups: replace_groups(),
+        },
+    )
+    .unwrap();
+    // 'migrations' -> task-2; 'migrations' dep on 'User endpoints' -> task-3
+    assert_eq!(
+        output.list.groups[0].items[1].depends_on,
+        ["task-1".to_string()]
+    );
+    assert_eq!(
+        output.list.groups[1].items[0].depends_on,
+        ["task-2".to_string()]
+    );
+}
+
+#[test]
+fn replace_list_nags_when_overwriting_non_empty_list() {
+    let list = add_task(&TodoList::default(), "old", "Existing task");
+    let output = todo_write(
+        &list,
+        &TodoWriteAction::ReplaceList {
+            groups: replace_groups(),
+        },
+    )
+    .unwrap();
+    let has_nag = output
+        .nags
+        .iter()
+        .any(|n| n.message.contains("Replaced the existing TODO list"));
+    assert!(has_nag, "should nag about overwriting: {:?}", output.nags);
+    assert_eq!(output.list.groups.len(), 2, "old groups should be gone");
+}
+
+#[test]
+fn replace_list_duplicate_key_rejected() {
+    let list = TodoList::default();
+    let groups: Vec<crate::plan::ReplaceGroup> = serde_json::from_value(serde_json::json!([
+        { "title": "g", "items": [
+            { "key": "dup", "description": "A" },
+            { "key": "dup", "description": "B" }
+        ]}
+    ]))
+    .unwrap();
+    let result = todo_write(&list, &TodoWriteAction::ReplaceList { groups });
+    assert!(result.is_err());
+}
+
+#[test]
+fn replace_list_key_shadowing_task_id_rejected() {
+    let list = TodoList::default();
+    let groups: Vec<crate::plan::ReplaceGroup> = serde_json::from_value(serde_json::json!([
+        { "title": "g", "items": [
+            { "description": "A" },
+            { "key": "task-1", "description": "B" }
+        ]}
+    ]))
+    .unwrap();
+    let result = todo_write(&list, &TodoWriteAction::ReplaceList { groups });
+    assert!(
+        result.is_err(),
+        "a key shaped like task-N must be rejected (it would shadow the real id)"
+    );
+}
+
+#[test]
+fn replace_list_unknown_key_nags() {
+    let list = TodoList::default();
+    let groups: Vec<crate::plan::ReplaceGroup> = serde_json::from_value(serde_json::json!([
+        { "title": "g", "items": [
+            { "description": "A", "depends_on": ["ghost-key"] }
+        ]}
+    ]))
+    .unwrap();
+    let output = todo_write(&list, &TodoWriteAction::ReplaceList { groups }).unwrap();
+    let has_nag = output
+        .nags
+        .iter()
+        .any(|n| n.message.contains("neither a sibling key nor an existing task id"));
+    assert!(has_nag, "unknown key should nag: {:?}", output.nags);
+}
+
+#[test]
+fn replace_list_self_reference_nags() {
+    let list = TodoList::default();
+    let groups: Vec<crate::plan::ReplaceGroup> = serde_json::from_value(serde_json::json!([
+        { "title": "g", "items": [
+            { "key": "self", "description": "A", "depends_on": ["self"] }
+        ]}
+    ]))
+    .unwrap();
+    let output = todo_write(&list, &TodoWriteAction::ReplaceList { groups }).unwrap();
+    let has_nag = output
+        .nags
+        .iter()
+        .any(|n| n.message.contains("self-reference"));
+    assert!(has_nag, "self-reference should nag: {:?}", output.nags);
+}
+
+#[test]
+fn replace_list_empty_description_rejected() {
+    let list = TodoList::default();
+    let groups: Vec<crate::plan::ReplaceGroup> = serde_json::from_value(serde_json::json!([
+        { "title": "g", "items": [ { "description": "   " } ]}
+    ]))
+    .unwrap();
+    let result = todo_write(&list, &TodoWriteAction::ReplaceList { groups });
+    assert!(result.is_err());
+}
+
+#[test]
+fn replace_list_empty_groups_rejected() {
+    let list = TodoList::default();
+    let result = todo_write(
+        &list,
+        &TodoWriteAction::ReplaceList { groups: Vec::new() },
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn replace_list_cycle_nags() {
+    let list = TodoList::default();
+    let groups: Vec<crate::plan::ReplaceGroup> = serde_json::from_value(serde_json::json!([
+        { "title": "g", "items": [
+            { "key": "a", "description": "A", "depends_on": ["b"] },
+            { "key": "b", "description": "B", "depends_on": ["a"] }
+        ]}
+    ]))
+    .unwrap();
+    let output = todo_write(&list, &TodoWriteAction::ReplaceList { groups }).unwrap();
+    let has_cycle_nag = output
+        .nags
+        .iter()
+        .any(|n| n.message.contains("circular dependency"));
+    assert!(has_cycle_nag, "cycle should nag: {:?}", output.nags);
+}
+
+#[test]
+fn replace_list_then_start_works() {
+    let list = TodoList::default();
+    let list = todo_write(
+        &list,
+        &TodoWriteAction::ReplaceList {
+            groups: replace_groups(),
+        },
+    )
+    .unwrap()
+    .list;
+    let output = todo_write(
+        &list,
+        &TodoWriteAction::Start { id: "task-1".into() },
+    )
+    .unwrap();
+    assert_eq!(
+        output.list.groups[0].items[0].status,
+        TodoStatus::InProgress
+    );
+}

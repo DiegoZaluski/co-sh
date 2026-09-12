@@ -75,7 +75,7 @@ every free function takes as input, and what every output embeds.
 ## Request types
 
 Each tool's input is a thin wrapper struct (`TodoReadInput`, `TodoWriteInput`,
-`TodoEditInput`, `TodoCrossOffInput`, `TodoLoadFromMdInput`) holding the
+`TodoEditInput`, `TodoCrossOffInput`) holding the
 payload below. They exist so the harness can deserialize the tool call
 arguments straight into typed values.
 

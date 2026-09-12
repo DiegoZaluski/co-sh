@@ -909,11 +909,20 @@ impl Harness {
         }
 
         // The plan tools are only exposed in Build/Yolo modes. Teach the
-        // agent the Markdown plan workflow (PLAN_WRITE) so it plans the full
-        // TODO list up front via `plan_load_from_md` instead of adding one
-        // task per `plan_todo_write` call.
+        // agent the structured TODO workflow: create the full plan in a
+        // single `plan_todo_write` call with `ReplaceList`, then drive it
+        // with `Start` / `Complete` / `Cancel` during execution.
         if !matches!(self.mode, Mode::Ask) {
-            let _ = write!(out, "## System: Plan\n{}\n\n", cosh_tools::plan::PLAN_WRITE);
+            let _ = write!(
+                out,
+                "## System: Plan\n\
+                 Plan the full TODO list up front: create it with a single \
+                 `plan_todo_write` call using the `ReplaceList` action (one entry \
+                 per group; use the optional per-item `key` so sibling tasks can \
+                 reference each other in `depends_on` within the same call). \
+                 During execution, `Start` one task at a time and `plan_todo_cross_off` \
+                 it when done; use `VerifyGroup` after testing a completed group.\n\n"
+            );
         }
 
         let _ = write!(out, "## Tools\n\n");
@@ -987,14 +996,14 @@ impl Harness {
             let removed: Vec<&String> = prior.iter().filter(|n| !current.contains(n)).collect();
             let added: Vec<&String> = current.iter().filter(|n| !prior.contains(n)).collect();
             if !removed.is_empty() || !added.is_empty() {
-                let _ = write!(out, "\n## Tool Availability Changed\n\n");
+                let _ = writeln!(out, "\n## Tool Availability Changed\n");
                 if !removed.is_empty() {
                     let list = removed
                         .iter()
                         .map(|n| format!("`{n}`"))
                         .collect::<Vec<_>>()
                         .join(", ");
-                    let _ = write!(out, "- No longer available; do not call: {list}.\n");
+                    let _ = writeln!(out, "- No longer available; do not call: {list}.");
                 }
                 if !added.is_empty() {
                     let list = added
@@ -1002,7 +1011,7 @@ impl Harness {
                         .map(|n| format!("`{n}`"))
                         .collect::<Vec<_>>()
                         .join(", ");
-                    let _ = write!(out, "- Now available: {list}.\n");
+                    let _ = writeln!(out, "- Now available: {list}.");
                 }
             }
         }

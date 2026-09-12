@@ -545,27 +545,27 @@ fn build_header_teaches_plan_workflow_but_ask_header_does_not() {
     use cosh_sdk::connector::Connector;
 
     // Build mode exposes the plan tools, so the header must teach the
-    // Markdown plan workflow (PLAN_WRITE) that lets the model create the
-    // full TODO list up front via `plan_load_from_md`.
+    // structured TODO workflow that lets the model create the full plan
+    // in a single `ReplaceList` call.
     let mut h = Harness::new(Connector::new("openai").unwrap(), ".", HashSet::new());
     let header = h.format_header_context();
     assert!(
-        header.contains("# Plan: <title>"),
-        "Build header must include the PLAN_WRITE workflow"
+        header.contains("## System: Plan"),
+        "Build header must include the Plan workflow"
     );
     assert!(
-        header.contains("Save the plan file with `fs_write`"),
-        "Build header must instruct the file-based plan workflow"
+        header.contains("ReplaceList"),
+        "Build header must instruct the ReplaceList workflow"
     );
 
-    // Ask mode is read-only for planning: it exposes only todo_read and
-    // load_from_md, so the mutation workflow instructions must stay out.
+    // Ask mode is read-only for planning: it exposes only todo_read, so the
+    // mutation workflow instructions must stay out.
     let mut h = Harness::new(Connector::new("openai").unwrap(), ".", HashSet::new())
         .with_mode(Mode::Ask);
     let header = h.format_header_context();
     assert!(
-        !header.contains("# Plan: <title>"),
-        "Ask header must not include the PLAN_WRITE workflow"
+        !header.contains("## System: Plan"),
+        "Ask header must not include the Plan workflow"
     );
 }
 

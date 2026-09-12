@@ -1,8 +1,8 @@
-//! Demonstrate `plan`: the stateful TODO list. Builds a plan with `Add`
-//! (including dependency nags), exercises `Start` (one-in-progress rule),
+//! Demonstrate `plan`: the stateful TODO list. Builds a plan with
+//! `ReplaceList` (full plan in one call, with key-based dependencies),
+//! exercises `Add` (including dependency nags), `Start` (one-in-progress rule),
 //! `Edit`, `CrossOff` with dependent warnings, filtered reads, the
-//! VerifyGroup verification contract, `Clean`, the pure free-function form,
-//! and the `load_from_md` Markdown round-trip.
+//! VerifyGroup verification contract, `Clean`, and the pure free-function form.
 //!
 //! Run with:
 //!
@@ -57,28 +57,30 @@ fn show_nags(label: &str, nags: &[cosh_tools::plan::types::Nag]) {
 }
 
 fn main() {
-    // ── 1. Build the plan ------------------------------------------------
+    // ── 1. Build the plan in a single ReplaceList call --------------------
     let mut plan = Plan::new();
-    plan.todo_write(&TodoWriteAction::Add {
-        group: "Database".into(),
-        description: "Design schema".into(),
-        depends_on: None,
-    })
-    .unwrap();
-    plan.todo_write(&TodoWriteAction::Add {
-        group: "Database".into(),
-        description: "Write migrations".into(),
-        depends_on: Some(vec!["task-1".into()]),
-    })
-    .unwrap();
-    plan.todo_write(&TodoWriteAction::Add {
-        group: "API".into(),
-        description: "Health check".into(),
-        depends_on: None,
-    })
-    .unwrap();
-    show("1. after three Adds (ids assigned sequentially)", &plan);
-
+    let out = plan
+        .todo_write(&TodoWriteAction::ReplaceList {
+            groups: serde_json::from_value(serde_json::json!([
+                {
+                    "title": "Database",
+                    "items": [
+                        { "key": "schema", "description": "Design schema" },
+                        { "key": "migrations", "description": "Write migrations", "depends_on": ["schema"] }
+                    ]
+                },
+                {
+                    "title": "API",
+                    "items": [
+                        { "description": "Health check" }
+                    ]
+                }
+            ]))
+            .unwrap(),
+        })
+        .unwrap();
+    show_nags("1. ReplaceList (full plan in one call, keys resolved)", &out.nags);
+    show("   ...the whole plan, ids assigned in listed order", &plan);
     // ── 2. Dependencies are advisory: a missing dep nags, not errors ------
     let out = plan
         .todo_write(&TodoWriteAction::Add {
@@ -208,32 +210,4 @@ fn main() {
     .unwrap();
     println!("== 9. free functions (no Plan state) ==");
     println!("  groups: {}, nags: {}\n", out.groups.len(), out.nags.len());
-
-    // ── 10. load_from_md: parse a Markdown plan file -----------------------
-    let path = std::env::temp_dir().join("cosh-plan-example.md");
-    std::fs::write(
-        &path,
-        "# Plan: Ship the API\n\n\
-         ## Database\n\
-         - [ ] Design schema\n\
-         - [x] Write migrations\n\
-           - depends: task-1\n\n\
-         ## API\n\
-         - [ ] Health check\n",
-    )
-    .unwrap();
-    plan.load_from_md(&path.to_string_lossy()).unwrap();
-    std::fs::remove_file(&path).ok();
-    show(
-        "10. after load_from_md (parsed file, ids renumbered)",
-        &plan,
-    );
-    let out = plan
-        .todo_read(&TodoReadAction::Get {
-            id: "task-2".into(),
-        })
-        .unwrap();
-    println!("== 10b. Get task-2 ==");
-    print!("{}", render(&TodoList { groups: out.groups }));
-    println!();
 }

@@ -54,7 +54,6 @@ fn internal_tools() -> &'static [(&'static str, &'static str)] {
         ("plan_todo_edit", "Edit todo items"),
         ("plan_todo_cross_off", "Cross off todo items"),
         ("plan_todo_read", "Read todo items"),
-        ("plan_load_from_md", "Load plan from markdown"),
         ("ask_questions", "Ask the user questions"),
         #[cfg(feature = "embed")]
         (

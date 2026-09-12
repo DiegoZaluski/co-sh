@@ -9,11 +9,10 @@ model's context.
 
 | Tool | What it does |
 |---|---|
-| [`plan_todo_write`](todo_write.md) | Mutate the list: `Add`, `Start`, `Remove`, `Clean`, `VerifyGroup`. |
+| [`plan_todo_write`](todo_write.md) | Mutate the list: `ReplaceList`, `Add`, `Start`, `Remove`, `Clean`, `VerifyGroup`. |
 | [`plan_todo_edit`](todo_edit.md) | Edit an existing task's metadata (description, group, dependencies). |
 | [`plan_todo_cross_off`](todo_cross_off.md) | Mark a task `Completed` or `Cancelled`. |
 | [`plan_todo_read`](todo_read.md) | Query the list: list with optional filters, or fetch one task. |
-| [`plan_load_from_md`](plan_from_md.md) | Parse a Markdown plan file into the list. |
 
 The design mirrors the other cosh modules: the public surface is a
 builder-style wrapper — [`Plan`](#the-plan-wrapper) — that holds the list and
@@ -116,15 +115,15 @@ The intended workflow is: complete a group's tasks, run the tests, then call
 - Adding new tasks to a verified group does **not** un-verify it.
 
 ---
+## Creating the full plan in one call
 
-## The Markdown plan format
-
-Plans can be written by hand as Markdown files and loaded with
-`plan_load_from_md`. The canonical syntax is defined by the crate constant
-[`PLAN_WRITE`](plan_from_md.md#the-plan_write-syntax) — group headings, flat
-checklist items, and optional `depends:` sub-bullets. The full grammar and
-its edge cases are on the [parser page](plan_from_md.md).
-
+The canonical way to create a plan is a single `plan_todo_write` call with the
+`ReplaceList` action: it takes complete groups of tasks, replaces the current
+list (nagging if anything was overwritten), assigns `task-1..N` ids in listed
+order, and resolves dependencies. Items may carry an optional `key` alias that
+sibling tasks reference in `depends_on` within the same call — the tool resolves
+each alias to the real `task-N` id. Unknown keys, duplicate keys, and cycles
+are reported as nags (duplicate keys are errors).
 ---
 
 ## The harness and the protected context block
@@ -134,14 +133,12 @@ Two harness behaviors shape how the plan is actually used:
 - **The plan is always visible.** The harness renders the current list as a
   dedicated, protected `## Tool TODOs` context block injected right after the
   system prompt — before the conversation history — and re-renders it after
-  every `plan_*` call. The block survives every compaction phase (the
-  useless-chain sweep and the LLM summarization) and disappears only when all
-  tasks are terminal or the list is empty. The model therefore sees the plan
-  without calling `plan_todo_read` first, and cannot forget it.
-- **Ask mode is read-only.** In Ask mode only `plan_todo_read` and
-  `plan_load_from_md` are exposed; the mutating tools (`plan_todo_write`,
-  `plan_todo_edit`) are restricted. (`plan_todo_cross_off` mutates too, so it
-  is not exposed in Ask mode either.)
+  every `plan_*` call. The block survives every compaction phase and
+  disappears only when all tasks are terminal or the list is empty. The model
+  therefore sees the plan without calling `plan_todo_read` first.
+- **Ask mode is read-only.** In Ask mode only `plan_todo_read` is exposed; the
+  mutating tools (`plan_todo_write`, `plan_todo_edit`) are restricted.
+  (`plan_todo_cross_off` mutates too, so it is not exposed in Ask mode either.)
 
 ---
 

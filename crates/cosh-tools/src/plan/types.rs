@@ -37,10 +37,24 @@ pub struct TodoCrossOffInput {
     pub action: TodoCrossOff,
 }
 
-/// Input for `plan_load_from_md`.
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct TodoLoadFromMdInput {
-    pub path: String,
+/// One task inside a `ReplaceList` group.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ReplaceItem {
+    /// Optional alias used to reference this task in `depends_on`
+    /// of sibling tasks within the same `ReplaceList` call.
+    /// The tool resolves it to the real `task-N` id.
+    pub key: Option<String>,
+    pub description: String,
+    /// Dependencies: may contain sibling `key`s (resolved to `task-N`)
+    /// or existing `task-N` ids.
+    pub depends_on: Option<Vec<String>>,
+}
+
+/// One group inside a `ReplaceList` action.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ReplaceGroup {
+    pub title: String,
+    pub items: Vec<ReplaceItem>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
