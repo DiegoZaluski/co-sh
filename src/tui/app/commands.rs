@@ -38,6 +38,17 @@ impl App {
         });
     }
 
+    /// Rebuild the right panel from the CURRENT session's persisted tool
+    /// parts (todos, bash runs, subagent windows). Called after every
+    /// session-switch path resets the panel: the panel content belongs to
+    /// the session, so it must survive app restarts and session switches
+    /// instead of silently disappearing.
+    pub(super) fn rehydrate_right_panel(&mut self) {
+        if let Some(session) = self.state.current_session().cloned() {
+            self.state.right_panel.rehydrate_from_session(&session);
+        }
+    }
+
     /// Open the rename dialog for the current session, prefilled with its
     /// title (opencode-style prompt: edit in place, Enter applies, Esc
     /// cancels). No-op without a session.

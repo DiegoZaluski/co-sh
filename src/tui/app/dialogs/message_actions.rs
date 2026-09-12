@@ -201,13 +201,14 @@ impl App {
                 let new_id = forked.id.clone();
                 self.state.add_session(forked);
                 self.finalize_stale_compaction_lines();
-                // The fork branches the CONVERSATION, not the panel: the
-                // right panel is app-level ephemera (todos, PTY/subagent
-                // history, focus) that lives on AppState, so a fork must
-                // start clean like every other session-selection path.
+                // The fork branches the conversation: the panel starts clean
+                // like every other session-selection path, then is rebuilt
+                // from the fork's OWN message history (the part before the
+                // fork point, which is what the fork persisted).
                 self.state.right_panel =
                     crate::routes::session::right_panel::types::RightPanelState::new();
                 self.state.switch_to_session(new_id, &self.session_store);
+                self.rehydrate_right_panel();
                 self.session_view.hovered_msg_idx = None;
                 self.toast_state.show(ToastOptions {
                     title: Some("Fork".into()),

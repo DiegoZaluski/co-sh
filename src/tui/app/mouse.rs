@@ -110,7 +110,7 @@ impl App {
                     self.prompt_view.blur();
                     // Clicking anywhere else in the chat also releases the
                     // right-panel keyboard focus.
-                    if !Self::is_in_right_panel(x, self.terminal_size()) {
+                    if !self.is_in_right_panel(x) {
                         self.state.right_panel.panel_focus = None;
                     }
                 }
@@ -159,7 +159,7 @@ impl App {
                 // selection on the bash / subagent section under the cursor.
                 if matches!(self.mode(), AppMode::Session)
                     && should_show_right_panel(self.terminal_size().width, &self.state.right_panel)
-                    && Self::is_in_right_panel(x, self.terminal_size())
+                    && self.is_in_right_panel(x)
                 {
                     self.state.right_panel.focus_at(y);
                     self.state.right_panel.begin_selection(x, y);
@@ -437,7 +437,7 @@ impl App {
                     {
                         self.sidebar.select_prev(self.state.session_summaries.len());
                     } else if matches!(self.mode(), AppMode::Session)
-                        && Self::is_in_right_panel(x, self.terminal_size())
+                        && self.is_in_right_panel(x)
                     {
                         self.state.right_panel.scroll_up_at(y, 3);
                     } else if matches!(self.mode(), AppMode::Session)
@@ -504,7 +504,7 @@ impl App {
                     {
                         self.sidebar.select_next(self.state.session_summaries.len());
                     } else if matches!(self.mode(), AppMode::Session)
-                        && Self::is_in_right_panel(x, self.terminal_size())
+                        && self.is_in_right_panel(x)
                     {
                         self.state.right_panel.scroll_down_at(y, 3);
                     } else if matches!(self.mode(), AppMode::Session)
@@ -555,7 +555,7 @@ impl App {
                     self.hovered_queue_row = None;
                 } else if matches!(self.mode(), AppMode::Session)
                     && should_show_right_panel(self.terminal_size().width, &self.state.right_panel)
-                    && Self::is_in_right_panel(x, self.terminal_size())
+                    && self.is_in_right_panel(x)
                 {
                     // The cursor is over the right panel, not chat content:
                     // clear any leftover chat highlight.
@@ -1325,6 +1325,9 @@ impl App {
                     .switch_to_session(session_id, &self.session_store);
                 // Returning to a session restores the last model used there.
                 self.restore_current_session_model();
+                // The panel content belongs to the session: rebuild it from
+                // the newly selected session's history.
+                self.rehydrate_right_panel();
                 self.session_view.hovered_msg_idx = None;
                 self.title_generated = true;
                 self.finalize_stale_compaction_lines();

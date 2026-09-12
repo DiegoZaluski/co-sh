@@ -967,9 +967,13 @@ impl App {
             session_bottom.saturating_sub(area.y + 1),
         )
     }
-    /// Check if a mouse x-coordinate is within the right panel area.
-    fn is_in_right_panel(x: u16, terminal_size: Rect) -> bool {
-        if terminal_size.width < 100 {
+    /// Check if a mouse x-coordinate is within the right panel area — and
+    /// the panel is actually VISIBLE (content + width + not user-hidden via
+    /// Ctrl+P). When hidden, its band belongs to the chat, so scroll/click
+    /// events there must fall through to the chat instead of being swallowed.
+    fn is_in_right_panel(&self, x: u16) -> bool {
+        let terminal_size = self.terminal_size();
+        if !should_show_right_panel(terminal_size.width, &self.state.right_panel) {
             return false;
         }
         let right_panel_x = terminal_size

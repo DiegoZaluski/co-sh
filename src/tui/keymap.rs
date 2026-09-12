@@ -12,6 +12,7 @@ pub enum Action {
     SendMessage,
     FocusInput,
     ToggleSidebar,
+    ToggleRightPanel,
     ToggleUsage,
     ShowSessionHistory,
     ToggleHelp,
@@ -75,6 +76,13 @@ impl KeyMap {
                     Action::ToggleSidebar,
                     KeyBinding {
                         key: Char('b'),
+                        modifiers: KeyModifiers::CONTROL,
+                    },
+                ),
+                (
+                    Action::ToggleRightPanel,
+                    KeyBinding {
+                        key: Char('p'),
                         modifiers: KeyModifiers::CONTROL,
                     },
                 ),

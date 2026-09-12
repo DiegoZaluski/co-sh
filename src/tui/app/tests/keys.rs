@@ -150,6 +150,76 @@ async fn shift_b_n_type_normally_without_panel_focus() {
     assert_eq!(app.state.right_panel.panel_focus, None);
 }
 
+/// Ctrl+P toggles the right panel: hidden even with content and a wide
+/// terminal, shown again on a second press, and a panel slot that held
+/// keyboard focus is released when the panel is hidden.
+#[tokio::test]
+async fn ctrl_p_toggles_right_panel_visibility() {
+    use crate::routes::session::right_panel::{should_show_right_panel, types::RightPanelState};
+
+    let _home = HOME_LOCK.lock();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    let mut panel = RightPanelState::new();
+    panel.start_pty("echo hi".to_string(), None);
+    panel.complete_last_pty("hi\n".to_string());
+    panel.panel_focus =
+        Some(crate::routes::session::right_panel::types::PanelFocus::Bash);
+    app.state.right_panel = panel;
+    assert!(should_show_right_panel(120, &app.state.right_panel));
+
+    app.process_key_event(mod_key(KeyCode::Char('p'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert!(app.state.right_panel.user_hidden);
+    assert!(
+        !should_show_right_panel(120, &app.state.right_panel),
+        "Ctrl+P must hide the panel even with content and a wide terminal"
+    );
+    assert_eq!(
+        app.state.right_panel.panel_focus, None,
+        "hiding the panel must release a focused slot"
+    );
+
+    app.process_key_event(mod_key(KeyCode::Char('p'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert!(!app.state.right_panel.user_hidden);
+    assert!(should_show_right_panel(120, &app.state.right_panel));
+}
+
+/// Regression: `is_in_right_panel` is also visibility-aware — after Ctrl+P
+/// the panel's old screen band belongs to the chat, so scroll/click events
+/// there must never be routed to the (hidden) panel.
+#[tokio::test]
+async fn hidden_right_panel_band_belongs_to_the_chat() {
+    use crate::routes::session::right_panel::{RIGHT_PANEL_WIDTH, types::RightPanelState};
+
+    let _home = HOME_LOCK.lock();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    let mut panel = RightPanelState::new();
+    panel.start_pty("echo hi".to_string(), None);
+    panel.complete_last_pty("hi\n".to_string());
+    app.state.right_panel = panel;
+
+    let width = app.terminal_size().width;
+    let band_x = width.saturating_sub(RIGHT_PANEL_WIDTH);
+    if width >= 100 {
+        assert!(
+            app.is_in_right_panel(band_x),
+            "visible panel must claim its band"
+        );
+    }
+
+    app.process_key_event(mod_key(KeyCode::Char('p'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert!(
+        !app.is_in_right_panel(band_x),
+        "hidden panel must NOT claim its old band: scroll would be swallowed"
+    );
+}
+
 /// Regression: ESC must interrupt the agent loop no matter what
 /// incidental UI state is active. The gates below `process_key_event`'s
 /// confirm-dialog sovereignty used to consume ESC before the

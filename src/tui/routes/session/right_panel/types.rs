@@ -20,7 +20,16 @@ use super::RIGHT_PANEL_WIDTH;
 use cosh_tui::core::renderables::markdown::estimate_height;
 use ratatui::buffer::{Buffer, Cell};
 
+use crate::types::{Part, Session, ToolStatus};
 use crate::util::text_region::{TextRegion, extract_text_in_region};
+
+/// Rehydration limits when the panel is rebuilt from a persisted session
+/// (app restart, session switch): only the most recent bash command and the
+/// newest few subagent windows PER agent CLI are restored, so opening an
+/// old session with a long tool history doesn't flood the panel. Older
+/// entries remain visible in the chat transcript's tool boxes.
+const REHYDRATE_BASH_KEEP: usize = 1;
+const REHYDRATE_SUBAGENT_KEEP_PER_AGENT: usize = 3;
 
 /// Minimum gap between subagent layout rebuilds (heights + rendered body
 /// cells). During streaming, chunks arrive far more often than the eye can
@@ -79,6 +88,47 @@ pub(crate) fn sanitize_subagent_text(text: &str) -> String {
     text.chars()
         .filter(|ch| !ch.is_control() || *ch == '\n')
         .collect()
+}
+
+/// Parse a plan tool's JSON result into the flat todo list shown in the
+/// panel: `{"list": {"groups": [{"items": [{"status", "description"}]}]}}`.
+/// Shared by the live `ToolResult` path (events) and the rehydration from
+/// persisted sessions, so both paths always agree. `None` when the output
+/// is not a plan result.
+pub(crate) fn parse_todo_output(output: &str) -> Option<Vec<TodoItem>> {
+    let val = serde_json::from_str::<serde_json::Value>(output).ok()?;
+    let groups = val.get("list")?.get("groups")?.as_array()?;
+    Some(
+        groups
+            .iter()
+            .flat_map(|g| {
+                g.get("items")
+                    .and_then(|items| items.as_array())
+                    .into_iter()
+                    .flatten()
+            })
+            .map(|item| {
+                let status = item
+                    .get("status")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("Pending");
+                let description = item
+                    .get("description")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or("");
+                TodoItem {
+                    status: match status {
+                        "InProgress" => "in_progress",
+                        "Completed" => "completed",
+                        "Cancelled" => "cancelled",
+                        _ => "pending",
+                    }
+                    .to_string(),
+                    content: description.to_string(),
+                }
+            })
+            .collect(),
+    )
 }
 
 /// Wrap one logical line into visual rows of at most `wrap_w` columns,
@@ -408,6 +458,9 @@ pub struct RightPanelState {
     /// ←/→ drive the focused slot's history; without focus they keep the
     /// prompt-cursor behavior.
     pub panel_focus: Option<PanelFocus>,
+    /// Manual show/hide override (Ctrl+P). `true` keeps the panel hidden
+    /// even when it has content and the terminal is wide enough.
+    pub user_hidden: bool,
     /// Bash view mode: `false` = live (only the most recent command +
     /// output), `true` = history (ALL commands stacked linearly, exactly
     /// the pre-history rendering).
@@ -530,6 +583,7 @@ impl RightPanelState {
             subagent_wrap_w: RIGHT_PANEL_WIDTH.saturating_sub(6),
             text_regions_w: 0,
             panel_focus: None,
+            user_hidden: false,
             bash_history_mode: false,
             agent_navs: HashMap::new(),
             visible_subagents: Vec::new(),
@@ -1363,6 +1417,11 @@ impl RightPanelState {
         self.mark_activity(SectionKind::Todo);
     }
 
+    /// Manual show/hide override (Ctrl+P).
+    pub fn toggle_hidden(&mut self) {
+        self.user_hidden = !self.user_hidden;
+    }
+
     /// Start a new PTY session for a bash command.
     pub fn start_pty(&mut self, command: String, workdir: Option<String>) {
         self.next_pty_id += 1;
@@ -1585,6 +1644,131 @@ impl RightPanelState {
         }
         let cut = output[start..].find('\n').map_or(start, |i| start + i + 1);
         output.drain(..cut);
+    }
+
+    /// Rebuild the panel content from a persisted session by replaying its
+    /// tool parts (plan todos, bash runs, subagent calls), so the panel
+    /// survives an app restart or a session switch. Everything restored is
+    /// FINISHED — live PTY processes died with the previous app instance —
+    /// and bounded (see the `REHYDRATE_*` limits) so a long history doesn't
+    /// flood the panel.
+    pub fn rehydrate_from_session(&mut self, session: &Session) {
+        // ── Todos: the LAST plan tool result wins ──
+        for msg in &session.messages {
+            for part in &msg.parts {
+                let Part::Tool(tp) = part else { continue };
+                if !matches!(tp.tool.as_str(), "plan_todo_write" | "plan_todo_cross_off") {
+                    continue;
+                }
+                if let Some(output) = &tp.output
+                    && let Some(todos) = parse_todo_output(output)
+                {
+                    self.todos = todos;
+                }
+            }
+        }
+        if !self.todos.is_empty() {
+            self.mark_activity(SectionKind::Todo);
+        }
+
+        // ── PTY sessions: collect bash + subagent calls chronologically ──
+        let mut bashes: Vec<(String, String, bool)> = Vec::new();
+        // (agent, "→ cosh:" input line, output, failed)
+        let mut subs: Vec<(String, Option<String>, String, bool)> = Vec::new();
+        for msg in &session.messages {
+            for part in &msg.parts {
+                let Part::Tool(tp) = part else { continue };
+                // No persisted output (crash mid-run) means the process
+                // never finished: restored as failed, not silently complete.
+                let failed = matches!(tp.status, ToolStatus::Failed(_)) || tp.output.is_none();
+                let output = tp.output.clone().unwrap_or_default();
+                match tp.tool.as_str() {
+                    "bash_run" => {
+                        let command = tp
+                            .input
+                            .get("command")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        bashes.push((command, output, failed));
+                    }
+                    "subagent_call" => {
+                        let agent = tp
+                            .input
+                            .get("agent")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let input = tp
+                            .input
+                            .get("input")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string);
+                        subs.push((agent, input, output, failed));
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Trim to the rehydration limits: the newest bash command only, and
+        // per agent CLI the newest few windows (older same-agent entries are
+        // superseded by the live display anyway).
+        if bashes.len() > REHYDRATE_BASH_KEEP {
+            bashes.drain(..bashes.len() - REHYDRATE_BASH_KEEP);
+        }
+        let kept_subs: Vec<(String, Option<String>, String, bool)> = subs
+            .iter()
+            .enumerate()
+            .filter(|(i, (agent, ..))| {
+                subs[i + 1..]
+                    .iter()
+                    .filter(|(a, ..): &&(String, Option<String>, String, bool)| a == agent)
+                    .count()
+                    < REHYDRATE_SUBAGENT_KEEP_PER_AGENT
+            })
+            .map(|(_, entry)| entry.clone())
+            .collect();
+
+        for (command, output, failed) in bashes {
+            self.replay_pty(command, None, output, failed);
+        }
+        for (agent, input, output, failed) in kept_subs {
+            let command = format!("subagent: {agent}");
+            // Same contract as the live path (events): an EMPTY input
+            // message never draws a "→ cosh:" line.
+            let input_line = input
+                .filter(|msg| !msg.is_empty())
+                .map(|msg| format!("→ cosh: {msg}\n"));
+            self.replay_pty(command, input_line, output, failed);
+        }
+    }
+
+    /// Append one restored PTY session through the live `start_pty` path
+    /// (so superseding, per-agent colors and queue bookkeeping match a live
+    /// run exactly), then fill its final output and terminal status.
+    fn replay_pty(
+        &mut self,
+        command: String,
+        input_line: Option<String>,
+        output: String,
+        failed: bool,
+    ) {
+        self.start_pty(command, None);
+        let Some(session) = self.pty_sessions.last_mut() else {
+            return;
+        };
+        if let Some(line) = input_line {
+            session.output.push_str(&line);
+        }
+        session.output.push_str(&output);
+        Self::truncate_output(&mut session.output);
+        session.status = if failed {
+            PtyStatus::Failed
+        } else {
+            PtyStatus::Completed
+        };
+        self.pty_gen = self.pty_gen.wrapping_add(1);
     }
 
     /// Derived line buffer of the bash PTY sessions (`$ command` + output
@@ -1852,6 +2036,187 @@ mod tests {
 
         assert_eq!(state.pty_sessions[0].output, "done");
         assert_eq!(state.pty_sessions[1].output, "output2");
+    }
+
+    // ── Rehydration from a persisted session ─────────────────────────
+
+    use crate::types::{Message, MessageRole, Part, Session, ToolPart, ToolStatus};
+
+    fn tool_part(tool: &str, input: serde_json::Value, output: Option<String>) -> Part {
+        Part::Tool(ToolPart {
+            tool: tool.to_string(),
+            input,
+            output,
+            status: ToolStatus::Completed,
+            tool_call_id: None,
+            is_start: false,
+            is_streaming: false,
+            cached_line_count: None,
+            lsp_notes: None,
+        })
+    }
+
+    fn session_with(parts: Vec<Part>) -> Session {
+        Session {
+            id: "s".to_string(),
+            title: "s".to_string(),
+            messages: vec![Message {
+                id: "msg-0".to_string(),
+                role: MessageRole::Assistant,
+                parts,
+                created_at: 0,
+                agent: None,
+                model: None,
+            }],
+            created_at: 0,
+            title_generated: false,
+            provider: None,
+            model: None,
+            reasoning: None,
+            ctx_ids: Default::default(),
+        }
+    }
+
+    fn todo_output_json(entries: &[(&str, &str)]) -> String {
+        let items: Vec<String> = entries
+            .iter()
+            .map(|(status, description)| {
+                format!(r#"{{"status": "{status}", "description": "{description}"}}"#)
+            })
+            .collect();
+        format!(
+            r#"{{"list": {{"groups": [{{"items": [{}]}}]}}}}"#,
+            items.join(",")
+        )
+    }
+
+    #[test]
+    fn rehydrate_restores_todos_from_the_last_plan_result() {
+        let mut state = RightPanelState::new();
+        let session = session_with(vec![
+            tool_part(
+                "plan_todo_write",
+                serde_json::json!({}),
+                Some(todo_output_json(&[("Pending", "old item")])),
+            ),
+            tool_part(
+                "plan_todo_write",
+                serde_json::json!({}),
+                Some(todo_output_json(&[
+                    ("InProgress", "first"),
+                    ("Completed", "second"),
+                ])),
+            ),
+        ]);
+
+        state.rehydrate_from_session(&session);
+
+        assert_eq!(state.todos.len(), 2);
+        assert_eq!(state.todos[0].content, "first");
+        assert_eq!(state.todos[0].status, "in_progress");
+        assert_eq!(state.todos[1].status, "completed");
+        assert_eq!(state.pending_todo_update_count, 0);
+    }
+
+    #[test]
+    fn rehydrate_keeps_only_the_most_recent_bash_command() {
+        let mut state = RightPanelState::new();
+        let session = session_with(vec![
+            tool_part(
+                "bash_run",
+                serde_json::json!({"command": "first"}),
+                Some("out1".to_string()),
+            ),
+            tool_part(
+                "bash_run",
+                serde_json::json!({"command": "second"}),
+                Some("out2".to_string()),
+            ),
+        ]);
+
+        state.rehydrate_from_session(&session);
+
+        assert_eq!(state.pty_sessions.len(), 1);
+        assert_eq!(state.pty_sessions[0].command, "second");
+        assert_eq!(state.pty_sessions[0].output, "out2");
+        assert_eq!(state.pty_sessions[0].status, PtyStatus::Completed);
+    }
+
+    #[test]
+    fn rehydrate_marks_crashed_running_tools_as_failed() {
+        let mut state = RightPanelState::new();
+        let mut part = tool_part(
+            "bash_run",
+            serde_json::json!({"command": "never finished"}),
+            None,
+        );
+        if let Part::Tool(tp) = &mut part {
+            tp.status = ToolStatus::Running;
+        }
+        let session = session_with(vec![part]);
+
+        state.rehydrate_from_session(&session);
+
+        assert_eq!(state.pty_sessions[0].status, PtyStatus::Failed);
+    }
+
+    #[test]
+    fn rehydrate_keeps_last_windows_per_agent_and_supersedes_the_rest() {
+        let mut state = RightPanelState::new();
+        let mut parts = Vec::new();
+        for i in 0..5 {
+            parts.push(tool_part(
+                "subagent_call",
+                serde_json::json!({"agent": "kilo", "input": format!("task {i}")}),
+                Some(format!("report {i}")),
+            ));
+        }
+        parts.push(tool_part(
+            "subagent_call",
+            serde_json::json!({"agent": "opencode", "input": "other task"}),
+            Some("other report".to_string()),
+        ));
+        let session = session_with(parts);
+
+        state.rehydrate_from_session(&session);
+
+        let kilos: Vec<_> = state
+            .pty_sessions
+            .iter()
+            .filter(|s| s.subagent_agent() == Some("kilo"))
+            .collect();
+        let opencodes: Vec<_> = state
+            .pty_sessions
+            .iter()
+            .filter(|s| s.subagent_agent() == Some("opencode"))
+            .collect();
+        // Per-agent limit: 3 of 5 kilo windows kept, opencode untouched.
+        assert_eq!(kilos.len(), 3);
+        assert_eq!(opencodes.len(), 1);
+        // The kept ones are the NEWEST of each queue.
+        assert!(kilos[0].output.contains("report 2"));
+        assert!(kilos[2].output.contains("report 4"));
+        assert!(kilos[0].superseded);
+        assert!(!kilos[2].superseded);
+        // The "→ cosh:" input line is reconstructed as the first line.
+        assert!(opencodes[0].output.starts_with("→ cosh: other task\n"));
+        assert_eq!(opencodes[0].status, PtyStatus::Completed);
+    }
+
+    #[test]
+    fn user_hidden_overrides_should_show_right_panel() {
+        use crate::routes::session::right_panel::should_show_right_panel;
+
+        let mut state = RightPanelState::new();
+        state.start_pty("echo hi".to_string(), None);
+        assert!(should_show_right_panel(120, &state));
+
+        state.toggle_hidden();
+        assert!(state.user_hidden);
+        assert!(!should_show_right_panel(120, &state));
+
+        state.toggle_hidden();
+        assert!(should_show_right_panel(120, &state));
     }
 
     #[test]
