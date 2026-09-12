@@ -2,10 +2,11 @@
 //!
 //! The [`ContextManager`] owns every conversation item — user prompts,
 //! assistant outputs, tool calls and tool results — in display order. Content
-//! is rendered through a recoverable layered view. Old useful tool results can
-//! be replaced by typed references, a recent token window stays verbatim, and
-//! an LLM checkpoint covers the remaining old prefix when the view still
-//! reaches 80% of the budget.
+//! is rendered through a recoverable layered view. The model can request that
+//! a tool result be replaced by a typed reference (tail masking, see
+//! [`ContextManager::mask_newest_tool_result`]), a recent token window stays
+//! verbatim, and an LLM checkpoint covers the remaining old prefix when the
+//! view still reaches 80% of the budget.
 //!
 //! [`build_messages`](Self::build_messages) renders the timeline as a
 //! provider-ready `Vec<ChatMessage>` with a 1:1 item→message mapping. The
@@ -49,9 +50,8 @@ pub const MAX_CONTEXT_TOKENS: usize = 100_000;
 const COMPACT_PCT: usize = 80;
 
 /// Percentage of the model window reserved for the most recent conversation
-/// turn in verbatim form. Older content is eligible for deterministic tool
-/// result masking and checkpointing; the newest turn remains a high-fidelity
-/// handoff after compaction.
+/// turn in verbatim form. Older content is eligible for checkpointing; the
+/// newest turn remains a high-fidelity handoff after compaction.
 const RECENT_RAW_PCT: usize = 20;
 
 /// Inclusive range of monotonic context item IDs covered by a derived
@@ -112,8 +112,9 @@ pub enum ContextItem {
         /// True when the tool produced no useful output (e.g. a zero-match
         /// search). Such a result served its purpose the moment the model
         /// reacted to it, so its chain is dead weight: the automatic sweep in
-        /// [`Self::run`] removes it (keeping the newest chain alive) without
-        /// waiting for a budget overflow.
+        /// [`Self::run`] removes it without waiting for a budget overflow.
+        /// The newest chain is kept until the model reacts — an explicit
+        /// `mask_tool_result` call counts as that reaction.
         useless: bool,
     },
     /// The final text response of a completed agent loop. Replaces the raw
@@ -202,8 +203,8 @@ impl ContextItem {
 /// persistence. Nothing is in-flight between save and restore — the snapshot
 /// is a plain clone. `overflow_model` records the stuck context-window
 /// overflow, `map_reduce` the current checkpoint-construction staging, and
-/// `split` any legacy split-and-concatenate staging, plus the deterministic
-/// model-view selectors.
+/// `split` any legacy split-and-concatenate staging, plus the model-view
+/// selectors.
 ///
 /// The timeline is APPEND-ONLY: nothing is ever removed by compaction, the
 /// useless-chain sweep or the abandoned-input cleanup. Those events only move
@@ -247,6 +248,9 @@ pub struct ContextManagerState {
     pub hidden: HashSet<u64>,
     /// Tool result IDs whose full payload remains in `items` and immutable
     /// history, but whose model-facing projection is a small typed reference.
+    /// Only the model's explicit `mask_tool_result` requests land here —
+    /// masking is never applied deterministically, because a mid-history
+    /// mutation would invalidate the providers' exact-prefix caches.
     #[serde(default)]
     pub masked: HashSet<u64>,
     /// Structured protected plan reconstructed from session deltas. Absent
@@ -354,8 +358,10 @@ pub struct ContextManager {
     /// revert/fork; never sent to the model. Ids below `visible_from` are
     /// implicitly hidden too and are pruned from here on compaction.
     hidden: HashSet<u64>,
-    /// Useful but old tool results represented by small typed placeholders in
+    /// Tool results the model explicitly asked to mask (the harness
+    /// `mask_tool_result` tool): represented by small typed placeholders in
     /// the model view. The original result remains untouched in `items`.
+    /// Never filled deterministically — see the `masked` state field note.
     masked: HashSet<u64>,
     /// Derived coverage of the newest base-visible checkpoint. Rebuilt from
     /// immutable checkpoint metadata on restore; never persisted separately.
@@ -870,12 +876,18 @@ impl ContextManager {
     /// Per-iteration tick: run the useless tool-chain sweep, then check the
     /// 80% budget trigger.
     ///
+    /// There is deliberately NO deterministic masking here: a mutation in the
+    /// middle of the history invalidates the exact-prefix cache of every
+    /// provider for everything after the changed position. Budget relief near
+    /// the trigger comes from the model's explicit `mask_tool_result` calls
+    /// (tail-only, cache-neutral) or from the LLM compaction, never from a
+    /// mid-history mutation.
+    ///
     /// When the total is at or over the trigger, returns
     /// [`RunOutcome::NeedsLlmCompaction`] so the harness runs the LLM
     /// compaction and applies the summary via [`Self::apply_llm_summary`].
     pub fn run(&mut self) -> RunOutcome {
         self.sweep_useless_chains();
-        self.mask_stale_tool_results();
         if self.total_tokens() < self.trigger() {
             RunOutcome::Resolved
         } else {
@@ -883,9 +895,12 @@ impl ContextManager {
         }
     }
 
-    /// Hide every tool chain whose result is marked `useless`, except the
-    /// newest chain (the one the model has not reacted to yet). Runs at the
-    /// start of every [`Self::run`], regardless of the budget. The chains
+    /// Hide every tool chain whose result is marked `useless`. Runs at the
+    /// start of every [`Self::run`], regardless of the budget. The newest
+    /// chain is preserved — the model has not reacted to it yet — EXCEPT when
+    /// its result was explicitly masked by a model `mask_tool_result` call:
+    /// that call IS the reaction, so it is the one case where the newest
+    /// chain may be hidden. The chains
     /// STAY in the timeline (append-only) — only their visibility flips, so
     /// revert/fork keep reaching them.
     fn sweep_useless_chains(&mut self) {
@@ -913,6 +928,20 @@ impl ContextManager {
                 _ => None,
             })
             .collect();
+        // Explicitly masked results (model `mask_tool_result` calls) mapped
+        // to their chain identity: masking is the model's reaction to a
+        // result, so the newest-chain protection no longer applies to them.
+        let masked_call_ids: HashSet<String> = self
+            .items
+            .iter()
+            .filter(|it| !self.is_hidden(it))
+            .filter_map(|it| match it {
+                ContextItem::ToolResult { id, call_id, .. } if self.masked.contains(id) => {
+                    Some(call_id.clone())
+                }
+                _ => None,
+            })
+            .collect();
         // Back-to-front so hiding a chain never invalidates a pending index;
         // hide_item also hides the partner half, so its index is skipped
         // naturally by the next iteration. Idempotent: an already-hidden
@@ -925,8 +954,9 @@ impl ContextManager {
             }
             let doomed = match &self.items[idx] {
                 ContextItem::ToolCall { call_id, .. } | ContextItem::ToolResult { call_id, .. } => {
-                    newest_call_id.as_deref() != Some(call_id.as_str())
-                        && useless_call_ids.contains(call_id)
+                    useless_call_ids.contains(call_id)
+                        && (newest_call_id.as_deref() != Some(call_id.as_str())
+                            || masked_call_ids.contains(call_id))
                 }
                 _ => false,
             };
@@ -936,44 +966,66 @@ impl ContextManager {
         }
     }
 
-    /// Replace useful but old tool result payloads with small typed references
-    /// in the model-facing projection. The raw result stays in `items` and in
-    /// immutable history, and remains available to checkpoint construction.
-    /// Only results before the recent raw window are eligible; the newest
-    /// interaction therefore always reaches the model verbatim.
-    fn mask_stale_tool_results(&mut self) {
-        if self.manual_compaction || self.total_tokens() < self.normal_trigger() {
-            return;
-        }
-        let raw_start = self.recent_raw_start();
-        for idx in 0..raw_start {
-            if self.total_tokens() < self.normal_trigger() {
-                break;
-            }
-            let id = match &self.items[idx] {
-                ContextItem::ToolResult {
-                    id, useless: false, ..
-                } if !self.is_hidden(&self.items[idx]) && !self.masked.contains(id) => *id,
-                _ => continue,
-            };
-            let old_tokens = self.items[idx].tokens(self.encoding);
-            let new_tokens = self.encoding.estimate(&masked_tool_result(id));
-            self.masked.insert(id);
-            self.cached_items_tokens = self
-                .cached_items_tokens
-                .saturating_sub(old_tokens)
-                .saturating_add(new_tokens);
-        }
+    /// Model-driven tail masking (the harness `mask_tool_result` tool):
+    /// replace the NEWEST visible tool-result payload with a small typed
+    /// reference in the model-facing projection. The raw result stays in
+    /// `items` and in immutable history, and remains available to checkpoint
+    /// construction, so a future rehydration tool can read it back.
+    ///
+    /// Only the tail is ever touched: a mutation at the end of the timeline
+    /// cannot invalidate a cached prefix (the tail is new, uncached content
+    /// anyway), which is why the retired deterministic mid-history masking
+    /// was replaced by this explicit model request. Idempotent: an already
+    /// masked or missing result yields `None`.
+    ///
+    /// Returns the masked source item id.
+    pub fn mask_newest_tool_result(&mut self) -> Option<u64> {
+        // The mask tool's own confirmation results are never targets: a
+        // reflex call must mask a REAL tool result, not the feedback of a
+        // previous mask call (its chain is swept as useless anyway).
+        let mask_call_ids: HashSet<&str> = self
+            .items
+            .iter()
+            .filter_map(|it| match it {
+                ContextItem::ToolCall { call_id, name, .. } if name == "mask_tool_result" => {
+                    Some(call_id.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        let idx = self
+            .items
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, item)| {
+                !self.is_hidden(item)
+                    && match item {
+                        ContextItem::ToolResult { id, call_id, .. } => {
+                            !self.masked.contains(id) && !mask_call_ids.contains(call_id.as_str())
+                        }
+                        _ => false,
+                    }
+            })
+            .map(|(idx, _)| idx)?;
+        let id = match &self.items[idx] {
+            ContextItem::ToolResult { id, .. } => *id,
+            _ => unreachable!("filtered above"),
+        };
+        let old_tokens = self.visible_item_tokens(&self.items[idx]);
+        let new_tokens = self.encoding.estimate(&masked_tool_result(id));
+        self.masked.insert(id);
+        self.cached_items_tokens = self
+            .cached_items_tokens
+            .saturating_sub(old_tokens)
+            .saturating_add(new_tokens);
+        Some(id)
     }
 
-    /// Raw timeline index at which the high-fidelity recent window starts.
+    /// Token-bounded start of the high-fidelity recent window.
     /// The window is token-bounded and expanded backwards when its first tool
     /// result needs an earlier matching call to keep native tool structure
     /// valid.
-    fn recent_raw_start(&self) -> usize {
-        self.recent_raw_start_for(self.max_tokens)
-    }
-
     fn recent_raw_start_for(&self, max_tokens: usize) -> usize {
         let target = max_tokens.saturating_mul(RECENT_RAW_PCT) / 100;
         let mut held = 0usize;

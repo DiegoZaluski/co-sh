@@ -365,14 +365,38 @@ fn build_lsp(cwd: &str) -> Option<Arc<Lsp>> {
 }
 
 fn default_harness_tools() -> Vec<HarnessTool> {
-    vec![HarnessTool {
-        name: "stop_agent_loop".into(),
-        description: "Stop running the agent loop".into(),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {}
-        }),
-    }]
+    vec![
+        HarnessTool {
+            name: "stop_agent_loop".into(),
+            description: "Stop running the agent loop".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        // Model-driven tail masking: the ONLY context-relief mechanism that
+        // never mutates the middle of the history, so it never invalidates
+        // the providers' exact-prefix prompt caches. The description ties the
+        // call to an EVENT (a tool result just turned out to be irrelevant),
+        // not to a judgment, and encourages batching it with the next tool
+        // call to avoid extra round-trips. No reminder block in front of the
+        // context: forgetting to mask is harmless (fail-open — the LLM
+        // compaction stays the structural fallback), while a persistent
+        // salient block would be re-paid full-price on every request.
+        HarnessTool {
+            name: "mask_tool_result".into(),
+            description: "Drop the most recent tool result from the conversation when it just \
+                turned out to be irrelevant to the task (empty or wrong file, superseded data, \
+                dead end): its payload is replaced by a short reference in the context. Takes \
+                no arguments and always targets the newest tool result. Call it as a reflex in \
+                the same response as your next tool call; forgetting it is harmless."
+                .into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+    ]
 }
 
 #[allow(clippy::struct_field_names)]
@@ -555,8 +579,14 @@ pub struct Harness {
 /// Reads the tool's own declared output contract: `find_grep` marks zero-match
 /// results with `"useless": true` in its JSON, and the model sees the same
 /// field. Gate by tool name so no other tool's JSON is ever interpreted.
+/// A successful `mask_tool_result` call is always useless: the model has
+/// reacted to the masked result, so its chain is dead weight and the
+/// useless-chain sweep removes it on the next turn at no extra cost.
 /// `pub(crate)` for the bridge unit test in `harness::test`.
 pub(crate) fn result_is_useless(name: &str, result: &str) -> bool {
+    if matches!(name, "mask_tool_result") {
+        return true;
+    }
     if !matches!(name, "find_grep" | "find_glob") {
         return false;
     }
@@ -753,9 +783,12 @@ impl Harness {
             .register_with_retry(
                 name,
                 || {
-                    transport
-                        .take()
-                        .ok_or_else(|| crate::mcp::McpError::Connect(name.to_string(), "test transport already consumed".to_string()))
+                    transport.take().ok_or_else(|| {
+                        crate::mcp::McpError::Connect(
+                            name.to_string(),
+                            "test transport already consumed".to_string(),
+                        )
+                    })
                 },
                 std::time::Duration::from_millis(200),
                 crate::mcp::manager::ProbePolicy::STDIO,
@@ -950,11 +983,7 @@ impl Harness {
         // would otherwise keep calling tools from its previous repertoire
         // and accumulate confusing failures.
         let current = self.effective_tool_names();
-        if let Some(prior) = self
-            .context_manager
-            .last_tool_set()
-            .map(<[String]>::to_vec)
-        {
+        if let Some(prior) = self.context_manager.last_tool_set().map(<[String]>::to_vec) {
             let removed: Vec<&String> = prior.iter().filter(|n| !current.contains(n)).collect();
             let added: Vec<&String> = current.iter().filter(|n| !prior.contains(n)).collect();
             if !removed.is_empty() || !added.is_empty() {
@@ -965,10 +994,7 @@ impl Harness {
                         .map(|n| format!("`{n}`"))
                         .collect::<Vec<_>>()
                         .join(", ");
-                    let _ = write!(
-                        out,
-                        "- No longer available; do not call: {list}.\n"
-                    );
+                    let _ = write!(out, "- No longer available; do not call: {list}.\n");
                 }
                 if !added.is_empty() {
                     let list = added
@@ -1075,6 +1101,14 @@ impl Harness {
                 self.stop = true;
                 Some(String::new())
             }
+            "mask_tool_result" => Some(match self.context_manager.mask_newest_tool_result() {
+                Some(id) => serde_json::json!({ "masked": true, "source_item": id }).to_string(),
+                None => serde_json::json!({
+                    "masked": false,
+                    "error": "no unmasked tool result in the visible timeline"
+                })
+                .to_string(),
+            }),
             _ => Some(String::new()),
         }
     }
@@ -1822,7 +1856,9 @@ impl Harness {
             .saturating_add(64);
         let output_tokens = (window / 10).clamp(64, 2_000);
         let connector = connector.with_max_tokens(output_tokens as u32);
-        let output_tokens = connector.effective_max_tokens().unwrap_or(output_tokens as u32) as usize;
+        let output_tokens = connector
+            .effective_max_tokens()
+            .unwrap_or(output_tokens as u32) as usize;
         if input_tokens.saturating_add(output_tokens) >= window {
             return Err(CompactionErr::ContextWindow {
                 window_tokens: Some(window),
@@ -2597,7 +2633,7 @@ impl Harness {
     /// otherwise queue it for dispatch. Shared by the inline-JSON path
     /// ([`Self::process_stream_chunk`]) and the native structured path
     /// ([`Self::process_native_tool_call`]).
-    fn route_tool_call(&mut self, tc: ToolCallData) {
+    pub(crate) fn route_tool_call(&mut self, tc: ToolCallData) {
         match self.handle_harness_tool(&tc) {
             None => {
                 self.tool_issuer.push_back(tc);
@@ -2929,12 +2965,21 @@ impl Harness {
         // `thinking_blocks` are the Claude extended-thinking blocks that
         // preceded this turn's tool call (empty for every other path) —
         // replayed verbatim, signature included, on the follow-up request.
+        // Harness tools are routed MID-STREAM, before the real tool calls of
+        // the same response are dispatched — they must never consume the
+        // stashed thinking blocks, which belong to the turn's real tool_use
+        // (Anthropic validates them on the follow-up request).
+        let thinking_blocks = if self.harness_tools.iter().any(|t| t.name == name) {
+            Vec::new()
+        } else {
+            std::mem::take(&mut self.pending_thinking_blocks)
+        };
         self.context_manager.add_tool_call_with_thinking(
             &tool_id,
             name,
             &args_str,
             signature,
-            std::mem::take(&mut self.pending_thinking_blocks),
+            thinking_blocks,
         );
         self.context_manager.add_tool_result_flagged(
             &tool_id,
@@ -2983,6 +3028,18 @@ impl Harness {
     /// manager built a wrapper. Distinct from how many servers run right now.
     fn lsp_available(&self) -> bool {
         self.lsp.is_some() || self.cosh_tools.as_ref().and_then(|c| c.lsp()).is_some()
+    }
+
+    /// Test-only access to the Claude thinking-block stash: the harness-test
+    /// module is a sibling of `core`, so the private field is unreachable.
+    #[cfg(test)]
+    pub(crate) fn stash_thinking_blocks_for_test(&mut self, blocks: Vec<ClaudeThinkingBlock>) {
+        self.pending_thinking_blocks = blocks;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_thinking_blocks_count_for_test(&self) -> usize {
+        self.pending_thinking_blocks.len()
     }
 
     /// Snapshot of the current LSP engine state for the TUI's footer/tags.

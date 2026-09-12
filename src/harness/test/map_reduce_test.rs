@@ -72,6 +72,9 @@ async fn offline_long_trace_compares_five_compaction_paths_without_claiming_mode
     };
 
     let mut masking = restore();
+    // Model-driven tail masking: the scripted model masks every tool result
+    // (newest first), exactly as repeated `mask_tool_result` calls would.
+    while masking.mask_newest_tool_result().is_some() {}
     masking.run();
     check_facts(&masking);
     assert_original_prefix(&masking);

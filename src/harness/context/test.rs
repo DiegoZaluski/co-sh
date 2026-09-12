@@ -307,7 +307,7 @@ fn sweep_keeps_useful_chains_intact() {
 }
 
 #[test]
-fn deterministic_masking_keeps_the_recent_window_raw_and_the_source_recoverable() {
+fn model_requested_masking_replaces_the_payload_and_keeps_the_source_recoverable() {
     let mut cm = cm(1_000);
     cm.add_user("inspect both files");
     cm.add_tool_call("old", "fs_read", r#"{"path":"old.rs"}"#);
@@ -317,9 +317,13 @@ fn deterministic_masking_keeps_the_recent_window_raw_and_the_source_recoverable(
     cm.add_tool_call("recent", "fs_read", r#"{"path":"recent.rs"}"#);
     cm.add_tool_result("recent", "fresh contents");
 
-    assert_eq!(cm.run(), RunOutcome::Resolved, "masking relieves pressure");
+    // The model masks the two results one after another (newest first).
+    assert_eq!(cm.mask_newest_tool_result(), Some(6));
+    assert_eq!(cm.mask_newest_tool_result(), Some(3));
+    assert_eq!(cm.mask_newest_tool_result(), None, "idempotent when done");
     let state = cm.save_state();
-    assert_eq!(state.masked, HashSet::from([3]));
+    assert_eq!(state.masked, HashSet::from([3, 6]));
+    // Raw payloads stay in the immutable timeline (rehydration-ready).
     assert!(matches!(
         &state.items[2],
         ContextItem::ToolResult { content, .. } if content == &old_payload
@@ -332,15 +336,78 @@ fn deterministic_masking_keeps_the_recent_window_raw_and_the_source_recoverable(
             .as_deref()
             .is_some_and(|content| content.contains("source context item #3"))
     }));
-    assert!(
-        messages
-            .iter()
-            .any(|message| { message.content.as_deref() == Some("fresh contents") })
-    );
+    assert!(messages.iter().any(|message| {
+        message
+            .content
+            .as_deref()
+            .is_some_and(|content| content.contains("source context item #6"))
+    }));
     assert!(
         !messages
             .iter()
             .any(|message| { message.content.as_deref() == Some(old_payload.as_str()) })
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| { message.content.as_deref() == Some("fresh contents") })
+    );
+}
+
+#[test]
+fn masking_only_touches_the_newest_visible_result_and_skips_hidden_ones() {
+    let mut cm = cm(10_000);
+    cm.add_user("task");
+    // Hidden result: never a masking target.
+    cm.add_tool_call("dead", "find_glob", "{}");
+    cm.add_tool_result_flagged("dead", "no matches", true);
+    // Newest result: the target.
+    cm.add_tool_call("alive", "fs_read", "{}");
+    cm.add_tool_result("alive", "big payload");
+    cm.sweep_useless_chains();
+    assert_eq!(cm.mask_newest_tool_result(), Some(5));
+    assert_eq!(
+        cm.mask_newest_tool_result(),
+        None,
+        "the hidden useless result is never a target"
+    );
+    let msgs = cm.build_messages("");
+    assert!(
+        !msgs.iter().any(|m| m
+            .content
+            .as_deref()
+            .is_some_and(|c| c.contains("no matches"))),
+        "the dead chain stays hidden"
+    );
+    assert!(
+        !msgs.iter().any(|m| m
+            .content
+            .as_deref()
+            .is_some_and(|c| c.contains("big payload"))),
+        "the newest payload is masked"
+    );
+}
+
+#[test]
+fn masking_the_newest_useless_chain_lets_the_sweep_hide_it() {
+    let mut cm = cm(10_000);
+    cm.add_user("task");
+    cm.add_tool_call("q", "find_grep", "{}");
+    cm.add_tool_result_flagged("q", "no matches", true);
+    cm.sweep_useless_chains();
+    assert_eq!(
+        cm.build_messages("").len(),
+        3,
+        "the newest useless chain is kept until the model reacts"
+    );
+    assert_eq!(cm.mask_newest_tool_result(), Some(3));
+    // The explicit mask IS the reaction: the sweep may now hide even the
+    // newest chain.
+    cm.sweep_useless_chains();
+    assert_eq!(
+        cm.build_messages("").len(),
+        1,
+        "the masked newest chain is hidden by the sweep"
     );
 }
 

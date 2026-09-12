@@ -20,9 +20,16 @@ earlier message selection.
 
 ## Model-view policy
 
-1. Deterministically mask old, reacted-to tool results, retaining their raw
-   payloads and source IDs in history. User instructions and the live TODO
-   block are not masking targets.
+1. Mask tool results ONLY on the model's explicit `mask_tool_result` request
+   (tail masking): the newest tool result is replaced by a typed reference,
+   retaining its raw payload and source ID in history. Masking never runs
+   deterministically and never touches mid-history positions — a mutation at
+   position *k* invalidates the exact-prefix prompt cache of every provider
+   for everything after *k*, while a tail mutation is cache-neutral. User
+   instructions and the live TODO block are not masking targets. The tool
+   lives only in the tool schema (part of the cached `tools → system` prefix);
+   forgetting to call it is harmless — the LLM compaction below stays the
+   structural fallback.
 2. Reserve a recent raw window (20% of the effective context budget), preserving
    native tool-call/result pairs. Automatic checkpointing covers the older
    prefix; the checkpoint is composed before the raw tail even though its
@@ -153,7 +160,7 @@ It compares identical immutable source items through five paths, using
 
 | Path | Estimated view tokens, before → after | Scripted calls | Observed property |
 | --- | --- | --- | --- |
-| Masking only | 29,337 → 5,757 | 0 | Keeps task facts and raw history |
+| Masking only (model-driven, all results masked) | 29,337 → 5,757 | 0 | Keeps task facts and raw history |
 | One-shot oracle | 29,337 → 1,300 | 1 | Input is 29,635 tokens: infeasible for the 8,000-token fixture window |
 | Legacy concatenation oracle | 29,337 → 99 | 8 | Whole-view behavior; no global reducer or audit |
 | Sequential MapReduce | 29,337 → 1,300 | 10 | Eight maps, reduction, audit; pending steering stays raw |

@@ -35,6 +35,83 @@ fn handle_harness_tool_consumes_stop_agent_loop() {
     assert!(h.stop);
 }
 
+/// `mask_tool_result` is a no-args harness tool: the harness masks the
+/// newest tool result in the context manager and reports the source item.
+#[test]
+fn handle_harness_tool_masks_the_newest_tool_result() {
+    let mut h = make_harness();
+    h.context_manager.add_user("task");
+    h.context_manager.add_tool_call("c1", "fs_read", "{}");
+    h.context_manager.add_tool_result("c1", "huge payload");
+    h.context_manager.add_assistant("reacted", false);
+
+    let tc = ToolCallData {
+        id: String::new(),
+        name: "mask_tool_result".into(),
+        arguments: json!({}),
+        thought_signature: String::new(),
+    };
+    let result = h.handle_harness_tool(&tc).expect("consumed");
+    let parsed: serde_json::Value = serde_json::from_str(&result).expect("json result");
+    assert_eq!(parsed["masked"], json!(true));
+    assert_eq!(parsed["source_item"], json!(3));
+    assert!(h.context_manager.save_state().masked.contains(&3));
+
+    // Nothing left to mask: a typed miss, not an error.
+    let result = h.handle_harness_tool(&tc).expect("consumed");
+    let parsed: serde_json::Value = serde_json::from_str(&result).expect("json result");
+    assert_eq!(parsed["masked"], json!(false));
+}
+
+/// A `mask_tool_result` call batched with a real tool call (the encouraged
+/// usage) is routed MID-STREAM, before the real call is dispatched. The
+/// harness-tool chain must therefore never consume the stashed Claude
+/// thinking blocks: those belong to the turn's REAL tool_use, which Anthropic
+/// validates verbatim on the follow-up request.
+#[test]
+fn mask_tool_call_never_consumes_the_thinking_block_stash() {
+    use crate::harness::context::ContextItem;
+    use cosh_sdk::connector::ClaudeThinkingBlock;
+    let mut h = make_harness();
+    h.context_manager.add_user("task");
+    h.context_manager.add_tool_call("c1", "fs_read", "{}");
+    h.context_manager.add_tool_result("c1", "huge payload");
+    h.stash_thinking_blocks_for_test(vec![ClaudeThinkingBlock {
+        thinking: "thought".into(),
+        signature: "sig".into(),
+    }]);
+
+    h.route_tool_call(ToolCallData {
+        id: "m1".into(),
+        name: "mask_tool_result".into(),
+        arguments: json!({}),
+        thought_signature: String::new(),
+    });
+
+    let mask_item = h
+        .context_manager
+        .items_snapshot()
+        .into_iter()
+        .find(
+            |item| matches!(item, ContextItem::ToolCall { name, .. } if name == "mask_tool_result"),
+        )
+        .expect("mask call recorded");
+    assert!(
+        match &mask_item {
+            ContextItem::ToolCall {
+                thinking_blocks, ..
+            } => thinking_blocks.is_empty(),
+            _ => false,
+        },
+        "the harness-tool chain carries no thinking blocks"
+    );
+    assert_eq!(
+        h.pending_thinking_blocks_count_for_test(),
+        1,
+        "stash untouched by the mask call"
+    );
+}
+
 /// All cloud providers officially recommend native function calling and warn
 /// that inline-JSON instructions in the prompt conflict with it (Gemini 3.x
 /// obeys the legacy inline-JSON `TOOL_FORMAT` literally and emits tool calls
