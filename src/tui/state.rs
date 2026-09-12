@@ -130,7 +130,13 @@ impl AppState {
     }
 
     /// Add a full session (with its messages) and a matching summary.
-    pub fn add_session(&mut self, session: Session) {
+    ///
+    /// Every tool part is assigned a unique `tool_call_id` first (see
+    /// [`Session::ensure_tool_call_ids`]) — restored/legacy sessions must not
+    /// share per-tool-type expansion keys, or expanding one box would toggle
+    /// every other box of the same tool.
+    pub fn add_session(&mut self, mut session: Session) {
+        session.ensure_tool_call_ids();
         let summary = SessionSummary {
             session_id: session.id.clone(),
             title: session.title.clone(),
@@ -200,7 +206,10 @@ impl AppState {
         if self.session_cache.contains(session_id) {
             return true;
         }
-        if let Some(session) = store.load_session(session_id) {
+        if let Some(mut session) = store.load_session(session_id) {
+            // Same normalization as `add_session`: restored sessions must not
+            // share per-tool-type expansion keys across boxes.
+            session.ensure_tool_call_ids();
             self.session_cache.put(session_id.to_string(), session);
             true
         } else {

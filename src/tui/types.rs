@@ -31,6 +31,32 @@ pub struct Session {
     pub ctx_ids: std::collections::HashMap<String, Vec<u64>>,
 }
 
+impl Session {
+    /// Assign a unique, stable `tool_call_id` to every tool part that lacks
+    /// one. The id is derived from the message id and part index, so it is
+    /// deterministic across reloads (a restored session re-derives the same
+    /// keys) and unique per part — two bash boxes in one session never share
+    /// an expansion key.
+    ///
+    /// This is the identity backbone for per-tool-box UI state (expand/
+    /// collapse, LSP-notes toggle, spinners): without it, legacy parts created
+    /// before ids were assigned would all fall back to the same per-tool-type
+    /// constant key and toggle together.
+    pub fn ensure_tool_call_ids(&mut self) {
+        for msg in &mut self.messages {
+            for (pi, part) in msg.parts.iter_mut().enumerate() {
+                if let Part::Tool(t) = part
+                    && t.tool_call_id
+                        .as_deref()
+                        .is_none_or(|id| id.trim().is_empty())
+                {
+                    t.tool_call_id = Some(format!("tc-{}-{pi}", msg.id));
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub id: String,

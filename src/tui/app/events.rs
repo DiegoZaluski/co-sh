@@ -16,6 +16,11 @@ use cosh::harness::HarnessEvent;
 use crate::notification;
 use cosh::harness::context::ContextManagerState;
 
+/// Process-wide sequence for live-created tool parts' `tool_call_id`s. The
+/// id is the identity every per-box UI state (expand/collapse, LSP-notes
+/// toggle, spinners) is keyed by — unique per part, stable once assigned.
+static TOOL_CALL_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 impl App {
     pub(super) fn handle_events(&mut self) -> io::Result<bool> {
         // NOTE: no toast tick here. `handle_events()` is only reached when
@@ -262,7 +267,14 @@ impl App {
                         input,
                         output: None,
                         status: ToolStatus::Running,
-                        tool_call_id: None,
+                        // Unique per-part identity: the key that per-box
+                        // expand/collapse state is keyed by. Without it all
+                        // boxes of a tool type shared one key and toggled
+                        // together (live parts used to be created with None).
+                        tool_call_id: Some(format!(
+                            "call-{}",
+                            TOOL_CALL_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                        )),
                         is_start: true,
                         is_streaming: false,
                         cached_line_count: None,

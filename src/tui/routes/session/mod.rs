@@ -3516,15 +3516,22 @@ impl SessionView {
         // ── Sticky scroll: recalculateBarProps on content size change ─────────
         // Mirrors OpenCode's `recalculateBarProps()` which calls `applyStickyStart`
         // when content size changes and user hasn't manually scrolled.
+        //
+        // Expand/collapse is a content size change like any other — it must
+        // NOT be special-cased (the old branch called `sync_manual_scroll_state`
+        // instead, which poisoned `has_manual_scroll` on every toggle and killed
+        // the auto-follow, leaving the view stranded mid-history: the
+        // "collapsing and expanding jumps to the wrong location" bug). With
+        // per-part expansion keys (see `Session::ensure_tool_call_ids`), a
+        // toggle changes ONLY the clicked box's height, so:
+        //   - sticky-bottom users stay glued to the bottom through BOTH
+        //     collapse and expand, and a collapse→expand cycle restores the
+        //     exact pre-toggle scroll position;
+        //   - manually-scrolled users are untouched (`recalculate_bar_props`
+        //     only re-aims when sticky), and since content ABOVE the clicked
+        //     box is unmoved, their raw `scroll_y` keeps the viewport anchored.
         if total_height != self.last_content_height {
-            if height_update.tool_state_changed {
-                // Expand/collapse is a local viewport interaction. Do not apply
-                // sticky-to-bottom here; that behavior is reserved for real
-                // content growth such as streamed tokens or appended messages.
-                self.sync_manual_scroll_state();
-            } else {
-                self.recalculate_bar_props(total_height, visible_height);
-            }
+            self.recalculate_bar_props(total_height, visible_height);
             self.last_content_height = total_height;
         }
 
