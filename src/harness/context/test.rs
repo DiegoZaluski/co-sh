@@ -267,6 +267,64 @@ fn a_fresh_input_after_a_compaction_with_nothing_produced_between_is_abandoned()
 // ── Useless tool-chain sweep ──────────────────────────────────────────────
 
 #[test]
+fn correction_block_renders_at_the_tail_before_the_todo_block() {
+    use cosh_tools::plan::types::{TaskGroup, TodoItem, TodoList, TodoStatus};
+    let mut cm = cm(10_000);
+    cm.add_user("task");
+    cm.set_correction_block("## Correction History\n\n- bad call".into());
+    cm.todo.sync(TodoList {
+        groups: vec![TaskGroup {
+            title: "step".into(),
+            items: vec![TodoItem {
+                id: "1".into(),
+                description: "do it".into(),
+                status: TodoStatus::Pending,
+                depends_on: Vec::new(),
+            }],
+            tests_verified: false,
+        }],
+    });
+
+    let msgs = cm.build_messages("");
+    let last = msgs.last().unwrap();
+    assert_eq!(
+        last.role, "user",
+        "blocks merge into the trailing user turn"
+    );
+    let content = last.content.as_deref().unwrap();
+    let corrections = content
+        .find("Correction History")
+        .expect("corrections rendered");
+    let todo = content.find("Tool TODOs").expect("todo block rendered");
+    assert!(corrections < todo, "corrections come BEFORE the TODO block");
+    // The steering prompt trails both blocks.
+    assert!(content.ends_with("task"));
+    // The block counts toward the budget (never free for the trigger).
+    let mut bare = ContextManager::new(10_000);
+    bare.add_user("task");
+    assert!(
+        cm.total_tokens() > bare.total_tokens(),
+        "the correction block counts toward the budget"
+    );
+}
+
+#[test]
+fn an_empty_correction_block_renders_nothing() {
+    let mut cm = cm(10_000);
+    cm.add_user("task");
+    cm.set_correction_block(String::new());
+    let msgs = cm.build_messages("");
+    assert_eq!(msgs.len(), 1, "no correction block message");
+    assert!(
+        !msgs[0]
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("Correction History")
+    );
+}
+
+#[test]
 fn sweep_useless_chains_hides_dead_chains_but_keeps_the_newest() {
     let mut cm = cm(100_000);
     cm.add_user("task");

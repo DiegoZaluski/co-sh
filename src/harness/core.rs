@@ -1144,16 +1144,21 @@ impl Harness {
 
     /// Build the system context for the LLM.
     ///
-    /// Returns the header context (instructions + tool definitions) plus the
-    /// correction memory. The conversation itself lives entirely in the
-    /// [`ContextManager`] and is delivered as structured messages via
+    /// Returns the header context (instructions + tool definitions). The
+    /// correction memory is NOT part of it: it churns on every tool failure
+    /// (new entry, duplicate reordering, eviction), and the system prompt
+    /// sits at position 0 — any change there invalidates the exact-prefix
+    /// cache of the WHOLE conversation. The block is mirrored into the
+    /// [`ContextManager`] instead and rendered at the TAIL of the messages
+    /// (before the TODO block), where a change only costs the tail itself.
+    /// The conversation itself lives entirely in the [`ContextManager`] and
+    /// is delivered as structured messages via
     /// [`stream_chat_with_messages`](Self::stream_chat_with_messages) — never
     /// duplicated into the system prompt.
     fn build_chat_context(&mut self) -> String {
-        let mut out = self.header_context.clone();
-        let correction = self.correction_memory.format();
-        out.push_str(&correction);
-        out
+        self.context_manager
+            .set_correction_block(self.correction_memory.format());
+        self.header_context.clone()
     }
 
     /// Send a chat completion and return the full response as a single string.
@@ -3040,6 +3045,11 @@ impl Harness {
     #[cfg(test)]
     pub(crate) fn pending_thinking_blocks_count_for_test(&self) -> usize {
         self.pending_thinking_blocks.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn push_correction_for_test(&mut self, msg: &str) {
+        self.correction_memory.push(msg);
     }
 
     /// Snapshot of the current LSP engine state for the TUI's footer/tags.

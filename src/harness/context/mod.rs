@@ -374,6 +374,18 @@ pub struct ContextManager {
     /// across `plan_*` re-renders. Never summarized — see [`todo_ctxt`] for
     /// the protection and removal rules.
     todo: TodoContext,
+    /// Transient tail block with the tool-correction memory, mirrored by the
+    /// harness before every request. Corrections churn constantly (new
+    /// failure, duplicate reordering, eviction), so they must NEVER live in
+    /// the system prompt: any change there invalidates the exact-prefix cache
+    /// of the WHOLE conversation. Rendered at the tail — before the TODO
+    /// block — a change only costs the block itself. Like the TODO block, it
+    /// is not an item: it is re-mirrored per request and never compacted.
+    /// Never persisted; a restored manager starts with an empty block.
+    correction_block: Option<String>,
+    /// Memoized token estimate of [`Self::correction_block`], kept in sync by
+    /// [`Self::set_correction_block`] so `total_tokens` stays O(1).
+    correction_block_tokens: usize,
     /// Transient rehydration signal, never authoritative or persisted state.
     todo_restore_pending: bool,
     /// Running token total of `items` (excluding the TODO block), kept in sync
@@ -465,6 +477,8 @@ impl ContextManager {
             masked: HashSet::new(),
             checkpoint_coverage: Vec::new(),
             todo: TodoContext::new(),
+            correction_block: None,
+            correction_block_tokens: 0,
             todo_restore_pending: false,
             cached_items_tokens: 0,
             manual_compaction: false,
@@ -1432,18 +1446,34 @@ impl ContextManager {
         {
             messages.push(user_message(current_input));
         }
-        // The protected TODO block goes at the END — after the conversation
-        // history and the steering input, right where the model is about to
-        // generate. It is re-rendered live from the tools' Plan state on every
-        // call, so it is structurally immune to even the LLM compaction (see
-        // `todo_ctxt`). The tail placement preserves the providers' exact-
-        // prefix caching: the stable [system → history] prefix keeps hitting
-        // the cache even when a `plan_*` dispatch re-renders the block, since
-        // a change only invalidates the tail (new, uncached content anyway).
-        // When the last message is itself a `user` turn, the block is MERGED
-        // into it (block first, steering after) instead of being injected as
-        // a second consecutive `user` message (rejected by some providers).
+        // Tail blocks in order: the tool-correction block first, then the
+        // protected TODO block. Corrections churn on every tool failure —
+        // rendering them at the TAIL keeps that churn away from the cached
+        // `[system → history]` prefix (a header placement would invalidate
+        // the WHOLE conversation on every new correction, exactly like the
+        // retired deterministic masking). A change here only costs the tail:
+        // new, uncached content anyway. When the last message is itself a
+        // `user` turn, the blocks are MERGED into it (blocks first, steering
+        // after) instead of being injected as a second consecutive `user`
+        // message (rejected by some providers).
+        let mut tail_block: Option<String> = None;
+        if let Some(corrections) = self.correction_block.as_deref() {
+            if let Some(existing) = tail_block.as_mut() {
+                existing.push_str("\n\n");
+                existing.push_str(corrections);
+            } else {
+                tail_block = Some(corrections.to_string());
+            }
+        }
         if let Some(block) = self.todo.text() {
+            if let Some(existing) = tail_block.as_mut() {
+                existing.push_str("\n\n");
+                existing.push_str(&block);
+            } else {
+                tail_block = Some(block);
+            }
+        }
+        if let Some(block) = tail_block {
             match messages.last_mut() {
                 Some(last) if last.role == "user" => {
                     let existing = last.content.take().unwrap_or_default();
@@ -1495,6 +1525,20 @@ impl ContextManager {
         tool_set.sort_unstable();
         tool_set.dedup();
         self.last_tool_set = Some(tool_set);
+    }
+
+    /// Mirror the tool-correction memory block for the next request (tail
+    /// rendering — see the field docs). An empty/blank text clears the block.
+    pub fn set_correction_block(&mut self, text: String) {
+        self.correction_block = if text.trim().is_empty() {
+            None
+        } else {
+            Some(text)
+        };
+        self.correction_block_tokens = self
+            .correction_block
+            .as_deref()
+            .map_or(0, |block| self.encoding.estimate(block));
     }
 
     pub fn save_state(&self) -> ContextManagerState {
@@ -1652,6 +1696,7 @@ impl ContextManager {
         }
         self.cached_items_tokens
             .saturating_add(self.todo.tokens(self.encoding))
+            .saturating_add(self.correction_block_tokens)
     }
 
     /// Whether the model must not see this raw item: it is behind a legacy

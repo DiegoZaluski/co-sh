@@ -112,6 +112,34 @@ fn mask_tool_call_never_consumes_the_thinking_block_stash() {
     );
 }
 
+/// The tool-correction memory churns on every tool failure (new entry,
+/// duplicate reordering, eviction). The system prompt sits at position 0 of
+/// the exact-prefix cache, so the corrections must NEVER be appended to it —
+/// they render at the TAIL of the messages instead (before the TODO block).
+#[test]
+fn correction_memory_never_reaches_the_system_prompt() {
+    let mut h = make_harness();
+    h.push_correction_for_test("Tool call failed — you sent: {}");
+
+    let system = h.build_chat_context_for_test();
+    assert!(
+        !system.contains("Correction History"),
+        "the system prompt must stay byte-stable across corrections"
+    );
+
+    let tail = h
+        .context_manager
+        .build_messages("")
+        .pop()
+        .expect("tail message");
+    assert!(
+        tail.content
+            .as_deref()
+            .is_some_and(|c| c.contains("Correction History")),
+        "the correction block renders at the message tail"
+    );
+}
+
 /// All cloud providers officially recommend native function calling and warn
 /// that inline-JSON instructions in the prompt conflict with it (Gemini 3.x
 /// obeys the legacy inline-JSON `TOOL_FORMAT` literally and emits tool calls
