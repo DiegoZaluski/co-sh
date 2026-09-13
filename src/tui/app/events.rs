@@ -920,23 +920,30 @@ impl App {
                         String::new()
                     };
 
-                    // Update the dialog with the loaded models (and stop the
-                    // loading spinner — even when the fetch found nothing, so
-                    // the empty list renders as before). Scan the whole stack:
-                    // the user may have pushed the reasoning sub-dialog on top
-                    // of the ModelList while the fetch was in flight.
-                    for d in self.dialog.stack.iter_mut() {
-                        if let DialogType::ModelList {
+                    // Update the dialog with the loaded models (and stop
+                    // the loading spinner, even when the fetch found
+                    // nothing, so the empty list renders as before). Look
+                    // past the top of the stack: the user may have pushed
+                    // the reasoning sub-dialog on top of the ModelList
+                    // while the fetch was in flight. `replace()` clears
+                    // the stack before showing the picker, so a single
+                    // ModelList can exist: take it and move the payload in
+                    // without cloning it.
+                    if let Some(d) = self
+                        .dialog
+                        .stack
+                        .iter_mut()
+                        .find(|d| matches!(d.dialog_type, DialogType::ModelList { .. }))
+                        && let DialogType::ModelList {
                             models: dialog_models,
                             current: dialog_current,
                             loading: dialog_loading,
                             ..
                         } = &mut d.dialog_type
-                        {
-                            *dialog_models = models_with_auto.clone();
-                            *dialog_current = auto_current.clone();
-                            *dialog_loading = false;
-                        }
+                    {
+                        *dialog_models = models_with_auto;
+                        *dialog_current = auto_current;
+                        *dialog_loading = false;
                     }
                 }
 

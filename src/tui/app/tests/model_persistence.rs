@@ -64,6 +64,117 @@ async fn summarizer_selection_and_cancel_never_change_the_agent_model() {
     );
 }
 
+/// Opening the model dialog with an empty cache must flag the dialog as
+/// loading: the background API fetch can take a few seconds and the list
+/// area shows the spinner (plus the seeded `auto` entry) until
+/// `ModelsLoaded` lands.
+#[tokio::test]
+async fn model_dialog_opens_in_loading_state_with_empty_cache() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".into());
+    app.open_model_dialog();
+    match &app.dialog.current().unwrap().dialog_type {
+        DialogType::ModelList {
+            models, loading, ..
+        } => {
+            assert!(
+                loading,
+                "empty cache should open the dialog in loading state"
+            );
+            assert_eq!(models.len(), 1);
+            assert_eq!(models[0].model, "auto");
+        }
+        _ => panic!("expected model picker"),
+    }
+}
+
+/// `ModelsLoaded` must repopulate the list and stop the spinner even when
+/// the reasoning sub-dialog sits on top of the ModelList: the handler looks
+/// past the top of the dialog stack instead of only checking the current
+/// dialog.
+#[tokio::test]
+async fn models_loaded_updates_model_list_beneath_reasoning_dialog() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".into());
+    app.open_model_dialog();
+    // Simulate the user pressing Enter on the seeded `auto` entry while the
+    // fetch is still in flight, pushing the reasoning sub-dialog on top.
+    app.dialog.show(DialogType::ReasoningList {
+        model: "auto".to_string(),
+        provider: String::new(),
+        levels: vec![
+            "default".to_string(),
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+        ],
+        current: String::new(),
+    });
+    app.event_tx
+        .send(cosh::harness::HarnessEvent::ModelsLoaded {
+            models: vec![cosh::ModelEntry {
+                provider: "summary-provider".into(),
+                model: "summary-model".into(),
+            }],
+            current: String::new(),
+        })
+        .unwrap();
+    app.poll_events();
+    assert!(
+        matches!(
+            app.dialog.current().unwrap().dialog_type,
+            DialogType::ReasoningList { .. }
+        ),
+        "reasoning sub-dialog should still be on top"
+    );
+    let model_list = app
+        .dialog
+        .stack
+        .iter()
+        .find(|d| matches!(d.dialog_type, DialogType::ModelList { .. }))
+        .expect("model list still in the dialog stack");
+    match &model_list.dialog_type {
+        DialogType::ModelList {
+            models, loading, ..
+        } => {
+            assert!(!loading, "ModelsLoaded must stop the loading spinner");
+            assert_eq!(models.len(), 2);
+            assert_eq!(models[0].model, "auto");
+            assert_eq!(models[1].model, "summary-model");
+        }
+        _ => panic!("expected model picker beneath the reasoning dialog"),
+    }
+}
+
+/// A fetch that finds nothing must still clear the loading flag so the
+/// dialog renders the plain (auto-only) list instead of a spinner forever.
+#[tokio::test]
+async fn models_loaded_with_no_models_stops_the_spinner() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".into());
+    app.open_model_dialog();
+    app.event_tx
+        .send(cosh::harness::HarnessEvent::ModelsLoaded {
+            models: vec![],
+            current: String::new(),
+        })
+        .unwrap();
+    app.poll_events();
+    match &app.dialog.current().unwrap().dialog_type {
+        DialogType::ModelList {
+            models, loading, ..
+        } => {
+            assert!(!loading, "an empty fetch must stop the spinner");
+            assert_eq!(models.len(), 1);
+            assert_eq!(models[0].model, "auto");
+        }
+        _ => panic!("expected model picker"),
+    }
+}
+
 #[tokio::test]
 async fn manual_compaction_resolves_only_explicit_summary_models_or_the_auto_chain() {
     let _guard = HOME_LOCK.lock();

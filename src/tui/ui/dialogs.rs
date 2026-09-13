@@ -17,6 +17,10 @@ use crate::component::spinner::SpinnerState;
 use crate::theme::{Theme, rgba_color};
 use crate::util::field_selection::DragSelection;
 
+/// Hint drawn next to the spinner while the ModelList waits on the
+/// background API fetch started by `open_model_dialog`.
+const MODEL_LIST_LOADING_HINT: &str = "Loading models";
+
 /// Visual item in the model list - either a provider header or a model
 #[derive(Debug, Clone)]
 enum VisualItem {
@@ -2353,7 +2357,7 @@ impl DialogState {
                     }
                     draw_text_line(
                         buf,
-                        "Loading models",
+                        MODEL_LIST_LOADING_HINT,
                         list_x + 2,
                         list_top,
                         list_w.saturating_sub(2),
