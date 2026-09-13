@@ -99,7 +99,7 @@ impl App {
             }
 
             let header_style = Style::default().fg(rgba_color(self.theme.text_muted));
-            let title_chars: Vec<char> = "~$co-sh".chars().collect();
+            let title_chars: Vec<char> = "← esc".chars().collect();
             for (i, ch) in title_chars.iter().enumerate() {
                 if let Some(cell) = buf.cell_mut((area.x + 1 + i as u16, area.y)) {
                     cell.set_char(*ch);
