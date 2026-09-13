@@ -1,4 +1,5 @@
 use std::io;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -28,6 +29,7 @@ use crate::routes::session::question::QuestionDialog;
 use crate::routes::session::queue_choice::QueueChoiceDialog;
 use crate::routes::session::queue_choice::QueueTarget;
 use crate::routes::session::right_panel::{RIGHT_PANEL_WIDTH, should_show_right_panel};
+use crate::routes::session::file_explorer::FileExplorerView;
 use crate::routes::session::sidebar::SidebarView;
 use crate::routes::settings::SettingsView;
 use crate::routes::tools::InternalToolsView;
@@ -128,6 +130,8 @@ pub(super) enum LeftPanelMode {
     History,
     /// The usage dashboard (Ctrl+U).
     Dashboard,
+    /// The file explorer tree (Ctrl+F).
+    Explorer,
 }
 
 /// Header link that opens the project's bug-report page.
@@ -186,6 +190,10 @@ pub struct App {
     pub session_view: SessionView,
     pub prompt_view: PromptView,
     pub sidebar: SidebarView,
+    /// Ctrl+F file explorer shown in the left panel while `left_panel` is
+    /// [`LeftPanelMode::Explorer`]. Built lazily on first open so a user who
+    /// never touches Ctrl+F pays no directory-read cost.
+    pub file_explorer: Option<FileExplorerView>,
     pub dialog: DialogState,
     pub permission_dialog: PermissionDialog,
     pub question_dialog: QuestionDialog,
@@ -336,6 +344,14 @@ pub struct App {
     // Mouse drag / selection tracking
     /// Position where the mouse was pressed down (for detecting drag selections).
     mouse_down_pos: Option<(u16, u16)>,
+    /// Whether the current/last mouse press began inside the left panel
+    /// (x < SIDEBAR_WIDTH). Checked on release so a text-selection drag
+    /// that started in the chat can never act on the sidebar (a stray
+    /// click there could otherwise launch the editor).
+    press_started_in_sidebar: bool,
+    /// Whether the last release was a drag (moved since the press). Set in
+    /// the release handler, consulted by the sidebar dispatch below it.
+    release_was_drag: bool,
     /// Whether a drag-selection is in progress.
     mouse_drag_active: bool,
     /// Set when a mouse Up was a drag (even if it selected nothing), so the
@@ -361,6 +377,9 @@ pub struct App {
     last_mouse_y: u16,
     /// Timestamp of last scroll wheel event (for debouncing rapid scrolls).
     last_scroll_time: Instant,
+    /// Set after the external editor returned: the next frame must be a
+    /// full repaint (the editor wrote arbitrary content over the screen).
+    needs_full_redraw: bool,
     /// Whether the sidebar is focused to receive scroll events.
     /// Set to true when the user clicks inside the sidebar; false on outside clicks.
     sidebar_focused: bool,
@@ -490,6 +509,7 @@ impl App {
             show_rag: false,
             prompt_view: PromptView::new(),
             sidebar: SidebarView::new(),
+            file_explorer: None,
             dialog: DialogState::new(),
             permission_dialog: PermissionDialog::new(),
             question_dialog: QuestionDialog::new(),
@@ -543,6 +563,8 @@ impl App {
             usage_cost_rx,
             usage_cost_tx,
             mouse_down_pos: None,
+            press_started_in_sidebar: false,
+            release_was_drag: false,
             mouse_drag_active: false,
             mouse_up_was_drag: false,
             drag_selection: None,
@@ -552,6 +574,7 @@ impl App {
             last_mouse_x: 0,
             last_mouse_y: 0,
             last_scroll_time: Instant::now(),
+            needs_full_redraw: false,
             sidebar_focused: false,
             bug_link_area: None,
             bell_enabled: saved_bell,
@@ -681,6 +704,13 @@ impl App {
             // (no input -> no ticks). Ticking on the measured delta keeps
             // the lifetime exact at any frame rate.
             self.toast_state.tick(delta.as_millis() as u64);
+
+            if self.needs_full_redraw {
+                // The external editor scribbled over the screen: force a
+                // complete repaint instead of a cell diff.
+                self.needs_full_redraw = false;
+                terminal.clear()?;
+            }
 
             terminal.draw(|frame| {
                 self.render(frame, delta_secs);
@@ -922,6 +952,74 @@ impl App {
     fn show_session_history(&mut self) {
         self.left_panel = LeftPanelMode::History;
         self.sidebar.open = true;
+    }
+
+    /// Ctrl+F: always open the left panel showing the file explorer rooted
+    /// at the working directory. Not a toggle — same one-key-shows-it
+    /// contract as Ctrl+U/Ctrl+S.
+    fn show_file_explorer(&mut self) {
+        self.left_panel = LeftPanelMode::Explorer;
+        self.sidebar.open = true;
+        if self.file_explorer.is_none() {
+            let root = PathBuf::from(&self.state.working_directory);
+            let root = if root.is_dir() {
+                root
+            } else {
+                // Placeholder/missing cwd (e.g. demo state): the process
+                // cwd is the next-best explorer root.
+                std::env::current_dir().unwrap_or(root)
+            };
+            self.file_explorer = Some(FileExplorerView::new(root));
+        }
+    }
+
+    /// Open `path` in the configured terminal editor (Settings → Editor),
+    /// falling back to the first of nvim → vim → nano found on `$PATH`.
+    ///
+    /// The editor temporarily takes over the terminal: raw mode, mouse
+    /// capture and the alternate screen are torn down before spawning and
+    /// re-established afterwards, so Cosh resumes in exactly the state it
+    /// had. When no editor can be launched (or the handover fails) this
+    /// silently does nothing — the explorer remains useful for navigation.
+    fn open_file_in_editor(&mut self, path: &std::path::Path) {
+        let Some(command) =
+            crate::util::editor::resolve_editor_command(&self.setup.editor)
+        else {
+            return;
+        };
+        // Command form "vim -u NONE": first token is the binary, the rest
+        // are its arguments. The file path is always appended last.
+        let mut tokens = command.split_whitespace();
+        let Some(program) = tokens.next() else {
+            return;
+        };
+        let args: Vec<String> = tokens.map(str::to_string).collect();
+
+        // Hand the terminal over. A failed teardown means the editor could
+        // not get a usable screen — skip the spawn, but re-establish the
+        // TUI's own state so rendering continues from a known-good base.
+        if restore_terminal().is_ok() {
+            // "--" keeps the editor from parsing a file named like a flag.
+            let launched = std::process::Command::new(program)
+                .args(&args)
+                .arg("--")
+                .arg(path)
+                .status();
+            // A failed spawn (binary vanished since the check) stays silent
+            // by design: no toast, no error — the explorer keeps working.
+            let _ = launched;
+        }
+
+        // Take the terminal back no matter how the editor exited.
+        if init_terminal().is_err() {
+            // The TUI cannot be resumed safely (no raw mode / alt screen):
+            // quit instead of rendering into a broken terminal.
+            self.should_quit = true;
+            return;
+        }
+        // The editor (or the failed teardown) left arbitrary content on the
+        // screen: force the next frame to repaint everything.
+        self.needs_full_redraw = true;
     }
 
     /// Tab/Shift+Tab on the dashboard: advance (or go back) through the

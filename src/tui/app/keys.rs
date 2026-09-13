@@ -339,6 +339,48 @@ impl App {
                 && self.sidebar.open
                 && self.terminal_size().width >= super::MIN_WIDTH_FOR_LEFT_PANEL
             {
+                // File explorer (Ctrl+F): the panel owns the keys while it
+                // is the active left-panel view — but never while a modal
+                // dialog is open (Enter on a file must not launch the
+                // editor under a dialog). Navigation works while the agent
+                // runs; it never touches session state.
+                if matches!(self.left_panel, super::LeftPanelMode::Explorer)
+                    && !self.dialog.visible()
+                    && !self.question_dialog.visible
+                    && !self.permission_dialog.visible
+                    && !self.queue_choice_dialog.visible
+                {
+                    match key.code {
+                        KeyCode::Up => {
+                            if let Some(explorer) = &mut self.file_explorer {
+                                explorer.select_prev();
+                            }
+                            return Ok(false);
+                        }
+                        KeyCode::Down => {
+                            if let Some(explorer) = &mut self.file_explorer {
+                                explorer.select_next();
+                            }
+                            return Ok(false);
+                        }
+                        KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right => {
+                            if let Some(explorer) = &mut self.file_explorer {
+                                match explorer.handle_key(key.code) {
+                                    crate::routes::session::file_explorer::ExplorerAction::
+                                        OpenFile(path) => {
+                                        self.open_file_in_editor(&path);
+                                    }
+                                    crate::routes::session::file_explorer::ExplorerAction::None => {
+                                    }
+                                }
+                            }
+                            return Ok(false);
+                        }
+                        _ => {}
+                    }
+                    // Other keys (typing, shortcuts) fall through to the
+                    // normal dispatch below.
+                }
                 match key.code {
                     KeyCode::Up => {
                         if self.state.status == crate::types::SessionStatus::Idle {
@@ -556,6 +598,9 @@ impl App {
                                 setting,
                             }) => {
                                 self.open_cache_ttl_input(setting);
+                            }
+                            Some(crate::routes::settings::SettingsAction::OpenEditorInput) => {
+                                self.open_editor_input();
                             }
                             Some(crate::routes::settings::SettingsAction::McpToggled) => {
                                 self.setup.save();
@@ -886,6 +931,11 @@ impl App {
                 Some(crate::keymap::Action::ShowSessionHistory) => {
                     // Ctrl+S: always open the left panel showing session history.
                     self.show_session_history();
+                }
+                Some(crate::keymap::Action::ShowFileExplorer) => {
+                    // Ctrl+F: always open the left panel showing the file
+                    // explorer rooted at the working directory.
+                    self.show_file_explorer();
                 }
                 Some(crate::keymap::Action::ToggleHelp) => {
                     if self.dialog.visible()

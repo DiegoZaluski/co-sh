@@ -229,7 +229,17 @@ impl App {
             }
 
             if self.sidebar.open && area.width >= super::MIN_WIDTH_FOR_LEFT_PANEL {
-                if matches!(self.left_panel, super::LeftPanelMode::Dashboard) {
+                if matches!(self.left_panel, super::LeftPanelMode::Explorer) {
+                    // File explorer (Ctrl+F): the tree owns the whole panel,
+                    // including the header box.
+                    if let Some(explorer) = &mut self.file_explorer {
+                        explorer.render(
+                            buf,
+                            Rect::new(area.x, area.y, sidebar_w, area.height),
+                            &self.theme,
+                        );
+                    }
+                } else if matches!(self.left_panel, super::LeftPanelMode::Dashboard) {
                     // Usage dashboard: a self-contained panel (session usage
                     // + spend per provider/total for the selected period).
                     let data = self.dashboard_data();
