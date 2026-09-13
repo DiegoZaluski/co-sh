@@ -45,7 +45,9 @@ impl Harness {
         let encoding = crate::util::TokenEncoding::for_model(connector.effective_model());
         // Unknown provider defaults remain unknown, rather than being replaced
         // with a segment budget. Provider errors remain authoritative.
-        let output = connector.effective_max_tokens().unwrap_or(0) as usize;
+        let output = connector
+            .effective_max_tokens()
+            .map_or(super::MIN_SUMMARY_OUTPUT_HEADROOM, |value| value as usize);
         (encoding
             .estimate(system)
             .saturating_add(encoding.estimate(prompt))
@@ -272,6 +274,19 @@ mod tests {
             ("openai".into(), "summary-first".into()),
             ("openrouter".into(), "summary-second".into()),
         ]
+    }
+
+    #[tokio::test]
+    async fn incomplete_summary_advances_directly_to_the_configured_fallback() {
+        let mut harness = harness()
+            .with_summarization_models(chain())
+            .with_mock_chats(vec![
+                Err("summarizer response is incomplete (finish reason: length)"),
+                Ok("Complete handoff from the second model"),
+            ]);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(harness.llm_compact(&tx).await);
+        assert_eq!(harness.mock_compaction_models, chain());
     }
 
     #[tokio::test]

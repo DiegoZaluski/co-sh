@@ -26,6 +26,9 @@ use std::sync::{Mutex, OnceLock};
 use tokio::time::Duration;
 
 #[cfg(test)]
+#[path = "test/checkpoint_output.rs"]
+mod checkpoint_output;
+#[cfg(test)]
 #[path = "test/map_reduce_test.rs"]
 mod map_reduce_test;
 #[path = "summarization.rs"]
@@ -217,6 +220,10 @@ const MAP_CONCURRENCY: usize = 4;
 /// Base of the exponential backoff between summarizer retries (attempt N
 /// waits `2^(N-1) * BASE`).
 const COMPACTION_RETRY_BACKOFF_BASE: Duration = Duration::from_millis(250);
+/// Minimum output headroom used only for local request-fit checks when a
+/// provider does not expose its default output reservation. It never becomes
+/// a `max_tokens` request parameter.
+const MIN_SUMMARY_OUTPUT_HEADROOM: usize = 200;
 
 /// Minimum time between two persistent context-overflow toasts: the user
 /// must keep being reminded while the provider is stuck, but not spammed on
@@ -403,6 +410,9 @@ enum CompactionErr {
     Interrupted,
     /// The provider rejected the prompt as larger than its context window.
     ContextWindow { window_tokens: Option<usize> },
+    /// Generation stopped before a natural completion. Retrying the same
+    /// request cannot change a deterministic truncation result.
+    Incomplete(String),
     /// Any other connector error.
     Other(String),
 }
@@ -1417,6 +1427,13 @@ impl Harness {
                     self.compaction_generic_retries = 0;
                     break CompactionOutcome::Failed;
                 }
+                Err(CompactionErr::Incomplete(reason)) => {
+                    let _ = tx.send(HarnessEvent::Toast {
+                        message: format!("LLM compaction failed: {reason}"),
+                        variant: ToastVariant::Error,
+                    });
+                    break CompactionOutcome::Failed;
+                }
                 Err(CompactionErr::Other(e)) => {
                     self.compaction_generic_retries += 1;
                     if self.compaction_generic_retries >= MAX_COMPACTION_RETRIES {
@@ -1618,6 +1635,12 @@ impl Harness {
                 self.context_manager.mark_overflow(&model);
                 self.notify_context_overflow(tx);
             }
+            Err(CompactionErr::Incomplete(message)) => {
+                let _ = tx.send(HarnessEvent::Toast {
+                    message: format!("LLM compaction failed: {message}"),
+                    variant: ToastVariant::Error,
+                });
+            }
             Err(CompactionErr::Interrupted) => self.compaction_interrupted = true,
             Ok(_) => {}
         }
@@ -1661,7 +1684,13 @@ impl Harness {
                     },
                 });
                 let result = self
-                    .summarize_checkpoint_request(&request.system, &request.prompt, tx, false)
+                    .summarize_checkpoint_request_mode(
+                        &request.system,
+                        &request.prompt,
+                        tx,
+                        false,
+                        false,
+                    )
                     .await;
                 let summary = match result {
                     Err(CompactionErr::ContextWindow { window_tokens })
@@ -1700,10 +1729,11 @@ impl Harness {
                     });
                 }
                 let mut summary = self
-                    .summarize_checkpoint_request(
+                    .summarize_checkpoint_request_mode(
                         &request.system,
                         &request.prompt,
                         tx,
+                        request.final_group,
                         request.final_group,
                     )
                     .await?;
@@ -1721,10 +1751,11 @@ impl Harness {
                             CompactionErr::Other("reducer requested an invalid source range".into())
                         })?;
                     summary = self
-                        .summarize_checkpoint_request(
+                        .summarize_checkpoint_request_mode(
                             &conflict.system,
                             &conflict.prompt,
                             tx,
+                            request.final_group,
                             request.final_group,
                         )
                         .await?;
@@ -1755,7 +1786,13 @@ impl Harness {
                     },
                 });
                 let audit = self
-                    .summarize_checkpoint_request(&request.system, &request.prompt, tx, false)
+                    .summarize_checkpoint_request_mode(
+                        &request.system,
+                        &request.prompt,
+                        tx,
+                        false,
+                        false,
+                    )
                     .await?;
                 if !self.context_manager.accept_validation(&request, &audit) {
                     return Err(CompactionErr::Other(
@@ -1778,7 +1815,13 @@ impl Harness {
                     event: LlmCompactionEvent::OutputStarted,
                 });
                 let corrected = self
-                    .summarize_checkpoint_request(&request.system, &request.prompt, tx, true)
+                    .summarize_checkpoint_request_mode(
+                        &request.system,
+                        &request.prompt,
+                        tx,
+                        true,
+                        true,
+                    )
                     .await?;
                 if !self.context_manager.accept_correction(&corrected) {
                     return Err(CompactionErr::Other(
@@ -1855,6 +1898,7 @@ impl Harness {
         }
 
         let mut generic_failure = false;
+        let mut incomplete_failure: Option<String> = None;
         let mut overflow_windows = Vec::new();
         while let Some(joined) = tasks.join_next().await {
             match joined {
@@ -1890,13 +1934,18 @@ impl Harness {
                     ..
                 }) => overflow_windows.push(window_tokens),
                 Ok(ParallelMapResult {
+                    result: Err(CompactionErr::Incomplete(message)),
+                    ..
+                }) => incomplete_failure = Some(message),
+                Ok(ParallelMapResult {
                     result: Err(CompactionErr::Other(_)),
                     ..
                 })
                 | Err(_) => generic_failure = true,
             }
 
-            if !generic_failure
+            if incomplete_failure.is_none()
+                && !generic_failure
                 && overflow_windows.is_empty()
                 && let Some(request) = requests.next()
             {
@@ -1919,6 +1968,12 @@ impl Harness {
             }
             self.emit_compaction_snapshot(tx);
             return Ok(());
+        }
+
+        if let Some(message) = incomplete_failure {
+            self.context_manager.disable_parallel_mapping();
+            self.emit_compaction_snapshot(tx);
+            return Err(CompactionErr::Incomplete(message));
         }
 
         if generic_failure {
@@ -1992,6 +2047,27 @@ impl Harness {
         event_tx: tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
         window: usize,
     ) -> Result<String, CompactionErr> {
+        Self::summarize_map_with_connector_mode(
+            connector,
+            system,
+            prompt,
+            stop_signal,
+            event_tx,
+            window,
+            false,
+        )
+        .await
+    }
+
+    async fn summarize_map_with_connector_mode(
+        connector: Connector,
+        system: String,
+        prompt: String,
+        stop_signal: Option<Arc<AtomicBool>>,
+        event_tx: tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
+        window: usize,
+        full_output: bool,
+    ) -> Result<String, CompactionErr> {
         use tokio_stream::StreamExt;
 
         let encoding = crate::util::TokenEncoding::for_model(connector.effective_model());
@@ -1999,12 +2075,19 @@ impl Harness {
             .estimate(&system)
             .saturating_add(encoding.estimate(&prompt))
             .saturating_add(64);
-        let output_tokens = (window / 10).clamp(64, 2_000);
-        let connector = connector.with_max_tokens(output_tokens as u32);
-        let output_tokens = connector
-            .effective_max_tokens()
-            .unwrap_or(output_tokens as u32) as usize;
-        if input_tokens.saturating_add(output_tokens) >= window {
+        let (connector, output_tokens) = if full_output {
+            (
+                connector.clone(),
+                connector.effective_max_tokens().map(|value| value as usize),
+            )
+        } else {
+            let target = (window / 10).clamp(64, 2_000);
+            let connector = connector.with_max_tokens(target as u32);
+            let output = connector.effective_max_tokens().unwrap_or(target as u32) as usize;
+            (connector, Some(output))
+        };
+        let output_headroom = output_tokens.unwrap_or(MIN_SUMMARY_OUTPUT_HEADROOM);
+        if input_tokens.saturating_add(output_headroom) >= window {
             return Err(CompactionErr::ContextWindow {
                 window_tokens: Some(window),
             });
@@ -2068,6 +2151,9 @@ impl Harness {
     fn classify_mock_compaction_error(message: String) -> CompactionErr {
         match message.as_str() {
             INTERRUPTED_MARKER => CompactionErr::Interrupted,
+            other if other.starts_with("summarizer response is incomplete") => {
+                CompactionErr::Incomplete(message)
+            }
             CONTEXT_WINDOW_MARKER => CompactionErr::ContextWindow {
                 window_tokens: None,
             },
@@ -2084,12 +2170,25 @@ impl Harness {
         }
     }
 
+    #[cfg(test)]
     async fn summarize_checkpoint_request(
         &mut self,
         system: &str,
         prompt: &str,
         tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
         stream_output: bool,
+    ) -> Result<String, CompactionErr> {
+        self.summarize_checkpoint_request_mode(system, prompt, tx, stream_output, false)
+            .await
+    }
+
+    async fn summarize_checkpoint_request_mode(
+        &mut self,
+        system: &str,
+        prompt: &str,
+        tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
+        stream_output: bool,
+        full_output: bool,
     ) -> Result<String, CompactionErr> {
         use super::events::HarnessEvent;
 
@@ -2109,13 +2208,14 @@ impl Harness {
                     response.map_err(CompactionErr::Other)
                 }
             } else {
-                Self::summarize_map_with_connector(
+                Self::summarize_map_with_connector_mode(
                     self.compaction_connector().clone(),
                     system.to_string(),
                     prompt.to_string(),
                     self.stop_signal.clone(),
                     tx.clone(),
                     self.context_manager.map_reduce_window(),
+                    full_output,
                 )
                 .await
             };
@@ -2147,6 +2247,9 @@ impl Harness {
                             return Err(CompactionErr::Interrupted);
                         }
                     }
+                }
+                Err(CompactionErr::Incomplete(error)) => {
+                    return Err(CompactionErr::Incomplete(error));
                 }
                 Err(error) => return Err(error),
             }
@@ -2251,6 +2354,16 @@ impl Harness {
                     }
                     self.context_manager.mark_overflow(&model);
                     self.notify_context_overflow(tx);
+                    break false;
+                }
+                Err(CompactionErr::Incomplete(e)) => {
+                    if self.summarization_connector.is_none() {
+                        self.context_manager.abort_split();
+                    }
+                    let _ = tx.send(HarnessEvent::Toast {
+                        message: format!("LLM compaction failed: {e}"),
+                        variant: ToastVariant::Error,
+                    });
                     break false;
                 }
                 Err(CompactionErr::Other(e)) => {
@@ -2372,6 +2485,9 @@ impl Harness {
                             window_tokens: None,
                         },
                         other => {
+                            if other.starts_with("summarizer response is incomplete") {
+                                return Err(CompactionErr::Incomplete(other.to_string()));
+                            }
                             // Test-only: "{CONTEXT_WINDOW_MARKER}:{window}"
                             // reports the window along with the overflow, so
                             // the mock can drive the REACTIVE split fork
@@ -2500,7 +2616,7 @@ impl Harness {
     fn validate_summary_completion(reason: Option<&str>) -> Result<(), CompactionErr> {
         match reason {
             Some("stop" | "STOP" | "end_turn") => Ok(()),
-            other => Err(CompactionErr::Other(format!(
+            other => Err(CompactionErr::Incomplete(format!(
                 "summarizer response is incomplete (finish reason: {})",
                 other.unwrap_or("missing")
             ))),

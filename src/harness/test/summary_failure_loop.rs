@@ -236,10 +236,7 @@ async fn exhausted_automatic_summary_retries_are_not_renewed_after_each_tool() {
         started, 1,
         "an exhausted failure must defer automatic compaction for this turn"
     );
-    assert_eq!(
-        h.mock_compaction_models.len(),
-        super::MAX_COMPACTION_RETRIES
-    );
+    assert_eq!(h.mock_compaction_models.len(), 1);
     assert!(h.context_manager.display_info().total_tokens >= 1_600);
 
     // A new user turn has a fresh chance; a failure must not disable
@@ -374,7 +371,7 @@ async fn automatic_compaction_selects_summarizer_before_testing_its_window() {
 }
 
 #[tokio::test]
-async fn truncated_retries_replace_visible_output_and_never_commit() {
+async fn truncated_summary_is_attempted_once_and_never_committed() {
     let (connector, mut requests, server) = output_limited_summarizer(u64::MAX).await;
     let mut h = work_harness(205_000);
     h.connector = connector;
@@ -385,7 +382,7 @@ async fn truncated_retries_replace_visible_output_and_never_commit() {
     while requests.try_recv().is_ok() {
         calls += 1;
     }
-    assert_eq!(calls, super::MAX_COMPACTION_RETRIES);
+    assert_eq!(calls, 1);
 
     let mut visible = String::new();
     let mut resets = 0;
@@ -405,7 +402,7 @@ async fn truncated_retries_replace_visible_output_and_never_commit() {
             _ => {}
         }
     }
-    assert_eq!(resets, super::MAX_COMPACTION_RETRIES - 1);
+    assert_eq!(resets, 0);
     assert_eq!(failures, 1);
     assert_eq!(
         visible.matches("## Objective").count(),

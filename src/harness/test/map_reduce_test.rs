@@ -202,6 +202,65 @@ fn staged_harness() -> Harness {
 }
 
 #[tokio::test]
+async fn incomplete_parallel_map_drains_successes_without_rescheduling() {
+    let mut harness = staged_harness().with_mock_map_delays(&[1, 20, 30, 40]);
+    let count = harness.context_manager.pending_map_requests().len();
+    assert!(count > MAP_CONCURRENCY);
+    harness.mock_chat_queue.push_back(Err(
+        "summarizer response is incomplete (finish reason: length)".into(),
+    ));
+    for ordinal in 1..MAP_CONCURRENCY {
+        harness
+            .mock_chat_queue
+            .push_back(Ok(format!("accepted {ordinal}")));
+    }
+    harness.mock_chat_response = Some(Ok("must not be scheduled".into()));
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let requests = harness.context_manager.pending_map_requests();
+    let result = harness.run_parallel_maps(requests, &tx).await;
+    assert!(
+        result.is_err(),
+        "truncation must leave this model rather than retry sequentially"
+    );
+    assert_eq!(harness.mock_compaction_models.len(), MAP_CONCURRENCY);
+    assert_eq!(
+        harness.context_manager.map_progress(),
+        (MAP_CONCURRENCY - 1, count)
+    );
+    let state = harness.context_manager.save_state();
+    assert_eq!(state.map_reduce.as_ref().unwrap().repartitions, 0);
+    assert!(
+        state.map_reduce.as_ref().unwrap().segments[0]
+            .summary
+            .is_none()
+    );
+    harness.context_manager.restore_state(&state);
+    assert_eq!(
+        harness.context_manager.map_progress(),
+        (MAP_CONCURRENCY - 1, count)
+    );
+}
+
+#[tokio::test]
+async fn incomplete_checkpoint_request_does_not_repeat_an_unchanged_request() {
+    for final_output in [false, true] {
+        let mut harness = staged_harness().with_mock_chats(vec![
+            Err("summarizer response is incomplete (finish reason: length)"),
+            Ok("must remain unconsumed"),
+        ]);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(
+            harness
+                .summarize_checkpoint_request("system", "source", &tx, final_output)
+                .await
+                .is_err()
+        );
+        assert_eq!(harness.mock_compaction_models.len(), 1);
+        assert_eq!(harness.mock_chat_queue.len(), 1);
+    }
+}
+
+#[tokio::test]
 async fn parallel_maps_persist_out_of_order_results_by_stable_ordinal() {
     let mut harness = staged_harness().with_mock_map_delays(&[80, 1, 20, 30]);
     let requests = harness.context_manager.pending_map_requests();

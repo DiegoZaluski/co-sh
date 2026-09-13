@@ -147,8 +147,9 @@ from the automatic trigger. Before choosing MapReduce, the selected
 summarizer's actual request is checked against its own known window, with
 prompt overhead and the output ceiling its adapter actually sends. Unknown
 provider output defaults remain unknown; provider errors are authoritative.
-MapReduce requests currently retain their separate 10% window reservation,
-clamped to 64–2,000 tokens (including final reductions; see the audit below).
+MapReduce maps, intermediate reductions and audits retain their separate 10%
+window reservation, clamped to 64–2,000 tokens. Final reductions and
+corrections preserve the selected connector's output configuration.
 Stream resets and one-shot retries discard partial text from both the
 candidate and its visible output; waits/streams respond to cancellation.
 
@@ -202,8 +203,8 @@ store its original error toast or provider finish reason. Other incomplete
 termination signals remain errors; the fix does not accept truncated text as
 checkpoint evidence.
 
-See [the boundary audit](context-compaction-audit.md) for additional findings,
-regression evidence, and remaining issues.
+See [the boundary audit](context-compaction-audit.md) for the responsibility
+boundaries, regression evidence, and validation details.
 
 ## Reproducible offline evaluation
 

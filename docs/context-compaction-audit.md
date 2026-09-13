@@ -114,35 +114,29 @@ Cada retry agora reinicia a saída visível. O teste
 `truncated_retries_replace_visible_output_and_never_commit` verifica que fica
 somente a última resposta e que nenhum fragmento incompleto vira checkpoint.
 
-## Achados adicionais ainda não alterados
+## Achados adicionais corrigidos
 
-### 9. Redução final usa o mesmo teto de um mapa individual
+### 9. Redução final usava o mesmo teto de um mapa individual
 
 Em `core.rs`, `summarize_checkpoint_request` usa
 `summarize_map_with_connector` para mapas, reduções, auditorias e correções.
-Todas essas requisições recebem o mesmo teto de 2k. O argumento que distingue
-a resposta final controla a exibição, mas não o orçamento de geração.
+Mapas, reduções intermediárias e auditorias continuam limitados para caber nas
+etapas seguintes. A redução final e as correções agora preservam a configuração
+de saída do conector, sem instalar o teto de 2k. O teste
+`final_reduction_and_correction_preserve_output_settings_while_audits_stay_bounded`
+verifica uma resposta final maior que 2k e confirma limites apenas nas
+auditorias.
 
-Isso já fica dentro da contingência, mas ainda confunde um segmento com o
-handoff global. Um resumo final que precise de mais espaço pode ser truncado
-apesar de caber no contexto do agente. Constatação por rastreamento das chamadas;
-não foi feita uma avaliação de qualidade com modelo real. Recomenda-se separar
-os orçamentos por etapa e testar a convergência das reduções antes de alterar
-essa política. A remoção do teto do fluxo normal não alterou essa política.
+### 10. Truncamento era tratado como erro genérico transitório
 
-### 10. Truncamento é tratado como erro genérico transitório
-
-`validate_summary_completion` converte `length`, `max_tokens`, término ausente
-e outros sinais incompletos em `CompactionErr::Other`. O retry repete a mesma
-requisição até três vezes sem mudar nenhuma condição que causou o truncamento.
-O teste de respostas truncadas confirma essas três chamadas.
-
-O loop entre dispatches foi corrigido, mas essas chamadas redundantes dentro
-de uma tentativa continuam possíveis. Recomenda-se distinguir término
-incompleto de erro transitório de transporte para permitir falha imediata ou
-avanço ao próximo modelo configurado, preservando os dados e a contabilização.
-Essa mudança de classificação não foi incluída na correção de separação dos
-orçamentos.
+`validate_summary_completion` agora produz `CompactionErr::Incomplete` para
+`length`, `max_tokens`, término ausente e outros sinais incompletos. O pedido
+não é repetido: resultados paralelos já iniciados são drenados, mapas aceitos
+permanecem persistidos e o próximo modelo configurado pode assumir a etapa.
+Os testes `incomplete_parallel_map_drains_successes_without_rescheduling`,
+`incomplete_checkpoint_request_does_not_repeat_an_unchanged_request` e
+`incomplete_summary_advances_directly_to_the_configured_fallback` fixam essa
+política. Erros de transporte continuam sujeitos aos retries limitados.
 
 ## Validação
 
