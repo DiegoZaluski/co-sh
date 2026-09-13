@@ -731,9 +731,10 @@ impl App {
                         } else {
                             self.prompt_view.note_activity();
                             if !self.prompt_view.input.is_empty() {
-                                self.prompt_view.input.pop();
-                                self.prompt_view.cursor_pos = self.prompt_view.input.len();
-                                self.prompt_view.reset_history_index();
+                                // Route through `backspace()` so a pasted
+                                // virtual-text placeholder is still removed
+                                // atomically instead of chipped char by char.
+                                self.prompt_view.backspace();
                                 self.slash_menu.update(&self.prompt_view.input);
                             }
                         }

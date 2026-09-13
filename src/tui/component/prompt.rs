@@ -412,6 +412,33 @@ impl PromptView {
 
     /// Delete the word (or run of whitespace then word) immediately before the cursor.
     /// Behaves like Ctrl+Backspace in most terminals/editors.
+    /// If the deletion range touches a pasted virtual-text placeholder, the ENTIRE
+    /// placeholder is removed atomically (matching the atomic-virtual-text behaviour
+    /// of `backspace`/`delete`) so Ctrl+Backspace / Ctrl+W cannot chip it away
+    /// character by character, bypassing the atomic rule.
+    pub fn delete_word_before_cursor(&mut self) {
+        if self.cursor_pos == 0 {
+            return;
+        }
+        let start = crate::util::word_ops::find_word_start(&self.input, self.cursor_pos);
+        if start < self.cursor_pos {
+            self.reset_history_index();
+            self.note_activity();
+            let mut from = start;
+            let mut to = self.cursor_pos;
+            // Grow the deletion range to cover every pasted virtual-text placeholder
+            // it touches, then drop their mappings so the placeholder cannot be
+            // deleted piecemeal by repeated Ctrl+Backspace / Backspace keystrokes.
+            while let Some((vt_pos, vt_end, idx)) = self.find_paste_overlapping(from, to) {
+                self.pasted_parts.remove(idx);
+                from = from.min(vt_pos);
+                to = to.max(vt_end);
+            }
+            self.input.drain(from..to);
+            self.cursor_pos = from;
+        }
+    }
+
     /// Handle pasted text. If the text is long (>=3 lines or >150 chars), compress it
     /// into a virtual-text placeholder like `[Pasted ~N lines]` and store the original
     /// text for later expansion. Otherwise, insert the text directly at the cursor.
@@ -456,19 +483,6 @@ impl PromptView {
             result = result.replace(&part.virtual_text, &part.actual_text);
         }
         result
-    }
-
-    pub fn delete_word_before_cursor(&mut self) {
-        if self.cursor_pos == 0 {
-            return;
-        }
-        let start = crate::util::word_ops::find_word_start(&self.input, self.cursor_pos);
-        if start < self.cursor_pos {
-            self.reset_history_index();
-            self.note_activity();
-            self.input.drain(start..self.cursor_pos);
-            self.cursor_pos = start;
-        }
     }
 
     pub fn cursor_word_left(&mut self) {
@@ -1402,5 +1416,66 @@ mod tests {
                 "opaque themes must keep painting the blend band (x={x})"
             );
         }
+    }
+
+    #[test]
+    fn ctrl_backspace_deletes_pasted_placeholder_atomically() {
+        let mut view = PromptView::new();
+        view.input = "hey ".into();
+        view.cursor_pos = view.input.len();
+        view.handle_paste("line one\nline two\nline three");
+        assert_eq!(view.input, "hey [Pasted ~3 lines]");
+        assert_eq!(view.pasted_parts.len(), 1);
+
+        // Ctrl+Backspace (delete word before cursor) must remove the WHOLE
+        // placeholder in one keystroke, leaving no orphan mapping behind.
+        view.delete_word_before_cursor();
+        assert_eq!(view.input, "hey ");
+        assert_eq!(view.cursor_pos, "hey ".len());
+        assert!(view.pasted_parts.is_empty());
+
+        // Afterwards, only normal characters remain: repeated backspaces just
+        // erase them one by one and never resurrect the pasted text.
+        while !view.input.is_empty() {
+            view.backspace();
+        }
+        assert!(view.input.is_empty());
+        assert!(view.pasted_parts.is_empty());
+        assert_eq!(view.expand_pasted_text(&view.input), "");
+    }
+
+    #[test]
+    fn ctrl_backspace_inside_pasted_placeholder_removes_it_whole() {
+        let mut view = PromptView::new();
+        view.handle_paste("a\nb\nc");
+        assert_eq!(view.input, "[Pasted ~3 lines]");
+
+        // Move the cursor into the MIDDLE of the placeholder (as if the user
+        // arrowed left a few times), then Ctrl+Backspace: the entire
+        // placeholder must go, not just the characters left of the cursor.
+        let mid = view.input.find("Pasted").unwrap() + "Pasted".len();
+        view.cursor_pos = mid;
+        view.delete_word_before_cursor();
+        assert!(view.input.is_empty());
+        assert!(view.pasted_parts.is_empty());
+        assert_eq!(view.cursor_pos, 0);
+    }
+
+    #[test]
+    fn ctrl_backspace_keeps_word_before_a_pasted_placeholder_intact() {
+        let mut view = PromptView::new();
+        view.input = "alpha beta ".into();
+        view.cursor_pos = view.input.len();
+        view.handle_paste("x\ny\nz");
+        assert_eq!(view.input, "alpha beta [Pasted ~3 lines]");
+
+        // One Ctrl+Backspace deletes only the placeholder; the earlier words
+        // stay untouched (each subsequent press deletes one word at a time).
+        view.delete_word_before_cursor();
+        assert_eq!(view.input, "alpha beta ");
+        assert!(view.pasted_parts.is_empty());
+
+        view.delete_word_before_cursor();
+        assert_eq!(view.input, "alpha ");
     }
 }
