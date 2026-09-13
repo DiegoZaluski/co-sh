@@ -1,6 +1,9 @@
 //! File-based logger for debugging the agent loop and tool dispatch.
 //!
-//! Writes structured log entries to `/tmp/cosh_debug.log` with timestamps.
+//! Writes structured log entries to `<tmpdir>/cosh/log/stdout.log` with
+//! timestamps — the same directory that receives the MCP stdio servers'
+//! stderr (`mcp_server_<label>_<ts>.log`), so everything observable about a
+//! broken MCP connection lives in one place.
 //!
 //! # Build behaviour
 //!
@@ -8,9 +11,10 @@
 //!   routed to the file logger. All crates in the workspace that use `log` will
 //!   have their output captured here — just call `init()` once at startup.
 //! - **Release builds**: `log::debug!()` and `log::trace!()` are stripped at
-//!   compile time by Cargo's default `release` profiles. Only `warn!()`,
-//!   `error!()`, and `info!()` calls survive — but the logger itself caps at
-//!   `Warn` level, so only warnings and errors are written.
+//!   compile time by Cargo's default `release` profiles. Only `info!()`,
+//!   `warn!()`, and `error!()` calls survive — the logger caps at `Info`, so
+//!   the MCP connection lifecycle (dialing, settled, per-server failures)
+//!   stays visible even outside a debug build.
 
 use log::{Level, Log, Metadata, Record};
 use std::fs::OpenOptions;
@@ -50,21 +54,32 @@ impl Log for FileLogger {
 
 /// Initialize the debug file logger.
 ///
-/// Writes to `{tmpdir}/{scope}.log` in append mode (creates the file if it
-/// does not exist), where `scope` identifies the caller (e.g. `"tui_main"`,
-/// `"tui_rag_app"`).
+/// Writes to `<tmpdir>/cosh/log/stdout.log` in append mode (creating the
+/// directory and the file as needed). The path comes from
+/// [`std::env::temp_dir`] — the std-native, cross-platform temp location —
+/// so every entry point funnels into the same stream the MCP server logs
+/// share. `scope` identifies the caller (e.g. `"tui_main"`) and is stamped
+/// into the session's first line, so appends from different entry points
+/// stay attributable.
 ///
 /// - **Debug builds**: sets the max log level to `Debug` — all `debug!()`,
 ///   `info!()`, `warn!()`, and `error!()` calls are captured.
-/// - **Release builds**: sets the max log level to `Warn` — only warnings and
-///   errors are recorded.
+/// - **Release builds**: sets the max log level to `Info` — info, warnings
+///   and errors are recorded (the MCP lifecycle logs are Info).
 ///
 /// # Panics
 ///
-/// Panics if the log file cannot be opened (e.g. permission denied) or if
-/// a logger has already been registered.
+/// Panics if the log directory/file cannot be created (e.g. permission
+/// denied) or if a logger has already been registered.
 pub fn init(scope: &str) {
-    let log_path = std::env::temp_dir().join(format!("{scope}.log"));
+    let log_dir = crate::harness::truncate::scratch_log_dir().join("log");
+    if let Err(err) = std::fs::create_dir_all(&log_dir) {
+        panic!(
+            "cannot create log directory {}: {err}",
+            log_dir.display()
+        );
+    }
+    let log_path = log_dir.join("stdout.log");
     let file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -81,5 +96,13 @@ pub fn init(scope: &str) {
     log::set_max_level(log::LevelFilter::Debug);
 
     #[cfg(not(debug_assertions))]
-    log::set_max_level(log::LevelFilter::Warn);
+    log::set_max_level(log::LevelFilter::Info);
+
+    // Session banner: with multiple entry points appending to one file,
+    // this is what makes each run's block attributable (and shows the
+    // process started at all — the #1 question when "nothing happens").
+    log::info!(
+        "──── cosh logger init (scope={scope}, pid={}) ────",
+        std::process::id()
+    );
 }

@@ -88,7 +88,7 @@ impl App {
             let _bg_us = _bg_start.elapsed().as_micros();
             // Rate-limited: the fill always exceeds 200us, so without this the
             // log would receive one line per frame for the whole session
-            // lifetime (a 400+ MB /tmp/tui_main.log in 8 hours).
+            // lifetime (a 400+ MB stdout.log in 8 hours).
             self.perf_frame = self.perf_frame.wrapping_add(1);
             if _bg_us > 200 && self.perf_frame.is_multiple_of(30) {
                 log::debug!(

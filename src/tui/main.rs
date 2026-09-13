@@ -29,8 +29,9 @@ use dotenvy::dotenv;
 async fn main() {
     dotenv().ok();
 
-    // Initialize debug file logger (no-op in release builds).
-    // Logs are written to /tmp/tui_main.log.
+    // Initialize debug file logger.
+    // Logs are written to /tmp/cosh/log/stdout.log (shared with the MCP
+    // server stderr logs in the same directory).
     cosh::util::logger::init("tui_main");
 
     if std::env::args().any(|a| a == "--check-keyring") {
