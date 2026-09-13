@@ -809,9 +809,16 @@ fn millis_u64(duration: Duration) -> u64 {
 /// legacy signature; a modern-reserved code against a legacy assumption
 /// proves the server modern. The inverse combinations are plain failures
 /// (a modern probe rejected with modern codes means version mismatch, not
-/// a legacy server). Transport errors, timeouts, and closing handshakes
-/// carry no era evidence and stay [`McpError::Connect`].
-fn map_initialize_error(entry_name: &str, assumed: era::Era) -> impl Fn(ClientInitializeError) -> McpError + '_ {
+/// a legacy server). An uncorrelated error response against a modern
+/// assumption is also flip evidence: a legacy server that cannot parse the
+/// `server/discover` request replies with a JSON-RPC error whose `id` does
+/// not echo ours (mem0 answers `-32602` that way), so rmcp hides the
+/// payload — but a server that answers *anything* malformed to a discover
+/// request is not speaking the modern dialect. Transport errors, timeouts,
+/// and closing handshakes carry no era evidence and stay
+/// [`McpError::Connect`].
+/// Visible to the scoped `test` module for classification assertions.
+pub(crate) fn map_initialize_error(entry_name: &str, assumed: era::Era) -> impl Fn(ClientInitializeError) -> McpError + '_ {
     move |err| match err {
         ClientInitializeError::JsonRpcError(data) => match assumed {
             // Modern dial refused with a modern-reserved code: the server
@@ -841,6 +848,26 @@ fn map_initialize_error(entry_name: &str, assumed: era::Era) -> impl Fn(ClientIn
                 McpError::EraStale(entry_name.to_string(), assumed.label(), data.to_string())
             }
         },
+        // A modern dial answered with a JSON-RPC error whose id does not
+        // correlate (rmcp hides the payload in that case). Same reasoning
+        // as the over-broad legacy arm above (MCP-B6): a server that
+        // answers a discover request with malformed garbage is not
+        // speaking the modern dialect, and one extra legacy dial is cheaper
+        // than a permanently failed connection. A legacy dial gains nothing
+        // from flipping on garbage (the modern era was already tried once
+        // in the same cycle) — it stays a plain failure.
+        ClientInitializeError::UncorrelatedErrorResponse { expected, received }
+            if assumed == era::Era::Modern =>
+        {
+            McpError::EraStale(
+                entry_name.to_string(),
+                assumed.label(),
+                format!(
+                    "discover answered with an uncorrelated error response \
+                     (expected id {expected}, received {received})"
+                ),
+            )
+        }
         _ => McpError::Connect(entry_name.to_string(), err.to_string()),
     }
 }

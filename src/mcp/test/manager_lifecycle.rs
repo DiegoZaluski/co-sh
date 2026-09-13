@@ -233,3 +233,37 @@ fn http_headers_reject_garbage() {
     assert!(err.contains("authorization"), "{err}");
     assert!(!err.contains("bad"), "secret must not leak: {err}");
 }
+/// Live end-to-end connect against the hosted mem0 MCP server (a legacy
+/// server that answers the modern probe with an uncorrelated JSON-RPC
+/// error — the regression that added the flip arm in
+/// `map_initialize_error`). Ignored by default: needs network access and
+/// the `mcp:mem0` credential in the OS keyring. Run explicitly with
+/// `cargo test --lib -- --ignored live_mem0`.
+#[tokio::test]
+#[ignore = "live: real network + keyring (mcp:mem0) required"]
+async fn live_mem0_connects_via_flip() {
+    use super::super::auth;
+    let key = auth::resolve_key("mem0", None).unwrap();
+    assert!(key.is_some(), "no mcp:mem0 key in keyring");
+    let mut manager = McpManager::new();
+    let entry = McpServerEntry {
+        name: "mem0".into(),
+        transport: McpTransport::Http(HttpTransport {
+            url: "https://mcp.mem0.ai/mcp/".into(),
+            headers: HashMap::new(),
+            api_key_env: None,
+            timeout_ms: 10_000,
+        }),
+        enabled: true,
+    };
+    manager.connect_one(&entry).await.unwrap();
+    let snaps = manager.status_snapshots();
+    assert_eq!(snaps.len(), 1, "{snaps:?}");
+    assert_eq!(snaps[0].status, ServerStatus::Ready, "{snaps:?}");
+    assert!(snaps[0].tool_count > 0, "{snaps:?}");
+    assert_eq!(
+        manager.era_of("mem0"),
+        Some(era::Era::Legacy),
+        "mem0 must have settled via the legacy flip"
+    );
+}

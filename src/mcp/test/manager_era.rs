@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use super::super::era::{self, Era};
 use super::super::error::McpError;
-use super::super::manager::{McpManager, ProbePolicy, era_loop_failed};
+use super::super::manager::{McpManager, ProbePolicy, era_loop_failed, map_initialize_error};
 use super::super::types::ServerStatus;
 use super::manager_support::{
     LegacyOnlyServer, ModernOnlyServer, OldVersionServer, SilentServer, attach_server,
@@ -28,6 +28,49 @@ fn era_loop_failed_reports_both_causes() {
     assert!(text.contains("modern refused"), "{text}");
     assert!(text.contains("legacy refused"), "{text}");
     assert!(text.contains("neither protocol era"), "{text}");
+}
+
+/// Regression (mem0): a legacy server that cannot parse `server/discover`
+/// answered with a JSON-RPC error whose `id` does not echo the request's —
+/// rmcp wraps that as `UncorrelatedErrorResponse` and hides the payload.
+/// That classification must count as legacy flip evidence on a modern dial,
+/// otherwise the server can never connect (it used to surface as "without
+/// era evidence"). On a legacy dial the same garbage stays a plain failure:
+/// the modern era was already tried once in that cycle, so a flip is a
+/// no-op loop.
+#[test]
+fn uncorrelated_error_response_is_legacy_evidence_on_modern_dial() {
+    use rmcp::model::NumberOrString;
+    use rmcp::service::ClientInitializeError;
+
+    let expected = rmcp::model::NumberOrString::Number(0);
+    let received = rmcp::model::NumberOrString::Number(42);
+    let err = ClientInitializeError::UncorrelatedErrorResponse {
+        expected,
+        received,
+    };
+
+    // Modern assumption → flip evidence (EraStale names the assumed era).
+    let mapped = (map_initialize_error("mem0", Era::Modern))(err);
+    assert!(
+        matches!(mapped, McpError::EraStale(..)),
+        "modern dial must flip on an uncorrelated error response, got {mapped:?}"
+    );
+    assert!(
+        mapped.to_string().contains("uncorrelated"),
+        "error text must carry the rmcp cause for the toast/log: {mapped}"
+    );
+
+    // Legacy assumption → plain failure, no era claim.
+    let same = ClientInitializeError::UncorrelatedErrorResponse {
+        expected: NumberOrString::Number(0),
+        received: NumberOrString::Number(42),
+    };
+    let mapped = (map_initialize_error("mem0", Era::Legacy))(same);
+    assert!(
+        matches!(mapped, McpError::Connect(..)),
+        "legacy dial must NOT flip on an uncorrelated error response, got {mapped:?}"
+    );
 }
 
 #[tokio::test]
