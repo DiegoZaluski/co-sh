@@ -303,7 +303,7 @@ impl FileExplorerView {
         } else if max_overflow > 0 {
             " \u{203a}"
         } else {
-            " Explorer"
+            ""
         };
         Self::draw_text_line(
             buf,
