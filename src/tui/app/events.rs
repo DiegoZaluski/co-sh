@@ -223,14 +223,6 @@ impl App {
                     // history (tool parts attach below); a future reset must
                     // never reach it.
                     self.stream_msg_id = None;
-                    // Track plan_todo_write calls for right panel TODO list
-                    if tool == "plan_todo_write" {
-                        self.state.right_panel.pending_todo_update_count += 1;
-                    }
-                    // Also track plan_todo_cross_off for checkmarks
-                    if tool == "plan_todo_cross_off" {
-                        self.state.right_panel.pending_todo_update_count += 1;
-                    }
                     // Start PTY tracking for bash calls
                     if tool == "bash_run" {
                         let command = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
@@ -341,14 +333,6 @@ impl App {
                 }
 
                 HarnessEvent::ToolResult { output } => {
-                    // Try to parse as TODO output to update right panel
-                    if self.state.right_panel.pending_todo_update_count > 0 {
-                        self.state.right_panel.pending_todo_update_count -= 1;
-                        if let Some(todos) = crate::routes::session::right_panel::types::parse_todo_output(&output)
-                        {
-                            self.state.right_panel.set_todos(todos);
-                        }
-                    }
                     let Some(session) = self.state.current_session_mut() else {
                         continue;
                     };
@@ -367,6 +351,14 @@ impl App {
                             }
                         }
                     }
+
+                    // Update the right panel TODO list when a plan write
+                    // completed (applied below: `session` still borrows here).
+                    let todo_update = if completed_tool_name.as_deref() == Some("plan_todo_write") {
+                        crate::routes::session::right_panel::types::parse_todo_output(&output)
+                    } else {
+                        None
+                    };
 
                     // Deduplicate plan_todo_write: only the LAST completed one keeps its output.
                     // Previous completed plan_todo_write parts get cleared so they render
@@ -401,6 +393,10 @@ impl App {
                     // complete_last_pty is a no-op for non-Running sessions).
                     // Required for bash_run which only completes via ToolResult.
                     self.state.right_panel.complete_last_pty(output.clone());
+
+                    if let Some(todos) = todo_update {
+                        self.state.right_panel.set_todos(todos);
+                    }
                 }
 
                 HarnessEvent::ToolError { error } => {

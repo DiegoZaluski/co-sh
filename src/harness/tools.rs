@@ -16,7 +16,7 @@ use cosh_tools::{
     lsp::Lsp,
     plan::{
         Plan,
-        types::{TodoCrossOffInput, TodoEditInput, TodoReadInput, TodoWriteInput},
+        types::TodoWriteInput,
     },
     question::{Question, types::QuestionInput},
     skills::{
@@ -333,10 +333,6 @@ impl CoshTools {
             self.web.description_fetch.clone(),
             self.web.description_search.clone(),
         ];
-        {
-            let plan = self.plan.lock().unwrap();
-            v.push(plan.description_todo_read.clone());
-        }
         v.push(self.question.description_ask.clone());
         #[cfg(feature = "embed")]
         v.push(self.recall.description_search.clone());
@@ -429,15 +425,6 @@ impl CoshTools {
             &self.web.description_search,
             include_schema,
         );
-        {
-            let plan = self.plan.lock().unwrap();
-            write_tool_if_enabled(
-                out,
-                disabled_tools,
-                &plan.description_todo_read,
-                include_schema,
-            );
-        }
         write_tool_if_enabled(
             out,
             disabled_tools,
@@ -506,10 +493,6 @@ impl CoshTools {
             extract_schema(&self.web.description_fetch),
             extract_schema(&self.web.description_search),
         ];
-        {
-            let plan = self.plan.lock().unwrap();
-            v.push(extract_schema(&plan.description_todo_read));
-        }
         v.push(extract_schema(&self.question.description_ask));
         #[cfg(feature = "embed")]
         v.push(extract_schema(&self.recall.description_search));
@@ -762,9 +745,6 @@ impl Tools for CoshTools {
         {
             let plan = self.plan.lock().unwrap();
             write_single_tool(out, &plan.description_todo_write, true);
-            write_single_tool(out, &plan.description_todo_edit, true);
-            write_single_tool(out, &plan.description_todo_cross_off, true);
-            write_single_tool(out, &plan.description_todo_read, true);
         }
         write_single_tool(out, &self.question.description_ask, true);
         #[cfg(feature = "embed")]
@@ -802,9 +782,6 @@ impl Tools for CoshTools {
         {
             let plan = self.plan.lock().unwrap();
             v.push(plan.description_todo_write.clone());
-            v.push(plan.description_todo_edit.clone());
-            v.push(plan.description_todo_cross_off.clone());
-            v.push(plan.description_todo_read.clone());
         }
         v.push(self.question.description_ask.clone());
         #[cfg(feature = "embed")]
@@ -843,9 +820,6 @@ impl Tools for CoshTools {
         {
             let plan = self.plan.lock().unwrap();
             v.push(extract_schema(&plan.description_todo_write));
-            v.push(extract_schema(&plan.description_todo_edit));
-            v.push(extract_schema(&plan.description_todo_cross_off));
-            v.push(extract_schema(&plan.description_todo_read));
         }
         v.push(extract_schema(&self.question.description_ask));
         #[cfg(feature = "embed")]
@@ -1124,35 +1098,10 @@ impl Tools for CoshTools {
                 let input: TodoWriteInput =
                     serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let mut plan = self.plan.lock().unwrap();
-                let output = plan.todo_write(&input.action).map_err(|e| e.to_string())?;
+                let output = plan.todo_write(&input.todos).map_err(|e| e.to_string())?;
                 serde_json::to_string(&output).map_err(|e| e.to_string())
             }
 
-            "plan_todo_edit" => {
-                let input: TodoEditInput =
-                    serde_json::from_value(args).map_err(|e| e.to_string())?;
-                let mut plan = self.plan.lock().unwrap();
-                let output = plan.todo_edit(&input.edit).map_err(|e| e.to_string())?;
-                serde_json::to_string(&output).map_err(|e| e.to_string())
-            }
-
-            "plan_todo_cross_off" => {
-                let input: TodoCrossOffInput =
-                    serde_json::from_value(args).map_err(|e| e.to_string())?;
-                let mut plan = self.plan.lock().unwrap();
-                let output = plan
-                    .todo_cross_off(&input.action)
-                    .map_err(|e| e.to_string())?;
-                serde_json::to_string(&output).map_err(|e| e.to_string())
-            }
-
-            "plan_todo_read" => {
-                let input: TodoReadInput =
-                    serde_json::from_value(args).map_err(|e| e.to_string())?;
-                let plan = self.plan.lock().unwrap();
-                let output = plan.todo_read(&input.action).map_err(|e| e.to_string())?;
-                serde_json::to_string(&output).map_err(|e| e.to_string())
-            }
             "skills_list" => {
                 let output = self.skills.list().map_err(|e| e.to_string())?;
                 serde_json::to_string(&output).map_err(|e| e.to_string())

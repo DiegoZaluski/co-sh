@@ -1,81 +1,65 @@
 # The `plan` module: a stateful TODO list for multi-step work
 
 `plan` is a small state machine for long-running tasks. It keeps a structured
-TODO list — groups of tasks with statuses and dependencies — that the agent
-mutates as work progresses, instead of losing the plan in conversation
-history. It is the one cosh tool that is fully **stateful**: every mutation
-happens on a single in-memory list that the harness owns and mirrors into the
+TODO list — a flat list of tasks with statuses and dependencies — that the
+agent rewrites as work progresses, instead of losing the plan in conversation
+history. It is the one cosh tool that is fully **stateful**: the list lives on
+a single in-memory structure that the harness owns and mirrors into the
 model's context.
 
 | Tool | What it does |
 |---|---|
-| [`plan_todo_write`](todo_write.md) | Mutate the list: `ReplaceList`, `Add`, `Start`, `Remove`, `Clean`, `VerifyGroup`. |
-| [`plan_todo_edit`](todo_edit.md) | Edit an existing task's metadata (description, group, dependencies). |
-| [`plan_todo_cross_off`](todo_cross_off.md) | Mark a task `Completed` or `Cancelled`. |
-| [`plan_todo_read`](todo_read.md) | Query the list: list with optional filters, or fetch one task. |
+| [`plan_todo_write`](todo_write.md) | Write the FULL TODO list (full-state replacement: statuses, dependencies, clearing). |
+
+There is exactly one tool, and it follows the dominant trained pattern
+(Claude Code's `TodoWrite`): a single write tool that receives the complete
+list on every call. There is no read tool, no edit tool, no cross-off tool:
+changing a status is just writing the list again, and the harness always shows
+the model the current plan (see [the protected context
+block](#the-harness-and-the-protected-context-block)), so a read would be
+redundant.
 
 The design mirrors the other cosh modules: the public surface is a
 builder-style wrapper — [`Plan`](#the-plan-wrapper) — that holds the list and
-exposes one method per operation. Each operation also exists as a **pure free
-function** (`todo_write`, `todo_edit`, …) that works on an explicit
-[`TodoList`](types.md#todolist) and returns the new list in its output; the
-wrapper is a thin stateful shell around them.
+exposes one stateful method, plus the **pure free function** (`todo_write`)
+that produces the new list from the submitted one; the wrapper is a thin
+stateful shell around it.
 
 ---
 
 ## The `Plan` wrapper
 
 ```rust,ignore
-use cosh_tools::plan::{Plan, TodoReadAction, TodoWriteAction, TodoCrossOff};
+use cosh_tools::plan::{Plan, TodoWriteInput};
 
 let mut plan = Plan::new();                       // an empty list
 
-plan.todo_write(&TodoWriteAction::Add {
-    group: "Database".into(),
-    description: "Design schema".into(),
-    depends_on: None,
-})?;
-
-plan.todo_write(&TodoWriteAction::Add {
-    group: "Database".into(),
-    description: "Write migrations".into(),
-    depends_on: Some(vec!["task-1".into()]),
-})?;
-
-plan.todo_cross_off(&TodoCrossOff::Complete { id: "task-1".into() })?;
-
-let out = plan.todo_read(&TodoReadAction::List { group: None, status: None })?;
+let input: TodoWriteInput = serde_json::from_value(serde_json::json!({
+    "todos": [
+        { "description": "Design schema", "key": "schema" },
+        { "description": "Write migrations", "depends_on": ["schema"] }
+    ]
+}))?;
+plan.todo_write(&input.todos)?;                   // full-state write
 ```
 
-The wrapper's methods mirror the free functions' signatures but take `&mut
-self`: each one applies the returned list to the internal state, so callers
-never thread the list around. `Plan::default()` is `Plan::new()`, and
-`plan.list()` borrows the current [`TodoList`](types.md#todolist) for
-inspection.
+The wrapper's method takes `&mut self`: it applies the returned list to the
+internal state, so callers never thread the list around. `Plan::default()` is
+`Plan::new()`, and `plan.list()` borrows the current
+[`TodoList`](types.md#todolist) for inspection.
 
 ### Why `&mut self`
 
 The wrapper is the API the harness uses, and the harness keeps its `Plan`
 behind a `Mutex`. That single shared instance is what makes the TODO list
-**the plan** — every `plan_*` call mutates the same state, and the harness
-mirrors that state into the model's context after every call (see
+**the plan** — every `plan_todo_write` call mutates the same state, and the
+harness mirrors that state into the model's context after every call (see
 [below](#the-harness-and-the-protected-context-block)). There is no
 persistence: the list lives for the session.
-
-### `with_test`
-
-`Plan::with_test(value)` is a configuration knob on the wrapper — "whether
-test generation is expected after each completed group". It currently has no
-observable effect on the todo operations themselves (there is no public
-getter and the harness does not set it today); it is documented here for
-completeness as part of the public API surface.
 
 ---
 
 ## The two core concepts
-
-Everything else in the module is easiest to understand through two ideas that
-recur on every operation page.
 
 ### 1. Nags are advice, errors are rejections
 
@@ -83,47 +67,38 @@ Every operation returns either `Err(PlanError)` — the request was **rejected
 and nothing changed** — or an output struct that contains `nags: Vec<Nag>`.
 Nags are advisory messages about problems that are **tolerated**: the
 operation still succeeds, and the caller is expected to read the nags and fix
-the situation. The same concern is sometimes a nag and sometimes an error,
-depending on whether it makes the operation meaningless:
+the situation.
 
 | Concern | Becomes | Example |
 |---|---|---|
-| Empty task description | **error** — a task must have text | `Add { description: "" }` |
-| Task / group does not exist | **error** — nothing to act on | `Start { id: "ghost" }` |
-| Task already in a terminal state | **error** — nothing to do | `Complete` on a completed task |
-| Two tasks in progress at once | **error** — the invariant is enforced | `Start` while another is `InProgress` |
-| Dependency is missing / self / cyclic | **nag** — the list is still updated | `Add` with `depends_on: ["nope"]` |
-| A removed task is still referenced | **nag** — the stale reference remains | `Remove` a dependency |
-| A group still has pending work when verified | **nag** — verification still recorded | `VerifyGroup` with pending tasks |
+| Empty task description | **error** — a task must have text | `description: ""` |
+| Duplicate keys / keys shaped like `task-N` | **error** — they would shadow real ids | two items `key: "schema"` |
+| Two tasks in progress at once | **error** — the invariant is enforced | two items `status: "in_progress"` |
+| Dependency is missing / self / cyclic | **nag** — the list is still updated | `depends_on: ["nope"]` |
+| An in-progress task with unfinished dependencies | **nag** — the state is accepted | `in_progress` on a task whose dep is `pending` |
 
 So when an operation succeeds, **check `output.nags` before trusting the
-result fully** — a task may have been added with a dependency that does not
+result fully** — a task may have been written with a dependency that does not
 exist.
 
-### 2. The verification contract
+### 2. Full-state writes
 
-Each [`TaskGroup`](types.md#taskgroup) carries a `tests_verified: bool` flag.
-The intended workflow is: complete a group's tasks, run the tests, then call
-`VerifyGroup` to record that tests passed. The module enforces this gently:
-
-- `todo_read` emits a **verification nag** for any group whose tasks are all
-  terminal but that has not been verified yet:
-  `"Group 'X' is complete but tests have not been confirmed. Use VerifyGroup
-  to confirm tests passed."`
-- `VerifyGroup` sets the flag (and nags if the group still has pending or
-  in-progress tasks — verification is recorded anyway).
-- Adding new tasks to a verified group does **not** un-verify it.
+Every `plan_todo_write` call replaces the previous list entirely. To start,
+complete, or cancel a task, the model rewrites the whole list with the updated
+status — the same move for every transition, matching the pattern the models
+were trained on. Exactly one task may be `in_progress` at a time; an empty
+list clears the plan.
 
 ---
-## Creating the full plan in one call
 
-The canonical way to create a plan is a single `plan_todo_write` call with the
-`ReplaceList` action: it takes complete groups of tasks, replaces the current
-list (nagging if anything was overwritten), assigns `task-1..N` ids in listed
-order, and resolves dependencies. Items may carry an optional `key` alias that
-sibling tasks reference in `depends_on` within the same call — the tool resolves
-each alias to the real `task-N` id. Unknown keys, duplicate keys, and cycles
-are reported as nags (duplicate keys are errors).
+## Ids, keys, and dependencies
+
+Ids are assigned by the tool, not the caller: tasks get `task-1..N` in listed
+order. Items may carry an optional `key` alias that sibling tasks reference in
+`depends_on` within the same call — the tool resolves each alias to the real
+`task-N` id. Existing `task-N` ids are accepted as dependencies too. Unknown
+keys and cycles are reported as nags; duplicate keys are errors.
+
 ---
 
 ## The harness and the protected context block
@@ -131,27 +106,27 @@ are reported as nags (duplicate keys are errors).
 Two harness behaviors shape how the plan is actually used:
 
 - **The plan is always visible.** The harness renders the current list as a
-  dedicated, protected `## Tool TODOs` context block injected right after the
-  system prompt — before the conversation history — and re-renders it after
-  every `plan_*` call. The block survives every compaction phase and
-  disappears only when all tasks are terminal or the list is empty. The model
-  therefore sees the plan without calling `plan_todo_read` first.
-- **Ask mode is read-only.** In Ask mode only `plan_todo_read` is exposed; the
-  mutating tools (`plan_todo_write`, `plan_todo_edit`) are restricted.
-  (`plan_todo_cross_off` mutates too, so it is not exposed in Ask mode either.)
+  dedicated, protected `## Tool TODOs` context block injected at the END of
+  the message list — right where the model is about to generate — and
+  re-renders it after every `plan_*` call. The block survives every
+  compaction phase and disappears only when all tasks are terminal or the
+  list is empty. The model therefore always sees the plan and never needs a
+  read tool.
+- **Ask mode has no plan tools.** The mutating tool is restricted in Ask
+  mode, and since reading is unnecessary by design, no plan tool is exposed
+  there at all.
 
 ---
 
 ## Summary
 
-- One stateful `Plan` per session; five operations, each with a pure free
-  function and a stateful wrapper method.
+- One stateful `Plan` per session; one full-state write operation with a pure
+  free function underneath.
 - **Errors reject and change nothing; nags advise and tolerate.** Check
-  `output.nags` after every mutation.
+  `output.nags` after every write.
 - Tasks get sequential `task-1`, `task-2`, … ids; at most one task may be
-  `InProgress` at a time; terminal states (`Completed`/`Cancelled`) are
-  sticky.
-- Groups must be verified with `VerifyGroup` after their tests pass, or
-  `todo_read` will nag about them.
+  `in_progress` at a time.
+- To change any status, rewrite the full list; call with an empty list to
+  clear the plan.
 
-Next: the [data model](types.md), then the five operation pages.
+Next: the [data model](types.md), then the [operation page](todo_write.md).

@@ -1,577 +1,187 @@
-use crate::plan::{
-    Plan, TodoCrossOff, TodoList, TodoStatus, TodoWriteAction, todo_cross_off, todo_write,
-};
+use crate::plan::{Plan, TodoItemInput, TodoList, TodoStatus, todo_write};
 
-use super::helpers::{add_task, add_task_with_deps};
+use super::helpers::input;
 
-// Add
+fn with_deps(description: &str, depends_on: Vec<String>) -> TodoItemInput {
+    TodoItemInput {
+        key: None,
+        description: description.into(),
+        status: TodoStatus::Pending,
+        depends_on: Some(depends_on),
+    }
+}
+
+fn keyed(key: &str, description: &str) -> TodoItemInput {
+    TodoItemInput {
+        key: Some(key.into()),
+        description: description.into(),
+        status: TodoStatus::Pending,
+        depends_on: None,
+    }
+}
+
+// Full-state write
 
 #[test]
-fn add_valid_task() {
-    let list = TodoList::default();
-    let output = todo_write(
-        &list,
-        &TodoWriteAction::Add {
-            group: "default".into(),
-            description: "Fix memory leak".into(),
-            depends_on: None,
-        },
-    )
+fn full_write_produces_the_submitted_list() {
+    let output = todo_write(&[input("New A"), input("New B")]).unwrap();
+    assert_eq!(output.list.items.len(), 2);
+    assert_eq!(output.list.items[0].description, "New A");
+}
+
+#[test]
+fn plan_replaces_its_list_on_every_write() {
+    let mut plan = Plan::new();
+    plan.todo_write(&[input("Old")]).unwrap();
+    plan.todo_write(&[input("New A"), input("New B")]).unwrap();
+    assert_eq!(plan.list().items.len(), 2, "the previous list is fully replaced");
+}
+
+#[test]
+fn empty_write_clears_the_list() {
+    let output = todo_write(&[]).unwrap();
+    assert!(output.list.items.is_empty(), "empty list clears the state");
+}
+
+#[test]
+fn ids_are_assigned_in_listed_order() {
+    let output = todo_write(&[input("A"), input("B"), input("C")]).unwrap();
+    assert_eq!(output.list.items[0].id, "task-1");
+    assert_eq!(output.list.items[1].id, "task-2");
+    assert_eq!(output.list.items[2].id, "task-3");
+}
+
+#[test]
+fn status_defaults_to_pending_when_omitted() {
+    let input: crate::plan::TodoWriteInput = serde_json::from_value(serde_json::json!({
+        "todos": [{ "description": "A" }]
+    }))
     .unwrap();
-    assert_eq!(output.list.groups.len(), 1);
-    assert_eq!(output.list.groups[0].title, "default");
-    assert_eq!(output.list.groups[0].items.len(), 1);
-    assert_eq!(
-        output.list.groups[0].items[0].description,
-        "Fix memory leak"
-    );
-    assert_eq!(output.list.groups[0].items[0].status, TodoStatus::Pending);
+    let output = todo_write(&input.todos).unwrap();
+    assert_eq!(output.list.items[0].status, TodoStatus::Pending);
 }
 
 #[test]
-fn add_to_existing_group() {
-    let list = add_task(&TodoList::default(), "backend", "Task 1");
-    let output = todo_write(
-        &list,
-        &TodoWriteAction::Add {
-            group: "backend".into(),
-            description: "Task 2".into(),
-            depends_on: None,
-        },
-    )
+fn statuses_round_trip_snake_case() {
+    let list: TodoList = serde_json::from_value(serde_json::json!({
+        "items": [
+            { "id": "task-1", "description": "A", "status": "in_progress", "depends_on": [] },
+            { "id": "task-2", "description": "B", "status": "cancelled", "depends_on": [] }
+        ]
+    }))
     .unwrap();
-    assert_eq!(output.list.groups.len(), 1);
-    assert_eq!(output.list.groups[0].items.len(), 2);
+    assert_eq!(list.items[0].status, TodoStatus::InProgress);
+    assert_eq!(list.items[1].status, TodoStatus::Cancelled);
+    let ser = serde_json::to_value(&list.items[0]).unwrap();
+    assert_eq!(ser["status"], "in_progress");
 }
 
 #[test]
-fn add_to_different_groups() {
-    let list = add_task(&TodoList::default(), "frontend", "UI");
-    let output = todo_write(
-        &list,
-        &TodoWriteAction::Add {
-            group: "backend".into(),
-            description: "API".into(),
-            depends_on: None,
-        },
-    )
-    .unwrap();
-    assert_eq!(output.list.groups.len(), 2);
-    assert_eq!(output.list.groups[0].title, "frontend");
-    assert_eq!(output.list.groups[1].title, "backend");
-}
-
-#[test]
-fn add_with_dependencies() {
-    let list = add_task(&TodoList::default(), "default", "Prerequisite");
-    let output = add_task_with_deps(&list, "default", "Dependent", vec!["task-1".into()]);
-    assert_eq!(output.groups[0].items[1].depends_on, vec!["task-1"]);
-}
-
-#[test]
-fn add_with_nonexistent_dependency_nags() {
-    let list = TodoList::default();
-    let output = todo_write(
-        &list,
-        &TodoWriteAction::Add {
-            group: "default".into(),
-            description: "Task".into(),
-            depends_on: Some(vec!["nonexistent".into()]),
-        },
-    )
-    .unwrap();
-    let has_nag = output
-        .nags
-        .iter()
-        .any(|n| n.message.contains("does not exist"));
-    assert!(has_nag);
-}
-
-#[test]
-fn add_empty_description_rejected() {
-    let list = TodoList::default();
-    let result = todo_write(
-        &list,
-        &TodoWriteAction::Add {
-            group: "default".into(),
-            description: "".into(),
-            depends_on: None,
-        },
-    );
+fn empty_description_rejected() {
+    let result = todo_write(&[input("   ")]);
     assert!(result.is_err());
 }
 
 #[test]
-fn add_whitespace_description_rejected() {
-    let list = TodoList::default();
-    let result = todo_write(
-        &list,
-        &TodoWriteAction::Add {
-            group: "default".into(),
-            description: "   ".into(),
-            depends_on: None,
+fn status_changes_are_just_rewrites() {
+    // The Claude-Code-style contract: updating a status is writing the full
+    // list again. Transition through every status without errors.
+    let list = todo_write(&[TodoItemInput {
+        status: TodoStatus::InProgress,
+        ..input("A")
+    }])
+    .unwrap()
+    .list;
+    assert_eq!(list.items[0].status, TodoStatus::InProgress);
+    let list = todo_write(&[TodoItemInput {
+        status: TodoStatus::Completed,
+        ..input("A")
+    }])
+    .unwrap()
+    .list;
+    assert_eq!(list.items[0].status, TodoStatus::Completed);
+    assert_eq!(list.items[0].description, "A");
+    assert_eq!(list.items[0].id, "task-1");
+}
+
+#[test]
+fn terminal_states_are_not_sticky_across_rewrites() {
+    // Full-state writes declare the desired state; resending a completed
+    // task as completed is a no-op, and the model may also reopen it.
+    let output = todo_write(&[TodoItemInput {
+        status: TodoStatus::Completed,
+        ..input("A")
+    }])
+    .unwrap();
+    assert_eq!(output.list.items[0].status, TodoStatus::Completed);
+    let reopened = todo_write(&[input("A")]).unwrap();
+    assert_eq!(reopened.list.items[0].status, TodoStatus::Pending);
+}
+
+// One-in-progress rule
+
+#[test]
+fn two_in_progress_rejected() {
+    let result = todo_write(&[
+        TodoItemInput {
+            status: TodoStatus::InProgress,
+            ..input("A")
         },
-    );
+        TodoItemInput {
+            status: TodoStatus::InProgress,
+            ..input("B")
+        },
+    ]);
     assert!(result.is_err());
 }
 
 #[test]
-fn add_generates_incremental_ids() {
-    let list = add_task(&TodoList::default(), "a", "First");
-    let list = add_task(&list, "b", "Second");
-    assert_eq!(list.groups[0].items[0].id, "task-1");
-    assert_eq!(list.groups[1].items[0].id, "task-2");
-}
-
-// Start
-
-#[test]
-fn start_task() {
-    let list = add_task(&TodoList::default(), "default", "Task 1");
-    let output = todo_write(
-        &list,
-        &TodoWriteAction::Start {
-            id: "task-1".into(),
+fn completing_the_current_task_frees_the_slot() {
+    let output = todo_write(&[
+        TodoItemInput {
+            status: TodoStatus::Completed,
+            ..input("A")
         },
-    )
+        TodoItemInput {
+            status: TodoStatus::InProgress,
+            ..input("B")
+        },
+    ])
     .unwrap();
-    assert_eq!(
-        output.list.groups[0].items[0].status,
-        TodoStatus::InProgress
-    );
+    assert_eq!(output.list.items[1].status, TodoStatus::InProgress);
+}
+
+// Keys and dependencies
+
+#[test]
+fn keys_resolve_to_ids() {
+    let output = todo_write(&[
+        keyed("schema", "Design schema"),
+        TodoItemInput {
+            depends_on: Some(vec!["schema".into()]),
+            ..keyed("migrations", "Write migrations")
+        },
+    ])
+    .unwrap();
+    assert_eq!(output.list.items[0].depends_on, Vec::<String>::new());
+    assert_eq!(output.list.items[1].depends_on, ["task-1".to_string()]);
 }
 
 #[test]
-fn start_nonexistent_fails() {
-    let list = TodoList::default();
-    let result = todo_write(&list, &TodoWriteAction::Start { id: "ghost".into() });
+fn existing_task_ids_are_accepted_as_dependencies() {
+    let output = todo_write(&[input("A"), with_deps("B", vec!["task-1".into()])]).unwrap();
+    assert_eq!(output.list.items[1].depends_on, ["task-1".to_string()]);
+}
+
+#[test]
+fn duplicate_key_rejected() {
+    let result = todo_write(&[keyed("dup", "A"), keyed("dup", "B")]);
     assert!(result.is_err());
 }
 
 #[test]
-fn start_double_rejected() {
-    let list = add_task(&TodoList::default(), "default", "Task A");
-    let list = add_task(&list, "default", "Task B");
-    let list = todo_write(
-        &list,
-        &TodoWriteAction::Start {
-            id: "task-1".into(),
-        },
-    )
-    .unwrap()
-    .list;
-    let result = todo_write(
-        &list,
-        &TodoWriteAction::Start {
-            id: "task-2".into(),
-        },
-    );
-    assert!(result.is_err());
-}
-
-#[test]
-fn start_in_different_groups_still_rejected() {
-    let list = add_task(&TodoList::default(), "a", "Task A");
-    let list = add_task(&list, "b", "Task B");
-    let list = todo_write(
-        &list,
-        &TodoWriteAction::Start {
-            id: "task-1".into(),
-        },
-    )
-    .unwrap()
-    .list;
-    let result = todo_write(
-        &list,
-        &TodoWriteAction::Start {
-            id: "task-2".into(),
-        },
-    );
-    assert!(result.is_err());
-}
-
-// Remove
-
-#[test]
-fn remove_task() {
-    let list = add_task(&TodoList::default(), "default", "Remove me");
-    let output = todo_write(
-        &list,
-        &TodoWriteAction::Remove {
-            id: "task-1".into(),
-        },
-    )
-    .unwrap();
-    assert!(output.list.groups[0].items.is_empty());
-}
-
-#[test]
-fn remove_nonexistent_fails() {
-    let list = TodoList::default();
-    let result = todo_write(&list, &TodoWriteAction::Remove { id: "ghost".into() });
-    assert!(result.is_err());
-}
-
-#[test]
-fn remove_with_stale_dependency_nags() {
-    let list = add_task(&TodoList::default(), "default", "Shared dep");
-    let list = add_task_with_deps(&list, "default", "Child", vec!["task-1".into()]);
-    let output = todo_write(
-        &list,
-        &TodoWriteAction::Remove {
-            id: "task-1".into(),
-        },
-    )
-    .unwrap();
-    let has_nag = output
-        .nags
-        .iter()
-        .any(|n| n.message.contains("still referenced as a dependency"));
-    assert!(has_nag);
-}
-
-// Clean
-
-#[test]
-fn clean_removes_completed_and_cancelled() {
-    let mut list = add_task(&TodoList::default(), "default", "Active");
-    list = add_task(&list, "default", "Done");
-    list = add_task(&list, "default", "Cancelled");
-    list = todo_cross_off(
-        &list,
-        &TodoCrossOff::Complete {
-            id: "task-2".into(),
-        },
-    )
-    .unwrap()
-    .list;
-    list = todo_cross_off(
-        &list,
-        &TodoCrossOff::Cancel {
-            id: "task-3".into(),
-        },
-    )
-    .unwrap()
-    .list;
-    let output = todo_write(&list, &TodoWriteAction::Clean { keep_pending: true }).unwrap();
-    assert_eq!(output.list.groups[0].items.len(), 1);
-    assert_eq!(output.list.groups[0].items[0].description, "Active");
-}
-
-#[test]
-fn clean_removes_across_groups() {
-    let list = add_task(&TodoList::default(), "a", "A1");
-    let list = add_task(&list, "b", "B1");
-    let list = todo_cross_off(
-        &list,
-        &TodoCrossOff::Complete {
-            id: "task-1".into(),
-        },
-    )
-    .unwrap()
-    .list;
-    let list = todo_cross_off(
-        &list,
-        &TodoCrossOff::Complete {
-            id: "task-2".into(),
-        },
-    )
-    .unwrap()
-    .list;
-    let output = todo_write(
-        &list,
-        &TodoWriteAction::Clean {
-            keep_pending: false,
-        },
-    )
-    .unwrap();
-    assert!(
-        output.list.groups.is_empty(),
-        "empty groups should be removed"
-    );
-}
-
-#[test]
-fn clean_empty_list_is_noop() {
-    let list = TodoList::default();
-    let output = todo_write(&list, &TodoWriteAction::Clean { keep_pending: true }).unwrap();
-    assert!(output.list.groups.is_empty());
-}
-
-/// Verifica que `todo_edit` detecta dependência circular transitiva.
-/// A -> B -> C -> A é detectado via BFS em `would_create_cycle`.
-#[test]
-fn edit_detects_circular_dependency() {
-    let list = add_task(&TodoList::default(), "default", "Task A"); // task-1
-    let list = add_task_with_deps(&list, "default", "Task B", vec!["task-1".into()]); // task-2
-    let list = add_task_with_deps(&list, "default", "Task C", vec!["task-2".into()]); // task-3
-    // Agora edita Task A para depender de Task C -> ciclo A->B->C->A
-    let output = crate::plan::todo_edit(
-        &list,
-        &crate::plan::TodoEdit {
-            id: "task-1".into(),
-            description: None,
-            group: None,
-            depends_on: Some(vec!["task-3".into()]),
-        },
-    )
-    .unwrap();
-    let has_cycle_nag = output
-        .nags
-        .iter()
-        .any(|n| n.message.contains("cycle") || n.message.contains("circular"));
-    assert!(
-        has_cycle_nag,
-        "Dependência circular A->B->C->A deveria gerar nag"
-    );
-}
-
-#[test]
-fn clean_keeps_groups_with_remaining_items() {
-    let list = add_task(&TodoList::default(), "backend", "Active task");
-    let list = add_task(&list, "backend", "Done task");
-    let list = todo_cross_off(
-        &list,
-        &TodoCrossOff::Complete {
-            id: "task-2".into(),
-        },
-    )
-    .unwrap()
-    .list;
-    let output = todo_write(&list, &TodoWriteAction::Clean { keep_pending: true }).unwrap();
-    assert_eq!(
-        output.list.groups.len(),
-        1,
-        "group with remaining items should persist"
-    );
-    assert_eq!(output.list.groups[0].title, "backend");
-    assert_eq!(output.list.groups[0].items.len(), 1);
-}
-
-#[test]
-fn clean_nags_count() {
-    let list = add_task(&TodoList::default(), "default", "Done");
-    let list = todo_cross_off(
-        &list,
-        &TodoCrossOff::Complete {
-            id: "task-1".into(),
-        },
-    )
-    .unwrap()
-    .list;
-    let output = todo_write(
-        &list,
-        &TodoWriteAction::Clean {
-            keep_pending: false,
-        },
-    )
-    .unwrap();
-    let has_task_nag = output
-        .nags
-        .iter()
-        .any(|n| n.message.contains("Removed 1 completed"));
-    let has_group_nag = output
-        .nags
-        .iter()
-        .any(|n| n.message.contains("empty group"));
-    assert!(has_task_nag, "should nag about removed tasks");
-    assert!(has_group_nag, "should nag about removed empty group");
-}
-
-// VerifyGroup
-
-#[test]
-fn verify_group_marks_verified() {
-    let list = add_task(&TodoList::default(), "backend", "Task A");
-    let list = add_task(&list, "backend", "Task B");
-    let list = todo_cross_off(
-        &list,
-        &TodoCrossOff::Complete {
-            id: "task-1".into(),
-        },
-    )
-    .unwrap()
-    .list;
-    let output = todo_write(
-        &list,
-        &TodoWriteAction::VerifyGroup {
-            group: "backend".into(),
-        },
-    )
-    .unwrap();
-    assert!(
-        output.list.groups[0].tests_verified,
-        "group should be verified after VerifyGroup"
-    );
-}
-
-#[test]
-fn verify_nonexistent_group_fails() {
-    let list = TodoList::default();
-    let result = todo_write(
-        &list,
-        &TodoWriteAction::VerifyGroup {
-            group: "ghost".into(),
-        },
-    );
-    assert!(result.is_err());
-}
-
-#[test]
-fn verify_group_with_pending_nags() {
-    let list = add_task(&TodoList::default(), "backend", "Task A"); // still Pending
-    let output = todo_write(
-        &list,
-        &TodoWriteAction::VerifyGroup {
-            group: "backend".into(),
-        },
-    )
-    .unwrap();
-    assert!(output.list.groups[0].tests_verified, "should still verify");
-    let has_nag = output.nags.iter().any(|n| n.message.contains("pending"));
-    assert!(has_nag, "should nag about pending tasks in verified group");
-}
-
-#[test]
-fn verify_group_persists_after_add() {
-    let list = add_task(&TodoList::default(), "backend", "Task A");
-    let list = todo_write(
-        &list,
-        &TodoWriteAction::VerifyGroup {
-            group: "backend".into(),
-        },
-    )
-    .unwrap()
-    .list;
-    // Add another task — tests_verified should remain true
-    let list = add_task(&list, "backend", "Task B");
-    assert!(
-        list.groups[0].tests_verified,
-        "adding a task should not unverify the group"
-    );
-}
-
-// ReplaceList
-
-fn replace_groups() -> Vec<crate::plan::ReplaceGroup> {
-    serde_json::from_value(serde_json::json!([
-        {
-            "title": "Database",
-            "items": [
-                { "key": "schema", "description": "Design schema" },
-                { "key": "migrations", "description": "Write migrations", "depends_on": ["schema"] }
-            ]
-        },
-        {
-            "title": "API",
-            "items": [
-                { "description": "User endpoints", "depends_on": ["migrations"] }
-            ]
-        }
-    ]))
-    .unwrap()
-}
-
-#[test]
-fn replace_list_creates_full_plan_on_empty_list() {
-    let list = TodoList::default();
-    let output = todo_write(
-        &list,
-        &TodoWriteAction::ReplaceList {
-            groups: replace_groups(),
-        },
-    )
-    .unwrap();
-    assert_eq!(output.list.groups.len(), 2);
-    assert_eq!(output.list.groups[0].items.len(), 2);
-    assert_eq!(output.list.groups[1].items.len(), 1);
-    // No overwrite nag on an empty list.
-    assert!(
-        output.nags.is_empty(),
-        "no nags expected: {:?}",
-        output.nags
-    );
-}
-
-#[test]
-fn replace_list_assigns_sequential_ids_in_order() {
-    let list = TodoList::default();
-    let output = todo_write(
-        &list,
-        &TodoWriteAction::ReplaceList {
-            groups: replace_groups(),
-        },
-    )
-    .unwrap();
-    assert_eq!(output.list.groups[0].items[0].id, "task-1");
-    assert_eq!(output.list.groups[0].items[1].id, "task-2");
-    assert_eq!(output.list.groups[1].items[0].id, "task-3");
-}
-
-#[test]
-fn replace_list_resolves_keys_to_ids() {
-    let list = TodoList::default();
-    let output = todo_write(
-        &list,
-        &TodoWriteAction::ReplaceList {
-            groups: replace_groups(),
-        },
-    )
-    .unwrap();
-    // 'migrations' -> task-2; 'migrations' dep on 'User endpoints' -> task-3
-    assert_eq!(
-        output.list.groups[0].items[1].depends_on,
-        ["task-1".to_string()]
-    );
-    assert_eq!(
-        output.list.groups[1].items[0].depends_on,
-        ["task-2".to_string()]
-    );
-}
-
-#[test]
-fn replace_list_nags_when_overwriting_non_empty_list() {
-    let list = add_task(&TodoList::default(), "old", "Existing task");
-    let output = todo_write(
-        &list,
-        &TodoWriteAction::ReplaceList {
-            groups: replace_groups(),
-        },
-    )
-    .unwrap();
-    let has_nag = output
-        .nags
-        .iter()
-        .any(|n| n.message.contains("Replaced the existing TODO list"));
-    assert!(has_nag, "should nag about overwriting: {:?}", output.nags);
-    assert_eq!(output.list.groups.len(), 2, "old groups should be gone");
-}
-
-#[test]
-fn replace_list_duplicate_key_rejected() {
-    let list = TodoList::default();
-    let groups: Vec<crate::plan::ReplaceGroup> = serde_json::from_value(serde_json::json!([
-        { "title": "g", "items": [
-            { "key": "dup", "description": "A" },
-            { "key": "dup", "description": "B" }
-        ]}
-    ]))
-    .unwrap();
-    let result = todo_write(&list, &TodoWriteAction::ReplaceList { groups });
-    assert!(result.is_err());
-}
-
-#[test]
-fn replace_list_key_shadowing_task_id_rejected() {
-    let list = TodoList::default();
-    let groups: Vec<crate::plan::ReplaceGroup> = serde_json::from_value(serde_json::json!([
-        { "title": "g", "items": [
-            { "description": "A" },
-            { "key": "task-1", "description": "B" }
-        ]}
-    ]))
-    .unwrap();
-    let result = todo_write(&list, &TodoWriteAction::ReplaceList { groups });
+fn key_shadowing_task_id_rejected() {
+    let result = todo_write(&[input("A"), keyed("task-1", "B")]);
     assert!(
         result.is_err(),
         "a key shaped like task-N must be rejected (it would shadow the real id)"
@@ -579,32 +189,22 @@ fn replace_list_key_shadowing_task_id_rejected() {
 }
 
 #[test]
-fn replace_list_unknown_key_nags() {
-    let list = TodoList::default();
-    let groups: Vec<crate::plan::ReplaceGroup> = serde_json::from_value(serde_json::json!([
-        { "title": "g", "items": [
-            { "description": "A", "depends_on": ["ghost-key"] }
-        ]}
-    ]))
-    .unwrap();
-    let output = todo_write(&list, &TodoWriteAction::ReplaceList { groups }).unwrap();
-    let has_nag = output.nags.iter().any(|n| {
-        n.message
-            .contains("neither a sibling key nor an existing task id")
-    });
+fn unknown_key_nags() {
+    let output = todo_write(&[with_deps("A", vec!["ghost-key".into()])]).unwrap();
+    let has_nag = output
+        .nags
+        .iter()
+        .any(|n| n.message.contains("neither a sibling key nor an existing task id"));
     assert!(has_nag, "unknown key should nag: {:?}", output.nags);
 }
 
 #[test]
-fn replace_list_self_reference_nags() {
-    let list = TodoList::default();
-    let groups: Vec<crate::plan::ReplaceGroup> = serde_json::from_value(serde_json::json!([
-        { "title": "g", "items": [
-            { "key": "self", "description": "A", "depends_on": ["self"] }
-        ]}
-    ]))
+fn self_reference_nags() {
+    let output = todo_write(&[TodoItemInput {
+        depends_on: Some(vec!["self".into()]),
+        ..keyed("self", "A")
+    }])
     .unwrap();
-    let output = todo_write(&list, &TodoWriteAction::ReplaceList { groups }).unwrap();
     let has_nag = output
         .nags
         .iter()
@@ -613,34 +213,18 @@ fn replace_list_self_reference_nags() {
 }
 
 #[test]
-fn replace_list_empty_description_rejected() {
-    let list = TodoList::default();
-    let groups: Vec<crate::plan::ReplaceGroup> = serde_json::from_value(serde_json::json!([
-        { "title": "g", "items": [ { "description": "   " } ]}
-    ]))
+fn cycle_nags() {
+    let output = todo_write(&[
+        TodoItemInput {
+            depends_on: Some(vec!["b".into()]),
+            ..keyed("a", "A")
+        },
+        TodoItemInput {
+            depends_on: Some(vec!["a".into()]),
+            ..keyed("b", "B")
+        },
+    ])
     .unwrap();
-    let result = todo_write(&list, &TodoWriteAction::ReplaceList { groups });
-    assert!(result.is_err());
-}
-
-#[test]
-fn replace_list_empty_groups_rejected() {
-    let list = TodoList::default();
-    let result = todo_write(&list, &TodoWriteAction::ReplaceList { groups: Vec::new() });
-    assert!(result.is_err());
-}
-
-#[test]
-fn replace_list_cycle_nags() {
-    let list = TodoList::default();
-    let groups: Vec<crate::plan::ReplaceGroup> = serde_json::from_value(serde_json::json!([
-        { "title": "g", "items": [
-            { "key": "a", "description": "A", "depends_on": ["b"] },
-            { "key": "b", "description": "B", "depends_on": ["a"] }
-        ]}
-    ]))
-    .unwrap();
-    let output = todo_write(&list, &TodoWriteAction::ReplaceList { groups }).unwrap();
     let has_cycle_nag = output
         .nags
         .iter()
@@ -649,44 +233,34 @@ fn replace_list_cycle_nags() {
 }
 
 #[test]
-fn replace_list_then_start_works() {
-    let list = TodoList::default();
-    let list = todo_write(
-        &list,
-        &TodoWriteAction::ReplaceList {
-            groups: replace_groups(),
+fn in_progress_with_unfinished_dependency_nags() {
+    let output = todo_write(&[
+        input("A"),
+        TodoItemInput {
+            status: TodoStatus::InProgress,
+            depends_on: Some(vec!["task-1".into()]),
+            ..input("B")
         },
-    )
-    .unwrap()
-    .list;
-    let output = todo_write(
-        &list,
-        &TodoWriteAction::Start {
-            id: "task-1".into(),
-        },
-    )
+    ])
     .unwrap();
-    assert_eq!(
-        output.list.groups[0].items[0].status,
-        TodoStatus::InProgress
-    );
+    let has_nag = output
+        .nags
+        .iter()
+        .any(|n| n.message.contains("which is still"));
+    assert!(has_nag, "unfinished dep should nag: {:?}", output.nags);
 }
 
+// Tool description
+
 #[test]
-fn todo_write_description_carries_a_concrete_example() {
+fn description_teaches_the_full_state_contract() {
     let description = &Plan::default().description_todo_write;
-    let action = &description["inputSchema"]["properties"]["action"];
-    let text = action["description"].as_str().expect("action description");
-    assert!(
-        text.contains("Example"),
-        "description teaches by example: {text}"
-    );
-    assert!(
-        text.contains("\"type\": \"ReplaceList\"") && text.contains("\"groups\""),
-        "the example shows the ReplaceList shape models struggle with: {text}"
-    );
-    assert!(
-        text.contains("{\"action\": {\"type\": \"Add\""),
-        "smaller actions are exemplified too: {text}"
-    );
+    let todos = &description["inputSchema"]["properties"]["todos"];
+    assert_eq!(todos["type"], "array");
+    let text = description["description"].as_str().expect("description");
+    assert!(text.contains("replaces the previous list"), "{text}");
+    assert!(text.contains("{\"todos\": ["), "teaches by example: {text}");
+    assert!(text.contains("in_progress"), "{text}");
+    let status = &todos["items"]["properties"]["status"];
+    assert_eq!(status["enum"].as_array().unwrap().len(), 4);
 }

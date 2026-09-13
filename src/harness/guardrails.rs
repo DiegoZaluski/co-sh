@@ -241,7 +241,6 @@ fn is_restricted_in_ask_mode(name: &str) -> bool {
             | "fs_rollback"
             | "bash_run"
             | "plan_todo_write"
-            | "plan_todo_edit"
             | "subagent_call"
     )
 }

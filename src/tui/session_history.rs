@@ -156,7 +156,21 @@ pub(crate) enum MessageDelta {
     },
 }
 
+/// Degrades a persisted plan to `None` when its shape is no longer
+/// compatible (e.g. sessions recorded before the flat-list TODO contract).
+fn deserialize_todo_lossy<'de, D>(de: D) -> Result<Option<TodoList>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value: Option<serde_json::Value> = serde::Deserialize::deserialize(de)?;
+    Ok(value.and_then(|v| serde_json::from_value(v).ok()))
+}
+
 /// Fine-grained persisted transitions for the context-manager projection.
+///
+/// The `todo` fields use a lossy deserializer: a session recorded by an
+/// older binary with an incompatible plan shape degrades to `None` (plan
+/// dropped) instead of failing the whole delta replay.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "field", rename_all = "snake_case")]
 pub(crate) enum ContextDelta {
@@ -171,7 +185,7 @@ pub(crate) enum ContextDelta {
         hidden: HashSet<u64>,
         #[serde(default)]
         masked: HashSet<u64>,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "deserialize_todo_lossy")]
         todo: Option<TodoList>,
         /// Last context item recorded with this plan (zero precedes all items).
         /// Absent in older histories, which have no historical plan binding.
@@ -224,6 +238,7 @@ pub(crate) enum ContextDelta {
         buffer_tokens: usize,
     },
     Todo {
+        #[serde(default, deserialize_with = "deserialize_todo_lossy")]
         value: Option<TodoList>,
         #[serde(default)]
         after_item_id: Option<u64>,

@@ -1,11 +1,33 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::todo_cross_off::TodoCrossOff;
-use super::todo_edit::TodoEdit;
-use super::todo_write::TodoWriteAction;
+/// Input for `plan_todo_write`: the full desired TODO list, replacing the
+/// previous one.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TodoWriteInput {
+    pub todos: Vec<TodoItemInput>,
+}
+
+/// One task as submitted by the model in a `plan_todo_write` call.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TodoItemInput {
+    /// Optional alias other tasks in this same call reference in
+    /// `depends_on`; resolved to the assigned `task-N` id.
+    pub key: Option<String>,
+    pub description: String,
+    /// Defaults to `pending` when omitted.
+    #[serde(default = "default_status")]
+    pub status: TodoStatus,
+    /// Dependencies: sibling `key`s or `task-N` ids.
+    pub depends_on: Option<Vec<String>>,
+}
+
+fn default_status() -> TodoStatus {
+    TodoStatus::Pending
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum TodoStatus {
     Pending,
     InProgress,
@@ -13,50 +35,18 @@ pub enum TodoStatus {
     Cancelled,
 }
 
-/// Input for `plan_todo_read`.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct TodoReadInput {
-    pub action: TodoReadAction,
+impl std::fmt::Display for TodoStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            TodoStatus::Pending => "pending",
+            TodoStatus::InProgress => "in_progress",
+            TodoStatus::Completed => "completed",
+            TodoStatus::Cancelled => "cancelled",
+        })
+    }
 }
 
-/// Input for `plan_todo_write`.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct TodoWriteInput {
-    pub action: TodoWriteAction,
-}
-
-/// Input for `plan_todo_edit`.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct TodoEditInput {
-    pub edit: TodoEdit,
-}
-
-/// Input for `plan_todo_cross_off`.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct TodoCrossOffInput {
-    pub action: TodoCrossOff,
-}
-
-/// One task inside a `ReplaceList` group.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct ReplaceItem {
-    /// Optional alias used to reference this task in `depends_on`
-    /// of sibling tasks within the same `ReplaceList` call.
-    /// The tool resolves it to the real `task-N` id.
-    pub key: Option<String>,
-    pub description: String,
-    /// Dependencies: may contain sibling `key`s (resolved to `task-N`)
-    /// or existing `task-N` ids.
-    pub depends_on: Option<Vec<String>>,
-}
-
-/// One group inside a `ReplaceList` action.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct ReplaceGroup {
-    pub title: String,
-    pub items: Vec<ReplaceItem>,
-}
-
+/// One task in the flat TODO list.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TodoItem {
     pub id: String,
@@ -65,32 +55,10 @@ pub struct TodoItem {
     pub depends_on: Vec<String>,
 }
 
-/// A named group of tasks.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TaskGroup {
-    pub title: String,
-    pub items: Vec<TodoItem>,
-    /// Whether the model has confirmed that tests were run for this group.
-    /// Set to `false` on creation; set to `true` via `VerifyGroup` action.
-    pub tests_verified: bool,
-}
-
-/// The full mutable state of the todo system.
+/// The full mutable state of the todo system: a flat list of tasks.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TodoList {
-    pub groups: Vec<TaskGroup>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type")]
-pub enum TodoReadAction {
-    List {
-        group: Option<String>,
-        status: Option<TodoStatus>,
-    },
-    Get {
-        id: String,
-    },
+    pub items: Vec<TodoItem>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -98,17 +66,10 @@ pub struct Nag {
     pub message: String,
 }
 
-/// Output produced by mutation operations (`todo_write`, `todo_edit`, `todo_cross_off`).
+/// Output produced by `todo_write`.
 #[derive(Debug, Clone, Serialize)]
 pub struct TodoWriteOutput {
     pub list: TodoList,
-    pub nags: Vec<Nag>,
-}
-
-/// Output produced by `todo_read`.
-#[derive(Debug, Clone, Serialize)]
-pub struct TodoReadOutput {
-    pub groups: Vec<TaskGroup>,
     pub nags: Vec<Nag>,
 }
 

@@ -91,36 +91,30 @@ pub(crate) fn sanitize_subagent_text(text: &str) -> String {
 }
 
 /// Parse a plan tool's JSON result into the flat todo list shown in the
-/// panel: `{"list": {"groups": [{"items": [{"status", "description"}]}]}}`.
+/// panel: `{"list": {"items": [{"status", "description"}]}}`.
 /// Shared by the live `ToolResult` path (events) and the rehydration from
 /// persisted sessions, so both paths always agree. `None` when the output
 /// is not a plan result.
 pub(crate) fn parse_todo_output(output: &str) -> Option<Vec<TodoItem>> {
     let val = serde_json::from_str::<serde_json::Value>(output).ok()?;
-    let groups = val.get("list")?.get("groups")?.as_array()?;
+    let items = val.get("list")?.get("items")?.as_array()?;
     Some(
-        groups
+        items
             .iter()
-            .flat_map(|g| {
-                g.get("items")
-                    .and_then(|items| items.as_array())
-                    .into_iter()
-                    .flatten()
-            })
             .map(|item| {
                 let status = item
                     .get("status")
                     .and_then(|s| s.as_str())
-                    .unwrap_or("Pending");
+                    .unwrap_or("pending");
                 let description = item
                     .get("description")
                     .and_then(|d| d.as_str())
                     .unwrap_or("");
                 TodoItem {
                     status: match status {
-                        "InProgress" => "in_progress",
-                        "Completed" => "completed",
-                        "Cancelled" => "cancelled",
+                        "in_progress" => "in_progress",
+                        "completed" => "completed",
+                        "cancelled" => "cancelled",
                         _ => "pending",
                     }
                     .to_string(),
@@ -381,8 +375,6 @@ pub struct RightPanelState {
     pub todos: Vec<TodoItem>,
     /// Active/completed PTY sessions.
     pub pty_sessions: Vec<PtySession>,
-    /// Counter for matching ToolResult back to plan_todo_write tool calls.
-    pub pending_todo_update_count: u32,
     /// Counter for generating unique PTY IDs.
     next_pty_id: u64,
     /// Monotonically increasing counter for section activation order.
@@ -544,7 +536,6 @@ impl RightPanelState {
         let mut state = Self {
             todos: Vec::new(),
             pty_sessions: Vec::new(),
-            pending_todo_update_count: 0,
             next_pty_id: 0,
             next_activity_id: 1,
             section_activity_order: [0; 3],
@@ -1657,7 +1648,7 @@ impl RightPanelState {
         for msg in &session.messages {
             for part in &msg.parts {
                 let Part::Tool(tp) = part else { continue };
-                if !matches!(tp.tool.as_str(), "plan_todo_write" | "plan_todo_cross_off") {
+                if !matches!(tp.tool.as_str(), "plan_todo_write") {
                     continue;
                 }
                 if let Some(output) = &tp.output
@@ -2085,7 +2076,7 @@ mod tests {
             })
             .collect();
         format!(
-            r#"{{"list": {{"groups": [{{"items": [{}]}}]}}}}"#,
+            r#"{{"list": {{"items": [{}]}}}}"#,
             items.join(",")
         )
     }
@@ -2097,14 +2088,14 @@ mod tests {
             tool_part(
                 "plan_todo_write",
                 serde_json::json!({}),
-                Some(todo_output_json(&[("Pending", "old item")])),
+                Some(todo_output_json(&[("pending", "old item")])),
             ),
             tool_part(
                 "plan_todo_write",
                 serde_json::json!({}),
                 Some(todo_output_json(&[
-                    ("InProgress", "first"),
-                    ("Completed", "second"),
+                    ("in_progress", "first"),
+                    ("completed", "second"),
                 ])),
             ),
         ]);
@@ -2115,7 +2106,6 @@ mod tests {
         assert_eq!(state.todos[0].content, "first");
         assert_eq!(state.todos[0].status, "in_progress");
         assert_eq!(state.todos[1].status, "completed");
-        assert_eq!(state.pending_todo_update_count, 0);
     }
 
     #[test]

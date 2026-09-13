@@ -1006,18 +1006,19 @@ impl Harness {
 
         // The plan tools are only exposed in Build/Yolo modes. Teach the
         // agent the structured TODO workflow: create the full plan in a
-        // single `plan_todo_write` call with `ReplaceList`, then drive it
-        // with `Start` / `Complete` / `Cancel` during execution.
+        // single `plan_todo_write` call, then drive it by rewriting the
+        // list with updated statuses during execution.
         if !matches!(self.mode, Mode::Ask) {
             let _ = write!(
                 out,
                 "## System: Plan\n\
                  Plan the full TODO list up front: create it with a single \
-                 `plan_todo_write` call using the `ReplaceList` action (one entry \
-                 per group; use the optional per-item `key` so sibling tasks can \
-                 reference each other in `depends_on` within the same call). \
-                 During execution, `Start` one task at a time and `plan_todo_cross_off` \
-                 it when done; use `VerifyGroup` after testing a completed group.\n\n"
+                 `plan_todo_write` call (flat list, one task per entry; use the \
+                 optional per-item `key` so sibling tasks can reference each \
+                 other in `depends_on` within the same call). During execution, \
+                 change a task's status (start, complete, cancel) by rewriting \
+                 the full list with the updated status; exactly one task may be \
+                 in-progress at a time.\n\n"
             );
         }
 

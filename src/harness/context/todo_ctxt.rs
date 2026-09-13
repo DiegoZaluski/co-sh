@@ -9,8 +9,7 @@
 //! block is merged into it (block first, steering after — avoiding two
 //! consecutive `user` messages, which some providers reject); otherwise it is
 //! injected as its own trailing `user` message. The model therefore always
-//! sees the current plan without needing to call `plan_todo_read` first, and
-//! cannot forget it.
+//! sees the current plan without needing any read step, and cannot forget it.
 //!
 //! # Cache-friendly placement
 //!
@@ -49,8 +48,8 @@
 //!      `Cancelled` (nothing `Pending`/`InProgress` remains): the plan is
 //!      done, the block disappears.
 //!   2. **The model manually removes the tasks** — the list becomes empty
-//!      through the existing `Remove`/`Clean` `plan_todo_write` actions:
-//!      nothing to show, the block disappears.
+//!      through a `plan_todo_write` call with an empty list: nothing to
+//!      show, the block disappears.
 //!
 //! The harness mirrors the tools' `Plan` state into this manager at loop
 //! start and after every `plan_*` dispatch, so the block is always a faithful
@@ -121,27 +120,21 @@ impl TodoContext {
 /// The Markdown block for `list`, or `None` when the plan is over (empty or
 /// all-terminal — removal rules 1 and 2).
 fn render(list: &TodoList) -> Option<String> {
-    if list.groups.is_empty() || all_terminal(list) {
+    if list.items.is_empty() || all_terminal(list) {
         return None;
     }
     let mut out = String::from(
         "## Tool TODOs\n\
          This protected block always shows the current plan. Update it with \
-         plan_todo_write / plan_todo_cross_off / plan_todo_edit.\n",
+         plan_todo_write (send the full list with the updated statuses).\n",
     );
-    for group in &list.groups {
-        if group.items.is_empty() {
-            continue;
+    for item in &list.items {
+        let mut line = format!("- [{}] {}", status_marker(item.status), item.description);
+        if !item.depends_on.is_empty() {
+            line.push_str(&format!("  (depends: {})", item.depends_on.join(", ")));
         }
-        out.push_str(&format!("\n### {}\n", group.title));
-        for item in &group.items {
-            let mut line = format!("- [{}] {}", status_marker(item.status), item.description);
-            if !item.depends_on.is_empty() {
-                line.push_str(&format!("  (depends: {})", item.depends_on.join(", ")));
-            }
-            out.push_str(&line);
-            out.push('\n');
-        }
+        out.push_str(&line);
+        out.push('\n');
     }
     Some(out)
 }
@@ -160,17 +153,16 @@ fn status_marker(status: TodoStatus) -> char {
 /// True when NO task is pending or in progress — every task is terminal
 /// (completed or cancelled): the plan is done (removal rule 1).
 fn all_terminal(list: &TodoList) -> bool {
-    !list.groups.iter().any(|g| {
-        g.items
-            .iter()
-            .any(|i| matches!(i.status, TodoStatus::Pending | TodoStatus::InProgress))
-    })
+    !list
+        .items
+        .iter()
+        .any(|i| matches!(i.status, TodoStatus::Pending | TodoStatus::InProgress))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cosh_tools::plan::types::{TaskGroup, TodoItem};
+    use cosh_tools::plan::types::TodoItem;
 
     fn enc() -> TokenEncoding {
         TokenEncoding::Cl100k
@@ -185,16 +177,8 @@ mod tests {
         }
     }
 
-    fn group(title: &str, items: Vec<TodoItem>) -> TaskGroup {
-        TaskGroup {
-            title: title.to_string(),
-            items,
-            tests_verified: false,
-        }
-    }
-
-    fn list(groups: Vec<TaskGroup>) -> TodoList {
-        TodoList { groups }
+    fn list(items: Vec<TodoItem>) -> TodoList {
+        TodoList { items }
     }
 
     #[test]
@@ -214,26 +198,19 @@ mod tests {
     #[test]
     fn pending_tasks_show_the_block() {
         let mut tc = TodoContext::new();
-        tc.sync(list(vec![group(
-            "Database",
-            vec![item("task-1", TodoStatus::Pending)],
-        )]));
+        tc.sync(list(vec![item("task-1", TodoStatus::Pending)]));
         let text = tc.text().expect("a visible block renders");
         assert!(text.contains("## Tool TODOs"));
-        assert!(text.contains("### Database"));
         assert!(text.contains("- [ ] do task-1"));
     }
 
     #[test]
     fn completed_tasks_stay_visible_until_everything_is_done() {
         let mut tc = TodoContext::new();
-        tc.sync(list(vec![group(
-            "Database",
-            vec![
-                item("task-1", TodoStatus::Completed),
-                item("task-2", TodoStatus::Pending),
-            ],
-        )]));
+        tc.sync(list(vec![
+            item("task-1", TodoStatus::Completed),
+            item("task-2", TodoStatus::Pending),
+        ]));
         let text = tc
             .text()
             .expect("a single pending task keeps the block alive");
@@ -247,10 +224,7 @@ mod tests {
     #[test]
     fn all_completed_hides_the_block() {
         let mut tc = TodoContext::new();
-        tc.sync(list(vec![group(
-            "Database",
-            vec![item("task-1", TodoStatus::Completed)],
-        )]));
+        tc.sync(list(vec![item("task-1", TodoStatus::Completed)]));
         assert!(
             tc.text().is_none(),
             "removal rule 1: all tasks completed → the block is gone"
@@ -260,10 +234,7 @@ mod tests {
     #[test]
     fn all_cancelled_hides_the_block() {
         let mut tc = TodoContext::new();
-        tc.sync(list(vec![group(
-            "Database",
-            vec![item("task-1", TodoStatus::Cancelled)],
-        )]));
+        tc.sync(list(vec![item("task-1", TodoStatus::Cancelled)]));
         assert!(
             tc.text().is_none(),
             "cancelled tasks are terminal too → the block is gone"
@@ -273,12 +244,9 @@ mod tests {
     #[test]
     fn empty_list_via_manual_removal_hides_the_block() {
         let mut tc = TodoContext::new();
-        tc.sync(list(vec![group(
-            "Database",
-            vec![item("task-1", TodoStatus::Pending)],
-        )]));
+        tc.sync(list(vec![item("task-1", TodoStatus::Pending)]));
         assert!(tc.text().is_some());
-        // The model removed the last task (Remove/Clean) → the list is empty.
+        // The model sent an empty list (full-state write) → the list is empty.
         tc.sync(TodoList::default());
         assert!(
             tc.text().is_none(),
@@ -289,10 +257,7 @@ mod tests {
     #[test]
     fn clear_drops_the_mirror() {
         let mut tc = TodoContext::new();
-        tc.sync(list(vec![group(
-            "Database",
-            vec![item("task-1", TodoStatus::Pending)],
-        )]));
+        tc.sync(list(vec![item("task-1", TodoStatus::Pending)]));
         assert!(tc.text().is_some());
         tc.clear();
         assert!(tc.text().is_none());
@@ -301,15 +266,12 @@ mod tests {
     #[test]
     fn render_includes_task_ids_and_dependencies() {
         let mut tc = TodoContext::new();
-        tc.sync(list(vec![group(
-            "API",
-            vec![TodoItem {
-                id: "task-3".to_string(),
-                description: "user endpoints".to_string(),
-                status: TodoStatus::InProgress,
-                depends_on: vec!["task-1".to_string()],
-            }],
-        )]));
+        tc.sync(list(vec![TodoItem {
+            id: "task-3".to_string(),
+            description: "user endpoints".to_string(),
+            status: TodoStatus::InProgress,
+            depends_on: vec!["task-1".to_string()],
+        }]));
         let text = tc.text().unwrap();
         assert!(text.contains("- [*] user endpoints  (depends: task-1)"));
     }
@@ -318,15 +280,9 @@ mod tests {
     fn tokens_count_only_when_visible() {
         let mut tc = TodoContext::new();
         assert_eq!(tc.tokens(enc()), 0);
-        tc.sync(list(vec![group(
-            "Database",
-            vec![item("task-1", TodoStatus::Pending)],
-        )]));
+        tc.sync(list(vec![item("task-1", TodoStatus::Pending)]));
         assert!(tc.tokens(enc()) > 0, "the rendered block has a token cost");
-        tc.sync(list(vec![group(
-            "Database",
-            vec![item("task-1", TodoStatus::Completed)],
-        )]));
+        tc.sync(list(vec![item("task-1", TodoStatus::Completed)]));
         assert_eq!(tc.tokens(enc()), 0, "a done plan costs nothing");
     }
 
@@ -340,10 +296,7 @@ mod tests {
     fn build_messages_merges_the_block_into_the_trailing_user_turn() {
         let mut m = cm(10_000);
         m.add_user("hello");
-        m.set_todo_list(list(vec![group(
-            "Database",
-            vec![item("task-1", TodoStatus::Pending)],
-        )]));
+        m.set_todo_list(list(vec![item("task-1", TodoStatus::Pending)]));
         let msgs = m.build_messages("");
         // Merged: a single user message carrying the block AND the prompt —
         // never two consecutive `user` messages. The block leads the merged
@@ -364,10 +317,7 @@ mod tests {
         // A restored/compacted timeline whose visible history is just the
         // assistant anchor: the block cannot be merged — it is appended as
         // its own trailing `user` message.
-        m.set_todo_list(list(vec![group(
-            "Database",
-            vec![item("task-1", TodoStatus::Pending)],
-        )]));
+        m.set_todo_list(list(vec![item("task-1", TodoStatus::Pending)]));
         m.add_user("hello");
         m.add_assistant("doing it", true);
         m.apply_llm_summary("## Objective\n- keep going".into());
@@ -389,10 +339,7 @@ mod tests {
     #[test]
     fn todo_block_survives_every_compaction_phase() {
         let mut m = cm(1000); // trigger = 800
-        m.set_todo_list(list(vec![group(
-            "Database",
-            vec![item("task-1", TodoStatus::Pending)],
-        )]));
+        m.set_todo_list(list(vec![item("task-1", TodoStatus::Pending)]));
         m.add_user("start");
         let prose: String = (0..40)
             .map(|i| {
@@ -452,10 +399,7 @@ mod tests {
     fn todo_block_tokens_count_toward_the_budget() {
         let mut m = cm(10_000);
         assert_eq!(m.display_info().total_tokens, 0);
-        m.set_todo_list(list(vec![group(
-            "Database",
-            vec![item("task-1", TodoStatus::Pending)],
-        )]));
+        m.set_todo_list(list(vec![item("task-1", TodoStatus::Pending)]));
         assert!(
             m.display_info().total_tokens > 0,
             "the block counts toward the budget so the trigger stays honest"
@@ -465,10 +409,7 @@ mod tests {
     #[test]
     fn restore_state_preserves_the_protected_plan() {
         let mut m = cm(10_000);
-        m.set_todo_list(list(vec![group(
-            "Database",
-            vec![item("task-1", TodoStatus::Pending)],
-        )]));
+        m.set_todo_list(list(vec![item("task-1", TodoStatus::Pending)]));
         let state = m.save_state();
         let mut restored = cm(10_000);
         restored.restore_state(&state);
@@ -486,20 +427,14 @@ mod tests {
     fn empty_and_terminal_plans_restore_without_resurrecting_old_work() {
         for plan in [
             TodoList::default(),
-            list(vec![group(
-                "Done",
-                vec![item("task-1", TodoStatus::Completed)],
-            )]),
+            list(vec![item("task-1", TodoStatus::Completed)]),
         ] {
             let mut source = cm(10_000);
             source.set_todo_list(plan.clone());
             let state = serde_json::from_str(&serde_json::to_string(&source.save_state()).unwrap())
                 .unwrap();
             let mut restored = cm(10_000);
-            restored.set_todo_list(list(vec![group(
-                "Stale",
-                vec![item("old", TodoStatus::Pending)],
-            )]));
+            restored.set_todo_list(list(vec![item("old", TodoStatus::Pending)]));
             restored.restore_state(&state);
             assert_eq!(
                 serde_json::to_value(restored.todo_list()).unwrap(),
@@ -512,10 +447,7 @@ mod tests {
     #[test]
     fn legacy_state_without_plan_clears_the_previous_projection() {
         let mut restored = cm(10_000);
-        restored.set_todo_list(list(vec![group(
-            "Stale",
-            vec![item("old", TodoStatus::Pending)],
-        )]));
+        restored.set_todo_list(list(vec![item("old", TodoStatus::Pending)]));
         let mut state = serde_json::to_value(restored.save_state()).unwrap();
         state.as_object_mut().unwrap().remove("todo");
         restored.restore_state(&serde_json::from_value(state).unwrap());

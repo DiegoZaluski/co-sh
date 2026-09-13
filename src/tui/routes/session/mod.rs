@@ -1504,11 +1504,8 @@ impl SessionView {
             "todo" => {
                 !matches!(part.status, ToolStatus::Running)
                     && has_output
-                    && !tool_render::format_todo_output(
-                        part.output.as_deref().unwrap_or("").trim(),
-                        &part.tool,
-                    )
-                    .is_empty()
+                    && !tool_render::format_todo_output(part.output.as_deref().unwrap_or("").trim())
+                        .is_empty()
             }
             _ => false,
         }
@@ -1587,7 +1584,7 @@ impl SessionView {
                         // bottom padding (1) = lines + 3; +2 external margins.
                         lines + 5
                     } else if tool_render::tool_display(&t.tool) == "todo" {
-                        let formatted = tool_render::format_todo_output(output, &t.tool);
+                        let formatted = tool_render::format_todo_output(output);
                         let lines = formatted.len().max(1) as u16;
                         lines + 4
                     } else if tool_render::tool_display(&t.tool) == "edit" {

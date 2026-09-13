@@ -1468,8 +1468,9 @@ mod tests {
             make_test_session("plan-parent", "Plan", vec![make_user_msg("m1", "first")]);
         let mut context = make_context(vec![user_item(1, "first")]);
         let plan = |title: &str| {
-            serde_json::from_value(serde_json::json!({"groups":[{
-                "title": title, "items": [], "tests_verified": false
+            serde_json::from_value(serde_json::json!({"items":[{
+                "id": "task-1", "description": title, "status": "pending",
+                "depends_on": []
             }]}))
             .unwrap()
         };
@@ -1487,7 +1488,7 @@ mod tests {
         child.id = "plan-child".into();
         assert!(store.fork_session(&session.id, "m1", &child));
         assert_eq!(
-            store.load_context(&child.id).unwrap().todo.unwrap().groups[0].title,
+            store.load_context(&child.id).unwrap().todo.unwrap().items[0].description,
             "first plan"
         );
         assert!(!store.file_path(&child.id).exists());
@@ -1498,8 +1499,8 @@ mod tests {
                 .unwrap()
                 .todo
                 .unwrap()
-                .groups[0]
-                .title,
+                .items[0]
+                .description,
             "first plan"
         );
         assert!(store.rollback_session(&session.id, "v1"));
@@ -1509,8 +1510,8 @@ mod tests {
                 .unwrap()
                 .todo
                 .unwrap()
-                .groups[0]
-                .title,
+                .items[0]
+                .description,
             "future plan"
         );
 
@@ -1533,8 +1534,8 @@ mod tests {
                 .unwrap()
                 .todo
                 .unwrap()
-                .groups[0]
-                .title,
+                .items[0]
+                .description,
             "first plan"
         );
         assert!(store.revert_session(&child.id, "m1"));
@@ -1546,7 +1547,7 @@ mod tests {
                 .unwrap()
                 .todo
                 .unwrap()
-                .groups
+                .items
                 .is_empty()
         );
         assert_eq!(
@@ -1555,8 +1556,8 @@ mod tests {
                 .unwrap()
                 .todo
                 .unwrap()
-                .groups[0]
-                .title,
+                .items[0]
+                .description,
             "future plan"
         );
 
@@ -1585,8 +1586,8 @@ mod tests {
                 .unwrap()
                 .todo
                 .unwrap()
-                .groups[0]
-                .title,
+                .items[0]
+                .description,
             "future plan"
         );
         assert!(std::fs::read(&path).unwrap().starts_with(&prefix));
@@ -1636,13 +1637,11 @@ mod tests {
         store.save_session_with_context(&session, &context);
         let path = store.file_path(&session.id);
         let mut prefix = std::fs::read(&path).unwrap();
-        for status in ["Pending", "InProgress", "Completed"] {
+        for status in ["pending", "in_progress", "completed"] {
             context.todo = Some(
-                serde_json::from_value(serde_json::json!({"groups":[{
-                    "title":"Release", "tests_verified":true, "items":[{
-                        "id":"task-2", "description":"Verify compatibility", "status":status,
-                        "depends_on":["task-1"]
-                    }]
+                serde_json::from_value(serde_json::json!({"items":[{
+                    "id":"task-2", "description":"Verify compatibility", "status":status,
+                    "depends_on":["task-1"]
                 }]}))
                 .unwrap(),
             );
@@ -1667,7 +1666,7 @@ mod tests {
                 .unwrap()
                 .todo
                 .unwrap()
-                .groups
+                .items
                 .is_empty()
         );
     }

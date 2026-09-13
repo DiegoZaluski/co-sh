@@ -455,9 +455,6 @@ pub(crate) fn tool_inline_text(part: &ToolPart) -> String {
             } else {
                 match part.tool.as_str() {
                     "plan_todo_write" => "TODO Write".to_string(),
-                    "plan_todo_edit" => "\u{270F} TODO Edit".to_string(),
-                    "plan_todo_cross_off" => "\u{2713} TODO Cross Off".to_string(),
-                    "plan_todo_read" => "\u{2630} TODO Read".to_string(),
                     _ => "\u{2630} TODO".to_string(),
                 }
             }
@@ -1628,7 +1625,7 @@ pub fn render_question_tool(ctx: &mut ToolRenderCtx, part: &ToolPart) {
 pub fn tool_copy_text(part: &ToolPart) -> Option<String> {
     let output = part.output.as_deref().unwrap_or("").trim();
     match tool_display(&part.tool) {
-        "todo" => (!output.is_empty()).then(|| format_todo_output(output, &part.tool).join("\n")),
+        "todo" => (!output.is_empty()).then(|| format_todo_output(output).join("\n")),
         // The Q&A markdown summary is exactly what's rendered on screen.
         "question" => question_markdown(part),
         "edit" => {
@@ -1657,42 +1654,31 @@ pub fn tool_copy_text(part: &ToolPart) -> Option<String> {
     }
 }
 
-pub fn format_todo_output(output: &str, tool_name: &str) -> Vec<String> {
+pub fn format_todo_output(output: &str) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
 
-    lines.push(
-        match tool_name {
-            "plan_todo_write" => "# Todos",
-            _ => "\u{2630} TODO",
-        }
-        .to_string(),
-    );
+    lines.push("# Todos".to_string());
 
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(output) {
-        let groups = json
+        let items = json
             .get("list")
-            .and_then(|l| l.get("groups"))
-            .or_else(|| json.get("groups"))
-            .and_then(|g| g.as_array());
+            .and_then(|l| l.get("items"))
+            .and_then(|i| i.as_array());
 
-        if let Some(groups) = groups {
-            for group in groups {
-                if let Some(items) = group.get("items").and_then(|i| i.as_array()) {
-                    for item in items {
-                        let desc = item
-                            .get("description")
-                            .and_then(|d| d.as_str())
-                            .unwrap_or("");
-                        let status = item.get("status").and_then(|s| s.as_str()).unwrap_or("?");
-                        let symbol = match status {
-                            "Completed" => "\u{2713}",
-                            "InProgress" => "\u{25CF}",
-                            "Cancelled" => "\u{2717}",
-                            _ => " ",
-                        };
-                        lines.push(format!("[{symbol}] {desc}"));
-                    }
-                }
+        if let Some(items) = items {
+            for item in items {
+                let desc = item
+                    .get("description")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or("");
+                let status = item.get("status").and_then(|s| s.as_str()).unwrap_or("?");
+                let symbol = match status {
+                    "completed" => "\u{2713}",
+                    "in_progress" => "\u{25CF}",
+                    "cancelled" => "\u{2717}",
+                    _ => " ",
+                };
+                lines.push(format!("[{symbol}] {desc}"));
             }
         }
 
@@ -1704,13 +1690,7 @@ pub fn format_todo_output(output: &str, tool_name: &str) -> Vec<String> {
             }
         }
 
-        let has_items = groups.is_some_and(|g| {
-            g.iter().any(|gr| {
-                gr.get("items")
-                    .and_then(|i| i.as_array())
-                    .is_some_and(|a| !a.is_empty())
-            })
-        });
+        let has_items = items.is_some_and(|i| !i.is_empty());
         if !has_items
             && json
                 .get("nags")
@@ -1749,7 +1729,7 @@ pub fn render_todo(ctx: &mut ToolRenderCtx, part: &ToolPart) {
         return;
     }
 
-    let formatted = format_todo_output(output, tool_name);
+    let formatted = format_todo_output(output);
     if formatted.is_empty() {
         *ctx.line_h = 1;
         return;

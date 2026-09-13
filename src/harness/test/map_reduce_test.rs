@@ -503,11 +503,9 @@ async fn whole_item_exceeding_the_actual_window_fails_without_slicing_or_committ
 #[tokio::test]
 async fn resumed_plan_rehydrates_tools_before_the_first_loop() {
     use cosh_tools::plan::types::TodoList;
-    let plan: TodoList = serde_json::from_value(serde_json::json!({"groups": [{
-        "title": "Release", "tests_verified": true, "items": [{
-            "id": "task-1", "description": "Keep API compatibility",
-            "status": "InProgress", "depends_on": []
-        }]
+    let plan: TodoList = serde_json::from_value(serde_json::json!({"items": [{
+        "id": "task-1", "description": "Keep API compatibility",
+        "status": "in_progress", "depends_on": []
     }]}))
     .unwrap();
     let mut harness = Harness::new_test().with_mock_stream(Ok(vec!["Ready"]));
@@ -559,7 +557,7 @@ async fn resumed_plan_rehydrates_tools_before_the_first_loop() {
             .as_ref()
             .unwrap()
             .todo_list()
-            .groups
+            .items
             .is_empty()
     );
 }

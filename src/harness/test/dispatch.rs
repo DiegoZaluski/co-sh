@@ -544,9 +544,9 @@ fn build_header_teaches_plan_workflow_but_ask_header_does_not() {
     use super::super::core::Mode;
     use cosh_sdk::connector::Connector;
 
-    // Build mode exposes the plan tools, so the header must teach the
+    // Build mode exposes the plan tool, so the header must teach the
     // structured TODO workflow that lets the model create the full plan
-    // in a single `ReplaceList` call.
+    // in a single full-state `plan_todo_write` call.
     let mut h = Harness::new(Connector::new("openai").unwrap(), ".", HashSet::new());
     let header = h.format_header_context();
     assert!(
@@ -554,12 +554,12 @@ fn build_header_teaches_plan_workflow_but_ask_header_does_not() {
         "Build header must include the Plan workflow"
     );
     assert!(
-        header.contains("ReplaceList"),
-        "Build header must instruct the ReplaceList workflow"
+        header.contains("plan_todo_write"),
+        "Build header must instruct the full-state write workflow"
     );
 
-    // Ask mode is read-only for planning: it exposes only todo_read, so the
-    // mutation workflow instructions must stay out.
+    // Ask mode is read-only for planning: it exposes no plan tools at all,
+    // so the mutation workflow instructions must stay out.
     let mut h =
         Harness::new(Connector::new("openai").unwrap(), ".", HashSet::new()).with_mode(Mode::Ask);
     let header = h.format_header_context();
@@ -707,7 +707,7 @@ fn handoff_summary_referencing_current_tools_stays_untouched() {
 
     let h = Harness::new(Connector::new("openai").unwrap(), ".", HashSet::new());
     let summary = "## Next Move\n1. Use `fs_edit` with the ops DSL, then `bash_run` cargo test. \
-                   The field `file_hash` anchors the edit. See plan_todo_edit for the tracker.";
+                   The field `file_hash` anchors the edit. See plan_todo_write for the tracker.";
     let annotated = annotate_summary_tool_set(summary, &h.effective_tool_names());
     assert_eq!(
         annotated, summary,
@@ -721,7 +721,7 @@ fn handoff_notice_lists_each_stale_tool_once() {
 
     let h = Harness::new(Connector::new("openai").unwrap(), ".", HashSet::new());
     let summary = "plan_todo_removed_helper then plan_old_cross_off, again plan_todo_removed_helper. \
-                   plan_todo_edit still exists and must not appear in the notice.";
+                   plan_todo_write still exists and must not appear in the notice.";
     let annotated = annotate_summary_tool_set(summary, &h.effective_tool_names());
     let notice = annotated
         .split("[Tool set notice]")
@@ -736,7 +736,7 @@ fn handoff_notice_lists_each_stale_tool_once() {
         "stable order, deduplicated: {notice}"
     );
     assert!(
-        !notice.contains("plan_todo_edit"),
+        !notice.contains("plan_todo_write"),
         "current tools are never listed as stale: {notice}"
     );
 }

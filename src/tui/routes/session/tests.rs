@@ -5156,6 +5156,27 @@ fn completed_question_label_is_not_copyable() {
     assert_eq!(tool_inline_text(&part), "Asking questions");
 }
 
+/// O box de TODO renderiza o formato PLANO do resultado de `plan_todo_write`
+/// (`{"list": {"items": [...]}}`, status snake_case), com marcadores por
+/// status e nags como linhas de aviso.
+#[test]
+fn todo_box_renders_the_flat_plan_output() {
+    use super::tool_render::format_todo_output;
+
+    let output = r#"{"list": {"items": [
+        {"id": "task-1", "description": "first", "status": "in_progress", "depends_on": []},
+        {"id": "task-2", "description": "second", "status": "completed", "depends_on": []},
+        {"id": "task-3", "description": "third", "status": "pending", "depends_on": []}
+    ]}, "nags": [{"message": "watch out"}]}"#;
+
+    let lines = format_todo_output(output);
+    assert_eq!(lines[0], "# Todos");
+    assert!(lines.iter().any(|l| l.contains("\u{25CF}") && l.contains("first")));
+    assert!(lines.iter().any(|l| l.contains("\u{2713}") && l.contains("second")));
+    assert!(lines.iter().any(|l| l.ends_with("[ ] third")));
+    assert!(lines.iter().any(|l| l.contains("\u{26A0} watch out")));
+}
+
 /// Regressão: o box de `write` estima altura a partir do `input.content`
 /// (o que `render_write` desenha), nunca do `output` (receipt JSON curto).
 /// Antes a estimativa media o `output`, então era menor que o desenho real
