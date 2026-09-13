@@ -13,6 +13,7 @@ use cosh_tui::core::renderables::r#box::BoxRenderable;
 use cosh_tui::core::types::MouseEvent;
 
 use crate::component::cursor::{Cursor, CursorState};
+use crate::component::spinner::SpinnerState;
 use crate::theme::{Theme, rgba_color};
 use crate::util::field_selection::DragSelection;
 
@@ -347,6 +348,9 @@ pub enum DialogType {
         models: Vec<ModelEntry>,
         current: String,
         filter: String,
+        /// True while a background API fetch is repopulating `models` — the
+        /// list area renders a spinner instead of the (still empty) list.
+        loading: bool,
     },
     /// Sub-dialog shown after picking a model that supports configurable
     /// reasoning: choose `default` / `low` / `medium` / `high`. Pushed on
@@ -510,11 +514,13 @@ impl std::fmt::Debug for DialogType {
                 models,
                 current,
                 filter,
+                loading,
             } => f
                 .debug_struct("ModelList")
                 .field("models", models)
                 .field("current", current)
                 .field("filter", filter)
+                .field("loading", loading)
                 .finish(),
             Self::ReasoningList {
                 model,
@@ -655,6 +661,9 @@ pub struct DialogInstance {
     pub dialog_type: DialogType,
     pub selected: usize,
     pub cursor: Cursor,
+    /// Animation state for the ModelList loading spinner (advanced by the
+    /// app render tick while a ModelList with `loading: true` is on top).
+    pub spinner: SpinnerState,
 }
 
 pub struct DialogState {
@@ -684,6 +693,7 @@ impl DialogState {
             dialog_type,
             selected: 0,
             cursor: Cursor::new(),
+            spinner: SpinnerState::new(),
         });
     }
 
@@ -1208,6 +1218,7 @@ impl DialogState {
                 models,
                 current: _,
                 filter,
+                loading: _,
             } => {
                 // Group models by provider (same as render)
                 let mut grouped: BTreeMap<String, Vec<&ModelEntry>> = BTreeMap::new();
@@ -2130,6 +2141,7 @@ impl DialogState {
                 models,
                 current,
                 filter,
+                loading,
             } => {
                 // Group models by provider and filter
 
@@ -2299,7 +2311,27 @@ impl DialogState {
                 let list_x = dialog_x + list_pad;
                 let list_w = dialog_w.saturating_sub(list_pad * 2);
 
-                if flat_entries.is_empty() {
+                if *loading {
+                    // Models are still being fetched through the API: show the
+                    // shared spinner instead of the (seeded or empty) list so
+                    // the wait is visible. The frame is advanced by the app
+                    // render tick (see app/render.rs), since this render takes
+                    // `&self`. Loading is cleared when ModelsLoaded updates the
+                    // list — or stays cleared with the plain empty-list render
+                    // if the fetch found nothing.
+                    if let Some(cell) = buf.cell_mut((list_x, list_top)) {
+                        cell.set_char(instance.spinner.current_char());
+                        cell.set_style(Style::default().fg(rgba_color(theme.primary)));
+                    }
+                    draw_text_line(
+                        buf,
+                        "Loading models",
+                        list_x + 2,
+                        list_top,
+                        list_w.saturating_sub(2),
+                        Style::default().fg(rgba_color(theme.text_muted)),
+                    );
+                } else if flat_entries.is_empty() {
                     draw_text_line(
                         buf,
                         "No matching models",

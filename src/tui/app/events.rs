@@ -920,16 +920,23 @@ impl App {
                         String::new()
                     };
 
-                    // Update the dialog with the loaded models
-                    if let Some(d) = self.dialog.current_mut()
-                        && let DialogType::ModelList {
+                    // Update the dialog with the loaded models (and stop the
+                    // loading spinner — even when the fetch found nothing, so
+                    // the empty list renders as before). Scan the whole stack:
+                    // the user may have pushed the reasoning sub-dialog on top
+                    // of the ModelList while the fetch was in flight.
+                    for d in self.dialog.stack.iter_mut() {
+                        if let DialogType::ModelList {
                             models: dialog_models,
                             current: dialog_current,
+                            loading: dialog_loading,
                             ..
                         } = &mut d.dialog_type
-                    {
-                        *dialog_models = models_with_auto;
-                        *dialog_current = auto_current;
+                        {
+                            *dialog_models = models_with_auto.clone();
+                            *dialog_current = auto_current.clone();
+                            *dialog_loading = false;
+                        }
                     }
                 }
 

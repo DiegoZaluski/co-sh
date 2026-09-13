@@ -85,12 +85,19 @@ impl App {
                 models: models_with_auto,
                 current: auto_current,
                 filter: String::new(),
+                loading: false,
             });
         } else {
+            // Nothing cached (first run, or every provider failed before):
+            // the background API fetch below may take a few seconds, so flag
+            // the dialog as loading — the list area shows a spinner until
+            // ModelsLoaded replaces the list (or clears the flag when the
+            // fetch finds nothing).
             self.dialog.replace(DialogType::ModelList {
                 models: vec![auto_entry],
                 current: auto_current,
                 filter: String::new(),
+                loading: true,
             });
         }
 

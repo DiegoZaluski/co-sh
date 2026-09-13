@@ -1,5 +1,8 @@
 pub const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
+/// Shared braille spinner frames + animation state. `Clone`/`Debug` so it
+/// can live inside the cloned/loggable dialog instances.
+#[derive(Debug, Clone)]
 pub struct SpinnerState {
     pub frame: usize,
     pub tick_counter: u32,

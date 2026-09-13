@@ -1,3 +1,4 @@
+use crate::ui::dialogs::DialogType;
 use std::time::Instant;
 
 use cosh_tui::core::lib::rgba::RGBA;
@@ -653,6 +654,12 @@ impl App {
             // all respect the terminal focus state (blur when user clicks outside).
             if let Some(d) = self.dialog.current_mut() {
                 d.cursor.terminal_focused = self.terminal_focused;
+                // Animate the ModelList loading spinner while models are
+                // being fetched through the API (frame advances only when
+                // the loading dialog is on top).
+                if let DialogType::ModelList { loading: true, .. } = &d.dialog_type {
+                    d.spinner.advance();
+                }
             }
             // The slash menu renders first so modal dialogs (e.g. the Ctrl+C
             // "Quit cosh?" confirm) always paint on top of it — the menu is

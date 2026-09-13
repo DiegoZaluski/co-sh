@@ -16,6 +16,7 @@ async fn summarizer_selection_and_cancel_never_change_the_agent_model() {
         models: vec![],
         current: String::new(),
         filter: String::new(),
+        loading: false,
     });
     app.event_tx
         .send(cosh::harness::HarnessEvent::ModelsLoaded {
@@ -46,6 +47,7 @@ async fn summarizer_selection_and_cancel_never_change_the_agent_model() {
         models: vec![],
         current: String::new(),
         filter: String::new(),
+        loading: false,
     });
     app.handle_model_dialog_key(KeyCode::Esc);
     assert!(app.summarization_model_edit.is_none());
@@ -276,6 +278,7 @@ async fn model_dialog_cancel_and_reasoning_esc_do_not_persist() {
         }],
         current: "gpt-oss-120b".to_string(),
         filter: String::new(),
+        loading: false,
     });
     assert!(app.handle_model_dialog_key(KeyCode::Esc));
     assert_eq!(app.llm_config.model.as_deref(), Some("gpt-oss-120b"));
