@@ -53,4 +53,15 @@ pub enum McpError {
     /// signal, the HTTP binding does not.
     #[error("MCP server '{0}' did not answer the protocol probe within {1}ms")]
     ProbeTimedOut(String, u64),
+
+    /// The HTTP entry declares `api_key_env` but neither the OS keyring nor
+    /// the environment provides a usable value (unset, or set to blank —
+    /// a blank variable is treated as missing, not as an empty key).
+    /// Reported before dialing — a guaranteed 401 must not masquerade as a
+    /// transport failure.
+    #[error(
+        "MCP server '{0}' has no API key: keyring entry absent and ${1} is unset or blank — \
+         set the variable to the key, or re-register the key in Settings"
+    )]
+    CredentialMissing(String, String),
 }

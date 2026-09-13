@@ -570,6 +570,26 @@ impl SettingsView {
         }
     }
 
+    /// Remove the MCP server selected in the settings list, if any. Returns
+    /// the removed entry's name so the caller can purge its keyring
+    /// credential (an orphaned `mcp:<name>` entry would otherwise outlive
+    /// the registration and keep a live secret for a server that no longer
+    /// exists).
+    pub fn remove_selected_mcp_server(&mut self, setup: &mut Setup) -> Option<String> {
+        let rows = selectable_rows(setup);
+        let index = match rows.get(self.selection.selected_index) {
+            Some(SettingsRow::McpServer(index)) => *index,
+            _ => return None,
+        };
+        if index >= setup.mcp.servers.len() {
+            return None;
+        }
+        let removed = setup.mcp.servers.remove(index);
+        let rows = selectable_rows(setup);
+        self.selection.clamp(rows.len());
+        Some(removed.name)
+    }
+
     pub fn handle_mouse(&self, mouse: &MouseEvent, area: Rect, setup: &Setup) -> Option<usize> {
         self.find_row_for_mouse(mouse, area, setup)
     }

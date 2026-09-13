@@ -38,6 +38,7 @@
 //! same session, which rmcp servers may poison after receiving a modern opener.
 //! See [`manager`] for the implementation details.
 
+pub mod auth;
 pub mod bridge;
 pub mod config;
 mod era;
@@ -54,8 +55,9 @@ pub use bridge::{
     tool_to_definition, tool_to_schema, PromptArgumentInfo, PromptInfo, ResourceInfo,
 };
 pub use config::{
-    HttpTransport, McpConfig, McpServerEntry, McpTransport, StdioTransport, build_mcp_entry,
-    parse_mcp_endpoint, parse_mcp_timeout, validate_mcp_config, validate_mcp_entry,
+    CredentialInput, HttpTransport, McpConfig, McpEntryDraft, McpServerEntry, McpTransport,
+    StdioTransport, build_mcp_entry, parse_mcp_credential, parse_mcp_endpoint, parse_mcp_timeout,
+    validate_mcp_config, validate_mcp_entry,
 };
 pub use error::McpError;
 pub use manager::McpManager;

@@ -73,6 +73,7 @@ fn validation_rejects_bad_entries() {
         transport: McpTransport::Http(HttpTransport {
             url: "example.com/mcp".to_string(),
             headers: HashMap::new(),
+            api_key_env: None,
             timeout_ms: 1000,
         }),
         enabled: true,
@@ -84,6 +85,7 @@ fn validation_rejects_bad_entries() {
         transport: McpTransport::Http(HttpTransport {
             url: "https://".to_string(),
             headers: HashMap::new(),
+            api_key_env: None,
             timeout_ms: 1000,
         }),
         enabled: true,
@@ -95,6 +97,7 @@ fn validation_rejects_bad_entries() {
         transport: McpTransport::Http(HttpTransport {
             url: "https://example.com/mcp".to_string(),
             headers: HashMap::new(),
+            api_key_env: None,
             timeout_ms: 0,
         }),
         enabled: true,
@@ -142,6 +145,7 @@ fn url_shapes_are_parsed_not_prefix_matched() {
             transport: McpTransport::Http(HttpTransport {
                 url: url.to_string(),
                 headers: HashMap::new(),
+            api_key_env: None,
                 timeout_ms: 1000,
             }),
             enabled: true,
@@ -161,6 +165,7 @@ fn url_shapes_are_parsed_not_prefix_matched() {
             transport: McpTransport::Http(HttpTransport {
                 url: url.to_string(),
                 headers: HashMap::new(),
+            api_key_env: None,
                 timeout_ms: 1000,
             }),
             enabled: true,

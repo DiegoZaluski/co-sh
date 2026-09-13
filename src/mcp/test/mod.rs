@@ -1,6 +1,7 @@
 //! Scoped unit tests for the MCP client module.
 //!
-//! One file per scope (mirroring `harness/test`): `bridge_*` covers protocol
+//! One file per scope (mirroring `harness/test`): `auth` covers credential
+//! parsing/resolution, `bridge_*` covers protocol
 //! conversions, `config_*` covers parsing and validation, `era` stays whole
 //! as a short correlated scope, and `manager_*` splits the session manager
 //! by concern over a shared duplex-test harness in [`manager_support`].
@@ -8,6 +9,7 @@
 //! section headers: resource/prompt catalog views and footer snapshot
 //! counting.
 
+pub(crate) mod auth;
 pub(crate) mod bridge_templates;
 pub(crate) mod bridge_tools;
 pub(crate) mod config_validation;

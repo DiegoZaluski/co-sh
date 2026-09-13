@@ -525,6 +525,7 @@ mod tests {
             transport: cosh::mcp::McpTransport::Http(cosh::mcp::HttpTransport {
                 url: "https://example.com/mcp".to_string(),
                 headers: Default::default(),
+                api_key_env: None,
                 timeout_ms: 1000,
             }),
             enabled: false,

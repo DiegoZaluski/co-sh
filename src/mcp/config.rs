@@ -40,9 +40,18 @@ pub struct StdioTransport {
 #[serde(deny_unknown_fields)]
 pub struct HttpTransport {
     pub url: String,
-    /// Extra request headers, e.g. `Authorization`.
+    /// Extra request headers, e.g. `Authorization` (static values only —
+    /// never put a credential here; use [`Self::api_key_env`] or the
+    /// registration wizard so the key lives in the OS keyring). A resolved
+    /// keyring/`api_key_env` credential replaces any static `Authorization`
+    /// header configured here on the dial.
     #[serde(default)]
     pub headers: HashMap<String, String>,
+    /// Environment variable consulted for the server's API key when the OS
+    /// keyring holds no credential (see [`super::auth`]). `None` means the
+    /// server is expected to be reachable without a credential.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
     /// Per-request timeout in milliseconds.
     #[serde(default = "default_http_timeout_ms")]
     pub timeout_ms: u64,
@@ -118,6 +127,16 @@ pub fn validate_mcp_entry(entry: &McpServerEntry) -> Result<(), McpError> {
                     "URL must be http(s):// with a host".to_string(),
                 ));
             }
+            if http
+                .api_key_env
+                .as_deref()
+                .is_some_and(|var| !is_env_var_name(var.trim()))
+            {
+                return Err(McpError::InvalidConfig(
+                    entry.name.clone(),
+                    "api_key_env must name a valid environment variable".to_string(),
+                ));
+            }
             if http.timeout_ms == 0 || http.timeout_ms > MAX_HTTP_TIMEOUT_MS {
                 return Err(McpError::InvalidConfig(
                     entry.name.clone(),
@@ -173,6 +192,63 @@ pub fn parse_mcp_timeout(input: &str) -> Result<u64, String> {
     Ok(ms)
 }
 
+/// A valid environment-variable name: `IDENT` characters, not digit-led.
+fn is_env_var_name(candidate: &str) -> bool {
+    let mut chars = candidate.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// The registration wizard's API-key field, classified. A `$VAR` reference
+/// names an environment variable (kept in the config); anything else is a
+/// directly typed key (returned to the caller for keyring storage — it
+/// never enters the config).
+#[derive(Clone, PartialEq, Eq)]
+pub enum CredentialInput {
+    /// No credential configured.
+    None,
+    /// `$VAR`: resolve from the environment at dial time.
+    EnvVar(String),
+    /// A directly typed key: the caller stores it in the OS keyring.
+    Secret(String),
+}
+
+// Manual Debug: `Secret` values are credentials — a stray `{:?}` on a
+// draft or form state must never print the key itself.
+impl std::fmt::Debug for CredentialInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CredentialInput::None => f.write_str("None"),
+            CredentialInput::EnvVar(var) => f.debug_tuple("EnvVar").field(var).finish(),
+            CredentialInput::Secret(_) => f.write_str("Secret(\"…\")"),
+        }
+    }
+}
+
+/// Classify the registration wizard's API-key field. Blank means none;
+/// `$NAME` names an environment variable (validated); anything else is a
+/// secret — trimmed, and rejected outright when it contains control
+/// characters, which could never survive as a header value anyway.
+pub fn parse_mcp_credential(input: &str) -> Result<CredentialInput, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(CredentialInput::None);
+    }
+    if let Some(var) = trimmed.strip_prefix('$') {
+        let var = var.trim();
+        if !is_env_var_name(var) {
+            return Err(format!(
+                "“{var}” is not a valid environment variable name after '$'."
+            ));
+        }
+        return Ok(CredentialInput::EnvVar(var.to_string()));
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err("API key must not contain control characters.".to_string());
+    }
+    Ok(CredentialInput::Secret(trimmed.to_string()))
+}
+
 /// Parse the endpoint field of the registration wizard: an `http(s)://` URL
 /// becomes a remote server, anything else a `command args...` stdio line.
 pub fn parse_mcp_endpoint(endpoint: &str) -> Result<McpTransport, String> {
@@ -185,6 +261,7 @@ pub fn parse_mcp_endpoint(endpoint: &str) -> Result<McpTransport, String> {
         return Ok(McpTransport::Http(HttpTransport {
             url: trimmed.to_string(),
             headers: HashMap::new(),
+            api_key_env: None,
             timeout_ms: DEFAULT_HTTP_TIMEOUT_MS,
         }));
     }
@@ -198,17 +275,66 @@ pub fn parse_mcp_endpoint(endpoint: &str) -> Result<McpTransport, String> {
     }))
 }
 
+/// One validated server draft plus any directly typed secret. `entry` is
+/// config-safe (no secret inside — serialize and persist it freely);
+/// `secret` must go to the OS keyring via [`super::auth::store_key`] and is
+/// then dropped, never written to `setup.json`.
+#[derive(Clone, PartialEq)]
+pub struct McpEntryDraft {
+    pub entry: McpServerEntry,
+    pub secret: Option<String>,
+}
+
+// Manual Debug: `secret` is a credential — never print it.
+impl std::fmt::Debug for McpEntryDraft {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpEntryDraft")
+            .field("entry", &self.entry)
+            .field("secret", &self.secret.as_ref().map(|_| "…"))
+            .finish()
+    }
+}
+
 /// Build a validated entry from wizard fields. Single constructor so the
-/// dialog and headless callers share the exact same rules.
+/// dialog and headless callers share the exact same rules. `credential` is
+/// the API-key field: `$VAR` names an environment variable (kept in the
+/// entry as `api_key_env`), a literal key comes back as the draft's
+/// `secret` for keyring storage.
 pub fn build_mcp_entry(
     name: &str,
     endpoint: &str,
     timeout: &str,
-) -> Result<McpServerEntry, String> {
+    credential: &str,
+) -> Result<McpEntryDraft, String> {
     if name.trim().is_empty() {
         return Err("Server name is required.".to_string());
     }
+    // The name keys the keyring entry (`mcp:<name>`), shows up in toasts,
+    // logs and error messages, and must survive a round-trip through
+    // setup.json — so control characters are rejected outright (they could
+    // forge log lines or toast line breaks; a trimmed non-empty name is
+    // otherwise free-form).
+    if name.chars().any(char::is_control) {
+        return Err("Server name must not contain control characters.".to_string());
+    }
+    let parsed_credential = parse_mcp_credential(credential)?;
     let mut transport = parse_mcp_endpoint(endpoint)?;
+    match (&mut transport, &parsed_credential) {
+        (McpTransport::Http(http), CredentialInput::EnvVar(var)) => {
+            http.api_key_env = Some(var.clone());
+        }
+        // Per the spec, stdio servers take credentials from their own
+        // process environment (`env` map), not from a client header.
+        (McpTransport::Stdio(_), CredentialInput::None) => {}
+        (McpTransport::Stdio(_), _) => {
+            return Err(
+                "API key applies to http(s):// endpoints only; pass stdio \
+                 credentials through the server's own environment."
+                    .to_string(),
+            );
+        }
+        (McpTransport::Http(_), _) => {}
+    }
     if let McpTransport::Http(http) = &mut transport {
         http.timeout_ms = parse_mcp_timeout(timeout)?;
     }
@@ -218,5 +344,9 @@ pub fn build_mcp_entry(
         enabled: true,
     };
     validate_mcp_entry(&entry).map_err(|err| err.to_string())?;
-    Ok(entry)
+    let secret = match parsed_credential {
+        CredentialInput::Secret(key) => Some(key),
+        _ => None,
+    };
+    Ok(McpEntryDraft { entry, secret })
 }

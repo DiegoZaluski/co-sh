@@ -493,6 +493,22 @@ impl App {
                         .change_summarizer(&mut self.setup, operation)
                     {
                         self.setup.save();
+                    } else if operation == "remove"
+                        && let Some(name) = self
+                            .settings_view
+                            .remove_selected_mcp_server(&mut self.setup)
+                    {
+                        // Purge the keyring credential too: a forgotten
+                        // server must not leave a live secret behind.
+                        // Failures are non-fatal — the entry is gone either
+                        // way, and the store may be locked.
+                        if let Err(err) = cosh::mcp::auth::forget_key(&name) {
+                            log::warn!(
+                                "keyring cleanup for removed MCP server failed: {}",
+                                err
+                            );
+                        }
+                        self.setup.save();
                     }
                     return Ok(false);
                 }

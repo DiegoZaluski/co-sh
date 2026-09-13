@@ -183,7 +183,19 @@ impl McpManager {
                     .await
             }
             McpTransport::Http(http) => {
-                let config = match http_config(http) {
+                // Resolve the credential BEFORE dialing: a missing key is a
+                // typed failure (snapshot + toast upstream), never a 401 that
+                // masquerades as a transport problem.
+                let key = match super::auth::resolve_key(&entry.name, http.api_key_env.as_deref())
+                {
+                    Ok(key) => key,
+                    Err(err) => {
+                        self.failures
+                            .insert(entry.name.clone(), err.to_string());
+                        return Err(err);
+                    }
+                };
+                let config = match http_config(http, key.as_deref()) {
                     Ok(config) => config,
                     Err(err) => {
                         let err = McpError::Connect(entry.name.clone(), err.to_string());
@@ -904,17 +916,31 @@ fn spawn_stdio(label: &str, stdio: &StdioTransport) -> std::io::Result<TokioChil
     Ok(transport)
 }
 
+/// Build the HTTP transport config for `http`, attaching the resolved
+/// credential (if any) as `Authorization: Bearer <key>` — the spec's access
+/// token usage (RFC 6750): the token rides in the header on every request,
+/// never in the URI. `key` was already resolved by the caller via
+/// [`super::auth::resolve_key`].
 /// Visible to the scoped `test` module for header assertions.
 pub(crate) fn http_config(
     http: &HttpTransport,
+    key: Option<&str>,
 ) -> Result<StreamableHttpClientTransportConfig, InvalidHeader> {
     let mut headers = HashMap::new();
-    for (key, value) in &http.headers {
-        let name: http::HeaderName = key.parse().map_err(|_| InvalidHeader(key.clone()))?;
-        let header_value: http::HeaderValue = value
+    for (name, value) in &http.headers {
+        let name: http::HeaderName = name.parse().map_err(|_| InvalidHeader(name.clone()))?;
+        // The value is NOT echoed back: headers may carry static
+        // credentials, and the error surfaces in snapshots/toasts.
+        let value: http::HeaderValue = value
             .parse()
-            .map_err(|_| InvalidHeader(format!("{key}={value}")))?;
-        headers.insert(name, header_value);
+            .map_err(|_| InvalidHeader(name.to_string()))?;
+        headers.insert(name, value);
+    }
+    if let Some(key) = key {
+        let value: http::HeaderValue = format!("Bearer {key}")
+            .parse()
+            .map_err(|_| InvalidHeader("authorization".to_string()))?;
+        headers.insert(http::header::AUTHORIZATION, value);
     }
     Ok(StreamableHttpClientTransportConfig::with_uri(http.url.trim()).custom_headers(headers))
 }

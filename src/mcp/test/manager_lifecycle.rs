@@ -175,6 +175,7 @@ async fn invalid_config_aborts_before_state_changes() {
         transport: McpTransport::Http(HttpTransport {
             url: "not a url".into(),
             headers: HashMap::new(),
+            api_key_env: None,
             timeout_ms: 0,
         }),
         enabled: true,
@@ -192,6 +193,7 @@ fn http_headers_reject_garbage() {
         transport: McpTransport::Http(HttpTransport {
             url: "https://example.com/mcp".into(),
             headers,
+            api_key_env: None,
             timeout_ms: 1000,
         }),
         enabled: true,
@@ -199,19 +201,35 @@ fn http_headers_reject_garbage() {
     let McpTransport::Http(http) = &entry.transport else {
         panic!("expected http");
     };
-    assert!(http_config(http).is_ok());
+    assert!(http_config(http, None).is_ok());
 
     let bad_name = HttpTransport {
         url: "https://example.com/mcp".into(),
         headers: HashMap::from([("not a header".to_string(), "x".to_string())]),
+        api_key_env: None,
         timeout_ms: 1000,
     };
-    assert!(http_config(&bad_name).is_err());
+    assert!(http_config(&bad_name, None).is_err());
 
     let bad_value = HttpTransport {
         url: "https://example.com/mcp".into(),
         headers: HashMap::from([("x-ok".to_string(), "bad\nvalue".to_string())]),
+        api_key_env: None,
         timeout_ms: 1000,
     };
-    assert!(http_config(&bad_value).is_err());
+    assert!(http_config(&bad_value, None).is_err());
+
+    // The resolved credential rides as Authorization: Bearer on the dial.
+    let keyed = HttpTransport {
+        url: "https://example.com/mcp".into(),
+        headers: HashMap::new(),
+        api_key_env: None,
+        timeout_ms: 1000,
+    };
+    assert!(http_config(&keyed, Some("sk-test")).is_ok());
+    // A key with header-illegal characters is a typed failure, NOT an echo
+    // of the secret.
+    let err = http_config(&keyed, Some("bad\nkey")).unwrap_err().to_string();
+    assert!(err.contains("authorization"), "{err}");
+    assert!(!err.contains("bad"), "secret must not leak: {err}");
 }

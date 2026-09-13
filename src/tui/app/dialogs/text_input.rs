@@ -214,10 +214,11 @@ impl App {
                 name,
                 endpoint,
                 timeout,
+                api_key,
                 field,
                 cursor_pos,
                 selection,
-            } => match [name, endpoint, timeout].into_iter().nth(*field) {
+            } => match [name, endpoint, timeout, api_key].into_iter().nth(*field) {
                 Some(line) => (line, cursor_pos, selection, *field),
                 None => return,
             },
@@ -260,15 +261,19 @@ impl App {
                     name,
                     endpoint,
                     timeout,
+                    api_key,
                     field,
                     selection,
                     cursor_pos: _,
-                } => [name, endpoint, timeout].get(*field).copied().map(|line| {
-                    selection
-                        .as_ref()
-                        .and_then(|sel| sel.slice_of(*field, line))
-                        .unwrap_or_else(|| line.to_string())
-                }),
+                } => [name, endpoint, timeout, api_key]
+                    .get(*field)
+                    .copied()
+                    .map(|line| {
+                        selection
+                            .as_ref()
+                            .and_then(|sel| sel.slice_of(*field, line))
+                            .unwrap_or_else(|| line.to_string())
+                    }),
                 _ => None,
             },
             None => None,
@@ -326,9 +331,15 @@ impl App {
                     name,
                     endpoint,
                     timeout,
+                    api_key,
                     ..
                 } => {
-                    let values = [name.as_str(), endpoint.as_str(), timeout.as_str()];
+                    let values = [
+                        name.as_str(),
+                        endpoint.as_str(),
+                        timeout.as_str(),
+                        api_key.as_str(),
+                    ];
                     form_panel_hit_field(area, &values, x, y)
                         .and_then(|(f, ci)| ci.map(|c| (f, byte_at_char(values[f], c))))
                 }
@@ -400,10 +411,16 @@ impl App {
                     name,
                     endpoint,
                     timeout,
+                    api_key,
                     selection: Some(sel),
                     ..
                 } => {
-                    let values = [name.as_str(), endpoint.as_str(), timeout.as_str()];
+                    let values = [
+                        name.as_str(),
+                        endpoint.as_str(),
+                        timeout.as_str(),
+                        api_key.as_str(),
+                    ];
                     values.get(sel.field()).map(|_| {
                         (
                             sel.field(),
@@ -473,10 +490,11 @@ impl App {
                     name,
                     endpoint,
                     timeout,
+                    api_key,
                     field,
                     selection,
                     ..
-                } => [name, endpoint, timeout]
+                } => [name, endpoint, timeout, api_key]
                     .get(*field)
                     .copied()
                     .and_then(|line| {
@@ -567,11 +585,12 @@ impl App {
                             name,
                             endpoint,
                             timeout,
+                            api_key,
                             field,
                             cursor_pos,
                             selection,
                         } => drive_form_edit(
-                            [name, endpoint, timeout],
+                            [name, endpoint, timeout, api_key],
                             field,
                             cursor_pos,
                             selection,
@@ -879,8 +898,10 @@ impl App {
 
     /// Validate and persist the MCP registration form. `build_mcp_entry`
     /// owns every rule (endpoint shape, timeout range, entry validation),
-    /// so the form only adds the duplicate-name check. Invalid input keeps
-    /// the panel open with an error toast.
+    /// so the form only adds the duplicate-name check. A directly typed
+    /// API key goes to the OS keyring (`mcp:<name>`), never to setup.json;
+    /// a `$VAR` reference is stored in the entry and resolved at dial time.
+    /// Invalid input keeps the panel open with an error toast.
     pub(in crate::app) fn save_mcp_form_dialog(&mut self) -> bool {
         let Some(d) = self.dialog.current() else {
             return false;
@@ -889,27 +910,49 @@ impl App {
             name,
             endpoint,
             timeout,
+            api_key,
             ..
         } = &d.dialog_type
         else {
             return false;
         };
-        let entry = match cosh::mcp::build_mcp_entry(name, endpoint, timeout) {
-            Ok(entry) => entry,
+        let draft = match cosh::mcp::build_mcp_entry(name, endpoint, timeout, api_key) {
+            Ok(draft) => draft,
             Err(message) => {
                 self.toast_form_error("Server not saved", message);
                 return false;
             }
         };
-        if self.setup.mcp.servers.iter().any(|s| s.name == entry.name) {
+        if self
+            .setup
+            .mcp
+            .servers
+            .iter()
+            .any(|s| s.name == draft.entry.name)
+        {
             self.toast_form_error(
                 "Server not saved",
-                format!("A server named “{}” is already registered.", entry.name),
+                format!(
+                    "A server named “{}” is already registered.",
+                    draft.entry.name
+                ),
             );
             return false;
         }
-        let saved = entry.name.clone();
-        self.setup.mcp.servers.push(entry);
+        // Keyring FIRST: the entry is only persisted once the credential is
+        // safely stored, so a failed store can never leave a server that
+        // connects without its key. The typed secret is dropped right after.
+        if let Some(key) = &draft.secret
+            && let Err(err) = cosh::mcp::auth::store_key(&draft.entry.name, key)
+        {
+            self.toast_form_error(
+                "Server not saved",
+                format!("Failed to store the API key in the OS keyring: {err}"),
+            );
+            return false;
+        }
+        let saved = draft.entry.name.clone();
+        self.setup.mcp.servers.push(draft.entry);
         self.setup.save();
         self.toast_form_success(
             "MCP server added",
@@ -918,13 +961,14 @@ impl App {
         true
     }
 
-    /// Open the MCP registration form: all three fields on one panel, blank
+    /// Open the MCP registration form: all four fields on one panel, blank
     /// for a new server.
     pub(in crate::app) fn open_mcp_form(&mut self) {
         self.dialog.show(DialogType::McpForm {
             name: String::new(),
             endpoint: String::new(),
             timeout: String::new(),
+            api_key: String::new(),
             field: 0,
             cursor_pos: 0,
             selection: None,
@@ -935,11 +979,12 @@ impl App {
 /// One editing step of a registration form's active line. `lines` are the
 /// field texts in field order, `field`/`cursor_pos` the active position
 /// (`cursor_pos` is a byte index into the active line). The last field is
-/// always the plain-number timeout, so Ctrl word jumps apply to every field
-/// but the last. Up/Down first move between the value's wrapped visual lines
-/// and only change fields at the first/last line. A mouse drag selection
-/// owned by the active field is replaced by typing, paste and deletions;
-/// navigation drops it. Returns whether the key was consumed.
+/// word-op-free (it is a timeout in the hook form, a masked API key in the
+/// MCP form), so Ctrl word jumps apply to every field but the last.
+/// Up/Down first move between the value's wrapped visual lines and only
+/// change fields at the first/last line. A mouse drag selection owned by
+/// the active field is replaced by typing, paste and deletions; navigation
+/// drops it. Returns whether the key was consumed.
 fn drive_form_edit<const N: usize>(
     lines: [&mut String; N],
     field: &mut usize,

@@ -330,7 +330,7 @@ fn confirm_dialog_w(message: &str, area_width: u16) -> u16 {
         .max(16)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum DialogType {
     Alert {
         message: String,
@@ -393,15 +393,19 @@ pub enum DialogType {
         input: String,
         cursor_pos: usize,
     },
-    /// MCP registration form: name, endpoint and timeout on a single panel
-    /// with the hook form's mechanics (Up/Down switch fields, Enter saves,
-    /// Esc cancels, click focuses). Every field stays visible and editable
-    /// until the save — no step-by-step wizard.
+    /// MCP registration form: name, endpoint, timeout and API key on a
+    /// single panel with the hook form's mechanics (Up/Down switch fields,
+    /// Enter saves, Esc cancels, click focuses). Every field stays visible
+    /// and editable until the save — no step-by-step wizard. The API key
+    /// is the LAST field: blank = public server, `$VAR` = read that
+    /// environment variable, anything else = a typed key stored in the OS
+    /// keyring (never persisted to setup.json).
     McpForm {
         name: String,
         endpoint: String,
         timeout: String,
-        /// Active field: 0 name · 1 endpoint · 2 timeout.
+        api_key: String,
+        /// Active field: 0 name · 1 endpoint · 2 timeout · 3 api key.
         field: usize,
         cursor_pos: usize,
         /// Mouse drag selection on the active field; `None` when nothing
@@ -472,6 +476,178 @@ pub enum DialogType {
     Shortcuts {
         scroll: usize,
     },
+}
+
+// Manual Debug: `ApiKeyInput.input` and `McpForm.api_key` hold whatever the
+// user is typing — possibly a live API key. A stray `{:?}` (log line, panic
+// message, test failure dump) must never print it, so secret-bearing fields
+// format as one redacted glyph.
+impl std::fmt::Debug for DialogType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fn secret(s: &str) -> &str {
+            if s.is_empty() { "" } else { "…" }
+        }
+        match self {
+            Self::Alert { message } => f
+                .debug_struct("Alert")
+                .field("message", message)
+                .finish(),
+            Self::Confirm { message } => f
+                .debug_struct("Confirm")
+                .field("message", message)
+                .finish(),
+            Self::ThemeList {
+                themes,
+                current,
+                filter,
+            } => f
+                .debug_struct("ThemeList")
+                .field("themes", themes)
+                .field("current", current)
+                .field("filter", filter)
+                .finish(),
+            Self::ModelList {
+                models,
+                current,
+                filter,
+            } => f
+                .debug_struct("ModelList")
+                .field("models", models)
+                .field("current", current)
+                .field("filter", filter)
+                .finish(),
+            Self::ReasoningList {
+                model,
+                provider,
+                levels,
+                current,
+            } => f
+                .debug_struct("ReasoningList")
+                .field("model", model)
+                .field("provider", provider)
+                .field("levels", levels)
+                .field("current", current)
+                .finish(),
+            Self::ToolCallList { current } => f
+                .debug_struct("ToolCallList")
+                .field("current", current)
+                .finish(),
+            Self::ApiKeyInput {
+                provider,
+                env_var,
+                input,
+                cursor_pos,
+            } => f
+                .debug_struct("ApiKeyInput")
+                .field("provider", provider)
+                .field("env_var", env_var)
+                .field("input", &secret(input))
+                .field("cursor_pos", cursor_pos)
+                .finish(),
+            Self::LocalUrlInput {
+                provider,
+                input,
+                cursor_pos,
+            } => f
+                .debug_struct("LocalUrlInput")
+                .field("provider", provider)
+                .field("input", input)
+                .field("cursor_pos", cursor_pos)
+                .finish(),
+            Self::ProviderKeyChoice { provider, env_var } => f
+                .debug_struct("ProviderKeyChoice")
+                .field("provider", provider)
+                .field("env_var", env_var)
+                .finish(),
+            Self::CacheTtlInput {
+                setting,
+                input,
+                cursor_pos,
+            } => f
+                .debug_struct("CacheTtlInput")
+                .field("setting", setting)
+                .field("input", input)
+                .field("cursor_pos", cursor_pos)
+                .finish(),
+            Self::McpForm {
+                name,
+                endpoint,
+                timeout,
+                api_key,
+                field,
+                cursor_pos,
+                selection,
+            } => f
+                .debug_struct("McpForm")
+                .field("name", name)
+                .field("endpoint", endpoint)
+                .field("timeout", timeout)
+                .field("api_key", &secret(api_key))
+                .field("field", field)
+                .field("cursor_pos", cursor_pos)
+                .field("selection", selection)
+                .finish(),
+            Self::RenameSession { input, cursor_pos } => f
+                .debug_struct("RenameSession")
+                .field("input", input)
+                .field("cursor_pos", cursor_pos)
+                .finish(),
+            Self::HookInput {
+                event,
+                editing_index,
+                name,
+                matcher,
+                command,
+                timeout,
+                field,
+                cursor_pos,
+                selection,
+            } => f
+                .debug_struct("HookInput")
+                .field("event", event)
+                .field("editing_index", editing_index)
+                .field("name", name)
+                .field("matcher", matcher)
+                .field("command", command)
+                .field("timeout", timeout)
+                .field("field", field)
+                .field("cursor_pos", cursor_pos)
+                .field("selection", selection)
+                .finish(),
+            Self::MessageActions {
+                message_id,
+                preview,
+                is_user_message,
+            } => f
+                .debug_struct("MessageActions")
+                .field("message_id", message_id)
+                .field("preview", preview)
+                .field("is_user_message", is_user_message)
+                .finish(),
+            Self::UndoList {
+                session_id,
+                versions,
+            } => f
+                .debug_struct("UndoList")
+                .field("session_id", session_id)
+                .field("versions", versions)
+                .finish(),
+            Self::QueueActions {
+                queue,
+                index,
+                preview,
+            } => f
+                .debug_struct("QueueActions")
+                .field("queue", queue)
+                .field("index", index)
+                .field("preview", preview)
+                .finish(),
+            Self::Shortcuts { scroll } => f
+                .debug_struct("Shortcuts")
+                .field("scroll", scroll)
+                .finish(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -960,11 +1136,17 @@ impl DialogState {
                 name,
                 endpoint,
                 timeout,
+                api_key,
                 field,
                 cursor_pos,
                 selection,
             } => {
-                let values = [name.as_str(), endpoint.as_str(), timeout.as_str()];
+                let values = [
+                    name.as_str(),
+                    endpoint.as_str(),
+                    timeout.as_str(),
+                    api_key.as_str(),
+                ];
                 focus_form_field(area, x, y_click, &values, field, cursor_pos, selection)
             }
             DialogType::RenameSession { .. } => {
@@ -1904,6 +2086,7 @@ impl DialogState {
                     hook_field_label,
                     hook_field_hint,
                     hook_field_placeholder,
+                    hook_field_mask,
                     &values,
                     *field,
                     *cursor_pos,
@@ -1914,11 +2097,17 @@ impl DialogState {
                 name,
                 endpoint,
                 timeout,
+                api_key,
                 field,
                 cursor_pos,
                 selection,
             } => {
-                let values = [name.as_str(), endpoint.as_str(), timeout.as_str()];
+                let values = [
+                    name.as_str(),
+                    endpoint.as_str(),
+                    timeout.as_str(),
+                    api_key.as_str(),
+                ];
                 render_form_panel(
                     buf,
                     area,
@@ -1930,6 +2119,7 @@ impl DialogState {
                     mcp_field_label,
                     mcp_field_hint,
                     mcp_field_placeholder,
+                    mcp_field_mask,
                     &values,
                     *field,
                     *cursor_pos,
@@ -3168,15 +3358,27 @@ fn mcp_field_label(field: usize) -> &'static str {
     match field {
         0 => "Name",
         1 => "Endpoint",
-        _ => "Timeout",
+        2 => "Timeout",
+        _ => "API Key",
     }
+}
+
+/// Per-field secrecy for the MCP form: the last field (API key) is masked.
+fn mcp_field_mask(field: usize) -> bool {
+    field >= 3
+}
+
+/// Per-field secrecy for the hook form: nothing is secret, show all values.
+fn hook_field_mask(_field: usize) -> bool {
+    false
 }
 
 fn mcp_field_hint(field: usize) -> &'static str {
     match field {
         0 => "local label shown in the footer · e.g. docs",
         1 => "command args... · or https://host/mcp",
-        _ => "HTTP only · seconds per tool call · empty = 30",
+        2 => "HTTP only · seconds per tool call · empty = 30",
+        _ => "HTTP only · blank = public · $VAR = env · key = keyring",
     }
 }
 
@@ -3186,7 +3388,8 @@ fn mcp_field_placeholder(field: usize) -> &'static str {
     match field {
         0 => "e.g. docs",
         1 => "e.g. server-cmd --args or https://host/mcp",
-        _ => "Optional, default 30s",
+        2 => "Optional, default 30s",
+        _ => "Optional · $MY_API_KEY or paste the key",
     }
 }
 
@@ -3397,6 +3600,12 @@ fn render_form_panel(
     label: fn(usize) -> &'static str,
     hint: fn(usize) -> &'static str,
     placeholder: fn(usize) -> &'static str,
+    // Per-field secrecy: masked fields render one `•` per character
+    // instead of the value, so a typed API key never reaches the screen
+    // (and thus never reaches terminal scrollback or tmux captures).
+    // Geometry, cursor and hit-testing keep using the REAL value — the
+    // masked string has the same character count, so nothing shifts.
+    mask: fn(usize) -> bool,
     fields: &[&str],
     active_field: usize,
     cursor_pos: usize,
@@ -3496,11 +3705,20 @@ fn render_form_panel(
         // the muted tone instead; geometry and hit-testing keep using the
         // real (empty) value, so the panel never shifts while typing.
         let char_before = value[..cursor_pos.min(value.len())].chars().count();
-        let shown: &str = if value.is_empty() {
-            placeholder(field)
+        // Secret fields render one `•` per character instead of the value,
+        // so a typed API key never reaches the screen (and never lands in
+        // terminal scrollback or tmux captures). The masked string has the
+        // same character count as the real value, so geometry, cursor and
+        // hit-testing are unaffected.
+        let masked = !value.is_empty() && mask(field);
+        let shown: String = if value.is_empty() {
+            placeholder(field).to_string()
+        } else if masked {
+            "•".repeat(value.chars().count())
         } else {
-            value
+            value.to_string()
         };
+        let shown = &shown;
         let shown_fg = if value.is_empty() {
             rgba_color(theme.text_muted)
         } else {
@@ -3760,6 +3978,7 @@ mod hook_panel_tests {
                 mcp_field_label,
                 mcp_field_hint,
                 mcp_field_placeholder,
+                mcp_field_mask,
                 values,
                 field,
                 cursor_pos,

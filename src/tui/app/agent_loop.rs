@@ -471,6 +471,38 @@ impl App {
                             variant: ToastVariant::Warning,
                         });
                     }
+                    // Per-server connection failures are isolated by the
+                    // manager — surface them: a failed server used to show
+                    // only as a silent footer count with no explanation.
+                    // Detail (including which credential failed and why)
+                    // lives in the snapshot's `last_error`; this toast is
+                    // the pointer, one per failing server.
+                    let failed: Vec<cosh::mcp::ServerSnapshot> = harness
+                        .mcp_snapshots()
+                        .into_iter()
+                        .filter(|s| matches!(s.status, cosh::mcp::ServerStatus::Failed))
+                        .collect();
+                    if !failed.is_empty() {
+                        use cosh::harness::events::{HarnessEvent, ToastVariant};
+                        let detail: String = failed
+                            .iter()
+                            .map(|s| {
+                                format!(
+                                    "  · {}: {}",
+                                    s.name,
+                                    s.last_error.as_deref().unwrap_or("unknown error")
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        let _ = event_tx.send(HarnessEvent::Toast {
+                            message: format!(
+                                "{} MCP server(s) failed to connect:\n{detail}",
+                                failed.len()
+                            ),
+                            variant: ToastVariant::Error,
+                        });
+                    }
 
                     // Restore the authoritative context from the session
                     // file's context records. No context — no history; the

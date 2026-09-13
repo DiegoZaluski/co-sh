@@ -256,7 +256,7 @@ async fn mcp_form_rejects_duplicate_name_and_bad_timeout() {
     app.setup
         .mcp
         .servers
-        .push(cosh::mcp::build_mcp_entry("docs", "https://example.com/mcp", "").unwrap());
+        .push(cosh::mcp::build_mcp_entry("docs", "https://example.com/mcp", "", "").unwrap().entry);
     app.open_mcp_form();
 
     type_text(&mut app, "docs");

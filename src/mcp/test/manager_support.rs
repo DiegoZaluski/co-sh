@@ -180,6 +180,7 @@ pub(crate) fn http_entry(name: &str, url: &str) -> McpServerEntry {
         transport: McpTransport::Http(HttpTransport {
             url: url.into(),
             headers: HashMap::new(),
+            api_key_env: None,
             timeout_ms: 1000,
         }),
         enabled: true,
