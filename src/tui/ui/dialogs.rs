@@ -67,6 +67,7 @@ const SHORTCUTS: &[ShortcutLine] = &[
     ShortcutLine::Header("Left panel"),
     ShortcutLine::Key("Ctrl+U", "Usage dashboard"),
     ShortcutLine::Key("Ctrl+S", "Session history"),
+    ShortcutLine::Key("Ctrl+F", "File explorer"),
     ShortcutLine::Key("Tab", "Cycle dashboard period (Shift+Tab back)"),
     ShortcutLine::Gap,
     ShortcutLine::Header("Right panel"),
