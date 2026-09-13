@@ -26,6 +26,10 @@ use crate::util::list_selection::ListSelection;
 /// never be able to grow it (and memory) without bound per refresh.
 const MAX_ROWS: usize = 100_000;
 
+/// Columns shifted per Right/Left press while scrolling horizontally
+/// (aligned with the 2-column indent so content lands predictably).
+const H_SCROLL_STEP: usize = 4;
+
 /// One flattened, visible row of the explorer tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExplorerEntry {
@@ -53,6 +57,11 @@ pub struct FileExplorerView {
     expanded: HashSet<PathBuf>,
     /// Flattened visible rows, rebuilt on expansion/root changes.
     entries: Vec<ExplorerEntry>,
+    /// Columns the view is shifted right (horizontal scroll). Clamped to
+    /// the widest visible row on every render, so collapsing a directory
+    /// or shrinking the panel can never leave the view scrolled past
+    /// actual content.
+    h_scroll: usize,
     /// Shared list-selection state: selected_index + scroll_offset.
     pub selection: ListSelection,
 }
@@ -63,6 +72,7 @@ impl FileExplorerView {
             root,
             expanded: HashSet::new(),
             entries: Vec::new(),
+            h_scroll: 0,
             selection: ListSelection::new(),
         };
         view.refresh();
@@ -194,7 +204,20 @@ impl FileExplorerView {
                 self.toggle_dir(&entry.path);
                 ExplorerAction::None
             }
+            KeyCode::Right => {
+                // The directory is already expanded (or it is a file):
+                // shift the view right so deeply nested content comes into
+                // view. Render clamps the offset to the real overflow.
+                self.h_scroll += H_SCROLL_STEP;
+                ExplorerAction::None
+            }
             KeyCode::Left => {
+                // Scrolled? Bring the view back first — navigation
+                // (collapse / jump to parent) only once fully returned.
+                if self.h_scroll > 0 {
+                    self.h_scroll = self.h_scroll.saturating_sub(H_SCROLL_STEP);
+                    return ExplorerAction::None;
+                }
                 // VS Code behavior: collapse an expanded directory; a file
                 // (or a collapsed dir) first jumps to its parent.
                 if entry.is_dir && entry.expanded {
@@ -250,10 +273,41 @@ impl FileExplorerView {
         bg_box.set_background_color(Some(theme.background_panel.into()));
         bg_box.render_self(buf, area);
 
+        let content_start_y = area.y + 2;
+        let visible_count = area.bottom().saturating_sub(content_start_y) as usize;
+        self.selection.set_visible_count(visible_count);
+        self.selection.clamp(self.entries.len());
+
+        // Horizontal scroll: the view can only be shifted as far as the
+        // widest visible row actually overflows — collapsing a directory
+        // or shrinking the panel snaps the view back for free. Row width
+        // = gutter (2/level) + arrow + space + name.
+        let viewport_w = area.width.saturating_sub(1) as usize;
+        let max_overflow = self
+            .entries
+            .iter()
+            .skip(self.selection.scroll_offset)
+            .take(visible_count)
+            .map(|e| 2 * e.depth + 5 + e.path.file_name().map_or(0, |n| n.to_string_lossy().len()))
+            .max()
+            .unwrap_or(0)
+            .saturating_sub(viewport_w);
+        self.h_scroll = self.h_scroll.min(max_overflow);
+        let shift = self.h_scroll as u16;
+
         let header_style = Style::default().fg(rgba_color(theme.text_muted));
+        // `‹›` marks a horizontally shifted view; `›` marks content still
+        // hidden to the right. Nothing extra when everything fits.
+        let scroll_hint = if self.h_scroll > 0 {
+            " \u{2039}\u{203a}"
+        } else if max_overflow > 0 {
+            " \u{203a}"
+        } else {
+            " Explorer"
+        };
         Self::draw_text_line(
             buf,
-            " Explorer",
+            &format!(" Explorer{scroll_hint}"),
             area.x + 1,
             area.y,
             area.width.saturating_sub(2),
@@ -265,11 +319,6 @@ impl FileExplorerView {
             cell.set_char('\u{2500}');
             cell.set_style(separator_style);
         }
-
-        let content_start_y = area.y + 2;
-        let visible_count = area.bottom().saturating_sub(content_start_y) as usize;
-        self.selection.set_visible_count(visible_count);
-        self.selection.clamp(self.entries.len());
 
         let primary_color = rgba_color(theme.primary);
         let warning_color = rgba_color(theme.warning);
@@ -283,7 +332,6 @@ impl FileExplorerView {
         let dir_fg = Style::default().fg(primary_color);
         let guide_fg = Style::default().fg(mute_fg);
 
-        let max_text_w = area.width.saturating_sub(2) as usize;
         for (i, entry) in self
             .entries
             .iter()
@@ -301,7 +349,7 @@ impl FileExplorerView {
             // Tree gutter: `│ ` guide pairs for every open ancestor level,
             // then the `├─` connector into the node.
             let gutter_w = 2 * entry.depth as u16 + 2;
-            Self::draw_tree_gutter(buf, area, entry.depth, y, guide_fg);
+            Self::draw_tree_gutter(buf, area, entry.depth, y, guide_fg, shift);
 
             let name = entry
                 .path
@@ -318,55 +366,75 @@ impl FileExplorerView {
                 } => '\u{2574}', // ˄ gutter ▾ marker
                 _ => ' ',
             };
-            // The arrow is tree chrome, not row content: painting it with
-            // the row font colored one indent char into the gutter, so it
-            // rides with the muted guide color like the `├─` connectors.
-            let label_x = area.x + 1 + gutter_w;
-            Self::draw_text_line(buf, &arrow.to_string(), label_x, y, 1, guide_fg);
             let name_style = if entry.is_dir && !is_selected {
                 dir_fg
             } else {
                 style
             };
-            Self::draw_text_line(
-                buf,
-                &name,
-                label_x + 2, // arrow cell + one space
-                y,
-                (max_text_w.saturating_sub((gutter_w + 2) as usize)) as u16,
-                name_style,
-            );
+            // Row content laid out at its natural columns minus the scroll
+            // offset, one char at a time: the arrow rides with the muted
+            // guide color (tree chrome, like the `├─` connectors) and the
+            // name carries the row style. Chars scrolled past the panel's
+            // left padding or the right edge are simply not painted — no
+            // column arithmetic can underflow, however deep the row.
+            let clip_left = area.x as i32 + 1;
+            let right = area.right() as i32;
+            let base_x = area.x as i32 + 1 + gutter_w as i32;
+            for (ci, ch) in format!("{arrow} {name}").chars().enumerate() {
+                if ch.is_control() {
+                    // Same guard as `draw_text_line`: a raw control char in
+                    // the buffer would crash ratatui's diff on odd names.
+                    continue;
+                }
+                let cx = base_x + ci as i32 - shift as i32;
+                if cx < clip_left || cx >= right {
+                    continue;
+                }
+                if let Some(cell) = buf.cell_mut((cx as u16, y)) {
+                    cell.set_char(ch);
+                    cell.set_style(if ci == 0 { guide_fg } else { name_style });
+                }
+            }
         }
     }
 
     /// Branch gutter + connector column for one row: `│ ` pairs for every
-    /// open ancestor level, then `├─`.
+    /// open ancestor level, then the `├─` connector into the node. Each
+    /// glyph sits at its natural column minus the scroll offset, so the
+    /// whole tree (guides, connectors, names) slides left together; glyphs
+    /// scrolled past the panel's left padding are simply not painted.
     fn draw_tree_gutter(
         buf: &mut Buffer,
         area: Rect,
         depth: usize,
         y: u16,
         guide: Style,
+        shift: u16,
     ) {
-        let mut x = area.x + 1;
+        let clip_left = area.x as i32 + 1;
+        let right = area.right() as i32;
+        let mut x = area.x as i32 + 1 - shift as i32;
         for _ in 0..depth {
-            for (offset, ch) in [(0u16, '\u{2502}'), (1, ' ')] {
-                if x + offset < area.right()
-                    && let Some(cell) = buf.cell_mut((x + offset, y))
+            for ch in ['\u{2502}', ' '] {
+                if x >= clip_left
+                    && x < right
+                    && let Some(cell) = buf.cell_mut((x as u16, y))
                 {
                     cell.set_char(ch);
                     cell.set_style(guide);
                 }
+                x += 1;
             }
-            x += 2;
         }
-        for (offset, ch) in [(0u16, '\u{251c}'), (1, '\u{2500}')] {
-            if x + offset < area.right()
-                && let Some(cell) = buf.cell_mut((x + offset, y))
+        for ch in ['\u{251c}', '\u{2500}'] {
+            if x >= clip_left
+                && x < right
+                && let Some(cell) = buf.cell_mut((x as u16, y))
             {
                 cell.set_char(ch);
                 cell.set_style(guide);
             }
+            x += 1;
         }
     }
 
@@ -538,5 +606,137 @@ mod tests {
         let view = FileExplorerView::new(temp_root("missing-root").join("nope"));
         assert!(view.is_empty());
         assert_eq!(view.selected_entry(), None);
+    }
+
+    /// Render into a fresh buffer and return it plus the panel geometry.
+    fn rendered(view: &mut FileExplorerView, width: u16, height: u16) -> (Buffer, Rect) {
+        let area = Rect::new(0, 0, width, height);
+        let mut buf = Buffer::empty(area);
+        let theme = crate::theme::ThemeRegistry::new().default_theme().clone();
+        view.render(&mut buf, area, &theme);
+        (buf, area)
+    }
+
+    fn cell_char(buf: &Buffer, x: u16, y: u16) -> char {
+        buf[(x, y)].symbol().chars().next().unwrap_or(' ')
+    }
+
+    #[test]
+    fn right_scrolls_view_when_nothing_more_to_expand() {
+        let root = temp_root("hscroll");
+        // Deeply nested: expanding the chain leaves the innermost rows far
+        // beyond a narrow panel's right edge.
+        fs::create_dir_all(root.join("l1/l2/l3/l4/l5/deep_directory_name.txt")).unwrap();
+        fs::write(root.join("deep_file_name_here.rs"), "").unwrap();
+
+        let mut view = FileExplorerView::new(root.clone());
+        for d in ["l1", "l1/l2", "l1/l2/l3", "l1/l2/l3/l4", "l1/l2/l3/l4/l5"] {
+            view.toggle_dir(&root.join(d));
+        }
+        // Select the deep file so its name is what we track on screen.
+        for _ in 0..view.len() {
+            if view
+                .selected_entry()
+                .unwrap()
+                .path
+                .ends_with("deep_file_name_here.rs")
+            {
+                break;
+            }
+            view.handle_key(KeyCode::Down);
+        }
+        let _before_buf = rendered(&mut view, 24, 14);
+        let before = view.h_scroll;
+        assert_eq!(before, 0, "freshly rendered view starts unscrolled");
+
+        // Right on the already-expanded dir (or file) scrolls the view.
+        assert_eq!(view.handle_key(KeyCode::Right), ExplorerAction::None);
+        let (buf_after, _a) = rendered(&mut view, 24, 14);
+        assert!(
+            view.h_scroll > before,
+            "Right must shift the view when content overflows"
+        );
+        // The header gains the shifted-view marker.
+        let header: String = (1..12).map(|x| cell_char(&buf_after, x, 0)).collect();
+        assert!(
+            header.contains('\u{2039}'),
+            "header shows ‹ after scrolling: {header}"
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn left_first_unscrolls_before_collapsing() {
+        let root = temp_root("hscroll-left");
+        fs::create_dir_all(root.join("a/b/c/d/e/target")).unwrap();
+        fs::write(root.join("a/b/c/d/e/deep_file_here.txt"), "").unwrap();
+
+        let mut view = FileExplorerView::new(root.clone());
+        for d in ["a", "a/b", "a/b/c", "a/b/c/d", "a/b/c/d/e"] {
+            view.toggle_dir(&root.join(d));
+        }
+        // Scroll right a couple of steps (on an expanded dir).
+        view.handle_key(KeyCode::Right);
+        view.handle_key(KeyCode::Right);
+        assert!(view.h_scroll > 0);
+        let expanded_before = view.entries.iter().filter(|e| e.expanded).count();
+
+        // First Left only winds the scroll back; nothing collapses.
+        assert_eq!(view.handle_key(KeyCode::Left), ExplorerAction::None);
+        assert_eq!(
+            view.entries.iter().filter(|e| e.expanded).count(),
+            expanded_before,
+            "Left must not collapse while the view is scrolled"
+        );
+        assert!(view.h_scroll > 0, "one step only");
+
+        // Keep pressing until the scroll reaches 0...
+        while view.h_scroll > 0 {
+            view.handle_key(KeyCode::Left);
+        }
+        // ...then Left collapses again (existing behavior intact).
+        let selected = view.selected_entry().cloned();
+        view.handle_key(KeyCode::Left);
+        assert!(
+            view.entries.iter().filter(|e| e.expanded).count() < expanded_before
+                || selected.map(|e| !e.is_dir).unwrap_or(false),
+            "Left collapses / navigates once fully unscrolled"
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn scroll_clamps_to_widest_visible_row_and_releases_on_collapse() {
+        let root = temp_root("hscroll-clamp");
+        fs::create_dir_all(root.join("only/deeper/and_more")).unwrap();
+        fs::write(
+            root.join("only/deeper/and_more/a_very_long_file_name.txt"),
+            "",
+        )
+        .unwrap();
+
+        let mut view = FileExplorerView::new(root.clone());
+        view.toggle_dir(&root.join("only"));
+        view.toggle_dir(&root.join("only/deeper"));
+        view.toggle_dir(&root.join("only/deeper/and_more"));
+
+        // Hammer Right far beyond any real overflow: the offset must stay
+        // bounded by the widest visible row, never run away.
+        for _ in 0..50 {
+            view.handle_key(KeyCode::Right);
+        }
+        let (_buf, _area) = rendered(&mut view, 20, 12);
+        assert!(
+            view.h_scroll < 400,
+            "clamped to actual overflow: {}",
+            view.h_scroll
+        );
+
+        // Collapsing the deep directory removes the overflow entirely:
+        // the next render must pull the view back to 0.
+        view.toggle_dir(&root.join("only/deeper/and_more"));
+        let _ = rendered(&mut view, 20, 12);
+        assert_eq!(view.h_scroll, 0, "view snaps back when overflow disappears");
+        fs::remove_dir_all(&root).unwrap();
     }
 }
