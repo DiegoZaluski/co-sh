@@ -318,7 +318,11 @@ impl FileExplorerView {
                 } => '\u{2574}', // ˄ gutter ▾ marker
                 _ => ' ',
             };
-            let label = format!("{arrow} {name}");
+            // The arrow is tree chrome, not row content: painting it with
+            // the row font colored one indent char into the gutter, so it
+            // rides with the muted guide color like the `├─` connectors.
+            let label_x = area.x + 1 + gutter_w;
+            Self::draw_text_line(buf, &arrow.to_string(), label_x, y, 1, guide_fg);
             let name_style = if entry.is_dir && !is_selected {
                 dir_fg
             } else {
@@ -326,10 +330,10 @@ impl FileExplorerView {
             };
             Self::draw_text_line(
                 buf,
-                &label,
-                area.x + 1 + gutter_w,
+                &name,
+                label_x + 2, // arrow cell + one space
                 y,
-                (max_text_w.saturating_sub(gutter_w as usize)) as u16,
+                (max_text_w.saturating_sub((gutter_w + 2) as usize)) as u16,
                 name_style,
             );
         }
