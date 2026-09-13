@@ -5,6 +5,7 @@ pub mod tool_render;
 
 pub mod dashboard;
 pub mod delete;
+pub mod file_explorer;
 pub mod permission;
 pub mod question;
 pub mod queue_choice;

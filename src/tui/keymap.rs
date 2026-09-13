@@ -15,6 +15,7 @@ pub enum Action {
     ToggleRightPanel,
     ToggleUsage,
     ShowSessionHistory,
+    ShowFileExplorer,
     ToggleHelp,
     ToggleConceal,
     ToggleThinking,
@@ -97,6 +98,13 @@ impl KeyMap {
                     Action::ShowSessionHistory,
                     KeyBinding {
                         key: Char('s'),
+                        modifiers: KeyModifiers::CONTROL,
+                    },
+                ),
+                (
+                    Action::ShowFileExplorer,
+                    KeyBinding {
+                        key: Char('f'),
                         modifiers: KeyModifiers::CONTROL,
                     },
                 ),

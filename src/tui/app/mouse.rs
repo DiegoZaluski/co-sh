@@ -69,6 +69,8 @@ impl App {
         match (event_type, button) {
             (MouseEventType::Down, MouseButton::Left) => {
                 self.mouse_down_pos = Some((x, y));
+                self.press_started_in_sidebar = x < SIDEBAR_WIDTH;
+                self.release_was_drag = false;
                 self.mouse_drag_active = false;
                 self.drag_selection = None;
 
@@ -265,6 +267,7 @@ impl App {
                 let is_drag =
                     self.mouse_drag_active || drag_start.is_some_and(|(sx, sy)| sx != x || sy != y);
                 self.mouse_drag_active = false;
+                self.release_was_drag = is_drag;
 
                 // Clicks that start and land over the open session-list
                 // sidebar belong to the sidebar — never to whatever occupies
@@ -436,6 +439,17 @@ impl App {
                         && self.state.status == crate::types::SessionStatus::Idle
                     {
                         self.sidebar.select_prev(self.state.session_summaries.len());
+                    } else if self.sidebar_focused
+                        && matches!(self.left_panel, super::LeftPanelMode::Explorer)
+                        && self.sidebar.open
+                        && self.terminal_size().width >= MIN_WIDTH_FOR_LEFT_PANEL
+                        && x < SIDEBAR_WIDTH
+                    {
+                        // Explorer navigation works while the agent runs:
+                        // it is pure UI, it never touches the session.
+                        if let Some(explorer) = &mut self.file_explorer {
+                            explorer.select_prev();
+                        }
                     } else if matches!(self.mode(), AppMode::Session)
                         && self.is_in_right_panel(x)
                     {
@@ -503,6 +517,15 @@ impl App {
                         && self.state.status == crate::types::SessionStatus::Idle
                     {
                         self.sidebar.select_next(self.state.session_summaries.len());
+                    } else if self.sidebar_focused
+                        && matches!(self.left_panel, super::LeftPanelMode::Explorer)
+                        && self.sidebar.open
+                        && self.terminal_size().width >= MIN_WIDTH_FOR_LEFT_PANEL
+                        && x < SIDEBAR_WIDTH
+                    {
+                        if let Some(explorer) = &mut self.file_explorer {
+                            explorer.select_next();
+                        }
                     } else if matches!(self.mode(), AppMode::Session)
                         && self.is_in_right_panel(x)
                     {
@@ -748,6 +771,10 @@ impl App {
                     if self.is_theme_dialog_visible() {
                         self.apply_filtered_theme_preview();
                     }
+                    // A click on the MCP registration form moved the field
+                    // focus / cursor: keep the accidental-close draft in
+                    // sync (no-op for every other dialog).
+                    self.sync_mcp_form_draft();
                     return Ok(true);
                 }
                 DialogAction::None => {}
@@ -924,12 +951,19 @@ impl App {
         // clicking anywhere else unfocuses it.
         if matches!(event_type, MouseEventType::Down) || matches!(event_type, MouseEventType::Up) {
             self.sidebar_focused = self.sidebar.open
-                && matches!(self.left_panel, super::LeftPanelMode::History)
+                && matches!(
+                    self.left_panel,
+                    super::LeftPanelMode::History | super::LeftPanelMode::Explorer
+                )
                 && self.terminal_size().width >= MIN_WIDTH_FOR_LEFT_PANEL
                 && x < SIDEBAR_WIDTH;
         }
 
-        if self.dispatch_sidebar_up(button, x, y, modifiers) {
+        // A press that began in the chat must not act on the sidebar when
+        // released there (e.g. a text-selection drag): the explorer branch
+        // would otherwise toggle directories or even launch the editor.
+        let drag_started_in_chat = self.release_was_drag && !self.press_started_in_sidebar;
+        if !drag_started_in_chat && self.dispatch_sidebar_up(button, x, y, modifiers) {
             return Ok(true);
         }
 
@@ -1153,6 +1187,9 @@ impl App {
                     Some(crate::routes::settings::SettingsAction::OpenCacheInput { setting }) => {
                         self.open_cache_ttl_input(setting);
                     }
+                    Some(crate::routes::settings::SettingsAction::OpenEditorInput) => {
+                        self.open_editor_input();
+                    }
                     Some(crate::routes::settings::SettingsAction::McpToggled) => {
                         self.setup.save();
                     }
@@ -1287,7 +1324,10 @@ impl App {
     /// Whether the given column lies over the open session-list sidebar.
     fn is_over_open_sidebar(&self, x: u16) -> bool {
         self.sidebar.open
-            && matches!(self.left_panel, super::LeftPanelMode::History)
+            && matches!(
+                self.left_panel,
+                super::LeftPanelMode::History | super::LeftPanelMode::Explorer
+            )
             && self.terminal_size().width >= MIN_WIDTH_FOR_LEFT_PANEL
             && x < SIDEBAR_WIDTH
     }
@@ -1304,8 +1344,34 @@ impl App {
         if !self.is_over_open_sidebar(x) {
             return false;
         }
+        // Mirror the key path's dialog gate: a modal owns the screen, so a
+        // click on the explorer must not expand directories or launch the
+        // editor underneath it.
+        if self.dialog.visible()
+            || self.question_dialog.visible
+            || self.permission_dialog.visible
+            || self.queue_choice_dialog.visible
+            || self.free_gateway_dialog.visible
+        {
+            return false;
+        }
         let mouse = MouseEvent::new(MouseEventType::Up, button, x, y, modifiers);
         let sidebar_area = Rect::new(0, 0, SIDEBAR_WIDTH, self.terminal_height());
+        if matches!(self.left_panel, super::LeftPanelMode::Explorer) {
+            // Explorer click: expand/collapse a directory or open a file
+            // in the editor. Clicks never steal focus semantics from the
+            // session list — the explorer owns the panel while active.
+            let action = self
+                .file_explorer
+                .as_mut()
+                .map(|e| e.handle_mouse(&mouse, sidebar_area))
+                .unwrap_or(crate::routes::session::file_explorer::ExplorerAction::None);
+            if let crate::routes::session::file_explorer::ExplorerAction::OpenFile(path) = action
+            {
+                self.open_file_in_editor(&path);
+            }
+            return true;
+        }
         match self.sidebar.handle_mouse(&mouse, sidebar_area, &self.state) {
             SidebarAction::SwitchTo(session_id) => {
                 if self.state.status != crate::types::SessionStatus::Idle {

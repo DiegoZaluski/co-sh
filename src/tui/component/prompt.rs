@@ -20,7 +20,7 @@ const BASE_H: u16 = 2;
 const AGENT_H: u16 = 1;
 const CAP_H: u16 = 1;
 const FOOTER_H: u16 = 1;
-const PLACEHOLDER: &str = "Type a message...";
+const PLACEHOLDER: &str = "let's go!";
 
 /// Maximum number of wrapped lines the prompt box may grow to before it stops
 /// growing and starts scrolling its content upward. Generous by design: a chat

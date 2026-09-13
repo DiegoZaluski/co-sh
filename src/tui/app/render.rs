@@ -100,7 +100,7 @@ impl App {
             }
 
             let header_style = Style::default().fg(rgba_color(self.theme.text_muted));
-            let title_chars: Vec<char> = "~$co-sh".chars().collect();
+            let title_chars: Vec<char> = "← esc".chars().collect();
             for (i, ch) in title_chars.iter().enumerate() {
                 if let Some(cell) = buf.cell_mut((area.x + 1 + i as u16, area.y)) {
                     cell.set_char(*ch);
@@ -230,7 +230,17 @@ impl App {
             }
 
             if self.sidebar.open && area.width >= super::MIN_WIDTH_FOR_LEFT_PANEL {
-                if matches!(self.left_panel, super::LeftPanelMode::Dashboard) {
+                if matches!(self.left_panel, super::LeftPanelMode::Explorer) {
+                    // File explorer (Ctrl+F): the tree owns the whole panel,
+                    // including the header box.
+                    if let Some(explorer) = &mut self.file_explorer {
+                        explorer.render(
+                            buf,
+                            Rect::new(area.x, area.y, sidebar_w, area.height),
+                            &self.theme,
+                        );
+                    }
+                } else if matches!(self.left_panel, super::LeftPanelMode::Dashboard) {
                     // Usage dashboard: a self-contained panel (session usage
                     // + spend per provider/total for the selected period).
                     let data = self.dashboard_data();

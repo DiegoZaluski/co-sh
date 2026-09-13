@@ -209,6 +209,87 @@ async fn mcp_form_registers_server_end_to_end() {
     }
 }
 
+/// Closing the MCP box without Enter (accidental Esc) must not lose the
+/// typed fields: the draft survives in the `App` and reopening prefills
+/// from it. A confirmed save (Enter) clears it, so the next registration
+/// starts blank again.
+#[tokio::test]
+async fn mcp_form_survives_accidental_close_and_clears_after_save() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.open_mcp_form();
+
+    type_text(&mut app, "docs");
+    assert!(app.handle_registration_form_key(key(KeyCode::Down)));
+    type_text(&mut app, "https://example.com/mcp");
+
+    // Accidental close: Esc pops the box with nothing saved.
+    assert!(app.handle_registration_form_key(key(KeyCode::Esc)));
+    assert!(!app.dialog.visible());
+    assert!(app.setup.mcp.servers.is_empty());
+
+    // Reopening restores every typed field, the focused field and cursor.
+    app.open_mcp_form();
+    assert!(
+        matches!(
+            app.dialog.current().map(|d| &d.dialog_type),
+            Some(DialogType::McpForm {
+                name,
+                endpoint,
+                field,
+                cursor_pos,
+                ..
+            }) if name == "docs" && endpoint == "https://example.com/mcp"
+                && *field == 1 && *cursor_pos == endpoint.len()
+        ),
+        "the draft prefills the reopened form"
+    );
+
+    // Confirm with Enter: the save persists AND clears the draft.
+    assert!(app.handle_registration_form_key(key(KeyCode::Down)));
+    assert!(app.handle_registration_form_key(key(KeyCode::Enter)));
+    assert!(!app.dialog.visible());
+    assert_eq!(app.setup.mcp.servers.len(), 1);
+
+    app.open_mcp_form();
+    assert!(
+        matches!(
+            app.dialog.current().map(|d| &d.dialog_type),
+            Some(DialogType::McpForm { name, endpoint, .. })
+                if name.is_empty() && endpoint.is_empty()
+        ),
+        "a confirmed save clears the draft"
+    );
+}
+
+/// Erasing the fields manually is the other way to dispose of the draft:
+/// reopening then shows the emptied panel, not the old content.
+#[tokio::test]
+async fn mcp_form_draft_follows_manual_erasure() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.open_mcp_form();
+
+    type_text(&mut app, "docs");
+    assert!(app.handle_registration_form_key(key(KeyCode::Esc)));
+    app.open_mcp_form();
+    for _ in 0.."docs".len() {
+        assert!(app.handle_registration_form_key(key(KeyCode::Backspace)));
+    }
+    assert!(app.handle_registration_form_key(key(KeyCode::Esc)));
+
+    app.open_mcp_form();
+    assert!(
+        matches!(
+            app.dialog.current().map(|d| &d.dialog_type),
+            Some(DialogType::McpForm { name, .. }) if name.is_empty()
+        ),
+        "manually erased fields reopen empty"
+    );
+}
+
 /// An invalid endpoint keeps the panel open WITHOUT discarding the other
 /// fields — the user fixes the one line instead of restarting a wizard.
 #[tokio::test]
@@ -253,10 +334,11 @@ async fn mcp_form_rejects_duplicate_name_and_bad_timeout() {
     let _guard = HOME_LOCK.lock();
     isolate_home();
     let mut app = App::new("/tmp".to_string());
-    app.setup
-        .mcp
-        .servers
-        .push(cosh::mcp::build_mcp_entry("docs", "https://example.com/mcp", "", "").unwrap().entry);
+    app.setup.mcp.servers.push(
+        cosh::mcp::build_mcp_entry("docs", "https://example.com/mcp", "", "")
+            .unwrap()
+            .entry,
+    );
     app.open_mcp_form();
 
     type_text(&mut app, "docs");

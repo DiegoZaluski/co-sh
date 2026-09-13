@@ -30,6 +30,9 @@ pub struct Setup {
     /// Registered MCP servers (empty when the user never added one, so
     /// legacy files without the section keep loading unchanged).
     pub mcp: McpConfig,
+    /// Terminal editor used by the file explorer (Ctrl+F). Empty: fall back
+    /// to the first available of `nvim`, `vim`, `nano`.
+    pub editor: String,
 }
 
 impl Default for Setup {
@@ -44,6 +47,7 @@ impl Default for Setup {
             cache: Cache::default(),
             lsp: true,
             mcp: McpConfig::default(),
+            editor: String::new(),
         }
     }
 }
