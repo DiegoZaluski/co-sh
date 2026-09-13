@@ -272,9 +272,13 @@ impl FileExplorerView {
         self.selection.clamp(self.entries.len());
 
         let primary_color = rgba_color(theme.primary);
+        let warning_color = rgba_color(theme.warning);
         let text_color = rgba_color(theme.text);
         let mute_fg = rgba_color(theme.text_muted);
-        let selected_fg = Style::default().fg(primary_color);
+        // The selection must differ from BOTH row colors: files render
+        // with `text` and directories with `primary`. `warning` is the
+        // tone furthest from both across the themes.
+        let selected_fg = Style::default().fg(warning_color);
         let normal_fg = Style::default().fg(text_color);
         let dir_fg = Style::default().fg(primary_color);
         let guide_fg = Style::default().fg(mute_fg);
