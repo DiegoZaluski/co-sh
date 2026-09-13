@@ -393,6 +393,14 @@ pub enum DialogType {
         input: String,
         cursor_pos: usize,
     },
+    /// Terminal editor command entry for the file explorer (Settings →
+    /// Editor). The user types an editor command ("nvim", "vim -u NONE")
+    /// or leaves it blank to fall back to the auto-detected editor
+    /// (first of nvim, vim, nano on $PATH).
+    EditorInput {
+        input: String,
+        cursor_pos: usize,
+    },
     /// MCP registration form: name, endpoint, timeout and API key on a
     /// single panel with the hook form's mechanics (Up/Down switch fields,
     /// Enter saves, Esc cancels, click focuses). Every field stays visible
@@ -566,6 +574,11 @@ impl std::fmt::Debug for DialogType {
             } => f
                 .debug_struct("CacheTtlInput")
                 .field("setting", setting)
+                .field("input", input)
+                .field("cursor_pos", cursor_pos)
+                .finish(),
+            Self::EditorInput { input, cursor_pos } => f
+                .debug_struct("EditorInput")
                 .field("input", input)
                 .field("cursor_pos", cursor_pos)
                 .finish(),
@@ -1098,7 +1111,8 @@ impl DialogState {
             }
             DialogType::ApiKeyInput { .. }
             | DialogType::LocalUrlInput { .. }
-            | DialogType::CacheTtlInput { .. } => {
+            | DialogType::CacheTtlInput { .. }
+            | DialogType::EditorInput { .. } => {
                 // Click outside the dialog box → dismiss
                 let dialog_w = 50u16.min(area.width.saturating_sub(8)).max(30);
                 let dialog_h = 7;
@@ -2032,6 +2046,20 @@ impl DialogState {
                     &instance.cursor,
                     "Prompt cache duration",
                     "e.g. 30m, 1h, 1h30m — empty or \"default\" resets",
+                    false,
+                    input,
+                    *cursor_pos,
+                );
+            }
+            DialogType::EditorInput { input, cursor_pos } => {
+                render_text_input_dialog(
+                    buf,
+                    area,
+                    theme,
+                    now,
+                    &instance.cursor,
+                    "Editor command",
+                    "e.g. nvim, vim -u NONE (args split on spaces) — empty: auto-detect",
                     false,
                     input,
                     *cursor_pos,

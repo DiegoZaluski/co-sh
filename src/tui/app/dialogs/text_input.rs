@@ -15,6 +15,7 @@ impl App {
                     DialogType::ApiKeyInput { .. }
                         | DialogType::LocalUrlInput { .. }
                         | DialogType::CacheTtlInput { .. }
+                        | DialogType::EditorInput { .. }
                         | DialogType::RenameSession { .. },
                 )
             )
@@ -44,6 +45,7 @@ impl App {
                     && let DialogType::ApiKeyInput { cursor_pos, .. }
                     | DialogType::LocalUrlInput { cursor_pos, .. }
                     | DialogType::CacheTtlInput { cursor_pos, .. }
+                    | DialogType::EditorInput { cursor_pos, .. }
                     | DialogType::RenameSession { cursor_pos, .. } = &mut d.dialog_type
                     && *cursor_pos > 0
                 {
@@ -62,6 +64,7 @@ impl App {
                     | DialogType::CacheTtlInput {
                         input, cursor_pos, ..
                     }
+                    | DialogType::EditorInput { input, cursor_pos }
                     | DialogType::RenameSession {
                         input, cursor_pos, ..
                     } = &mut d.dialog_type
@@ -76,6 +79,7 @@ impl App {
                     && let DialogType::ApiKeyInput { cursor_pos, .. }
                     | DialogType::LocalUrlInput { cursor_pos, .. }
                     | DialogType::CacheTtlInput { cursor_pos, .. }
+                    | DialogType::EditorInput { cursor_pos, .. }
                     | DialogType::RenameSession { cursor_pos, .. } = &mut d.dialog_type
                 {
                     *cursor_pos = 0;
@@ -93,6 +97,7 @@ impl App {
                     | DialogType::CacheTtlInput {
                         input, cursor_pos, ..
                     }
+                    | DialogType::EditorInput { input, cursor_pos }
                     | DialogType::RenameSession {
                         input, cursor_pos, ..
                     } = &mut d.dialog_type
@@ -112,6 +117,7 @@ impl App {
                     | DialogType::CacheTtlInput {
                         input, cursor_pos, ..
                     }
+                    | DialogType::EditorInput { input, cursor_pos }
                     | DialogType::RenameSession {
                         input, cursor_pos, ..
                     } = &mut d.dialog_type
@@ -133,6 +139,7 @@ impl App {
                     | DialogType::CacheTtlInput {
                         input, cursor_pos, ..
                     }
+                    | DialogType::EditorInput { input, cursor_pos }
                     | DialogType::RenameSession {
                         input, cursor_pos, ..
                     } = &mut d.dialog_type
@@ -155,6 +162,7 @@ impl App {
                     | DialogType::CacheTtlInput {
                         input, cursor_pos, ..
                     }
+                    | DialogType::EditorInput { input, cursor_pos }
                     | DialogType::RenameSession {
                         input, cursor_pos, ..
                     } = &mut d.dialog_type
@@ -728,6 +736,15 @@ impl App {
         });
     }
 
+    /// Open the editor-command input box (Settings → Editor), prefilled
+    /// with the configured command (blank = auto-detect fallback chain).
+    pub(in crate::app) fn open_editor_input(&mut self) {
+        self.dialog.show(DialogType::EditorInput {
+            cursor_pos: self.setup.editor.len(),
+            input: self.setup.editor.clone(),
+        });
+    }
+
     /// Perform the save for the current text input dialog (API key → keyring,
     /// local URL → setup.json). Returns `true` when the input was accepted.
     pub(in crate::app) fn save_text_input_dialog(&mut self) -> bool {
@@ -836,6 +853,15 @@ impl App {
                         false
                     }
                 }
+            }
+            DialogType::EditorInput { input, .. } => {
+                // Any typed value is accepted verbatim (it may be a full
+                // command like "vim -u NONE"); empty clears back to the
+                // auto-detected fallback chain. Launch failures stay silent
+                // by design, so there is nothing to validate here.
+                self.setup.editor = input.trim().to_string();
+                self.setup.save();
+                true
             }
             DialogType::HookInput { .. } => self.save_hook_input_dialog(),
             DialogType::McpForm { .. } => self.save_mcp_form_dialog(),

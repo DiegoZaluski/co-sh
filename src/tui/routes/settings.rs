@@ -76,6 +76,12 @@ fn settings_items() -> &'static [SettingsItem] {
             description: "Only these models, in order. Empty: use the agent model. Enter: edit; Delete: remove; Alt+Up/Down: reorder",
             event: "",
         },
+        SettingsItem {
+            id: "editor",
+            label: "Editor",
+            description: "Terminal editor for the file explorer (Ctrl+F). Enter: edit. Empty: first of nvim, vim, nano found on $PATH",
+            event: "",
+        },
     ]
 }
 
@@ -94,6 +100,11 @@ fn cache_choice_value(id: &str, setup: &Setup) -> Option<String> {
         "openai_cache_retention" => Some(crate::util::setup::format_cache_duration(
             setup.cache.openai_retention_min,
         )),
+        "editor" => Some(if setup.editor.trim().is_empty() {
+            "auto (nvim › vim › nano)".into()
+        } else {
+            truncate(setup.editor.trim(), COMMAND_PREVIEW_LEN)
+        }),
         _ => None,
     }
 }
@@ -407,6 +418,9 @@ pub enum SettingsAction {
     OpenCacheInput {
         setting: &'static str,
     },
+    /// Open the editor-command input box (Settings → Editor; used by the
+    /// Ctrl+F file explorer). Blank = auto-detect (nvim → vim → nano).
+    OpenEditorInput,
 }
 
 /// Last-typed content of the MCP registration box
@@ -557,6 +571,11 @@ impl SettingsView {
                 let item = &settings_items()[*i];
                 if item.id == "summarization_models" {
                     return Some(SettingsAction::OpenSummarizationModel { index: None });
+                }
+                // The editor setting is a free-form command, not a switch:
+                // open its own input box (the file explorer launches it).
+                if item.id == "editor" {
+                    return Some(SettingsAction::OpenEditorInput);
                 }
                 // Choice settings (cache TTL/retention) open a duration
                 // input box instead of toggling a switch — the value is a
@@ -1047,6 +1066,7 @@ mod tests {
                 SettingsRow::Category(4),
                 SettingsRow::Category(5),
                 SettingsRow::AddSummarizationModel,
+                SettingsRow::Category(6),
                 SettingsRow::AddMcpServer,
             ]
         );
@@ -1076,6 +1096,7 @@ mod tests {
                 SettingsRow::Category(4),
                 SettingsRow::Category(5),
                 SettingsRow::AddSummarizationModel,
+                SettingsRow::Category(6),
                 SettingsRow::AddMcpServer,
             ]
         );
@@ -1238,6 +1259,56 @@ mod tests {
         );
         assert!(!setup.hooks.pre_tool_use_enabled);
         assert!(view.selection.selected_index < selectable_rows(&setup).len());
+    }
+
+    /// The Editor row is a free-form command setting: activating it opens
+    /// the editor-command input (never a switch flip), the row renders the
+    /// configured command (or the auto-detect hint), and the typed value
+    /// round-trips into `setup.editor`.
+    #[test]
+    fn editor_setting_opens_input_and_round_trips() {
+        let mut setup = Setup::default();
+        let mut view = SettingsView::new();
+
+        let editor_row = |setup: &Setup| {
+            selectable_rows(setup)
+                .iter()
+                .position(|r| matches!(r, SettingsRow::Category(6)))
+                .expect("editor category row exists")
+        };
+
+        // Blank configured command: the row shows the fallback hint.
+        view.selection.selected_index = editor_row(&setup);
+        assert_eq!(
+            view.activate_selected(&mut setup),
+            Some(SettingsAction::OpenEditorInput)
+        );
+        assert_eq!(setup.editor, "", "activation never mutates the setting");
+
+        // The rendered row carries the auto-detect hint.
+        let theme = test_theme();
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(area);
+        view.render(&mut buf, area, &theme, &setup);
+        let all: String = (area.y..area.bottom())
+            .map(|y| {
+                (area.x..area.right())
+                    .map(|x| {
+                        buf.cell((x, y))
+                            .map(|c| c.symbol().to_string())
+                            .unwrap_or_default()
+                    })
+                    .collect::<String>()
+            })
+            .collect::<String>();
+        assert!(all.contains("Editor: auto (nvim › vim › nano)"));
+
+        // The choice display for a configured command shows the command.
+        setup.editor = "vim -u NONE".into();
+        assert_eq!(
+            cache_choice_value("editor", &setup),
+            Some("vim -u NONE".to_string())
+        );
     }
 
     #[test]
