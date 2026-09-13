@@ -30,6 +30,9 @@ use tokio::time::Duration;
 mod map_reduce_test;
 #[path = "summarization.rs"]
 mod summarization;
+#[cfg(test)]
+#[path = "test/summary_failure_loop.rs"]
+mod summary_failure_loop;
 
 /// One event delivered to a streaming callback: a text token, or the reset
 /// marker the SDK emits when it retries a mid-stream failure (the consumer
@@ -1313,17 +1316,9 @@ impl Harness {
     /// forwarded to the TUI so the user watches the "Summarizing" box fill
     /// live. Returns whether the summary was applied.
     ///
-    /// Overflow recovery (the accepted design): when the provider rejects the
-    /// prompt as larger than its context window, ONE tool chain is drained
-    /// per attempt and the call is retried ("1 por vez"); when the provider
-    /// reported its window, further chains are drained locally with the token
-    /// estimate so no HTTP round trip is paid per chain. The prompt is
-    /// REBUILT before every attempt, so a retry always serializes the
-    /// current (post-drain) timeline — never a stale prompt that still
-    /// contains the removed chains. Once every chain is gone the overflow is
-    /// marked stuck for this provider and the user is notified. Generic
-    /// errors are retried [`MAX_COMPACTION_RETRIES`] times with exponential
-    /// backoff, then a TUI notification is surfaced.
+    /// MapReduce is used when the selected summarizer cannot fit the complete
+    /// request, or when verified contingency progress is being resumed.
+    /// Generic errors use bounded retries with backoff and a failure toast.
     async fn llm_compact_selected(
         &mut self,
         tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
@@ -1350,6 +1345,12 @@ impl Harness {
             Some(request) => request,
             None => return false,
         };
+        if self
+            .summarization_request_overflow(&request.system, &request.prompt)
+            .is_some()
+        {
+            return self.checkpoint_context(tx).await;
+        }
         let _ = tx.send(HarnessEvent::LlmCompaction {
             event: LlmCompactionEvent::Started,
         });
@@ -1358,9 +1359,14 @@ impl Harness {
         self.compaction_generic_retries = 0;
         let mut summary = String::new();
         let outcome = loop {
-            // A failed attempt's partial tokens must not pollute the summary
-            // applied from a later successful attempt (the TUI box keeps its
-            // already-streamed text, but the APPLIED value stays clean).
+            // A retry starts a new response in both the candidate and the
+            // TUI. Concatenating failed partial responses makes the visible
+            // text look like one long, completed summary.
+            if self.compaction_generic_retries > 0 {
+                let _ = tx.send(HarnessEvent::LlmCompaction {
+                    event: LlmCompactionEvent::OutputStarted,
+                });
+            }
             summary.clear();
             match self
                 .stream_summarize_for_compaction(&request.system, &request.prompt, |chunk| {
@@ -1430,12 +1436,26 @@ impl Harness {
             }
         };
         let ok = match outcome {
-            CompactionOutcome::Applied if !summary.trim().is_empty() => self
-                .context_manager
-                .apply_llm_summary(summary.trim().to_string()),
+            CompactionOutcome::Applied => {
+                let summary = summary.trim();
+                let ok = !summary.is_empty()
+                    && self.context_manager.apply_llm_summary(summary.to_string());
+                if !ok {
+                    let reason = if summary.is_empty() {
+                        "summarizer returned an empty response"
+                    } else {
+                        "summary and retained context exceed the compaction budget"
+                    };
+                    let _ = tx.send(HarnessEvent::Toast {
+                        message: format!("LLM compaction failed: {reason}"),
+                        variant: ToastVariant::Error,
+                    });
+                }
+                ok
+            }
             // The contingency resolved the overflow — a successful pass.
             CompactionOutcome::ResolvedByContingency => true,
-            CompactionOutcome::Applied | CompactionOutcome::Failed => false,
+            CompactionOutcome::Failed => false,
         };
         let _ = tx.send(HarnessEvent::LlmCompaction {
             event: if ok {
@@ -2378,23 +2398,14 @@ impl Harness {
         // The summarizer is a SEPARATE agent: its request carries NO tool
         // definitions (a dedicated connector call that clones the params with
         // tools cleared), so the model answers with prose, never a tool call.
-        let mut connector = self.compaction_connector().clone();
-        if let Some(window) = self.known_checkpoint_window() {
-            let encoding = crate::util::TokenEncoding::for_model(connector.effective_model());
-            let output = (window / 10).clamp(64, 2_000);
-            connector = connector.with_max_tokens(output as u32);
-            let output = connector.effective_max_tokens().unwrap_or(output as u32) as usize;
-            if encoding
-                .estimate(system)
-                .saturating_add(encoding.estimate(prompt))
-                .saturating_add(64)
-                .saturating_add(output)
-                >= window
-            {
-                return Err(CompactionErr::ContextWindow {
-                    window_tokens: Some(window),
-                });
-            }
+        // Normal summarization preserves the selected connector's output
+        // settings. MapReduce owns its segment limits; the trigger budget is
+        // not a generation limit for the complete handoff.
+        let connector = self.compaction_connector().clone();
+        if let Some(window) = self.summarization_request_overflow(system, prompt) {
+            return Err(CompactionErr::ContextWindow {
+                window_tokens: Some(window),
+            });
         }
         let mut stream = tokio::select! {
             result = connector.stream_chat_with_system_no_tools(prompt, system) => {
@@ -3399,6 +3410,13 @@ impl Harness {
         // an input the user gave up on — only the newest input stays.
         self.context_manager.remove_abandoned_inputs();
 
+        // A failed automatic pass has already exhausted its bounded retries
+        // and configured model chain. Do not renew that budget after every
+        // tool dispatch while the unchanged over-trigger history remains.
+        // A new user turn or manual compaction gets a fresh attempt; actual
+        // provider context-window recovery below remains independent.
+        let mut automatic_compaction_failed = false;
+
         // Apply the 80% compaction before the first LLM request, so the
         // initial context is already within budget. When the useless-chain
         // sweep still leaves the total over the trigger, the LLM compaction
@@ -3408,20 +3426,9 @@ impl Harness {
         if matches!(self.context_manager.run(), RunOutcome::NeedsLlmCompaction)
             || self.context_manager.compaction_staging_active()
         {
-            // Known-window contingency: when the ACTIVE model's window is
-            // known and the remaining context still exceeds it, the
-            // single-shot compaction transcript would itself overflow the
-            // provider — drive the hierarchical MapReduce path instead (a
-            // restored in-progress split is always resumed).
-            if self.context_manager.compaction_staging_active()
-                || self
-                    .known_checkpoint_window()
-                    .is_some_and(|w| self.context_manager.display_info().total_tokens > w)
-            {
-                self.checkpoint_context(&tx).await;
-            } else {
-                self.llm_compact(&tx).await;
-            }
+            // Select the summarizer before deciding whether its actual
+            // request needs MapReduce. The main agent's window may differ.
+            automatic_compaction_failed = !self.llm_compact(&tx).await;
             if !self.context_manager.last_user_equals(input) {
                 self.context_manager.add_user(input);
             }
@@ -3652,16 +3659,14 @@ impl Harness {
                 }
 
                 if switched {
-                    // The fallback model may be smaller than the context we
-                    // hold: when its window is known and the estimate exceeds
-                    // it, drive the split contingency BEFORE retrying the
-                    // request (an in-progress split is always resumed).
+                    // The fallback changes the agent's budget and renews its
+                    // automatic attempt. Route through the chosen summarizer
+                    // before deciding whether MapReduce is necessary.
+                    automatic_compaction_failed = false;
                     if self.context_manager.compaction_staging_active()
-                        || self
-                            .known_checkpoint_window()
-                            .is_some_and(|w| self.context_manager.display_info().total_tokens > w)
+                        || matches!(self.context_manager.run(), RunOutcome::NeedsLlmCompaction)
                     {
-                        self.checkpoint_context(&tx).await;
+                        automatic_compaction_failed = !self.llm_compact(&tx).await;
                     }
                     continue;
                 }
@@ -4462,8 +4467,10 @@ impl Harness {
             // Compact before the next request. The LLM compaction runs when
             // the total is still over the trigger — the harness performs the
             // model call.
-            if matches!(self.context_manager.run(), RunOutcome::NeedsLlmCompaction) {
-                self.llm_compact(&tx).await;
+            if matches!(self.context_manager.run(), RunOutcome::NeedsLlmCompaction)
+                && !automatic_compaction_failed
+            {
+                automatic_compaction_failed = !self.llm_compact(&tx).await;
             }
             let _ = tx.send(HarnessEvent::ContextInfo {
                 info: self.context_manager.display_info(),

@@ -9,8 +9,7 @@ use super::summarize::{
     build_map_prompt, build_reduce_prompt, build_validation_prompt, serialize_item,
 };
 use super::{
-    COMPACT_PCT, ContextItemRange, ContextManager, LlmCompactionRequest, coalesce_ranges,
-    merge_ranges,
+    ContextItemRange, ContextManager, LlmCompactionRequest, coalesce_ranges, merge_ranges,
 };
 use serde::{Deserialize, Serialize};
 
@@ -189,7 +188,9 @@ impl ContextManager {
             state.window = state.window.min(window);
             return true;
         }
-        let source = self.checkpoint_source_indices_for(window);
+        // Source coverage and the retained raw tail belong to the receiving
+        // agent. The summarizer window only sizes the map/reduce requests.
+        let source = self.checkpoint_source_indices();
         if source.is_empty() {
             return false;
         }
@@ -715,11 +716,7 @@ impl ContextManager {
             .filter_map(|id| self.items.iter().position(|item| item.id() == *id))
             .collect();
         if source.len() != state.source_item_ids.len()
-            || !self.apply_summary_to_source_with_trigger(
-                summary,
-                &source,
-                (state.window.saturating_mul(COMPACT_PCT) / 100).min(self.normal_trigger()),
-            )
+            || !self.apply_summary_to_source(summary, &source)
         {
             self.map_reduce = Some(state);
             return false;
@@ -881,6 +878,44 @@ fn parse_range(value: &str) -> Option<ContextItemRange> {
 mod tests {
     use super::*;
     use crate::harness::context::ContextItem;
+
+    #[test]
+    fn map_reduce_retains_the_agents_raw_tail_independent_of_summarizer_window() {
+        let mut manager = ContextManager::new(10_000);
+        manager.add_user(&"older evidence ".repeat(4_000));
+        let tail = "recent evidence ".repeat(600);
+        manager.add_assistant(&tail, true);
+        let recent_id = manager.items.back().unwrap().id();
+        assert!(manager.begin_map_reduce(1_000));
+        assert!(
+            !manager
+                .map_reduce
+                .as_ref()
+                .unwrap()
+                .source_item_ids
+                .contains(&recent_id),
+            "the recent tail is for the main agent, not an input to the small summarizer"
+        );
+    }
+
+    #[test]
+    fn map_reduce_commit_uses_the_receiving_agents_budget() {
+        let mut manager = ContextManager::new(10_000);
+        manager.add_user(&"older evidence ".repeat(4_000));
+        assert!(manager.begin_map_reduce(1_000));
+        // Exercise the commit of an already validated candidate. New raw
+        // context is part of the agent's view, never a summarizer request.
+        manager.add_assistant(&"new evidence ".repeat(600), true);
+        let state = manager.map_reduce.as_mut().unwrap();
+        state.phase = MapReducePhase::Ready;
+        state.final_summary = Some("validated handoff".into());
+        assert!(
+            manager.commit_map_reduce(),
+            "a fitting agent view must not be rejected against the summarizer window"
+        );
+        assert!(manager.total_tokens() > 1_000);
+        assert!(manager.total_tokens() < manager.normal_trigger());
+    }
 
     fn large_manager(window: usize) -> ContextManager {
         let mut manager = ContextManager::new(window);

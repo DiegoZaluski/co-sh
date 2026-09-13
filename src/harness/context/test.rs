@@ -1188,6 +1188,49 @@ fn an_error_survives_a_state_roundtrip() {
 // ── summary annotator hook (handoff/tool-set consistency check) ───────────
 
 #[test]
+fn checkpoint_budget_includes_the_annotation_that_will_be_committed() {
+    let mut manager = cm(1_000);
+    manager.add_user(&prose_copies(200));
+    manager.begin_manual_compaction();
+    manager.set_summary_annotator(Box::new(|summary| {
+        format!("{summary} {}", "notice ".repeat(1_000))
+    }));
+    let before = serde_json::to_value(manager.save_state()).unwrap();
+    assert!(!manager.apply_llm_summary("small handoff".into()));
+    assert_eq!(serde_json::to_value(manager.save_state()).unwrap(), before);
+}
+
+#[test]
+fn legacy_commit_checks_annotated_output_and_preserves_rejected_staging() {
+    let mut manager = cm(10_000);
+    manager.add_user("source evidence");
+    manager.begin_split(1_000);
+    let chunk = manager.split_next_chunk().unwrap();
+    manager.advance_split("small handoff", chunk.chunk_end);
+    manager.set_summary_annotator(Box::new(|summary| {
+        format!("{summary} {}", "notice ".repeat(1_000))
+    }));
+    let before = serde_json::to_value(manager.save_state()).unwrap();
+    assert!(!manager.commit_split());
+    assert_eq!(serde_json::to_value(manager.save_state()).unwrap(), before);
+}
+
+#[test]
+fn legacy_commit_cannot_cover_items_that_have_not_been_summarized() {
+    let mut manager = cm(10_000);
+    for _ in 0..3 {
+        manager.add_user(&"source ".repeat(150));
+    }
+    manager.begin_split(200);
+    let chunk = manager.split_next_chunk().unwrap();
+    manager.advance_split("first chunk only", chunk.chunk_end);
+    assert!(!manager.split_all_consumed());
+    let before = serde_json::to_value(manager.save_state()).unwrap();
+    assert!(!manager.commit_split());
+    assert_eq!(serde_json::to_value(manager.save_state()).unwrap(), before);
+}
+
+#[test]
 fn summary_annotator_runs_on_every_commit_path_and_never_accumulates() {
     let mut manager = cm(10_000);
     manager.add_user(&prose_copies(200));

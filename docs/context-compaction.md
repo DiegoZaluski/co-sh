@@ -140,10 +140,70 @@ non-converging output. An explicit model switch renews exhausted recovery
 budgets while preserving accepted maps; retrying the same model does not.
 Generic errors and cancellation are not classified as stuck context windows.
 
-No-tools requests reserve prompt overhead and bound output tokens to 10% of
-the active window, clamped to 64–2,000 tokens. These are local estimates, not
-provider guarantees; provider window errors remain authoritative. Stream
-resets discard partial text, and waits/streams respond to cancellation.
+Normal one-shot summarization preserves the selected connector's output
+configuration, including provider defaults and any explicit caller setting.
+It never borrows MapReduce's segment ceiling or derives a generation limit
+from the automatic trigger. Before choosing MapReduce, the selected
+summarizer's actual request is checked against its own known window, with
+prompt overhead and the output ceiling its adapter actually sends. Unknown
+provider output defaults remain unknown; provider errors are authoritative.
+MapReduce requests currently retain their separate 10% window reservation,
+clamped to 64–2,000 tokens (including final reductions; see the audit below).
+Stream resets and one-shot retries discard partial text from both the
+candidate and its visible output; waits/streams respond to cancellation.
+
+Source coverage, the recent raw tail, and the checkpoint commit budget belong
+to the receiving agent. A smaller summarizer window sizes its requests; it
+does not shrink the agent's raw tail or reject an otherwise fitting agent
+view. All commit paths measure the annotated text they actually install.
+Legacy split commits also require complete source consumption and retain
+staging when the candidate is rejected.
+
+An automatic compaction failure defers further threshold-triggered attempts
+for the current agent turn, after the existing retries and configured model
+chain have run. The agent can continue with the preserved source. A new user
+turn or `/compact` gets a fresh attempt; recovery from an actual provider
+context-window error remains available. Successful compaction can run again
+within the same turn if subsequent work fills the budget.
+
+### Regression: streamed summary, error, one tool call, repeat
+
+The GLM-5.3-flash report (same model for agent and summarizer, 1M context
+window, approximately 164k automatic trigger) is consistent with two coupled
+bugs: a 2,000-token output ceiling on one-shot summaries when window discovery
+succeeded, and a fresh retry budget after every tool dispatch. Input capacity
+does not prevent output truncation. A `length` finish reason correctly rejects
+the streamed text as incomplete, leaving the original over-trigger context
+in place. The next dispatch then used to start the same failing process again.
+A fresh manual harness without discovery did not set that output ceiling,
+which explains why `/compact` could succeed on the same history.
+
+`summary_failure_loop` reproduces this through a local HTTP/SSE provider and
+the real SDK completion checks. Before the fix, two small tool calls produced
+three failed compactions, nine requests with `max_tokens: 2000`, and three
+`LLM compaction failed: summarizer response is incomplete (finish reason: length)`
+toasts. The same source succeeded manually with no explicit output limit.
+After the fix, automatic and manual paths each complete with one request and
+unchanged connector output settings. Separate tests cover exhausted retries at turn
+entry and mid-turn, rejected oversized summaries, manual retry, and a fresh
+user turn. The existing successful-regrowth test still permits multiple
+successful compactions when new content actually fills the budget.
+
+The persisted local session also corroborates this mechanism: the three
+compaction boxes between 02:14 and 02:18 UTC on 2026-09-13 each contain three
+`## Objective` headings, omit `## Code & Anchors`, and end mid-sentence/code.
+The following box at 02:19 contains the complete section structure and is
+followed by the only committed checkpoint. Previously the UI concatenated
+the three failed responses inside each box, making the displayed output look
+like a much longer summary. Retries now reset that display as well.
+
+These artifacts identify the most likely cause of the incident, but do not
+store its original error toast or provider finish reason. Other incomplete
+termination signals remain errors; the fix does not accept truncated text as
+checkpoint evidence.
+
+See [the boundary audit](context-compaction-audit.md) for additional findings,
+regression evidence, and remaining issues.
 
 ## Reproducible offline evaluation
 

@@ -1243,14 +1243,9 @@ impl ContextManager {
     /// This keeps the legacy split staging correct until MapReduce replaces it:
     /// the split already summarized the raw tail, so retaining that tail would
     /// duplicate it in the model view.
-    pub(super) fn apply_full_llm_summary(&mut self, summary: String) -> bool {
+    pub(super) fn apply_full_llm_summary(&mut self, summary: String, window: usize) -> bool {
         let source = self.all_visible_source_indices();
-        if source.is_empty() || summary.trim().is_empty() {
-            return false;
-        }
-        self.commit_summary_to_source(summary, &source);
-        self.clear_overflow();
-        true
+        self.apply_summary_to_source_with_trigger(summary, &source, window.saturating_add(1))
     }
 
     fn apply_summary_to_source(&mut self, summary: String, source: &[usize]) -> bool {
@@ -1264,6 +1259,16 @@ impl ContextManager {
         trigger: usize,
     ) -> bool {
         if source.is_empty() || summary.trim().is_empty() {
+            return false;
+        }
+        // Validate the exact text that will be installed. The annotation can
+        // grow or shrink a handoff; checking the unannotated candidate first
+        // would allow an over-budget commit (or reject a fitting one).
+        let summary = match &self.summary_annotator {
+            Some(annotate) => annotate(&summary),
+            None => summary,
+        };
+        if summary.trim().is_empty() {
             return false;
         }
         let removed_tokens = source.iter().fold(0usize, |total, &idx| {
@@ -1293,10 +1298,6 @@ impl ContextManager {
 
     fn commit_summary_to_source(&mut self, summary: String, source: &[usize]) {
         let direct_ids: Vec<u64> = source.iter().map(|&idx| self.items[idx].id()).collect();
-        let summary = match &self.summary_annotator {
-            Some(annotate) => annotate(&summary),
-            None => summary,
-        };
         let mut all_ranges = coalesce_ranges(&direct_ids);
         for &idx in source {
             if let ContextItem::Compaction {

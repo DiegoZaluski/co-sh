@@ -324,17 +324,17 @@ impl ContextManager {
         {
             return false;
         }
+        if !self.split_all_consumed() {
+            return false;
+        }
         let Some(split) = self.split.take() else {
             return false;
         };
-        if split.buffer.trim().is_empty() {
-            return false;
+        let committed = self.apply_full_llm_summary(split.buffer.clone(), split.window);
+        if !committed {
+            self.split = Some(split);
         }
-        let fits = self.encoding.estimate(&split.buffer) <= split.window;
-        if fits {
-            self.apply_full_llm_summary(split.buffer);
-        }
-        fits
+        committed
     }
 
     /// Abort the split: drop the staging (buffer + cursor). The timeline is

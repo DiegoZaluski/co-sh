@@ -33,6 +33,28 @@ impl Harness {
             .unwrap_or(&self.connector)
     }
 
+    /// Check the actual request against the selected summarizer's window.
+    /// This observes connector output settings without imposing a new limit.
+    pub(super) fn summarization_request_overflow(
+        &self,
+        system: &str,
+        prompt: &str,
+    ) -> Option<usize> {
+        let window = self.known_checkpoint_window()?;
+        let connector = self.compaction_connector();
+        let encoding = crate::util::TokenEncoding::for_model(connector.effective_model());
+        // Unknown provider defaults remain unknown, rather than being replaced
+        // with a segment budget. Provider errors remain authoritative.
+        let output = connector.effective_max_tokens().unwrap_or(0) as usize;
+        (encoding
+            .estimate(system)
+            .saturating_add(encoding.estimate(prompt))
+            .saturating_add(64)
+            .saturating_add(output)
+            >= window)
+            .then_some(window)
+    }
+
     pub(super) fn compaction_model_key(&self) -> String {
         let connector = self.compaction_connector();
         let model = connector.effective_model().unwrap_or("?");
@@ -285,7 +307,10 @@ mod tests {
             assert_eq!(body["model"], "chosen-summary");
             assert!(body.get("tools").is_none());
             assert!(body.get("reasoning_effort").is_none());
-            assert_eq!(body["max_tokens"], 400);
+            assert!(
+                body.get("max_tokens").is_none(),
+                "normal summarization must preserve provider defaults"
+            );
             let response = "data: {\"choices\":[{\"delta\":{\"content\":\"Checkpoint: keep the API stable; run integration tests.\"},\"finish_reason\":\"stop\"}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":12,\"total_tokens\":112}}\n\ndata: [DONE]\n\n";
             socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).as_bytes()).await.unwrap();
         });
