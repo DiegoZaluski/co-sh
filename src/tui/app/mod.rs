@@ -200,6 +200,11 @@ pub struct App {
     /// None: agent picker; Some(None): add summarizer; Some(Some(i)): edit.
     pub summarization_model_edit: Option<Option<usize>>,
     pub show_settings: bool,
+    /// Draft of the MCP registration box that survives an accidental
+    /// close: `open_mcp_form` prefills from it, every edit keeps it in
+    /// sync, and a successful save (Enter) clears it. See
+    /// [`crate::routes::settings::McpFormDraft`].
+    pub(crate) mcp_form_draft: Option<crate::routes::settings::McpFormDraft>,
     pub router_view: RouterView,
     pub show_router: bool,
     #[cfg(feature = "embed")]
@@ -472,6 +477,7 @@ impl App {
             settings_view: SettingsView::new(),
             summarization_model_edit: None,
             show_settings: false,
+            mcp_form_draft: None,
             router_view: {
                 let mut rv = RouterView::new();
                 rv.set_fallbacks(saved_fallbacks);

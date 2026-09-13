@@ -409,6 +409,38 @@ pub enum SettingsAction {
     },
 }
 
+/// Last-typed content of the MCP registration box
+/// (`DialogType::McpForm`). Held by the `App` while no dialog is open so
+/// an accidental close (Esc, click outside, any dismiss) never loses
+/// what was already typed: reopening the form prefills from here. The
+/// draft is cleared only when a save succeeds (Enter) — or when the user
+/// erases the fields themselves, which simply re-syncs blanks into it.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct McpFormDraft {
+    pub name: String,
+    pub endpoint: String,
+    pub timeout: String,
+    /// The raw typed key (never persisted anywhere but the draft); masked
+    /// in [`Debug`] like every other credential preview.
+    pub api_key: String,
+    /// Active field: 0 name · 1 endpoint · 2 timeout · 3 api key.
+    pub field: usize,
+    pub cursor_pos: usize,
+}
+
+impl std::fmt::Debug for McpFormDraft {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpFormDraft")
+            .field("name", &self.name)
+            .field("endpoint", &self.endpoint)
+            .field("timeout", &self.timeout)
+            .field("api_key", &if self.api_key.is_empty() { "" } else { "…" })
+            .field("field", &self.field)
+            .field("cursor_pos", &self.cursor_pos)
+            .finish()
+    }
+}
+
 // View
 
 pub struct SettingsView {

@@ -231,6 +231,7 @@ impl App {
         line.insert_str(*cursor, &cleaned);
         *cursor += cleaned.len();
         d.cursor.note_activity();
+        self.sync_mcp_form_draft();
     }
     /// Copy the registration form's active field to the system clipboard
     /// through the shared selection helper (same toast contract as every
@@ -541,7 +542,7 @@ impl App {
         if let Some(d) = self.dialog.current_mut() {
             d.cursor.note_activity();
         }
-        match key.code {
+        let consumed = match key.code {
             KeyCode::Enter => {
                 if self.save_registration_form() {
                     self.dialog.pop();
@@ -603,7 +604,12 @@ impl App {
                     false
                 }
             }
-        }
+        };
+        // Keep the accidental-close draft in sync with whatever is now on
+        // the panel (a no-op unless the MCP form is still open — a save
+        // or Esc has just popped it).
+        self.sync_mcp_form_draft();
+        consumed
     }
 
     /// Validate and persist whichever registration form is open.
@@ -958,21 +964,58 @@ impl App {
             "MCP server added",
             format!("“{saved}” connects on the next agent loop."),
         );
+        // The user confirmed with Enter: the draft served its purpose and
+        // must not leak into the next registration.
+        self.mcp_form_draft = None;
         true
     }
 
-    /// Open the MCP registration form: all four fields on one panel, blank
-    /// for a new server.
+    /// Open the MCP registration form: all four fields on one panel.
+    /// Prefills from the accidental-close draft (see
+    /// [`crate::routes::settings::McpFormDraft`]) so closing the box
+    /// without Enter never loses typed content; the draft is only dropped
+    /// by a successful save or by the user erasing the fields themselves.
     pub(in crate::app) fn open_mcp_form(&mut self) {
+        let draft = self.mcp_form_draft.clone().unwrap_or_default();
         self.dialog.show(DialogType::McpForm {
-            name: String::new(),
-            endpoint: String::new(),
-            timeout: String::new(),
-            api_key: String::new(),
-            field: 0,
-            cursor_pos: 0,
+            name: draft.name,
+            endpoint: draft.endpoint,
+            timeout: draft.timeout,
+            api_key: draft.api_key,
+            field: draft.field,
+            cursor_pos: draft.cursor_pos,
             selection: None,
         });
+    }
+
+    /// Refresh the MCP registration draft from the open form so an
+    /// accidental close (Esc, click outside) can be reopened with
+    /// everything the user had typed. A no-op unless the topmost dialog
+    /// is an MCP form — in particular it never touches the draft after a
+    /// successful save has cleared it.
+    pub(in crate::app) fn sync_mcp_form_draft(&mut self) {
+        let draft = self.dialog.current().and_then(|d| match &d.dialog_type {
+            DialogType::McpForm {
+                name,
+                endpoint,
+                timeout,
+                api_key,
+                field,
+                cursor_pos,
+                ..
+            } => Some(crate::routes::settings::McpFormDraft {
+                name: name.clone(),
+                endpoint: endpoint.clone(),
+                timeout: timeout.clone(),
+                api_key: api_key.clone(),
+                field: *field,
+                cursor_pos: *cursor_pos,
+            }),
+            _ => None,
+        });
+        if let Some(draft) = draft {
+            self.mcp_form_draft = Some(draft);
+        }
     }
 }
 

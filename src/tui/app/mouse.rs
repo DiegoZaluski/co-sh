@@ -748,6 +748,10 @@ impl App {
                     if self.is_theme_dialog_visible() {
                         self.apply_filtered_theme_preview();
                     }
+                    // A click on the MCP registration form moved the field
+                    // focus / cursor: keep the accidental-close draft in
+                    // sync (no-op for every other dialog).
+                    self.sync_mcp_form_draft();
                     return Ok(true);
                 }
                 DialogAction::None => {}
