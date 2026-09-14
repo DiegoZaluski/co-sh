@@ -316,8 +316,38 @@ pub fn lookup_on_path(command: &str) -> Option<PathBuf> {
         if is_executable_file(&candidate) {
             return Some(candidate);
         }
+        for extension in command_extensions() {
+            let with_extension = dir.join(format!("{command}.{extension}"));
+            if is_executable_file(&with_extension) {
+                return Some(with_extension);
+            }
+        }
     }
     None
+}
+
+/// Executable extensions probed after the bare command name.
+///
+/// Windows CreateProcess appends `PATHEXT` entries (default `.COM`, `.EXE`,
+/// `.BAT`, `.CMD`) when no extension is given; PATH discovery must mirror
+/// that or every catalog entry resolves to `None` on Windows. `PATHEXT` is
+/// read when present (order preserved, entries normalized), the documented
+/// default substituted otherwise.
+#[cfg(windows)]
+fn command_extensions() -> Vec<String> {
+    const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
+    let raw = std::env::var("PATHEXT").unwrap_or_else(|_| DEFAULT_PATHEXT.to_owned());
+    raw.split(';')
+        .filter_map(|entry| {
+            let entry = entry.trim();
+            (!entry.is_empty()).then(|| entry.trim_start_matches('.').to_ascii_lowercase())
+        })
+        .collect()
+}
+
+#[cfg(not(windows))]
+fn command_extensions() -> Vec<String> {
+    Vec::new()
 }
 
 #[cfg(unix)]
@@ -341,6 +371,50 @@ fn is_executable_file(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RAII replacement of `PATH` for the duration of one test; restores the
+    /// previous value on drop.
+    ///
+    /// Every caller MUST carry `#[serial_test::serial]`. Other tests that
+    /// read `PATH` (all of them only make *negative* lookups of unique
+    /// command names) stay correct under a temporary mutation window; any
+    /// future test asserting a *positive* lookup on the ambient PATH must
+    /// also take `#[serial_test::serial]`. Windows-only: unix builds never
+    /// mutate `PATH`, keeping the helper dead-code clean there.
+    #[cfg(windows)]
+    struct ScopedPath {
+        previous: Option<std::ffi::OsString>,
+    }
+
+    #[cfg(windows)]
+    impl ScopedPath {
+        fn set<I>(dirs: I) -> Self
+        where
+            I: IntoIterator,
+            I::Item: AsRef<std::ffi::OsStr>,
+        {
+            let previous = std::env::var_os("PATH");
+            // SAFETY: test-only; `#[serial_test::serial]` on the callers
+            // keeps this single-threaded for the duration of the guard.
+            unsafe {
+                std::env::set_var(
+                    "PATH",
+                    std::env::join_paths(dirs).expect("joinable PATH entries"),
+                );
+            }
+            Self { previous }
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for ScopedPath {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.take() {
+                // SAFETY: same single-threaded test context as `set`.
+                unsafe { std::env::set_var("PATH", previous) };
+            }
+        }
+    }
 
     #[test]
     fn handles_extension_is_case_insensitive_and_exact() {
@@ -428,6 +502,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn handles_survives_non_utf8_file_names() {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;
@@ -445,6 +520,47 @@ mod tests {
             rust.handles(weird_rs),
             "lossy extension matching preserved for non-UTF-8 stems"
         );
+    }
+
+    /// Windows discovery must resolve `command` → `command.exe` via the
+    /// PATHEXT-equivalent probe; a bare `dir.join(command)` finds nothing.
+    #[test]
+    #[cfg(windows)]
+    #[serial_test::serial]
+    fn lookup_on_path_finds_windows_executable_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("fake-server-xyz.exe"), b"").unwrap();
+
+        let guard = ScopedPath::set(std::iter::once(dir.path()));
+        let found = lookup_on_path("fake-server-xyz");
+        let absent = lookup_on_path("definitely-not-a-real-binary-xyz");
+        drop(guard);
+
+        assert_eq!(
+            found,
+            Some(dir.path().join("fake-server-xyz.exe")),
+            "PATH lookup must append the Windows executable extension"
+        );
+        assert!(absent.is_none());
+    }
+
+    /// A command already carrying an executable extension is found verbatim,
+    /// and a directory hit does not pass for a file.
+    #[test]
+    #[cfg(windows)]
+    #[serial_test::serial]
+    fn lookup_on_path_verbatim_and_directory_edge_cases() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("fake-server-abc.exe"), b"").unwrap();
+        std::fs::create_dir(dir.path().join("fake-dir-server.exe")).unwrap();
+
+        let guard = ScopedPath::set(std::iter::once(dir.path()));
+        let verbatim = lookup_on_path("fake-server-abc.exe");
+        let directory_is_not_file = lookup_on_path("fake-dir-server");
+        drop(guard);
+
+        assert_eq!(verbatim, Some(dir.path().join("fake-server-abc.exe")));
+        assert!(directory_is_not_file.is_none());
     }
 
     #[test]

@@ -723,7 +723,7 @@ fn resolve_project_root(path: &Path, spec: &ServerSpec, workspace_root: &Path) -
 
     let mut current = file_abs.parent();
     while let Some(dir) = current {
-        if !dir.starts_with(&root_abs) {
+        if !starts_with_fs(dir, &root_abs) {
             break; // left the workspace
         }
         if spec
@@ -738,15 +738,47 @@ fn resolve_project_root(path: &Path, spec: &ServerSpec, workspace_root: &Path) -
     None
 }
 
+/// `Path::starts_with` tuned for the host filesystem's case semantics:
+/// exact on Unix, per-component ASCII case-insensitive on Windows (the
+/// range Windows applies case-insensitively for ASCII path components).
+/// Non-ASCII case pairs stay distinct here — harmless for drive letters
+/// and the ASCII-dominant paths this walk sees. A differently-cased
+/// workspace root or drive letter (`C:\` vs `c:\`) must not exclude every
+/// spec from the marker walk.
+fn starts_with_fs(path: &Path, base: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        if path.starts_with(base) {
+            return true;
+        }
+        let mut path_components = path.components();
+        for base_component in base.components() {
+            let Some(path_component) = path_components.next() else {
+                return false;
+            };
+            if !path_component
+                .as_os_str()
+                .eq_ignore_ascii_case(base_component.as_os_str())
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    #[cfg(not(windows))]
+    path.starts_with(base)
+}
+
 /// Best-effort canonicalization of a resolved project root.
 ///
 /// Without it, the same directory reached through different lexical paths
 /// (a symlink into the tree, a non-canonical workspace root) produces
-/// distinct `ClientKey`s — and thus two processes of the same server for one
+/// distinct `ClientKey`s — and thus two processes of one server for one
 /// project. When the path cannot be canonicalized (it may not exist yet),
 /// the lexical path is kept: distinct-but-equal keys degrade to a redundant
 /// server, never to a missing one.
-fn canonical_root(path: &Path) -> PathBuf {
+pub(crate) fn canonical_root(path: &Path) -> PathBuf {
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     strip_windows_verbatim(&canonical)
 }

@@ -125,8 +125,22 @@ fn uri_from_path_encodes_special_characters() {
 
     #[cfg(windows)]
     {
-        use std::path::PathBuf;
-        let uri = uri_from_path(PathBuf::from(r"C:\\src\\proj")).unwrap();
+        let uri = uri_from_path(Path::new(r"C:\src\proj")).unwrap();
         assert_eq!(uri.as_str(), "file:///C:/src/proj");
     }
+}
+
+/// Windows drive paths must not percent-encode the drive colon and must
+/// convert backslashes to forward slashes.
+#[test]
+#[cfg(windows)]
+fn uri_from_path_encodes_windows_drive() {
+    use crate::lsp::client::uri_from_path;
+
+    let uri = uri_from_path(Path::new(r"C:\src\my project\café.rs")).unwrap();
+    assert_eq!(uri.as_str(), "file:///C:/src/my%20project/caf%C3%A9.rs");
+
+    // Already-forward-slash input is left alone.
+    let uri = uri_from_path(Path::new(r"C:/src/proj")).unwrap();
+    assert_eq!(uri.as_str(), "file:///C:/src/proj");
 }

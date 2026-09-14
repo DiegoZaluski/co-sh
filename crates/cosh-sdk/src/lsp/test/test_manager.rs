@@ -135,9 +135,11 @@ async fn root_resolution_walks_up_to_nearest_marker() {
         .iter()
         .find(|(_, name)| *name == "rust-nested")
         .unwrap();
+    // Manager roots go through `canonical_root`, which strips the Windows
+    // verbatim prefix `canonicalize` adds — expect the stripped form.
     assert_eq!(
         nested.0.root,
-        pkg.canonicalize().unwrap(),
+        super::super::manager::canonical_root(&pkg),
         "nearest marker wins over workspace root"
     );
 
@@ -147,7 +149,7 @@ async fn root_resolution_walks_up_to_nearest_marker() {
         .unwrap();
     assert_eq!(
         markerless.0.root,
-        root.canonicalize().unwrap(),
+        super::super::manager::canonical_root(&root),
         "marker-less specs fall back to workspace root"
     );
 }
@@ -275,8 +277,11 @@ async fn extensionless_files_match_by_name() {
     );
 
     let matches = manager.matches_for_file(&file);
+    assert_eq!(
+        matches[0].0.root,
+        super::super::manager::canonical_root(&root)
+    );
     assert_eq!(matches.len(), 1, "bare `Dockerfile` claims the spec");
-    assert_eq!(matches[0].0.root, root.canonicalize().unwrap());
 }
 
 /// The same project reached through a symlink must resolve to the same
@@ -634,7 +639,10 @@ async fn managed_events_are_tagged_with_identity() {
         match &event.event {
             crate::lsp::Event::StateChanged(_) => {
                 assert_eq!(event.server, "tagged");
-                assert_eq!(event.root, dir.path().canonicalize().unwrap());
+                assert_eq!(
+                    event.root,
+                    super::super::manager::canonical_root(dir.path())
+                );
                 break;
             }
             _ => continue,
@@ -675,4 +683,48 @@ async fn stop_client_targets_only_its_key() {
     let states = manager.states();
     assert_eq!(states.len(), 1);
     assert_eq!(states[0].0.server, "two");
+}
+
+/// The workspace root with different drive/path casing must still be
+/// recognized during the marker walk (Windows filesystems are
+/// case-insensitive; `Path::starts_with` is not).
+#[tokio::test]
+#[cfg(windows)]
+async fn root_resolution_tolerates_path_casing() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    std::fs::write(root.join("Cargo.toml"), "[package]\n").unwrap();
+
+    // Flip the case of the first character of the drive prefix, whatever
+    // drive the tempdir landed on (`C:` ↔ `c:`). Skip when the root has no
+    // drive/UNC prefix — nothing to case-flip.
+    let text = root.display().to_string();
+    let cased = match text.chars().next() {
+        Some(first) if first.is_ascii_alphabetic() => {
+            let mut flipped = String::with_capacity(text.len());
+            flipped.push(first.to_ascii_lowercase());
+            flipped.push_str(&text[1..]);
+            std::path::PathBuf::from(flipped)
+        }
+        // No drive prefix to case-flip; the walk is not exercised here.
+        _ => return,
+    };
+    assert_ne!(
+        cased.display().to_string(),
+        root.display().to_string(),
+        "test must build a differently-cased root to exercise the walk"
+    );
+
+    let manager = Manager::build(
+        ManagerConfig::new(cased),
+        vec![spec("rust", "unused", &[".rs"], &["Cargo.toml"])],
+        never_factory(),
+    );
+
+    let matches = manager.matches_for_file(&root.join("lib.rs"));
+    assert_eq!(
+        matches.len(),
+        1,
+        "differently-cased workspace root must still match"
+    );
 }

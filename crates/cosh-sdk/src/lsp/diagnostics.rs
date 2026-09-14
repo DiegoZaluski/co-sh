@@ -285,6 +285,11 @@ fn severity_then_position(diag: &Diagnostic) -> (DiagnosticSeverity, u32, u32, &
 /// component must be empty or `localhost` (RFC 8089 equivalence); any other
 /// host is not a local file path. Invalid `%` sequences pass through as
 /// literal text rather than failing the whole uri.
+///
+/// The result shape is platform-dependent by design: on Windows a drive
+/// path (`file:///C:/…`) decodes to a plain `C:/…` path (usable as-is);
+/// every other platform keeps the reconstructed leading slash (`/C:/…`
+/// shape for the same uri).
 pub fn uri_to_path(uri: &lsp_types::Uri) -> Option<PathBuf> {
     let raw = uri.as_str();
     let rest = raw.strip_prefix("file://")?;
@@ -313,6 +318,25 @@ pub fn uri_to_path(uri: &lsp_types::Uri) -> Option<PathBuf> {
         }
     }
 
+    #[cfg(windows)]
+    {
+        // `split_once('/')` above consumed the leading slash, so a drive
+        // path surfaces as `C:/…` already; anything else (UNC `//…`,
+        // relative paths) keeps the reconstructed leading slash.
+        let decoded = String::from_utf8(decoded)
+            .unwrap_or_else(|err| String::from_utf8_lossy(err.as_bytes()).into_owned());
+        let mut chars = decoded.chars();
+        let is_drive = matches!(chars.next(), Some('A'..='Z' | 'a'..='z'))
+            && matches!(chars.next(), Some(':'));
+        if is_drive {
+            // Already an owned String: no extra copy.
+            Some(PathBuf::from(decoded))
+        } else {
+            Some(PathBuf::from(format!("/{decoded}")))
+        }
+    }
+
+    #[cfg(not(windows))]
     Some(PathBuf::from(format!(
         "/{}",
         String::from_utf8_lossy(&decoded)

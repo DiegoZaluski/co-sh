@@ -196,11 +196,51 @@ fn uri_to_path_handles_authority_component() {
         uri_to_path(&Uri::from_str("file://localhost").unwrap()),
         None
     );
-    // Windows drive-letter form keeps its leading slash shape.
+    // Windows drive-letter form: a plain drive path on Windows, the
+    // `/drive` shape elsewhere (both documented in the function contract).
+    #[cfg(windows)]
+    assert_eq!(
+        uri_to_path(&Uri::from_str("file:///C:/src/a.rs").unwrap()),
+        Some(PathBuf::from(r"C:\src\a.rs"))
+    );
+    #[cfg(not(windows))]
     assert_eq!(
         uri_to_path(&Uri::from_str("file:///C:/src/a.rs").unwrap()),
         Some(PathBuf::from("/C:/src/a.rs"))
     );
+}
+
+/// Windows: `file:///C:/…` must decode to a usable drive path, and the
+/// result must round-trip through [`crate::lsp::client::uri_from_path`].
+#[test]
+#[cfg(windows)]
+fn uri_to_path_yields_drive_paths_on_windows() {
+    assert_eq!(
+        uri_to_path(&Uri::from_str("file:///C:/src/a.rs").unwrap()),
+        Some(PathBuf::from(r"C:\src\a.rs"))
+    );
+    assert_eq!(
+        uri_to_path(&Uri::from_str("file:///C:/my%20project/a.rs").unwrap()),
+        Some(PathBuf::from(r"C:\my project\a.rs"))
+    );
+    // UNC paths are not drive paths: the leading slash stays.
+    assert_eq!(
+        uri_to_path(&Uri::from_str("file:///srv/share/a.rs").unwrap()),
+        Some(PathBuf::from("/srv/share/a.rs"))
+    );
+}
+
+/// Windows: the same file URI always maps back to the same path, and a real
+/// path round-trips through `uri_from_path` → `uri_to_path` unchanged.
+#[test]
+#[cfg(windows)]
+fn uri_round_trip_preserves_windows_paths() {
+    use crate::lsp::client::uri_from_path;
+    use std::path::Path;
+
+    let original = Path::new(r"C:\src\my project\café.rs");
+    let uri = uri_from_path(original).unwrap();
+    assert_eq!(uri_to_path(&uri), Some(original.to_path_buf()));
 }
 
 // ── Settle-wait ──────────────────────────────────────────────────────────
