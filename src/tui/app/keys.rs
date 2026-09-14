@@ -481,6 +481,9 @@ impl App {
                             HomeAction::OpenRag => {
                                 self.show_rag = true;
                             }
+                            HomeAction::Banner(banner_action) => {
+                                self.handle_banner_action(banner_action);
+                            }
                         }
                         return Ok(false);
                     }

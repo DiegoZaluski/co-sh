@@ -2,7 +2,10 @@ use crate::logo::{LOGO, LOGO_WIDTH};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
+pub mod banner;
 pub mod footer;
+
+pub use banner::{BannerAction, BannerContent, BannerView, UpdateStatus};
 
 use cosh_tui::core::types::MouseEvent;
 
@@ -110,6 +113,8 @@ pub enum HomeAction {
     OpenInternalTools,
     OpenAddProvider,
     OpenSettings,
+    /// A click landed on the announcement banner below the menu.
+    Banner(BannerAction),
 }
 
 pub struct HomeView {
@@ -117,6 +122,9 @@ pub struct HomeView {
     pub frame: u64,
     pub anim_active: bool,
     pub anim_total_frames: u64,
+    /// Announcement banner rendered below the menu (release updates now;
+    /// feature news can be added later via [`BannerContent`]).
+    pub banner: BannerView,
 }
 
 impl HomeView {
@@ -126,6 +134,7 @@ impl HomeView {
             frame: 0,
             anim_active: true,
             anim_total_frames: 850,
+            banner: BannerView::new(),
         }
     }
 
@@ -176,7 +185,6 @@ impl HomeView {
         }
     }
 
-    #[allow(clippy::unused_self)]
     pub fn handle_mouse(&self, mouse: &MouseEvent, area: Rect) -> Option<HomeAction> {
         let cx = area.x + area.width / 2;
         let logo_start_y = area.y + 2;
@@ -192,6 +200,11 @@ impl HomeView {
 
         let my = mouse.y;
         let mx = mouse.x;
+
+        // Banner (below the menu) takes precedence over the menu rows.
+        if let Some(banner_action) = self.banner.handle_click(mx, my) {
+            return Some(HomeAction::Banner(banner_action));
+        }
 
         for (i, _item) in MENU_ITEMS.iter().enumerate() {
             let item_y = menu_y + i as u16;
@@ -274,19 +287,51 @@ impl HomeView {
             draw_text_line(buf, &entry, menu_left, my, area.width, style);
         }
 
+        // Announcement banner (release updates): a horizontal rectangle
+        // anchored BOTTOM-UP — it sits just above the footer with a 2-line
+        // gap, not right below the menu. Its height comes from the banner's
+        // own internal items (BannerView::height), never hardcoded here.
+        const SIDEBAR_RESERVE: u16 = 22;
+        const BANNER_FOOTER_GAP: u16 = 2;
         let key_hints = "show session history ctrl+B | show keyboard shortcuts ctrl+K";
+        let hints_visible = (key_hints.len() as u16) + SIDEBAR_RESERVE <= area.width;
+        let hints_y = area.bottom().saturating_sub(2);
+        // First row BELOW the menu: neither the footer nor the banner may
+        // ever encroach on it. The menu always wins on short terminals.
+        let menu_bottom = menu_y + MENU_ITEMS.len() as u16;
+        // Shrink-height policy — HIDE, never overlap. As the terminal gets
+        // shorter: the footer (key hints) is hidden first once the menu would
+        // reach its row, then the banner once the gap between the menu and
+        // the bottom can no longer fit it.
+        let hints_fits = hints_visible && hints_y >= menu_bottom;
+        // Anchor from the hints row (or terminal bottom when the hints are
+        // hidden): banner bottom edge = anchor - gap, then subtract the
+        // banner's own height to get its top row.
+        let anchor_y = if hints_fits { hints_y } else { area.bottom() };
+        let banner_top = anchor_y
+            .saturating_sub(BANNER_FOOTER_GAP + self.banner.height());
+        let banner_fits =
+            banner_top >= menu_bottom && banner_top >= area.y;
+        if banner_fits {
+            self.banner.render(buf, area, theme, banner_top, anchor_y);
+        } else {
+            // Hidden: drop the click hitboxes from the previous frame so a
+            // stale on-screen button can never receive clicks.
+            self.banner.clear_hitboxes();
+        }
+
         // Hide the hints once the terminal is too narrow to also fit the left
         // panel: expanding the sidebar narrows the usable width by
         // SIDEBAR_WIDTH (22), so only show them while they'd still fit in that
-        // worst case.
-        const SIDEBAR_RESERVE: u16 = 22;
-        if (key_hints.len() as u16) + SIDEBAR_RESERVE <= area.width {
+        // worst case. They are ALSO hidden when the terminal is too short and
+        // the menu would reach their row (shrink-height policy above).
+        if hints_fits {
             let hint_x = cx.saturating_sub(key_hints.len() as u16 / 2);
             draw_text_line(
                 buf,
                 key_hints,
                 hint_x,
-                area.bottom().saturating_sub(2),
+                hints_y,
                 area.width,
                 Style::default().fg(muted),
             );

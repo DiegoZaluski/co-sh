@@ -15,6 +15,7 @@ mod state;
 mod theme;
 mod types;
 mod ui;
+mod update;
 mod usage;
 mod util;
 

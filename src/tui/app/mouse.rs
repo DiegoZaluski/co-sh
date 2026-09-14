@@ -1079,6 +1079,9 @@ impl App {
                     crate::routes::home::HomeAction::OpenRag => {
                         self.show_rag = true;
                     }
+                    crate::routes::home::HomeAction::Banner(banner_action) => {
+                        self.handle_banner_action(banner_action);
+                    }
                 }
                 return Ok(true);
             }

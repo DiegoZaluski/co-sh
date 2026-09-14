@@ -38,6 +38,62 @@ impl App {
         });
     }
 
+    /// Handle a click (or Enter/`u` key press) on the home banner's update
+    /// announcement: run the update pipeline or open the changelog page.
+    pub(super) fn handle_banner_action(&mut self, action: crate::routes::home::BannerAction) {
+        use crate::routes::home::BannerAction;
+
+        let Some(crate::routes::home::BannerContent::ReleaseUpdate { tag, .. }) =
+            self.home_view.banner.content.clone()
+        else {
+            return;
+        };
+
+        match action {
+            BannerAction::OpenChangelog => {
+                let url = self
+                    .update_changelog_url
+                    .clone()
+                    .unwrap_or_else(|| format!("https://github.com/{}/releases/tag/{tag}", crate::update::REPO));
+                std::thread::spawn(move || {
+                    if let Err(err) = open::that(url) {
+                        log::error!("Failed to open changelog URL: {err}");
+                    }
+                });
+            }
+            BannerAction::StartUpdate => {
+                // Fire-and-forget: the pipeline downloads/installs and
+                // RELAUNCHES cosh when it finishes, so the very next step is
+                // to close this TUI. No toast, no spinner, no in-app state —
+                // the terminal closing and reopening IS the feedback.
+                crate::update::spawn_update_pipeline(&tag);
+                self.should_quit = true;
+            }
+        }
+    }
+
+    /// Drain update-related events from the background release check (drives
+    /// the banner content). Called once per frame.
+    pub(super) fn pump_update_events(&mut self) {
+        use crate::routes::home::{BannerContent, UpdateStatus};
+
+        while let Ok(event) = self.update_event_rx.try_recv() {
+            match event {
+                crate::update::UpdateEvent::CheckFinished(Some(release)) => {
+                    self.update_changelog_url = Some(release.url.clone());
+                    self.home_view.banner.content = Some(BannerContent::ReleaseUpdate {
+                        version: release.version.clone(),
+                        tag: release.tag.clone(),
+                    });
+                    self.home_view.banner.status = UpdateStatus::Idle;
+                }
+                crate::update::UpdateEvent::CheckFinished(None) => {
+                    // Up to date or check failed: banner stays hidden.
+                }
+            }
+        }
+    }
+
     /// Rebuild the right panel from the CURRENT session's persisted tool
     /// parts (todos, bash runs, subagent windows). Called after every
     /// session-switch path resets the panel: the panel content belongs to
