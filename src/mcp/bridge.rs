@@ -1,7 +1,10 @@
 use cosh_sdk::connector::{ToolDefinition, ToolFunction};
 use cosh_sdk::extract_action::ToolSchema;
+use rmcp::model::{
+    CallToolResult, GetPromptResult, Prompt, PromptMessage, ReadResourceResult, Resource,
+    ResourceTemplate, Tool,
+};
 use serde::{Deserialize, Serialize};
-use rmcp::model::{CallToolResult, GetPromptResult, Prompt, PromptMessage, ReadResourceResult, Resource, ResourceTemplate, Tool};
 
 /// Cosh-side view of one MCP resource or resource template. Templates and
 /// concrete resources share one shape so the TUI can list them uniformly,
@@ -320,9 +323,7 @@ pub fn resource_to_text(result: &ReadResourceResult) -> String {
         .contents
         .iter()
         .filter_map(|content| match content {
-            rmcp::model::ResourceContents::TextResourceContents { text, .. } => {
-                Some(text.clone())
-            }
+            rmcp::model::ResourceContents::TextResourceContents { text, .. } => Some(text.clone()),
             _ => None,
         })
         .collect::<Vec<_>>()

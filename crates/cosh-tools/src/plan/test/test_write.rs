@@ -34,7 +34,11 @@ fn plan_replaces_its_list_on_every_write() {
     let mut plan = Plan::new();
     plan.todo_write(&[input("Old")]).unwrap();
     plan.todo_write(&[input("New A"), input("New B")]).unwrap();
-    assert_eq!(plan.list().items.len(), 2, "the previous list is fully replaced");
+    assert_eq!(
+        plan.list().items.len(),
+        2,
+        "the previous list is fully replaced"
+    );
 }
 
 #[test]
@@ -191,10 +195,10 @@ fn key_shadowing_task_id_rejected() {
 #[test]
 fn unknown_key_nags() {
     let output = todo_write(&[with_deps("A", vec!["ghost-key".into()])]).unwrap();
-    let has_nag = output
-        .nags
-        .iter()
-        .any(|n| n.message.contains("neither a sibling key nor an existing task id"));
+    let has_nag = output.nags.iter().any(|n| {
+        n.message
+            .contains("neither a sibling key nor an existing task id")
+    });
     assert!(has_nag, "unknown key should nag: {:?}", output.nags);
 }
 

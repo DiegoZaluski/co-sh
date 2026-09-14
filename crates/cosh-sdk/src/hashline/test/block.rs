@@ -200,7 +200,9 @@ fn apply_to_resolves_block_and_matches_replace() {
     let block_result = block_section
         .apply_to(text, Some(stub_resolver as BlockResolver))
         .expect("apply_to should succeed");
-    let replace_result = replace_section.apply_to(text, None).expect("apply_to should succeed");
+    let replace_result = replace_section
+        .apply_to(text, None)
+        .expect("apply_to should succeed");
 
     assert_eq!(
         block_result.text,

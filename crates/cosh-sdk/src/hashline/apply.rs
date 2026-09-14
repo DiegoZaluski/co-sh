@@ -544,7 +544,8 @@ fn group_variants(
             let mut plans: Vec<(Option<u32>, Option<u32>, usize)> = vec![(None, None, 0)];
             if group.start == trailing {
                 let previous = nearest_content(lines, group.start as isize - 2, -1);
-                let fits = previous.is_none_or(|line| indent_columns(line) == indent_columns(trail));
+                let fits =
+                    previous.is_none_or(|line| indent_columns(line) == indent_columns(trail));
                 if first_essential && fits && indent_columns(trail) > indent_columns(first) {
                     plans.push((None, Some(group.start), 1));
                 } else if baseline
@@ -557,8 +558,9 @@ fn group_variants(
                 let next = nearest_content(lines, group.start as isize, 1);
                 let previous = nearest_content(lines, trailing as isize - 2, -1);
                 let before_first = nearest_content(lines, group.start as isize - 2, -1);
-                let selected_boundary = enclosing_boundaries(lines, path, group.start + 1, group.end)
-                    .contains(&group.start);
+                let selected_boundary =
+                    enclosing_boundaries(lines, path, group.start + 1, group.end)
+                        .contains(&group.start);
                 let structural_edge = STRUCTURAL_CLOSER_RE.is_match(first.trim())
                     && indent_columns(first) == indent_columns(lead)
                     && indent_columns(first)
@@ -590,9 +592,7 @@ fn group_variants(
                 }
                 if baseline
                     && first_essential
-                    && before_first.is_some_and(|line| {
-                        indent_columns(first) < indent_columns(line)
-                    })
+                    && before_first.is_some_and(|line| indent_columns(first) < indent_columns(line))
                     && indent_columns(lead) > indent_columns(first)
                 {
                     ambiguous = true;
@@ -750,12 +750,9 @@ fn repair_boundaries(
     combos.sort_by_key(|combo| (combo.touched, combo.kept, combo.dropped));
     let mut best: Option<(Combo, String)> = None;
     for combo in combos {
-        if best
-            .as_ref()
-            .is_some_and(|(value, _)| {
-                (combo.touched, combo.kept, combo.dropped) > (value.touched, value.kept, value.dropped)
-            })
-        {
+        if best.as_ref().is_some_and(|(value, _)| {
+            (combo.touched, combo.kept, combo.dropped) > (value.touched, value.kept, value.dropped)
+        }) {
             break;
         }
         let candidate = splice_variants(edits, &groups, &combo.choices);
@@ -791,11 +788,18 @@ fn repair_boundaries(
         .filter_map(|((group, variants), choice)| {
             choice.map(|index| {
                 let variant = &variants[index];
-                boundary_variant_repair_warning(group.start, variant.kept as u32, variant.dropped as u32)
+                boundary_variant_repair_warning(
+                    group.start,
+                    variant.kept as u32,
+                    variant.dropped as u32,
+                )
             })
         })
         .collect();
-    Ok(Some((splice_variants(edits, &groups, &combo.choices), warnings)))
+    Ok(Some((
+        splice_variants(edits, &groups, &combo.choices),
+        warnings,
+    )))
 }
 
 #[derive(Clone)]
@@ -862,7 +866,11 @@ fn body_relocatable(rows: &[&str], path: &str) -> bool {
     false
 }
 
-fn repair_landings(edits: &[Edit], lines: &[String], path: Option<&str>) -> (Vec<Edit>, Vec<String>) {
+fn repair_landings(
+    edits: &[Edit],
+    lines: &[String],
+    path: Option<&str>,
+) -> (Vec<Edit>, Vec<String>) {
     let mut groups: Vec<((u32, u32), InsertGroup)> = Vec::new();
     for (index, edit) in edits.iter().enumerate() {
         if let Edit::Insert {
@@ -920,7 +928,8 @@ fn repair_landings(edits: &[Edit], lines: &[String], path: Option<&str>) -> (Vec
                 if !has_content(text) {
                     continue;
                 }
-                if !STRUCTURAL_CLOSER_RE.is_match(text) || !leading_indent(text).starts_with(&target)
+                if !STRUCTURAL_CLOSER_RE.is_match(text)
+                    || !leading_indent(text).starts_with(&target)
                 {
                     break;
                 }
@@ -966,9 +975,8 @@ fn repair_landings(edits: &[Edit], lines: &[String], path: Option<&str>) -> (Vec
                         .into_iter()
                         .filter(|node| {
                             node.end_line > group.anchor
-                                && indent_columns(
-                                    &lines[(node.start_line - 1) as usize],
-                                ) <= target_cols
+                                && indent_columns(&lines[(node.start_line - 1) as usize])
+                                    <= target_cols
                         })
                         .map(|node| node.end_line)
                         .collect();
@@ -989,14 +997,9 @@ fn repair_landings(edits: &[Edit], lines: &[String], path: Option<&str>) -> (Vec
                         }
                         if parses_cleanly(Some(path), &materialize(lines, &trial).0) {
                             out = trial;
-                            warnings.push(after_insert_opener_escape_warning(
-                                group.anchor,
-                                landing,
-                            ));
-                            trace!(
-                                "opener escape: anchor {} -> {landing}",
-                                group.anchor
-                            );
+                            warnings
+                                .push(after_insert_opener_escape_warning(group.anchor, landing));
+                            trace!("opener escape: anchor {} -> {landing}", group.anchor);
                             break;
                         }
                     }
@@ -1036,7 +1039,7 @@ fn materialize(original: &[String], edits: &[Edit]) -> (String, Option<u32>) {
                 .entry(anchor.line)
                 .or_default()
                 .push((index, edit.clone())),
-            Edit::Block { .. } => {},
+            Edit::Block { .. } => {}
         }
     }
     for (line, mut bucket) in buckets.into_iter().rev() {
@@ -1061,7 +1064,7 @@ fn materialize(original: &[String], edits: &[Edit]) -> (String, Option<u32>) {
                 } => replacements.push(text),
                 Edit::Insert { text, .. } => before.push(text),
                 Edit::Delete { .. } => delete = true,
-                Edit::Block { .. } => {},
+                Edit::Block { .. } => {}
             }
         }
         if before.is_empty() && replacements.is_empty() && after.is_empty() && !delete {
@@ -1114,11 +1117,7 @@ fn materialize(original: &[String], edits: &[Edit]) -> (String, Option<u32>) {
 /// Returns an error when an anchor is out of bounds, an unresolved
 /// `Edit::Block` variant reached the applier (a wiring bug), or a boundary
 /// echo cannot be placed without ambiguity.
-pub fn apply_edits(
-    text: &str,
-    edits: &[Edit],
-    path: Option<&str>,
-) -> Result<ApplyResult, String> {
+pub fn apply_edits(text: &str, edits: &[Edit], path: Option<&str>) -> Result<ApplyResult, String> {
     if edits.is_empty() {
         return Ok(ApplyResult {
             text: text.to_string(),
@@ -1135,9 +1134,8 @@ pub fn apply_edits(
         target.push(edit.clone());
     }
     if let Some(phantom) = phantom_line(&lines) {
-        target.retain(
-            |edit| !matches!(edit, Edit::Delete { anchor, .. } if anchor.line == phantom),
-        );
+        target
+            .retain(|edit| !matches!(edit, Edit::Delete { anchor, .. } if anchor.line == phantom));
     }
     for (index, edit) in target.clone().iter().enumerate() {
         target[index] = with_index(edit, u32::try_from(index).unwrap_or(u32::MAX));
@@ -1168,7 +1166,10 @@ pub fn apply_edits(
     };
     if authored_parses {
         if let Some(ambiguity) = ambiguities.first() {
-            trace!("reject: ambiguous echo at {}..{}", ambiguity.start, ambiguity.end);
+            trace!(
+                "reject: ambiguous echo at {}..{}",
+                ambiguity.start, ambiguity.end
+            );
             return Err(ambiguous_boundary_echo_message(
                 ambiguity.start,
                 ambiguity.end,

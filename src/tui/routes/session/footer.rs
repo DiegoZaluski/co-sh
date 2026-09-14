@@ -68,9 +68,7 @@ impl FooterView {
             // Display width, not byte length: right-anchored segments and
             // the draw limit must both count terminal cells (wide glyphs
             // occupy two).
-            let disp_w = |s: &str| {
-                unicode_width::UnicodeWidthStr::width(s).max(1) as u16
-            };
+            let disp_w = |s: &str| unicode_width::UnicodeWidthStr::width(s).max(1) as u16;
 
             let mut rx = area.right().saturating_sub(2);
 

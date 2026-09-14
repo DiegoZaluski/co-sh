@@ -23,13 +23,13 @@ use crate::routes::add_provider::AddProviderView;
 use crate::routes::home::HomeView;
 use crate::routes::router::RouterView;
 use crate::routes::session::SessionView;
+use crate::routes::session::file_explorer::FileExplorerView;
 use crate::routes::session::free_gateway_recommendation::FreeGatewayRecommendationDialog;
 use crate::routes::session::permission::PermissionDialog;
 use crate::routes::session::question::QuestionDialog;
 use crate::routes::session::queue_choice::QueueChoiceDialog;
 use crate::routes::session::queue_choice::QueueTarget;
 use crate::routes::session::right_panel::{RIGHT_PANEL_WIDTH, should_show_right_panel};
-use crate::routes::session::file_explorer::FileExplorerView;
 use crate::routes::session::sidebar::SidebarView;
 use crate::routes::settings::SettingsView;
 use crate::routes::tools::InternalToolsView;
@@ -71,7 +71,10 @@ use terminal::{init_terminal, restore_terminal};
 /// never exposes raw session data, satisfying the SDK's
 /// `with_session_id` contract ("never raw user data").
 pub(crate) fn session_affinity_id(session_id: &str) -> String {
-    format!("{:016x}", xxhash_rust::xxh64::xxh64(session_id.as_bytes(), 0))
+    format!(
+        "{:016x}",
+        xxhash_rust::xxh64::xxh64(session_id.as_bytes(), 0)
+    )
 }
 
 /// The editable prompt text of a message: its non-synthetic text parts
@@ -485,8 +488,7 @@ impl App {
             let update_event_tx = update_event_tx.clone();
             async move {
                 let release = crate::update::fetch_latest_release().await;
-                let _ = update_event_tx
-                    .send(crate::update::UpdateEvent::CheckFinished(release));
+                let _ = update_event_tx.send(crate::update::UpdateEvent::CheckFinished(release));
             }
         });
 
@@ -742,9 +744,7 @@ impl App {
 
             // Refresh the footer's git branch at its own rate-limited cadence
             // (the tracker internally throttles disk reads to twice a second).
-            self.state.git_branch = self
-                .branch_tracker
-                .current(&self.state.working_directory);
+            self.state.git_branch = self.branch_tracker.current(&self.state.working_directory);
 
             if self.needs_full_redraw {
                 // The external editor scribbled over the screen: force a
@@ -1024,9 +1024,7 @@ impl App {
     /// had. When no editor can be launched (or the handover fails) this
     /// silently does nothing — the explorer remains useful for navigation.
     fn open_file_in_editor(&mut self, path: &std::path::Path) {
-        let Some(command) =
-            crate::util::editor::resolve_editor_command(&self.setup.editor)
-        else {
+        let Some(command) = crate::util::editor::resolve_editor_command(&self.setup.editor) else {
             return;
         };
         // Command form "vim -u NONE": first token is the binary, the rest

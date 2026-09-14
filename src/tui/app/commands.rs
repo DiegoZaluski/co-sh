@@ -51,10 +51,12 @@ impl App {
 
         match action {
             BannerAction::OpenChangelog => {
-                let url = self
-                    .update_changelog_url
-                    .clone()
-                    .unwrap_or_else(|| format!("https://github.com/{}/releases/tag/{tag}", crate::update::REPO));
+                let url = self.update_changelog_url.clone().unwrap_or_else(|| {
+                    format!(
+                        "https://github.com/{}/releases/tag/{tag}",
+                        crate::update::REPO
+                    )
+                });
                 std::thread::spawn(move || {
                     if let Err(err) = open::that(url) {
                         log::error!("Failed to open changelog URL: {err}");

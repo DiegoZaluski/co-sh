@@ -50,9 +50,9 @@ pub mod types;
 mod test;
 
 pub use bridge::{
-    expand_resource_template, is_tool_error, match_resource_template, prompt_to_info,
-    prompt_to_text, resource_to_info, resource_to_text, result_to_text, template_to_info,
-    tool_to_definition, tool_to_schema, PromptArgumentInfo, PromptInfo, ResourceInfo,
+    PromptArgumentInfo, PromptInfo, ResourceInfo, expand_resource_template, is_tool_error,
+    match_resource_template, prompt_to_info, prompt_to_text, resource_to_info, resource_to_text,
+    result_to_text, template_to_info, tool_to_definition, tool_to_schema,
 };
 pub use config::{
     CredentialInput, HttpTransport, McpConfig, McpEntryDraft, McpServerEntry, McpTransport,

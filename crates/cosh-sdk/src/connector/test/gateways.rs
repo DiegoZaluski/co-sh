@@ -6,8 +6,9 @@
 //! and the Go shared-account key fallback (`OPENCODE_GO_API_KEY` →
 //! `OPENCODE_API_KEY`). Both gateways always require an API key.
 
-use super::super::{Connector, OPENCODE_GO_PROVIDER, OPENCODE_ZEN_PROVIDER, get_provider,
-    get_provider_env_var};
+use super::super::{
+    Connector, OPENCODE_GO_PROVIDER, OPENCODE_ZEN_PROVIDER, get_provider, get_provider_env_var,
+};
 use super::common::{ENV_LOCK, EnvGuard, mock_server};
 
 const CHAT_OK: &str = r#"{"choices":[{"message":{"content":"ok"}}]}"#;

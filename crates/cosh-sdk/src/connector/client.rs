@@ -81,7 +81,8 @@ impl Connector {
     pub fn effective_max_tokens(&self) -> Option<u32> {
         match self.provider?.family {
             Family::Claude => Some(claude::caller::request_max_tokens(
-                &self.params, self.effective_model()?,
+                &self.params,
+                self.effective_model()?,
             )),
             _ => self.params.max_tokens,
         }

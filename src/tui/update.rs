@@ -208,14 +208,13 @@ pub fn spawn_update_pipeline(latest_tag: &str) {
         // bitmask can make CreateProcess fail outright.
         #[cfg(windows)]
         {
-            let script_url = format!(
-                "https://raw.githubusercontent.com/{REPO}/{latest_tag}/download.ps1"
-            );
+            let script_url =
+                format!("https://raw.githubusercontent.com/{REPO}/{latest_tag}/download.ps1");
             // Process-unique temp name: a predictable shared path would let
             // a local process pre-create or swap the script between the
             // download and its execution under -ExecutionPolicy Bypass.
-            let script = std::env::temp_dir()
-                .join(format!("cosh-update-{}.ps1", std::process::id()));
+            let script =
+                std::env::temp_dir().join(format!("cosh-update-{}.ps1", std::process::id()));
             let cmd = format!(
                 "curl.exe -fsSL -o \"{}\" \"{script_url}\" && powershell -NoProfile -ExecutionPolicy Bypass -File \"{}\" & set COSH_UPDATE_RC=!ERRORLEVEL! & del /q \"{}\" & start \"\" \"{current_exe}\" & exit /b !COSH_UPDATE_RC!",
                 script.display(),
@@ -245,9 +244,8 @@ pub fn spawn_update_pipeline(latest_tag: &str) {
         // relaunch cosh on the freed terminal.
         #[cfg(unix)]
         {
-            let script_url = format!(
-                "https://raw.githubusercontent.com/{REPO}/{latest_tag}/download.sh"
-            );
+            let script_url =
+                format!("https://raw.githubusercontent.com/{REPO}/{latest_tag}/download.sh");
             let script = format!(
                 "set -o pipefail; curl -fsSL {script_url} | COSH_VERSION={latest_tag} bash; exec {current_exe}"
             );

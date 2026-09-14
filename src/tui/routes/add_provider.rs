@@ -96,8 +96,7 @@ impl AddProviderView {
     }
 
     fn clamp_selection(&mut self) {
-        self.selection
-            .set_visible_count(self.visible_count.max(1));
+        self.selection.set_visible_count(self.visible_count.max(1));
         self.selection.clamp(self.filtered_providers().len());
     }
 
@@ -113,14 +112,12 @@ impl AddProviderView {
 
     pub fn select_next(&mut self) {
         self.selection.set_visible_count(self.visible_count.max(1));
-        self.selection
-            .select_next(self.filtered_providers().len());
+        self.selection.select_next(self.filtered_providers().len());
     }
 
     pub fn select_prev(&mut self) {
         self.selection.set_visible_count(self.visible_count.max(1));
-        self.selection
-            .select_prev(self.filtered_providers().len());
+        self.selection.select_prev(self.filtered_providers().len());
     }
 
     pub fn selected_provider(&self) -> Option<ProviderEntry> {
@@ -173,13 +170,7 @@ impl AddProviderView {
         self.find_row_for_mouse(mouse, area)
     }
 
-    pub fn render(
-        &mut self,
-        buf: &mut Buffer,
-        area: Rect,
-        theme: &Theme,
-        setup: &Setup,
-    ) {
+    pub fn render(&mut self, buf: &mut Buffer, area: Rect, theme: &Theme, setup: &Setup) {
         let providers = self.filtered_providers();
         let fg = rgba_color(theme.text);
         let muted = rgba_color(theme.text_muted);
@@ -338,7 +329,10 @@ mod tests {
         let mut buf = Buffer::empty(term);
         view.render(&mut buf, render_area, &theme, &setup);
 
-        assert!(view.visible_count > 0, "viewport must show at least one row");
+        assert!(
+            view.visible_count > 0,
+            "viewport must show at least one row"
+        );
         let max_w = max_row_width();
         let row_x = render_area.x + (render_area.width.saturating_sub(max_w as u16)) / 2;
         let name_x = row_x + 2;

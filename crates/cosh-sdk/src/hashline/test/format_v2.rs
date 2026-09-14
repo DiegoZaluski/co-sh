@@ -3,7 +3,9 @@ use super::super::parser::{parse_patch, parse_patch_streaming};
 
 fn apply_patch(text: &str, diff: &str) -> String {
     let (edits, _) = parse_patch(diff).unwrap();
-    apply_edits(text, &edits, None).expect("apply_edits should succeed").text
+    apply_edits(text, &edits, None)
+        .expect("apply_edits should succeed")
+        .text
 }
 
 #[test]

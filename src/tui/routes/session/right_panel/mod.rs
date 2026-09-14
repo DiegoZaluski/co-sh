@@ -217,8 +217,8 @@ pub fn render_right_panel(
         // BOTTOM_MARGIN keeps the panel's bottom gap out of the subagent
         // budget: without it a tall window list would grow back over the
         // reserved row in Phase 2.
-        let budget = (viewport_h - gaps - fixed_nat - frame - BOTTOM_MARGIN)
-            .max(types::MIN_WINDOW_ROWS);
+        let budget =
+            (viewport_h - gaps - fixed_nat - frame - BOTTOM_MARGIN).max(types::MIN_WINDOW_ROWS);
         state.subagent_wrap_w = wrap_w;
         if has_subagent {
             state.resolve_visible_subagents(wrap_w, budget);
@@ -1814,11 +1814,15 @@ mod tests {
         );
         state.start_pty("ls".to_string(), None);
         state.complete_last_pty(
-            (0..40).map(|i| format!("bash line {i}\n")).collect::<String>(),
+            (0..40)
+                .map(|i| format!("bash line {i}\n"))
+                .collect::<String>(),
         );
         state.start_pty("subagent: kilo".to_string(), None);
         state.complete_last_pty(
-            (0..40).map(|i| format!("kilo line {i}\n")).collect::<String>(),
+            (0..40)
+                .map(|i| format!("kilo line {i}\n"))
+                .collect::<String>(),
         );
 
         // Viewport small enough that every section overflows and each gets

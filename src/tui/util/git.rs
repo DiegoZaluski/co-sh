@@ -86,8 +86,8 @@ pub fn resolve_branch(git_dir: &Path) -> Option<String> {
     // Detached HEAD: HEAD holds a raw object id (40 hex chars for SHA-1
     // repositories, 64 for SHA-256). Validate the shape before displaying —
     // anything else is a corrupted or unsupported HEAD, not a commit.
-    let is_sha = (head.len() == 40 || head.len() == 64)
-        && head.chars().all(|c| c.is_ascii_hexdigit());
+    let is_sha =
+        (head.len() == 40 || head.len() == 64) && head.chars().all(|c| c.is_ascii_hexdigit());
     if is_sha {
         Some(head.chars().take(7).collect())
     } else {
@@ -136,11 +136,7 @@ mod tests {
 
     fn init_repo(dir: &Path) {
         fs::create_dir_all(dir.join(".git")).unwrap();
-        fs::write(
-            dir.join(".git/HEAD"),
-            "ref: refs/heads/feature/login\n",
-        )
-        .unwrap();
+        fs::write(dir.join(".git/HEAD"), "ref: refs/heads/feature/login\n").unwrap();
     }
 
     #[test]

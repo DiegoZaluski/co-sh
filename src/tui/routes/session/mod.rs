@@ -1368,11 +1368,13 @@ impl SessionView {
                         && matches!(tool.status, ToolStatus::Completed)
                         && Self::lsp_notes_count(notes) > 0
                     {
-                        let expanded = tool_state.is_expanded_or(
-                            &Self::lsp_notes_id(tool),
-                            config.diagnostics_mode,
-                        );
-                        let header = if expanded { "- Diagnostics" } else { "+ Diagnostics" };
+                        let expanded = tool_state
+                            .is_expanded_or(&Self::lsp_notes_id(tool), config.diagnostics_mode);
+                        let header = if expanded {
+                            "- Diagnostics"
+                        } else {
+                            "+ Diagnostics"
+                        };
                         let header_style = Style::default().fg(rgba_color(theme.error));
                         draw_text_line(buf, header, x, y, max_w, header_style);
                         y += 1;
@@ -1560,8 +1562,7 @@ impl SessionView {
                 // matches the drawn box even mid-loop (Running bash/glob with
                 // streamed output already draw their box).
                 let is_block = Self::tool_is_block(t);
-                let notes_h =
-                    Self::lsp_notes_height(t, tool_state, config.diagnostics_mode);
+                let notes_h = Self::lsp_notes_height(t, tool_state, config.diagnostics_mode);
                 if is_block {
                     let output = t.output.as_deref().unwrap_or("").trim();
                     // Add 2 rows for the block's internal padding (top/bottom border lines),
@@ -1605,8 +1606,7 @@ impl SessionView {
                         // underestimated the box by up to ~19 rows, so the walk
                         // started the next part inside the box and the cached
                         // height clipped it.
-                        let display_lines =
-                            tool_render::write_box_lines(t).unwrap_or(0);
+                        let display_lines = tool_render::write_box_lines(t).unwrap_or(0);
                         // Internal box: top padding (1) + title + content +
                         // bottom padding (1) = lines + 3; +2 external margins.
                         display_lines + 5
@@ -1690,19 +1690,13 @@ impl SessionView {
     /// `+`/`- LSP` header, plus one clipped line per finding when expanded.
     /// Must stay in sync with the notes drawn at the end of the
     /// `Part::Tool` branch in `render_parts`.
-    fn lsp_notes_height(
-        t: &ToolPart,
-        tool_state: &ToolRenderState,
-        default_expanded: bool,
-    ) -> u16 {
+    fn lsp_notes_height(t: &ToolPart, tool_state: &ToolRenderState, default_expanded: bool) -> u16 {
         match (&t.lsp_notes, &t.status) {
             (Some(n), ToolStatus::Completed) => {
                 let count = Self::lsp_notes_count(n);
                 if count == 0 {
                     0
-                } else if tool_state
-                    .is_expanded_or(&Self::lsp_notes_id(t), default_expanded)
-                {
+                } else if tool_state.is_expanded_or(&Self::lsp_notes_id(t), default_expanded) {
                     1 + count
                 } else {
                     1
@@ -2155,20 +2149,15 @@ impl SessionView {
                             && (config.show_generic_tool_output
                                 || tool_render::tool_display(&tool.tool) != "generic")
                         {
-                            let notes_rows =
-                                i32::from(Self::lsp_notes_height(
-                                    tool,
-                                    &self.tool_state,
-                                    config.diagnostics_mode,
-                                ));
-                            if notes_rows > 0
-                                && click_y >= part_y + part_h - notes_rows
-                            {
+                            let notes_rows = i32::from(Self::lsp_notes_height(
+                                tool,
+                                &self.tool_state,
+                                config.diagnostics_mode,
+                            ));
+                            if notes_rows > 0 && click_y >= part_y + part_h - notes_rows {
                                 let id = Self::lsp_notes_id(tool);
-                                self.tool_state.toggle_with_default(
-                                    &id,
-                                    config.diagnostics_mode,
-                                );
+                                self.tool_state
+                                    .toggle_with_default(&id, config.diagnostics_mode);
                                 return true;
                             }
                         }

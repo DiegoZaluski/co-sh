@@ -204,7 +204,9 @@ fn effective_max_tokens(user_max: Option<u32>, thinking: &Option<ThinkingConfig>
 
 /// Predict the wire output ceiling with the same thinking policy as builders.
 pub(crate) fn request_max_tokens(params: &Parameters, model: &str) -> u32 {
-    let thinking = params.reasoning_effort.as_deref()
+    let thinking = params
+        .reasoning_effort
+        .as_deref()
         .and_then(|effort| thinking_for_effort(model, effort));
     effective_max_tokens(params.max_tokens, &thinking)
 }

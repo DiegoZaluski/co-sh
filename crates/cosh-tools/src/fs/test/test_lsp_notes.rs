@@ -5,7 +5,9 @@
 use std::sync::Arc;
 
 use cosh_sdk::lsp::test_support::{auto_respond, spawn_fake_server};
-use cosh_sdk::lsp::{ClientFactory, DiagnosticsEngine, LanguageServer, Manager, ManagerConfig, ServerSpec};
+use cosh_sdk::lsp::{
+    ClientFactory, DiagnosticsEngine, LanguageServer, Manager, ManagerConfig, ServerSpec,
+};
 use serde_json::json;
 
 use crate::fs::Fs;
@@ -96,7 +98,10 @@ async fn write_attaches_error_notes_by_default() {
     assert_eq!(notes.errors[0].message, "boom");
     assert_eq!(notes.errors[0].path, "sample.fake");
     assert_eq!(notes.errors[0].line, 1);
-    assert!(notes.warnings.is_empty(), "warnings need an explicit opt-in");
+    assert!(
+        notes.warnings.is_empty(),
+        "warnings need an explicit opt-in"
+    );
 }
 
 #[tokio::test]
@@ -109,14 +114,22 @@ async fn warnings_guard_opts_in_and_without_lsp_suppresses() {
     let fs = Fs::new().cwd(dir.path()).with_lsp(Arc::clone(&lsp));
 
     // Opt-in: errors AND warnings.
-    let results = fs.warnings().write(vec![target("sample.fake")]).await.unwrap();
+    let results = fs
+        .warnings()
+        .write(vec![target("sample.fake")])
+        .await
+        .unwrap();
     let notes = results[0].lsp_notes.as_ref().unwrap();
     assert_eq!(notes.errors.len(), 1);
     assert_eq!(notes.warnings.len(), 1);
     assert_eq!(notes.warnings[0].message, "meh");
 
     // Suppression: the guard only affects the chained call...
-    let results = fs.without_lsp().write(vec![target("sample.fake")]).await.unwrap();
+    let results = fs
+        .without_lsp()
+        .write(vec![target("sample.fake")])
+        .await
+        .unwrap();
     assert!(results[0].lsp_notes.is_none());
 
     // ...and the default policy is back on the next call.

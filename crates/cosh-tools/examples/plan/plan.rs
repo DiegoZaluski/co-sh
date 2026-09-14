@@ -10,9 +10,7 @@
 //! cargo run --example plan
 //! ```
 
-use cosh_tools::plan::{
-    Plan, TodoItemInput, TodoList, TodoStatus, TodoWriteInput, todo_write,
-};
+use cosh_tools::plan::{Plan, TodoItemInput, TodoList, TodoStatus, TodoWriteInput, todo_write};
 
 /// Render a list the way the harness's protected context block does:
 /// checkbox markers and dependencies.
@@ -61,7 +59,10 @@ fn main() {
     }))
     .unwrap();
     let out = plan.todo_write(&input.todos).unwrap();
-    show_nags("1. full write (whole plan in one call, keys resolved)", &out.nags);
+    show_nags(
+        "1. full write (whole plan in one call, keys resolved)",
+        &out.nags,
+    );
     show("   ...ids assigned in listed order", &plan);
 
     // ── 2. Dependencies are advisory: a missing dep nags, not errors ------

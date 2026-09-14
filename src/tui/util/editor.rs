@@ -104,9 +104,7 @@ mod tests {
             Some(cmd) => assert!(FALLBACK_EDITORS.contains(&cmd.as_str())),
             None => {
                 // Legitimate only when NONE of the fallback editors exist.
-                assert!(!FALLBACK_EDITORS
-                    .iter()
-                    .any(|name| command_exists(name)));
+                assert!(!FALLBACK_EDITORS.iter().any(|name| command_exists(name)));
             }
         }
     }

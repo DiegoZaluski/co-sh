@@ -1383,3 +1383,150 @@ fn test_theme_syntax_colors_highlight_code_block() {
         "`let` should be highlighted with the theme keyword color"
     );
 }
+
+fn table_top_right_corner(buf: &Buffer, width: u16) -> u16 {
+    (0..width)
+        .rev()
+        .find(|&x| buf.cell((x, 0)).is_some_and(|cell| cell.symbol() == "┐"))
+        .expect("table top-right corner must be rendered inside the area")
+}
+
+/// A table with long columns must retain its outer border when constrained to
+/// the narrow width used by subagent boxes.
+#[test]
+fn test_very_wide_table_keeps_complete_right_border() {
+    let text = "| first header col | second header col | third header col | fourth header col |\n|---|---|---|---|\n| aaa | bbb | ccc | ddd |\n";
+    let w = 42;
+    let md = make_md(text);
+    let mut buf = Buffer::empty(Rect::new(0, 0, w, 20));
+    md.render_self(&mut buf, Rect::new(0, 0, w, 20));
+
+    let right = table_top_right_corner(&buf, w);
+    assert!(right < w);
+    assert!(
+        (0..20).any(|y| buf
+            .cell((right, y))
+            .is_some_and(|cell| cell.symbol() == "┘")),
+        "right border must include the bottom corner"
+    );
+}
+
+/// Tables whose normal padded minimum exceeds the area drop padding and keep
+/// their right border instead of being clipped by the buffer.
+#[test]
+fn test_many_column_table_keeps_complete_right_border() {
+    let names = [
+        "a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9", "a10", "a11", "a12",
+    ];
+    let header: Vec<String> = names.iter().map(|name| format!("| {name} ")).collect();
+    let separator = "|---".repeat(names.len());
+    let row: Vec<String> = names.iter().map(|name| format!("| x{name} ")).collect();
+    let text = format!("{}|\n{}|\n{}|\n", header.concat(), separator, row.concat());
+    let w = 42;
+    let md = make_md(&text);
+    let mut buf = Buffer::empty(Rect::new(0, 0, w, 20));
+    md.render_self(&mut buf, Rect::new(0, 0, w, 20));
+
+    let right = table_top_right_corner(&buf, w);
+    assert!(right < w);
+    assert!(
+        (0..20).any(|y| buf
+            .cell((right, y))
+            .is_some_and(|cell| cell.symbol() == "┘")),
+        "right border must include the bottom corner"
+    );
+}
+
+#[test]
+fn test_very_wide_table_estimate_matches_painted_layout() {
+    let text = "| first header col | second header col | third header col | fourth header col |\n|---|---|---|---|\n| aaa | bbb | ccc | ddd |\n";
+    let w = 42;
+    let est = usize::from(crate::core::renderables::markdown::estimate_height(text, w));
+    let mut buf = Buffer::empty(Rect::new(0, 0, w, est as u16 + 2));
+    let md = make_md(text);
+    md.render_self(&mut buf, Rect::new(0, 0, w, est as u16));
+    let painted = (0..est)
+        .filter(|&y| (0..w).any(|x| buf.cell((x, y as u16)).is_some_and(|c| c.symbol() != " ")))
+        .count();
+    assert_eq!(
+        est, painted,
+        "estimate must match the rendered table height"
+    );
+}
+
+#[test]
+fn test_exactly_fitting_table_keeps_corners() {
+    let text = "| A | B | C | D | E |\n|---|---|---|---|---|\n| 1 | 2 | 3 | 4 | 5 |\n";
+    let w = 20;
+    let md = make_md(text);
+    let mut buf = Buffer::empty(Rect::new(0, 0, w, 5));
+    md.render_self(&mut buf, Rect::new(0, 0, w, 5));
+
+    assert_eq!(table_top_right_corner(&buf, w), 19);
+    assert_eq!(buf.cell((19, 4)).unwrap().symbol(), "┘");
+    assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "┌");
+    for (index, header) in ["A", "B", "C", "D", "E"].iter().enumerate() {
+        let x = (index as u16) * 4 + 1;
+        assert_eq!(buf.cell((x, 1)).unwrap().symbol(), *header);
+    }
+}
+
+#[test]
+fn test_narrow_table_drops_padding_and_keeps_left_border() {
+    let text = "| A | B | C | D | E |\n|---|---|---|---|---|\n| 1 | 2 | 3 | 4 | 5 |\n";
+    let w = 19;
+    let md = make_md(text);
+    let mut buf = Buffer::empty(Rect::new(0, 0, w, 5));
+    md.render_self(&mut buf, Rect::new(0, 0, w, 5));
+
+    let right = table_top_right_corner(&buf, w);
+    assert_eq!(right, 10, "zero padding should preserve every column");
+    assert_eq!(buf.cell((0, 1)).unwrap().symbol(), "│");
+    assert_eq!(buf.cell((right, 1)).unwrap().symbol(), "│");
+    assert_eq!(buf.cell((0, 4)).unwrap().symbol(), "└");
+    assert_eq!(buf.cell((right, 4)).unwrap().symbol(), "┘");
+    for (index, header) in ["A", "B", "C", "D", "E"].iter().enumerate() {
+        assert_eq!(
+            buf.cell((1 + index as u16 * 2, 1)).unwrap().symbol(),
+            *header
+        );
+    }
+}
+
+#[test]
+fn test_zero_width_column_keeps_distinct_borders() {
+    let md = make_md("| long header |\n|---|\n| long body |\n");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 2, 5));
+    md.render_self(&mut buf, Rect::new(0, 0, 2, 5));
+
+    assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "┌");
+    assert_eq!(buf.cell((1, 0)).unwrap().symbol(), "┐");
+    assert_eq!(buf.cell((0, 1)).unwrap().symbol(), "│");
+    assert_eq!(buf.cell((1, 1)).unwrap().symbol(), "│");
+    assert_eq!(buf.cell((0, 4)).unwrap().symbol(), "└");
+    assert_eq!(buf.cell((1, 4)).unwrap().symbol(), "┘");
+}
+
+#[test]
+fn test_too_many_zero_width_columns_are_truncated_to_a_complete_grid() {
+    let md = make_md("| a | b | c |\n|---|---|---|\n| 1 | 2 | 3 |\n");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 2, 5));
+    md.render_self(&mut buf, Rect::new(0, 0, 2, 5));
+
+    assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "┌");
+    assert_eq!(buf.cell((1, 0)).unwrap().symbol(), "┐");
+    assert_eq!(buf.cell((0, 4)).unwrap().symbol(), "└");
+    assert_eq!(buf.cell((1, 4)).unwrap().symbol(), "┘");
+}
+
+#[test]
+fn test_one_cell_area_omits_table_instead_of_overlapping_borders() {
+    let md = make_md("| header |\n|---|\n| body |\n");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 1, 5));
+    md.render_self(&mut buf, Rect::new(0, 0, 1, 5));
+
+    assert!(
+        (0..5).all(|y| buf.cell((0, y)).is_some_and(|cell| cell.symbol() == " ")),
+        "a one-cell area cannot contain distinct table borders"
+    );
+}

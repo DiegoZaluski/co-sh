@@ -164,8 +164,7 @@ async fn ctrl_p_toggles_right_panel_visibility() {
     let mut panel = RightPanelState::new();
     panel.start_pty("echo hi".to_string(), None);
     panel.complete_last_pty("hi\n".to_string());
-    panel.panel_focus =
-        Some(crate::routes::session::right_panel::types::PanelFocus::Bash);
+    panel.panel_focus = Some(crate::routes::session::right_panel::types::PanelFocus::Bash);
     app.state.right_panel = panel;
     assert!(should_show_right_panel(120, &app.state.right_panel));
 

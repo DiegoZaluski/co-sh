@@ -308,10 +308,8 @@ impl HomeView {
         // hidden): banner bottom edge = anchor - gap, then subtract the
         // banner's own height to get its top row.
         let anchor_y = if hints_fits { hints_y } else { area.bottom() };
-        let banner_top = anchor_y
-            .saturating_sub(BANNER_FOOTER_GAP + self.banner.height());
-        let banner_fits =
-            banner_top >= menu_bottom && banner_top >= area.y;
+        let banner_top = anchor_y.saturating_sub(BANNER_FOOTER_GAP + self.banner.height());
+        let banner_fits = banner_top >= menu_bottom && banner_top >= area.y;
         if banner_fits {
             self.banner.render(buf, area, theme, banner_top, anchor_y);
         } else {

@@ -134,7 +134,14 @@ impl BannerView {
     /// Renders the banner centered horizontally in `area`, starting at row
     /// `y`, never extending below `bottom_limit` (e.g. the key-hints row).
     /// No-op when there is no content or the terminal is too small.
-    pub fn render(&mut self, buf: &mut Buffer, area: Rect, theme: &Theme, y: u16, bottom_limit: u16) {
+    pub fn render(
+        &mut self,
+        buf: &mut Buffer,
+        area: Rect,
+        theme: &Theme,
+        y: u16,
+        bottom_limit: u16,
+    ) {
         // Fresh hitboxes every frame: stale areas from a previous layout
         // must never receive clicks.
         self.button_area = None;
@@ -166,11 +173,8 @@ impl BannerView {
         // bytes — the link contains multi-byte BMP glyphs.
         let title_w = Self::text_width(&headline) + 1; // +1: 🎉 renders 2 cells
         let button_w = Self::text_width(button_label);
-        let mut banner_w = title_w
-            .max(Self::text_width(link_text))
-            .max(button_w)
-            + INNER_PADDING * 2
-            + 2;
+        let mut banner_w =
+            title_w.max(Self::text_width(link_text)).max(button_w) + INNER_PADDING * 2 + 2;
         if banner_w > area.width.saturating_sub(2) {
             banner_w = area.width.saturating_sub(2);
         }

@@ -48,11 +48,11 @@ fn dump(name: &str, text: &str, edits: &[Edit], path: Option<&str>) {
             for warning in &result.warnings {
                 println!("{warning}");
             }
-        },
+        }
         Err(error) => {
             println!("ERROR:");
             println!("{error}");
-        },
+        }
     }
     println!();
 }
@@ -74,7 +74,12 @@ fn parity_dump() {
     dump(
         "drop_leading_and_trailing_echo",
         "function f() {\n  keepA();\n  old1();\n  old2();\n  keepB();\n}",
-        &replacement(3, 4, &["  keepA();", "  new1();", "  new2();", "  keepB();"], 1),
+        &replacement(
+            3,
+            4,
+            &["  keepA();", "  new1();", "  new2();", "  keepB();"],
+            1,
+        ),
         Some("x.ts"),
     );
     dump(

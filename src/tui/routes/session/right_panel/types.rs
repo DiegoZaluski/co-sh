@@ -2075,10 +2075,7 @@ mod tests {
                 format!(r#"{{"status": "{status}", "description": "{description}"}}"#)
             })
             .collect();
-        format!(
-            r#"{{"list": {{"items": [{}]}}}}"#,
-            items.join(",")
-        )
+        format!(r#"{{"list": {{"items": [{}]}}}}"#, items.join(","))
     }
 
     #[test]
