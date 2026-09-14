@@ -2814,6 +2814,15 @@ fn heap_in_use_bytes() -> usize {
     unsafe { mallinfo2().uordblks }
 }
 
+/// Non-Linux fallback: glibc `mallinfo2` does not exist there. The memory
+/// benches that sample it are `#[ignore]`d and tuned for Linux/heaptrack, so
+/// a constant 0 keeps them compiling on Windows/macOS (their asserts are
+/// relative and stay trivially true).
+#[cfg(not(target_os = "linux"))]
+fn heap_in_use_bytes() -> usize {
+    0
+}
+
 /// Resident set size from /proc/self/status (Linux).
 fn rss_bytes() -> usize {
     std::fs::read_to_string("/proc/self/status")

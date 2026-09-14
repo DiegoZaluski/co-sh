@@ -447,15 +447,12 @@ impl JsonParseState {
                     log::debug!("Closing due to: key");
                     true
                 }
-                ',' if in_object_value || in_array => {
-                    if closing_char_count % 2 == 0 {
-                        // We're ready to close the value
-                        log::debug!("Closing due to: value");
-                        true
-                    } else {
-                        // We're not ready to close the value
-                        false
-                    }
+                ','
+                    if (in_object_value || in_array) && closing_char_count % 2 == 0 =>
+                {
+                    // We're ready to close the value
+                    log::debug!("Closing due to: value");
+                    true
                 }
                 '}' if in_object_value => {
                     // We're ready to close the value

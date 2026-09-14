@@ -34,6 +34,7 @@ mod cost;
 mod dialogs;
 mod keys;
 mod model_persistence;
+mod paste_burst;
 mod providers;
 mod rag;
 mod render;

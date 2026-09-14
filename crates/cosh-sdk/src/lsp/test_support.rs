@@ -149,7 +149,7 @@ pub async fn auto_respond(mut server: FakeServer, replies: Vec<(String, Value)>)
         let Ok(parsed) = serde_json::from_str::<Value>(&body) else {
             continue;
         };
-        if !parsed.get("id").is_some_and(|id| !id.is_null()) {
+        if parsed.get("id").is_none_or(|id| id.is_null()) {
             continue; // notifications need no answer
         }
         let id = parsed["id"].clone();

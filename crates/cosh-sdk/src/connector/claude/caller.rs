@@ -1080,22 +1080,22 @@ fn parse_sse_stream(
                         Ok(v) => {
                             let kind = v["type"].as_str().unwrap_or("");
                             match kind {
-                                "content_block_delta" => {
-                                    if v["delta"]["type"] == "text_delta" {
-                                        let token = v["delta"]["text"]
-                                            .as_str()
-                                            .unwrap_or("")
-                                            .to_owned();
-                                        yield Ok(StreamChunk {
-                                            raw: data,
-                                            token,
-                                            reasoning: String::new(),
-                                            finish_reason: None,
-                                            thinking_blocks: None,
-                                            tool_call: None,
-                                            reset: false,
-                                        });
-                                    }
+                                "content_block_delta"
+                                    if v["delta"]["type"] == "text_delta" =>
+                                {
+                                    let token = v["delta"]["text"]
+                                        .as_str()
+                                        .unwrap_or("")
+                                        .to_owned();
+                                    yield Ok(StreamChunk {
+                                        raw: data,
+                                        token,
+                                        reasoning: String::new(),
+                                        finish_reason: None,
+                                        thinking_blocks: None,
+                                        tool_call: None,
+                                        reset: false,
+                                    });
                                 }
                                 "message_delta" => {
                                     let finish_reason = v["delta"]["stop_reason"]

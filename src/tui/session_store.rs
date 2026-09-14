@@ -2640,7 +2640,12 @@ mod tests {
     /// The lock is bound to the open file description: a holder KILLED while
     /// holding it is cleaned up by the kernel, so the store writes straight
     /// through with no orphan lockfile and no visible contention.
+    ///
+    /// Unix-only by design: the harness drives the external `flock(1)` CLI
+    /// and `kill -9 -- -<pgid>` to simulate a foreign killed process — tools
+    /// that do not exist on Windows.
     #[test]
+    #[cfg(unix)]
     fn killed_lock_holder_releases_the_store() {
         use std::os::unix::process::CommandExt;
         let dir = tempfile::tempdir().unwrap();

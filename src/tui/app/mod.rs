@@ -48,6 +48,7 @@ mod events;
 mod gateway_recommendation;
 mod keys;
 mod mouse;
+mod paste_burst;
 mod providers;
 mod rag;
 mod render;
@@ -279,6 +280,11 @@ pub struct App {
     /// one-off compaction task runs (there is no loop status to read —
     /// between loops the app is Idle). Cleared by the CompactOnDemand event.
     manual_compaction_active: bool,
+    /// Windows paste-burst coalescer state (see `paste_burst` module docs):
+    /// tracks the cadence of plain character keys so an Enter arriving in the
+    /// middle of a console-paste burst is classified as a paste artifact
+    /// (newline) instead of a user submit.
+    paste_burst: paste_burst::PasteBurstState,
     /// The (session id, message id) opened by the CURRENT streaming attempt
     /// (the `BeginAssistant` → `ClearAssistant` window). A mid-stream reset
     /// may discard ONLY this message, and ONLY while its session is still on
@@ -529,6 +535,7 @@ impl App {
             pending_gateway_message: None,
             title_generated: false,
             manual_compaction_active: false,
+            paste_burst: paste_burst::PasteBurstState::default(),
             stream_msg_id: None,
             #[cfg(feature = "embed")]
             pending_delete_db_name: None,
@@ -726,6 +733,10 @@ impl App {
             }
 
             self.poll_events();
+            // Windows paste-burst: no key arrived within the burst window →
+            // the buffered paste lands atomically in the prompt (through the
+            // normal `handle_paste` path) instead of trickling char by char.
+            self.paste_burst_flush_if_due();
             self.pump_queued_messages();
         }
 

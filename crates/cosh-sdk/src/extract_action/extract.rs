@@ -597,15 +597,13 @@ impl ExtractAction {
                         self.state.current_key.clear();
                     }
                 }
-                ':' => {
-                    if self.state.depth == 1_i32 {
-                        if let Some(ref key) = self.state.pending_key.take()
-                            && !is_known_key(key, &self.tool_keys)
-                        {
-                            self.state.early_exit = true;
-                        }
-                        self.state.depth1_state = Some(Depth1State::InValue);
+                ':' if self.state.depth == 1_i32 => {
+                    if let Some(ref key) = self.state.pending_key.take()
+                        && !is_known_key(key, &self.tool_keys)
+                    {
+                        self.state.early_exit = true;
                     }
+                    self.state.depth1_state = Some(Depth1State::InValue);
                 }
                 ',' if self.state.depth == 1_i32 => {
                     self.state.depth1_state = Some(Depth1State::ExpectKey);

@@ -1,5 +1,6 @@
 use std::io;
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
@@ -17,6 +18,26 @@ impl App {
     /// `handle_events`). Extracted so tests can dispatch synthetic keys.
     pub(super) fn process_key_event(&mut self, key: KeyEvent) -> io::Result<bool> {
         if key.kind == KeyEventKind::Press {
+            // Windows paste-burst coalescing (see `paste_burst` module docs):
+            // a console paste arrives as one plain Char key per character plus
+            // one plain Enter per line break (crossterm has no bracketed paste
+            // on Windows), and each of those Enters used to submit the prompt
+            // — splitting a large paste into one message per line. While a
+            // burst is in flight its characters and Enters are buffered in the
+            // coalescer instead of being applied one by one; when the burst
+            // ends the WHOLE buffer is replayed through `PromptView::
+            // handle_paste`, so long pastes land atomically and compress into
+            // the `[Pasted ~N lines]` placeholder exactly like on Unix. The
+            // gate is a no-op unless the bare prompt owns the keyboard.
+            let burst_now = Instant::now();
+            if self.paste_burst_handle_key(&key, burst_now) {
+                return Ok(false);
+            }
+            // A key arrived after the burst ended: land the pending paste
+            // atomically BEFORE this key acts (an Enter here must submit the
+            // full pasted text, not the pre-burst prompt content).
+            self.paste_burst_flush_if_due();
+
             // Modal sovereignty: while a Confirm dialog is on screen it owns
             // the ENTIRE keyboard — the slash menu, the prompt, the sidebar
             // and every panel must not react to any key until the user
@@ -325,10 +346,7 @@ impl App {
                     self.rag_view.handle_insert_newline();
                     return Ok(false);
                 }
-                self.prompt_view.note_activity();
-                let pos = self.prompt_view.cursor_pos;
-                self.prompt_view.input.insert(pos, '\n');
-                self.prompt_view.cursor_pos = pos + 1;
+                self.insert_newline_in_prompt();
                 return Ok(false);
             }
 
@@ -1413,5 +1431,15 @@ impl App {
             }
         }
         Ok(false)
+    }
+
+    /// Insert a newline at the prompt cursor (Shift/Ctrl/Alt+Enter, and the
+    /// paste-burst Enter suppression route through here so both paths keep
+    /// identical cursor/activity semantics).
+    fn insert_newline_in_prompt(&mut self) {
+        self.prompt_view.note_activity();
+        let pos = self.prompt_view.cursor_pos;
+        self.prompt_view.input.insert(pos, '\n');
+        self.prompt_view.cursor_pos = pos + 1;
     }
 }
