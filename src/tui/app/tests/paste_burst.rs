@@ -67,7 +67,9 @@ async fn windows_paste_burst_is_not_split_into_multiple_sends() {
         "during the burst the paste must be buffered, not streamed into the prompt"
     );
     assert!(
-        app.state.current_session().is_none_or(|s| s.messages.is_empty()),
+        app.state
+            .current_session()
+            .is_none_or(|s| s.messages.is_empty()),
         "paste line breaks must NEVER auto-send (the user did not press Enter)"
     );
 
@@ -118,7 +120,9 @@ async fn paste_burst_trailing_newline_does_not_send() {
         app.process_key_event(evt).unwrap();
     }
     assert!(
-        app.state.current_session().is_none_or(|s| s.messages.is_empty()),
+        app.state
+            .current_session()
+            .is_none_or(|s| s.messages.is_empty()),
         "a paste ending in a newline must not auto-send"
     );
 
@@ -143,7 +147,9 @@ async fn paste_burst_consecutive_newlines_do_not_send() {
         app.process_key_event(evt).unwrap();
     }
     assert!(
-        app.state.current_session().is_none_or(|s| s.messages.is_empty()),
+        app.state
+            .current_session()
+            .is_none_or(|s| s.messages.is_empty()),
         "blank lines inside a paste must not auto-send"
     );
 
@@ -227,7 +233,11 @@ async fn mashed_enters_in_empty_prompt_still_send() {
         .unwrap();
 
     let session = app.state.current_session().expect("session exists");
-    assert_eq!(session.messages.len(), 1, "only 'hi' is sent; the empty second Enter sends nothing");
+    assert_eq!(
+        session.messages.len(),
+        1,
+        "only 'hi' is sent; the empty second Enter sends nothing"
+    );
     assert_eq!(super::message_prompt_text(&session.messages[0]), "hi");
 }
 
@@ -246,7 +256,9 @@ async fn short_line_paste_is_not_split_into_multiple_sends() {
         app.process_key_event(evt).unwrap();
     }
     assert!(
-        app.state.current_session().is_none_or(|s| s.messages.is_empty()),
+        app.state
+            .current_session()
+            .is_none_or(|s| s.messages.is_empty()),
         "short lines must not split-send: Enter within 80ms of text is a paste artifact"
     );
 
@@ -353,7 +365,11 @@ async fn leaked_count_does_not_survive_a_send() {
     app.process_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
     assert_eq!(
-        app.state.current_session().expect("session exists").messages.len(),
+        app.state
+            .current_session()
+            .expect("session exists")
+            .messages
+            .len(),
         1,
         "precondition: 'ab' sent as one message"
     );

@@ -208,10 +208,10 @@ pub fn ambiguous_boundary_echo_message(
     let where_clause = match side {
         BoundarySide::Leading => {
             format!("opens by restating the {count} line(s) just above the range")
-        },
+        }
         BoundarySide::Trailing => {
             format!("ends by restating the {count} line(s) just below the range")
-        },
+        }
     };
     format!(
         "`replace {start_line}..{end_line}:` rejected: the body {where_clause}, but is too \

@@ -164,7 +164,10 @@ mod oracle {
     #[test]
     fn none_path_and_unknown_extension_are_never_clean() {
         assert!(!parses_cleanly(None, "fn f() {}"));
-        assert!(!parses_cleanly(Some("x.definitely-unknown-ext"), "fn f() {}"));
+        assert!(!parses_cleanly(
+            Some("x.definitely-unknown-ext"),
+            "fn f() {}"
+        ));
     }
 
     /// Upstream: empty source short-circuits to unparsed (summary.rs L166).
@@ -437,10 +440,7 @@ mod landings {
         let file = "function f() {\n    if (x) {\n        for (y) {\n            a();\n        }\n    }\n    b();\n}\n";
         let (outer_text, outer_warnings) = apply_ok(file, &[insert_after(4, "    c();", 1)], None);
         assert_eq!(outer_text.lines().nth(6), Some("    c();"));
-        assert!(
-            outer_warnings[0]
-                .contains("moved past 2 closing lines to after line 6")
-        );
+        assert!(outer_warnings[0].contains("moved past 2 closing lines to after line 6"));
         let (inner_text, _) = apply_ok(file, &[insert_after(4, "        c();", 1)], None);
         assert_eq!(inner_text.lines().nth(5), Some("        c();"));
     }
@@ -515,7 +515,12 @@ mod composite {
     fn two_groups_repaired_independently() {
         let file = "const a = {\n\tx() {\n\t\treturn 1;\n\t},\n};\nconst b = {\n\ty() {\n\t\treturn 2;\n\t},\n};";
         let mut edits = replacement(5, 5, &["\tw() {", "\t\treturn 9;", "\t},"], 1);
-        edits.extend(replacement(10, 10, &["\tz() {", "\t\treturn 8;", "\t},"], 2));
+        edits.extend(replacement(
+            10,
+            10,
+            &["\tz() {", "\t\treturn 8;", "\t},"],
+            2,
+        ));
         let (text, warnings) = apply_ok(file, &edits, Some("x.ts"));
         assert_eq!(
             text,
@@ -641,7 +646,10 @@ mod defensive {
             &replacement(2, 3, &["\tsetup2();", "\trun2();", "});"], 1),
             Some("x.ts"),
         );
-        assert_eq!(text, "it('a', () => {\n\tsetup2();\n\trun2();\n});\nafter();");
+        assert_eq!(
+            text,
+            "it('a', () => {\n\tsetup2();\n\trun2();\n});\nafter();"
+        );
         assert!(!warnings.is_empty());
     }
 }

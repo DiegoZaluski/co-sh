@@ -14,10 +14,7 @@ use cosh_tools::{
     find::{Find, GlobCallOptions, GlobMatchCallback, GrepMatchCallback},
     fs::{Fs, FsRollbackInput, LspNotes, Target, TargetFile},
     lsp::Lsp,
-    plan::{
-        Plan,
-        types::TodoWriteInput,
-    },
+    plan::{Plan, types::TodoWriteInput},
     question::{Question, types::QuestionInput},
     skills::{
         Skills,
@@ -925,13 +922,19 @@ impl Tools for CoshTools {
                 let targets: Vec<TargetFile> =
                     serde_json::from_value(args["targets"].clone()).map_err(|e| e.to_string())?;
                 let results = self.fs.write(targets).await?;
-                self.emit_lsp_notes("fs_write", results.iter().filter_map(|r| r.lsp_notes.as_ref()));
+                self.emit_lsp_notes(
+                    "fs_write",
+                    results.iter().filter_map(|r| r.lsp_notes.as_ref()),
+                );
                 serde_json::to_string(&results).map_err(|e| e.to_string())
             }
 
             "fs_edit" => {
                 let results = self.fs.edit(args).await?;
-                self.emit_lsp_notes("fs_edit", results.iter().filter_map(|r| r.lsp_notes.as_ref()));
+                self.emit_lsp_notes(
+                    "fs_edit",
+                    results.iter().filter_map(|r| r.lsp_notes.as_ref()),
+                );
                 serde_json::to_string(&results).map_err(|e| e.to_string())
             }
 

@@ -1,4 +1,3 @@
-
 use std::collections::BTreeMap;
 use std::time::SystemTime;
 
@@ -329,10 +328,7 @@ fn render_rename_session_dialog(
 /// padding on each side), capped to the available area width.
 fn confirm_dialog_w(message: &str, area_width: u16) -> u16 {
     let needed = message.len() as u16 + 4;
-    30u16
-        .max(needed)
-        .min(area_width.saturating_sub(4))
-        .max(16)
+    30u16.max(needed).min(area_width.saturating_sub(4)).max(16)
 }
 
 #[derive(Clone)]
@@ -504,14 +500,10 @@ impl std::fmt::Debug for DialogType {
             if s.is_empty() { "" } else { "…" }
         }
         match self {
-            Self::Alert { message } => f
-                .debug_struct("Alert")
-                .field("message", message)
-                .finish(),
-            Self::Confirm { message } => f
-                .debug_struct("Confirm")
-                .field("message", message)
-                .finish(),
+            Self::Alert { message } => f.debug_struct("Alert").field("message", message).finish(),
+            Self::Confirm { message } => {
+                f.debug_struct("Confirm").field("message", message).finish()
+            }
             Self::ThemeList {
                 themes,
                 current,
@@ -665,10 +657,9 @@ impl std::fmt::Debug for DialogType {
                 .field("index", index)
                 .field("preview", preview)
                 .finish(),
-            Self::Shortcuts { scroll } => f
-                .debug_struct("Shortcuts")
-                .field("scroll", scroll)
-                .finish(),
+            Self::Shortcuts { scroll } => {
+                f.debug_struct("Shortcuts").field("scroll", scroll).finish()
+            }
         }
     }
 }

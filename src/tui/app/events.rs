@@ -7,13 +7,13 @@ use ratatui::style::Color;
 
 use super::{App, AppMode};
 use crate::component::spinner_highlight::HighlightSpinner;
+use crate::notification;
 use crate::routes::session::delete::terminated_loop_save_target;
 use crate::routes::session::queue_choice::QueueTarget;
 use crate::session_store::is_valid_session;
 use crate::types::SessionStatus;
 use crate::ui::dialogs::DialogType;
 use cosh::harness::HarnessEvent;
-use crate::notification;
 use cosh::harness::context::ContextManagerState;
 
 /// Process-wide sequence for live-created tool parts' `tool_call_id`s. The
@@ -539,10 +539,9 @@ impl App {
                     // Persist the OWNING session (TUI-A), never the viewed
                     // one. Owner gone (deleted mid-run) → skip save/title.
                     let done_target = match self.active_loop_session_id.clone() {
-                        Some(owner) => terminated_loop_save_target(
-                            Some(owner.as_str()),
-                            |id| self.state.session_cache.contains(id),
-                        ),
+                        Some(owner) => terminated_loop_save_target(Some(owner.as_str()), |id| {
+                            self.state.session_cache.contains(id)
+                        }),
                         None => self.state.current_session_id.clone(),
                     };
                     // Persist session to disk if it has valid dialog
@@ -598,9 +597,7 @@ impl App {
                                     // the same opaque affinity hash as the
                                     // main loop (pins it to the warm backend).
                                     connector = connector
-                                        .with_session_id(super::session_affinity_id(
-                                            &session_id,
-                                        ));
+                                        .with_session_id(super::session_affinity_id(&session_id));
                                     // Disable tools and retry for the title call —
                                     // it is a simple chat completion.
                                     connector = connector
@@ -713,10 +710,9 @@ impl App {
                     // `None` owner = legacy path without owner tracking:
                     // fall back to the current session to preserve behavior.
                     let save_target = match self.active_loop_session_id.clone() {
-                        Some(owner) => terminated_loop_save_target(
-                            Some(owner.as_str()),
-                            |id| self.state.session_cache.contains(id),
-                        ),
+                        Some(owner) => terminated_loop_save_target(Some(owner.as_str()), |id| {
+                            self.state.session_cache.contains(id)
+                        }),
                         None => self.state.current_session_id.clone(),
                     };
                     if save_target.is_some() {

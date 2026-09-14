@@ -5,7 +5,9 @@
 
 use std::collections::HashMap;
 
-use super::super::config::{HttpTransport, McpConfig, McpServerEntry, McpTransport, StdioTransport};
+use super::super::config::{
+    HttpTransport, McpConfig, McpServerEntry, McpTransport, StdioTransport,
+};
 use super::super::era;
 use super::super::manager::{McpManager, http_config, stderr_log_path};
 use super::super::types::ServerStatus;
@@ -229,7 +231,9 @@ fn http_headers_reject_garbage() {
     assert!(http_config(&keyed, Some("sk-test")).is_ok());
     // A key with header-illegal characters is a typed failure, NOT an echo
     // of the secret.
-    let err = http_config(&keyed, Some("bad\nkey")).unwrap_err().to_string();
+    let err = http_config(&keyed, Some("bad\nkey"))
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("authorization"), "{err}");
     assert!(!err.contains("bad"), "secret must not leak: {err}");
 }

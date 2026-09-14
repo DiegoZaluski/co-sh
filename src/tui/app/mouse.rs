@@ -450,9 +450,7 @@ impl App {
                         if let Some(explorer) = &mut self.file_explorer {
                             explorer.select_prev();
                         }
-                    } else if matches!(self.mode(), AppMode::Session)
-                        && self.is_in_right_panel(x)
-                    {
+                    } else if matches!(self.mode(), AppMode::Session) && self.is_in_right_panel(x) {
                         self.state.right_panel.scroll_up_at(y, 3);
                     } else if matches!(self.mode(), AppMode::Session)
                         && self.question_dialog.visible
@@ -526,9 +524,7 @@ impl App {
                         if let Some(explorer) = &mut self.file_explorer {
                             explorer.select_next();
                         }
-                    } else if matches!(self.mode(), AppMode::Session)
-                        && self.is_in_right_panel(x)
-                    {
+                    } else if matches!(self.mode(), AppMode::Session) && self.is_in_right_panel(x) {
                         self.state.right_panel.scroll_down_at(y, 3);
                     } else if matches!(self.mode(), AppMode::Session)
                         && self.question_dialog.visible
@@ -1366,8 +1362,7 @@ impl App {
                 .as_mut()
                 .map(|e| e.handle_mouse(&mouse, sidebar_area))
                 .unwrap_or(crate::routes::session::file_explorer::ExplorerAction::None);
-            if let crate::routes::session::file_explorer::ExplorerAction::OpenFile(path) = action
-            {
+            if let crate::routes::session::file_explorer::ExplorerAction::OpenFile(path) = action {
                 self.open_file_in_editor(&path);
             }
             return true;

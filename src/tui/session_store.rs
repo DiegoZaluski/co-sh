@@ -580,10 +580,7 @@ impl SessionStore {
             return;
         };
         if projection.branches.is_empty()
-            || !projection
-                .branches
-                .values()
-                .all(|branch| branch.deleted)
+            || !projection.branches.values().all(|branch| branch.deleted)
         {
             return;
         }
@@ -1494,24 +1491,12 @@ mod tests {
         assert!(!store.file_path(&child.id).exists());
         assert!(store.revert_session(&session.id, "m2"));
         assert_eq!(
-            store
-                .load_context(&session.id)
-                .unwrap()
-                .todo
-                .unwrap()
-                .items[0]
-                .description,
+            store.load_context(&session.id).unwrap().todo.unwrap().items[0].description,
             "first plan"
         );
         assert!(store.rollback_session(&session.id, "v1"));
         assert_eq!(
-            store
-                .load_context(&session.id)
-                .unwrap()
-                .todo
-                .unwrap()
-                .items[0]
-                .description,
+            store.load_context(&session.id).unwrap().todo.unwrap().items[0].description,
             "future plan"
         );
 
@@ -1551,13 +1536,7 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(
-            store
-                .load_context(&session.id)
-                .unwrap()
-                .todo
-                .unwrap()
-                .items[0]
-                .description,
+            store.load_context(&session.id).unwrap().todo.unwrap().items[0].description,
             "future plan"
         );
 
@@ -3094,7 +3073,10 @@ mod tests {
         store.delete_session("6000");
 
         assert!(!store.has_session("6000"), "the parent is tombstoned");
-        assert!(path.exists(), "the file must survive while its fork is active");
+        assert!(
+            path.exists(),
+            "the file must survive while its fork is active"
+        );
         assert!(
             store.has_session("6000-fork"),
             "the fork must remain loadable"
@@ -3133,7 +3115,10 @@ mod tests {
         store.delete_session("6100-fork");
 
         assert!(!store.has_session("6100-fork"), "the fork is tombstoned");
-        assert!(path.exists(), "the file must survive while its parent is active");
+        assert!(
+            path.exists(),
+            "the file must survive while its parent is active"
+        );
         assert!(store.has_session("6100"), "the parent must remain loadable");
     }
 

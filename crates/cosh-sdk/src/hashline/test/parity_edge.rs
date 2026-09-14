@@ -48,56 +48,130 @@ fn dump(name: &str, text: &str, edits: &[Edit], path: Option<&str>) {
             for warning in &result.warnings {
                 println!("{warning}");
             }
-        },
+        }
         Err(error) => {
             println!("ERROR:");
             println!("{error}");
-        },
+        }
     }
     println!();
 }
 
 #[test]
 fn parity_dump_edge() {
-    dump("E1_authored_parses", "function f() {\n  old();\n}",
-        &replacement(2, 2, &["  new();"], 1), Some("x.ts"));
-    dump("E2_unrepairable", "fn f() {\n}\n",
-        &replacement(1, 2, &["fn f() {"], 1), Some("x.rs"));
-    dump("E3_broken_baseline", "fn broken(",
-        &replacement(1, 1, &["fn f() {"], 1), Some("x.rs"));
-    dump("E4_unknown_ext", "const handlers = {\n\tkeep\n};",
-        &replacement(2, 2, &["changed"], 1), Some("x.unknown"));
-    dump("E5_placement_a", "a {\n}\n",
-        &replacement(2, 2, &["}"], 1), Some("x.rs"));
-    dump("E6_placement_b",
+    dump(
+        "E1_authored_parses",
+        "function f() {\n  old();\n}",
+        &replacement(2, 2, &["  new();"], 1),
+        Some("x.ts"),
+    );
+    dump(
+        "E2_unrepairable",
+        "fn f() {\n}\n",
+        &replacement(1, 2, &["fn f() {"], 1),
+        Some("x.rs"),
+    );
+    dump(
+        "E3_broken_baseline",
+        "fn broken(",
+        &replacement(1, 1, &["fn f() {"], 1),
+        Some("x.rs"),
+    );
+    dump(
+        "E4_unknown_ext",
+        "const handlers = {\n\tkeep\n};",
+        &replacement(2, 2, &["changed"], 1),
+        Some("x.unknown"),
+    );
+    dump(
+        "E5_placement_a",
+        "a {\n}\n",
+        &replacement(2, 2, &["}"], 1),
+        Some("x.rs"),
+    );
+    dump(
+        "E6_placement_b",
         "fn f() {\n    match x {\n        y => 1,\n    }\n}",
-        &replacement(3, 3, &["        z => 2,,"], 1), Some("x.rs"));
+        &replacement(3, 3, &["        z => 2,,"], 1),
+        Some("x.rs"),
+    );
     let mut e7 = replacement(2, 3, &["\tsetup2();", "});"], 1);
     e7.push(delete(4, 2));
-    dump("E7_deleted_neighbor", "it('a', () => {\n\tsetup();\n});\n});\nafter();", &e7, Some("x.ts"));
+    dump(
+        "E7_deleted_neighbor",
+        "it('a', () => {\n\tsetup();\n});\n});\nafter();",
+        &e7,
+        Some("x.ts"),
+    );
     let mut e8 = replacement(2, 3, &["\tz();"], 1);
     e8.extend(replacement(5, 5, &["\tc();"], 2));
-    dump("E8_clean_beside_repaired", "fn f() {\n\ta();\n}\nfn g() {\n\tb();\n}\n", &e8, Some("x.rs"));
+    dump(
+        "E8_clean_beside_repaired",
+        "fn f() {\n\ta();\n}\nfn g() {\n\tb();\n}\n",
+        &e8,
+        Some("x.rs"),
+    );
     let mut e9 = vec![insert_after(3, "    x();", 1)];
     e9.extend(replacement(2, 2, &["    a2();"], 2));
-    dump("E9_insert_replace_compose", "function f() {\n    a();\n    b();\n}\n", &e9, Some("x.js"));
-    dump("E10_opener_escape", "function f() {\n    if (x) {\n        a();\n    }\n    b();\n}\n",
-        &[insert_after(2, "    c();", 1)], Some("x.js"));
-    dump("E11_statement_echo", "foo();\nold();\nbar();",
-        &replacement(2, 2, &["new();", "bar();"], 1), Some("x.ts"));
+    dump(
+        "E9_insert_replace_compose",
+        "function f() {\n    a();\n    b();\n}\n",
+        &e9,
+        Some("x.js"),
+    );
+    dump(
+        "E10_opener_escape",
+        "function f() {\n    if (x) {\n        a();\n    }\n    b();\n}\n",
+        &[insert_after(2, "    c();", 1)],
+        Some("x.js"),
+    );
+    dump(
+        "E11_statement_echo",
+        "foo();\nold();\nbar();",
+        &replacement(2, 2, &["new();", "bar();"], 1),
+        Some("x.ts"),
+    );
     let mut e12 = replacement(5, 5, &["\tw() {", "\t\treturn 9;", "\t},"], 1);
-    e12.extend(replacement(10, 10, &["\tz() {", "\t\treturn 8;", "\t},"], 2));
-    dump("E12_two_groups",
+    e12.extend(replacement(
+        10,
+        10,
+        &["\tz() {", "\t\treturn 8;", "\t},"],
+        2,
+    ));
+    dump(
+        "E12_two_groups",
         "const a = {\n\tx() {\n\t\treturn 1;\n\t},\n};\nconst b = {\n\ty() {\n\t\treturn 2;\n\t},\n};",
-        &e12, Some("x.ts"));
-    dump("E13_underfilled", "fn f() {\n\ta();\n\tb();\n}\n",
-        &replacement(2, 4, &["\ta();"], 1), Some("x.rs"));
-    dump("E14_tab_columns", "function f() {\n\tif (x) {\n\t\t\ta();\n\t\t}\n\t\tb();\n\t}\n",
-        &[insert_after(3, "\t\tc();", 1)], Some("x.js"));
-    dump("E15_landing_slide", "function f() {\n    if (x) {\n        a();\n    }\n    b();\n}\n",
-        &[insert_after(3, "    c();", 1)], None);
-    dump("E16_slide_cross_targeted", "function f() {\n    if (x) {\n        a();\n    }\n    b();\n}\n",
-        &[insert_after(3, "    c();", 1), delete(4, 2)], None);
-    dump("E17_slide_two_levels", "function f() {\n    if (x) {\n        for (y) {\n            a();\n        }\n    }\n    b();\n}\n",
-        &[insert_after(4, "    c();", 1)], None);
+        &e12,
+        Some("x.ts"),
+    );
+    dump(
+        "E13_underfilled",
+        "fn f() {\n\ta();\n\tb();\n}\n",
+        &replacement(2, 4, &["\ta();"], 1),
+        Some("x.rs"),
+    );
+    dump(
+        "E14_tab_columns",
+        "function f() {\n\tif (x) {\n\t\t\ta();\n\t\t}\n\t\tb();\n\t}\n",
+        &[insert_after(3, "\t\tc();", 1)],
+        Some("x.js"),
+    );
+    dump(
+        "E15_landing_slide",
+        "function f() {\n    if (x) {\n        a();\n    }\n    b();\n}\n",
+        &[insert_after(3, "    c();", 1)],
+        None,
+    );
+    dump(
+        "E16_slide_cross_targeted",
+        "function f() {\n    if (x) {\n        a();\n    }\n    b();\n}\n",
+        &[insert_after(3, "    c();", 1), delete(4, 2)],
+        None,
+    );
+    dump(
+        "E17_slide_two_levels",
+        "function f() {\n    if (x) {\n        for (y) {\n            a();\n        }\n    }\n    b();\n}\n",
+        &[insert_after(4, "    c();", 1)],
+        None,
+    );
 }

@@ -184,7 +184,8 @@ mod tests {
     #[tokio::test]
     async fn deleting_a_session_without_a_running_loop_keeps_working_normally() {
         let mut app = App::new("/tmp".to_string());
-        app.state.add_empty_session("idle-one".into(), "t".into(), 0);
+        app.state
+            .add_empty_session("idle-one".into(), "t".into(), 0);
         app.state.current_session_id = Some("idle-one".into());
         app.state.status = SessionStatus::Idle;
         app.stop_signal.store(false, Ordering::Relaxed);
@@ -204,7 +205,8 @@ mod tests {
     #[tokio::test]
     async fn deleting_an_unrelated_session_never_touches_another_sessions_loop() {
         let mut app = app_with_running_loop_on("loop-owner");
-        app.state.add_empty_session("bystander".into(), "t".into(), 0);
+        app.state
+            .add_empty_session("bystander".into(), "t".into(), 0);
 
         app.delete_session("bystander");
 
@@ -251,7 +253,8 @@ mod tests {
     #[tokio::test]
     async fn repro_a_background_delete_clears_owner_so_stopped_skips_save() {
         let mut app = app_with_running_loop_on("owner-a");
-        app.state.add_empty_session("viewer-b".into(), "t".into(), 0);
+        app.state
+            .add_empty_session("viewer-b".into(), "t".into(), 0);
         app.state.current_session_id = Some("viewer-b".to_string());
         app.delete_session("owner-a");
         assert_eq!(
@@ -292,7 +295,8 @@ mod tests {
     #[tokio::test]
     async fn deleting_unrelated_session_preserves_other_sessions_hint_state() {
         let mut app = app_with_running_loop_on("loop-owner");
-        app.state.add_empty_session("bystander".into(), "t".into(), 0);
+        app.state
+            .add_empty_session("bystander".into(), "t".into(), 0);
         app.queue_actions_deferred_start = true;
         app.delete_session("bystander");
         // Unrelated delete must not touch the running loop's deferred start.
@@ -309,10 +313,7 @@ mod tests {
             Some("a".to_string())
         );
         // Owner deleted → skip (never fall back to viewed session).
-        assert_eq!(
-            terminated_loop_save_target(Some("a"), |_| false),
-            None
-        );
+        assert_eq!(terminated_loop_save_target(Some("a"), |_| false), None);
         // No owner tracking → caller falls back to current (handled outside).
         assert_eq!(terminated_loop_save_target(None, |_| true), None);
     }
@@ -338,4 +339,3 @@ mod tests {
         );
     }
 }
-

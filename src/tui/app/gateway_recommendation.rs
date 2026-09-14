@@ -60,8 +60,7 @@ impl App {
             self.restore_pending_gateway_message();
             self.toast_state.show(ToastOptions {
                 title: Some("Free gateway declined".into()),
-                message: "Configure a provider API key (ADD Provider) to use its models."
-                    .into(),
+                message: "Configure a provider API key (ADD Provider) to use its models.".into(),
                 variant: ToastVariant::Warning,
                 duration_ms: 8000,
             });

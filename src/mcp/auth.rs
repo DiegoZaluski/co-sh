@@ -40,7 +40,10 @@ fn keyring_id(server_name: &str) -> String {
 /// neither the keyring nor the environment provides a value. A keyring
 /// *lookup* failure (locked store, dbus error) degrades to the env fallback
 /// instead of failing the connection — the variable may still be set.
-pub fn resolve_key(server_name: &str, api_key_env: Option<&str>) -> Result<Option<String>, McpError> {
+pub fn resolve_key(
+    server_name: &str,
+    api_key_env: Option<&str>,
+) -> Result<Option<String>, McpError> {
     match stored_key(server_name) {
         Ok(Some(key)) => return Ok(Some(key)),
         // NoEntry is the normal "not stored here" case: fall through to
@@ -100,4 +103,3 @@ pub fn forget_key(server_name: &str) -> Result<(), keyring::Error> {
         Err(err) => Err(err),
     }
 }
-

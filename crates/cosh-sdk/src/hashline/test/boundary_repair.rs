@@ -104,7 +104,10 @@ fn inserts_before_after_head_and_tail() {
 
 #[test]
 fn ignores_a_delete_of_the_trailing_phantom_line() {
-    assert_eq!(apply("one\ntwo\n", &[delete(3, 1)], None).text, "one\ntwo\n");
+    assert_eq!(
+        apply("one\ntwo\n", &[delete(3, 1)], None).text,
+        "one\ntwo\n"
+    );
 }
 
 #[test]
@@ -181,7 +184,12 @@ fn drops_duplicated_leading_and_trailing_boundary_lines_around_a_range_replaceme
     let file = "function f() {\n  keepA();\n  old1();\n  old2();\n  keepB();\n}";
     let result = apply(
         file,
-        &replacement(3, 4, &["  keepA();", "  new1();", "  new2();", "  keepB();"], 1),
+        &replacement(
+            3,
+            4,
+            &["  keepA();", "  new1();", "  new2();", "  keepB();"],
+            1,
+        ),
         Some("x.ts"),
     );
     assert_eq!(
@@ -245,10 +253,7 @@ fn slides_a_shallower_body_past_the_closing_line_and_warns() {
         result.text,
         "function f() {\n    if (x) {\n        a();\n    }\n    c();\n    b();\n}\n"
     );
-    assert!(
-        result.warnings[0]
-            .contains("moved past 1 closing line to after line 4")
-    );
+    assert!(result.warnings[0].contains("moved past 1 closing line to after line 4"));
 }
 
 #[test]
@@ -256,10 +261,7 @@ fn crosses_multiple_closer_levels_and_stops_at_the_body_depth() {
     let file = "function f() {\n    if (x) {\n        for (y) {\n            a();\n        }\n    }\n    b();\n}\n";
     let outer = apply(file, &[insert_after(4, "    c();", 1)], None);
     assert_eq!(outer.text.lines().nth(6), Some("    c();"));
-    assert!(
-        outer.warnings[0]
-            .contains("moved past 2 closing lines to after line 6")
-    );
+    assert!(outer.warnings[0].contains("moved past 2 closing lines to after line 6"));
     let inner = apply(file, &[insert_after(4, "        c();", 1)], None);
     assert_eq!(inner.text.lines().nth(5), Some("        c();"));
 }
@@ -267,11 +269,7 @@ fn crosses_multiple_closer_levels_and_stops_at_the_body_depth() {
 #[test]
 fn refuses_to_cross_a_line_targeted_by_another_hunk() {
     let file = "function f() {\n    if (x) {\n        a();\n    }\n    b();\n}\n";
-    let result = apply(
-        file,
-        &[insert_after(3, "    c();", 1), delete(4, 2)],
-        None,
-    );
+    let result = apply(file, &[insert_after(3, "    c();", 1), delete(4, 2)], None);
     assert_eq!(
         result.text,
         "function f() {\n    if (x) {\n        a();\n    c();\n    b();\n}\n"

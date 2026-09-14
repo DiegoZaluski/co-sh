@@ -327,11 +327,9 @@ pub fn build_mcp_entry(
         // process environment (`env` map), not from a client header.
         (McpTransport::Stdio(_), CredentialInput::None) => {}
         (McpTransport::Stdio(_), _) => {
-            return Err(
-                "API key applies to http(s):// endpoints only; pass stdio \
+            return Err("API key applies to http(s):// endpoints only; pass stdio \
                  credentials through the server's own environment."
-                    .to_string(),
-            );
+                .to_string());
         }
         (McpTransport::Http(_), _) => {}
     }

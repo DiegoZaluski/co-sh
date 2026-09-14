@@ -103,9 +103,7 @@ impl PasteBurstState {
     /// ARMED the burst (transition), which is the caller's cue to retract the
     /// leaked prefix.
     fn note_text_key(&mut self, now: Instant) -> bool {
-        let fresh = self
-            .last_text_key_at
-            .is_some_and(|t| is_recent(t, now));
+        let fresh = self.last_text_key_at.is_some_and(|t| is_recent(t, now));
         if !fresh {
             // A gap wider than the window breaks the run: the previously
             // leaked characters were typed at human cadence, not pasted.
@@ -121,15 +119,12 @@ impl PasteBurstState {
     /// within the window, OR an Enter chain that started inside such a burst
     /// is still running (blank-line run).
     fn burst_armed(&self, now: Instant) -> bool {
-        let text_burst = self
-            .last_text_key_at
-            .is_some_and(|t| is_recent(t, now))
+        let text_burst = self.last_text_key_at.is_some_and(|t| is_recent(t, now))
             && self.text_keys_in_window >= BURST_MIN_KEYS;
-        let chained_enter =
-            self.chain_started_in_text_burst
-                && self
-                    .last_absorbed_enter_at
-                    .is_some_and(|t| is_recent(t, now));
+        let chained_enter = self.chain_started_in_text_burst
+            && self
+                .last_absorbed_enter_at
+                .is_some_and(|t| is_recent(t, now));
         text_burst || chained_enter
     }
 
@@ -179,7 +174,6 @@ impl PasteBurstState {
         }
     }
 
-
     /// A "text" key the way a Windows console reports pasted characters:
     /// printable chars carrying no modifiers beyond SHIFT (uppercase paste
     /// chars arrive SHIFTed) — PLUS the CTRL+ALT pair, the Windows-console
@@ -192,9 +186,7 @@ impl PasteBurstState {
         if !matches!(key.code, KeyCode::Char(_)) {
             return false;
         }
-        let altgr = key
-            .modifiers
-            .contains(KeyModifiers::CONTROL)
+        let altgr = key.modifiers.contains(KeyModifiers::CONTROL)
             && key.modifiers.contains(KeyModifiers::ALT);
         if altgr {
             return true;
@@ -347,7 +339,10 @@ impl App {
         // the `leaked` CHARS immediately before `cursor_pos`. `cursor_pos`
         // and `input` are BYTE offsets — walk chars, never subtract counts
         // (a multibyte char in the leaked run would panic `drain`).
-        let end = self.prompt_view.cursor_pos.min(self.prompt_view.input.len());
+        let end = self
+            .prompt_view
+            .cursor_pos
+            .min(self.prompt_view.input.len());
         let start = self.prompt_view.input[..end]
             .char_indices()
             .rev()
@@ -428,7 +423,10 @@ mod state_machine_tests {
             assert!(!s.note_text_key(t + i * STEP), "3 keys must not arm");
         }
         s.push_newline(t + 4u32 * STEP, true);
-        assert!(s.chain_started_in_text_burst, "chain anchored by text_recent Enter");
+        assert!(
+            s.chain_started_in_text_burst,
+            "chain anchored by text_recent Enter"
+        );
         assert_eq!(s.take_buffer().unwrap(), "\n");
         // take_buffer resets the chain flag.
         assert!(!s.chain_started_in_text_burst);

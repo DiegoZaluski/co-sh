@@ -74,10 +74,7 @@ impl Log for FileLogger {
 pub fn init(scope: &str) {
     let log_dir = crate::harness::truncate::scratch_log_dir().join("log");
     if let Err(err) = std::fs::create_dir_all(&log_dir) {
-        panic!(
-            "cannot create log directory {}: {err}",
-            log_dir.display()
-        );
+        panic!("cannot create log directory {}: {err}", log_dir.display());
     }
     let log_path = log_dir.join("stdout.log");
     let file = OpenOptions::new()

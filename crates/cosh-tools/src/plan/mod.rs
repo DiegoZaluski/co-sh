@@ -5,7 +5,9 @@ pub mod types;
 mod test;
 
 pub use todo_write::todo_write;
-pub use types::{Nag, PlanError, TodoItem, TodoItemInput, TodoList, TodoStatus, TodoWriteInput, TodoWriteOutput};
+pub use types::{
+    Nag, PlanError, TodoItem, TodoItemInput, TodoList, TodoStatus, TodoWriteInput, TodoWriteOutput,
+};
 
 use crate::ToolDescription;
 

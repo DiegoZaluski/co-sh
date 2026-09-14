@@ -236,11 +236,6 @@ pub fn check_tool_permission(
 fn is_restricted_in_ask_mode(name: &str) -> bool {
     matches!(
         name,
-        "fs_write"
-            | "fs_edit"
-            | "fs_rollback"
-            | "bash_run"
-            | "plan_todo_write"
-            | "subagent_call"
+        "fs_write" | "fs_edit" | "fs_rollback" | "bash_run" | "plan_todo_write" | "subagent_call"
     )
 }

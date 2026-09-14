@@ -15,11 +15,11 @@
 pub mod ast_edit;
 pub mod edit;
 pub mod fuzzy;
+#[cfg(test)]
+mod fuzzy_equivalence;
 pub mod read;
 pub mod replace;
 pub mod rollback;
-#[cfg(test)]
-mod fuzzy_equivalence;
 #[cfg(test)]
 mod test;
 pub mod types;

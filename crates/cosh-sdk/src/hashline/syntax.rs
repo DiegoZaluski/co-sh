@@ -112,11 +112,12 @@ pub fn parses_cleanly(path: Option<&str>, text: &str) -> bool {
     {
         return *cached;
     }
-    let parsed = parse(path, text)
-        .is_some_and(|tree| !tree.root_node().has_error());
+    let parsed = parse(path, text).is_some_and(|tree| !tree.root_node().has_error());
     if let Ok(mut cache) = CACHE.lock() {
         let SyntaxCache {
-            parses, parse_order, ..
+            parses,
+            parse_order,
+            ..
         } = &mut *cache;
         insert_fifo(parses, parse_order, cache_key, parsed);
     }
@@ -183,7 +184,9 @@ pub fn node_chain(lines: &[String], path: &str, line: u32) -> Vec<NodeSpan> {
         .unwrap_or_default();
     if let Ok(mut cache) = CACHE.lock() {
         let SyntaxCache {
-            chains, chain_order, ..
+            chains,
+            chain_order,
+            ..
         } = &mut *cache;
         insert_fifo(chains, chain_order, cache_key, chain.clone());
     }

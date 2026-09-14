@@ -1,4 +1,6 @@
-use super::types::{Nag, PlanError, TodoItem, TodoItemInput, TodoList, TodoStatus, TodoWriteOutput};
+use super::types::{
+    Nag, PlanError, TodoItem, TodoItemInput, TodoList, TodoStatus, TodoWriteOutput,
+};
 
 /// Replace the entire TODO list with the given flat list of tasks
 /// (full-state write, the whole list every call).
@@ -31,8 +33,7 @@ pub fn todo_write(todos: &[TodoItemInput]) -> Result<TodoWriteOutput, PlanError>
     // assigned below, allowing intra-batch dependencies. Keys that look like
     // real ids (task-N) are rejected: they would shadow the id assigned to
     // an actual task and silently redirect dependencies.
-    let mut key_to_id: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
+    let mut key_to_id: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for (idx, item) in todos.iter().enumerate() {
         let id = format!("task-{}", idx + 1);
         if let Some(key) = &item.key {
@@ -86,7 +87,8 @@ pub fn todo_write(todos: &[TodoItemInput]) -> Result<TodoWriteOutput, PlanError>
     let all_ids: Vec<String> = items.iter().map(|i| i.id.clone()).collect();
     let mut resolved_items = Vec::with_capacity(items.len());
     for (idx, item) in todos.iter().enumerate() {
-        let mut resolved: Vec<String> = Vec::with_capacity(item.depends_on.as_ref().map_or(0, Vec::len));
+        let mut resolved: Vec<String> =
+            Vec::with_capacity(item.depends_on.as_ref().map_or(0, Vec::len));
         for dep in item.depends_on.as_ref().into_iter().flatten() {
             if let Some(id) = key_to_id.get(dep) {
                 if Some(dep.as_str()) == item.key.as_deref() {

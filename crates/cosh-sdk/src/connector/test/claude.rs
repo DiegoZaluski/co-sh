@@ -378,14 +378,18 @@ async fn effective_output_reservation_matches_captured_wire_limits() {
         ("claude-sonnet-4-6", "none", 2_000, 2_000),
     ] {
         let (port, captured, _raw, handle) = mock_server(
-            r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}"#, 200,
+            r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}"#,
+            200,
         );
-        let connector = claude_connector(port).with_model(model)
-            .with_reasoning_effort(effort).with_max_tokens(requested);
+        let connector = claude_connector(port)
+            .with_model(model)
+            .with_reasoning_effort(effort)
+            .with_max_tokens(requested);
         assert_eq!(connector.effective_max_tokens(), Some(expected));
         connector.chat("hello").await.unwrap();
         handle.join().unwrap();
-        let body: serde_json::Value = serde_json::from_str(&captured.lock().unwrap().take().unwrap()).unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(&captured.lock().unwrap().take().unwrap()).unwrap();
         assert_eq!(body["max_tokens"], expected);
     }
 }

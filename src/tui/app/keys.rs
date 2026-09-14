@@ -563,10 +563,7 @@ impl App {
                         // Failures are non-fatal — the entry is gone either
                         // way, and the store may be locked.
                         if let Err(err) = cosh::mcp::auth::forget_key(&name) {
-                            log::warn!(
-                                "keyring cleanup for removed MCP server failed: {}",
-                                err
-                            );
+                            log::warn!("keyring cleanup for removed MCP server failed: {}", err);
                         }
                         self.setup.save();
                     }
@@ -1325,8 +1322,7 @@ impl App {
                                 self.prompt_view.delete();
                             }
                             KeyCode::PageUp => {
-                                if self.is_in_right_panel(self.last_mouse_x)
-                                {
+                                if self.is_in_right_panel(self.last_mouse_x) {
                                     let vh = self.state.right_panel.visible_height.max(1);
                                     self.state
                                         .right_panel
@@ -1339,8 +1335,7 @@ impl App {
                                 }
                             }
                             KeyCode::PageDown => {
-                                if self.is_in_right_panel(self.last_mouse_x)
-                                {
+                                if self.is_in_right_panel(self.last_mouse_x) {
                                     let vh = self.state.right_panel.visible_height.max(1);
                                     self.state
                                         .right_panel

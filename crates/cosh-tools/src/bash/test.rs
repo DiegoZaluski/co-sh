@@ -321,7 +321,10 @@ async fn test_spawn_bash_pty_large_output() {
     // PTYs pass the payload through untouched; the count is exact.
     #[cfg(windows)]
     {
-        assert!(payload_len(&raw) >= n, "expected at least {n} payload bytes");
+        assert!(
+            payload_len(&raw) >= n,
+            "expected at least {n} payload bytes"
+        );
     }
     #[cfg(unix)]
     assert_eq!(raw.len(), n);

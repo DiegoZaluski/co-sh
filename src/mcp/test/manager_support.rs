@@ -13,7 +13,7 @@ use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
     CallToolResponse, CallToolResult, ContentBlock, DiscoverResult, ErrorCode,
     GetPromptRequestParams, GetPromptResponse, GetPromptResult, ListPromptsResult,
-    ListResourcesResult, ListResourceTemplatesResult, ListToolsResult, PaginatedRequestParams,
+    ListResourceTemplatesResult, ListResourcesResult, ListToolsResult, PaginatedRequestParams,
     Prompt, PromptArgument, PromptMessage, ReadResourceRequestParams, ReadResourceResponse,
     ReadResourceResult, Resource, ResourceContents, ResourceTemplate, Role, ServerCapabilities,
     ServerInfo, Tool,
@@ -116,9 +116,15 @@ pub(crate) async fn attach_server<H>(manager: &mut McpManager, name: &str, handl
 where
     H: ServerHandler + Clone + Send + Sync + 'static,
 {
-    attach_server_full(manager, name, handler, ProbePolicy::STDIO, era::PROBE_TIMEOUT)
-        .await
-        .unwrap();
+    attach_server_full(
+        manager,
+        name,
+        handler,
+        ProbePolicy::STDIO,
+        era::PROBE_TIMEOUT,
+    )
+    .await
+    .unwrap();
 }
 
 /// [`attach_server`] with an explicit probe policy and budget, for the
@@ -209,8 +215,9 @@ impl ServerHandler for CatalogServer {
         &self,
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
-    ) -> impl std::future::Future<Output = Result<ListResourcesResult, McpErrorData>> + MaybeSendFuture + '_
-    {
+    ) -> impl std::future::Future<Output = Result<ListResourcesResult, McpErrorData>>
+    + MaybeSendFuture
+    + '_ {
         std::future::ready(Ok(ListResourcesResult {
             resources: vec![
                 Resource::new("file:///notes.txt", "notes")
@@ -226,13 +233,10 @@ impl ServerHandler for CatalogServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<ListResourceTemplatesResult, McpErrorData>>
-           + MaybeSendFuture
-           + '_ {
+    + MaybeSendFuture
+    + '_ {
         std::future::ready(Ok(ListResourceTemplatesResult {
-            resource_templates: vec![ResourceTemplate::new(
-                "file:///docs/{id}",
-                "doc-by-id",
-            )],
+            resource_templates: vec![ResourceTemplate::new("file:///docs/{id}", "doc-by-id")],
             ..Default::default()
         }))
     }
@@ -241,8 +245,9 @@ impl ServerHandler for CatalogServer {
         &self,
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> impl std::future::Future<Output = Result<ReadResourceResponse, McpErrorData>> + MaybeSendFuture + '_
-    {
+    ) -> impl std::future::Future<Output = Result<ReadResourceResponse, McpErrorData>>
+    + MaybeSendFuture
+    + '_ {
         std::future::ready(if request.uri == "file:///notes.txt" {
             Ok(ReadResourceResponse::Complete(ReadResourceResult::new(
                 vec![ResourceContents::text("hello notes", &request.uri)],
@@ -380,8 +385,8 @@ impl ServerHandler for ModernOnlyServer {
         _request: rmcp::model::InitializeRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<rmcp::model::InitializeResult, McpErrorData>>
-           + MaybeSendFuture
-           + '_ {
+    + MaybeSendFuture
+    + '_ {
         std::future::ready(Err(McpErrorData::new(
             rmcp::model::ErrorCode::METHOD_NOT_FOUND,
             "unknown method: initialize",

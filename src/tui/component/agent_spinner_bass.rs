@@ -189,9 +189,8 @@ fn seeded_rng(seed: u64) -> impl Iterator<Item = u64> {
 /// not precision.
 #[allow(clippy::cast_precision_loss)]
 fn noise01(seed: u64, col: u64, seg: u64) -> f32 {
-    let mut h = seed
-        ^ col.wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        ^ seg.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    let mut h =
+        seed ^ col.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ seg.wrapping_mul(0xBF58_476D_1CE4_E5B9);
     h ^= h >> 30;
     h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
     h ^= h >> 27;
@@ -298,9 +297,7 @@ impl AgentSpinnerBass {
         self.frames_elapsed = self.frames_elapsed.saturating_add(1);
 
         // Birth animation finishes once every bar has been born and grown.
-        if !self.initialized
-            && self.frames_elapsed >= BIRTH_DELAY_MAX + BIRTH_GROW_FRAMES
-        {
+        if !self.initialized && self.frames_elapsed >= BIRTH_DELAY_MAX + BIRTH_GROW_FRAMES {
             self.initialized = true;
         }
 
@@ -379,8 +376,8 @@ impl AgentSpinnerBass {
         #[allow(clippy::cast_precision_loss)]
         let i = col as f32;
         let detune = self.wave_phase_offset(col);
-        let bass = BASS_AMPLITUDE
-            * (t * BASS_WAVE_FREQUENCY - i * BASS_WAVE_PHASE_STEP + detune).sin();
+        let bass =
+            BASS_AMPLITUDE * (t * BASS_WAVE_FREQUENCY - i * BASS_WAVE_PHASE_STEP + detune).sin();
         let shimmer = SHIMMER_AMPLITUDE
             * (t * SHIMMER_WAVE_FREQUENCY + i * SHIMMER_WAVE_PHASE_STEP + detune).sin();
         (0.5 + bass + shimmer).clamp(0.0, 1.0)
@@ -572,7 +569,11 @@ impl AgentSpinnerBass {
     fn bar_color(&self, col: usize, frame: u32) -> RGBA {
         let base = self.bar_color_base;
         let height = self.rendered_height(col, frame);
-        let light = lerp_color(base, RGBA::from_ints(255, 255, 255, 255), LIGHT_SHADE_STRENGTH);
+        let light = lerp_color(
+            base,
+            RGBA::from_ints(255, 255, 255, 255),
+            LIGHT_SHADE_STRENGTH,
+        );
         let dark = lerp_color(base, RGBA::from_ints(0, 0, 0, 255), DARK_SHADE_STRENGTH);
         lerp_color(light, dark, height)
     }
@@ -627,7 +628,11 @@ impl AgentSpinnerBass {
             let ellipsis_idx =
                 (self.ellipsis_step / ELLIPSIS_ANIM_SPEED) as usize % ELLIPSIS_FRAMES.len();
             let ellipsis_text = ELLIPSIS_FRAMES[ellipsis_idx];
-            let ellipsis_max = ELLIPSIS_FRAMES.iter().map(|f| f.chars().count()).max().unwrap_or(0);
+            let ellipsis_max = ELLIPSIS_FRAMES
+                .iter()
+                .map(|f| f.chars().count())
+                .max()
+                .unwrap_or(0);
             let ellipsis_x = x
                 .saturating_add(self.bar_count as u16)
                 .saturating_add(1)
@@ -652,7 +657,6 @@ impl AgentSpinnerBass {
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -781,7 +785,10 @@ mod tests {
                 "bar {col} not at floor before its birth step"
             );
             let grown = spinner.bar_char(col, birth + BIRTH_GROW_FRAMES + 1);
-            assert!(BLOCK_CHARS.contains(&grown), "bar {col} glyph {grown} invalid");
+            assert!(
+                BLOCK_CHARS.contains(&grown),
+                "bar {col} glyph {grown} invalid"
+            );
         }
     }
 
@@ -995,8 +1002,6 @@ mod tests {
         );
     }
 
-
-
     #[test]
     fn bar_color_darkens_as_it_rises() {
         let registry = crate::theme::ThemeRegistry::new();
@@ -1006,9 +1011,7 @@ mod tests {
         let luminance = |c: RGBA| -> f32 {
             let (r, g, b, _) = c.to_ints();
             #[allow(clippy::cast_precision_loss)]
-            let lum = 0.212_6 * f32::from(r)
-                + 0.715_2 * f32::from(g)
-                + 0.072_2 * f32::from(b);
+            let lum = 0.212_6 * f32::from(r) + 0.715_2 * f32::from(g) + 0.072_2 * f32::from(b);
             lum
         };
 

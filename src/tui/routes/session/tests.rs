@@ -5180,8 +5180,16 @@ fn todo_box_renders_the_flat_plan_output() {
 
     let lines = format_todo_output(output);
     assert_eq!(lines[0], "# Todos");
-    assert!(lines.iter().any(|l| l.contains("\u{25CF}") && l.contains("first")));
-    assert!(lines.iter().any(|l| l.contains("\u{2713}") && l.contains("second")));
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("\u{25CF}") && l.contains("first"))
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("\u{2713}") && l.contains("second"))
+    );
     assert!(lines.iter().any(|l| l.ends_with("[ ] third")));
     assert!(lines.iter().any(|l| l.contains("\u{26A0} watch out")));
 }

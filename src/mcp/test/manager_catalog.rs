@@ -60,7 +60,10 @@ async fn read_resource_roundtrip_and_unknown() {
         .read_resource("file:///absent.txt")
         .await
         .unwrap_err();
-    assert!(matches!(missing, McpError::UnknownResource(_)), "{missing:?}");
+    assert!(
+        matches!(missing, McpError::UnknownResource(_)),
+        "{missing:?}"
+    );
 }
 
 #[tokio::test]

@@ -221,9 +221,7 @@ impl DiffRenderable {
         bg: Color,
     ) -> Style {
         let cat = cats.and_then(|c| c.get(byte_pos).copied().flatten());
-        Style::default()
-            .bg(bg)
-            .fg(rgba_color(self.syntax_fg(cat)))
+        Style::default().bg(bg).fg(rgba_color(self.syntax_fg(cat)))
     }
 
     fn classify_line(line: &str) -> DiffLineType {

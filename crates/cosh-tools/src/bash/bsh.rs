@@ -7,11 +7,11 @@
 
 use async_stream::stream;
 #[cfg(any(unix, windows))]
-use portable_pty::native_pty_system;
-#[cfg(any(unix, windows))]
 use portable_pty::CommandBuilder;
 #[cfg(any(unix, windows))]
 use portable_pty::PtySize;
+#[cfg(any(unix, windows))]
+use portable_pty::native_pty_system;
 use regex::Regex;
 use std::path::Path;
 use std::pin::Pin;
@@ -78,7 +78,8 @@ pub fn critical_bash_patterns() -> &'static [Regex] {
 
 const BUFFER_SIZE: usize = 4096;
 
-static ENV_VAR_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*$").unwrap());
+static ENV_VAR_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*$").unwrap());
 
 #[allow(clippy::unwrap_used)]
 fn env_var_pattern() -> &'static Regex {

@@ -149,10 +149,11 @@ fn lang_name_from_path(filepath: &str) -> Option<&'static str> {
     Some(match ext.as_str() {
         "rs" => "rust",
         "py" => "python",
-        "js" | "jsx" | "mjs" | "cjs" | "json" | "ts" | "tsx" | "mts" | "cts" | "php"
-        | "lua" | "dart" => "javascript",
-        "cs" | "c" | "h" | "cpp" | "c++" | "cxx" | "hpp" | "m" | "mm" | "objc"
-        | "objectivec" => "csharp",
+        "js" | "jsx" | "mjs" | "cjs" | "json" | "ts" | "tsx" | "mts" | "cts" | "php" | "lua"
+        | "dart" => "javascript",
+        "cs" | "c" | "h" | "cpp" | "c++" | "cxx" | "hpp" | "m" | "mm" | "objc" | "objectivec" => {
+            "csharp"
+        }
         "go" => "go",
         "java" | "scala" | "groovy" => "java",
         "hs" | "lhs" => "haskell",
@@ -166,11 +167,7 @@ fn lang_name_from_path(filepath: &str) -> Option<&'static str> {
 /// Syntax style for tool code boxes, resolved through the active [`Theme`]
 /// exactly like markdown codeblocks are (see `syntax_colors`): theme colors
 /// win, anything unset falls back to the surrounding text color.
-fn code_highlight_style(
-    cat: Option<HighlightCategory>,
-    default_fg: Color,
-    theme: &Theme,
-) -> Style {
+fn code_highlight_style(cat: Option<HighlightCategory>, default_fg: Color, theme: &Theme) -> Style {
     let fg = match cat {
         Some(HighlightCategory::Keyword) => rgba_color(theme.syntax_keyword),
         Some(HighlightCategory::String) => rgba_color(theme.syntax_string),
@@ -521,13 +518,7 @@ pub(crate) fn write_has_warnings(part: &ToolPart) -> bool {
     part.output
         .as_deref()
         .and_then(|o| serde_json::from_str::<serde_json::Value>(o).ok())
-        .and_then(|v| {
-            v.as_array()?
-                .first()?
-                .get("warnings")?
-                .as_str()
-                .map(|_| ())
-        })
+        .and_then(|v| v.as_array()?.first()?.get("warnings")?.as_str().map(|_| ()))
         .is_some()
 }
 

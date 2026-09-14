@@ -15,8 +15,8 @@ use rmcp::transport::{
 };
 
 use super::bridge::{
-    is_tool_error, match_resource_template, prompt_to_info, resource_to_info, result_to_text,
-    template_to_info, PromptInfo, ResourceInfo,
+    PromptInfo, ResourceInfo, is_tool_error, match_resource_template, prompt_to_info,
+    resource_to_info, result_to_text, template_to_info,
 };
 use super::config::{HttpTransport, McpConfig, McpServerEntry, McpTransport, StdioTransport};
 use super::error::McpError;
@@ -186,12 +186,10 @@ impl McpManager {
                 // Resolve the credential BEFORE dialing: a missing key is a
                 // typed failure (snapshot + toast upstream), never a 401 that
                 // masquerades as a transport problem.
-                let key = match super::auth::resolve_key(&entry.name, http.api_key_env.as_deref())
-                {
+                let key = match super::auth::resolve_key(&entry.name, http.api_key_env.as_deref()) {
                     Ok(key) => key,
                     Err(err) => {
-                        self.failures
-                            .insert(entry.name.clone(), err.to_string());
+                        self.failures.insert(entry.name.clone(), err.to_string());
                         return Err(err);
                     }
                 };
@@ -402,10 +400,13 @@ impl McpManager {
         id: &str,
         serves: impl Fn(&RunningServer) -> bool,
     ) -> Option<&'a str> {
-        let mut owners = self.entries.iter().filter(|entry| match self.running.get(&entry.name) {
-            Some(server) => serves(server),
-            None => false,
-        });
+        let mut owners = self
+            .entries
+            .iter()
+            .filter(|entry| match self.running.get(&entry.name) {
+                Some(server) => serves(server),
+                None => false,
+            });
         let first = owners.next()?;
         if let Some(second) = owners.next() {
             log::warn!(
@@ -680,7 +681,13 @@ impl McpManager {
 
         let first_transport = transport()?;
         let first_err = match self
-            .connect_in_era(entry_name, first_transport, call_timeout, first_budget, first)
+            .connect_in_era(
+                entry_name,
+                first_transport,
+                call_timeout,
+                first_budget,
+                first,
+            )
             .await
         {
             Ok(()) => return Ok(()),
@@ -718,7 +725,8 @@ impl McpManager {
                 "mcp: '{entry_name}' failed in {} without era evidence: {first_err}",
                 first.label()
             );
-            self.failures.insert(entry_name.to_string(), first_err.to_string());
+            self.failures
+                .insert(entry_name.to_string(), first_err.to_string());
             return Err(first_err);
         };
         log::info!(
@@ -731,7 +739,8 @@ impl McpManager {
             // spawn would instantly time out. Report the first failure and
             // leave the cache alone (the refuted assumption was never
             // disproven by a second dial).
-            self.failures.insert(entry_name.to_string(), first_err.to_string());
+            self.failures
+                .insert(entry_name.to_string(), first_err.to_string());
             return Err(first_err);
         }
         // Build the retry transport BEFORE publishing the speculative era:
@@ -740,14 +749,21 @@ impl McpManager {
         let second_transport = match transport() {
             Ok(t) => t,
             Err(err) => {
-                self.failures.insert(entry_name.to_string(), err.to_string());
+                self.failures
+                    .insert(entry_name.to_string(), err.to_string());
                 return Err(err);
             }
         };
         self.eras.insert(entry_name.to_string(), next);
 
         match self
-            .connect_in_era(entry_name, second_transport, call_timeout, remaining(), next)
+            .connect_in_era(
+                entry_name,
+                second_transport,
+                call_timeout,
+                remaining(),
+                next,
+            )
             .await
         {
             Ok(()) => Ok(()),
@@ -818,7 +834,10 @@ fn millis_u64(duration: Duration) -> u64 {
 /// and closing handshakes carry no era evidence and stay
 /// [`McpError::Connect`].
 /// Visible to the scoped `test` module for classification assertions.
-pub(crate) fn map_initialize_error(entry_name: &str, assumed: era::Era) -> impl Fn(ClientInitializeError) -> McpError + '_ {
+pub(crate) fn map_initialize_error(
+    entry_name: &str,
+    assumed: era::Era,
+) -> impl Fn(ClientInitializeError) -> McpError + '_ {
     move |err| match err {
         ClientInitializeError::JsonRpcError(data) => match assumed {
             // Modern dial refused with a modern-reserved code: the server
@@ -958,9 +977,8 @@ pub(crate) fn http_config(
         let name: http::HeaderName = name.parse().map_err(|_| InvalidHeader(name.clone()))?;
         // The value is NOT echoed back: headers may carry static
         // credentials, and the error surfaces in snapshots/toasts.
-        let value: http::HeaderValue = value
-            .parse()
-            .map_err(|_| InvalidHeader(name.to_string()))?;
+        let value: http::HeaderValue =
+            value.parse().map_err(|_| InvalidHeader(name.to_string()))?;
         headers.insert(name, value);
     }
     if let Some(key) = key {

@@ -17,11 +17,7 @@ use super::manager_support::{
 
 #[test]
 fn era_loop_failed_reports_both_causes() {
-    let first = McpError::EraStale(
-        "s".into(),
-        Era::Modern.label(),
-        "modern refused".into(),
-    );
+    let first = McpError::EraStale("s".into(), Era::Modern.label(), "modern refused".into());
     let second = McpError::EraStale("s".into(), Era::Legacy.label(), "legacy refused".into());
     let err = era_loop_failed("s", Era::Legacy, &first, second);
     let text = err.to_string();
@@ -45,10 +41,7 @@ fn uncorrelated_error_response_is_legacy_evidence_on_modern_dial() {
 
     let expected = rmcp::model::NumberOrString::Number(0);
     let received = rmcp::model::NumberOrString::Number(42);
-    let err = ClientInitializeError::UncorrelatedErrorResponse {
-        expected,
-        received,
-    };
+    let err = ClientInitializeError::UncorrelatedErrorResponse { expected, received };
 
     // Modern assumption → flip evidence (EraStale names the assumed era).
     let mapped = (map_initialize_error("mem0", Era::Modern))(err);
@@ -80,7 +73,11 @@ async fn unknown_server_probes_then_caches_modern_era() {
     attach_server(&mut manager, "a", server).await;
 
     assert_eq!(manager.era_of("a"), Some(era::Era::Modern));
-    assert_eq!(probes.load(Ordering::Relaxed), 1, "first connect must probe");
+    assert_eq!(
+        probes.load(Ordering::Relaxed),
+        1,
+        "first connect must probe"
+    );
 
     // Reconnect the same name: the cached era dials `Discover` directly,
     // skipping the open-ended probe. The one discover round trip left is
