@@ -12,7 +12,7 @@ The engine exposes one public function and two internal spawners:
 |---|---|
 | [`run(timeout_ms, env, pty, command, cwd)`](#run--the-free-function) | Validate, then stream the command; dispatches to a spawner. |
 | `spawn_bash(env, cwd, command, timeout_ms)` | The piped (non-PTY) spawner. |
-| `spawn_bash_pty(env, cwd, command, timeout_ms)` | The PTY spawner (Unix only). |
+| `spawn_bash_pty(env, cwd, command, timeout_ms)` | The PTY spawner (Unix and Windows). |
 
 Both spawners return `Pin<Box<dyn Stream<Item = Result<SpawnOutput,
 io::Error>>>>` — note the `Result` per item. `run` wraps whichever spawner
@@ -42,10 +42,25 @@ pub fn run<'a>(
 2. `validate_bash_patterns(command)` → `"Pattern match found: <regex>"` for
    the first matching pattern.
 
-It then selects the spawner: `spawn_bash_pty` when `pty` is true **and** the
-platform is Unix; `spawn_bash` otherwise (on non-Unix platforms a `pty: true`
-request silently degrades to the piped path). The selected stream's `Err`
-items are dropped as described above.
+It then selects the spawner: `spawn_bash_pty` when `pty` is true and the
+platform supports it (Unix and Windows); `spawn_bash` otherwise. The selected
+stream's `Err` items are dropped as described above.
+
+### Windows executable resolution
+
+On Windows, `spawn_bash` and `spawn_bash_pty` never spawn a bare `"bash"`:
+`CreateProcessW` searches `System32` **before** `PATH`, so the WSL launcher
+(`C:\Windows\System32\bash.exe`) would win and commands would run inside WSL,
+ignoring the Windows `cwd`. Instead, the executor resolves a Git Bash
+(`bash.exe`) once, in this order:
+
+1. `where.exe bash.exe` — the first hit that is not `System32\…` or a
+   `WindowsApps` store alias (respects the user's `PATH`);
+2. the standard Git-for-Windows locations — `…\Git\bin\bash.exe` preferred
+   (a login wrapper that puts Git's POSIX tools on the child's `PATH`), then
+   `…\Git\usr\bin\bash.exe`.
+
+If nothing is found, spawning panics: Git for Windows is a hard requirement.
 
 ---
 
@@ -145,13 +160,16 @@ from the piped path in several ways:
   `None`. As in the piped path, `exit_code` is `None` when the process died
   by a signal, `Some(n)` otherwise.
 
-### The self-pipe timeout
+### Timeouts — platform split
 
 Because the reader blocks inside a blocking thread, the async timeout cannot
-just abort it. Instead, a **self-pipe** unblocks the blocking `poll(2)`:
+just abort it; how the blocking side is interrupted differs per platform:
 
-1. `pipe2` creates a pipe before the blocking task starts; the read end moves
-   into the blocking task, the write end stays on the async side.
+**Unix — the self-pipe trick.** A `pipe2` created before the blocking task
+unblocks the blocking `poll(2)`:
+
+1. The read end moves into the blocking task; the write end stays on the
+   async side.
 2. The blocking task's `poll(2)` watches **both** the PTY master fd and the
    pipe read end.
 3. When the async timeout fires, it sets a kill flag, writes one byte to the
@@ -164,9 +182,21 @@ timeout-side `write` + `close`, and the blocking-side `poll`/`read`/`close` —
 and each fd is created once, consumed on one side, and closed exactly once
 (verified by inspection in the source).
 
-As in the piped path, `Some(0)` yields the deterministic single timeout
-item — but here the check runs before the process is even spawned, so the
-PTY is never opened.
+**Windows — ConPTY.** The ConPTY output pipe never reaches EOF when the child
+exits (the conhost side keeps the pipe handle open), so termination is driven
+by the child's status rather than by EOF:
+
+1. A watcher thread runs the blocking `child.wait()`; a pre-cloned
+   `ChildKiller` lets the async side kill the child on timeout
+   (`TerminateProcess`).
+2. bash under ConPTY emits a DSR cursor query (`ESC[6n`) at startup and
+   blocks until the terminal answers — the stream detects the sequence in
+   the output and replies `ESC[1;1R` through the PTY writer.
+3. When the watcher reports the reaped child, the reader gets a short drain
+   window for in-flight chunks, then the final status item is emitted and
+   the (still blocked) reader thread is detached. On timeout the final item
+   carries `signal: Some(-1)`; Windows has no signal concept, so a killed
+   child surfaces as a non-zero exit code in the normal-exit path.
 
 ---
 
@@ -179,5 +209,6 @@ PTY is never opened.
 - Timeouts kill the child and emit a final `signal: -1` item; `0` never reads
   output; partial output before the deadline is preserved.
 - The PTY path multiplexes through a 24×80 pseudo-terminal with a blocking
-  reader bridged via a channel, a self-pipe for timeouts, and
-  strsignal→number mapping.
+  reader bridged via a channel: Unix uses a self-pipe for timeouts and
+  strsignal→number mapping; Windows uses ConPTY, a DSR reply, a
+  child-status watcher, and a pre-cloned killer.

@@ -1,12 +1,21 @@
 #[allow(unused_imports)]
 use super::bsh::spawn_bash;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[allow(unused_imports)]
 use super::bsh::spawn_bash_pty;
 #[allow(unused_imports)]
 use tokio_stream::StreamExt;
 #[allow(dead_code)]
 const BUFFER_SIZE: usize = 4096;
+
+/// Count of payload bytes (`a`) after stripping ANSI escape sequences —
+/// used by PTY tests on Windows, where ConPTY interleaves escape sequences
+/// and viewport re-render artifacts with the payload.
+#[allow(dead_code)]
+fn payload_len(bytes: &[u8]) -> usize {
+    let stripped = strip_ansi_escapes::strip(bytes.as_ref() as &[_]);
+    stripped.iter().filter(|b| **b == b'a').count()
+}
 
 #[tokio::test]
 async fn test_spawn_bash_simple_echo() {
@@ -214,7 +223,7 @@ async fn test_spawn_bash_exit_code_after_output() {
 // output bytes differ from the non-PTY path.  We use `text.contains()`
 // instead of exact byte comparison.
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[tokio::test]
 async fn test_spawn_bash_pty_simple_echo() {
     let mut stream = spawn_bash_pty(None, ".", "echo hello", None);
@@ -228,7 +237,7 @@ async fn test_spawn_bash_pty_simple_echo() {
     assert!(text.contains("hello"));
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[tokio::test]
 async fn test_spawn_bash_pty_exit_code() {
     let mut stream = spawn_bash_pty(None, ".", "exit 42", None);
@@ -242,7 +251,7 @@ async fn test_spawn_bash_pty_exit_code() {
     assert_eq!(exit_code, Some(42));
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[tokio::test]
 async fn test_spawn_bash_pty_env() {
     let mut stream = spawn_bash_pty(
@@ -260,7 +269,7 @@ async fn test_spawn_bash_pty_env() {
     assert!(text.contains("hello world"));
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[tokio::test]
 async fn test_spawn_bash_pty_invalid_env_var_name() {
     let mut stream = spawn_bash_pty(
@@ -295,18 +304,27 @@ async fn test_spawn_bash_pty_signal() {
     assert!(got_signal);
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[tokio::test]
 async fn test_spawn_bash_pty_large_output() {
     let n = BUFFER_SIZE * 2 + 100;
     let cmd = format!("printf 'a%.0s' $(seq 1 {n})", n = n);
     let mut stream = spawn_bash_pty(None, ".", &cmd, None);
-    let mut total = 0usize;
+    let mut raw: Vec<u8> = Vec::new();
     while let Some(result) = stream.next().await {
         let output = result.unwrap();
-        total += output.stdout.len();
+        raw.extend_from_slice(&output.stdout);
     }
-    assert_eq!(total, n);
+    // ConPTY (Windows) interleaves escape sequences and, when a line wraps
+    // past the viewport width, re-renders the wrapped segment — so the
+    // payload count can slightly exceed `n` but never falls short. Unix
+    // PTYs pass the payload through untouched; the count is exact.
+    #[cfg(windows)]
+    {
+        assert!(payload_len(&raw) >= n, "expected at least {n} payload bytes");
+    }
+    #[cfg(unix)]
+    assert_eq!(raw.len(), n);
 }
 
 #[tokio::test]
@@ -325,7 +343,7 @@ async fn test_spawn_bash_timeout() {
     assert!(items[0].stderr.is_empty());
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[tokio::test]
 async fn test_spawn_bash_pty_timeout() {
     let mut stream = spawn_bash_pty(None, ".", "sleep 10", Some(10));
@@ -357,7 +375,7 @@ async fn test_spawn_bash_timeout_zero() {
     assert!(items[0].stderr.is_empty());
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[tokio::test]
 async fn test_spawn_bash_pty_timeout_zero() {
     let mut stream = spawn_bash_pty(None, ".", "echo should-not-appear", Some(0));
@@ -394,7 +412,7 @@ async fn test_spawn_bash_timeout_partial_output() {
     );
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[tokio::test]
 async fn test_spawn_bash_pty_timeout_partial_output() {
     let mut stream = spawn_bash_pty(None, ".", "echo hello && sleep 10", Some(200));
@@ -431,7 +449,7 @@ async fn test_spawn_bash_no_timeout_completes_normally() {
     assert_eq!(last.exit_code, Some(0));
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[tokio::test]
 async fn test_spawn_bash_pty_no_timeout_completes_normally() {
     let mut stream = spawn_bash_pty(None, ".", "echo hi", Some(10_000));
@@ -459,7 +477,7 @@ async fn test_spawn_bash_timeout_signal_exit_code_invariant() {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[tokio::test]
 async fn test_spawn_bash_pty_timeout_signal_exit_code_invariant() {
     let mut stream = spawn_bash_pty(None, ".", "sleep 10", Some(10));
@@ -472,23 +490,34 @@ async fn test_spawn_bash_pty_timeout_signal_exit_code_invariant() {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[tokio::test]
 async fn test_spawn_bash_pty_timeout_large_output_before_timeout() {
     let n = BUFFER_SIZE * 2 + 50;
     let cmd = format!("printf 'a%.0s' $(seq 1 {n}) && sleep 10", n = n,);
     let mut stream = spawn_bash_pty(None, ".", &cmd, Some(200));
 
-    let mut data = 0usize;
+    let mut raw: Vec<u8> = Vec::new();
     while let Some(result) = stream.next().await {
         let item = result.unwrap();
         if item.signal == Some(-1) {
             assert_eq!(item.exit_code, None);
         } else {
-            data += item.stdout.len();
+            raw.extend_from_slice(&item.stdout);
         }
     }
 
-    assert!(data > 0, "expected some data before PTY timeout");
-    assert_eq!(data, n, "expected all pre-sleep output");
+    // ConPTY (Windows) interleaves escape sequences and, when a line wraps
+    // past the viewport width, re-renders the wrapped segment — so the
+    // payload count can slightly exceed `n` but never falls short. Unix
+    // PTYs pass the payload through untouched; the count is exact.
+    #[cfg(windows)]
+    {
+        assert!(payload_len(&raw) >= n, "expected all pre-sleep output");
+    }
+    #[cfg(unix)]
+    {
+        assert!(raw.len() > 0, "expected some data before PTY timeout");
+        assert_eq!(raw.len(), n, "expected all pre-sleep output");
+    }
 }

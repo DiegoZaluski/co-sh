@@ -76,6 +76,9 @@ async fn main() {
     show("non-zero exit", &run_and_render(&bash, "exit 42").await);
 
     // 4. A signal death: killed by SIGKILL (9); exit_code is None.
+    //    Windows/ConPTY has no signal concept — a killed child surfaces as
+    //    a non-zero exit code — so this demo is Unix-only.
+    #[cfg(unix)]
     show(
         "killed by signal",
         &run_and_render(&bash, "kill -KILL $$").await,
