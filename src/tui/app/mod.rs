@@ -396,6 +396,13 @@ pub struct App {
     /// Whether the animated chat-logo plays on the empty-session landing
     /// screen (`/anim` toggle). When off, the static LOGO_CHAT is drawn.
     pub(super) anim_enabled: bool,
+    /// Test-only fixed terminal size. `Some(rect)` makes `terminal_size()`
+    /// return it instead of querying the real console — mouse hit-testing
+    /// tests must not depend on the ambient terminal's actual geometry
+    /// (a `cargo test` run inside a 100x30 Windows Terminal would otherwise
+    /// misplace dialogs whose click coordinates assume 80x24).
+    #[cfg(test)]
+    test_size_override: Option<Rect>,
 }
 
 impl App {
@@ -586,6 +593,8 @@ impl App {
             bug_link_area: None,
             bell_enabled: saved_bell,
             anim_enabled: saved_anim,
+            #[cfg(test)]
+            test_size_override: None,
         }
     }
 
@@ -1259,12 +1268,23 @@ impl App {
         ))
     }
 
-    #[allow(clippy::unused_self)]
     fn terminal_size(&self) -> Rect {
+        // Test injection first: hit-testing tests must be deterministic
+        // regardless of the console `cargo test` happens to run inside.
+        #[cfg(test)]
+        if let Some(rect) = self.test_size_override {
+            return rect;
+        }
         // We don't store the terminal size, but ratatui's Terminal::size is not accessible here.
         // Use a reasonable fallback: assume crossterm's terminal size.
         let (w, h) = crossterm::terminal::size().unwrap_or((80, 24));
         Rect::new(0, 0, w, h)
+    }
+
+    /// Test-only: pin the terminal geometry used by every mouse hit-test.
+    #[cfg(test)]
+    pub(crate) fn set_test_size(&mut self, width: u16, height: u16) {
+        self.test_size_override = Some(Rect::new(0, 0, width, height));
     }
 
     fn terminal_height(&self) -> u16 {

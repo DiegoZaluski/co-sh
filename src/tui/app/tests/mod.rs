@@ -18,14 +18,28 @@ fn mod_key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
 /// `dirs`, which reads the process-wide environment.
 static HOME_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
-/// Redirect `$HOME` to a scratch dir and drop any config left there by a
-/// previous run, so `setup.save()` never touches the developer's files.
+/// Redirect `$HOME` — AND, crucially on Windows, the config/data dirs — to
+/// a scratch dir and drop any config left there by a previous run, so
+/// `setup.save()` never touches the developer's files.
+///
+/// `$HOME` alone is NOT enough: on Windows `directories::ProjectDirs`
+/// resolves through the known-folders API (`APPDATA`), ignoring `HOME`
+/// entirely. The `COSH_CONFIG_DIR` / `COSH_DATA_DIR` overrides (read by
+/// `util::setup`) pin every consumer to the scratch dir on all platforms.
 fn isolate_home() {
     let home = std::env::temp_dir().join("cosh-hook-test-home");
-    let _ = std::fs::remove_dir_all(home.join(".config"));
+    let _ = std::fs::remove_dir_all(&home);
     std::fs::create_dir_all(&home).expect("create scratch home");
-    // SAFETY: tests holding HOME_LOCK are the only threads reading it.
-    unsafe { std::env::set_var("HOME", &home) };
+    let cfg = home.join(".config").join("cosh");
+    let data = home.join(".local").join("share").join("cosh");
+    std::fs::create_dir_all(&cfg).expect("create scratch config dir");
+    std::fs::create_dir_all(&data).expect("create scratch data dir");
+    // SAFETY: tests holding HOME_LOCK are the only threads reading these.
+    unsafe {
+        std::env::set_var("HOME", &home);
+        std::env::set_var("COSH_CONFIG_DIR", &cfg);
+        std::env::set_var("COSH_DATA_DIR", &data);
+    }
 }
 
 mod agent_loop;

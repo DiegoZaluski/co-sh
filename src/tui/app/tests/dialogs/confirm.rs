@@ -22,6 +22,11 @@ fn click(app: &mut App, column: u16, row: u16) {
 #[tokio::test]
 async fn confirm_quit_yes_click_quits_even_with_slash_menu_open() {
     let mut app = App::new("/tmp".to_string());
+    // Pin the geometry: the click below assumes the 80x24 fallback layout
+    // (dialog centered at x=25, "Yes" at x=35..38, row 12). Without the pin,
+    // terminal::size() returns the REAL console running `cargo test` and the
+    // click misses on any other terminal size.
+    app.set_test_size(80, 24);
 
     // Slash menu open, as when the user typed "/" into the prompt.
     app.slash_menu.visible = true;
@@ -53,6 +58,9 @@ async fn confirm_quit_yes_click_quits_even_with_slash_menu_open() {
 #[tokio::test]
 async fn confirm_quit_yes_click_in_session_with_live_slash_menu() {
     let mut app = App::new("/tmp".to_string());
+    // Pin the geometry — same reason as the first confirm test: the click
+    // at (36, 12) assumes the 80x24 fallback layout.
+    app.set_test_size(80, 24);
 
     // Enter Session mode via /new, then type "/" to open the slash menu.
     let new_cmd = crate::ui::slash_menu::SlashCommand {
@@ -94,6 +102,9 @@ async fn confirm_quit_full_real_input_flow_with_slash_menu() {
     use crossterm::event::{KeyCode as K, KeyEvent, KeyModifiers};
 
     let mut app = App::new("/tmp".to_string());
+    // Pin the geometry — same reason as the other confirm tests: the click
+    // at (36, 12) assumes the 80x24 fallback layout.
+    app.set_test_size(80, 24);
 
     let key = |code: K, mods: KeyModifiers| KeyEvent::new(code, mods);
 

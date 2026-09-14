@@ -230,3 +230,215 @@ async fn mashed_enters_in_empty_prompt_still_send() {
     assert_eq!(session.messages.len(), 1, "only 'hi' is sent; the empty second Enter sends nothing");
     assert_eq!(super::message_prompt_text(&session.messages[0]), "hi");
 }
+
+/// REGRESSION (fix #1): a paste whose lines are SHORTER than the arming
+/// threshold (4 text keys) used to split-send: the first Enter arrived
+/// before `text_keys_in_window` reached 4 and fell through to SendMessage,
+/// submitting `hi` as its own message. An Enter within 80ms of ANY recent
+/// text key — armed or not — must be absorbed as a paste newline instead.
+#[tokio::test]
+async fn short_line_paste_is_not_split_into_multiple_sends() {
+    let _home = HOME_LOCK.lock();
+    let mut app = app_with_session();
+
+    let pasted = "hi\nbye\nok";
+    for evt in paste_key_events(pasted) {
+        app.process_key_event(evt).unwrap();
+    }
+    assert!(
+        app.state.current_session().is_none_or(|s| s.messages.is_empty()),
+        "short lines must not split-send: Enter within 80ms of text is a paste artifact"
+    );
+
+    end_burst_window();
+    app.paste_burst_flush_if_due();
+    // 8 chars < PASTE_MIN_CHARS(150), 3 lines >= PASTE_MIN_LINES(3) → the
+    // whole paste compresses into the placeholder, byte-identical content.
+    assert_eq!(app.prompt_view.input, "[Pasted ~3 lines]");
+
+    app.process_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    let session = app.state.current_session().expect("session exists");
+    assert_eq!(session.messages.len(), 1);
+    assert_eq!(
+        super::message_prompt_text(&session.messages[0]),
+        pasted,
+        "placeholder must expand back to the FULL short-line paste"
+    );
+}
+
+/// REGRESSION (fix #2): when a modal opens mid-burst the pending paste must
+/// LAND in the prompt, not be dropped — a paste is user data. The pre-fix
+/// behaviour discarded the buffer, silently losing everything past the
+/// first characters.
+#[tokio::test]
+async fn dialog_mid_burst_lands_paste_instead_of_dropping() {
+    let _home = HOME_LOCK.lock();
+    let mut app = app_with_session();
+
+    let tail = "rest of the pasted content that must survive the dialog";
+    // Arm the burst with the first four chars, keep the tail buffered...
+    for evt in paste_key_events("head") {
+        app.process_key_event(evt).unwrap();
+    }
+    for ch in tail.chars() {
+        app.process_key_event(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+            .unwrap();
+    }
+
+    // A modal opens mid-burst (exactly what Ctrl+C does: show the quit
+    // confirm). The very next key must NOT discard the pending paste.
+    app.dialog.show(crate::ui::dialogs::DialogType::Confirm {
+        message: "Quit cosh?".into(),
+    });
+    app.process_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
+        .unwrap();
+
+    // The dialog is sovereign (the modal test below asserts it swallows
+    // keys); close it and inspect the prompt.
+    app.dialog.pop();
+    assert!(
+        app.prompt_view.input.contains("head") && app.prompt_view.input.contains(&tail[..20]),
+        "pending paste must land in the prompt when ownership is lost, got: {:?}",
+        app.prompt_view.input
+    );
+}
+
+/// REGRESSION (fix #3): AltGr characters (Char + CTRL+ALT — the Windows
+/// console signature for `@ # $ €` on ABNT) must count as paste text keys.
+/// Pre-fix, each one flushed the coalescer mid-burst, degrading an
+/// AltGr-heavy paste to fractional delivery without compression.
+#[tokio::test]
+async fn altgr_chars_keep_the_burst_coalescing() {
+    let _home = HOME_LOCK.lock();
+    let mut app = app_with_session();
+
+    let pasted = "user@mail.com COSTS $100 #tag";
+    // Simulate ABNT AltGr keys: every Char carries CTRL|ALT.
+    for ch in pasted.chars() {
+        let evt = KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL | KeyModifiers::ALT);
+        app.process_key_event(evt).unwrap();
+    }
+    assert!(
+        app.prompt_view.input.is_empty(),
+        "AltGr chars must be buffered by the coalescer, not streamed into the prompt"
+    );
+
+    end_burst_window();
+    app.paste_burst_flush_if_due();
+    assert!(
+        app.prompt_view.input.contains(&pasted[..12]),
+        "AltGr paste must land whole through handle_paste, got: {:?}",
+        app.prompt_view.input
+    );
+}
+
+/// REGRESSION (stale-leak invariant): a sub-threshold run (leaked chars in
+/// the prompt, burst never armed) followed by a real send must not leave a
+/// stale `leaked_chars` behind — otherwise the NEXT burst's arming
+/// transition would retract characters typed after the send, duplicating
+/// them into the wrong buffer.
+#[tokio::test]
+async fn leaked_count_does_not_survive_a_send() {
+    let _home = HOME_LOCK.lock();
+    let mut app = app_with_session();
+
+    // Human-cadence typed text: 2 fast chars (leaked, burst NOT armed),
+    // then a human pause, then a real Enter that sends "ab".
+    app.process_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
+        .unwrap();
+    app.process_key_event(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE))
+        .unwrap();
+    end_burst_window();
+    app.process_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(
+        app.state.current_session().expect("session exists").messages.len(),
+        1,
+        "precondition: 'ab' sent as one message"
+    );
+
+    // Immediately after the send, a new fast burst arms. If the leaked
+    // count from "ab" survived, the arming transition would retract 2
+    // chars of THIS paste into the wrong buffer (duplicated later).
+    let pasted = "pasted after send";
+    for evt in paste_key_events(pasted) {
+        app.process_key_event(evt).unwrap();
+    }
+    end_burst_window();
+    app.paste_burst_flush_if_due();
+    assert_eq!(
+        app.prompt_view.input, pasted,
+        "post-send paste must land byte-identical: no stale retraction"
+    );
+}
+
+/// REGRESSION (fix #5): the flush path accepts an INJECTED clock
+/// (`paste_burst_flush_if_due_at`), so the burst-end behaviour is testable
+/// with synthetic Instants — no real sleeps, no CI flakiness. While the
+/// burst is still armed the flush must NOT land; once the window elapses it
+/// must land exactly once.
+#[tokio::test]
+async fn flush_at_is_deterministic_on_injected_clock() {
+    let _home = HOME_LOCK.lock();
+    let mut app = app_with_session();
+
+    for evt in paste_key_events("deterministic flush") {
+        app.process_key_event(evt).unwrap();
+    }
+    assert!(
+        !app.prompt_view.input.contains("deterministic"),
+        "precondition: burst buffered, not yet landed"
+    );
+
+    // Synthetic now far past the window: must land exactly once. The window
+    // is read through the paste_burst module's re-export so the test tracks
+    // the real threshold instead of hard-coding 80ms.
+    let later = std::time::Instant::now() + crate::app::paste_burst::BURST_WINDOW;
+    app.paste_burst_flush_if_due_at(later);
+    assert_eq!(
+        app.prompt_view.input, "deterministic flush",
+        "flush past the window must land the whole paste atomically"
+    );
+    // Idempotent: a second flush with nothing buffered must not duplicate.
+    app.paste_burst_flush_if_due_at(later + Duration::from_secs(1));
+    assert_eq!(
+        app.prompt_view.input, "deterministic flush",
+        "flush must be idempotent once drained"
+    );
+}
+
+/// REGRESSION (fix #4 companion): a REAL modal (the quit confirm) must
+/// disarm the coalescer — while it is open, a text key flushes the pending
+/// paste (lands it in the prompt) and is then swallowed by the modal, never
+/// typed anywhere. Guards the hand-maintained `prompt_owns_keyboard`
+/// mirror: if a new modal gate is forgotten there, this class of test
+/// catches the leak.
+#[tokio::test]
+async fn modal_sovereignty_disarms_the_coalescer() {
+    let _home = HOME_LOCK.lock();
+    let mut app = app_with_session();
+
+    for evt in paste_key_events("pasted before modal") {
+        app.process_key_event(evt).unwrap();
+    }
+    app.dialog.show(crate::ui::dialogs::DialogType::Confirm {
+        message: "Quit cosh?".into(),
+    });
+    // Text key while the modal is up: flushes, then falls through to the
+    // sovereign gate — which must swallow it (prompt must NOT receive 'x').
+    app.process_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
+        .unwrap();
+    assert!(
+        !app.prompt_view.input.contains('x'),
+        "modal must swallow the key after the flush, got: {:?}",
+        app.prompt_view.input
+    );
+    // The pending paste landed (never dropped): flush happened on the
+    // ownership-loss path.
+    assert!(
+        app.prompt_view.input.contains("pasted before modal"),
+        "ownership loss must LAND the paste, got: {:?}",
+        app.prompt_view.input
+    );
+}

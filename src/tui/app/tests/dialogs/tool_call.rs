@@ -91,6 +91,10 @@ async fn tool_call_dialog_mouse_click_applies_mode() {
         KeyModifiers, MouseButton as CBtn, MouseEvent as CMouse, MouseEventKind as CKind,
     };
     let mut app = App::new("/tmp".to_string());
+    // Pin the geometry: without this, terminal::size() returns the REAL
+    // console running `cargo test`, and the hardcoded click row below
+    // misses the dialog rows on any terminal that is not 80x24.
+    app.set_test_size(80, 24);
     let cmd = crate::ui::slash_menu::SlashCommand {
         name: "toolcall".into(),
         desc: String::new(),

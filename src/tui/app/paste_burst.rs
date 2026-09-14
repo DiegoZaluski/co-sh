@@ -50,9 +50,9 @@
 //! [`BURST_WINDOW`] of the last pasted character is absorbed as a newline —
 //! the next press, outside the window, submits normally. Held-key auto-repeat
 //! (~33ms/char) arms the burst the same way: it lands as one atomic insert
-//! instead of char-by-char trickle. AltGr-produced characters (CTRL+ALT on the
-//! Windows console) are not "plain" keys: they flush the buffer mid-burst and
-//! fall through.
+//! instead of char-by-char trickle. AltGr-produced characters (CTRL+ALT on
+//! the Windows console) COUNT as paste text keys: an AltGr-heavy paste keeps
+//! coalescing instead of flushing on every `@`.
 
 use std::time::{Duration, Instant};
 
@@ -65,7 +65,7 @@ use super::{App, AppMode, LeftPanelMode};
 /// typing is ~66ms/char. Generous enough to absorb Remote-Desktop / console
 /// load jitter that stretches record gaps past 50ms, still far below any
 /// human keystroke cadence.
-const BURST_WINDOW: Duration = Duration::from_millis(80);
+pub(super) const BURST_WINDOW: Duration = Duration::from_millis(80);
 
 /// Plain character keys that must have arrived inside [`BURST_WINDOW`] for
 /// the burst to arm. Four keys within 80ms means >50 chars/s — far beyond any
@@ -179,20 +179,27 @@ impl PasteBurstState {
         }
     }
 
-    /// Drop everything (used when the prompt loses keyboard ownership
-    /// mid-burst: replaying stale paste into a hidden prompt would
-    /// surprise the user more than losing it).
-    fn reset(&mut self) {
-        let _ = self.take_buffer();
-        self.last_text_key_at = None;
-    }
 
     /// A "text" key the way a Windows console reports pasted characters:
     /// printable chars carrying no modifiers beyond SHIFT (uppercase paste
-    /// chars arrive SHIFTed). AltGr chars (CTRL+ALT) do NOT qualify.
+    /// chars arrive SHIFTed) — PLUS the CTRL+ALT pair, the Windows-console
+    /// signature of an AltGr character (`@ # $ € ª º` on ABNT). Real
+    /// hotkeys never produce Char + CTRL+ALT on Windows (Ctrl+letter keys
+    /// arrive as lowercase letters with CTRL only), so counting AltGr as
+    /// text keeps an AltGr-heavy paste coalescing instead of flushing the
+    /// buffer on every `@`.
     fn is_plain_text_key(key: &KeyEvent) -> bool {
-        matches!(key.code, KeyCode::Char(_))
-            && (key.modifiers - KeyModifiers::SHIFT).is_empty()
+        if !matches!(key.code, KeyCode::Char(_)) {
+            return false;
+        }
+        let altgr = key
+            .modifiers
+            .contains(KeyModifiers::CONTROL)
+            && key.modifiers.contains(KeyModifiers::ALT);
+        if altgr {
+            return true;
+        }
+        (key.modifiers - KeyModifiers::SHIFT).is_empty()
     }
 
     fn is_plain_enter(key: &KeyEvent) -> bool {
@@ -208,6 +215,16 @@ impl App {
     /// top of `App::process_key_event` (keys.rs) — when a new overlay gate is
     /// added there, add it here too, or the coalescer will absorb keys that
     /// overlay should receive.
+    ///
+    /// The SLASH MENU is deliberately NOT a gate: while it is open, plain
+    /// text keys still reach the prompt through the menu's own `Char`
+    /// handler (keys.rs pushes the char into `prompt_view.input` and
+    /// re-filters the menu), so a paste arriving mid-query must keep
+    /// coalescing. Treating the menu as an owner made every paste that
+    /// begins with `/` lose its tail: the leaked prefix opened the menu,
+    /// the ownership check disowned the coalescer, and the buffered rest
+    /// was dropped (or worse, the paste's own Enter EXECUTED a slash
+    /// command). Modals that truly own the keyboard remain gates.
     fn prompt_owns_keyboard(&self) -> bool {
         self.prompt_view.is_focused
             && matches!(self.mode(), AppMode::Session)
@@ -221,15 +238,17 @@ impl App {
             && !self.is_text_input_visible()
             && !self.dialog.visible()
             && !self.sidebar_focused
-            && !self.slash_menu.visible
             && !self.show_settings
             && !self.show_add_provider
             && !self.show_router
             && !self.show_internal_tools
             && !matches!(self.left_panel, LeftPanelMode::Explorer)
             && !self.is_rag_mode()
+            && !self.is_theme_dialog_visible()
+            && !self.is_tool_call_dialog_visible()
+            && !self.is_message_actions_dialog_visible()
+            && !self.is_undo_dialog_visible()
     }
-
     /// Absorb a key into the in-flight paste burst. Returns `true` when the
     /// key was consumed by the coalescer (the caller must stop processing it
     /// — in particular it must NOT reach the `SendMessage` keymap action).
@@ -239,10 +258,15 @@ impl App {
     /// pasted text lands before the command acts, then falls through.
     pub(super) fn paste_burst_handle_key(&mut self, key: &KeyEvent, now: Instant) -> bool {
         if !self.prompt_owns_keyboard() {
-            // Ownership lost mid-burst (a dialog opened): drop the pending
-            // buffer for consistency rather than popping it into the prompt
-            // minutes later.
-            self.paste_burst.reset();
+            // Ownership lost mid-burst (a dialog opened). LAND the pending
+            // text into the prompt rather than dropping it: a paste is user
+            // data — silently discarding it loses work. Divergence from the
+            // Unix path (deliberate): there, an Event::Paste arriving while
+            // an input dialog is open is routed INTO that dialog's field
+            // (events.rs); here the text parks in the background prompt —
+            // no corruption, no accidental send, fully visible once the
+            // prompt regains focus.
+            self.flush_paste_buffer();
             return false;
         }
         let plain_text = PasteBurstState::is_plain_text_key(key);
@@ -278,16 +302,35 @@ impl App {
         }
 
         // Plain Enter.
-        if self.paste_burst.burst_armed(now) {
-            let text_burst_was_active = self
-                .paste_burst
-                .last_text_key_at
-                .is_some_and(|t| is_recent(t, now));
-            self.paste_burst.push_newline(now, text_burst_was_active);
+        //
+        // Absorb when the burst is armed OR when ANY text key was seen
+        // within the window (`text_recent`) — even below the arming
+        // threshold. A paste whose FIRST line is shorter than
+        // [`BURST_MIN_KEYS`] (e.g. `hi\nbye\nok`) delivers its first Enter
+        // before the counter reaches 4; falling through there would
+        // split-send the paste exactly like the pre-fix bug. A human
+        // cannot hit Enter within 80ms of the last character (motor time
+        // alone is ~150ms), while a console paste delivers it in <1ms.
+        let text_recent = self
+            .paste_burst
+            .last_text_key_at
+            .is_some_and(|t| is_recent(t, now));
+        if self.paste_burst.burst_armed(now) || text_recent {
+            if !self.paste_burst.burst_armed(now) {
+                // The threshold run has not armed yet (short first line):
+                // retract the leaked chars BEFORE the newline so the replay
+                // buffer keeps paste order (`"hi"` then `'\n'`), and so the
+                // later arming transition does not double-retract.
+                self.retract_leaked_prefix();
+            }
+            self.paste_burst.push_newline(now, text_recent);
             return true;
         }
         // Enter outside any burst: flush the pending paste (if any) so the
         // keymap submits the FULL text, then fall through to SendMessage.
+        // (No stale leaked count can survive: take_buffer inside the flush
+        // resets leaked_chars before its early return, so the next burst's
+        // arming transition can never retract foreign characters.)
         self.flush_paste_buffer();
         false
     }
@@ -318,7 +361,7 @@ impl App {
         self.paste_burst.clear_leaked();
     }
 
-    /// Replay the pending paste burst through the NORMAL paste path
+    /// Replay the pending paste text through the NORMAL paste path
     /// (`PromptView::handle_paste`): line endings normalized, and long pastes
     /// compressed into the `[Pasted ~N lines]` virtual-text placeholder —
     /// identical to what Linux/macOS receive in one `Event::Paste`.
@@ -333,21 +376,114 @@ impl App {
 
     /// Called once per main-loop iteration from `run()`: when the burst is
     /// over (no key within [`BURST_WINDOW`]) the buffered paste lands in the
-    /// prompt as one atomic paste.
-    pub(super) fn paste_burst_flush_if_due(&mut self) {
+    /// prompt as one atomic paste. `now` is injected (same clock as the key
+    /// path) so tests can drive this deterministically.
+    pub(super) fn paste_burst_flush_if_due_at(&mut self, now: Instant) {
         // Only land the paste while the prompt owns the keyboard. If a
-        // dialog opened mid-burst, exactly one of two things happens: the
-        // FIRST key processed while the dialog is open hits the ownership
-        // check at the top of `paste_burst_handle_key` and RESETS (drops)
-        // the buffer; if no key ever arrives, the buffer stays pending and
-        // THIS per-frame flush lands it as soon as ownership returns. The
-        // two consumers are mutually exclusive per key, never redundant.
-        let now = Instant::now();
+        // dialog opened mid-burst, the FIRST key processed while the dialog
+        // is open hits the ownership check at the top of
+        // `paste_burst_handle_key` and flushes (lands) the buffer there;
+        // if no key ever arrives, the buffer stays pending and THIS
+        // per-frame flush lands it as soon as ownership returns. The two
+        // consumers are mutually exclusive per key, never redundant.
         if !self.paste_burst.buffer_is_empty()
             && self.prompt_owns_keyboard()
             && !self.paste_burst.burst_armed(now)
         {
             self.flush_paste_buffer();
         }
+    }
+
+    /// Production entry point: flush against the wall clock.
+    pub(super) fn paste_burst_flush_if_due(&mut self) {
+        self.paste_burst_flush_if_due_at(Instant::now());
+    }
+}
+#[cfg(test)]
+mod state_machine_tests {
+    //! Deterministic unit tests for the [`PasteBurstState`] machine — driven
+    //! with a synthetic clock (microsecond steps, no real sleeps). The
+    //! integration tests in `super::super::tests::paste_burst` cover the App
+    //! wiring; this module pins the state-machine invariants themselves.
+
+    use super::*;
+
+    /// One microsecond-ish step — any delta far below BURST_WINDOW.
+    const STEP: Duration = Duration::from_micros(100);
+
+    /// A start instant; every timeline in these tests is relative to it.
+    fn t0() -> Instant {
+        Instant::now()
+    }
+
+    /// REGRESSION (fix #1 invariant): an Enter absorbed while the burst is
+    /// NOT yet armed (short first line, `text_recent` only) must still set
+    /// the chain flag, so a following blank-line run chains correctly.
+    #[test]
+    fn enter_below_threshold_still_chains_blank_lines() {
+        let mut s = PasteBurstState::default();
+        let t = t0();
+        // 3 text keys (< BURST_MIN_KEYS = 4): not armed.
+        for i in 1..=3u32 {
+            assert!(!s.note_text_key(t + i * STEP), "3 keys must not arm");
+        }
+        s.push_newline(t + 4u32 * STEP, true);
+        assert!(s.chain_started_in_text_burst, "chain anchored by text_recent Enter");
+        assert_eq!(s.take_buffer().unwrap(), "\n");
+        // take_buffer resets the chain flag.
+        assert!(!s.chain_started_in_text_burst);
+    }
+
+    /// REGRESSION (invariant from fix #6): take_buffer must fully reset run
+    /// state so the next burst arms from scratch with no stale flags.
+    #[test]
+    fn take_buffer_resets_all_run_state() {
+        let mut s = PasteBurstState::default();
+        let t = t0();
+        for i in 1..=4u32 {
+            s.note_text_key(t + i * STEP);
+        }
+        s.push_char('a');
+        s.note_leaked_char();
+        s.push_newline(t + 5u32 * STEP, true);
+        assert!(s.take_buffer().is_some());
+        assert!(s.take_buffer().is_none(), "buffer drained");
+        assert_eq!(s.leaked_chars(), 0);
+        assert!(!s.chain_started_in_text_burst);
+        assert!(s.last_absorbed_enter_at.is_none());
+        // Old timestamps must not arm a new burst.
+        assert!(!s.burst_armed(t + 6u32 * STEP));
+    }
+
+    /// A gap wider than the window breaks the run: previously leaked chars
+    /// were human typing, must NOT be retracted into a later burst.
+    #[test]
+    fn wide_gap_drops_leaked_run() {
+        let mut s = PasteBurstState::default();
+        let t = t0();
+        for i in 1..=3u32 {
+            s.note_text_key(t + i * STEP);
+        }
+        s.note_leaked_char();
+        s.note_leaked_char();
+        assert_eq!(s.leaked_chars(), 2);
+        // Human pause > BURST_WINDOW, then typing resumes.
+        let late = t + 4u32 * STEP + BURST_WINDOW + Duration::from_millis(50);
+        assert!(!s.note_text_key(late), "run broken, not armed");
+        assert_eq!(s.leaked_chars(), 0, "stale leaked run discarded");
+        assert_eq!(s.text_keys_in_window, 1);
+    }
+
+    /// A text burst stays armed only while keys keep arriving within the
+    /// window; after BURST_WINDOW of silence it expires.
+    #[test]
+    fn burst_expires_after_window_of_silence() {
+        let mut s = PasteBurstState::default();
+        let t = t0();
+        for i in 1..=4u32 {
+            s.note_text_key(t + i * STEP);
+        }
+        assert!(s.burst_armed(t + 4u32 * STEP));
+        assert!(!s.burst_armed(t + 4u32 * STEP + BURST_WINDOW + STEP));
     }
 }

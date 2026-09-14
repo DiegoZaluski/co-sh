@@ -316,10 +316,37 @@ fn default_true() -> bool {
 // Persistence
 
 /// Resolve the config directory path (`~/.config/cosh/`).
+///
+/// `COSH_CONFIG_DIR` overrides the location when set — the test harness
+/// uses this because `directories::ProjectDirs` resolves through the
+/// platform's known-folders API (on Windows: `APPDATA`/`LOCALAPPDATA`),
+/// which IGNORES the `$HOME` redirect that `isolate_home()` performs. A
+/// plain `$HOME` override cannot isolate the config on Windows; an explicit
+/// path override can.
 fn config_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("COSH_CONFIG_DIR") {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
     let proj = ProjectDirs::from("", "", "cosh")
         .expect("could not determine project directories (is $HOME set?)");
     proj.config_dir().to_path_buf()
+}
+
+/// Resolve the data directory path (`~/.local/share/cosh/` on Unix).
+///
+/// `COSH_DATA_DIR` overrides the location when set — same rationale as
+/// [`config_dir`]'s `COSH_CONFIG_DIR` override.
+pub(crate) fn data_dir_override() -> PathBuf {
+    if let Ok(dir) = std::env::var("COSH_DATA_DIR") {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+    let proj = ProjectDirs::from("", "", "cosh")
+        .expect("could not determine project directories (is $HOME set?)");
+    proj.data_dir().to_path_buf()
 }
 
 /// Full path to `setup.json`.

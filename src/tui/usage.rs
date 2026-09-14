@@ -12,7 +12,6 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
 use cosh_sdk::connector::TokenUsage;
@@ -77,15 +76,15 @@ pub struct UsageStore {
 }
 
 impl UsageStore {
-    /// Create a store rooted at `{data_dir}/usage/usage.jsonl`.
+    /// Create a store rooted at `{data_dir}/usage/usage.jsonl`. Honours
+    /// `COSH_DATA_DIR` (test isolation; see `util::setup::data_dir_override`).
     ///
     /// # Panics
-    /// Panics if `ProjectDirs` cannot be determined (e.g. no `$HOME` set),
-    /// mirroring [`SessionStore`](crate::session_store::SessionStore).
+    /// Panics if the data directory cannot be determined (no override AND
+    /// `ProjectDirs` fails, e.g. no `$HOME` set), mirroring
+    /// [`SessionStore`](crate::session_store::SessionStore).
     pub fn new() -> Self {
-        let proj_dirs =
-            ProjectDirs::from("", "", "cosh").expect("could not determine project directories");
-        let dir = proj_dirs.data_dir().join(USAGE_DIR);
+        let dir = crate::util::setup::data_dir_override().join(USAGE_DIR);
         std::fs::create_dir_all(&dir).ok();
         Self {
             file: dir.join(USAGE_FILE),

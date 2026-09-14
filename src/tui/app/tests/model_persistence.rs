@@ -222,10 +222,16 @@ fn new_cmd() -> crate::ui::slash_menu::SlashCommand {
 async fn global_model_loads_applies_and_overwrites() {
     let _guard = HOME_LOCK.lock();
     isolate_home();
-    // isolate_home wipes <scratch>/.config first, so write AFTER it runs.
-    let cfg = std::env::temp_dir()
-        .join("cosh-hook-test-home")
-        .join(".config/cosh");
+    // isolate_home wipes the scratch dir first, so write AFTER it runs.
+    // Seed via the SAME resolution path the app uses: COSH_CONFIG_DIR now
+    // points at the scratch config dir (pre-fix, this test wrote to
+    // `$TEMP/.../.config/cosh` while the app read `%APPDATA%\cosh` — the
+    // developer's REAL setup — so the assertion compared against live user
+    // state and failed wherever it differed).
+    let cfg = {
+        let dir = std::env::var("COSH_CONFIG_DIR").expect("isolate_home sets COSH_CONFIG_DIR");
+        std::path::PathBuf::from(dir)
+    };
     std::fs::create_dir_all(&cfg).unwrap();
     std::fs::write(
         cfg.join("setup.json"),

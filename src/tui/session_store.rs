@@ -39,7 +39,6 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chrono::Datelike;
-use directories::ProjectDirs;
 use serde::Serialize;
 use xxhash_rust::xxh32::xxh32;
 
@@ -108,19 +107,20 @@ pub struct SessionStore {
 
 impl SessionStore {
     /// Create a new `SessionStore`, resolving the CWD and creating the
-    /// per-CWD sessions directory.
+    /// per-CWD sessions directory. Honours `COSH_DATA_DIR` (test isolation;
+    /// see `util::setup::data_dir_override`).
     ///
     /// # Panics
-    /// Panics if the `ProjectDirs` cannot be determined (e.g. no $HOME set).
+    /// Panics if the data directory cannot be determined (no override AND
+    /// `ProjectDirs` fails, e.g. no `$HOME` set).
     pub fn new() -> Self {
-        let proj_dirs =
-            ProjectDirs::from("", "", "cosh").expect("could not determine project directories");
-        let cwd_hash = compute_cwd_hash();
-        let sessions_dir = proj_dirs.data_dir().join("sessions").join(&cwd_hash);
+        let sessions_dir = crate::util::setup::data_dir_override()
+            .join("sessions")
+            .join(compute_cwd_hash());
         std::fs::create_dir_all(&sessions_dir).ok();
         Self {
             sessions_dir,
-            cwd_hash,
+            cwd_hash: compute_cwd_hash(),
             notify: None,
             lock_wait: LOCK_WAIT_TIMEOUT,
         }
