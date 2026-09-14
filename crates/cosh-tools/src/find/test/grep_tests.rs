@@ -3,8 +3,28 @@ use super::super::grep::{grep, grep_targets};
 use super::super::types::Grep;
 use cosh_sdk::hashline::snapshots::SnapshotStore;
 
-const FIND_DIR: &str = "/home/inky/co-sh/crates/cosh-sdk/src/find";
-const GLOB_FILE: &str = "/home/inky/co-sh/crates/cosh-sdk/src/find/glob.rs";
+/// Seed a Rust file with `pub fn glob` and `pub fn grep` in a scratch dir —
+/// the shape the grep tests need (a `.rs` tree with known symbols). Each call
+/// gets a fresh directory so tests stay independent.
+fn fixture_dir(name: &str) -> std::path::PathBuf {
+    let dir = temp_dir(name);
+    std::fs::write(
+        dir.join("glob.rs"),
+        "pub fn glob(pattern: &str) -> usize {\n    pattern.len()\n}\n",
+    )
+    .expect("write glob.rs fixture");
+    std::fs::write(
+        dir.join("grep.rs"),
+        "pub fn grep(needle: &str) -> usize {\n    needle.len()\n}\n",
+    )
+    .expect("write grep.rs fixture");
+    dir
+}
+
+/// Path of the seeded `glob.rs` fixture inside a [`fixture_dir`].
+fn fixture_glob_file(dir: &std::path::Path) -> String {
+    dir.join("glob.rs").to_string_lossy().into_owned()
+}
 
 /// Create a scratch directory for grep tests that need controlled fixtures.
 /// Recreated fresh on each call so tests are independent of prior state.
@@ -17,6 +37,7 @@ fn temp_dir(name: &str) -> std::path::PathBuf {
 
 #[test]
 fn grep_finds_matches_in_directory() {
+    let dir = fixture_dir("grep_dir");
     let out = grep(
         &Grep {
             glob: Some("*.rs".to_string()),
@@ -25,7 +46,7 @@ fn grep_finds_matches_in_directory() {
             ..Default::default()
         },
         "pub fn glob",
-        FIND_DIR,
+        dir.to_str().unwrap(),
     )
     .expect("grep should succeed");
 
@@ -39,22 +60,28 @@ fn grep_finds_matches_in_directory() {
             m.line
         );
     }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn grep_finds_matches_in_single_file() {
-    let out = grep(&Grep::default(), "pub fn glob", GLOB_FILE)
-        .expect("grep on a single file should succeed");
+    let dir = fixture_dir("grep_single");
+    let file = fixture_glob_file(&dir);
+    let out =
+        grep(&Grep::default(), "pub fn glob", &file).expect("grep on a single file should succeed");
 
     assert!(
         !out.matches.is_empty(),
         "expected at least one match in glob.rs"
     );
     assert_eq!(out.files_searched, 1);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn grep_returns_context_lines() {
+    let dir = fixture_dir("grep_ctx");
+    let file = fixture_glob_file(&dir);
     let out = grep(
         &Grep {
             max_count: Some(1),
@@ -63,7 +90,7 @@ fn grep_returns_context_lines() {
             ..Default::default()
         },
         "pub fn glob",
-        GLOB_FILE,
+        &file,
     )
     .expect("grep with context should succeed");
 
@@ -73,17 +100,20 @@ fn grep_returns_context_lines() {
         !first.context_before.is_empty() || !first.context_after.is_empty(),
         "expected at least one context line around the match"
     );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn grep_ignore_case_widens_results() {
+    let dir = fixture_dir("grep_case");
+    let file = fixture_glob_file(&dir);
     let sensitive = grep(
         &Grep {
             ignore_case: Some(false),
             ..Default::default()
         },
         "PUB FN GLOB",
-        GLOB_FILE,
+        &file,
     )
     .expect("case-sensitive grep should succeed");
 
@@ -93,7 +123,7 @@ fn grep_ignore_case_widens_results() {
             ..Default::default()
         },
         "PUB FN GLOB",
-        GLOB_FILE,
+        &file,
     )
     .expect("case-insensitive grep should succeed");
 
@@ -105,6 +135,7 @@ fn grep_ignore_case_widens_results() {
         insensitive.total_matches > 0,
         "uppercase pattern must match in case-insensitive mode"
     );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -116,6 +147,7 @@ fn grep_nonexistent_path_returns_error() {
 
 #[test]
 fn grep_surfaces_hashline_anchors_per_file() {
+    let dir = fixture_dir("grep_anchors");
     let out = grep(
         &Grep {
             glob: Some("*.rs".to_string()),
@@ -124,7 +156,7 @@ fn grep_surfaces_hashline_anchors_per_file() {
             ..Default::default()
         },
         "pub fn glob",
-        FIND_DIR,
+        dir.to_str().unwrap(),
     )
     .expect("grep should succeed");
 
@@ -163,12 +195,15 @@ fn grep_surfaces_hashline_anchors_per_file() {
         let paired = out.matches.iter().filter(|m| m.path == f.path).count();
         assert!(paired > 0, "no match pairs with anchor {}", f.path);
     }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn grep_single_file_anchor_matches_content_hash() {
-    let out = grep(&Grep::default(), "pub fn glob", GLOB_FILE)
-        .expect("grep on a single file should succeed");
+    let dir = fixture_dir("grep_anchor_hash");
+    let file = fixture_glob_file(&dir);
+    let out =
+        grep(&Grep::default(), "pub fn glob", &file).expect("grep on a single file should succeed");
 
     assert!(
         !out.matches.is_empty(),
@@ -180,26 +215,30 @@ fn grep_single_file_anchor_matches_content_hash() {
         "single-file grep must anchor exactly one file"
     );
 
-    let text = std::fs::read_to_string(GLOB_FILE).expect("read search target");
+    let text = std::fs::read_to_string(&file).expect("read search target");
     let expected = cosh_sdk::hashline::format::compute_file_hash(&text);
     assert_eq!(
         out.files[0].file_hash, expected,
         "anchor hash must equal the file content hash"
     );
     assert!(
-        out.files[0].header.contains(GLOB_FILE),
+        out.files[0].header.contains(file.as_str()),
         "header should carry the absolute path: {}",
         out.files[0].header
     );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn grep_without_matches_has_no_anchors() {
+    let dir = fixture_dir("grep_no_match");
+    let file = fixture_glob_file(&dir);
     let out =
-        grep(&Grep::default(), "zzz_no_such_pattern_xyz", GLOB_FILE).expect("grep should succeed");
+        grep(&Grep::default(), "zzz_no_such_pattern_xyz", &file).expect("grep should succeed");
 
     assert!(out.matches.is_empty());
     assert!(out.files.is_empty(), "no matches means no anchors");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -370,8 +409,10 @@ fn grep_total_cap_skips_file_window_pagination() {
 
 #[test]
 fn grep_zero_matches_is_marked_useless() {
+    let dir = fixture_dir("grep_useless");
+    let file = fixture_glob_file(&dir);
     let out =
-        grep(&Grep::default(), "zzz_no_such_pattern_xyz", GLOB_FILE).expect("grep should succeed");
+        grep(&Grep::default(), "zzz_no_such_pattern_xyz", &file).expect("grep should succeed");
 
     assert!(out.matches.is_empty());
     assert_eq!(
@@ -542,6 +583,8 @@ fn grep_line_range_requires_single_file_targets() {
 
 #[test]
 fn grep_line_range_malformed_errors() {
+    let dir = fixture_dir("grep_range_err");
+    let file = fixture_glob_file(&dir);
     for bad in ["abc", "1-", "-3", "5-1", "0-2"] {
         let result = grep(
             &Grep {
@@ -549,10 +592,11 @@ fn grep_line_range_malformed_errors() {
                 ..Default::default()
             },
             "fn",
-            GLOB_FILE,
+            &file,
         );
         assert!(result.is_err(), "malformed line_range {bad:?} must fail");
     }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

@@ -1634,7 +1634,7 @@ async fn test_agent_loop_stop_mid_stream() {
             Err(_) => continue,
         }
     }
-    let _ = handle.abort();
+    handle.abort();
 
     // The loop MUST report `Stopped` — not `Done` (the turn was interrupted,
     // not completed) and not `Error`.

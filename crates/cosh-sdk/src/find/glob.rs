@@ -541,7 +541,9 @@ mod tests {
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
-    use super::{GlobConfig, filter_entries, resolve_symlink_target_type};
+    #[cfg(unix)]
+    use super::resolve_symlink_target_type;
+    use super::{GlobConfig, filter_entries};
     use crate::find::task;
 
     struct TempDirGuard(PathBuf);

@@ -13,7 +13,7 @@ const BUFFER_SIZE: usize = 4096;
 /// and viewport re-render artifacts with the payload.
 #[allow(dead_code)]
 fn payload_len(bytes: &[u8]) -> usize {
-    let stripped = strip_ansi_escapes::strip(bytes.as_ref() as &[_]);
+    let stripped = strip_ansi_escapes::strip(bytes);
     stripped.iter().filter(|b| **b == b'a').count()
 }
 

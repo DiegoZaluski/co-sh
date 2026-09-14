@@ -1,6 +1,29 @@
 use std::io::BufRead;
 use std::path::{Component, Path, PathBuf};
 
+/// Windows `canonicalize` returns verbatim (`\\?\C:\…`) paths. Every consumer
+/// downstream (rollback keys, seen-lines keys, hashline headers, diagnostics)
+/// spells paths the plain way, so a verbatim-resolved key silently splits the
+/// store in two: `record("C:\…")` vs `seen_lines(r"\\?\C:\…")` never meet.
+/// Strip the prefix — mapping `\\?\UNC\server\share` back to `\\server\share` —
+/// so the resolved path keeps the plain drive spelling.
+#[cfg(windows)]
+fn strip_windows_verbatim(path: PathBuf) -> PathBuf {
+    let text = path.as_os_str().to_string_lossy();
+    if let Some(stripped) = text.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{stripped}"))
+    } else if let Some(stripped) = text.strip_prefix(r"\\?\") {
+        PathBuf::from(stripped)
+    } else {
+        path
+    }
+}
+
+#[cfg(not(windows))]
+fn strip_windows_verbatim(path: PathBuf) -> PathBuf {
+    path
+}
+
 /// Result of a path validation check.
 #[derive(Debug, PartialEq, Eq)]
 pub enum GuardResult {
@@ -79,7 +102,9 @@ impl PathGuard {
                 // (file doesn't exist yet), try the parent directory. If that
                 // also fails and the path is inside the project root, use the
                 // normalized path directly.
-                let Ok(root_canon) = self.root.canonicalize() else {
+                // Strip the verbatim prefix here too: the containment check
+                // below compares against `resolved`, which is plain-spelled.
+                let Ok(root_canon) = self.root.canonicalize().map(strip_windows_verbatim) else {
                     return Err(format!(
                         "permission denied: `{path}` is outside the project directory"
                     ));
@@ -89,12 +114,12 @@ impl PathGuard {
                 let in_root = normalized.starts_with(&root_norm);
 
                 let resolved = match normalized.canonicalize() {
-                    Ok(canon) => canon,
+                    Ok(canon) => strip_windows_verbatim(canon),
                     Err(_) => match normalized.parent() {
                         Some(parent) => match parent.canonicalize() {
                             Ok(parent_canon) => {
                                 let file_name = normalized.file_name().unwrap_or_default();
-                                parent_canon.join(file_name)
+                                strip_windows_verbatim(parent_canon.join(file_name))
                             }
                             Err(_) => {
                                 if in_root {

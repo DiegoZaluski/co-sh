@@ -89,6 +89,17 @@ fn workspace() -> (tempfile::TempDir, PathBuf) {
     (dir, file)
 }
 
+/// Build a valid file URI from a fixture path. `Path::display()`
+/// leaves Windows separators intact, which makes `file://{display}` invalid.
+fn file_uri(path: &std::path::Path) -> String {
+    let path = path.to_string_lossy().replace('\\', "/");
+    if path.starts_with('/') {
+        format!("file://{path}")
+    } else {
+        format!("file:///{path}")
+    }
+}
+
 fn lsp_for(
     dir: &std::path::Path,
     capabilities: &'static str,
@@ -198,7 +209,7 @@ async fn diagnostics_render_pushed_entries_with_filter() {
 #[tokio::test]
 async fn definitions_resolve_via_symbol_addressing() {
     let (dir, file) = workspace();
-    let definition_uri = format!("file://{}", file.display());
+    let definition_uri = file_uri(&file);
     const CAPS: &str = r#"{"definitionProvider":true}"#;
     let replies = vec![(
         "textDocument/definition",
@@ -218,7 +229,11 @@ async fn definitions_resolve_via_symbol_addressing() {
         .unwrap();
 
     assert_eq!(out.definitions.len(), 1);
-    assert_eq!(out.definitions[0].path, file.display().to_string());
+    assert_eq!(
+        PathBuf::from(&out.definitions[0].path),
+        file,
+        "definition path must identify the fixture regardless of separator spelling"
+    );
     assert_eq!(
         out.definitions[0].line, 1,
         "wire lines are 0-based; output is 1-based"
@@ -416,7 +431,7 @@ async fn rename_two_phase_dry_run_then_apply() {
     let replies = vec![(
         "textDocument/rename",
         json!({ "changes": {
-            &format!("file://{}", file.display()): [
+            file_uri(&file): [
                 { "range": { "start": {"line":0,"character":3}, "end": {"line":0,"character":9} }, "newText": "renamed" },
                 { "range": { "start": {"line":1,"character":14}, "end": {"line":1,"character":20} }, "newText": "renamed" }
             ]
@@ -578,7 +593,7 @@ async fn workspace_symbols_after_touch_returns_canned_hits() {
             "name": "make_thing",
             "kind": 12,
             "location": {
-                "uri": format!("file://{}", file.display()),
+                "uri": file_uri(&file),
                 "range": { "start": {"line":3,"character":4}, "end": {"line":3,"character":14} }
             }
         }
@@ -615,7 +630,7 @@ async fn call_hierarchy_outgoing_direction() {
         json!({
             "name": name,
             "kind": 12,
-            "uri": format!("file://{}", file.display()),
+            "uri": file_uri(&file),
             "range": { "start": {"line":0,"character":0}, "end": {"line":2,"character":0} },
             "selectionRange": { "start": {"line":0,"character":3}, "end": {"line":0,"character":9} }
         })
@@ -663,7 +678,7 @@ async fn code_actions_list_and_apply() {
     std::fs::write(&file, "let x: String = 1;\n").unwrap();
 
     // Fake server returns one quickfix that replaces the whole line.
-    let file_uri = format!("file://{}", file.display());
+    let file_uri = file_uri(&file);
     let mut changes_map = serde_json::Map::new();
     changes_map.insert(
         file_uri,

@@ -2663,7 +2663,7 @@ pub(crate) fn estimate_height_ext(text: &str, max_w: u16, keep_last_feed: bool) 
         // The final block of a DOCUMENT drops its trailing feed row: no blank
         // line is left at the foot. Interior slices (streaming segments) keep
         // it — the following blocks position themselves after it.
-        let keeps_feed = !(block_idx + 1 == block_count && !keep_last_feed);
+        let keeps_feed = block_idx + 1 != block_count || keep_last_feed;
         let height = {
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             source.hash(&mut hasher);

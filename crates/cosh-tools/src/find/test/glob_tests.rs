@@ -5,8 +5,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::super::glob::{glob, glob_with};
 use super::super::types::Glob;
 
-const FIND_DIR: &str = "/home/inky/co-sh/crates/cosh-sdk/src/find";
-
 /// Minimal temp dir that cleans itself up (no extra dependencies).
 struct TempDir(PathBuf);
 
@@ -44,6 +42,10 @@ fn write_file(path: &Path, content: &str) {
 
 #[test]
 fn glob_finds_rust_files() {
+    let tmp = TempDir::new();
+    write_file(&tmp.path().join("a.rs"), "x");
+    write_file(&tmp.path().join("sub").join("b.rs"), "x");
+
     let out = glob(
         &Glob {
             recursive: Some(true),
@@ -52,7 +54,7 @@ fn glob_finds_rust_files() {
             ..Default::default()
         },
         "*.rs",
-        FIND_DIR,
+        tmp.path().to_str().unwrap(),
     )
     .expect("glob should succeed");
 
@@ -70,6 +72,10 @@ fn glob_finds_rust_files() {
 
 #[test]
 fn glob_dir_filter_returns_only_dirs() {
+    let tmp = TempDir::new();
+    write_file(&tmp.path().join("f.txt"), "x");
+    std::fs::create_dir_all(tmp.path().join("sub")).expect("create dir fixture");
+
     let out = glob(
         &Glob {
             file_type: Some("dir".to_string()),
@@ -78,10 +84,11 @@ fn glob_dir_filter_returns_only_dirs() {
             ..Default::default()
         },
         "*",
-        "/home/inky/co-sh/crates",
+        tmp.path().to_str().unwrap(),
     )
     .expect("glob with dir filter should succeed");
 
+    assert!(!out.matches.is_empty(), "expected at least one dir");
     for entry in &out.matches {
         assert_eq!(
             entry.file_type, "dir",
@@ -93,6 +100,11 @@ fn glob_dir_filter_returns_only_dirs() {
 
 #[test]
 fn glob_max_results_limits_output() {
+    let tmp = TempDir::new();
+    for i in 0..10 {
+        write_file(&tmp.path().join(format!("f{i}.rs")), "x");
+    }
+
     let out = glob(
         &Glob {
             recursive: Some(true),
@@ -101,7 +113,7 @@ fn glob_max_results_limits_output() {
             ..Default::default()
         },
         "*.rs",
-        "/home/inky/co-sh",
+        tmp.path().to_str().unwrap(),
     )
     .expect("glob with max_results should succeed");
 
@@ -113,13 +125,15 @@ fn glob_max_results_limits_output() {
 
 #[test]
 fn glob_rejects_unknown_file_type() {
+    let tmp = TempDir::new();
+    write_file(&tmp.path().join("a.txt"), "x");
     let err = glob(
         &Glob {
             file_type: Some("executable".to_string()),
             ..Default::default()
         },
         "*",
-        "/home/inky/co-sh",
+        tmp.path().to_str().unwrap(),
     )
     .err()
     .expect("glob with unknown file_type should return an error");

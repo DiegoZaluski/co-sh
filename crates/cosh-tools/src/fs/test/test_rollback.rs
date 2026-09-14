@@ -1,23 +1,54 @@
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use cosh_sdk::rollback::record;
 
 use super::super::rollback::rollback;
 use super::super::types::{FsMetadata, FsRollback};
 
-static TEST_ID: AtomicU64 = AtomicU64::new(0);
+/// Unique scratch root for each rollback test: fixtures live in a per-test
+/// temp directory, never in a developer's real project tree.
+struct TempRoot(PathBuf);
 
-const ROOT: &str = "/home/inky/co-sh";
+impl TempRoot {
+    fn new(label: &str) -> Self {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time is after UNIX_EPOCH")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("cosh_fs_rb_{label}_{id}_{nanos}"));
+        std::fs::create_dir_all(&dir).expect("create temp root");
+        Self(dir)
+    }
 
-fn tmp(label: &str) -> String {
-    let id = TEST_ID.fetch_add(1, Ordering::Relaxed);
-    format!("{ROOT}/cosh_test_rb_{label}_{id}.txt")
+    fn path(&self) -> &Path {
+        &self.0
+    }
 }
 
-fn meta() -> FsMetadata {
+impl Drop for TempRoot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+static TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+fn tmp(root: &TempRoot, label: &str) -> String {
+    let id = TEST_ID.fetch_add(1, Ordering::Relaxed);
+    root.0
+        .join(format!("cosh_test_rb_{label}_{id}.txt"))
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn meta(root: &TempRoot) -> FsMetadata {
     FsMetadata {
-        root: Path::new(ROOT).to_path_buf(),
+        root: root.path().to_path_buf(),
         allowlist: None,
         blocklist: None,
     }
@@ -35,11 +66,16 @@ fn rm(path: &str) {
 
 #[tokio::test]
 async fn rollback_denied_when_path_is_outside_project_root() {
-    let outside = "/tmp/cosh_tool_rb_outside.txt";
-    std::fs::write(outside, "content").unwrap();
-    let _ = record(outside, "content");
+    let root = TempRoot::new("outside");
+    let outside = std::env::temp_dir().join(format!(
+        "cosh_tool_rb_outside_{}.txt",
+        TEST_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    let outside = outside.to_string_lossy().into_owned();
+    std::fs::write(&outside, "content").unwrap();
+    let _ = record(&outside, "content");
 
-    let err = rollback(&FsRollback, meta(), outside, "")
+    let err = rollback(&FsRollback, meta(&root), &outside, "")
         .await
         .unwrap_err();
 
@@ -47,21 +83,22 @@ async fn rollback_denied_when_path_is_outside_project_root() {
         err.contains("permission denied"),
         "should deny path outside root, got: {err}"
     );
-    let _ = std::fs::remove_file(outside);
+    let _ = std::fs::remove_file(&outside);
 }
 
 #[tokio::test]
 async fn rollback_denied_when_path_is_in_blocklist() {
-    let path = tmp("blocked");
+    let root = TempRoot::new("blocked");
+    let path = tmp(&root, "blocked");
     write_file(&path, "v1\n");
     let _ = record(&path, "v1\n");
     write_file(&path, "v2\n");
     let _ = record(&path, "v2\n");
 
     let blocked_meta = FsMetadata {
-        root: Path::new(ROOT).to_path_buf(),
+        root: root.path().to_path_buf(),
         allowlist: None,
-        blocklist: Some(vec![Path::new(ROOT).to_path_buf()]),
+        blocklist: Some(vec![root.path().to_path_buf()]),
     };
 
     let err = rollback(&FsRollback, blocked_meta, &path, "")
@@ -77,12 +114,13 @@ async fn rollback_denied_when_path_is_in_blocklist() {
 
 #[tokio::test]
 async fn rollback_returns_error_on_blocklist_allowlist_mismatch() {
-    let path = tmp("mismatch");
+    let root = TempRoot::new("mismatch");
+    let path = tmp(&root, "mismatch");
     write_file(&path, "content\n");
     let _ = record(&path, "content\n");
 
     let mismatch_meta = FsMetadata {
-        root: Path::new(ROOT).to_path_buf(),
+        root: root.path().to_path_buf(),
         allowlist: Some(vec![Path::new(&path).to_path_buf()]),
         blocklist: Some(vec![Path::new(&path).to_path_buf()]),
     };
@@ -94,17 +132,19 @@ async fn rollback_returns_error_on_blocklist_allowlist_mismatch() {
 
 #[tokio::test]
 async fn rollback_allowed_outside_root_when_path_in_allowlist() {
-    let outside = format!(
-        "/tmp/cosh_tool_rb_allowlist_{}.txt",
+    let root = TempRoot::new("allowlist");
+    let outside = std::env::temp_dir().join(format!(
+        "cosh_tool_rb_allowlist_{}.txt",
         TEST_ID.fetch_add(1, Ordering::Relaxed)
-    );
+    ));
+    let outside = outside.to_string_lossy().into_owned();
     std::fs::write(&outside, "v1\n").unwrap();
     let _ = record(&outside, "v1\n");
     std::fs::write(&outside, "v2\n").unwrap();
     let _ = record(&outside, "v2\n");
 
     let allowed_meta = FsMetadata {
-        root: Path::new(ROOT).to_path_buf(),
+        root: root.path().to_path_buf(),
         allowlist: Some(vec![Path::new(&outside).to_path_buf()]),
         blocklist: None,
     };
@@ -122,13 +162,14 @@ async fn rollback_allowed_outside_root_when_path_in_allowlist() {
 
 #[tokio::test]
 async fn rollback_empty_hash_restores_previous_version() {
-    let path = tmp("empty_hash");
+    let root = TempRoot::new("empty_hash");
+    let path = tmp(&root, "empty_hash");
     write_file(&path, "version one\n");
     let _ = record(&path, "version one\n");
     write_file(&path, "version two\n");
     let _ = record(&path, "version two\n");
 
-    let out = rollback(&FsRollback, meta(), &path, "")
+    let out = rollback(&FsRollback, meta(&root), &path, "")
         .await
         .expect("empty hash must trigger previous-version restore");
 
@@ -143,13 +184,14 @@ async fn rollback_empty_hash_restores_previous_version() {
 
 #[tokio::test]
 async fn rollback_whitespace_only_hash_treated_as_empty() {
-    let path = tmp("ws_hash");
+    let root = TempRoot::new("ws_hash");
+    let path = tmp(&root, "ws_hash");
     write_file(&path, "v1\n");
     let _ = record(&path, "v1\n");
     write_file(&path, "v2\n");
     let _ = record(&path, "v2\n");
 
-    let out = rollback(&FsRollback, meta(), &path, "   ")
+    let out = rollback(&FsRollback, meta(&root), &path, "   ")
         .await
         .expect("whitespace-only hash must be treated as empty");
 
@@ -164,14 +206,15 @@ async fn rollback_whitespace_only_hash_treated_as_empty() {
 
 #[tokio::test]
 async fn rollback_hash_with_surrounding_whitespace_is_trimmed() {
-    let path = tmp("trim_hash");
+    let root = TempRoot::new("trim_hash");
+    let path = tmp(&root, "trim_hash");
     write_file(&path, "original\n");
     let h = record(&path, "original\n").unwrap();
     write_file(&path, "updated\n");
     let _ = record(&path, "updated\n");
 
     let padded = format!("  {h}  ");
-    let out = rollback(&FsRollback, meta(), &path, &padded)
+    let out = rollback(&FsRollback, meta(&root), &path, &padded)
         .await
         .expect("hash with surrounding whitespace must be trimmed and resolved");
 
@@ -186,13 +229,14 @@ async fn rollback_hash_with_surrounding_whitespace_is_trimmed() {
 
 #[tokio::test]
 async fn rollback_explicit_hash_restores_target_version() {
-    let path = tmp("explicit_hash");
+    let root = TempRoot::new("explicit_hash");
+    let path = tmp(&root, "explicit_hash");
     write_file(&path, "state a\n");
     let h_a = record(&path, "state a\n").unwrap();
     write_file(&path, "state b\n");
     let _ = record(&path, "state b\n");
 
-    let out = rollback(&FsRollback, meta(), &path, &h_a)
+    let out = rollback(&FsRollback, meta(&root), &path, &h_a)
         .await
         .expect("explicit hash restore must succeed");
 
@@ -208,13 +252,14 @@ async fn rollback_explicit_hash_restores_target_version() {
 
 #[tokio::test]
 async fn rollback_header_has_hashline_format() {
-    let path = tmp("header_shape");
+    let root = TempRoot::new("header_shape");
+    let path = tmp(&root, "header_shape");
     write_file(&path, "v1\n");
     let h = record(&path, "v1\n").unwrap();
     write_file(&path, "v2\n");
     let _ = record(&path, "v2\n");
 
-    let out = rollback(&FsRollback, meta(), &path, &h).await.unwrap();
+    let out = rollback(&FsRollback, meta(&root), &path, &h).await.unwrap();
 
     assert!(
         out.header.starts_with('\u{00B6}'),
@@ -233,13 +278,14 @@ async fn rollback_header_has_hashline_format() {
 
 #[tokio::test]
 async fn rollback_replaced_hash_reflects_content_before_restore() {
-    let path = tmp("replaced_hash");
+    let root = TempRoot::new("replaced_hash");
+    let path = tmp(&root, "replaced_hash");
     write_file(&path, "before\n");
     let _ = record(&path, "before\n");
     write_file(&path, "after\n");
     let h_after = record(&path, "after\n").unwrap();
 
-    let out = rollback(&FsRollback, meta(), &path, "").await.unwrap();
+    let out = rollback(&FsRollback, meta(&root), &path, "").await.unwrap();
 
     assert_eq!(
         out.replaced_hash, h_after,
@@ -250,12 +296,13 @@ async fn rollback_replaced_hash_reflects_content_before_restore() {
 
 #[tokio::test]
 async fn rollback_replaced_hash_is_empty_when_file_did_not_exist() {
-    let path = tmp("replaced_hash_deleted");
+    let root = TempRoot::new("replaced_hash_deleted");
+    let path = tmp(&root, "replaced_hash_deleted");
     write_file(&path, "content\n");
     let h = record(&path, "content\n").unwrap();
     rm(&path);
 
-    let out = rollback(&FsRollback, meta(), &path, &h)
+    let out = rollback(&FsRollback, meta(&root), &path, &h)
         .await
         .expect("restore of deleted file must succeed");
 
@@ -268,13 +315,14 @@ async fn rollback_replaced_hash_is_empty_when_file_did_not_exist() {
 
 #[tokio::test]
 async fn rollback_warning_is_none_on_clean_restore() {
-    let path = tmp("clean_restore");
+    let root = TempRoot::new("clean_restore");
+    let path = tmp(&root, "clean_restore");
     write_file(&path, "v1\n");
     let _ = record(&path, "v1\n");
     write_file(&path, "v2\n");
     let _ = record(&path, "v2\n");
 
-    let out = rollback(&FsRollback, meta(), &path, "").await.unwrap();
+    let out = rollback(&FsRollback, meta(&root), &path, "").await.unwrap();
 
     assert!(
         out.warning.is_none(),
@@ -285,14 +333,15 @@ async fn rollback_warning_is_none_on_clean_restore() {
 
 #[tokio::test]
 async fn rollback_warning_is_some_when_file_was_externally_modified() {
-    let path = tmp("ext_mod_warning");
+    let root = TempRoot::new("ext_mod_warning");
+    let path = tmp(&root, "ext_mod_warning");
     write_file(&path, "session version\n");
     let h = record(&path, "session version\n").unwrap();
 
     // Simulate external modification — write directly without record()
     write_file(&path, "externally changed\n");
 
-    let out = rollback(&FsRollback, meta(), &path, &h)
+    let out = rollback(&FsRollback, meta(&root), &path, &h)
         .await
         .expect("restore over external modification must succeed");
 
@@ -313,10 +362,13 @@ async fn rollback_warning_is_some_when_file_was_externally_modified() {
 
 #[tokio::test]
 async fn rollback_error_no_history_for_path() {
-    let path = tmp("no_history_tool");
+    let root = TempRoot::new("no_history");
+    let path = tmp(&root, "no_history_tool");
     write_file(&path, "fresh file\n");
 
-    let err = rollback(&FsRollback, meta(), &path, "").await.unwrap_err();
+    let err = rollback(&FsRollback, meta(&root), &path, "")
+        .await
+        .unwrap_err();
 
     assert!(
         err.contains("no rollback history"),
@@ -327,13 +379,14 @@ async fn rollback_error_no_history_for_path() {
 
 #[tokio::test]
 async fn rollback_error_hash_not_found_in_history() {
-    let path = tmp("bad_hash_tool");
+    let root = TempRoot::new("bad_hash");
+    let path = tmp(&root, "bad_hash_tool");
     write_file(&path, "content\n");
     let h = record(&path, "content\n").unwrap();
     write_file(&path, "updated\n");
     let _ = record(&path, "updated\n");
 
-    let err = rollback(&FsRollback, meta(), &path, "DEAD")
+    let err = rollback(&FsRollback, meta(&root), &path, "DEAD")
         .await
         .unwrap_err();
 
@@ -344,17 +397,20 @@ async fn rollback_error_hash_not_found_in_history() {
 
 #[tokio::test]
 async fn rollback_error_already_at_requested_version() {
-    let path = tmp("already_current_tool");
+    let root = TempRoot::new("already_current");
+    let path = tmp(&root, "already_current_tool");
     write_file(&path, "v1\n");
     let h = record(&path, "v1\n").unwrap();
     write_file(&path, "v2\n");
     let _ = record(&path, "v2\n");
 
     // Restore to v1 first
-    rollback(&FsRollback, meta(), &path, &h).await.unwrap();
+    rollback(&FsRollback, meta(&root), &path, &h).await.unwrap();
 
     // Restore again — disk already has v1
-    let err = rollback(&FsRollback, meta(), &path, &h).await.unwrap_err();
+    let err = rollback(&FsRollback, meta(&root), &path, &h)
+        .await
+        .unwrap_err();
 
     assert!(
         err.contains("already at version"),
@@ -365,11 +421,14 @@ async fn rollback_error_already_at_requested_version() {
 
 #[tokio::test]
 async fn rollback_error_no_previous_when_only_one_version() {
-    let path = tmp("single_version_tool");
+    let root = TempRoot::new("single_version");
+    let path = tmp(&root, "single_version_tool");
     write_file(&path, "only version\n");
     let _ = record(&path, "only version\n");
 
-    let err = rollback(&FsRollback, meta(), &path, "").await.unwrap_err();
+    let err = rollback(&FsRollback, meta(&root), &path, "")
+        .await
+        .unwrap_err();
 
     assert!(
         err.contains("no previous version"),

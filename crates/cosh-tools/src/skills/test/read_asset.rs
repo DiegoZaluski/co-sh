@@ -27,15 +27,19 @@ fn read_asset_path_traversal_rejected() {
 fn read_asset_absolute_path_rejected() {
     let dir = TempDir::new();
     single_skill(dir.path(), "safe", "description: Safe skill\n", "body");
+    let absolute_asset = dir.path().join("outside-the-skill.md");
 
     let result = execute(&SkillSchema {
         action: SkillAction::ReadAsset,
-        asset_path: Some("/etc/passwd".into()),
+        asset_path: Some(absolute_asset.to_string_lossy().into_owned()),
         skill_name: Some("safe".into()),
         ..list_schema(dir.path())
     });
 
-    assert!(matches!(result, Err(SkillError::PathTraversal(_))));
+    assert!(
+        matches!(result, Err(SkillError::PathTraversal(_))),
+        "expected absolute path rejection, got: {result:?}"
+    );
 }
 
 #[test]

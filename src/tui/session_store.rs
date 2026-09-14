@@ -2361,10 +2361,11 @@ mod tests {
         assert_eq!(store.load_context(&session.id).unwrap().items.len(), 2);
         let mut saw_busy_toast = false;
         while let Ok(event) = rx.try_recv() {
-            if let HarnessEvent::Toast { message, variant } = event {
-                if variant == ToastVariant::Warning && message.contains("busy") {
-                    saw_busy_toast = true;
-                }
+            if let HarnessEvent::Toast { message, variant } = event
+                && variant == ToastVariant::Warning
+                && message.contains("busy")
+            {
+                saw_busy_toast = true;
             }
         }
         assert!(saw_busy_toast, "contention must surface as a warning toast");

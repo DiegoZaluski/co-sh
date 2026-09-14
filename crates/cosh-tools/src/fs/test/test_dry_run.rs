@@ -6,18 +6,53 @@ use super::super::edit::edit;
 use super::super::replace::content_edit;
 use super::super::types::{EditTarget, FsEdit, FsMetadata, ReplaceEdit};
 use cosh_sdk::rollback;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-fn make_metadata() -> FsMetadata {
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Unique scratch root: dry-run fixtures live in a per-test temp directory,
+/// never in a developer's real project tree.
+struct TempRoot(PathBuf);
+
+impl TempRoot {
+    fn new(label: &str) -> Self {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time is after UNIX_EPOCH")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("cosh_fs_dryrun_{label}_{id}_{nanos}"));
+        std::fs::create_dir_all(&dir).expect("create temp root");
+        Self(dir)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempRoot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn make_metadata(root: &Path) -> FsMetadata {
     FsMetadata {
-        root: PathBuf::from("/home/inky/co-sh"),
+        root: root.to_path_buf(),
         allowlist: None,
         blocklist: None,
     }
 }
 
-fn fixture(name: &str, text: &str) -> (String, String) {
-    let path = format!("/home/inky/co-sh/cosh_test_dry_run_{name}");
+fn fixture(root: &TempRoot, name: &str, text: &str) -> (String, String) {
+    let path = root
+        .0
+        .join(format!("cosh_test_dry_run_{name}"))
+        .to_string_lossy()
+        .into_owned();
     std::fs::write(&path, text).unwrap();
     let hash = rollback::record(&path, text).expect("snapshot recorded");
     (path, hash)
@@ -25,9 +60,10 @@ fn fixture(name: &str, text: &str) -> (String, String) {
 
 #[tokio::test]
 async fn dry_run_returns_diff_and_leaves_the_file_untouched() {
-    let (path, hash) = fixture("targets", "fn main() {\n    x();\n}\n");
+    let root = TempRoot::new("targets");
+    let (path, hash) = fixture(&root, "targets", "fn main() {\n    x();\n}\n");
     let out = edit(
-        make_metadata(),
+        make_metadata(root.path()),
         FsEdit {
             targets: vec![EditTarget {
                 path: path.clone(),
@@ -63,9 +99,10 @@ async fn dry_run_surfaces_syntax_breakage_before_applying() {
     // An unrepairable break: the payload keeps the opener but breaks a
     // statement inside, so no boundary row can restore the parse and the
     // parse-broken advisory is machine-confirmed in the PREVIEW.
-    let (path, hash) = fixture("syntax.rs", "fn f() {\n}\n");
+    let root = TempRoot::new("syntax");
+    let (path, hash) = fixture(&root, "syntax.rs", "fn f() {\n}\n");
     let out = edit(
-        make_metadata(),
+        make_metadata(root.path()),
         FsEdit {
             targets: vec![EditTarget {
                 path: path.clone(),
@@ -96,9 +133,10 @@ async fn dry_run_surfaces_syntax_breakage_before_applying() {
 
 #[tokio::test]
 async fn without_dry_run_the_edit_applies_for_real() {
-    let (path, hash) = fixture("real", "a\nb\n");
+    let root = TempRoot::new("real");
+    let (path, hash) = fixture(&root, "real", "a\nb\n");
     let out = edit(
-        make_metadata(),
+        make_metadata(root.path()),
         FsEdit {
             targets: vec![EditTarget {
                 path: path.clone(),
@@ -117,9 +155,10 @@ async fn without_dry_run_the_edit_applies_for_real() {
 
 #[tokio::test]
 async fn content_engine_honors_dry_run() {
-    let (path, hash) = fixture("content", "value = compute(x);\n");
+    let root = TempRoot::new("content");
+    let (path, hash) = fixture(&root, "content", "value = compute(x);\n");
     let out = content_edit(
-        &make_metadata(),
+        &make_metadata(root.path()),
         &[ReplaceEdit {
             path: path.clone(),
             file_hash: Some(hash),
@@ -144,9 +183,10 @@ async fn content_engine_honors_dry_run() {
 
 #[tokio::test]
 async fn dry_run_batch_writes_nothing_even_when_a_later_target_would_fail() {
-    let (path, hash) = fixture("batch", "a\nb\n");
+    let root = TempRoot::new("batch");
+    let (path, hash) = fixture(&root, "batch", "a\nb\n");
     let out = edit(
-        make_metadata(),
+        make_metadata(root.path()),
         FsEdit {
             targets: vec![EditTarget {
                 path: path.clone(),

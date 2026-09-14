@@ -324,10 +324,10 @@ fn default_true() -> bool {
 /// plain `$HOME` override cannot isolate the config on Windows; an explicit
 /// path override can.
 fn config_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("COSH_CONFIG_DIR") {
-        if !dir.is_empty() {
-            return PathBuf::from(dir);
-        }
+    if let Ok(dir) = std::env::var("COSH_CONFIG_DIR")
+        && !dir.is_empty()
+    {
+        return PathBuf::from(dir);
     }
     let proj = ProjectDirs::from("", "", "cosh")
         .expect("could not determine project directories (is $HOME set?)");
@@ -339,10 +339,10 @@ fn config_dir() -> PathBuf {
 /// `COSH_DATA_DIR` overrides the location when set — same rationale as
 /// [`config_dir`]'s `COSH_CONFIG_DIR` override.
 pub(crate) fn data_dir_override() -> PathBuf {
-    if let Ok(dir) = std::env::var("COSH_DATA_DIR") {
-        if !dir.is_empty() {
-            return PathBuf::from(dir);
-        }
+    if let Ok(dir) = std::env::var("COSH_DATA_DIR")
+        && !dir.is_empty()
+    {
+        return PathBuf::from(dir);
     }
     let proj = ProjectDirs::from("", "", "cosh")
         .expect("could not determine project directories (is $HOME set?)");

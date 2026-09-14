@@ -262,9 +262,9 @@ fn validate_asset_path_escape_via_symlink_rejected() {
     std::fs::write(&outside, "escaped").unwrap();
 
     // Symlink from base/evil -> ../outside
-    let evil = dir.path().join("evil");
     #[cfg(unix)]
     {
+        let evil = dir.path().join("evil");
         std::os::unix::fs::symlink("../outside", &evil).unwrap();
     }
 
@@ -493,9 +493,9 @@ fn validate_asset_path_dotdot_after_symlink_rejected() {
     std::fs::write(sub.join("target.txt"), "content").unwrap();
 
     // Symlink inside base that points to a sibling dir.
-    let link = dir.path().join("link");
     #[cfg(unix)]
     {
+        let link = dir.path().join("link");
         std::os::unix::fs::symlink("sub", &link).unwrap();
     }
     // Try to escape via the symlinked dir using `..`

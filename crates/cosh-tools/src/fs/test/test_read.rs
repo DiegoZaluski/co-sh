@@ -4,14 +4,6 @@ use super::super::read::read;
 use super::super::types::{FsMetadata, FsRead, Target};
 use cosh_sdk::hashline::snapshots::SnapshotStore;
 
-fn meta() -> FsMetadata {
-    FsMetadata {
-        root: PathBuf::from("/home/inky/co-sh"),
-        allowlist: None,
-        blocklist: None,
-    }
-}
-
 /// Create a scratch directory rooted at itself, so the path guard accepts the
 /// fixtures inside it. Recreated fresh on each call.
 fn temp_dir(name: &str) -> PathBuf {
@@ -31,18 +23,27 @@ fn meta_with_root(root: &Path) -> FsMetadata {
 
 #[tokio::test]
 async fn test_function_search() {
+    // Rust fixtures with known symbols (a fn for the symbol search, a plain
+    // file for the whole-file read) — seeded in a scratch dir so the test
+    // exercises the same code paths without depending on repo layout.
+    let dir = temp_dir("symbol_search");
+    let fn_file = dir.join("fixture_fn.rs");
+    std::fs::write(&fn_file, "pub fn fixture_symbol() -> u32 {\n    42\n}\n").unwrap();
+    let plain_file = dir.join("fixture_plain.rs");
+    std::fs::write(&plain_file, "line one\nline two\n").unwrap();
+
     let results = read(
-        meta(),
+        meta_with_root(&dir),
         FsRead {
             targets: vec![
                 Target {
-                    path: "/home/inky/co-sh/crates/cosh-sdk/src/hashline/tokenizer.rs".to_string(),
+                    path: fn_file.to_string_lossy().to_string(),
                     line: None,
-                    symbol: Some("tokenize".to_string()),
+                    symbol: Some("fixture_symbol".to_string()),
                     line_range: None,
                 },
                 Target {
-                    path: "/home/inky/co-sh/crates/cosh-sdk/src/hashline/types.rs".to_string(),
+                    path: plain_file.to_string_lossy().to_string(),
                     line: None,
                     symbol: None,
                     line_range: None,
@@ -58,15 +59,20 @@ async fn test_function_search() {
         assert!(!r.header.is_empty(), "header should not be empty");
         assert!(!r.content.is_empty(), "content should not be empty");
     }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
 async fn test_line_block() {
+    let dir = temp_dir("line_block");
+    let file = dir.join("fixture.rs");
+    std::fs::write(&file, "l1\nl2\nl3\nl4\nl5\nl6\n").unwrap();
+
     let results = read(
-        meta(),
+        meta_with_root(&dir),
         FsRead {
             targets: vec![Target {
-                path: "/home/inky/co-sh/crates/cosh-sdk/src/hashline/tokenizer.rs".to_string(),
+                path: file.to_string_lossy().to_string(),
                 line: Some(5),
                 symbol: None,
                 line_range: None,
@@ -84,6 +90,8 @@ async fn test_line_block() {
     assert!(!result.file_hash.is_empty());
     assert!(!result.header.is_empty());
     assert!(!result.content.is_empty());
+    assert!(result.content.contains("5| l5"), "{}", result.content);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ── line_range exact reads ─────────────────────────────────────────────

@@ -18,7 +18,7 @@ impl TempDir {
     pub fn new() -> Self {
         let pid = std::process::id();
         let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = PathBuf::from(format!("/tmp/cosh_skills_test_{pid}_{n}"));
+        let path = std::env::temp_dir().join(format!("cosh_skills_test_{pid}_{n}"));
         fs::create_dir_all(&path).expect("failed to create temp dir");
         Self { path }
     }

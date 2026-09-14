@@ -172,7 +172,7 @@ mod tests {
             "the deleted session must vanish from the sidebar summaries"
         );
         assert!(
-            app.state.pending_queues.get("loop-owner").is_none(),
+            !app.state.pending_queues.contains_key("loop-owner"),
             "the deleted session's pending queues must be removed"
         );
     }

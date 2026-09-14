@@ -653,6 +653,7 @@ mod tests {
 
     use crate::find::task::CancelToken;
 
+    #[cfg(unix)]
     use super::classify_file_type;
 
     static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);

@@ -401,7 +401,7 @@ async fn clicking_multiline_user_message_opens_message_actions_without_panicking
         sessions_dir.join("session-1788063765396.jsonl"),
         concat!(
             r#"{"title":"Aug 30 01:22","title_generated":false,"created_at":1788063765396,"#,
-            r#""cwd":"/home/inky/co-sh","provider":"opencode","model":"big-pickle","reasoning":"high","context":null}"#,
+            r#""cwd":"C:\\sandbox","provider":"opencode","model":"big-pickle","reasoning":"high","context":null}"#,
             "\n",
             r#"{"Message":{"id":"msg-0","role":"user","parts":[{"type":"Text","text":"Crie um AGENT.md para o projeto,\n1. pesquise como cria um AGENT.md eficiente \n2. estude o projeto e implemente","synthetic":false}],"created_at":1788063765396,"agent":null,"model":null,"ctx_ids":[]}}"#,
             "\n",

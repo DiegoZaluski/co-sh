@@ -149,6 +149,28 @@ impl Clone for InMemoryFilesystem {
     }
 }
 
+/// Windows `canonicalize` returns verbatim (`\\?\C:\…`) paths. Snapshot keys
+/// and headers must stay in the plain drive spelling (matching what every
+/// producer/consumer passes), so map `\\?\UNC\server\share` back to
+/// `\\server\share` and strip the plain `\\?\` prefix.
+#[cfg(windows)]
+pub(crate) fn strip_verbatim_prefix(path: std::path::PathBuf) -> std::path::PathBuf {
+    use std::path::PathBuf;
+    let text = path.as_os_str().to_string_lossy();
+    if let Some(stripped) = text.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{stripped}"))
+    } else if let Some(stripped) = text.strip_prefix(r"\\?\") {
+        PathBuf::from(stripped)
+    } else {
+        path
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn strip_verbatim_prefix(path: std::path::PathBuf) -> std::path::PathBuf {
+    path
+}
+
 impl InMemoryFilesystem {
     pub fn new(initial: impl IntoIterator<Item = (String, String)>) -> Self {
         Self {
@@ -276,14 +298,37 @@ impl Filesystem for DiskFilesystem {
     }
 
     async fn canonical_path(&self, path: &str) -> String {
-        tokio::fs::canonicalize(path)
+        let canonical = tokio::fs::canonicalize(path)
             .await
-            .unwrap_or_else(|_| Path::new(path).to_path_buf())
+            .unwrap_or_else(|_| Path::new(path).to_path_buf());
+        // Windows `canonicalize` yields verbatim (`\\?\C:\…`) paths. Snapshot
+        // stores are keyed by this string, so a verbatim key would never meet
+        // the plain drive spelling every caller (`rollback::record`, guard
+        // validation, hashline headers) uses. Keep the plain form.
+        strip_verbatim_prefix(canonical)
             .to_string_lossy()
             .to_string()
     }
 
     async fn exists(&self, path: &str) -> Result<bool> {
         Ok(tokio::fs::try_exists(path).await.unwrap_or(false))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn strip_verbatim_prefix_keeps_snapshot_keys_in_plain_windows_form() {
+        use std::path::PathBuf;
+
+        assert_eq!(
+            super::strip_verbatim_prefix(PathBuf::from(r"\\?\C:\work\file.rs")),
+            PathBuf::from(r"C:\work\file.rs")
+        );
+        assert_eq!(
+            super::strip_verbatim_prefix(PathBuf::from(r"\\?\UNC\server\share\file.rs")),
+            PathBuf::from(r"\\server\share\file.rs")
+        );
     }
 }

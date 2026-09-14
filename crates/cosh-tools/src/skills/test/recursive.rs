@@ -1,10 +1,13 @@
 //! Tests for recursive vs non-recursive directory discovery.
 
+#[cfg(unix)]
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 
-use super::super::{SkillAction, SkillOutput, SkillSchema, SkillSource, execute};
+#[cfg(unix)]
+use super::super::SkillSource;
+use super::super::{SkillAction, SkillOutput, SkillSchema, execute};
 use super::common::{TempDir, list_schema};
 
 #[test]

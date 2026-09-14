@@ -721,12 +721,11 @@ impl RightPanelState {
     /// is never overridden by auto-follow).
     pub fn panel_left(&mut self) {
         match self.panel_focus.clone() {
-            Some(PanelFocus::Bash) => {
-                if !self.bash_history_mode {
-                    self.bash_history_mode = true;
-                    self.bump_gen_for_layout();
-                }
+            Some(PanelFocus::Bash) if !self.bash_history_mode => {
+                self.bash_history_mode = true;
+                self.bump_gen_for_layout();
             }
+            Some(PanelFocus::Bash) => {}
             Some(PanelFocus::Agent(agent)) => {
                 let queue = self.agent_queue(&agent);
                 if queue.len() < 2 {
@@ -749,12 +748,11 @@ impl RightPanelState {
     /// forward, and reaching the newest entry re-arms auto-follow.
     pub fn panel_right(&mut self) {
         match self.panel_focus.clone() {
-            Some(PanelFocus::Bash) => {
-                if self.bash_history_mode {
-                    self.bash_history_mode = false;
-                    self.bump_gen_for_layout();
-                }
+            Some(PanelFocus::Bash) if self.bash_history_mode => {
+                self.bash_history_mode = false;
+                self.bump_gen_for_layout();
             }
+            Some(PanelFocus::Bash) => {}
             Some(PanelFocus::Agent(agent)) => {
                 let queue = self.agent_queue(&agent);
                 let nav = self.agent_navs.entry(agent).or_default();

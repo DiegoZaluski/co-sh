@@ -1799,6 +1799,7 @@ pub fn grep(options: GrepOptions) -> Result<GrepResult, String> {
 mod tests {
     #[cfg(unix)]
     use std::{ffi::CString, os::unix::ffi::OsStrExt};
+    #[cfg(unix)]
     use std::{
         fs,
         path::{Path, PathBuf},
@@ -1806,13 +1807,16 @@ mod tests {
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
-    use super::{
-        GrepConfig, GrepOutputMode, escape_unescaped_parentheses, grep_sync, sanitize_braces,
-    };
+    #[cfg(unix)]
+    use super::{GrepConfig, GrepOutputMode, grep_sync};
+    use super::{escape_unescaped_parentheses, sanitize_braces};
+    #[cfg(unix)]
     use crate::find::task;
 
+    #[cfg(unix)]
     struct TempDirGuard(PathBuf);
 
+    #[cfg(unix)]
     impl TempDirGuard {
         fn new() -> Self {
             static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1832,12 +1836,14 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     impl Drop for TempDirGuard {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
     }
 
+    #[cfg(unix)]
     fn write_file(path: &Path, content: &str) {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).expect("create parent directories for test file");

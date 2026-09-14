@@ -1270,15 +1270,11 @@ mod tests {
         let mut setup = Setup::default();
         let mut view = SettingsView::new();
 
-        let editor_row = |setup: &Setup| {
-            selectable_rows(setup)
-                .iter()
-                .position(|r| matches!(r, SettingsRow::Category(6)))
-                .expect("editor category row exists")
-        };
-
         // Blank configured command: the row shows the fallback hint.
-        view.selection.selected_index = editor_row(&setup);
+        view.selection.selected_index = selectable_rows(&setup)
+            .iter()
+            .position(|r| matches!(r, SettingsRow::Category(6)))
+            .expect("editor category row exists");
         assert_eq!(
             view.activate_selected(&mut setup),
             Some(SettingsAction::OpenEditorInput)
