@@ -367,6 +367,8 @@ pub struct App {
     live_requested: bool,
     /// Timestamp of the previous frame (for delta_time calculation).
     last_frame_time: std::time::Instant,
+    /// Rate-limited resolver for the git branch shown in the session footer.
+    branch_tracker: crate::util::git::BranchTracker,
     /// Per-frame counter — rate-limits the PERF debug logs in the render hot
     /// path (bg_fill etc.) to one sample per ~30 frames (~1/sec) instead of
     /// one write per frame.
@@ -598,6 +600,7 @@ impl App {
             drag_selection: None,
             live_requested: false,
             last_frame_time: std::time::Instant::now(),
+            branch_tracker: crate::util::git::BranchTracker::default(),
             perf_frame: 0,
             last_mouse_x: 0,
             last_mouse_y: 0,
@@ -736,6 +739,12 @@ impl App {
             // (no input -> no ticks). Ticking on the measured delta keeps
             // the lifetime exact at any frame rate.
             self.toast_state.tick(delta.as_millis() as u64);
+
+            // Refresh the footer's git branch at its own rate-limited cadence
+            // (the tracker internally throttles disk reads to twice a second).
+            self.state.git_branch = self
+                .branch_tracker
+                .current(&self.state.working_directory);
 
             if self.needs_full_redraw {
                 // The external editor scribbled over the screen: force a

@@ -1459,6 +1459,7 @@ dependencies = [
  "tiktoken-rs",
  "tokio",
  "tokio-stream",
+ "unicode-width",
  "url",
  "xxhash-rust",
 ]

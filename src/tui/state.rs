@@ -63,6 +63,10 @@ pub struct AppState {
     pub scroll_y: i32,
     pub content_height: i32,
     pub working_directory: String,
+    /// Current git branch (or short SHA on detached HEAD) for the session
+    /// footer; `None` when the working directory is outside a repository.
+    /// Refreshed by the app loop via the git branch tracker.
+    pub git_branch: Option<String>,
     pub mode: Mode,
     pub connected: bool,
     /// Whether LSP is enabled at all (`COSH_LSP`). Distinct from how many
@@ -89,6 +93,7 @@ impl AppState {
             scroll_y: 0,
             content_height: 0,
             working_directory: String::new(),
+            git_branch: None,
             mode: Mode::Build,
             connected: false,
             lsp_available: false,

@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod git;
 pub mod editor;
 pub mod field_selection;
 pub mod list_selection;
