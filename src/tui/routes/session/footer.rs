@@ -7,15 +7,29 @@ use crate::theme::{Theme, rgba_color};
 
 fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
     let right = x + max_w;
-    for (i, ch) in text.chars().enumerate() {
-        let cx = x + i as u16;
-        if cx >= right {
+    let mut cx = x;
+    for ch in text.chars() {
+        // Wide glyphs (CJK, emoji — all legal in branch names and paths)
+        // occupy two terminal cells; advancing one cell per char would
+        // shift the right-anchored segments and overwrite the wide char's
+        // second half.
+        let w = unicode_width::UnicodeWidthChar::width(ch)
+            .unwrap_or(0)
+            .max(1) as u16;
+        if cx + w > right {
             break;
         }
         if let Some(cell) = buf.cell_mut((cx, y)) {
             cell.set_char(ch);
             cell.set_style(style);
         }
+        if w == 2
+            && let Some(cell) = buf.cell_mut((cx + 1, y))
+        {
+            cell.set_char(' ');
+            cell.set_style(style);
+        }
+        cx += w;
     }
 }
 
@@ -45,16 +59,30 @@ impl FooterView {
         let muted = Style::default().fg(rgba_color(theme.text_muted));
         let success = Style::default().fg(rgba_color(theme.success));
         let warning = Style::default().fg(rgba_color(theme.warning));
+        let accent = Style::default().fg(rgba_color(theme.accent));
 
         if state.current_session().is_some() {
             let dir = &state.working_directory;
             let dir_display = if dir.is_empty() { "~" } else { dir };
 
+            // Display width, not byte length: right-anchored segments and
+            // the draw limit must both count terminal cells (wide glyphs
+            // occupy two).
+            let disp_w = |s: &str| unicode_width::UnicodeWidthStr::width(s).max(1) as u16;
+
             let mut rx = area.right().saturating_sub(2);
 
             let dir_str = format!(" {dir_display}");
-            rx = rx.saturating_sub(dir_str.len() as u16);
-            draw_text_line(buf, &dir_str, rx, area.y, dir_str.len() as u16, muted);
+            rx = rx.saturating_sub(disp_w(&dir_str));
+            draw_text_line(buf, &dir_str, rx, area.y, disp_w(&dir_str), muted);
+
+            // Current git branch (or detached SHA) beside the working
+            // directory; hidden entirely outside a repository.
+            if let Some(branch) = &state.git_branch {
+                let branch_str = format!(" {branch}");
+                rx = rx.saturating_sub(disp_w(&branch_str));
+                draw_text_line(buf, &branch_str, rx, area.y, disp_w(&branch_str), accent);
+            }
 
             let conn_indicator = if state.connected {
                 "\u{25cf}"
@@ -62,21 +90,14 @@ impl FooterView {
                 "\u{25cb}"
             };
             let conn_str = format!(" {conn_indicator}");
-            rx = rx.saturating_sub(conn_str.len() as u16);
+            rx = rx.saturating_sub(disp_w(&conn_str));
             let conn_style = if state.connected { success } else { warning };
-            draw_text_line(
-                buf,
-                &conn_str,
-                rx,
-                area.y,
-                conn_str.len() as u16,
-                conn_style,
-            );
+            draw_text_line(buf, &conn_str, rx, area.y, disp_w(&conn_str), conn_style);
 
             if state.permission_count > 0 {
                 let s = format!("  perm {}", state.permission_count);
-                rx = rx.saturating_sub(s.len() as u16);
-                draw_text_line(buf, &s, rx, area.y, s.len() as u16, muted);
+                rx = rx.saturating_sub(disp_w(&s));
+                draw_text_line(buf, &s, rx, area.y, disp_w(&s), muted);
             }
 
             if state.mcp_count > 0 || state.mcp_errors > 0 {
@@ -85,14 +106,14 @@ impl FooterView {
                 } else {
                     format!("  mcp {}", state.mcp_count)
                 };
-                rx = rx.saturating_sub(s.len() as u16);
-                draw_text_line(buf, &s, rx, area.y, s.len() as u16, muted);
+                rx = rx.saturating_sub(disp_w(&s));
+                draw_text_line(buf, &s, rx, area.y, disp_w(&s), muted);
             }
 
             if !state.lsp_servers.is_empty() {
                 let s = format!("  lsp {}", state.lsp_servers.len());
-                rx = rx.saturating_sub(s.len() as u16);
-                draw_text_line(buf, &s, rx, area.y, s.len() as u16, muted);
+                rx = rx.saturating_sub(disp_w(&s));
+                draw_text_line(buf, &s, rx, area.y, disp_w(&s), muted);
             }
         }
     }

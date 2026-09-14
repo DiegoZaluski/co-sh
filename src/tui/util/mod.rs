@@ -1,6 +1,7 @@
 pub mod cache;
 pub mod editor;
 pub mod field_selection;
+pub mod git;
 pub mod list_selection;
 pub mod markdown;
 pub mod scroll;

@@ -159,6 +159,13 @@ static CELL_WRAP_CACHE: std::sync::LazyLock<Mutex<LruCache<CellWrapCacheKey, Wra
 /// (whole-word moves, character-level breaking for oversized words).
 fn wrap_cell_spans(cell: &[CellSpan], col_w: u16) -> WrappedCell {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    // A 0-width column (last-resort table fitting) has no room for content:
+    // short-circuit to ONE empty line instead of letting the line builder
+    // grapheme-break long words into one grapheme per line, which would
+    // inflate the row height with mostly-blank lines.
+    if col_w == 0 {
+        return std::sync::Arc::new(vec![Vec::new()]);
+    }
     for span in cell {
         span.text.hash(&mut hasher);
         span.style.hash(&mut hasher);
@@ -2174,7 +2181,7 @@ impl MarkdownRenderable {
             return;
         }
 
-        let col_count = headers.len();
+        let mut col_count = headers.len();
 
         // ── Calculate column widths ─────────────────────────────
         // Sizing MUST use display width (grapheme-aware), not
@@ -2198,39 +2205,127 @@ impl MarkdownRenderable {
             }
         }
 
-        // Clamp total width to available space
-        let padding: u16 = 1; // 1 char padding on each side
-        let border_gaps = if col_count > 1 {
-            col_count as u16 - 1
-        } else {
-            0
-        };
-        let total_w: u16 = col_widths.iter().map(|w| w + 2 * padding).sum::<u16>() + border_gaps;
+        // ── Fit the table inside the available width ────────────
+        // The table must NEVER be laid out wider than `available`: the
+        // buffer silently clips anything past `max_x`, so an oversized
+        // layout loses the right border and the trailing columns (the
+        // "wide table gets cut off inside the subagent box" bug).
+        //
+        // Sizing degrades gracefully through three stages, each only
+        // tried when the previous one cannot fit:
+        //   1. proportional scaling + greedy reduction, columns floored
+        //      at 1 content column with the normal 1-column side padding;
+        //   2. the side padding is dropped to 0 (borders hug the text)
+        //      and the columns are re-scaled from their natural widths;
+        //   3. last resort: columns may shrink to 0 content columns so
+        //      the border grid itself always fits — no column content is
+        //      drawn for a 0-width column, but nothing leaks past the
+        //      area either.
         let available = max_x.saturating_sub(area_x);
-        if total_w > available {
-            // Scale columns proportionally (integer floor division)
-            for w in &mut col_widths {
-                *w = ((u32::from(*w) * u32::from(available)) / u32::from(total_w)) as u16;
-            }
-            // Ensure minimum width of 1 for every column
-            for w in &mut col_widths {
-                *w = (*w).max(1);
-            }
-            // Greedy redistribution: iteratively reduce the largest column
-            // until the total fits within the available width.
-            // This corrects rounding errors from proportional scaling.
-            while col_widths.iter().map(|w| w + 2 * padding).sum::<u16>() + border_gaps > available
-            {
-                if let Some(max_idx) = (0..col_widths.len())
-                    .filter(|&i| col_widths[i] > 1)
-                    .max_by_key(|&i| col_widths[i])
-                {
-                    col_widths[max_idx] -= 1;
-                } else {
-                    break; // All columns at minimum width, can't reduce further
+        // Even a zero-width single column needs distinct left and right
+        // border cells. At one cell wide there is no valid grid to paint.
+        if available < 2 {
+            return;
+        }
+        // Gap count derives from the SLICE length (not the original
+        // col_count) so the stage-4 truncation loop measures the width of
+        // the column prefix it is testing — using the original count would
+        // over-estimate and truncate more columns than necessary.
+        //
+        // PAINTED width is sum(w + 2*pad) + n for padded columns: every
+        // column renders its own LEFT border cell plus content+padding, and
+        // the last column adds the trailing right border (consecutive columns
+        // SHARE the border cell between them — see render_cell_line's vline
+        // at `sx - 1` = the previous column's `ex`). Budgeting only n-1
+        // borders (the old math) left the rightmost corner one column past
+        // the available width, where cell_mut silently dropped it — a missing
+        // ┐/┘ on exactly-fitting tables.
+        // With no side padding, the first column needs one additional cell:
+        // its left border cannot share the first content cell. Subsequent
+        // columns share the preceding right border as usual.
+        let layout_w = |widths: &[u16], pad: u16| -> u16 {
+            let borders = u16::try_from(widths.len()).unwrap_or(u16::MAX);
+            widths
+                .iter()
+                .map(|w| w.saturating_add(2 * pad))
+                .try_fold(borders, |acc, w| acc.checked_add(w))
+                .and_then(|width| width.checked_add(u16::from(pad == 0 && !widths.is_empty())))
+                .unwrap_or(u16::MAX)
+        };
+        let natural_widths: Vec<u16> = col_widths.clone();
+
+        // Proportionally scale `widths` for `pad`, then greedily shave the
+        // largest columns until the layout fits `available`. `min_col` is
+        // the floor a column may reach (1, or 0 in the last-resort stage).
+        let fit_widths = |widths: &mut Vec<u16>, pad: u16, min_col: u16, available: u16| {
+            let total = layout_w(widths, pad);
+            if total > available && total > 0 {
+                for w in widths.iter_mut() {
+                    *w = ((u32::from(*w) * u32::from(available)) / u32::from(total)) as u16;
+                    // Floor the SCALED width at min_col too, not just the
+                    // greedy shave: integer division can round a small
+                    // column straight to 0, and greedy shaving can only
+                    // reduce from there. Without this floor a table whose
+                    // scaled widths all round to 0 renders an empty border
+                    // grid — and the stage-2 entry check, seeing the
+                    // collapsed widths "fit" with padding, never retries
+                    // with real content.
+                    *w = (*w).max(min_col);
                 }
             }
+            // Greedy redistribution: iteratively reduce the largest column
+            // until the total fits within the available width. This
+            // corrects rounding errors from proportional scaling.
+            let mut guard = 0usize;
+            while layout_w(widths, pad) > available {
+                guard += 1;
+                if guard > widths.len() * usize::from(u16::MAX).max(1) {
+                    break; // saturation guard; cannot happen with clamped sums
+                }
+                if let Some(max_idx) = (0..widths.len())
+                    .filter(|&i| widths[i] > min_col)
+                    .max_by_key(|&i| widths[i])
+                {
+                    widths[max_idx] -= 1;
+                } else {
+                    break; // every column at the floor for this stage
+                }
+            }
+        };
+
+        // Stage 1: normal padding (1 column each side), columns ≥ 1.
+        if layout_w(&col_widths, 1) > available {
+            fit_widths(&mut col_widths, 1, 1, available);
         }
+        // Stage 2: drop the side padding and re-scale from natural widths.
+        let padding: u16 = if layout_w(&col_widths, 1) <= available {
+            1
+        } else {
+            col_widths = natural_widths.clone();
+            fit_widths(&mut col_widths, 0, 1, available);
+            if layout_w(&col_widths, 0) <= available {
+                0
+            } else {
+                // Stage 3: allow 0-width columns so the border grid always
+                // fits inside the area.
+                col_widths = natural_widths;
+                fit_widths(&mut col_widths, 0, 0, available);
+                0
+            }
+        };
+
+        // Stage 4 (pathological): so many columns that even the border
+        // separators alone exceed the available width — no width trick can
+        // fit the grid. Truncate the TRAILING columns so the remaining
+        // grid renders complete and inside the area instead of leaking
+        // past it and being silently clipped at the buffer edge.
+        while col_count > 0 && layout_w(&col_widths[..col_count], 0) > available {
+            col_count -= 1;
+        }
+        if col_count == 0 {
+            return;
+        }
+        col_widths.truncate(col_count);
 
         let border_color = table_border_color.map_or_else(
             || rgba_to_color(palette.muted_color()),
@@ -2252,10 +2347,15 @@ impl MarkdownRenderable {
         // Compute column start positions
         let mut col_starts: Vec<u16> = Vec::with_capacity(col_count);
         let mut cx = area_x;
-        for &cw in &col_widths {
+        for (ci, &cw) in col_widths.iter().enumerate() {
             col_starts.push(cx);
             cx += cw + 2 * padding;
             cx += 1; // border between columns
+            if ci == 0 && padding == 0 {
+                // Reserve the first column's left border. Without this the
+                // first content grapheme overwrites it at zero padding.
+                cx += 1;
+            }
         }
 
         // Helper to render a border line
@@ -2266,6 +2366,7 @@ impl MarkdownRenderable {
             for ci in 0..col_count {
                 let sx = col_starts[ci];
                 let cw = col_widths[ci] + 2 * padding;
+                let leading_border = u16::from(ci == 0 && padding == 0);
                 let start_char = if ci == 0 { left } else { sep };
                 // Corner position: for the first column (ci=0), the left edge is at `sx`;
                 // for subsequent columns, the separator sits between this column and the previous one.
@@ -2275,7 +2376,7 @@ impl MarkdownRenderable {
                     cell.set_style(border_style);
                 }
                 // Horizontal line: skip the corner position (already drawn above)
-                for dx in 0..cw {
+                for dx in 0..cw + leading_border {
                     let px = sx + dx;
                     if px == corner_pos {
                         continue;
@@ -2285,7 +2386,7 @@ impl MarkdownRenderable {
                         cell.set_style(border_style);
                     }
                 }
-                let ex = sx + cw;
+                let ex = sx + cw + leading_border;
                 let corner = if ci + 1 < col_count { sep } else { right };
                 if let Some(cell) = buf.cell_mut((ex, y)) {
                     cell.set_char(corner);
@@ -2317,6 +2418,7 @@ impl MarkdownRenderable {
 
             for ci in 0..col_count {
                 let sx = col_starts[ci];
+                let leading_border = u16::from(ci == 0 && padding == 0);
                 // Get the pre-wrapped styled line for this cell at the given
                 // line index.
                 let spans = wrapped
@@ -2342,12 +2444,12 @@ impl MarkdownRenderable {
                 // view switches. Inline span styles are patched over the
                 // row's base style so bold/code/links survive inside cells;
                 // headers keep their bold via the base style.
-                let mut cx = sx + padding;
+                let mut cx = sx + padding + leading_border;
                 for span in &spans {
                     for (grapheme, gw) in
                         crate::core::lib::unicode_util::graphemes_with_width(&span.text)
                     {
-                        if cx + gw > sx + col_widths[ci] + padding {
+                        if cx + gw > sx + col_widths[ci] + padding + leading_border {
                             break;
                         }
                         let style = base_cell_style.patch(span.style);
@@ -2368,7 +2470,7 @@ impl MarkdownRenderable {
                 }
 
                 // Vertical border on the right of each cell
-                let ex = sx + col_widths[ci] + 2 * padding;
+                let ex = sx + col_widths[ci] + 2 * padding + leading_border;
                 if let Some(cell) = buf.cell_mut((ex, y)) {
                     cell.set_char('│');
                     cell.set_style(actual_border_style);
@@ -2399,7 +2501,11 @@ impl MarkdownRenderable {
                 .last()
                 .copied()
                 .unwrap_or(area_x)
-                .saturating_add(col_widths[col_count - 1] + 2 * padding)
+                .saturating_add(
+                    col_widths[col_count - 1]
+                        + 2 * padding
+                        + u16::from(col_count == 1 && padding == 0),
+                )
                 .min(max_x);
             for li in 0..nlines {
                 let y_line = start_y + li as u16;

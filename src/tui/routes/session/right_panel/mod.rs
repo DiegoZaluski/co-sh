@@ -55,8 +55,18 @@ fn draw_chip(buf: &mut Buffer, x: u16, y: u16, label: &str, bg: RGBA) {
 
 /// Panel width in columns.
 pub const RIGHT_PANEL_WIDTH: u16 = 42;
-/// Gap (in rows) between consecutive sections.
-const SECTION_GAP: i32 = 1;
+/// Extra rows between consecutive section BANDS. Each section already
+/// renders its own TOP_GAP above its box, so `0` here makes the visible gap
+/// between two boxes exactly that 1 TOP_GAP row — the same rhythm as the
+/// boxes' internal padding (TOP_PAD/BOTTOM_PAD), keeping the layout compact.
+const SECTION_GAP: i32 = 0;
+/// Margin kept BELOW the last section. Each section renders its own TOP_GAP
+/// above its box, but nothing reserved the mirrored gap at the bottom: when
+/// content grew, boxes ran flush against the panel's bottom edge. This
+/// reserves that row (unpainted panel background) so the bottom margin is
+/// respected exactly like the top one, regardless of content size. Not tied
+/// to SECTION_GAP (which is 0): the bottom edge always keeps its 1-row gap.
+const BOTTOM_MARGIN: i32 = 1;
 
 /// Total byte budget for the cached rendered subagent bodies. Real sessions
 /// hold 1-3 entries (a few MB); when the accumulated output of many sessions
@@ -204,7 +214,11 @@ pub fn render_right_panel(
         // otherwise the natural height can overflow the viewport by up to
         // the frame size and squeeze a neighbouring section.
         let frame = i32::from(has_subagent) * BOX_OVERHEAD;
-        let budget = (viewport_h - gaps - fixed_nat - frame).max(types::MIN_WINDOW_ROWS);
+        // BOTTOM_MARGIN keeps the panel's bottom gap out of the subagent
+        // budget: without it a tall window list would grow back over the
+        // reserved row in Phase 2.
+        let budget =
+            (viewport_h - gaps - fixed_nat - frame - BOTTOM_MARGIN).max(types::MIN_WINDOW_ROWS);
         state.subagent_wrap_w = wrap_w;
         if has_subagent {
             state.resolve_visible_subagents(wrap_w, budget);
@@ -236,7 +250,10 @@ pub fn render_right_panel(
     // ── Phase 2: allocate space fairly (independent of render order) ──
     let count = visible.len() as i32;
     let gap_total = (count - 1) * SECTION_GAP;
-    let available = viewport_h - gap_total;
+    // The bottom margin is carved out of the layout space up front: every
+    // section is capped to what fits ABOVE the reserved row, so the gap
+    // survives even when sections are squeezed to their scrollable bands.
+    let available = viewport_h - gap_total - BOTTOM_MARGIN;
     let base_h = available / count;
 
     let mut allocations = vec![0i32; visible.len()];
@@ -1770,6 +1787,102 @@ mod tests {
             "unpainted void of {} rows inside the subagent box",
             sub.bottom - 1 - last_paint
         );
+    }
+
+    /// REGRESSION: the panel's BOTTOM margin must be respected even when
+    /// the content overflows the viewport. Sections carry their own TOP_GAP
+    /// above each box, but nothing reserved the mirrored gap below the last
+    /// section: boxes grew flush against the panel's bottom edge. The layout
+    /// now carves the margin row out of Phase 2's space and Phase 0's
+    /// subagent budget, so the last section's band always ends at least one
+    /// row above the viewport bottom.
+    #[test]
+    fn panel_respects_bottom_margin_when_content_overflows() {
+        let theme = test_theme();
+        let mut state = RightPanelState::new();
+        state.subagent_rebuild_interval = std::time::Duration::ZERO;
+        state.text_regions_w = 38;
+
+        // Todos + bash + subagent, all taller than the viewport.
+        state.set_todos(
+            (0..20)
+                .map(|i| types::TodoItem {
+                    status: "pending".to_string(),
+                    content: format!("todo item {i} with a longish description to wrap"),
+                })
+                .collect(),
+        );
+        state.start_pty("ls".to_string(), None);
+        state.complete_last_pty(
+            (0..40)
+                .map(|i| format!("bash line {i}\n"))
+                .collect::<String>(),
+        );
+        state.start_pty("subagent: kilo".to_string(), None);
+        state.complete_last_pty(
+            (0..40)
+                .map(|i| format!("kilo line {i}\n"))
+                .collect::<String>(),
+        );
+
+        // Viewport small enough that every section overflows and each gets
+        // squeezed to its scrollable band.
+        let h = 30u16;
+        let mut buf = Buffer::empty(Rect::new(0, 0, 50, h));
+        render_right_panel(&mut buf, Rect::new(0, 0, 50, h), &mut state, &theme, 120);
+
+        // The lowest section band must stop at least BOTTOM_MARGIN (1) rows
+        // above the viewport bottom — the reserved gap row.
+        let lowest_bottom = state
+            .section_layouts
+            .iter()
+            .map(|l| l.bottom)
+            .max()
+            .expect("sections rendered");
+        assert!(
+            lowest_bottom < i32::from(h),
+            "last section must respect the bottom margin: band bottom {lowest_bottom} vs viewport {h}"
+        );
+
+        // And the reserved row must actually be unpainted panel background:
+        // no section box fills it with its element color.
+        let panel_bg = rgba_color(theme.background_panel);
+        for x in 0u16..50 {
+            assert_eq!(
+                buf.cell((x, h - 1)).map(|c| c.bg),
+                Some(panel_bg),
+                "row {h}-1 must stay bare panel background (bottom margin), col {x}"
+            );
+        }
+
+        // The VISIBLE gap between adjacent section boxes is exactly 1 row:
+        // with SECTION_GAP = 0 the next band starts where the previous one
+        // ends (band gap 0), and its own TOP_GAP row is the single blank row
+        // between the two boxes — the same rhythm as the internal padding.
+        let mut bands: Vec<(i32, i32)> = state
+            .section_layouts
+            .iter()
+            .map(|l| (l.top, l.bottom))
+            .collect();
+        bands.sort_unstable();
+        for pair in bands.windows(2) {
+            let band_gap = pair[1].0 - pair[0].1; // next.top - prev.bottom
+            assert_eq!(
+                band_gap, SECTION_GAP,
+                "bands must tile back-to-back (SECTION_GAP = 0): {bands:?}"
+            );
+            // The single separator row between the boxes is the next
+            // section's TOP_GAP row: it must carry the bare panel background
+            // (no box paints it), proving the visible gap is exactly 1 row.
+            let sep_row = pair[0].1 as u16;
+            for x in 0u16..50 {
+                assert_eq!(
+                    buf.cell((x, sep_row)).map(|c| c.bg),
+                    Some(panel_bg),
+                    "separator row {sep_row} between boxes must be bare panel background, col {x}"
+                );
+            }
+        }
     }
 
     /// REGRESSION: the subagent box's TOP/BOTTOM padding rows are painted

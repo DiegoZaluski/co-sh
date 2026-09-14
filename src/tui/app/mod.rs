@@ -376,6 +376,8 @@ pub struct App {
     live_requested: bool,
     /// Timestamp of the previous frame (for delta_time calculation).
     last_frame_time: std::time::Instant,
+    /// Rate-limited resolver for the git branch shown in the session footer.
+    branch_tracker: crate::util::git::BranchTracker,
     /// Per-frame counter — rate-limits the PERF debug logs in the render hot
     /// path (bg_fill etc.) to one sample per ~30 frames (~1/sec) instead of
     /// one write per frame.
@@ -394,6 +396,17 @@ pub struct App {
     sidebar_focused: bool,
     /// Clickable area of the "bug report" header link (None when not drawn).
     bug_link_area: Option<Rect>,
+    /// Receiver for update-related background tasks: the boot-time GitHub
+    /// release check and the completion of the update pipeline.
+    update_event_rx: tokio::sync::mpsc::UnboundedReceiver<crate::update::UpdateEvent>,
+    /// Sender half of [`Self::update_event_rx`], cloned into the tasks.
+    update_event_tx: tokio::sync::mpsc::UnboundedSender<crate::update::UpdateEvent>,
+    /// Changelog URL of the announced release (from the GitHub API response).
+    /// Kept outside the banner so the view stays pure display state.
+    update_changelog_url: Option<String>,
+    /// Whether the update pipeline is currently running in the background
+    /// (guards against double-clicks starting a second install).
+    update_in_progress: bool,
     /// Whether the terminal bell rings when an agent loop finishes.
     bell_enabled: bool,
     /// Whether the animated chat-logo plays on the empty-session landing
@@ -475,6 +488,22 @@ impl App {
         state.lsp_available = setup.lsp;
 
         let usage_store = crate::usage::UsageStore::new();
+
+        // (tx, rx) for update-related background tasks, created here so both
+        // halves can be moved into the struct below.
+        let (update_event_tx, update_event_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // Boot-time GitHub release check: announces a newer release on the
+        // home banner. Runs in the background so startup never blocks on the
+        // network; a failed or rate-limited check simply keeps the banner
+        // hidden. The result reaches the UI thread through `update_event_tx`.
+        tokio::runtime::Handle::current().spawn({
+            let update_event_tx = update_event_tx.clone();
+            async move {
+                let release = crate::update::fetch_latest_release().await;
+                let _ = update_event_tx.send(crate::update::UpdateEvent::CheckFinished(release));
+            }
+        });
 
         // Boot-time refresh of the models.dev catalog: keeps token prices and
         // context windows current instead of aging with the first-ever cached
@@ -587,6 +616,7 @@ impl App {
             drag_selection: None,
             live_requested: false,
             last_frame_time: std::time::Instant::now(),
+            branch_tracker: crate::util::git::BranchTracker::default(),
             perf_frame: 0,
             last_mouse_x: 0,
             last_mouse_y: 0,
@@ -594,6 +624,10 @@ impl App {
             needs_full_redraw: false,
             sidebar_focused: false,
             bug_link_area: None,
+            update_event_rx,
+            update_event_tx,
+            update_changelog_url: None,
+            update_in_progress: false,
             bell_enabled: saved_bell,
             anim_enabled: saved_anim,
             #[cfg(test)]
@@ -724,6 +758,10 @@ impl App {
             // the lifetime exact at any frame rate.
             self.toast_state.tick(delta.as_millis() as u64);
 
+            // Refresh the footer's git branch at its own rate-limited cadence
+            // (the tracker internally throttles disk reads to twice a second).
+            self.state.git_branch = self.branch_tracker.current(&self.state.working_directory);
+
             if self.needs_full_redraw {
                 // The external editor scribbled over the screen: force a
                 // complete repaint instead of a cell diff.
@@ -750,6 +788,7 @@ impl App {
             // normal `handle_paste` path) instead of trickling char by char.
             self.paste_burst_flush_if_due();
             self.pump_queued_messages();
+            self.pump_update_events();
         }
 
         restore_terminal()?;
