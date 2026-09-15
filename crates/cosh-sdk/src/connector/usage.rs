@@ -16,14 +16,14 @@
 //! Cache *creation* has no OpenAI/Gemini equivalent, so it stays zero for
 //! those families.
 //!
-//! ## Real vs estimated cost
+//! ## Real reported cost
 //!
-//! Some gateways report what they actually billed inside the response
+//! Some providers report what they actually billed inside the response
 //! itself (OpenRouter's `usage.cost`; the OpenCode Zen/Go gateways append a
-//! final frame with a top-level `cost` — see `extract_reported_cost`). That
-//! REAL amount lands in [`TokenUsage::reported_cost`]; the usage panel
-//! should always prefer it over the price-table path via
-//! [`TokenUsage::effective_cost`].
+//! final frame with a top-level `cost`; Charm Hyper's `usage.cost.usd` — see
+//! `extract_reported_cost`). That REAL amount lands in
+//! [`TokenUsage::reported_cost`] and is the only price the usage panel ever
+//! shows: there is no local price-table fallback.
 
 /// Full token usage from an LLM response (or streaming usage frame),
 /// normalized across provider families.
@@ -51,9 +51,10 @@ pub struct TokenUsage {
     pub reasoning_tokens: u32,
     /// REAL cost (USD) the provider reported inside the response itself
     /// (`usage.cost` on OpenRouter/Vercel; a top-level `cost` on the final
-    /// OpenCode Zen/Go frame). `None` when the provider does not report a
-    /// cost — callers then fall back to the price-table path
-    /// ([`TokenUsage::cost`]). Prefer [`TokenUsage::effective_cost`].
+    /// OpenCode Zen/Go frame; `usage.cost.usd` on Charm Hyper). `None` when
+    /// the provider does not report a cost — the record then stays unpriced
+    /// and is excluded from dollar totals. There is NO price-table fallback:
+    /// the provider is the only source of truth for its own billing.
     #[serde(default)]
     pub reported_cost: Option<f64>,
 }
@@ -98,51 +99,6 @@ impl TokenUsage {
             },
         }
     }
-
-    /// Cost in US dollars for this usage at the given per-model pricing
-    /// (USD per million tokens, as published in the models.dev catalog).
-    ///
-    /// Every token counter is billed at its own rate: plain input, cache
-    /// writes (Anthropic premium), cache reads (the ~10% discount) and
-    /// output. Reasoning tokens are NOT priced separately — providers bill
-    /// them as part of the completion (`output_tokens` includes them).
-    #[must_use]
-    pub fn cost(&self, pricing: &Pricing) -> f64 {
-        const MTOK: f64 = 1_000_000.0;
-        (f64::from(self.input_tokens) * pricing.input
-            + f64::from(self.output_tokens) * pricing.output
-            + f64::from(self.cache_read_input_tokens) * pricing.cache_read
-            + f64::from(self.cache_creation_input_tokens) * pricing.cache_write)
-            / MTOK
-    }
-
-    /// The cost the usage panel should display: the provider's REAL billed
-    /// amount when it reported one (`reported_cost` — authoritative, it is
-    /// what the gateway actually charged), falling back to the price-table
-    /// computation ([`cost`](Self::cost)) for providers that do not.
-    #[must_use]
-    pub fn effective_cost(&self, pricing: &Pricing) -> f64 {
-        self.reported_cost.unwrap_or_else(|| self.cost(pricing))
-    }
-}
-
-/// Per-model token pricing in USD per million tokens, used to turn the
-/// API-reported [`TokenUsage`] into a real cost.
-///
-/// Rates come from the models.dev catalog (field `cost`), which publishes
-/// the official per-model prices — this is a price TABLE, not an estimate:
-/// the token counts themselves always come from the provider's own usage
-/// object.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Pricing {
-    /// Plain (uncached) input tokens. USD / Mtok.
-    pub input: f64,
-    /// Completion tokens. USD / Mtok.
-    pub output: f64,
-    /// Cache-read tokens (Anthropic, OpenAI prompt caching). USD / Mtok.
-    pub cache_read: f64,
-    /// Cache-write tokens (Anthropic cache_creation). USD / Mtok.
-    pub cache_write: f64,
 }
 
 #[cfg(test)]
@@ -201,29 +157,6 @@ mod tests {
         assert_eq!(with_cost.merge_stream(lower).reported_cost, Some(0.95));
     }
 
-    /// The TUI usage panel prefers the provider's REAL billed cost and only
-    /// falls back to the price-table estimate when none was reported.
-    #[test]
-    fn effective_cost_prefers_reported_value() {
-        let pricing = Pricing {
-            input: 2.50,
-            output: 10.0,
-            cache_read: 1.25,
-            cache_write: 0.0,
-        };
-        let mut usage = TokenUsage {
-            input_tokens: 2_000_000,
-            output_tokens: 1_000_000,
-            ..TokenUsage::default()
-        };
-        // No reported cost: the price-table path.
-        assert!((usage.effective_cost(&pricing) - 15.0).abs() < 1e-9);
-        // Real billed amount supersedes the estimate (e.g. a gateway
-        // subscription whose billed rate differs from list price).
-        usage.reported_cost = Some(0.03);
-        assert!((usage.effective_cost(&pricing) - 0.03).abs() < 1e-9);
-    }
-
     #[test]
     fn merge_stream_accumulates_growing_gemini_counters() {
         let a = TokenUsage {
@@ -242,43 +175,5 @@ mod tests {
         assert_eq!(merged.total_input_tokens(), 350);
         assert_eq!(merged.output_tokens, 60);
         assert_eq!(merged.reasoning_tokens, 40);
-    }
-
-    #[test]
-    fn cost_prices_each_bucket_at_its_own_rate() {
-        // gpt-4o-like: $2.50/M in, $10/M out, $1.25/M cache read.
-        let pricing = Pricing {
-            input: 2.50,
-            output: 10.0,
-            cache_read: 1.25,
-            cache_write: 0.0,
-        };
-        let usage = TokenUsage {
-            input_tokens: 2_000_000,
-            output_tokens: 1_000_000,
-            cache_read_input_tokens: 4_000_000,
-            ..TokenUsage::default()
-        };
-        // 2M*2.5 + 1M*10 + 4M*1.25 = 5 + 10 + 5 = 20
-        assert!((usage.cost(&pricing) - 20.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn cost_applies_anthropic_cache_write_premium() {
-        let pricing = Pricing {
-            input: 3.0,
-            output: 15.0,
-            cache_read: 0.3,
-            cache_write: 3.75,
-        };
-        let usage = TokenUsage {
-            input_tokens: 1_000_000,
-            output_tokens: 200_000,
-            cache_creation_input_tokens: 100_000,
-            cache_read_input_tokens: 2_000_000,
-            ..TokenUsage::default()
-        };
-        // 1M*3 + 0.2M*15 + 0.1M*3.75 + 2M*0.3 = 3 + 3 + 0.375 + 0.6 = 6.975
-        assert!((usage.cost(&pricing) - 6.975).abs() < 1e-9);
     }
 }

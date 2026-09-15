@@ -1,4 +1,5 @@
 use super::TokenUsage;
+use super::cost::{CostError, ProviderCost, provider_session_cost};
 use super::error::ConnectorError;
 use super::output::{ChatOutput, ChatStream, LsOutput};
 use super::params::{ChatMessage, Parameters, ResponseFormat, ToolCallMode, ToolDefinition};
@@ -588,9 +589,8 @@ impl Connector {
     ///
     /// The REAL cost the provider reported inside the response
     /// (`usage.cost`, or the OpenCode Zen/Go top-level `cost`) is stamped
-    /// onto [`TokenUsage::reported_cost`] — the usage panel should display
-    /// [`TokenUsage::effective_cost`] so the gateway's actual billed amount
-    /// supersedes the price-table estimate.
+    /// onto [`TokenUsage::reported_cost`] — the provider's actual billed
+    /// amount, with no local re-pricing fallback.
     ///
     /// Returns `None` when no usage object is present or the JSON is invalid.
     #[must_use]
@@ -604,6 +604,41 @@ impl Connector {
         }?;
         usage.reported_cost = super::output::extract_reported_cost(raw).or(usage.reported_cost);
         Some(usage)
+    }
+
+    /// Real session spend, reported by the PROVIDER itself — never estimated.
+    ///
+    /// Supported:
+    ///     `openrouter`,
+    ///     `zen`,
+    ///     `opencode-go`,
+    ///     `charm`.
+    ///
+    /// Everything else returns [`CostError::CostNotSupported`] (hide the
+    /// price rows). More providers coming in a future release.
+    ///
+    /// `session_reported_costs` are the per-request costs the provider
+    /// already reported in each response ([`TokenUsage::reported_cost`]);
+    /// their sum is the session spend. For `openrouter` the figure comes
+    /// from the provider's account endpoint instead.
+    ///
+    /// # Errors
+    ///
+    /// [`CostError::CostNotSupported`] (unsupported provider — hide cost
+    /// UI), [`CostError::MissingApiKey`] (no key resolved),
+    /// [`CostError::CostUnavailable`] (endpoint failed or unusable answer).
+    pub async fn session_cost(
+        &self,
+        session_reported_costs: &[f64],
+    ) -> Result<ProviderCost, CostError> {
+        let provider = self.provider()?;
+        provider_session_cost(
+            provider,
+            &self.params,
+            self.params.service_keyring.as_deref(),
+            session_reported_costs,
+        )
+        .await
     }
 
     /// The provider name (e.g. `"openai"`, `"claude"`, `"gemini"`).

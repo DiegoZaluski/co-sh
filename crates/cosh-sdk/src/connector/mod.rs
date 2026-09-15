@@ -9,6 +9,7 @@
 
 pub(crate) mod claude;
 pub(crate) mod common;
+pub(crate) mod cost;
 pub(crate) mod discovery;
 pub(crate) mod gemini;
 pub(crate) mod openai;
@@ -22,11 +23,12 @@ mod provider;
 
 pub mod retry;
 
+pub use cost::{CostError, ProviderCost, provider_session_cost, supports_cost_reporting};
+
 pub use client::Connector;
 pub use discovery::{
-    ModelReasoning, discover_context_window, effective_context_window, lookup_pricing,
-    model_pricing, model_reasoning, model_reasoning_from_catalog, refresh_pricing_catalog,
-    resolve_reasoning_effort,
+    ModelReasoning, discover_context_window, effective_context_window, model_reasoning,
+    model_reasoning_from_catalog, refresh_pricing_catalog, resolve_reasoning_effort,
 };
 pub use error::ConnectorError;
 pub use output::{ChatOutput, ChatStream, LsOutput, ModelInfo, StreamChunk};
@@ -45,7 +47,7 @@ pub use provider::{
     invalidate_api_key, is_local_provider, is_opencode_gateway, known_local_providers,
     known_providers, known_providers_with_env, normalize_local_base_url,
 };
-pub use usage::{Pricing, TokenUsage};
+pub use usage::TokenUsage;
 
 #[cfg(test)]
 mod test;

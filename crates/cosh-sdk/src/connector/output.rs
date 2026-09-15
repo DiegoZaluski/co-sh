@@ -41,10 +41,10 @@ impl ChatOutput {
     /// any.
     ///
     /// Same wire shapes as [`ChatStream::reported_cost`]: `usage.cost`
-    /// (OpenRouter/Vercel) or a top-level `cost` — numeric or numeric
+    /// (OpenRouter, Charm Hyper) or a top-level `cost` — numeric or numeric
     /// string — as the OpenCode Zen/Go gateways send. This is the
-    /// authoritative billed amount; prefer it over the price-table estimate
-    /// (fall back to [`TokenUsage::cost`] when `None`).
+    /// authoritative billed amount; `None` means the provider reported no
+    /// cost and the record stays unpriced (no local fallback).
     #[must_use]
     pub fn reported_cost(&self) -> Option<f64> {
         extract_reported_cost(&self.raw)
@@ -220,13 +220,12 @@ impl ChatStream {
     /// Returns the REAL cost (USD) the provider reported inside the
     /// response, if any.
     ///
-    /// Wire shapes recognized: `usage.cost` (OpenRouter, Vercel AI Gateway)
+    /// Wire shapes recognized: `usage.cost` (OpenRouter, Charm Hyper)
     /// and the OpenCode Zen/Go gateways' trailing top-level `cost` —
     /// numeric or numeric string — on the final streamed frame. This is the
-    /// authoritative spend figure and always supersedes a local price-table
-    /// estimate. Providers that do not report a cost return `None`, in
-    /// which case the caller falls back to the token-count × catalog-price
-    /// estimate ([`TokenUsage::cost`]).
+    /// authoritative spend figure. Providers that do not report a cost
+    /// return `None` — the record stays unpriced; nothing is estimated
+    /// locally.
     pub async fn reported_cost(&mut self) -> Option<f64> {
         if !self.finished {
             use tokio_stream::StreamExt;
