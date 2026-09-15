@@ -948,6 +948,10 @@ impl App {
                     self.question_dialog.show_questions(questions);
                     // Blur the prompt when questions appear (like OpenCode hides the prompt)
                     self.prompt_view.blur();
+                    // Send a desktop notification if the terminal
+                    // window is not focused (user switched away): the
+                    // dialog blocks the loop until answered.
+                    notification::notify_question(self.terminal_focused);
                 }
 
                 HarnessEvent::PermissionRequest {
@@ -955,6 +959,10 @@ impl App {
                     description,
                     args,
                 } => {
+                    // Send a desktop notification if the terminal
+                    // window is not focused (user switched away): the
+                    // dialog blocks the loop until answered.
+                    notification::notify_permission(self.terminal_focused, &tool, &description);
                     // Show the permission dialog with details from the harness
                     self.permission_dialog.request =
                         Some(crate::routes::session::permission::PermissionRequest {
