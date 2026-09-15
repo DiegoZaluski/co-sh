@@ -22,21 +22,29 @@ impl App {
             // a console paste arrives as one plain Char key per character plus
             // one plain Enter per line break (crossterm has no bracketed paste
             // on Windows), and each of those Enters used to submit the prompt
-            // — splitting a large paste into one message per line. While a
-            // burst is in flight its characters and Enters are buffered in the
-            // coalescer instead of being applied one by one; when the burst
-            // ends the WHOLE buffer is replayed through `PromptView::
-            // handle_paste`, so long pastes land atomically and compress into
-            // the `[Pasted ~N lines]` placeholder exactly like on Unix. The
-            // gate is a no-op unless the bare prompt owns the keyboard.
+            // — splitting a large paste into one message per line. Characters
+            // are NEVER withheld: they stream into the prompt in real time
+            // while being mirrored into the coalescer's shadow; only Enters
+            // within the burst window are absorbed, and at burst end the run
+            // is replayed through `PromptView::handle_paste` with its real
+            // line breaks (`[Pasted ~N lines]` compression, exactly like the
+            // Unix Event::Paste path). The gate is a no-op unless the bare
+            // prompt owns the keyboard.
+            //
+            // Land any pending run BEFORE this key is classified: the gate
+            // below mirrors the key's own character into the shadow, so a
+            // flush AFTER it would count this key's char in the retraction
+            // length before it is typed (an off-by-one that duplicated the
+            // first char after a mid-paste console stall). Flushing first
+            // guarantees the shadow mirrors exactly the chars already in the
+            // prompt; the gate's own fall-through paths (non-text keys,
+            // outside-burst Enters) flush again after classification, which
+            // is idempotent and never double-counts.
+            self.paste_burst_flush_if_due();
             let burst_now = Instant::now();
             if self.paste_burst_handle_key(&key, burst_now) {
                 return Ok(false);
             }
-            // A key arrived after the burst ended: land the pending paste
-            // atomically BEFORE this key acts (an Enter here must submit the
-            // full pasted text, not the pre-burst prompt content).
-            self.paste_burst_flush_if_due();
 
             // Modal sovereignty: while a Confirm dialog is on screen it owns
             // the ENTIRE keyboard — the slash menu, the prompt, the sidebar
@@ -105,7 +113,17 @@ impl App {
                 self.state.right_panel.panel_focus = None;
             }
 
-            if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            // AltGr exclusion: Char + CTRL+ALT is the Windows-console
+            // signature of an AltGr character (`@ # $` on ABNT layouts —
+            // crossterm's parser reports it exactly that way), NEVER a
+            // Ctrl+C hotkey. Without this guard, pasting text containing
+            // the letter `c` through an ABNT layout quits the app
+            // mid-paste (the quit-confirm dialog opening where a letter
+            // was expected).
+            if key.code == KeyCode::Char('c')
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT)
+            {
                 // If there is a drag selection in a create-db field, copy it.
                 #[cfg(feature = "embed")]
                 if matches!(self.mode(), AppMode::Rag) && self.rag_view.has_field_selection() {

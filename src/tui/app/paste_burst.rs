@@ -8,63 +8,62 @@
 //! `ReadConsoleInput` and has NO bracketed-paste support
 //! (crossterm-rs/crossterm#737; the VT-input hybrid PR #1030 is not released),
 //! so the same paste reaches the TUI as ONE PLAIN KEY EVENT PER CHARACTER
-//! plus ONE PLAIN `Enter` PER LINE BREAK. Without coalescing this has two
-//! visible symptoms:
+//! plus ONE PLAIN `Enter` PER LINE BREAK. Without coalescing, every plain
+//! Enter falls through to the `SendMessage` keymap action and submits
+//! whatever accumulated so far — one message per line, none of them
+//! user-initiated.
 //!
-//! 1. every plain Enter falls through to the `SendMessage` keymap action and
-//!    submits whatever accumulated so far — one message per line, none of
-//!    them user-initiated;
-//! 2. the characters trickle in one keystroke at a time ("looks like it is
-//!    being typed"), and `PromptView::handle_paste` — the only place that
-//!    compresses long pastes into the `[Pasted ~N lines]` placeholder — is
-//!    NEVER reached, so the raw text goes out verbatim.
+//! THE FIX — characters are NEVER held back. Every plain text key falls
+//! through to the prompt through the normal typing path, so typing ALWAYS
+//! renders in real time: a paste streams into the prompt exactly like the
+//! pre-coalescer console behaviour, and a HELD KEY (OS auto-repeat, ~20-33ms
+//! per repeat — the same cadence class as a paste burst) shows its
+//! characters the moment they arrive. The vanish-until-release bug is
+//! impossible by construction: there is nothing to vanish into.
 //!
-//! THE FIX: while a paste burst is ARMED, plain character keys and plain
-//! Enters are NOT applied to the prompt one by one — they are accumulated in
-//! a side buffer ([`PasteBurstState::buffer`]). As soon as the burst ends
-//! (no key of it for [`BURST_WINDOW`], checked once per frame from `run()`
-//! and before every key that falls through), the WHOLE buffer is replayed
-//! through `PromptView::handle_paste` — exactly the Linux/macOS path. Long
-//! pastes therefore land atomically, stream-free, and compress into the
-//! `[Pasted ~N lines]` placeholder; a single real Enter then sends the
-//! expanded text as ONE message.
+//! What IS classified is the PLAIN ENTER: an Enter arriving within
+//! [`BURST_WINDOW`] of recent text keys — armed or not — is a paste line
+//! break, not a user submit (a human cannot hit Enter within 80ms of the
+//! last character; motor time alone is ~150ms, while a console paste
+//! delivers the next record in <1ms). Absorbed Enters go into a SHADOW copy
+//! of the run ([`PasteBurstState::shadow`]) alongside a mirror of every
+//! streamed character, preserving arrival order.
 //!
-//! ARMING (the state machine must be able to reach its armed state, so the
-//! bookkeeping runs BEFORE the armed check): every plain text key updates a
-//! rolling count of keys seen within [`BURST_WINDOW`]; the burst arms as soon
-//! as that count reaches [`BURST_MIN_KEYS`] (>50 chars/s — no human finger;
-//! fast digraphs top out around 2 keys per window). The handful of characters
-//! that fell through to the prompt BEFORE arming (the threshold run) is
-//! RETRACTED from the prompt into the buffer on the arming transition, so the
-//! replay is byte-identical to a whole-paste `Event::Paste`.
+//! When the burst ends (no key of it for [`BURST_WINDOW`], checked once per
+//! frame from `run()` and before every key that falls through), runs that
+//! absorbed at least one Enter are RETRACTED from the prompt and replayed
+//! through `PromptView::handle_paste` — exactly the Linux/macOS path: line
+//! endings normalize and long pastes compress into the `[Pasted ~N lines]`
+//! placeholder. Runs with no absorbed Enter (plain typing, held keys,
+//! single-line pastes) are left exactly as typed — a replay would be a
+//! visual no-op at best and would compress fast human typing into a
+//! placeholder at worst.
 //!
 //! ENTER CHAINING: blank lines inside a paste produce back-to-back Enters
-//! with no text keys between them. A plain Enter is absorbed as a newline
-//! when the text burst is active, and the chain MAY continue across further
+//! with no text keys between them. The chain MAY continue across further
 //! Enters within [`BURST_WINDOW`] — but only if the chain STARTED inside a
-//! text burst ([`PasteBurstState::chain_started_in_text_burst`]). This bounds
-//! the chain: once the buffer is flushed the flag resets, so a user mashing
-//! Enter in the empty prompt can never be swallowed indefinitely.
+//! text burst ([`PasteBurstState::chain_started_in_text_burst`]). This
+//! bounds the chain: once the run is flushed the flag resets, so a user
+//! mashing Enter in the empty prompt can never be swallowed indefinitely.
 //!
 //! Known trade-offs (documented, self-healing): a real Enter pressed within
-//! [`BURST_WINDOW`] of the last pasted character is absorbed as a newline —
-//! the next press, outside the window, submits normally. AltGr-produced
-//! characters (CTRL+ALT on the Windows console) COUNT as paste text keys: an
-//! AltGr-heavy paste keeps coalescing instead of flushing on every `@`.
+//! [`BURST_WINDOW`] of the last pasted/typed character is absorbed as a
+//! newline — the next press, outside the window, submits normally. A
+//! single-line paste (no line break) never triggers the shadow replay, so
+//! it stays as typed instead of compressing into the placeholder — a
+//! cosmetic divergence from Unix only; the content submitted is identical.
 //!
-//! HELD KEYS are NOT paste traffic: a key held down produces OS auto-repeat
-//! events (same character, ~20-33ms cadence) that would otherwise satisfy the
-//! cadence counter and arm the burst — the visible "held-key vanish" bug
-//! (hold `s`, nothing appears until release). [`PasteBurstState::
-//! note_auto_repeat`] classifies same-character keys arriving at the OS
-//! repeat cadence ([`REPEAT_MIN_GAP`]..[`REPEAT_MAX_GAP`]) as auto-repeat and
-//! routes them AROUND the coalescer: the key types into the prompt normally,
-//! any pending paste is landed first, and the run state is discarded so the
-//! held key can never arm a burst or make its own Enter classify as a paste
-//! newline. A paste is never misclassified: it delivers consecutive
-//! characters back-to-back with sub-millisecond gaps (below
-//! [`REPEAT_MIN_GAP`], even for same-character runs), while a human cannot
-//! re-press the same key faster than [`REPEAT_MAX_GAP`].
+//! WHY NO AUTO-REPEAT DISCRIMINATOR: an earlier iteration tried to tell a
+//! held key apart from a paste by gap timing (same character, 15-75ms). It
+//! fails on real Windows consoles: a paste containing same-character runs
+//! (indentation spaces, "aaaa") under console/RDP jitter produces the SAME
+//! gaps, misclassifying a paste as held-key typing — which landed the paste
+//! uncoalesced (streaming) and could split-send. Timing cannot separate the
+//! two event streams because THEY ARE the same stream at the OS level
+//! (`wRepeatCount` is discarded by crossterm's parser). Classifying only the
+//! Enter — the only key whose misrouting actually harms — removes the
+//! tension entirely: characters stream no matter what, Enters within the
+//! window never submit.
 
 use std::time::{Duration, Instant};
 
@@ -85,22 +84,6 @@ pub(super) const BURST_WINDOW: Duration = Duration::from_millis(80);
 /// delivers hundreds of records in the time the coalescer needs to arm.
 const BURST_MIN_KEYS: u32 = 4;
 
-/// Minimum gap between two same-character keys for the pair to be classified
-/// as OS auto-repeat rather than paste traffic. A console paste delivers its
-/// records back-to-back (sub-millisecond gaps); even the slowest paste
-/// jitter on Remote Desktop keeps same-char gaps below this except in the
-/// pathological case (which self-heals at the ≤3-char leak, never split-send).
-const REPEAT_MIN_GAP: Duration = Duration::from_millis(15);
-
-/// Maximum gap between two same-character keys for the pair to be classified
-/// as OS auto-repeat. The burst arms on ANY sustained cadence below
-/// [`BURST_WINDOW`] (each key is "fresh" relative to the previous one), so
-/// every OS repeat rate — Windows caps at ~33ms, Linux/macOS at ~20-66ms —
-/// must fall inside the repeat window. Humans cannot re-press the SAME key
-/// faster than ~80ms (double-tap motor floor); pasted same-char runs arrive
-/// with sub-millisecond gaps, below [`REPEAT_MIN_GAP`].
-const REPEAT_MAX_GAP: Duration = Duration::from_millis(75);
-
 fn is_recent(t: Instant, now: Instant) -> bool {
     now.duration_since(t) <= BURST_WINDOW
 }
@@ -114,75 +97,51 @@ pub(super) struct PasteBurstState {
     /// burst. Chained (blank-line) Enters are only absorbed while this is
     /// set; it resets on every flush, bounding the chain to one paste.
     chain_started_in_text_burst: bool,
-    /// Plain characters that fell through to the prompt while the burst was
-    /// not yet armed (the first `BURST_MIN_KEYS - 1` of a run). Retracted
-    /// into the buffer when the burst arms, so the atomic replay contains
-    /// the WHOLE paste.
-    leaked_chars: usize,
-    /// Characters (and `\n` for line breaks) absorbed from the in-flight
-    /// paste burst, waiting to be replayed through `PromptView::handle_paste`
-    /// once the burst ends.
-    buffer: String,
-    /// Previous plain text character, for OS auto-repeat detection
-    /// ([`Self::note_auto_repeat`]).
-    last_repeat_char: Option<char>,
-    /// When the previous plain text character arrived — the repeat-cadence
-    /// baseline (updated on EVERY text key, repeat or not, unlike
-    /// `last_text_key_at` which only real text keys touch).
-    last_char_key_at: Option<Instant>,
+    /// Shadow copy of the in-flight run: a mirror of every text character
+    /// that streamed into the prompt plus one `\n` per absorbed Enter, in
+    /// arrival order. Replayed through `PromptView::handle_paste` at burst
+    /// end (runs with absorbed Enters only), reconstructing the paste —
+    /// normalized line endings and `[Pasted ~N lines]` compression — from
+    /// text that was never withheld from the prompt.
+    shadow: String,
+    /// How many of the shadow's characters are TEXT characters (the rest are
+    /// absorbed newlines). These are exactly the characters currently sitting
+    /// in the prompt immediately before the cursor, retracted at replay time
+    /// so the replay does not duplicate them.
+    shadow_text_len: usize,
+    /// Whether the in-flight run reached PASTE semantics: the burst armed
+    /// (4+ text keys in the window) or a plain Enter was absorbed. Only a
+    /// replay-worthy run may be flushed — before that, the shadow is just
+    /// a mirror of characters that may still become part of an armed run
+    /// milliseconds later, and flushing it early would chop the paste into
+    /// an unretracted prefix plus a replayed tail.
+    run_replayable: bool,
 }
 
 impl PasteBurstState {
     /// Bookkeeping for a plain text key. MUST run before the armed check so
-    /// the machine can reach the armed state. Returns `true` when this key
-    /// ARMED the burst (transition), which is the caller's cue to retract the
-    /// leaked prefix.
-    fn note_text_key(&mut self, now: Instant) -> bool {
+    /// the machine can reach the armed state. The key itself always falls
+    /// through to the prompt — this only maintains the cadence counters that
+    /// classify the NEXT plain Enter.
+    fn note_text_key(&mut self, now: Instant) {
         let fresh = self.last_text_key_at.is_some_and(|t| is_recent(t, now));
         if !fresh {
-            // A gap wider than the window breaks the run: the previously
-            // leaked characters were typed at human cadence, not pasted.
-            self.leaked_chars = 0;
+            // A gap wider than the window breaks the run: the streamed
+            // characters were typed at human cadence, not pasted.
             self.text_keys_in_window = 0;
+            if !self.run_replayable {
+                // The broken run never reached paste semantics: its shadow
+                // mirror is dead weight (the characters stay in the prompt
+                // as typed) and must not leak into a later run's retraction
+                // length. A replay-worthy run keeps its shadow across the
+                // gap — console/RDP jitter routinely exceeds the window
+                // mid-paste, and its prefix is still awaiting replay.
+                self.shadow.clear();
+                self.shadow_text_len = 0;
+            }
         }
         self.text_keys_in_window += 1;
         self.last_text_key_at = Some(now);
-        self.last_char_key_at = Some(now);
-        self.text_keys_in_window == BURST_MIN_KEYS
-    }
-
-    /// Classify a plain text key as OS auto-repeat (a HELD key) rather than
-    /// paste traffic. The signature: the SAME character as the previous text
-    /// key, at the OS repeat cadence — a gap of [`REPEAT_MIN_GAP`]..
-    /// [`REPEAT_MAX_GAP`]. A paste delivers consecutive characters
-    /// back-to-back with sub-millisecond gaps (never inside the repeat
-    /// window, even for same-character runs), and a human cannot re-press
-    /// one key faster than [`REPEAT_MAX_GAP`]. Must be called for EVERY
-    /// plain text key (it advances the cadence baseline) BEFORE
-    /// [`Self::note_text_key`]. Returns `true` when the key is a repeat.
-    fn note_auto_repeat(&mut self, ch: char, now: Instant) -> bool {
-        let is_repeat = self.last_repeat_char == Some(ch)
-            && self.last_char_key_at.is_some_and(|t| {
-                let gap = now.duration_since(t);
-                gap >= REPEAT_MIN_GAP && gap <= REPEAT_MAX_GAP
-            });
-        self.last_repeat_char = Some(ch);
-        self.last_char_key_at = Some(now);
-        is_repeat
-    }
-
-    /// Discard the in-flight run bookkeeping after auto-repeat detection.
-    /// The keys were OS repeats of a held key — not paste traffic — so the
-    /// cadence count must not accumulate toward [`BURST_MIN_KEYS`], no
-    /// half-typed run may stay "leaked" for a later retraction, and a stale
-    /// `last_text_key_at` must not make the held key's own Enter classify as
-    /// a paste newline (a user who holds `s` and presses Enter while holding
-    /// expects `ssss<Enter>` to SEND, exactly like the trickle they watched).
-    fn abandon_run(&mut self) {
-        self.text_keys_in_window = 0;
-        self.leaked_chars = 0;
-        self.last_text_key_at = None;
-        self.chain_started_in_text_burst = false;
     }
 
     /// Whether a paste burst is in flight: a stream of pasted text keys is
@@ -198,50 +157,70 @@ impl PasteBurstState {
         text_burst || chained_enter
     }
 
-    fn buffer_is_empty(&self) -> bool {
-        self.buffer.is_empty()
+    fn shadow_is_empty(&self) -> bool {
+        self.shadow.is_empty()
     }
 
-    fn leaked_chars(&self) -> usize {
-        self.leaked_chars
+    fn shadow_text_len(&self) -> usize {
+        self.shadow_text_len
     }
 
-    fn clear_leaked(&mut self) {
-        self.leaked_chars = 0;
+    fn run_replayable(&self) -> bool {
+        self.run_replayable
     }
 
-    fn note_leaked_char(&mut self) {
-        self.leaked_chars += 1;
+    /// Mark the run as replay-worthy (the burst armed). Sticky until the
+    /// shadow is taken or cleared.
+    fn mark_replayable(&mut self) {
+        self.run_replayable = true;
     }
 
-    fn push_char(&mut self, ch: char) {
-        self.buffer.push(ch);
+    fn push_text_char(&mut self, ch: char) {
+        self.shadow.push(ch);
+        self.shadow_text_len += 1;
     }
 
-    /// Absorb a plain Enter as a paste line break. `text_burst_was_active`
-    /// marks whether the ENTER CHAIN may continue after it (only chains that
-    /// begin inside a real text burst are extendable).
+    /// Absorb a plain Enter as a paste line break: recorded in the shadow
+    /// (the replay turns it into a real newline). An absorbed Enter is
+    /// itself paste semantics — the run becomes replay-worthy.
+    /// `text_burst_was_active` marks whether the ENTER CHAIN may continue
+    /// after it (only chains that begin inside a real text burst are
+    /// extendable).
     fn push_newline(&mut self, now: Instant, text_burst_was_active: bool) {
-        self.buffer.push('\n');
+        self.shadow.push('\n');
         self.last_absorbed_enter_at = Some(now);
+        self.run_replayable = true;
         if text_burst_was_active {
             self.chain_started_in_text_burst = true;
         }
     }
 
-    /// Drain the pending paste text (empty → `None`), resetting the run
-    /// state so the next paste arms from scratch and no stale chain flag can
-    /// swallow a later Enter.
-    fn take_buffer(&mut self) -> Option<String> {
+    /// Drop the shadow WITHOUT replaying it. Used when the streamed run is
+    /// already part of the prompt content a fall-through Enter is about to
+    /// send — a replay here would duplicate the text.
+    fn clear(&mut self) {
+        self.shadow.clear();
+        self.shadow_text_len = 0;
         self.chain_started_in_text_burst = false;
-        self.leaked_chars = 0;
         self.text_keys_in_window = 0;
         self.last_absorbed_enter_at = None;
-        if self.buffer.is_empty() {
-            None
-        } else {
-            Some(std::mem::take(&mut self.buffer))
-        }
+        self.run_replayable = false;
+    }
+
+    /// Take the shadow for replay: `Some(text)` when the run absorbed at
+    /// least one Enter (worth reconstructing through `handle_paste`), `None`
+    /// for runs with no line break — those are cleared and left as typed.
+    /// Resets the run state either way, so the next burst arms from scratch
+    /// and no stale chain flag can swallow a later Enter.
+    fn take_replay(&mut self) -> Option<String> {
+        let had_enter = self.shadow.contains('\n');
+        let text = std::mem::take(&mut self.shadow);
+        self.shadow_text_len = 0;
+        self.chain_started_in_text_burst = false;
+        self.text_keys_in_window = 0;
+        self.last_absorbed_enter_at = None;
+        self.run_replayable = false;
+        if had_enter { Some(text) } else { None }
     }
 
     /// A "text" key the way a Windows console reports pasted characters:
@@ -250,8 +229,8 @@ impl PasteBurstState {
     /// signature of an AltGr character (`@ # $ € ª º` on ABNT). Real
     /// hotkeys never produce Char + CTRL+ALT on Windows (Ctrl+letter keys
     /// arrive as lowercase letters with CTRL only), so counting AltGr as
-    /// text keeps an AltGr-heavy paste coalescing instead of flushing the
-    /// buffer on every `@`.
+    /// text keeps an AltGr-heavy paste's Enters classified correctly
+    /// instead of treating them as user submits.
     fn is_plain_text_key(key: &KeyEvent) -> bool {
         if !matches!(key.code, KeyCode::Char(_)) {
             return false;
@@ -311,18 +290,22 @@ impl App {
             && !self.is_message_actions_dialog_visible()
             && !self.is_undo_dialog_visible()
     }
-    /// Absorb a key into the in-flight paste burst. Returns `true` when the
+
+    /// Classify a key for the in-flight paste burst. Returns `true` when the
     /// key was consumed by the coalescer (the caller must stop processing it
     /// — in particular it must NOT reach the `SendMessage` keymap action).
     ///
-    /// Only plain text keys and plain Enters participate; any other key
-    /// (Esc, arrows, Ctrl combos…) mid-burst flushes the buffer first so the
-    /// pasted text lands before the command acts, then falls through.
+    /// Text characters are NEVER consumed: they fall through to the prompt
+    /// immediately (streaming render, held keys included) while being
+    /// mirrored into the shadow for the burst-end replay. Only plain Enters
+    /// inside the burst window are absorbed (as paste line breaks); any
+    /// other key (Esc, arrows, Ctrl combos…) mid-burst flushes the run
+    /// first so the pasted text lands before the command acts, then falls
+    /// through.
     pub(super) fn paste_burst_handle_key(&mut self, key: &KeyEvent, now: Instant) -> bool {
         if !self.prompt_owns_keyboard() {
-            // Ownership lost mid-burst (a dialog opened). LAND the pending
-            // text into the prompt rather than dropping it: a paste is user
-            // data — silently discarding it loses work. Divergence from the
+            // Ownership lost mid-burst (a dialog opened). LAND the run rather
+            // than dropping it: a paste is user data. Divergence from the
             // Unix path (deliberate): there, an Event::Paste arriving while
             // an input dialog is open is routed INTO that dialog's field
             // (events.rs); here the text parks in the background prompt —
@@ -341,35 +324,23 @@ impl App {
         }
 
         if plain_text {
+            // Cadence bookkeeping BEFORE the fall-through (the burst must be
+            // able to arm from the Default state). The character itself is
+            // NEVER withheld: it streams into the prompt through the normal
+            // typing path, and the shadow mirrors it so the burst-end replay
+            // can reconstruct the run with its real line breaks.
+            self.paste_burst.note_text_key(now);
+            if self.paste_burst.burst_armed(now) {
+                // The run reached paste semantics: its shadow is
+                // replay-worthy at burst end (sticky until taken/cleared,
+                // so the per-key flush below cannot chop the run while it
+                // is still forming).
+                self.paste_burst.mark_replayable();
+            }
             let KeyCode::Char(ch) = key.code else {
                 unreachable!("is_plain_text_key guarantees a Char code");
             };
-            // Auto-repeat discrimination BEFORE the cadence bookkeeping: a
-            // HELD key (same char, OS repeat cadence) is typing, not paste
-            // traffic — land any pending paste and discard the in-flight run
-            // so holding a key streams into the prompt like the pre-coalescer
-            // behaviour instead of vanishing into the buffer until release.
-            if self.paste_burst.note_auto_repeat(ch, now) {
-                self.flush_paste_buffer();
-                self.paste_burst.abandon_run();
-                return false;
-            }
-            // Bookkeeping BEFORE the armed check (the burst must be able to
-            // arm from the Default state).
-            let just_armed = self.paste_burst.note_text_key(now);
-            if just_armed {
-                // The threshold run already fell through to the prompt:
-                // retract it into the buffer so the atomic replay contains
-                // the WHOLE paste, not just its tail.
-                self.retract_leaked_prefix();
-            }
-            if self.paste_burst.burst_armed(now) {
-                self.paste_burst.push_char(ch);
-                return true;
-            }
-            // Not armed (yet): the key falls through to normal typing and is
-            // counted as leaked, for retraction if the burst arms.
-            self.paste_burst.note_leaked_char();
+            self.paste_burst.push_text_char(ch);
             return false;
         }
 
@@ -388,80 +359,98 @@ impl App {
             .last_text_key_at
             .is_some_and(|t| is_recent(t, now));
         if self.paste_burst.burst_armed(now) || text_recent {
-            if !self.paste_burst.burst_armed(now) {
-                // The threshold run has not armed yet (short first line):
-                // retract the leaked chars BEFORE the newline so the replay
-                // buffer keeps paste order (`"hi"` then `'\n'`), and so the
-                // later arming transition does not double-retract.
-                self.retract_leaked_prefix();
-            }
             self.paste_burst.push_newline(now, text_recent);
             return true;
         }
-        // Enter outside any burst: flush the pending paste (if any) so the
-        // keymap submits the FULL text, then fall through to SendMessage.
-        // (No stale leaked count can survive: take_buffer inside the flush
-        // resets leaked_chars before its early return, so the next burst's
-        // arming transition can never retract foreign characters.)
+        // Enter outside any burst (>80ms since the last text key). Land the
+        // run FIRST, through the normal flush path: a jittered paste (console
+        // stall stretching one record gap past the window) arrives here with
+        // its line breaks still only in the shadow — replaying restores them
+        // (retract the streamed chars, re-insert with real newlines) so this
+        // Enter submits the FULL multi-line text as ONE message. The retraction
+        // is exact (the shadow mirrors precisely the streamed tail chars), so
+        // there is no duplication; for plain typed text the replay at worst
+        // leaves a transient trailing newline, which the submit path trims.
         self.flush_paste_buffer();
         false
     }
 
-    /// Pull the last `leaked_chars` characters inserted before the cursor
-    /// back out of the prompt (they are re-buffered for the atomic replay).
-    fn retract_leaked_prefix(&mut self) {
-        let leaked = self.paste_burst.leaked_chars();
-        if leaked == 0 {
+    /// Replay the pending run through the NORMAL paste path
+    /// (`PromptView::handle_paste`): the streamed characters are retracted
+    /// from the prompt and re-inserted with real line breaks — line endings
+    /// normalized, and long pastes compressed into the `[Pasted ~N lines]`
+    /// virtual-text placeholder — identical to what Linux/macOS receive in
+    /// one `Event::Paste`. Runs with no absorbed Enter are cleared without
+    /// replaying: plain typing and held keys stay exactly as typed.
+    fn flush_paste_buffer(&mut self) {
+        if self.paste_burst.shadow_is_empty() {
             return;
         }
-        // The leaked chars were inserted sequentially at the cursor within
-        // one burst (no cursor movement between them), so they are exactly
-        // the `leaked` CHARS immediately before `cursor_pos`. `cursor_pos`
-        // and `input` are BYTE offsets — walk chars, never subtract counts
-        // (a multibyte char in the leaked run would panic `drain`).
-        let end = self
-            .prompt_view
-            .cursor_pos
-            .min(self.prompt_view.input.len());
-        let start = self.prompt_view.input[..end]
-            .char_indices()
-            .rev()
-            .nth(leaked - 1)
-            .map_or(0, |(i, _)| i);
-        let retracted: String = self.prompt_view.input.drain(start..end).collect();
-        for ch in retracted.chars() {
-            self.paste_burst.push_char(ch);
+        if !self.paste_burst.run_replayable() {
+            // The run never developed paste semantics (no absorbed Enter, the
+            // cadence never armed): the streamed characters ARE the final
+            // content — nothing to retract or replay.
+            self.paste_burst.clear();
+            return;
         }
-        self.prompt_view.cursor_pos = start;
-        self.paste_burst.clear_leaked();
-    }
-
-    /// Replay the pending paste text through the NORMAL paste path
-    /// (`PromptView::handle_paste`): line endings normalized, and long pastes
-    /// compressed into the `[Pasted ~N lines]` virtual-text placeholder —
-    /// identical to what Linux/macOS receive in one `Event::Paste`.
-    fn flush_paste_buffer(&mut self) {
-        let Some(text) = self.paste_burst.take_buffer() else {
+        let text_len = self.paste_burst.shadow_text_len();
+        let Some(text) = self.paste_burst.take_replay() else {
             return;
         };
-        self.prompt_view.note_activity();
-        self.prompt_view.handle_paste(&text);
-        self.slash_menu.update(&self.prompt_view.input);
+
+        // Retract the run's text characters — they sit immediately before the
+        // cursor (every streamed insert advanced it; absorbed Enters did not
+        // move it) — so the replay below re-inserts them at the same spot
+        // with real newlines. `cursor_pos` and `input` are BYTE offsets —
+        // walk chars, never subtract counts (a multibyte char in the run
+        // would panic a naive byte drain).
+        let retracted = if text_len == 0 {
+            // A pure-Enter run (blank lines only): nothing streamed, so the
+            // replay inserts exactly the newlines the prompt never received.
+            true
+        } else if self.prompt_view.cursor_pos == self.prompt_view.input.len() {
+            let end = self
+                .prompt_view
+                .cursor_pos
+                .min(self.prompt_view.input.len());
+            let start = self.prompt_view.input[..end]
+                .char_indices()
+                .rev()
+                .nth(text_len - 1)
+                .map_or(0, |(i, _)| i);
+            self.prompt_view.input.drain(start..end);
+            self.prompt_view.cursor_pos = start;
+            true
+        } else {
+            // The cursor moved mid-burst (a mouse click): the run is no
+            // longer the contiguous tail — retracting would take foreign
+            // characters and replaying would DUPLICATE the streamed text.
+            // Degrade gracefully: the text stays as streamed (its absorbed
+            // line breaks are lost, content intact).
+            false
+        };
+
+        if retracted {
+            self.prompt_view.note_activity();
+            self.prompt_view.handle_paste(&text);
+            self.slash_menu.update(&self.prompt_view.input);
+        }
     }
 
     /// Called once per main-loop iteration from `run()`: when the burst is
-    /// over (no key within [`BURST_WINDOW`]) the buffered paste lands in the
-    /// prompt as one atomic paste. `now` is injected (same clock as the key
-    /// path) so tests can drive this deterministically.
+    /// over (no key within [`BURST_WINDOW`]) the run is replayed through the
+    /// normal paste path. `now` is injected (same clock as the key path) so
+    /// tests can drive this deterministically.
     pub(super) fn paste_burst_flush_if_due_at(&mut self, now: Instant) {
         // Only land the paste while the prompt owns the keyboard. If a
         // dialog opened mid-burst, the FIRST key processed while the dialog
         // is open hits the ownership check at the top of
-        // `paste_burst_handle_key` and flushes (lands) the buffer there;
-        // if no key ever arrives, the buffer stays pending and THIS
+        // `paste_burst_handle_key` and flushes (lands) the run there;
+        // if no key ever arrives, the shadow stays pending and THIS
         // per-frame flush lands it as soon as ownership returns. The two
         // consumers are mutually exclusive per key, never redundant.
-        if !self.paste_burst.buffer_is_empty()
+        if !self.paste_burst.shadow_is_empty()
+            && self.paste_burst.run_replayable()
             && self.prompt_owns_keyboard()
             && !self.paste_burst.burst_armed(now)
         {
@@ -474,6 +463,7 @@ impl App {
         self.paste_burst_flush_if_due_at(Instant::now());
     }
 }
+
 #[cfg(test)]
 mod state_machine_tests {
     //! Deterministic unit tests for the [`PasteBurstState`] machine — driven
@@ -500,56 +490,80 @@ mod state_machine_tests {
         let t = t0();
         // 3 text keys (< BURST_MIN_KEYS = 4): not armed.
         for i in 1..=3u32 {
-            assert!(!s.note_text_key(t + i * STEP), "3 keys must not arm");
+            s.note_text_key(t + i * STEP);
         }
         s.push_newline(t + 4u32 * STEP, true);
         assert!(
             s.chain_started_in_text_burst,
             "chain anchored by text_recent Enter"
         );
-        assert_eq!(s.take_buffer().unwrap(), "\n");
-        // take_buffer resets the chain flag.
+        assert!(
+            s.run_replayable(),
+            "an absorbed Enter makes the run replay-worthy"
+        );
+        assert_eq!(s.take_replay().unwrap(), "\n");
+        // take_replay resets the chain flag.
         assert!(!s.chain_started_in_text_burst);
     }
 
-    /// REGRESSION (invariant from fix #6): take_buffer must fully reset run
+    /// REGRESSION (invariant from fix #6): take_replay must fully reset run
     /// state so the next burst arms from scratch with no stale flags.
     #[test]
-    fn take_buffer_resets_all_run_state() {
+    fn take_replay_resets_all_run_state() {
         let mut s = PasteBurstState::default();
         let t = t0();
         for i in 1..=4u32 {
             s.note_text_key(t + i * STEP);
         }
-        s.push_char('a');
-        s.note_leaked_char();
+        s.mark_replayable();
+        s.push_text_char('a');
         s.push_newline(t + 5u32 * STEP, true);
-        assert!(s.take_buffer().is_some());
-        assert!(s.take_buffer().is_none(), "buffer drained");
-        assert_eq!(s.leaked_chars(), 0);
+        assert!(s.take_replay().is_some());
+        assert!(s.take_replay().is_none(), "shadow drained");
+        assert_eq!(s.shadow_text_len(), 0);
         assert!(!s.chain_started_in_text_burst);
+        assert!(!s.run_replayable());
         assert!(s.last_absorbed_enter_at.is_none());
         // Old timestamps must not arm a new burst.
         assert!(!s.burst_armed(t + 6u32 * STEP));
     }
 
-    /// A gap wider than the window breaks the run: previously leaked chars
-    /// were human typing, must NOT be retracted into a later burst.
+    /// A gap wider than the window breaks the run: the cadence counter
+    /// resets, so sustained human typing never reaches the arming threshold
+    /// that classifies the next Enter as a paste line break. A NOT-yet-
+    /// replayable run's shadow is dropped with it (its characters stay in
+    /// the prompt as typed); a REPLAYABLE run keeps its shadow — console/RDP
+    /// jitter routinely exceeds the window mid-paste, and the run's prefix
+    /// is still awaiting the burst-end replay.
     #[test]
-    fn wide_gap_drops_leaked_run() {
+    fn wide_gap_resets_the_cadence_count() {
         let mut s = PasteBurstState::default();
         let t = t0();
         for i in 1..=3u32 {
             s.note_text_key(t + i * STEP);
         }
-        s.note_leaked_char();
-        s.note_leaked_char();
-        assert_eq!(s.leaked_chars(), 2);
+        s.push_text_char('x');
+        s.push_text_char('y');
         // Human pause > BURST_WINDOW, then typing resumes.
         let late = t + 4u32 * STEP + BURST_WINDOW + Duration::from_millis(50);
-        assert!(!s.note_text_key(late), "run broken, not armed");
-        assert_eq!(s.leaked_chars(), 0, "stale leaked run discarded");
-        assert_eq!(s.text_keys_in_window, 1);
+        s.note_text_key(late);
+        assert_eq!(s.text_keys_in_window, 1, "stale cadence run discarded");
+        assert!(!s.run_replayable());
+        assert!(
+            s.shadow_is_empty(),
+            "dead mirror dropped with the broken run"
+        );
+
+        // Same gap, but the run had reached paste semantics: shadow kept.
+        let mut s2 = PasteBurstState::default();
+        for i in 1..=4u32 {
+            s2.note_text_key(t + i * STEP);
+        }
+        s2.mark_replayable();
+        s2.push_text_char('z');
+        s2.note_text_key(late);
+        assert_eq!(s2.shadow, "z", "replay-worthy run survives the gap");
+        assert_eq!(s2.shadow_text_len(), 1);
     }
 
     /// A text burst stays armed only while keys keep arriving within the
@@ -565,86 +579,36 @@ mod state_machine_tests {
         assert!(!s.burst_armed(t + 4u32 * STEP + BURST_WINDOW + STEP));
     }
 
-    /// REGRESSION (the held-key vanish bug): OS auto-repeat of a held key
-    /// (same char, ~33ms cadence — inside the repeat window) must be
-    /// classified as a repeat, NOT counted as paste traffic.
+    /// The shadow mirrors text characters and absorbed newlines separately:
+    /// `shadow_text_len` counts only the TEXT chars (the retraction length);
+    /// the newline count is implicit (`shadow.len() - shadow_text_len`).
     #[test]
-    fn held_key_repeat_is_detected() {
+    fn shadow_tracks_text_and_newline_lengths_separately() {
         let mut s = PasteBurstState::default();
         let t = t0();
-        // First press of 's', then OS repeats at 33ms — every repeat after
-        // the first must classify as auto-repeat.
-        assert!(!s.note_auto_repeat('s', t));
-        for i in 1..=10u32 {
-            assert!(
-                s.note_auto_repeat('s', t + i * Duration::from_millis(33)),
-                "repeat #{i} of the same key at OS cadence must be detected"
-            );
+        for ch in "abc".chars() {
+            s.push_text_char(ch);
         }
+        s.push_newline(t, true);
+        s.push_newline(t + STEP, true);
+        s.push_text_char('d');
+        // Two absorbed Enters → two shadow newlines; text chars counted apart.
+        assert_eq!(s.shadow, "abc\n\nd");
+        assert_eq!(s.shadow_text_len(), 4, "newlines are not text chars");
     }
 
-    /// A paste delivering the same character repeatedly arrives back-to-back
-    /// with sub-millisecond gaps — far below [`REPEAT_MIN_GAP`] — so it must
-    /// NOT classify as auto-repeat (otherwise a paste of `ssssss` would
-    /// stream into the prompt uncoalesced, reintroducing the split-send bug).
+    /// A run with NO absorbed Enter (plain typing, held keys, single-line
+    /// pastes) is cleared WITHOUT a replay: the streamed text stays in the
+    /// prompt exactly as typed — no retraction, no placeholder compression
+    /// of fast human typing.
     #[test]
-    fn pasted_same_char_run_is_not_auto_repeat() {
+    fn take_replay_without_enter_leaves_text_as_typed() {
         let mut s = PasteBurstState::default();
-        let t = t0();
-        assert!(!s.note_auto_repeat('s', t));
-        for i in 1..=10u32 {
-            assert!(
-                !s.note_auto_repeat('s', t + i * STEP),
-                "paste-pace same-char run must never classify as auto-repeat"
-            );
+        for ch in "just typing".chars() {
+            s.push_text_char(ch);
         }
-    }
-
-    /// A human double-tap of the same key is slower than the repeat window
-    /// (> 75ms motor floor) — it must classify as distinct presses, not
-    /// auto-repeat, or double letters typed deliberately ("ss", "ll") would
-    /// drop the second character out of the coalescer's run accounting.
-    #[test]
-    fn human_double_tap_is_not_auto_repeat() {
-        let mut s = PasteBurstState::default();
-        let t = t0();
-        assert!(!s.note_auto_repeat('s', t));
-        assert!(!s.note_auto_repeat('s', t + Duration::from_millis(90)));
-    }
-
-    /// A repeat classification must NOT let the held key arm the burst: the
-    /// run bookkeeping (`text_keys_in_window`) only advances through
-    /// `note_text_key`, which the App wiring skips for repeats.
-    #[test]
-    fn repeats_never_arm_the_burst() {
-        let mut s = PasteBurstState::default();
-        let t = t0();
-        assert!(!s.note_auto_repeat('s', t));
-        for i in 1..=20u32 {
-            s.note_auto_repeat('s', t + i * Duration::from_millis(33));
-        }
-        assert!(!s.burst_armed(t + 20u32 * Duration::from_millis(33)));
-    }
-
-    /// `abandon_run` must discard the whole in-flight run — cadence count,
-    /// leaked prefix and chain flag — so a held key can neither arm a burst
-    /// later nor make its own Enter classify as a paste newline.
-    #[test]
-    fn abandon_run_resets_run_state() {
-        let mut s = PasteBurstState::default();
-        let t = t0();
-        for i in 1..=3u32 {
-            s.note_text_key(t + i * STEP);
-        }
-        s.note_leaked_char();
-        s.push_newline(t + 4u32 * STEP, true);
-        s.abandon_run();
-        assert_eq!(s.text_keys_in_window, 0);
-        assert_eq!(s.leaked_chars(), 0);
-        assert!(!s.chain_started_in_text_burst);
-        // last_text_key_at cleared: a subsequent Enter must not see
-        // text_recent and absorb as a paste newline.
-        let later = t + 5u32 * STEP;
-        assert!(!s.burst_armed(later));
+        assert!(s.take_replay().is_none(), "no Enter → no replay");
+        assert!(s.shadow.is_empty(), "shadow cleared either way");
+        assert_eq!(s.shadow_text_len(), 0);
     }
 }

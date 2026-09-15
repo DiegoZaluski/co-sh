@@ -92,11 +92,13 @@ async fn held_key_auto_repeat_streams_into_the_prompt() {
 /// THE BUG: a large multi-line paste on Windows used to be auto-split — every
 /// line break inside the pasted text arrived as a plain Enter and sent whatever
 /// had accumulated so far, so N lines became N messages without the user ever
-/// pressing Enter. The paste must be COALESCED (nothing left in the prompt
-/// char by char), flushed atomically through `handle_paste` at the burst end
-/// (compressing into the `[Pasted ~N lines]` placeholder exactly like on
-/// Unix), and a single real Enter must send ONE message with the full
-/// expanded text.
+/// pressing Enter. The coalescer must NEVER split-send: paste line breaks are
+/// absorbed as newlines (never reaching `SendMessage`), and at burst end the
+/// streamed run is retracted and replayed through `handle_paste`, compressing
+/// into the `[Pasted ~N lines]` placeholder exactly like on Unix. Characters
+/// themselves stream into the prompt in real time — the coalescer never
+/// holds them back (the held-key vanish regression) — so DURING the burst
+/// the raw text is visible in the input.
 #[tokio::test]
 async fn windows_paste_burst_is_not_split_into_multiple_sends() {
     let _home = HOME_LOCK.lock();
@@ -106,16 +108,15 @@ async fn windows_paste_burst_is_not_split_into_multiple_sends() {
     let pasted = format!("{line}\n{line}\n{line}");
 
     // The exact event stream a Windows console produces for that paste.
-    // While the burst is armed NOTHING may remain in the prompt char by char
-    // — that is the visible "streaming/typing" symptom. (The few chars that
-    // fell through while the detector armed are retracted on the arming
-    // transition.)
+    // Characters stream into the prompt (real-time render); the absorbed
+    // Enters are NOT typed, so the input is the concatenation of the lines.
     for evt in paste_key_events(&pasted) {
         app.process_key_event(evt).unwrap();
     }
-    assert!(
-        app.prompt_view.input.is_empty(),
-        "during the burst the paste must be buffered, not streamed into the prompt"
+    assert_eq!(
+        app.prompt_view.input,
+        pasted.replace('\n', ""),
+        "characters must stream in real time; absorbed Enters must not be typed"
     );
     assert!(
         app.state
@@ -369,8 +370,9 @@ async fn dialog_mid_burst_lands_paste_instead_of_dropping() {
 
 /// REGRESSION (fix #3): AltGr characters (Char + CTRL+ALT — the Windows
 /// console signature for `@ # $ €` on ABNT) must count as paste text keys.
-/// Pre-fix, each one flushed the coalescer mid-burst, degrading an
-/// AltGr-heavy paste to fractional delivery without compression.
+/// Pre-fix, each one flushed the coalescer mid-burst, so the paste's own
+/// Enters were classified as user submits (split-send). They now count as
+/// text: they stream into the prompt like any other character.
 #[tokio::test]
 async fn altgr_chars_keep_the_burst_coalescing() {
     let _home = HOME_LOCK.lock();
@@ -382,16 +384,23 @@ async fn altgr_chars_keep_the_burst_coalescing() {
         let evt = KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL | KeyModifiers::ALT);
         app.process_key_event(evt).unwrap();
     }
+    assert_eq!(
+        app.prompt_view.input, pasted,
+        "AltGr chars are text keys: they stream into the prompt untouched"
+    );
     assert!(
-        app.prompt_view.input.is_empty(),
-        "AltGr chars must be buffered by the coalescer, not streamed into the prompt"
+        app.state
+            .current_session()
+            .is_none_or(|s| s.messages.is_empty()),
+        "no auto-send: this AltGr run contains no Enter"
     );
 
+    // Burst-end flush with no absorbed Enter: the run is left as typed.
     end_burst_window();
     app.paste_burst_flush_if_due();
-    assert!(
-        app.prompt_view.input.contains(&pasted[..12]),
-        "AltGr paste must land whole through handle_paste, got: {:?}",
+    assert_eq!(
+        app.prompt_view.input, pasted,
+        "single-line run stays as typed (no replay), got: {:?}",
         app.prompt_view.input
     );
 }
@@ -444,18 +453,25 @@ async fn leaked_count_does_not_survive_a_send() {
 /// (`paste_burst_flush_if_due_at`), so the burst-end behaviour is testable
 /// with synthetic Instants — no real sleeps, no CI flakiness. While the
 /// burst is still armed the flush must NOT land; once the window elapses it
-/// must land exactly once.
+/// must land exactly once (retract the streamed run, replay with its real
+/// line break through `handle_paste`).
 #[tokio::test]
 async fn flush_at_is_deterministic_on_injected_clock() {
     let _home = HOME_LOCK.lock();
     let mut app = app_with_session();
 
-    for evt in paste_key_events("deterministic flush") {
+    // Multi-line paste: the absorbed Enter makes the run replay-worthy at
+    // burst end (a single-line run would legitimately stay as typed).
+    let pasted = "deterministic flush\nsecond line";
+    for evt in paste_key_events(pasted) {
         app.process_key_event(evt).unwrap();
     }
-    assert!(
-        !app.prompt_view.input.contains("deterministic"),
-        "precondition: burst buffered, not yet landed"
+    // Characters streamed (the absorbed Enter was not typed) and the armed
+    // burst's per-key flush must NOT land while keys keep arriving.
+    assert_eq!(
+        app.prompt_view.input,
+        pasted.replace('\n', ""),
+        "precondition: run streamed, not yet replayed"
     );
 
     // Synthetic now far past the window: must land exactly once. The window
@@ -463,14 +479,16 @@ async fn flush_at_is_deterministic_on_injected_clock() {
     // the real threshold instead of hard-coding 80ms.
     let later = std::time::Instant::now() + crate::app::paste_burst::BURST_WINDOW;
     app.paste_burst_flush_if_due_at(later);
+    // 29 chars < PASTE_MIN_CHARS(150), 2 lines < PASTE_MIN_LINES(3) → the
+    // replay retracts the streamed run and inserts the text WITH its newline.
     assert_eq!(
-        app.prompt_view.input, "deterministic flush",
-        "flush past the window must land the whole paste atomically"
+        app.prompt_view.input, pasted,
+        "flush past the window must land the run with its real line break"
     );
     // Idempotent: a second flush with nothing buffered must not duplicate.
     app.paste_burst_flush_if_due_at(later + Duration::from_secs(1));
     assert_eq!(
-        app.prompt_view.input, "deterministic flush",
+        app.prompt_view.input, pasted,
         "flush must be idempotent once drained"
     );
 }
