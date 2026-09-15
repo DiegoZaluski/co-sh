@@ -612,10 +612,36 @@ impl Connector {
     ///     `openrouter`,
     ///     `zen`,
     ///     `opencode-go`,
-    ///     `charm`.
+    ///     `charm`,
+    ///     `xai`,
+    ///     `vercel`.
     ///
-    /// Everything else returns [`CostError::CostNotSupported`] (hide the
-    /// price rows). More providers coming in a future release.
+    /// Unsupported:
+    ///     `openai`,
+    ///     `claude`,
+    ///     `mistral`,
+    ///     `fireworks`,
+    ///     `deepseek`,
+    ///     `groq`,
+    ///     `together`,
+    ///     `cerebras`,
+    ///     `cohere`,
+    ///     `perplexity`,
+    ///     `sambanova`,
+    ///     `poe`,
+    ///     `nvidia`,
+    ///     `anyscale`,
+    ///     `cloudflare`,
+    ///     `azure`,
+    ///     `gemini`,
+    ///     `zai`,
+    ///     `huggingface`.
+    ///
+    /// Unsupported providers expose no spend API usable with a normal
+    /// inference key: `openai`/`claude`/`mistral` require an admin key,
+    /// `fireworks` a separate `account_id`, `deepseek` reports balance
+    /// only; the rest document no spend API at all. All return
+    /// [`CostError::CostNotSupported`] — hide the price rows.
     ///
     /// `session_reported_costs` are the per-request costs the provider
     /// already reported in each response ([`TokenUsage::reported_cost`]);

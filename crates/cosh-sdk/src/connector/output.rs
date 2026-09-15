@@ -324,13 +324,30 @@ fn extract_family_usage(family: Family, raw: &str) -> Option<TokenUsage> {
 ///   #26213). Numeric strings are accepted, so `"cost":"0.0042"` and
 ///   `"cost":0.0042` both parse.
 ///
+/// xAI reports the exact billed amount as `usage.cost_in_usd_ticks`
+/// (1 USD = 10^10 ticks); it is converted to USD here so every consumer
+/// sees one unit.
+///
 /// Family-agnostic on purpose. Families whose native response shape has no
 /// `usage`/`cost` object (Claude, Gemini) simply never match.
 ///
 /// Rejects negative or non-finite/non-numeric values: a malformed cost must
-/// never poison the spend totals — `None` falls back to the estimate path.
+/// never poison the spend totals.
 pub(crate) fn extract_reported_cost(raw: &str) -> Option<f64> {
     let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let ticks = v
+        .get("usage")
+        .and_then(|usage| usage.get("cost_in_usd_ticks"))
+        .and_then(serde_json::Value::as_i64);
+    if let Some(ticks) = ticks {
+        // xAI bills in 10^-10 USD ticks (docs.x.ai/developers/cost-tracking).
+        let usd = ticks as f64 / 10_000_000_000.0;
+        return if usd.is_finite() && usd >= 0.0 {
+            Some(usd)
+        } else {
+            None
+        };
+    }
     let value = v
         .get("usage")
         .and_then(|usage| usage.get("cost"))
@@ -379,6 +396,18 @@ mod tests {
         // Non-streaming responses report the same top-level shape.
         let raw = r#"{"id":"x","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":8,"completion_tokens":6},"cost":"0.0031"}"#;
         assert!((extract_reported_cost(raw).unwrap() - 0.0031).abs() < 1e-12);
+    }
+
+    /// xAI: the exact billed amount arrives as `usage.cost_in_usd_ticks`
+    /// (1 USD = 10^10 ticks) and is converted to USD here.
+    #[test]
+    fn extracts_reported_cost_from_xai_ticks() {
+        // 37_756_000 ticks (docs.x.ai example, printed there as $0.0038).
+        let raw = r#"{"usage":{"input_tokens":199,"output_tokens":1,"cost_in_usd_ticks":37756000}}"#;
+        assert!((extract_reported_cost(raw).unwrap() - 0.0037756).abs() < 1e-12);
+        // Streaming final chunk carries the same field.
+        let raw = r#"{"choices":[],"usage":{"cost_in_usd_ticks":158500}}"#;
+        assert_eq!(extract_reported_cost(raw), Some(0.00001585));
     }
 
     /// `usage.cost` wins when both shapes appear in one frame (the usage
