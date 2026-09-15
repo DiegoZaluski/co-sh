@@ -340,6 +340,10 @@ fn cosh() -> Theme {
     t.syntax_number = RGBA::from_hex("#FF7EDB");
     t.syntax_type = RGBA::from_hex("#C792EA");
     t.syntax_operator = RGBA::from_hex("#64F0DC");
+    // Prompt/input-box fill matches the markdown code-block background: the
+    // palette derives that from `background` (`bg*9/10 + 8` per channel,
+    // markdown/styles.rs) — #07070A → #0E0E11.
+    t.background_element = RGBA::from_hex("#0E0E11");
     t.queue_next_loop = RGBA::from_hex("#3A3116");
     t.queue_next_request = RGBA::from_hex("#123A38");
     t
