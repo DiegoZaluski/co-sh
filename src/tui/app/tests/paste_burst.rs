@@ -38,6 +38,57 @@ fn end_burst_window() {
     std::thread::sleep(HUMAN_KEY_GAP);
 }
 
+/// REGRESSION (the held-key vanish bug): holding a key on Linux/macOS/Windows
+/// produces OS auto-repeat events (same character, ~20-33ms cadence). The
+/// paste-burst coalescer's cadence counter used to arm on those repeats, so
+/// the held key's characters vanished into the buffer and only appeared when
+/// the key was released. Auto-repeat must stream into the prompt like normal
+/// typing, and the Enter that follows must send.
+#[tokio::test]
+async fn held_key_auto_repeat_streams_into_the_prompt() {
+    let _home = HOME_LOCK.lock();
+    let mut app = app_with_session();
+
+    // Press 's' once, then keep it held: OS repeats arrive at ~33ms cadence.
+    // The first press is a real keypress; every subsequent one is a repeat.
+    app.process_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
+        .unwrap();
+    let mut expected = 1usize;
+    for _ in 0..10 {
+        std::thread::sleep(Duration::from_millis(33));
+        app.process_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
+            .unwrap();
+        expected += 1;
+        // The repeat must be VISIBLE in the prompt immediately — not parked
+        // in the coalescer buffer until key release.
+        assert_eq!(
+            app.prompt_view.input.chars().filter(|c| *c == 's').count(),
+            expected,
+            "held-key repeats must stream into the prompt, got: {:?}",
+            app.prompt_view.input
+        );
+    }
+
+    // Release the key, then press Enter: the typed text sends as one message
+    // (the repeat run must not make the Enter classify as a paste newline).
+    end_burst_window();
+    app.paste_burst_flush_if_due();
+    app.process_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+
+    let session = app.state.current_session().expect("session exists");
+    assert_eq!(
+        session.messages.len(),
+        1,
+        "held-key text must send on Enter"
+    );
+    assert_eq!(
+        super::message_prompt_text(&session.messages[0]),
+        "sssssssssss",
+        "all repeat characters must be present in the sent message"
+    );
+}
+
 /// THE BUG: a large multi-line paste on Windows used to be auto-split — every
 /// line break inside the pasted text arrived as a plain Enter and sent whatever
 /// had accumulated so far, so N lines became N messages without the user ever

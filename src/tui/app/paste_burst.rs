@@ -48,11 +48,23 @@
 //!
 //! Known trade-offs (documented, self-healing): a real Enter pressed within
 //! [`BURST_WINDOW`] of the last pasted character is absorbed as a newline —
-//! the next press, outside the window, submits normally. Held-key auto-repeat
-//! (~33ms/char) arms the burst the same way: it lands as one atomic insert
-//! instead of char-by-char trickle. AltGr-produced characters (CTRL+ALT on
-//! the Windows console) COUNT as paste text keys: an AltGr-heavy paste keeps
-//! coalescing instead of flushing on every `@`.
+//! the next press, outside the window, submits normally. AltGr-produced
+//! characters (CTRL+ALT on the Windows console) COUNT as paste text keys: an
+//! AltGr-heavy paste keeps coalescing instead of flushing on every `@`.
+//!
+//! HELD KEYS are NOT paste traffic: a key held down produces OS auto-repeat
+//! events (same character, ~20-33ms cadence) that would otherwise satisfy the
+//! cadence counter and arm the burst — the visible "held-key vanish" bug
+//! (hold `s`, nothing appears until release). [`PasteBurstState::
+//! note_auto_repeat`] classifies same-character keys arriving at the OS
+//! repeat cadence ([`REPEAT_MIN_GAP`]..[`REPEAT_MAX_GAP`]) as auto-repeat and
+//! routes them AROUND the coalescer: the key types into the prompt normally,
+//! any pending paste is landed first, and the run state is discarded so the
+//! held key can never arm a burst or make its own Enter classify as a paste
+//! newline. A paste is never misclassified: it delivers consecutive
+//! characters back-to-back with sub-millisecond gaps (below
+//! [`REPEAT_MIN_GAP`], even for same-character runs), while a human cannot
+//! re-press the same key faster than [`REPEAT_MAX_GAP`].
 
 use std::time::{Duration, Instant};
 
@@ -72,6 +84,22 @@ pub(super) const BURST_WINDOW: Duration = Duration::from_millis(80);
 /// human finger (fast digraphs hit ~2 keys per window), while a console paste
 /// delivers hundreds of records in the time the coalescer needs to arm.
 const BURST_MIN_KEYS: u32 = 4;
+
+/// Minimum gap between two same-character keys for the pair to be classified
+/// as OS auto-repeat rather than paste traffic. A console paste delivers its
+/// records back-to-back (sub-millisecond gaps); even the slowest paste
+/// jitter on Remote Desktop keeps same-char gaps below this except in the
+/// pathological case (which self-heals at the ≤3-char leak, never split-send).
+const REPEAT_MIN_GAP: Duration = Duration::from_millis(15);
+
+/// Maximum gap between two same-character keys for the pair to be classified
+/// as OS auto-repeat. The burst arms on ANY sustained cadence below
+/// [`BURST_WINDOW`] (each key is "fresh" relative to the previous one), so
+/// every OS repeat rate — Windows caps at ~33ms, Linux/macOS at ~20-66ms —
+/// must fall inside the repeat window. Humans cannot re-press the SAME key
+/// faster than ~80ms (double-tap motor floor); pasted same-char runs arrive
+/// with sub-millisecond gaps, below [`REPEAT_MIN_GAP`].
+const REPEAT_MAX_GAP: Duration = Duration::from_millis(75);
 
 fn is_recent(t: Instant, now: Instant) -> bool {
     now.duration_since(t) <= BURST_WINDOW
@@ -95,6 +123,13 @@ pub(super) struct PasteBurstState {
     /// paste burst, waiting to be replayed through `PromptView::handle_paste`
     /// once the burst ends.
     buffer: String,
+    /// Previous plain text character, for OS auto-repeat detection
+    /// ([`Self::note_auto_repeat`]).
+    last_repeat_char: Option<char>,
+    /// When the previous plain text character arrived — the repeat-cadence
+    /// baseline (updated on EVERY text key, repeat or not, unlike
+    /// `last_text_key_at` which only real text keys touch).
+    last_char_key_at: Option<Instant>,
 }
 
 impl PasteBurstState {
@@ -112,7 +147,42 @@ impl PasteBurstState {
         }
         self.text_keys_in_window += 1;
         self.last_text_key_at = Some(now);
+        self.last_char_key_at = Some(now);
         self.text_keys_in_window == BURST_MIN_KEYS
+    }
+
+    /// Classify a plain text key as OS auto-repeat (a HELD key) rather than
+    /// paste traffic. The signature: the SAME character as the previous text
+    /// key, at the OS repeat cadence — a gap of [`REPEAT_MIN_GAP`]..
+    /// [`REPEAT_MAX_GAP`]. A paste delivers consecutive characters
+    /// back-to-back with sub-millisecond gaps (never inside the repeat
+    /// window, even for same-character runs), and a human cannot re-press
+    /// one key faster than [`REPEAT_MAX_GAP`]. Must be called for EVERY
+    /// plain text key (it advances the cadence baseline) BEFORE
+    /// [`Self::note_text_key`]. Returns `true` when the key is a repeat.
+    fn note_auto_repeat(&mut self, ch: char, now: Instant) -> bool {
+        let is_repeat = self.last_repeat_char == Some(ch)
+            && self.last_char_key_at.is_some_and(|t| {
+                let gap = now.duration_since(t);
+                gap >= REPEAT_MIN_GAP && gap <= REPEAT_MAX_GAP
+            });
+        self.last_repeat_char = Some(ch);
+        self.last_char_key_at = Some(now);
+        is_repeat
+    }
+
+    /// Discard the in-flight run bookkeeping after auto-repeat detection.
+    /// The keys were OS repeats of a held key — not paste traffic — so the
+    /// cadence count must not accumulate toward [`BURST_MIN_KEYS`], no
+    /// half-typed run may stay "leaked" for a later retraction, and a stale
+    /// `last_text_key_at` must not make the held key's own Enter classify as
+    /// a paste newline (a user who holds `s` and presses Enter while holding
+    /// expects `ssss<Enter>` to SEND, exactly like the trickle they watched).
+    fn abandon_run(&mut self) {
+        self.text_keys_in_window = 0;
+        self.leaked_chars = 0;
+        self.last_text_key_at = None;
+        self.chain_started_in_text_burst = false;
     }
 
     /// Whether a paste burst is in flight: a stream of pasted text keys is
@@ -271,6 +341,19 @@ impl App {
         }
 
         if plain_text {
+            let KeyCode::Char(ch) = key.code else {
+                unreachable!("is_plain_text_key guarantees a Char code");
+            };
+            // Auto-repeat discrimination BEFORE the cadence bookkeeping: a
+            // HELD key (same char, OS repeat cadence) is typing, not paste
+            // traffic — land any pending paste and discard the in-flight run
+            // so holding a key streams into the prompt like the pre-coalescer
+            // behaviour instead of vanishing into the buffer until release.
+            if self.paste_burst.note_auto_repeat(ch, now) {
+                self.flush_paste_buffer();
+                self.paste_burst.abandon_run();
+                return false;
+            }
             // Bookkeeping BEFORE the armed check (the burst must be able to
             // arm from the Default state).
             let just_armed = self.paste_burst.note_text_key(now);
@@ -281,9 +364,6 @@ impl App {
                 self.retract_leaked_prefix();
             }
             if self.paste_burst.burst_armed(now) {
-                let KeyCode::Char(ch) = key.code else {
-                    unreachable!("is_plain_text_key guarantees a Char code");
-                };
                 self.paste_burst.push_char(ch);
                 return true;
             }
@@ -483,5 +563,88 @@ mod state_machine_tests {
         }
         assert!(s.burst_armed(t + 4u32 * STEP));
         assert!(!s.burst_armed(t + 4u32 * STEP + BURST_WINDOW + STEP));
+    }
+
+    /// REGRESSION (the held-key vanish bug): OS auto-repeat of a held key
+    /// (same char, ~33ms cadence — inside the repeat window) must be
+    /// classified as a repeat, NOT counted as paste traffic.
+    #[test]
+    fn held_key_repeat_is_detected() {
+        let mut s = PasteBurstState::default();
+        let t = t0();
+        // First press of 's', then OS repeats at 33ms — every repeat after
+        // the first must classify as auto-repeat.
+        assert!(!s.note_auto_repeat('s', t));
+        for i in 1..=10u32 {
+            assert!(
+                s.note_auto_repeat('s', t + i * Duration::from_millis(33)),
+                "repeat #{i} of the same key at OS cadence must be detected"
+            );
+        }
+    }
+
+    /// A paste delivering the same character repeatedly arrives back-to-back
+    /// with sub-millisecond gaps — far below [`REPEAT_MIN_GAP`] — so it must
+    /// NOT classify as auto-repeat (otherwise a paste of `ssssss` would
+    /// stream into the prompt uncoalesced, reintroducing the split-send bug).
+    #[test]
+    fn pasted_same_char_run_is_not_auto_repeat() {
+        let mut s = PasteBurstState::default();
+        let t = t0();
+        assert!(!s.note_auto_repeat('s', t));
+        for i in 1..=10u32 {
+            assert!(
+                !s.note_auto_repeat('s', t + i * STEP),
+                "paste-pace same-char run must never classify as auto-repeat"
+            );
+        }
+    }
+
+    /// A human double-tap of the same key is slower than the repeat window
+    /// (> 75ms motor floor) — it must classify as distinct presses, not
+    /// auto-repeat, or double letters typed deliberately ("ss", "ll") would
+    /// drop the second character out of the coalescer's run accounting.
+    #[test]
+    fn human_double_tap_is_not_auto_repeat() {
+        let mut s = PasteBurstState::default();
+        let t = t0();
+        assert!(!s.note_auto_repeat('s', t));
+        assert!(!s.note_auto_repeat('s', t + Duration::from_millis(90)));
+    }
+
+    /// A repeat classification must NOT let the held key arm the burst: the
+    /// run bookkeeping (`text_keys_in_window`) only advances through
+    /// `note_text_key`, which the App wiring skips for repeats.
+    #[test]
+    fn repeats_never_arm_the_burst() {
+        let mut s = PasteBurstState::default();
+        let t = t0();
+        assert!(!s.note_auto_repeat('s', t));
+        for i in 1..=20u32 {
+            s.note_auto_repeat('s', t + i * Duration::from_millis(33));
+        }
+        assert!(!s.burst_armed(t + 20u32 * Duration::from_millis(33)));
+    }
+
+    /// `abandon_run` must discard the whole in-flight run — cadence count,
+    /// leaked prefix and chain flag — so a held key can neither arm a burst
+    /// later nor make its own Enter classify as a paste newline.
+    #[test]
+    fn abandon_run_resets_run_state() {
+        let mut s = PasteBurstState::default();
+        let t = t0();
+        for i in 1..=3u32 {
+            s.note_text_key(t + i * STEP);
+        }
+        s.note_leaked_char();
+        s.push_newline(t + 4u32 * STEP, true);
+        s.abandon_run();
+        assert_eq!(s.text_keys_in_window, 0);
+        assert_eq!(s.leaked_chars(), 0);
+        assert!(!s.chain_started_in_text_burst);
+        // last_text_key_at cleared: a subsequent Enter must not see
+        // text_recent and absorb as a paste newline.
+        let later = t + 5u32 * STEP;
+        assert!(!s.burst_armed(later));
     }
 }
