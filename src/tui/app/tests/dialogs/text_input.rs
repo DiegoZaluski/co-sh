@@ -1,4 +1,4 @@
-use super::super::{App, HOME_LOCK, isolate_home, key, mod_key};
+use super::super::{App, CLIPBOARD_LOCK, HOME_LOCK, isolate_home, key, mod_key};
 use crate::ui::dialogs::DialogType;
 use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -424,6 +424,7 @@ async fn registration_form_drag_selects_range_and_release_copies() {
     use crossterm::event::{MouseButton as MBtn, MouseEventKind as MKind};
 
     let _guard = HOME_LOCK.lock();
+    let _clipboard = CLIPBOARD_LOCK.lock();
     isolate_home();
     let mut app = App::new("/tmp".to_string());
     app.dialog.show(DialogType::HookInput {
@@ -574,6 +575,7 @@ async fn registration_form_ctrl_c_copies_selected_range() {
     use crossterm::event::{MouseButton as MBtn, MouseEventKind as MKind};
 
     let _guard = HOME_LOCK.lock();
+    let _clipboard = CLIPBOARD_LOCK.lock();
     isolate_home();
     let mut app = App::new("/tmp".to_string());
     app.dialog.show(DialogType::HookInput {
@@ -739,6 +741,7 @@ async fn registration_form_ctrl_w_deletes_word_and_other_ctrl_is_ignored() {
 #[tokio::test]
 async fn registration_form_ctrl_c_copies_active_field_instead_of_quitting() {
     let _guard = HOME_LOCK.lock();
+    let _clipboard = CLIPBOARD_LOCK.lock();
     isolate_home();
     let mut app = App::new("/tmp".to_string());
     app.open_mcp_form();
@@ -782,6 +785,7 @@ async fn registration_form_copy_toast_paints_above_the_panel() {
     use ratatui::{Terminal, backend::TestBackend};
 
     let _guard = HOME_LOCK.lock();
+    let _clipboard = CLIPBOARD_LOCK.lock();
     isolate_home();
     let mut app = App::new("/tmp".to_string());
     app.open_mcp_form();

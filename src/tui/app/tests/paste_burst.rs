@@ -1,15 +1,7 @@
-use std::sync::Mutex;
 use std::time::Duration;
 
-use super::{App, HOME_LOCK, isolate_home};
+use super::{App, CLIPBOARD_LOCK, HOME_LOCK, isolate_home};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-
-/// Serializes every test that touches the REAL system clipboard. `cargo test`
-/// runs tests in parallel threads; the Ctrl+V tests below write and read the
-/// OS clipboard, and an interleaving (test A writes its fixture between test
-/// B's write and read) fails both spuriously. `HOME_LOCK` does not cover the
-/// clipboard, so these tests take this lock around their whole body.
-static CLIPBOARD_LOCK: Mutex<()> = Mutex::new(());
 
 /// Windows consoles deliver a paste as PLAIN KEY EVENTS (one `Char` event per
 /// character plus one plain `Enter` per line break) because crossterm <= 0.29
