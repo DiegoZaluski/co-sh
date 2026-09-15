@@ -37,6 +37,23 @@ pub fn clipboard_available() -> bool {
     }
 }
 
+/// Read the system clipboard's TEXT content. Returns `None` when the
+/// clipboard is unavailable, the read fails, or the content is not text.
+///
+/// Used by the Ctrl+V paste handler (keys.rs) — the opencode mini-port: on
+/// Windows the terminal usually does not emit a bracketed paste for Ctrl+V,
+/// so the key event is the paste signal and the text must come from the
+/// clipboard directly.
+pub fn clipboard_text() -> Option<String> {
+    if let Ok(mut guard) = CLIPBOARD.lock()
+        && let Some(ref mut cb) = *guard
+        && let Ok(text) = cb.get_text()
+    {
+        return Some(text);
+    }
+    None
+}
+
 /// Copy the current selection to clipboard and show a toast notification.
 /// Returns `true` if text was copied.
 pub fn copy_selection(text: &str, toast: &mut ToastState) -> bool {

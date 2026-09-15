@@ -527,3 +527,109 @@ async fn modal_sovereignty_disarms_the_coalescer() {
         app.prompt_view.input
     );
 }
+
+/// The opencode mini-port (anomalyco/opencode#13871): Ctrl+V reads the system
+/// clipboard and routes the text through `PromptView::handle_paste` — the SAME
+/// pipeline as a terminal paste — so a Windows multi-line clipboard lands as
+/// `[Pasted ~N lines]` deterministically, with no reliance on bracketed paste
+/// (which Windows terminals do not reliably emit and crossterm's Windows
+/// backend cannot even deliver).
+#[tokio::test]
+async fn ctrl_v_pastes_clipboard_text_through_the_normal_paste_path() {
+    let _home = HOME_LOCK.lock();
+    let mut app = app_with_session();
+
+    // Headless CI has no clipboard at all: the paste path can't be exercised
+    // there — but the key-consumption behaviour below still applies.
+    if !crate::util::selection::clipboard_available() {
+        return;
+    }
+    let pasted = "clipboard line one\nclipboard line two\nclipboard line three";
+    assert!(
+        crate::util::selection::copy_to_clipboard(pasted),
+        "precondition: clipboard write succeeds"
+    );
+
+    app.process_key_event(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL))
+        .unwrap();
+
+    // 3 lines >= PASTE_MIN_LINES(3) → compressed into the placeholder,
+    // exactly like the Unix Event::Paste path.
+    assert_eq!(
+        app.prompt_view.input, "[Pasted ~3 lines]",
+        "Ctrl+V must route clipboard text through handle_paste (placeholder compression), got: {:?}",
+        app.prompt_view.input
+    );
+    assert!(
+        app.state
+            .current_session()
+            .is_none_or(|s| s.messages.is_empty()),
+        "paste must not auto-send"
+    );
+
+    // The real Enter submits — the placeholder expands back on send.
+    app.process_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    let session = app.state.current_session().expect("session exists");
+    assert_eq!(session.messages.len(), 1);
+    assert_eq!(
+        super::message_prompt_text(&session.messages[0]),
+        pasted,
+        "sent message must carry the FULL clipboard text (placeholder expanded back)"
+    );
+}
+
+/// Ctrl+V with an unavailable/empty clipboard must be CONSUMED, never fall
+/// through to the typing path — a fall-through would type a stray `v` into
+/// the prompt (the same reason opentui ignores ctrl-modified keys).
+#[tokio::test]
+async fn ctrl_v_with_no_clipboard_text_never_types_a_stray_v() {
+    let _home = HOME_LOCK.lock();
+    let mut app = app_with_session();
+
+    // Best effort: clear whatever the environment clipboard holds.
+    if crate::util::selection::clipboard_available() {
+        crate::util::selection::copy_to_clipboard("");
+    }
+
+    app.process_key_event(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL))
+        .unwrap();
+
+    assert!(
+        app.prompt_view.input.is_empty(),
+        "Ctrl+V without clipboard text must not type anything, got: {:?}",
+        app.prompt_view.input
+    );
+    assert!(
+        app.state
+            .current_session()
+            .is_none_or(|s| s.messages.is_empty()),
+        "and must not send"
+    );
+}
+
+/// AltGr guard: on Windows consoles an AltGr character arrives as Char +
+/// CTRL+ALT — including `v` on some layouts. That is TEXT, never the Ctrl+V
+/// paste hotkey: it must stream into the prompt like any other character.
+#[tokio::test]
+async fn altgr_v_types_the_character_instead_of_pasting() {
+    let _home = HOME_LOCK.lock();
+    let mut app = app_with_session();
+
+    // Put text on the clipboard when possible: the assert below is only
+    // meaningful if a paste WOULD have been visible.
+    if crate::util::selection::clipboard_available() {
+        crate::util::selection::copy_to_clipboard("SHOULD NOT PASTE");
+    }
+
+    app.process_key_event(KeyEvent::new(
+        KeyCode::Char('v'),
+        KeyModifiers::CONTROL | KeyModifiers::ALT,
+    ))
+    .unwrap();
+
+    assert_eq!(
+        app.prompt_view.input, "v",
+        "AltGr+v is a text character: it types, it never pastes"
+    );
+}

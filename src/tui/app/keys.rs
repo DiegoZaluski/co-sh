@@ -156,6 +156,27 @@ impl App {
                 return Ok(false);
             }
 
+            // Ctrl+V = clipboard paste (opencode mini-port): Windows
+            // terminals do not reliably emit a bracketed paste for Ctrl+V
+            // (many never emit one at all — crossterm's Windows backend has
+            // no paste support whatsoever), so the key event IS the paste
+            // signal. Read the system clipboard and route the text through
+            // the normal paste path. A terminal that DOES intercept Ctrl+V
+            // never delivers this key event, so there is no double-paste
+            // path. The key is consumed even when the clipboard is empty —
+            // a fall-through would type a stray `v` into the prompt (the
+            // same reason opentui ignores ctrl-modified keys). Guarded
+            // against AltGr (CTRL+ALT is an AltGr character on Windows
+            // consoles, never a hotkey).
+            if key.code == KeyCode::Char('v')
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT)
+                && self.prompt_owns_keyboard()
+            {
+                self.paste_clipboard_text_into_prompt();
+                return Ok(false);
+            }
+
             // Check theme dialog FIRST, before action lookup
             if self.is_theme_dialog_visible() && self.handle_theme_dialog_key(key.code) {
                 return Ok(false);
@@ -1457,5 +1478,28 @@ impl App {
         let pos = self.prompt_view.cursor_pos;
         self.prompt_view.input.insert(pos, '\n');
         self.prompt_view.cursor_pos = pos + 1;
+    }
+
+    /// Paste the system clipboard's TEXT into the chat prompt through the
+    /// normal paste path (`PromptView::handle_paste`) — the exact mini-port
+    /// of opencode's Windows fix (anomalyco/opencode#13871, dialog variant
+    /// #39844): Windows terminals do not reliably emit a bracketed paste for
+    /// Ctrl+V, so the handler reads the clipboard itself and routes the text
+    /// through the same pipeline as the terminal paste — line endings
+    /// normalized, long pastes compressed into `[Pasted ~N lines]`.
+    ///
+    /// No-op (not an error) when the clipboard has no text: the caller
+    /// consumes the key either way, so an empty clipboard never leaks a
+    /// stray `v` into the prompt.
+    fn paste_clipboard_text_into_prompt(&mut self) {
+        let Some(text) = selection::clipboard_text() else {
+            return;
+        };
+        if text.trim().is_empty() {
+            return;
+        }
+        self.prompt_view.note_activity();
+        self.prompt_view.handle_paste(&text);
+        self.slash_menu.update(&self.prompt_view.input);
     }
 }

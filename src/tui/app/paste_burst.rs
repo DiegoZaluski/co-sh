@@ -266,7 +266,7 @@ impl App {
     /// the ownership check disowned the coalescer, and the buffered rest
     /// was dropped (or worse, the paste's own Enter EXECUTED a slash
     /// command). Modals that truly own the keyboard remain gates.
-    fn prompt_owns_keyboard(&self) -> bool {
+    pub(super) fn prompt_owns_keyboard(&self) -> bool {
         self.prompt_view.is_focused
             && matches!(self.mode(), AppMode::Session)
             && !self.is_confirm_dialog_visible()
