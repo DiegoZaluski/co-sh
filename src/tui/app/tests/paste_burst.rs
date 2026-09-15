@@ -1,7 +1,15 @@
+use std::sync::Mutex;
 use std::time::Duration;
 
 use super::{App, HOME_LOCK, isolate_home};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+/// Serializes every test that touches the REAL system clipboard. `cargo test`
+/// runs tests in parallel threads; the Ctrl+V tests below write and read the
+/// OS clipboard, and an interleaving (test A writes its fixture between test
+/// B's write and read) fails both spuriously. `HOME_LOCK` does not cover the
+/// clipboard, so these tests take this lock around their whole body.
+static CLIPBOARD_LOCK: Mutex<()> = Mutex::new(());
 
 /// Windows consoles deliver a paste as PLAIN KEY EVENTS (one `Char` event per
 /// character plus one plain `Enter` per line break) because crossterm <= 0.29
@@ -534,9 +542,17 @@ async fn modal_sovereignty_disarms_the_coalescer() {
 /// `[Pasted ~N lines]` deterministically, with no reliance on bracketed paste
 /// (which Windows terminals do not reliably emit and crossterm's Windows
 /// backend cannot even deliver).
+///
+/// Scope note (deliberate divergence from the Unix `Event::Paste` router in
+/// `events.rs`, which dispatches into dialogs/fields): this port covers ONLY
+/// the chat prompt — the motivating bug is pasting a multi-line message into
+/// it on Windows. Surfaces with their own paste routing (registration fields,
+/// question dialog, RAG inputs) are untouched; extending Ctrl+V to them is a
+/// follow-up that should mirror `events.rs`'s ownership chain.
 #[tokio::test]
 async fn ctrl_v_pastes_clipboard_text_through_the_normal_paste_path() {
     let _home = HOME_LOCK.lock();
+    let _clipboard = CLIPBOARD_LOCK.lock();
     let mut app = app_with_session();
 
     // Headless CI has no clipboard at all: the paste path can't be exercised
@@ -585,6 +601,7 @@ async fn ctrl_v_pastes_clipboard_text_through_the_normal_paste_path() {
 #[tokio::test]
 async fn ctrl_v_with_no_clipboard_text_never_types_a_stray_v() {
     let _home = HOME_LOCK.lock();
+    let _clipboard = CLIPBOARD_LOCK.lock();
     let mut app = app_with_session();
 
     // Best effort: clear whatever the environment clipboard holds.
@@ -614,6 +631,7 @@ async fn ctrl_v_with_no_clipboard_text_never_types_a_stray_v() {
 #[tokio::test]
 async fn altgr_v_types_the_character_instead_of_pasting() {
     let _home = HOME_LOCK.lock();
+    let _clipboard = CLIPBOARD_LOCK.lock();
     let mut app = app_with_session();
 
     // Put text on the clipboard when possible: the assert below is only

@@ -156,7 +156,7 @@ impl App {
                 return Ok(false);
             }
 
-            // Ctrl+V = clipboard paste (opencode mini-port): Windows
+            // Ctrl+V = clipboard paste (opencode mini-port, prompt-only): Windows
             // terminals do not reliably emit a bracketed paste for Ctrl+V
             // (many never emit one at all — crossterm's Windows backend has
             // no paste support whatsoever), so the key event IS the paste
@@ -168,6 +168,14 @@ impl App {
             // same reason opentui ignores ctrl-modified keys). Guarded
             // against AltGr (CTRL+ALT is an AltGr character on Windows
             // consoles, never a hotkey).
+            //
+            // SCOPE: only the chat prompt — the motivating bug is pasting a
+            // multi-line message into it. The Unix `Event::Paste` router
+            // (events.rs) additionally dispatches into registration fields,
+            // the question dialog and RAG inputs; extending Ctrl+V to those
+            // surfaces is a follow-up that should mirror that ownership
+            // chain. Until then this gate's `prompt_owns_keyboard()` check
+            // deliberately leaves those surfaces alone.
             if key.code == KeyCode::Char('v')
                 && key.modifiers.contains(KeyModifiers::CONTROL)
                 && !key.modifiers.contains(KeyModifiers::ALT)
@@ -1481,16 +1489,24 @@ impl App {
     }
 
     /// Paste the system clipboard's TEXT into the chat prompt through the
-    /// normal paste path (`PromptView::handle_paste`) — the exact mini-port
-    /// of opencode's Windows fix (anomalyco/opencode#13871, dialog variant
-    /// #39844): Windows terminals do not reliably emit a bracketed paste for
-    /// Ctrl+V, so the handler reads the clipboard itself and routes the text
-    /// through the same pipeline as the terminal paste — line endings
-    /// normalized, long pastes compressed into `[Pasted ~N lines]`.
+    /// normal paste path (`PromptView::handle_paste`) — a mini-port of
+    /// opencode's Windows fix (anomalyco/opencode#13871): Windows terminals
+    /// do not reliably emit a bracketed paste for Ctrl+V, so the handler
+    /// reads the clipboard itself and routes the text through the same
+    /// pipeline as the terminal paste — line endings normalized, long pastes
+    /// compressed into `[Pasted ~N lines]`.
     ///
     /// No-op (not an error) when the clipboard has no text: the caller
     /// consumes the key either way, so an empty clipboard never leaks a
-    /// stray `v` into the prompt.
+    /// stray `v` into the prompt. Whitespace-only clipboards are dropped by
+    /// the same guard (a lone `\n` pasted verbatim is visually identical to
+    /// nothing, but would leave the "is the prompt dirty" heuristics set).
+    ///
+    /// NOTE: `selection::clipboard_text` is a synchronous IPC round-trip on
+    /// Linux (X11/Wayland); a hung clipboard owner can stall the UI thread.
+    /// Accepted for now — Windows, the motivating platform, uses a fast
+    /// local API — but a worker-thread read with a timeout is the hardening
+    /// path if that ever bites.
     fn paste_clipboard_text_into_prompt(&mut self) {
         let Some(text) = selection::clipboard_text() else {
             return;
