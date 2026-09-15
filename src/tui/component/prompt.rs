@@ -982,9 +982,34 @@ impl PromptView {
             }
         }
 
-        let agent_label = capitalize(agent_name);
-        let label_style = Style::default().fg(rgba_color(agent_color));
+        // Paint the label row (`Build … provider model . high`) with the box
+        // fill before drawing its text: the row sits inside the input box, so
+        // its cells must carry the exact `background_element` color — stale
+        // glyphs left by input lines that previously occupied this row would
+        // otherwise stay visible through the fg-only styles below.
+        // Mirrors the cap-band rule: on transparent themes (`background_element`
+        // alpha 0 → `Color::Reset`) no fill is painted, only the glyph clear.
         let label_y = input_area.y + BASE_H + eff_n;
+        let label_bg = rgba_color(theme.background_element);
+        for cx in x_off..x_off + max_line_w {
+            if let Some(cell) = buf.cell_mut((cx, label_y)) {
+                cell.set_char(' ');
+                if label_bg != Color::Reset {
+                    cell.set_bg(label_bg);
+                }
+            }
+        }
+        // Row-scoped styles: every segment drawn on the label row carries the
+        // box fill as its background so the text always reads over it.
+        let row_bg = if label_bg != Color::Reset {
+            Style::default().bg(label_bg)
+        } else {
+            Style::default()
+        };
+        let row_muted_style = row_bg.fg(rgba_color(theme.text_muted));
+
+        let agent_label = capitalize(agent_name);
+        let label_style = row_bg.fg(rgba_color(agent_color));
         draw_text_line(buf, &agent_label, x_off, label_y, max_line_w, label_style);
 
         let mut cap_border_box = BoxRenderable::new();
@@ -1080,10 +1105,10 @@ impl PromptView {
             let model_name = short_model_name(model_name);
             let reason = reasoning.filter(|r| !r.is_empty() && *r != "default");
             let sep = if reason.is_some() { " . " } else { "" };
-            let model_style = Style::default().fg(rgba_color(theme.text));
+            let model_style = row_bg.fg(rgba_color(theme.text));
             let reason_style = reason
-                .map(|r| reason_level_style(r, theme))
-                .unwrap_or(muted_style);
+                .map(|r| row_bg.patch(reason_level_style(r, theme)))
+                .unwrap_or(row_muted_style);
 
             // Gateway provider prefix, muted, followed by one spacer column.
             let prov_seg = if provider.is_empty() {
@@ -1130,13 +1155,13 @@ impl PromptView {
 
             let mut segments: Vec<(String, Style)> = Vec::new();
             if !prov_out.is_empty() {
-                segments.push((prov_out, muted_style));
+                segments.push((prov_out, row_muted_style));
             }
             if !model_out.is_empty() {
                 segments.push((model_out, model_style));
             }
             if !reason_out.is_empty() {
-                segments.push((sep.to_string(), muted_style));
+                segments.push((sep.to_string(), row_muted_style));
                 segments.push((reason_out, reason_style));
             }
             let total_w: usize = segments.iter().map(|(t, _)| t.chars().count()).sum();
