@@ -90,13 +90,12 @@ pub const INSTRUCTIONS_BUILD: &str = concat!(
     "  for subsequent edits on the same file. Do NOT re-read a file just to get a new tag.\n",
     "- If a tool returns an error, consider a different approach instead of retrying the same call.\n\n",
     "## Self-Review Loop\n",
-    "- After completing any code changes, you MUST call a subagent for code review using `subagent_call`.\n",
-    "- The subagent review should focus on: correctness, security, performance, and maintainability.\n",
-    "- If the review identifies critical issues (bugs, security vulnerabilities, broken functionality), fix them immediately.\n",
-    "- After fixing issues, call the subagent again to review the corrected code.\n",
-    "- Repeat this review-fix loop until the subagent reports only cosmetic/minor issues (style, formatting, optional improvements).\n",
-    "- Only invoke `stop_agent_loop` when the review confirms no critical issues remain.\n",
-    "- This self-correction loop ensures code quality before considering a task complete.\n"
+    "- After code changes, decide yourself whether a subagent review is needed: the test is whether the change affects runtime behavior.\n",
+    "- If yes, call `subagent_call` for a review (correctness, security, performance, maintainability).\n",
+    "- Purely cosmetic changes (comments, formatting, typos, docs) cannot affect behavior — skip the review.\n",
+    "- When in doubt, review.\n",
+    "- Fix any critical issues the subagent finds, then request another review; repeat until only minor issues remain.\n",
+    "- Only invoke `stop_agent_loop` when no critical issues remain (or when no review was needed).\n"
 );
 
 pub const INSTRUCTIONS_ASK: &str = concat!(
@@ -125,7 +124,7 @@ pub const INSTRUCTIONS_ASK: &str = concat!(
 /// `subagent_call` internal path): a nested harness that runs the task
 /// with an empty context in Yolo mode. Deliberately does NOT mention
 /// sub-agents or `subagent_call` at all — the main agent's instructions
-/// mandate a code-review sub-agent loop, and exposing that here would
+/// encourage a code-review sub-agent loop, and exposing that here would
 /// make the sub-agent nest itself indefinitely. The sub-agent calls
 /// other sub-agents only if it decides to on its own.
 ///
@@ -154,7 +153,7 @@ pub const INSTRUCTIONS_SUBAGENT: &str = concat!(
 );
 
 /// Maximum consecutive tool-call failures before aborting the agent loop.
-const MAX_TOOL_RETRIES: usize = 3;
+const MAX_TOOL_RETRIES: usize = 10;
 
 /// Maximum total agent-loop iterations (tool calls + responses) before
 /// the harness stops the loop as a safety net against runaway tool-calling.
