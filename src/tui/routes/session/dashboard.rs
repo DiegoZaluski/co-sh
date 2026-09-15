@@ -19,12 +19,10 @@ use crate::usage::SpendSummary;
 pub struct DashboardData {
     /// Tokens used by the current session (real API usage).
     pub session_tokens: u64,
-    /// Real cost of the current session (None until a price is known).
+    /// REAL cost of the current session as reported by the provider
+    /// (`None` when the provider does not report costs — no price row,
+    /// never an estimate).
     pub session_cost: Option<f64>,
-    /// Whether the current session has requests whose spend could not be
-    /// resolved at all (no provider-reported cost, no catalog price). Drives
-    /// the yellow warning next to the session cost line.
-    pub session_unpriced: bool,
     /// Spend for the selected period (per provider + total).
     pub period: SpendSummary,
     /// The period currently selected.
@@ -149,14 +147,12 @@ pub fn render(buf: &mut Buffer, area: Rect, data: &DashboardData, theme: &Theme)
         Style::default().fg(text),
     );
     y += 1;
-    // No resolvable cost is surfaced as a yellow warning, never as a silent
-    // `$0`/`—` (an understated total is worse than an honest one).
+    // Cost policy: only the provider's REAL reported cost is shown. A
+    // provider without cost reporting gets a muted `—` — no estimate is
+    // ever fabricated, and the absence is NOT a warning (it is the
+    // documented behavior for providers that don't vouch for a price).
     let (cost_str, cost_style) = match data.session_cost {
         Some(c) => (format_usd(c), Style::default().fg(text)),
-        None if data.session_unpriced => (
-            "unpriced".to_string(),
-            Style::default().fg(rgba_color(theme.warning)),
-        ),
         None => ("—".to_string(), Style::default().fg(muted)),
     };
     draw_text(
@@ -224,22 +220,6 @@ pub fn render(buf: &mut Buffer, area: Rect, data: &DashboardData, theme: &Theme)
             Style::default().fg(primary),
         );
         y += 1;
-    }
-
-    // ── Unpriced warning (pinned above the Total, yellow) ──
-    // Requests whose spend could not be resolved (no provider-reported cost
-    // AND no catalog price) are excluded from the dollar totals — say so
-    // instead of letting the total silently understate the real spend.
-    if data.period.unpriced > 0 && budget_bottom > area.y {
-        let warn = format!("⚠ {} req. unpriced", data.period.unpriced);
-        draw_text(
-            buf,
-            &warn,
-            inner,
-            budget_bottom,
-            area.width,
-            Style::default().fg(rgba_color(theme.warning)),
-        );
     }
 
     // ── Total (pinned to bottom, same amount column) ──

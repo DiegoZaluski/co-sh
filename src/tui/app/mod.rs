@@ -310,12 +310,9 @@ pub struct App {
     usage_records: Vec<crate::usage::UsageRecord>,
     /// Global usage log persistence (append per request, read for aggregates).
     usage_store: crate::usage::UsageStore,
-    /// Monotonic id for correlating an in-flight cost lookup with its record.
+    /// Monotonic id assigned to each usage record (runtime-only correlation;
+    /// never persisted).
     usage_next_id: u64,
-    /// Receiver for the async price-backfill task: (record id, cost USD).
-    usage_cost_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, f64)>,
-    /// Sender half of [`Self::usage_cost_rx`], cloned into backfill tasks.
-    usage_cost_tx: tokio::sync::mpsc::UnboundedSender<(u64, f64)>,
     /// Stores the theme name that was active when the theme dialog opened (for cancel/restore)
     theme_dialog_original: Option<String>,
     /// Stores the model that was active when the model dialog opened (for cancel/restore)
@@ -429,7 +426,6 @@ impl App {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (answer_tx, _answer_rx) = mpsc::unbounded_channel();
         let (perm_tx, _perm_rx) = mpsc::unbounded_channel();
-        let (usage_cost_tx, usage_cost_rx) = tokio::sync::mpsc::unbounded_channel();
 
         // Load session summaries derived from the immutable histories.
         // Full sessions are loaded lazily into the LRU cache on demand.
@@ -505,11 +501,11 @@ impl App {
             }
         });
 
-        // Boot-time refresh of the models.dev catalog: keeps token prices and
-        // context windows current instead of aging with the first-ever cached
-        // copy. Runs in the background so startup never blocks on the network;
-        // a failed refresh keeps the existing cache (validated before it can
-        // replace it). Stale data beats no data.
+        // Boot-time refresh of the models.dev catalog: keeps context windows
+        // and reasoning metadata current instead of aging with the first-ever
+        // cached copy. Runs in the background so startup never blocks on the
+        // network; a failed refresh keeps the existing cache (validated before
+        // it can replace it). Stale data beats no data.
         tokio::runtime::Handle::current().spawn(async {
             if !cosh_sdk::connector::refresh_pricing_catalog(crate::usage::MODELS_DEV_CACHE_DIR)
                 .await
@@ -519,7 +515,7 @@ impl App {
         });
 
         // Records loaded from disk get fresh unique runtime ids (see
-        // UsageStore::load) so cost backfills can never enrich a stale record.
+        // UsageStore::load) so they never collide in in-memory maps.
         let usage_records = usage_store.load();
         let usage_next_id = usage_records.len() as u64;
 
@@ -606,8 +602,6 @@ impl App {
             usage_records,
             usage_store,
             usage_next_id,
-            usage_cost_rx,
-            usage_cost_tx,
             mouse_down_pos: None,
             press_started_in_sidebar: false,
             release_was_drag: false,
@@ -833,8 +827,9 @@ impl App {
     }
 
     /// Assemble the snapshot the usage dashboard renders. The session block
-    /// comes from the live per-session records (which gain costs as backfills
-    /// land); the spend-by-period block aggregates the full on-disk log.
+    /// comes from the live per-session records (each already carries the
+    /// cost the provider reported); the spend-by-period block aggregates the
+    /// full on-disk log.
     fn dashboard_data(&self) -> crate::routes::session::dashboard::DashboardData {
         use crate::usage::summarize;
         use std::time::{SystemTime, UNIX_EPOCH};
@@ -847,16 +842,12 @@ impl App {
         let session_records = self.session_records();
         let session_tokens = crate::usage::total_tokens(&session_records);
         let session_cost = Self::sum_cost(&session_records);
-        // The session has requests whose spend could not be resolved at all
-        // (no reported cost, no catalog price) — the dashboard warns in yellow.
-        let session_unpriced = session_records.iter().any(|r| r.cost_usd.is_none());
 
         let period = summarize(&self.usage_records, self.usage_period, now_ms);
 
         crate::routes::session::dashboard::DashboardData {
             session_tokens,
             session_cost,
-            session_unpriced,
             period,
             period_enum: self.usage_period,
         }
@@ -896,38 +887,27 @@ impl App {
         has.then_some(total)
     }
 
-    /// Resolve a request's recorded cost as `(value, reported)`:
-    ///   - the provider-reported REAL cost (`usage.cost`) is the source of
-    ///     truth and is used verbatim — never re-priced locally;
-    ///   - otherwise the models.dev price-table estimate, when a price is
-    ///     known (`reported` stays `None` so the record is marked estimated);
-    ///   - otherwise `(None, None)` — the record stays UNPRICED and the
-    ///     dashboard warns instead of guessing.
-    fn resolve_recorded_cost(
-        reported_cost: Option<f64>,
-        usage: &cosh_sdk::connector::TokenUsage,
-        pricing: Option<cosh_sdk::connector::Pricing>,
-    ) -> (Option<f64>, Option<f64>) {
-        match reported_cost {
-            Some(rc) => (Some(rc), Some(rc)),
-            None => (pricing.map(|p| usage.cost(&p)), None),
-        }
+    /// Resolve a request's recorded cost as `(value, reported)`.
+    ///
+    /// The provider-reported REAL cost (`usage.cost`) is the ONLY source:
+    /// it is recorded verbatim, never re-priced locally. When the provider
+    /// does not report a cost the record stays `None` (unpriced) — the TUI
+    /// no longer estimates spend from price tables: providers without cost
+    /// reporting simply show no price (see
+    /// `cosh_sdk::connector::supports_cost_reporting`).
+    fn resolve_recorded_cost(reported_cost: Option<f64>) -> Option<f64> {
+        reported_cost
     }
 
     /// Persist one real API request's usage for the current session.
     ///
-    /// Cost resolution order (source of truth first):
-    ///   1. The REAL cost the provider reported in its usage object
-    ///      (`usage.cost` — OpenRouter, Vercel AI Gateway, OpenCode Zen):
-    ///      recorded verbatim, NEVER touched by local pricing.
-    ///   2. The OFFLINE models.dev catalog estimate (real tokens × official
-    ///      price) when the provider does not report a cost. If the model's
-    ///      price is not cached yet, a background task fetches the catalog
-    ///      and reports the estimate back on `usage_cost_rx` — a guessed
-    ///      `$0` is never recorded.
-    ///   3. `None`: no reported cost and no price known. The record stays
-    ///      unpriced and the dashboard shows a yellow warning instead of
-    ///      silently understating spend.
+    /// Cost policy: the REAL cost the provider reported in its usage object
+    /// (`usage.cost` — OpenRouter, Charm Hyper, OpenCode Zen/Go) is recorded
+    /// verbatim and is the ONLY price the dashboard ever shows. Providers
+    /// that do not report a cost stay unpriced and are EXCLUDED from dollar
+    /// totals — no models.dev estimate is applied anymore (estimates
+    /// misrepresent gateway discounts/subscription rates; the provider is
+    /// the only source of truth for its own billing).
     fn record_usage(
         &mut self,
         usage: cosh_sdk::connector::TokenUsage,
@@ -945,11 +925,7 @@ impl App {
         let id = self.usage_next_id;
         self.usage_next_id = self.usage_next_id.wrapping_add(1);
 
-        let (cost, reported) = Self::resolve_recorded_cost(
-            reported_cost,
-            &usage,
-            cosh_sdk::connector::model_pricing(model, crate::usage::MODELS_DEV_CACHE_DIR),
-        );
+        let cost = Self::resolve_recorded_cost(reported_cost);
 
         let record = crate::usage::UsageRecord {
             id,
@@ -959,47 +935,12 @@ impl App {
             model: model.to_owned(),
             usage,
             cost_usd: cost,
-            reported_cost_usd: reported,
         };
 
         self.usage_records.push(record.clone());
         self.usage_store.append(&record);
-
-        // No reported cost and no price yet → fetch the catalog in the
-        // background and report the estimate back (keeps the UI thread off
-        // the network). The backfill is an ESTIMATE (reported stays None).
-        if reported.is_none() && cost.is_none() && !model.is_empty() {
-            let tx = self.usage_cost_tx.clone();
-            let model = model.to_owned();
-            self.tokio_handle.spawn(async move {
-                if let Some(pricing) =
-                    cosh_sdk::connector::lookup_pricing(&model, crate::usage::MODELS_DEV_CACHE_DIR)
-                        .await
-                {
-                    let _ = tx.send((id, usage.cost(&pricing)));
-                }
-            });
-        }
     }
 
-    /// Drain resolved cost backfills from the background pricing task and
-    /// enrich the matching records (memory + disk) so dollar totals settle.
-    fn pump_usage_costs(&mut self) {
-        let mut changed = false;
-        while let Ok((id, cost)) = self.usage_cost_rx.try_recv() {
-            if let Some(r) = self.usage_records.iter_mut().find(|r| r.id == id)
-                && r.cost_usd.replace(cost) != Some(cost)
-            {
-                changed = true;
-            }
-        }
-        if changed {
-            // Rewrite the on-disk log with the enriched costs. Backfills are
-            // rare, so this never happens on the hot path.
-            let records = self.usage_records.clone();
-            self.usage_store.rewrite(&records);
-        }
-    }
 
     /// Ctrl+U: always open the left panel showing the usage dashboard. Not a
     /// toggle — pressing it again keeps showing the dashboard, so the user

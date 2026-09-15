@@ -1002,9 +1002,6 @@ impl App {
                 }
             }
         }
-        // Settle any cost backfills that landed while we drained events so
-        // accounting stays truthful without re-reading the log per frame.
-        self.pump_usage_costs();
     }
 
     /// Incremental persistence: called on each throttled `ContextSnapshot`

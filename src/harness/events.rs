@@ -197,11 +197,11 @@ pub enum HarnessEvent {
         /// The model that served the request.
         model: String,
         /// REAL cost (USD) reported by the provider inside its usage object
-        /// (`usage.cost` — OpenRouter, Vercel AI Gateway, OpenCode Zen). The
-        /// authoritative billed amount: always supersedes the local
-        /// price-table estimate. `None` when the provider does not report a
-        /// cost (the TUI then falls back to the estimate, or to no cost at
-        /// all when no price is known).
+        /// (`usage.cost` — OpenRouter, Charm Hyper, OpenCode Zen/Go). The
+        /// authoritative billed amount and the ONLY price the TUI shows:
+        /// there is no local estimate fallback. `None` when the provider
+        /// does not report a cost — the record stays unpriced (excluded
+        /// from dollar totals; its tokens still count).
         reported_cost: Option<f64>,
     },
 }

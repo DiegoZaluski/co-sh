@@ -2,12 +2,13 @@
 //!
 //! Persists one record per real API request in a global JSONL log
 //! (`{data_dir}/usage/usage.jsonl`) and aggregates it into the token and
-//! dollar figures the dashboard shows. Token counters are the provider's OWN
-//! usage object (the same numbers it bills — never a local estimate); the
-//! dollar figure is those real tokens × the model's official price from the
-//! models.dev catalog. A model with no known price is recorded WITHOUT a cost
-//! (its tokens still count) and is excluded from dollar totals — a guessed
-//! `$0` would silently understate spend.
+//! dollar figures the dashboard shows. Token counters and the dollar figure
+//! are both taken verbatim from the provider's OWN response — its usage
+//! object and the REAL cost it reports inside it. A provider that reports no
+//! cost yields a record WITHOUT a price (its tokens still count) and it is
+//! excluded from dollar totals — nothing is ever estimated locally.
+//! `cosh_sdk::connector::supports_cost_reporting` lists the providers that
+//! report costs today.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -20,16 +21,17 @@ use cosh_sdk::connector::TokenUsage;
 const USAGE_DIR: &str = "usage";
 const USAGE_FILE: &str = "usage.jsonl";
 
-/// Cache-dir handle passed to the SDK's pricing lookups so it reuses the
-/// same models.dev catalog discovery maintains.
+/// Cache-dir handle shared with the SDK's context-window / reasoning
+/// metadata lookups, so both reuse the same models.dev catalog discovery
+/// maintains.
 pub const MODELS_DEV_CACHE_DIR: Option<&str> = Some("cosh/cache");
 
 /// A single API request's real usage, persisted as one JSONL line.
 ///
 /// Every field is always populated except `cost_usd`, which is omitted when
-/// the model's price is unknown (skipped on serialization so the log stays
-/// clean). The `id` is runtime-only correlation (for async cost backfill) and
-/// is never written to disk.
+/// the provider does not report a cost (skipped on serialization so the log
+/// stays clean). There is no estimate path: a record without a
+/// provider-reported cost is simply unpriced and excluded from $ totals.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageRecord {
     #[serde(skip)]
@@ -45,28 +47,12 @@ pub struct UsageRecord {
     pub model: String,
     /// Real per-request token usage (input/output/cache split).
     pub usage: TokenUsage,
-    /// Cost in USD used in every total: the REAL amount reported by the
-    /// provider (`reported_cost_usd`) when it reports one, otherwise the
-    /// token-count × catalog-price estimate. `None` when neither is
-    /// available (excluded from $ totals; the dashboard shows a warning).
+    /// REAL cost (USD) the provider itself reported in its usage object
+    /// (`usage.cost` — OpenRouter, Charm Hyper, OpenCode Zen/Go). The
+    /// authoritative billed amount, recorded verbatim — never re-priced
+    /// locally. `None` when the provider does not report a cost.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
-    /// REAL cost (USD) the provider itself reported in its usage object
-    /// (`usage.cost` — OpenRouter, Vercel AI Gateway, OpenCode Zen). The
-    /// authoritative billed amount; when present, `cost_usd` equals this.
-    /// `None` when the provider does not report a cost (`cost_usd` is then
-    /// an ESTIMATE whenever it is `Some`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reported_cost_usd: Option<f64>,
-}
-
-impl UsageRecord {
-    /// Whether the record's `cost_usd` is a catalog-price ESTIMATE rather
-    /// than the provider-reported real cost.
-    #[must_use]
-    pub fn is_estimate(&self) -> bool {
-        self.cost_usd.is_some() && self.reported_cost_usd.is_none()
-    }
 }
 
 /// Appends/reads the global usage log.
@@ -122,7 +108,7 @@ impl UsageStore {
     ///
     /// Assigns fresh unique runtime `id`s (0..n) — ids are never persisted
     /// (serde skip), so records loaded from disk would otherwise ALL carry
-    /// id 0 and a cost backfill could enrich the WRONG record.
+    /// id 0 and collide in in-memory maps.
     pub fn load(&self) -> Vec<UsageRecord> {
         let Ok(raw) = std::fs::read_to_string(&self.file) else {
             return Vec::new();
@@ -135,30 +121,6 @@ impl UsageStore {
                 r
             })
             .collect()
-    }
-
-    /// Atomically rewrite the whole log with `records` (used to enrich
-    /// records whose cost resolved after the original append).
-    pub fn rewrite(&self, records: &[UsageRecord]) {
-        let Some(dir) = self.file.parent().map(|p| p.to_path_buf()) else {
-            return;
-        };
-        std::fs::create_dir_all(&dir).ok();
-        let tmp = self.file.with_extension("jsonl.tmp");
-        let result = (|| -> std::io::Result<()> {
-            let mut out = std::fs::File::create(&tmp)?;
-            for r in records {
-                if let Ok(line) = serde_json::to_string(r) {
-                    out.write_all(line.as_bytes())?;
-                    out.write_all(b"\n")?;
-                }
-            }
-            out.flush()?;
-            Ok(())
-        })();
-        if result.is_ok() {
-            let _ = std::fs::rename(tmp, &self.file);
-        }
     }
 }
 
@@ -249,18 +211,14 @@ impl UsagePeriod {
 /// Aggregated spend, optionally split by provider.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpendSummary {
-    /// Spend per provider, descendently sorted by cost. Providers whose cost
-    /// is unknown are omitted from the dollar view (their tokens still show
-    /// in `tokens`).
+    /// Spend per provider, descendently sorted by cost. Providers that do
+    /// not report costs are omitted from the dollar view (their tokens still
+    /// show in `tokens`).
     pub by_provider: Vec<(String, f64)>,
     /// Grand total spend across all providers in the period.
     pub total: f64,
     /// Total billed tokens in the period (input+output+cache), all models.
     pub tokens: u64,
-    /// Requests in the period whose cost could not be resolved (no
-    /// provider-reported cost AND no catalog price). The dashboard surfaces
-    /// this as a yellow warning instead of silently understating spend.
-    pub unpriced: u64,
 }
 
 /// Sum the real token counters of a slice of records.
@@ -278,11 +236,13 @@ pub fn total_tokens(records: &[UsageRecord]) -> u64 {
 }
 
 /// Aggregate spend for the given period. `now_ms` anchors "today/week/…".
+///
+/// Records without a provider-reported cost are excluded from dollar totals
+/// (no estimate is ever fabricated); their tokens still count.
 pub fn summarize(records: &[UsageRecord], period: UsagePeriod, now_ms: u64) -> SpendSummary {
     let lower = period.start_ms(now_ms);
     let mut by_provider: Vec<(String, f64)> = Vec::new();
     let mut in_period_tokens = 0u64;
-    let mut unpriced = 0u64;
 
     for r in records {
         // A record belongs to the period when it isn't older than the start.
@@ -297,7 +257,6 @@ pub fn summarize(records: &[UsageRecord], period: UsagePeriod, now_ms: u64) -> S
                 + u64::from(u.cache_read_input_tokens)
         };
         let Some(cost) = r.cost_usd else {
-            unpriced += 1;
             continue;
         };
         match by_provider.iter_mut().find(|(p, _)| p == &r.provider) {
@@ -312,7 +271,6 @@ pub fn summarize(records: &[UsageRecord], period: UsagePeriod, now_ms: u64) -> S
         by_provider,
         total,
         tokens: in_period_tokens,
-        unpriced,
     }
 }
 
@@ -339,7 +297,6 @@ mod tests {
                 ..TokenUsage::default()
             },
             cost_usd: cost,
-            reported_cost_usd: None,
         }
     }
 
@@ -379,33 +336,27 @@ mod tests {
         assert!((s.total - 1.0).abs() < 1e-9);
         // 400 in + 400 out = 800 tokens counted regardless of pricing.
         assert_eq!(s.tokens, 800);
-        // The unpriced request is surfaced, never silently dropped.
-        assert_eq!(s.unpriced, 1);
     }
 
     #[test]
-    fn reported_cost_marks_the_record_as_real_not_estimated() {
-        let mut r = rec(1, "openrouter", Some(0.95), 100, 100);
-        r.reported_cost_usd = Some(0.95);
-        assert!(!r.is_estimate());
+    fn reported_cost_is_kept_verbatim_not_re_priced() {
+        // The provider-reported REAL cost is the ONLY source: it is recorded
+        // verbatim and never re-derived from a price table.
+        let r = rec(1, "openrouter", Some(0.95), 100, 100);
+        assert_eq!(r.cost_usd, Some(0.95));
 
-        // Same total, but resolved from the catalog → estimate.
-        assert!(rec(1, "openai", Some(0.95), 100, 100).is_estimate());
-
-        // No cost at all: neither real nor estimated.
+        // No cost at all: the record stays unpriced (excluded from $ totals).
         let unpriced = rec(1, "tiny-local", None, 100, 100);
-        assert!(!unpriced.is_estimate());
         assert_eq!(unpriced.cost_usd, None);
     }
 
     #[test]
     fn records_without_cost_persisted_round_trip_keeps_unpriced() {
-        // Old log lines (pre reported-cost) must deserialize: the field is
-        // serde-defaulted, so history stays readable and stays "estimated".
+        // Old log lines without a cost must still deserialize (cost_usd is
+        // serde-defaulted): history stays readable and stays unpriced.
         let line = r#"{"ts":1,"session_id":"s1","provider":"p","model":"m","usage":{"input_tokens":1,"output_tokens":2},"cost_usd":0.5}"#;
         let r: UsageRecord = serde_json::from_str(line).unwrap();
-        assert_eq!(r.reported_cost_usd, None);
-        assert!(r.is_estimate());
+        assert_eq!(r.cost_usd, Some(0.5));
     }
 
     #[test]
