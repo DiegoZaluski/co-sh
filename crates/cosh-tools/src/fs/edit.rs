@@ -1,6 +1,7 @@
+use cosh_sdk::hashline::normalize::{normalize_to_lf, strip_bom};
 use cosh_sdk::hashline::{
     diff::structured_patch,
-    format::{HL_FILE_PREFIX, compute_file_hash, format_hashline_header},
+    format::{HL_FILE_PREFIX, compute_file_hash, format_hashline_header, format_numbered_line},
     fs::DiskFilesystem,
     input::Patch,
     patcher::{Patcher, merge_warnings},
@@ -10,14 +11,107 @@ use cosh_sdk::rollback;
 
 use super::types::{EditTarget, FsEdit, FsMetadata};
 use crate::util::path_guard::assert_editable_file;
+use regex::Regex;
 use serde::Serialize;
+use std::collections::BTreeSet;
 use std::fmt;
 use std::path::Path;
+use std::sync::LazyLock;
 
 /// Marker appended to a dry-run result's warnings so the model cannot
 /// mistake a preview for an applied edit.
 const DRY_RUN_WARNING: &str = "Dry run: nothing was written — reissue without \
      `dry_run` to apply this exact edit.";
+
+/// Lines of context shown either side of an error-referenced line.
+const ERROR_CONTEXT_LINES: u32 = 2;
+
+/// Soft cap on distinct anchors rendered in one enriched error: beyond this
+/// the model re-anchors from the header anyway, and an unbounded block lets a
+/// pathological error string (line refs echoed from file content) flood it.
+const MAX_ERROR_ANCHORS: usize = 8;
+
+#[allow(clippy::unwrap_used)]
+static ERROR_LINE_REF_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)line (\d+)").unwrap());
+
+/// Enrich a failed edit's error with the file's CURRENT anchor so the model
+/// can re-issue the corrected edit without a re-read round trip.
+///
+/// A successful edit returns a fresh `¶path#TAG`, but the error path used to
+/// return bare prose — the model then had no valid tag to retry with and
+/// burned rounds re-reading the file just to mint one. Every failure carries
+/// the live `¶path#TAG` plus (when the error references line numbers) the
+/// current content of those lines, so the next attempt is informed.
+///
+/// `MismatchError` diagnostics are left untouched: they already render the
+/// current anchor and context themselves (their message embeds `¶` headers).
+fn enrich_edit_error(display_path: &str, read_path: &str, err: &str) -> String {
+    if err.contains(HL_FILE_PREFIX) {
+        return err.to_string();
+    }
+    // Nothing was written on any error path (prepare is in-memory; commit is
+    // a single write), so the disk state here is exactly the pre-edit content
+    // the next attempt will be validated against.
+    let Ok(bytes) = std::fs::read(read_path) else {
+        return err.to_string();
+    };
+    let text = normalize_to_lf(&strip_bom(&String::from_utf8_lossy(&bytes)).text);
+    let hash = compute_file_hash(&text);
+    let lines: Vec<&str> = text.split('\n').collect();
+
+    let mut out = format!(
+        "{err}\n\nCurrent anchor: {HL_FILE_PREFIX}{display_path}#{hash} — the file has {} \
+         lines. Re-issue the corrected edit with THIS tag; no re-read is needed.",
+        lines.len(),
+    );
+
+    // When the error names line numbers (out-of-range anchors, parse failures
+    // at `line N:`, boundary rejections), show the live content around them —
+    // the model authored the ops against stale or elided output.
+    let anchors: BTreeSet<u32> = ERROR_LINE_REF_RE
+        .captures_iter(err)
+        .filter_map(|c| c[1].parse::<u32>().ok())
+        .filter(|n| (1..=lines.len() as u32).contains(n))
+        .collect();
+    if anchors.is_empty() {
+        return out;
+    }
+    let truncated = anchors.len() > MAX_ERROR_ANCHORS;
+    let shown: BTreeSet<u32> = anchors.iter().take(MAX_ERROR_ANCHORS).copied().collect();
+    let mut display: BTreeSet<u32> = BTreeSet::new();
+    for &line in &shown {
+        let lo = 1u32.max(line.saturating_sub(ERROR_CONTEXT_LINES));
+        let hi = (lines.len() as u32).min(line + ERROR_CONTEXT_LINES);
+        display.extend(lo..=hi);
+    }
+    out.push_str("\nLive content at the referenced line(s):\n");
+    let mut previous: Option<u32> = None;
+    for line_num in display {
+        if previous.is_some_and(|p| line_num > p + 1) {
+            out.push_str("...\n");
+        }
+        previous = Some(line_num);
+        let marker = if anchors.contains(&line_num) {
+            "*"
+        } else {
+            " "
+        };
+        out.push_str(marker);
+        out.push_str(&format_numbered_line(
+            line_num,
+            lines[(line_num - 1) as usize],
+        ));
+        out.push('\n');
+    }
+    if truncated {
+        out.push_str(&format!(
+            "... ({} more referenced line(s) omitted — re-anchor from the tag above)\n",
+            anchors.len() - MAX_ERROR_ANCHORS
+        ));
+    }
+    out
+}
 
 #[derive(Debug, Serialize)]
 pub struct EditResult {
@@ -154,9 +248,13 @@ pub(crate) async fn edit_target(
     );
 
     let patch = Patch::parse(&hashline_input, &SplitOptions::default()).map_err(|e| {
-        format!(
-            "failed to parse edit operations for `{}`: {}",
-            target.path, e
+        enrich_edit_error(
+            &target.path,
+            &path_str,
+            &format!(
+                "failed to parse edit operations for `{}`: {}",
+                target.path, e
+            ),
         )
     })?;
 
@@ -170,7 +268,7 @@ pub(crate) async fn edit_target(
     let prepared = patcher
         .prepare(&patch.sections[0])
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| enrich_edit_error(&target.path, &path_str, &e.to_string()))?;
 
     // Content-anchored callers pass the exact post-edit text they expect.
     // The hashline engine's boundary-echo and indent-repair heuristics may
@@ -180,12 +278,16 @@ pub(crate) async fn edit_target(
     if let Some(expected) = expected_after
         && prepared.apply_result.text != expected
     {
-        return Err(format!(
-            "content replace for `{}` deviated from the exact replacement: the \
-             hashline engine's boundary/indent repair altered the payload. \
-             Re-read the touched region and reissue with the `targets` engine \
-             if the repaired form is acceptable.",
-            target.path
+        return Err(enrich_edit_error(
+            &target.path,
+            &path_str,
+            &format!(
+                "content replace for `{}` deviated from the exact replacement: the \
+                 hashline engine's boundary/indent repair altered the payload. \
+                 Re-read the touched region and reissue with the `targets` engine \
+                 if the repaired form is acceptable.",
+                target.path
+            ),
         ));
     }
 
@@ -224,7 +326,10 @@ pub(crate) async fn edit_target(
 
     let _ = rollback::record(&path_str, &prepared.normalized);
 
-    let section = patcher.commit(prepared).await.map_err(|e| e.to_string())?;
+    let section = patcher
+        .commit(prepared)
+        .await
+        .map_err(|e| enrich_edit_error(&target.path, &path_str, &e.to_string()))?;
 
     cosh_sdk::tree_sitter::tree_sitter().invalidate(&path_str);
 

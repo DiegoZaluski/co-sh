@@ -513,7 +513,7 @@ impl<F: Filesystem, S: SnapshotStore> Patcher<F, S> {
                 Some(ResolveBlockEditsOptions {
                     on_unresolved: ResolveAction::Throw,
                 }),
-            )
+            )?
         } else {
             edits.to_vec()
         };
@@ -522,9 +522,25 @@ impl<F: Filesystem, S: SnapshotStore> Patcher<F, S> {
             return apply_edits(normalized, &resolved, Some(canonical_path)).map_err(boxed_msg);
         }
         // Whole-file unchanged → the tag still names the live content, so an
-        // edit anchored at ANY line (displayed or not) is safe to apply.
+        // edit anchored at ANY line (displayed or not) is safe to apply. The
+        // tag being current does NOT mean the model saw every line: a read
+        // with an elided/truncated window mints a full-file tag for content
+        // it never surfaced. Run the unseen-anchor gate here too (mirrors the
+        // recovery path) so anchoring elided content gets flagged up front.
         if live_matches {
-            return apply_edits(normalized, &resolved, Some(canonical_path)).map_err(boxed_msg);
+            let mut result =
+                apply_edits(normalized, &resolved, Some(canonical_path)).map_err(boxed_msg)?;
+            // The `expected.is_none()` early-return above makes `expected`
+            // provably `Some` here; the `if let` keeps that invariant
+            // enforced by types rather than by branch order.
+            if let Some(exp) = expected
+                && let Some(warning) =
+                    self.recovery
+                        .unseen_anchor_warning(canonical_path, exp, &resolved)
+            {
+                result.warnings.insert(0, warning);
+            }
+            return Ok(result);
         }
         // Head/tail-only inserts are position-stable: "start"/"end" cannot move
         // with content drift, so a stale tag is non-fatal. Apply onto the live

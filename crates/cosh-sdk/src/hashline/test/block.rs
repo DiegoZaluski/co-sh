@@ -1,6 +1,3 @@
-use std::panic::AssertUnwindSafe;
-use std::panic::catch_unwind;
-
 use super::super::block::{ResolveBlockEditsOptions, resolve_block_edits};
 use super::super::format::compute_file_hash;
 use super::super::fs::InMemoryFilesystem;
@@ -111,7 +108,8 @@ fn expands_block_edit_like_equivalent_range_replace() {
         PATH,
         Some(stub_resolver as BlockResolver),
         None,
-    );
+    )
+    .unwrap();
     let (replace_edits, _) = parse_patch("replace 2..3:\n+A\n+B").unwrap();
 
     assert!(!resolved.iter().any(|e| matches!(e, Edit::Block { .. })));
@@ -128,22 +126,17 @@ fn fast_path_returns_input_untouched_when_no_block_edits() {
         PATH,
         Some(stub_resolver as BlockResolver),
         None,
-    );
+    )
+    .unwrap();
     assert_eq!(resolved, original);
 }
 
 #[test]
-fn throws_when_no_resolver_wired() {
+fn errors_when_no_resolver_wired() {
     let (edits, _) = parse_patch("replace block 2:\n+X").unwrap();
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        resolve_block_edits(&edits, "ignored", PATH, None, None)
-    }));
-    assert!(result.is_err());
-    let msg = result
-        .unwrap_err()
-        .downcast_ref::<String>()
-        .cloned()
-        .unwrap_or_else(|| "".to_string());
+    // Err, never a panic — authored-input rejection flows through the same
+    // channel as every other malformed edit (parity guarantee).
+    let msg = resolve_block_edits(&edits, "ignored", PATH, None, None).unwrap_err();
     assert!(msg.contains("not available here"));
 }
 
@@ -158,29 +151,29 @@ fn drops_unresolvable_block_edit_in_drop_mode() {
         Some(ResolveBlockEditsOptions {
             on_unresolved: ResolveAction::Drop,
         }),
-    );
+    )
+    .unwrap();
     assert!(resolved.is_empty());
 }
 
 #[test]
-fn throws_block_unresolved_when_resolver_returns_null() {
+fn errors_block_unresolved_when_resolver_returns_null() {
     let (edits, _) = parse_patch("replace block 7:\n+X").unwrap();
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        resolve_block_edits(
-            &edits,
-            "ignored",
-            PATH,
-            Some(null_resolver as BlockResolver),
-            None,
-        )
-    }));
-    assert!(result.is_err());
-    let msg = result
-        .unwrap_err()
-        .downcast_ref::<String>()
-        .cloned()
-        .unwrap_or_else(|| "".to_string());
-    assert!(msg.contains("could not resolve a syntactic block beginning on line 7"));
+    // Err, never a panic — the patcher has no catch_unwind around this call,
+    // so a panic here would kill the whole agent loop instead of returning
+    // the diagnostic to the model.
+    let msg = resolve_block_edits(
+        &edits,
+        "ignored",
+        PATH,
+        Some(null_resolver as BlockResolver),
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        msg.contains("could not resolve a syntactic block beginning on line 7"),
+        "{msg}"
+    );
 }
 
 #[test]
@@ -212,21 +205,19 @@ fn apply_to_resolves_block_and_matches_replace() {
 }
 
 #[test]
-fn apply_to_throws_when_block_edit_has_no_resolver() {
+fn apply_to_errors_when_block_edit_has_no_resolver() {
     let text = "function x() {\n  if (y) {\n  }\n}\n";
     let section = Patch::parse_single(
         &format!("¶{PATH}#1A2B\nreplace block 2:\n+X"),
         &SplitOptions::default(),
     )
     .unwrap();
-    let result = catch_unwind(AssertUnwindSafe(|| section.apply_to(text, None)));
-    assert!(result.is_err());
-    let msg = result
-        .unwrap_err()
-        .downcast_ref::<String>()
-        .cloned()
-        .unwrap_or_else(|| "".to_string());
-    assert!(msg.contains("replace block"));
+    // Clean Err, never a panic — apply_to's Throw path returns the
+    // diagnostic through the same channel as every other malformed edit.
+    let msg = section
+        .apply_to(text, None)
+        .unwrap_err();
+    assert!(msg.contains("replace block"), "{msg}");
 }
 
 #[test]
@@ -322,8 +313,7 @@ async fn rejects_block_edit_whose_tag_was_never_recorded_for_path() {
 }
 
 #[tokio::test]
-#[should_panic(expected = "could not resolve a syntactic block")]
-async fn throws_block_unresolved_when_patcher_resolver_returns_null() {
+async fn patcher_returns_error_when_resolver_returns_null() {
     let text = "function x() {\n  if (y) {\n  }\n}\n";
     let fs = InMemoryFilesystem::new([(PATH.to_string(), text.to_string())]);
     let mut store = InMemorySnapshotStore::new(&InMemorySnapshotStoreOptions::default());
@@ -335,7 +325,13 @@ async fn throws_block_unresolved_when_patcher_resolver_returns_null() {
         &SplitOptions::default(),
     )
     .unwrap();
-    patcher.apply(&patch).await.unwrap();
+    // A clean Err carrying the diagnostic — never a panic (the patcher's
+    // apply path has no catch_unwind; a panic would kill the agent loop).
+    let msg = patcher.apply(&patch).await.unwrap_err().to_string();
+    assert!(
+        msg.contains("could not resolve a syntactic block"),
+        "{msg}"
+    );
 }
 
 #[test]
@@ -374,7 +370,8 @@ fn resolve_block_edits_expands_delete_block_into_pure_deletes() {
         PATH,
         Some(stub_resolver as BlockResolver),
         None,
-    );
+    )
+    .unwrap();
 
     assert!(resolved.iter().all(|e| matches!(e, Edit::Delete { .. })));
     let delete_lines: Vec<u32> = resolved

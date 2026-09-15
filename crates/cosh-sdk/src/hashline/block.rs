@@ -48,20 +48,23 @@ pub fn has_block_edit(edits: &[Edit]) -> bool {
 /// only — [`apply_edits`] re-derives every edit's index from array order, so
 /// the passthrough edits keeping their original indices is harmless.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if an unresolvable block edit is encountered and `on_unresolved` is set to `Throw`.
-#[allow(clippy::similar_names, clippy::panic)]
-#[must_use]
+/// Returns the `block_unresolved_message` diagnostic when an unresolvable
+/// block edit is encountered and `on_unresolved` is set to [`ResolveAction::Throw`]
+/// — never a panic: authored-input rejection flows through the same `Err`
+/// channel as every other malformed edit (see the parity guarantee
+/// `unresolved_block_is_an_error_not_a_panic`).
+#[allow(clippy::similar_names)]
 pub fn resolve_block_edits(
     edits: &[Edit],
     text: &str,
     path: &str,
     resolver: Option<BlockResolver>,
     options: Option<ResolveBlockEditsOptions>,
-) -> Vec<Edit> {
+) -> Result<Vec<Edit>, String> {
     if !has_block_edit(edits) {
-        return edits.to_vec();
+        return Ok(edits.to_vec());
     }
 
     let on_unresolved = options.unwrap_or_default().on_unresolved;
@@ -98,7 +101,7 @@ pub fn resolve_block_edits(
                     } else {
                         BLOCK_RESOLVER_UNAVAILABLE.to_string()
                     };
-                    panic!("line {line_num}: {msg}");
+                    return Err(format!("line {line_num}: {msg}"));
                 }
             }
         };
@@ -128,5 +131,5 @@ pub fn resolve_block_edits(
         }
     }
 
-    resolved
+    Ok(resolved)
 }

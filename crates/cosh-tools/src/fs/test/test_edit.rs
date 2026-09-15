@@ -506,3 +506,86 @@ async fn edit_last_target_failure_keeps_everything_before_it() {
     assert_eq!(std::fs::read_to_string(&path_b).unwrap(), "BETA\n");
     assert_eq!(std::fs::read_to_string(&path_c).unwrap(), "gamma\n");
 }
+
+// ── Error enrichment: every failure carries the live ¶path#TAG ──────
+
+#[tokio::test]
+async fn edit_error_carries_current_anchor_and_line_context() {
+    // A failing edit (valid tag, deterministic parse rejection) must come
+    // back with the file's CURRENT anchor so the model can re-issue without
+    // a re-read, plus the live content around the line the error names.
+    let root = TempRoot::new("enrich");
+    let path = root.file("cosh_test_edit_enrich.txt");
+    std::fs::write(&path, "alpha\nbeta\ngamma\n").unwrap();
+
+    let result = edit(
+        make_metadata(root.path()),
+        FsEdit {
+            targets: vec![EditTarget {
+                path: path.clone(),
+                file_hash: hash_file(&path),
+                // `replace block N:` on a plain-text file resolves to no
+                // tree-sitter block — a deterministic rejection whose message
+                // names the in-range line (`... beginning on line 1 ...`).
+                ops: "replace block 1:\n+X".to_string(),
+            }],
+            dry_run: false,
+        },
+    )
+    .await;
+    assert!(result.is_err());
+    let msg = result.unwrap_err().to_string();
+
+    // Current anchor: the live tag, computed from the on-disk content.
+    let live_hash = compute_file_hash("alpha\nbeta\ngamma\n");
+    let anchor = format!("\u{b6}{path}#{live_hash}");
+    assert!(
+        msg.contains(&anchor),
+        "expected current anchor {anchor} in: {msg}"
+    );
+    assert!(msg.contains("no re-read is needed"), "got: {msg}");
+    // Line references get live context; the anchor line is starred.
+    assert!(
+        msg.contains("Live content at the referenced line(s)"),
+        "got: {msg}"
+    );
+    assert!(msg.contains("*1| alpha"), "starred anchor line missing: {msg}");
+    assert!(msg.contains("beta"), "live content missing: {msg}");
+}
+
+#[tokio::test]
+async fn edit_error_without_line_refs_shows_anchor_only() {
+    // An out-of-range anchor on an otherwise valid tag is rejected by the
+    // bounds check without a recoverable line to show: the error still
+    // carries the current anchor — the model's minimum for an informed
+    // retry — but no live-content block (there is no line 99 to display).
+    let root = TempRoot::new("enrichparse");
+    let path = root.file("cosh_test_edit_enrich_parse.txt");
+    std::fs::write(&path, "one\ntwo\n").unwrap();
+
+    let result = edit(
+        make_metadata(root.path()),
+        FsEdit {
+            targets: vec![EditTarget {
+                path: path.clone(),
+                file_hash: hash_file(&path),
+                ops: "replace 99..99:\n+X".to_string(),
+            }],
+            dry_run: false,
+        },
+    )
+    .await;
+    assert!(result.is_err());
+    let msg = result.unwrap_err().to_string();
+
+    let live_hash = compute_file_hash("one\ntwo\n");
+    let anchor = format!("\u{b6}{path}#{live_hash}");
+    assert!(
+        msg.contains(&anchor),
+        "expected current anchor {anchor} in: {msg}"
+    );
+    assert!(
+        !msg.contains("Live content at the referenced line(s)"),
+        "out-of-range line must not produce a context block, got: {msg}"
+    );
+}

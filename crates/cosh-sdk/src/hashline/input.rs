@@ -400,7 +400,7 @@ impl PatchSection {
             Some(ResolveBlockEditsOptions {
                 on_unresolved: ResolveAction::Throw,
             }),
-        );
+        )?;
         let mut result = apply_edits(text, &resolved, Some(&self.path))?;
         // Preserve parse warnings so consumers don't need to call `parse()`
         // separately.
@@ -443,7 +443,7 @@ impl PatchSection {
             Some(ResolveBlockEditsOptions {
                 on_unresolved: ResolveAction::Drop,
             }),
-        );
+        )?;
         let mut result = apply_edits(text, &resolved, Some(&self.path))?;
         if !warnings.is_empty() {
             let merged: Vec<String> = warnings

@@ -243,6 +243,43 @@ impl<S: SnapshotStore> Recovery<S> {
         Some(result)
     }
 
+    /// Warning text when the edit anchors target lines the model never saw
+    /// surfaced by the tool output that minted `file_hash`, or `None` when
+    /// every anchor was surfaced (or no seen lines were recorded — e.g. the
+    /// file was read via a tool that does not track them).
+    ///
+    /// Public so the patcher can run the same gate on the NORMAL apply path
+    /// (tag still matches live content): drift recovery is not the only way a
+    /// model ends up anchoring elided content — a read with a truncated
+    /// window mints a perfectly current tag for lines it never showed.
+    pub fn unseen_anchor_warning(
+        &mut self,
+        path: &str,
+        file_hash: &str,
+        edits: &[Edit],
+    ) -> Option<String> {
+        let seen = self.store.seen_lines(path, file_hash);
+        if seen.is_empty() {
+            return None;
+        }
+        let seen_set: std::collections::HashSet<u32> = seen.iter().map(|(l, _)| *l).collect();
+        let unseen: Vec<u32> = collect_anchor_lines(edits)
+            .into_iter()
+            .filter(|line| !seen_set.contains(line))
+            .collect();
+        if unseen.is_empty() {
+            return None;
+        }
+        let listed = unseen
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        Some(format!(
+            "Edit anchors target lines {listed} which were not surfaced by the preceding tool output; verify the diff against the current file."
+        ))
+    }
+
     /// Append a warning when the edit anchors target lines the model never saw
     /// surfaced by the tool output that minted the stale tag. The snapshot
     /// itself may be older than what the model saw (the tag fingerprints the
@@ -251,25 +288,9 @@ impl<S: SnapshotStore> Recovery<S> {
     /// a "verify the diff" hedge. Silent when no seen lines were recorded for
     /// the tag (e.g. the file was read via a tool that does not track them).
     fn append_unseen_anchor_warning(&mut self, result: &mut RecoveryResult, args: &RecoveryArgs) {
-        let seen = self.store.seen_lines(&args.path, &args.file_hash);
-        if seen.is_empty() {
-            return;
+        if let Some(warning) = self.unseen_anchor_warning(&args.path, &args.file_hash, &args.edits)
+        {
+            result.warnings.push(warning);
         }
-        let seen_set: std::collections::HashSet<u32> = seen.iter().map(|(l, _)| *l).collect();
-        let unseen: Vec<u32> = collect_anchor_lines(&args.edits)
-            .into_iter()
-            .filter(|line| !seen_set.contains(line))
-            .collect();
-        if unseen.is_empty() {
-            return;
-        }
-        let listed = unseen
-            .iter()
-            .map(u32::to_string)
-            .collect::<Vec<_>>()
-            .join(", ");
-        result.warnings.push(format!(
-            "Edit anchors target lines {listed} which were not surfaced by the preceding tool output; verify the diff against the current file."
-        ));
     }
 }

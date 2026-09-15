@@ -4451,6 +4451,16 @@ impl Harness {
                                  (failure #{}/{MAX_TOOL_RETRIES})",
                                 self.tool_failure_count,
                             );
+                            // Feed the correction memory like the other
+                            // failure paths (hooks, permissions, extraction)
+                            // so repeated tool errors accumulate in the
+                            // tail-rendered Correction History block instead
+                            // of scrolling away as bare ToolError turns.
+                            // Enriched edit errors carry live-content blocks;
+                            // keep only the diagnostic head (error line +
+                            // current anchor) so the block stays lean.
+                            let head: Vec<&str> = e.lines().take(3).collect();
+                            self.correction_memory.push(&head.join("\n"));
                             let _ = tx.send(HarnessEvent::ToolError { error: e });
                             if self.tool_failure_count >= MAX_TOOL_RETRIES {
                                 let msg = format!(
