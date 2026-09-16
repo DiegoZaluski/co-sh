@@ -16,13 +16,13 @@
 //! |------|--------|------------|
 //! | `opencode` | `opencode` | `opencode run --auto "<input>"` |
 //! | `claude` | `claude` | `claude -p --permission-mode bypassPermissions "<input>"` |
-//! | `codex` | `codex` | `codex exec --sandbox workspace-write "<input>"` |
+//! | `codex` | `codex` | `codex exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox "<input>"` |
 //! | `cursor` | `agent` | `agent -p --force "<input>"` |
-//! | `aider` | `aider` | `aider --yes --no-auto-commits --message "<input>"` |
-//! | `goose` | `goose` | `goose run -t "<input>"` |
+//! | `aider` | `aider` | `aider --yes-always --no-auto-commits --message "<input>"` |
+//! | `goose` | `goose` | `goose run --no-session -t "<input>"` |
 //! | `kilo` | `kilo` | `kilo run --auto "<input>"` |
-//! | `gemini` | `gemini` | `gemini -p "<input>"` |
-//! | `interpreter` | `interpreter` | `interpreter exec --ask-for-approval auto "<input>"` |
+//! | `gemini` | `gemini` | `gemini --skip-trust --approval-mode yolo -p "<input>"` |
+//! | `interpreter` | `interpreter` | `interpreter exec --sandbox danger-full-access --ask-for-approval never "<input>"` |
 //!
 //! See [`AGENTS`](call::AGENTS) for the full list.
 

@@ -102,7 +102,18 @@ pub const AGENTS: &[Agent] = &[
     Agent {
         name: "codex",
         binary: "codex",
-        args: &["exec", "--sandbox", "workspace-write"],
+        // Full-auto exec: `--skip-git-repo-check` lets codex run outside a git
+        // repo (headless calls have no one to confirm directory trust), and
+        // `--dangerously-bypass-approvals-and-sandbox` skips every approval
+        // prompt. The default `--sandbox workspace-write` relies on bubblewrap
+        // user namespaces, which are unavailable in many environments — codex
+        // then blocks *all* commands and file writes with no way to approve.
+        // Intended for externally sandboxed automation.
+        args: &[
+            "exec",
+            "--skip-git-repo-check",
+            "--dangerously-bypass-approvals-and-sandbox",
+        ],
         input_flag: None,
     },
     Agent {
@@ -114,7 +125,9 @@ pub const AGENTS: &[Agent] = &[
     Agent {
         name: "aider",
         binary: "aider",
-        args: &["--yes", "--no-auto-commits"],
+        // `--yes-always` is the documented auto-confirm flag (AIDER_YES_ALWAYS);
+        // `--yes` is only a legacy alias on some versions.
+        args: &["--yes-always", "--no-auto-commits"],
         // `aider` takes the prompt as the value of `--message`, not as a
         // positional argument (positional args are file names). Passing the
         // input as the flag's value is required for a single-shot call.
@@ -123,7 +136,9 @@ pub const AGENTS: &[Agent] = &[
     Agent {
         name: "goose",
         binary: "goose",
-        args: &["run", "-t"],
+        // `--no-session` skips session-file storage, which the goose docs
+        // recommend for automated scripts and one-off tasks.
+        args: &["run", "--no-session", "-t"],
         input_flag: None,
     },
     Agent {
@@ -135,13 +150,30 @@ pub const AGENTS: &[Agent] = &[
     Agent {
         name: "gemini",
         binary: "gemini",
-        args: &["-p"],
+        // Headless runs in an untrusted workspace refuse to start and the
+        // trust prompt cannot be answered non-interactively: `--skip-trust`
+        // trusts the directory for this run. SECURITY NOTE: this also bypasses
+        // the repo-config trust gate (project-local Gemini config from an
+        // untrusted checkout can be loaded) — run in workspaces you trust.
+        // `--approval-mode yolo` auto-approves all tool calls.
+        args: &["--skip-trust", "--approval-mode", "yolo", "-p"],
         input_flag: None,
     },
     Agent {
         name: "interpreter",
         binary: "interpreter",
-        args: &["exec", "--ask-for-approval", "auto"],
+        // `exec` is the documented non-interactive subcommand. Approval values
+        // are `untrusted|on-request|never` — `auto` is not valid — so `never`
+        // is the no-prompt choice. `--sandbox danger-full-access` avoids the
+        // bubblewrap user-namespace dependency that blocks all work in many
+        // environments.
+        args: &[
+            "exec",
+            "--sandbox",
+            "danger-full-access",
+            "--ask-for-approval",
+            "never",
+        ],
         input_flag: None,
     },
 ];
@@ -158,7 +190,7 @@ fn strip_ansi(s: &str) -> String {
 fn install_hint(agent: &str) -> &'static str {
     match agent {
         "opencode" => {
-            "Install: npm install -g @opencode/cli. More: https://github.com/opencode-ai/opencode"
+            "Install: curl -fsSL https://opencode.ai/install | bash (or: npm install -g opencode-ai). More: https://opencode.ai/docs"
         }
         "kilo" => {
             "Install: curl -fsSL https://kilo.ai/install.sh | sh. More: https://kilo.ai/docs/code-with-ai/platforms/cli"
@@ -166,7 +198,9 @@ fn install_hint(agent: &str) -> &'static str {
         "claude" => {
             "Install: npm install -g @anthropic-ai/claude-code. More: https://code.claude.com/docs"
         }
-        "codex" => "Install: npm install -g @openai/codex. More: https://learn.chatgpt.com/docs",
+        "codex" => {
+            "Install: npm install -g @openai/codex. More: https://developers.openai.com/codex"
+        }
         "cursor" => {
             "Install: curl https://cursor.com/install -fsS | bash. More: https://cursor.com/cli"
         }
@@ -174,10 +208,10 @@ fn install_hint(agent: &str) -> &'static str {
             "Install: pip install open-interpreter. More: https://github.com/OpenInterpreter/open-interpreter"
         }
         "aider" => {
-            "Install: pip install aider-chat. For headless mode also use --yes --no-auto-commits. More: https://aider.chat/docs/scripting.html"
+            "Install: pip install aider-chat. For headless mode also use --yes-always --no-auto-commits. More: https://aider.chat/docs/scripting.html"
         }
         "goose" => {
-            "Install: curl -fsSL https://block.github.io/goose/install.sh | bash. More: https://goose-docs.ai"
+            "Install: curl -fsSL https://github.com/block/goose/releases/download/stable/download_cli.sh | bash. More: https://block.github.io/goose"
         }
         "gemini" => {
             "Install: npm install -g @google/gemini-cli. Then: gemini auth login. More: https://github.com/google-gemini/gemini-cli"
@@ -293,6 +327,11 @@ pub fn call(
     cmd.args(entry.args_for(input));
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
+    // Headless automation must never block reading stdin: some CLIs (e.g.
+    // `codex exec`) append piped stdin to the prompt and would hang if
+    // inherited stdin were an open pipe. `/dev/null` gives them an immediate
+    // EOF.
+    cmd.stdin(std::process::Stdio::null());
 
     let mut child = cmd.spawn().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
@@ -400,23 +439,27 @@ pub fn call(
 
     if result.is_empty() {
         let blocking_hint = match agent {
-            "aider" => " aider may be waiting for confirmation. Set AIDER_YES=true or pass --yes.",
+            "aider" => {
+                " aider may be waiting for confirmation. Use --yes-always (set automatically by this tool)."
+            }
             "claude" => {
                 " claude may be waiting for permission approval. Use --permission-mode bypassPermissions."
             }
             "opencode" => " opencode may be waiting for permission approval. Use --auto.",
             "kilo" => " kilo may be waiting for permission approval. Use --auto.",
             "codex" => {
-                " codex may be waiting for permission approval. Use --sandbox workspace-write."
+                " codex may be waiting on directory trust or approvals. Use --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox."
             }
             "cursor" => " cursor may be waiting for permission approval. Use agent -p --force.",
             "interpreter" => {
-                " interpreter may be waiting for permission approval. Use --ask-for-approval auto."
+                " interpreter may be waiting for permission approval. Use --ask-for-approval never."
             }
             _ => "",
         };
         Err(format!(
-            "sub-agent '{agent}' did not respond within {timeout_secs} seconds.{blocking_hint} The CLI may not be installed. Run the install command from the error above.",
+            "sub-agent '{agent}' did not respond within {timeout_secs} \
+             seconds.{blocking_hint} The CLI was found in PATH but produced \
+             no output; check the blocking hint above.",
             agent = agent,
             timeout_secs = timeout.as_secs(),
         ))
@@ -449,7 +492,7 @@ mod tests {
         // Regression: aider's prompt is the value of `--message`, never a
         // positional argument (positional args are file names).
         let expected: Vec<String> = vec![
-            "--yes".into(),
+            "--yes-always".into(),
             "--no-auto-commits".into(),
             "--message".into(),
             "review x".into(),
@@ -457,7 +500,7 @@ mod tests {
         assert_eq!(agent("aider").args_for("review x"), expected);
         assert_eq!(
             agent("aider").invocation(),
-            "aider --yes --no-auto-commits --message \"<input>\""
+            "aider --yes-always --no-auto-commits --message \"<input>\""
         );
     }
 
@@ -486,18 +529,24 @@ mod tests {
                 "claude",
                 "claude -p --permission-mode bypassPermissions \"<input>\"",
             ),
-            ("codex", "codex exec --sandbox workspace-write \"<input>\""),
+            (
+                "codex",
+                "codex exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox \"<input>\"",
+            ),
             ("cursor", "agent -p --force \"<input>\""),
             (
                 "aider",
-                "aider --yes --no-auto-commits --message \"<input>\"",
+                "aider --yes-always --no-auto-commits --message \"<input>\"",
             ),
-            ("goose", "goose run -t \"<input>\""),
+            ("goose", "goose run --no-session -t \"<input>\""),
             ("kilo", "kilo run --auto \"<input>\""),
-            ("gemini", "gemini -p \"<input>\""),
+            (
+                "gemini",
+                "gemini --skip-trust --approval-mode yolo -p \"<input>\"",
+            ),
             (
                 "interpreter",
-                "interpreter exec --ask-for-approval auto \"<input>\"",
+                "interpreter exec --sandbox danger-full-access --ask-for-approval never \"<input>\"",
             ),
         ];
         assert_eq!(AGENTS.len(), expected.len(), "registry must stay in sync");
@@ -529,7 +578,7 @@ mod tests {
         assert_eq!(
             agent("aider").args_for(""),
             vec![
-                "--yes".to_string(),
+                "--yes-always".to_string(),
                 "--no-auto-commits".to_string(),
                 "--message".to_string(),
                 String::new()
