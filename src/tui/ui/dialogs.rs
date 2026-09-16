@@ -406,6 +406,13 @@ pub enum DialogType {
         input: String,
         cursor_pos: usize,
     },
+    /// Skill-directories entry (Settings → Skill directories). The user
+    /// types colon-separated source directories for the `skills_*` tools
+    /// (~ expands to $HOME) or leaves it blank to fall back to `~/.skills`.
+    SkillsInput {
+        input: String,
+        cursor_pos: usize,
+    },
     /// MCP registration form: name, endpoint, timeout and API key on a
     /// single panel with the hook form's mechanics (Up/Down switch fields,
     /// Enter saves, Esc cancels, click focuses). Every field stays visible
@@ -582,6 +589,11 @@ impl std::fmt::Debug for DialogType {
                 .finish(),
             Self::EditorInput { input, cursor_pos } => f
                 .debug_struct("EditorInput")
+                .field("input", input)
+                .field("cursor_pos", cursor_pos)
+                .finish(),
+            Self::SkillsInput { input, cursor_pos } => f
+                .debug_struct("SkillsInput")
                 .field("input", input)
                 .field("cursor_pos", cursor_pos)
                 .finish(),
@@ -1118,7 +1130,8 @@ impl DialogState {
             DialogType::ApiKeyInput { .. }
             | DialogType::LocalUrlInput { .. }
             | DialogType::CacheTtlInput { .. }
-            | DialogType::EditorInput { .. } => {
+            | DialogType::EditorInput { .. }
+            | DialogType::SkillsInput { .. } => {
                 // Click outside the dialog box → dismiss
                 let dialog_w = 50u16.min(area.width.saturating_sub(8)).max(30);
                 let dialog_h = 7;
@@ -2067,6 +2080,20 @@ impl DialogState {
                     &instance.cursor,
                     "Editor command",
                     "e.g. nvim, vim -u NONE (args split on spaces) — empty: auto-detect",
+                    false,
+                    input,
+                    *cursor_pos,
+                );
+            }
+            DialogType::SkillsInput { input, cursor_pos } => {
+                render_text_input_dialog(
+                    buf,
+                    area,
+                    theme,
+                    now,
+                    &instance.cursor,
+                    "Skill directories",
+                    "colon-separated paths (~ = $HOME) — empty: ~/.skills",
                     false,
                     input,
                     *cursor_pos,

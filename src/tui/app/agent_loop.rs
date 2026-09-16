@@ -280,6 +280,11 @@ impl App {
         // per-server failures, so one bad server never blocks the turn.
         let mcp_config = self.setup.mcp.clone();
 
+        // Skill-discovery config (Settings screen → setup.json). Cloned
+        // into the agent thread; resolved (tilde expansion + existence
+        // check) when the wrapper is built below, inside the thread.
+        let skills_config = self.setup.skills.clone();
+
         // RAG recall context
         // 1) Description suffix (what the model sees in the tool doc)
         #[cfg(feature = "embed")]
@@ -463,6 +468,7 @@ impl App {
                         .with_fallbacks(remaining)
                         .with_summarization_models(summarization_models)
                         .with_local_base_urls(local_base_urls)
+                        .with_skills(skills_config.to_skills())
                         .with_mcp_config(mcp_config);
 
                     // Connect MCP servers before the header snapshot: the

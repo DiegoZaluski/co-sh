@@ -25,6 +25,8 @@ pub struct Setup {
     pub providers: Providers,
     pub model: Model,
     pub cache: Cache,
+    /// Skill-discovery configuration (Settings screen).
+    pub skills: SkillsConfig,
     /// Master switch for the LSP engine (kept flat: it has no sub-options).
     pub lsp: bool,
     /// Registered MCP servers (empty when the user never added one, so
@@ -45,6 +47,7 @@ impl Default for Setup {
             providers: Providers::default(),
             model: Model::default(),
             cache: Cache::default(),
+            skills: SkillsConfig::default(),
             lsp: true,
             mcp: McpConfig::default(),
             editor: String::new(),
@@ -228,6 +231,102 @@ pub fn format_cache_duration(min: u32) -> String {
     } else {
         format!("{}h{:02}m", min / 60, min % 60)
     }
+}
+
+// Skills
+
+/// Skill-discovery configuration (Settings screen → Skill directories).
+///
+/// `dirs` is the user-editable list of source directories; when it is empty
+/// the harness falls back to the `~/.skills` default. Each listed directory
+/// holds one subdirectory per skill (a skill is a directory containing a
+/// `SKILL.md`). Missing directories are skipped silently, so a default path
+/// that does not exist is never an error.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct SkillsConfig {
+    /// Source directories, in priority order (first source wins on name
+    /// collision). Tilde (`~`) prefixes are expanded at resolve time
+    /// (`resolved_dirs` / `to_skills`). Entries must not contain `:` —
+    /// the Settings dialog joins/splits the list on it.
+    pub dirs: Vec<String>,
+    /// Scan each directory recursively (skills at any depth) instead of
+    /// only the immediate subdirectories.
+    pub recursive: bool,
+    /// Glob-style name exclusions (e.g. `"deprecated-*"`). Empty: keep all.
+    pub ignore: Vec<String>,
+    /// Allowlist of exact skill names. Empty: everything passes.
+    pub include: Vec<String>,
+}
+
+impl SkillsConfig {
+    /// The default source directory (`~/.skills`).
+    #[must_use]
+    pub fn default_dir() -> String {
+        "~/.skills".to_string()
+    }
+
+    /// The effective source directories: the user's list when non-empty,
+    /// otherwise the `~/.skills` default. Tilde prefixes are expanded
+    /// against `$HOME`; entries that still start with `~` (no resolvable
+    /// home) are dropped.
+    #[must_use]
+    pub fn resolved_dirs(&self) -> Vec<String> {
+        self.resolved_dirs_with(std::env::var("HOME").ok().as_deref())
+    }
+
+    /// [`Self::resolved_dirs`] with the home directory injected (pure —
+    /// the testable core, no environment access).
+    #[must_use]
+    pub fn resolved_dirs_with(&self, home: Option<&str>) -> Vec<String> {
+        let dirs = if self.dirs.is_empty() {
+            vec![Self::default_dir()]
+        } else {
+            self.dirs.clone()
+        };
+        dirs.into_iter()
+            .filter_map(|d| expand_tilde_with(&d, home))
+            .map(|d| d.trim().to_string())
+            .filter(|d| !d.is_empty())
+            .collect()
+    }
+
+    /// Build the skills wrapper for the harness: directory sources from
+    /// [`Self::resolved_dirs`] (existing directories only — discovery is a
+    /// hard error for unreadable sources, so a missing path is skipped),
+    /// plus the recursion and name filters.
+    #[must_use]
+    pub fn to_skills(&self) -> cosh_tools::skills::Skills {
+        use cosh_tools::skills::SkillSource;
+        let sources: Vec<SkillSource> = self
+            .resolved_dirs()
+            .into_iter()
+            .filter(|d| std::path::Path::new(d).is_dir())
+            .map(|d| SkillSource::Directory { path: d })
+            .collect();
+        cosh_tools::skills::Skills::new()
+            .recursive(self.recursive)
+            .ignore(self.ignore.clone())
+            .include(self.include.clone())
+            .sources(sources)
+    }
+}
+
+/// Expand a leading `~` (alone or followed by `/`) to the given home
+/// directory. Returns `None` when the path starts with `~` but `home` is
+/// `None` — the caller drops such entries instead of passing a literal
+/// `~/...` path to the filesystem.
+fn expand_tilde_with(path: &str, home: Option<&str>) -> Option<String> {
+    // An empty HOME is no home: expanding against it would produce
+    // root-anchored garbage ("/x", "/.skills").
+    let home = home.filter(|h| !h.is_empty());
+    if path == "~" {
+        return home.map(String::from);
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        return home.map(|h| format!("{h}/{rest}"));
+    }
+    Some(path.to_string())
 }
 
 // Providers
@@ -602,6 +701,45 @@ mod tests {
         let legacy: Setup =
             serde_json::from_str(r#"{"providers":{"zen_public_opt_in":true}}"#).unwrap();
         assert!(legacy.providers.local.is_empty());
+    }
+
+    /// The skills section: legacy files without it fall back to the
+    /// `~/.skills` default, a configured list replaces it, and tilde
+    /// prefixes expand against `$HOME` (unexpandable entries are dropped).
+    #[test]
+    fn skills_config_defaults_and_tilde_expansion() {
+        // Legacy file without the section → the ~/.skills default.
+        let legacy: Setup = serde_json::from_str("{}").unwrap();
+        assert!(legacy.skills.dirs.is_empty());
+        assert_eq!(legacy.skills.resolved_dirs().len(), 1);
+        assert!(legacy.skills.resolved_dirs()[0].ends_with("/.skills"));
+
+        // Round-trip of a custom list + filters.
+        let mut setup = Setup::default();
+        setup.skills.dirs = vec!["~/myskills".into(), "/opt/skills".into()];
+        setup.skills.recursive = true;
+        setup.skills.ignore = vec!["deprecated-*".into()];
+        let json = serde_json::to_string(&setup).unwrap();
+        let loaded: Setup = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.skills.dirs, setup.skills.dirs);
+        assert!(loaded.skills.recursive);
+        assert_eq!(loaded.skills.ignore, vec!["deprecated-*".to_string()]);
+
+        // Tilde expansion with a resolvable home (pure core — no env access).
+        let resolved = loaded.skills.resolved_dirs_with(Some("/home/tester"));
+        assert_eq!(
+            resolved,
+            vec![
+                "/home/tester/myskills".to_string(),
+                "/opt/skills".to_string()
+            ]
+        );
+
+        // Entries that keep a bare `~` prefix without a home are dropped.
+        assert_eq!(
+            loaded.skills.resolved_dirs_with(None),
+            vec!["/opt/skills".to_string()]
+        );
     }
 
     /// The global model selection is a single overwritten slot that

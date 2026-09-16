@@ -667,6 +667,9 @@ impl App {
                             Some(crate::routes::settings::SettingsAction::OpenEditorInput) => {
                                 self.open_editor_input();
                             }
+                            Some(crate::routes::settings::SettingsAction::OpenSkillsInput) => {
+                                self.open_skills_input();
+                            }
                             Some(crate::routes::settings::SettingsAction::McpToggled) => {
                                 self.setup.save();
                             }

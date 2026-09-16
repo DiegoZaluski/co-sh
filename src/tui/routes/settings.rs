@@ -82,6 +82,12 @@ fn settings_items() -> &'static [SettingsItem] {
             description: "Terminal editor for the file explorer (Ctrl+F). Enter: edit. Empty: first of nvim, vim, nano found on $PATH",
             event: "",
         },
+        SettingsItem {
+            id: "skill_dirs",
+            label: "Skill directories",
+            description: "Where the skills_* tools look for SKILL.md packs (colon-separated paths, ~ expands to $HOME). Enter: edit. Empty: ~/.skills",
+            event: "",
+        },
     ]
 }
 
@@ -104,6 +110,11 @@ fn cache_choice_value(id: &str, setup: &Setup) -> Option<String> {
             "auto (nvim › vim › nano)".into()
         } else {
             truncate(setup.editor.trim(), COMMAND_PREVIEW_LEN)
+        }),
+        "skill_dirs" => Some(if setup.skills.dirs.is_empty() {
+            "~/.skills".into()
+        } else {
+            truncate(&setup.skills.dirs.join(":"), COMMAND_PREVIEW_LEN * 2)
         }),
         _ => None,
     }
@@ -421,6 +432,9 @@ pub enum SettingsAction {
     /// Open the editor-command input box (Settings → Editor; used by the
     /// Ctrl+F file explorer). Blank = auto-detect (nvim → vim → nano).
     OpenEditorInput,
+    /// Open the skill-directories input box (Settings → Skill directories;
+    /// setup.json `skills.dirs`). Blank = the `~/.skills` default.
+    OpenSkillsInput,
 }
 
 /// Last-typed content of the MCP registration box
@@ -576,6 +590,9 @@ impl SettingsView {
                 // open its own input box (the file explorer launches it).
                 if item.id == "editor" {
                     return Some(SettingsAction::OpenEditorInput);
+                }
+                if item.id == "skill_dirs" {
+                    return Some(SettingsAction::OpenSkillsInput);
                 }
                 // Choice settings (cache TTL/retention) open a duration
                 // input box instead of toggling a switch — the value is a
@@ -1067,6 +1084,7 @@ mod tests {
                 SettingsRow::Category(5),
                 SettingsRow::AddSummarizationModel,
                 SettingsRow::Category(6),
+                SettingsRow::Category(7),
                 SettingsRow::AddMcpServer,
             ]
         );
@@ -1097,6 +1115,7 @@ mod tests {
                 SettingsRow::Category(5),
                 SettingsRow::AddSummarizationModel,
                 SettingsRow::Category(6),
+                SettingsRow::Category(7),
                 SettingsRow::AddMcpServer,
             ]
         );
@@ -1304,6 +1323,54 @@ mod tests {
         assert_eq!(
             cache_choice_value("editor", &setup),
             Some("vim -u NONE".to_string())
+        );
+    }
+
+    /// The Skill-directories row is a free-form path setting: activating it
+    /// opens the skills input (never a switch flip), the row renders the
+    /// configured list (or the ~/.skills default hint), and the typed value
+    /// round-trips into `setup.skills.dirs`.
+    #[test]
+    fn skill_dirs_setting_opens_input_and_round_trips() {
+        let mut setup = Setup::default();
+        let mut view = SettingsView::new();
+
+        view.selection.selected_index = selectable_rows(&setup)
+            .iter()
+            .position(|r| matches!(r, SettingsRow::Category(7)))
+            .expect("skill_dirs category row exists");
+        assert_eq!(
+            view.activate_selected(&mut setup),
+            Some(SettingsAction::OpenSkillsInput)
+        );
+        assert!(
+            setup.skills.dirs.is_empty(),
+            "activation never mutates the setting"
+        );
+
+        // The rendered row carries the default hint.
+        let theme = test_theme();
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        view.render(&mut buf, area, &theme, &setup);
+        let all: String = (area.y..area.bottom())
+            .map(|y| {
+                (area.x..area.right())
+                    .map(|x| {
+                        buf.cell((x, y))
+                            .map(|c| c.symbol().to_string())
+                            .unwrap_or_default()
+                    })
+                    .collect::<String>()
+            })
+            .collect::<String>();
+        assert!(all.contains("Skill directories: ~/.skills"));
+
+        // The choice display for a configured list joins the paths.
+        setup.skills.dirs = vec!["~/a".into(), "/opt/b".into()];
+        assert_eq!(
+            cache_choice_value("skill_dirs", &setup),
+            Some("~/a:/opt/b".to_string())
         );
     }
 

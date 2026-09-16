@@ -16,6 +16,7 @@ impl App {
                         | DialogType::LocalUrlInput { .. }
                         | DialogType::CacheTtlInput { .. }
                         | DialogType::EditorInput { .. }
+                        | DialogType::SkillsInput { .. }
                         | DialogType::RenameSession { .. },
                 )
             )
@@ -46,6 +47,7 @@ impl App {
                     | DialogType::LocalUrlInput { cursor_pos, .. }
                     | DialogType::CacheTtlInput { cursor_pos, .. }
                     | DialogType::EditorInput { cursor_pos, .. }
+                    | DialogType::SkillsInput { cursor_pos, .. }
                     | DialogType::RenameSession { cursor_pos, .. } = &mut d.dialog_type
                     && *cursor_pos > 0
                 {
@@ -65,6 +67,7 @@ impl App {
                         input, cursor_pos, ..
                     }
                     | DialogType::EditorInput { input, cursor_pos }
+                    | DialogType::SkillsInput { input, cursor_pos }
                     | DialogType::RenameSession {
                         input, cursor_pos, ..
                     } = &mut d.dialog_type
@@ -80,6 +83,7 @@ impl App {
                     | DialogType::LocalUrlInput { cursor_pos, .. }
                     | DialogType::CacheTtlInput { cursor_pos, .. }
                     | DialogType::EditorInput { cursor_pos, .. }
+                    | DialogType::SkillsInput { cursor_pos, .. }
                     | DialogType::RenameSession { cursor_pos, .. } = &mut d.dialog_type
                 {
                     *cursor_pos = 0;
@@ -98,6 +102,7 @@ impl App {
                         input, cursor_pos, ..
                     }
                     | DialogType::EditorInput { input, cursor_pos }
+                    | DialogType::SkillsInput { input, cursor_pos }
                     | DialogType::RenameSession {
                         input, cursor_pos, ..
                     } = &mut d.dialog_type
@@ -118,6 +123,7 @@ impl App {
                         input, cursor_pos, ..
                     }
                     | DialogType::EditorInput { input, cursor_pos }
+                    | DialogType::SkillsInput { input, cursor_pos }
                     | DialogType::RenameSession {
                         input, cursor_pos, ..
                     } = &mut d.dialog_type
@@ -140,6 +146,7 @@ impl App {
                         input, cursor_pos, ..
                     }
                     | DialogType::EditorInput { input, cursor_pos }
+                    | DialogType::SkillsInput { input, cursor_pos }
                     | DialogType::RenameSession {
                         input, cursor_pos, ..
                     } = &mut d.dialog_type
@@ -163,6 +170,7 @@ impl App {
                         input, cursor_pos, ..
                     }
                     | DialogType::EditorInput { input, cursor_pos }
+                    | DialogType::SkillsInput { input, cursor_pos }
                     | DialogType::RenameSession {
                         input, cursor_pos, ..
                     } = &mut d.dialog_type
@@ -745,6 +753,16 @@ impl App {
         });
     }
 
+    /// Open the skill-directories input box (Settings → Skill directories),
+    /// prefilled with the configured list (blank = the `~/.skills` default).
+    pub(in crate::app) fn open_skills_input(&mut self) {
+        let input = self.setup.skills.dirs.join(":");
+        self.dialog.show(DialogType::SkillsInput {
+            cursor_pos: input.len(),
+            input,
+        });
+    }
+
     /// Perform the save for the current text input dialog (API key → keyring,
     /// local URL → setup.json). Returns `true` when the input was accepted.
     pub(in crate::app) fn save_text_input_dialog(&mut self) -> bool {
@@ -860,6 +878,19 @@ impl App {
                 // auto-detected fallback chain. Launch failures stay silent
                 // by design, so there is nothing to validate here.
                 self.setup.editor = input.trim().to_string();
+                self.setup.save();
+                true
+            }
+            DialogType::SkillsInput { input, .. } => {
+                // Colon-separated skill directories; empty restores the
+                // ~/.skills default (an empty `dirs` list). Missing paths
+                // are skipped silently at discovery time.
+                self.setup.skills.dirs = input
+                    .split(':')
+                    .map(str::trim)
+                    .filter(|p| !p.is_empty())
+                    .map(String::from)
+                    .collect();
                 self.setup.save();
                 true
             }
