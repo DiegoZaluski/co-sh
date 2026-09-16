@@ -272,7 +272,10 @@ impl SkillsConfig {
     /// home) are dropped.
     #[must_use]
     pub fn resolved_dirs(&self) -> Vec<String> {
-        self.resolved_dirs_with(std::env::var("HOME").ok().as_deref())
+        // cosh_tools::skills::home_dir normalizes MSYS-style HOME values
+        // ("/c/Users/..." from Git Bash) that native fs calls cannot
+        // resolve on Windows, falling back to USERPROFILE.
+        self.resolved_dirs_with(cosh_tools::skills::home_dir().as_deref())
     }
 
     /// [`Self::resolved_dirs`] with the home directory injected (pure —
@@ -297,12 +300,16 @@ impl SkillsConfig {
     /// plus the recursion and name filters.
     #[must_use]
     pub fn to_skills(&self) -> cosh_tools::skills::Skills {
-        use cosh_tools::skills::SkillSource;
+        use cosh_tools::skills::{SkillSource, normalize_shell_path};
         let sources: Vec<SkillSource> = self
             .resolved_dirs()
             .into_iter()
-            .filter(|d| std::path::Path::new(d).is_dir())
-            .map(|d| SkillSource::Directory { path: d })
+            // Normalize before the existence probe: an MSYS-spelled entry
+            // ("/c/...") would fail `is_dir` natively on Windows and be
+            // silently dropped.
+            .map(|d| normalize_shell_path(&d))
+            .filter(|native| std::path::Path::new(native).is_dir())
+            .map(|native| SkillSource::Directory { path: native })
             .collect();
         cosh_tools::skills::Skills::new()
             .recursive(self.recursive)

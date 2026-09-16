@@ -23,12 +23,14 @@ pub mod actions;
 pub mod discover;
 pub mod frontmatter;
 pub mod match_util;
+pub mod paths;
 pub mod types;
 
 #[cfg(test)]
 mod test;
 
 pub use actions::execute;
+pub use paths::{home_dir, msys_to_windows, normalize_shell_path};
 pub use types::{
     EmbeddedSkill, SkillAction, SkillContent, SkillError, SkillInfo, SkillOutput, SkillSchema,
     SkillSource, SkillsMatchInput, SkillsReadAssetInput, SkillsReadInput,

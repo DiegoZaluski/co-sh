@@ -17,9 +17,8 @@ use cosh_tools::{
     plan::{Plan, types::TodoWriteInput},
     question::{Question, types::QuestionInput},
     skills::{
-        Skills,
+        SkillSource, Skills,
         types::{SkillsMatchInput, SkillsReadAssetInput, SkillsReadInput},
-        SkillSource,
     },
     subagent::{
         SubAgent,
@@ -155,7 +154,7 @@ pub struct CoshTools {
 /// does not exist must never break the skills tools — they simply report
 /// an empty list until the directory (or a setup.json override) appears.
 fn default_skill_sources() -> Vec<SkillSource> {
-    default_skill_sources_for(std::env::var("HOME").ok().as_deref())
+    default_skill_sources_for(cosh_tools::skills::home_dir().as_deref())
 }
 
 /// [`default_skill_sources`] with the home directory injected (testable).
@@ -163,7 +162,12 @@ fn default_skill_sources_for(home: Option<&str>) -> Vec<SkillSource> {
     let Some(home) = home else {
         return Vec::new();
     };
+    // A HOME inherited from Git Bash / MSYS uses POSIX drive syntax
+    // ("/c/Users/..."), which native filesystem calls cannot resolve on
+    // Windows — normalize it before the `is_dir` probe, or the default
+    // source would be silently dropped (empty skills list).
     let dir = format!("{home}/.skills");
+    let dir = cosh_tools::skills::normalize_shell_path(&dir);
     if std::path::Path::new(&dir).is_dir() {
         vec![SkillSource::Directory { path: dir }]
     } else {
@@ -1388,6 +1392,38 @@ mod skills_sources_tests {
         std::fs::create_dir_all(home.join(".skills")).unwrap();
         let sources = default_skill_sources_for(Some(home.to_str().unwrap()));
         assert_eq!(sources.len(), 1);
+    }
+
+    /// Regression (Windows): a HOME inherited from Git Bash uses MSYS
+    /// drive syntax ("/c/Users/...") which native fs calls cannot resolve.
+    /// The resolver must normalize it, or the default source is silently
+    /// dropped and the skills tools report an empty list.
+    #[cfg(windows)]
+    #[test]
+    fn msys_style_home_is_normalized_before_the_existence_probe() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().to_str().unwrap();
+        std::fs::create_dir_all(dir.path().join(".skills")).unwrap();
+
+        // Re-spell the native temp path ("C:/...") as MSYS ("/c/...").
+        let mut chars = home.chars();
+        let drive = chars.next().unwrap().to_ascii_lowercase();
+        assert!(drive.is_ascii_alphabetic(), "tempdir must yield a plain drive path");
+        let rest = chars
+            .collect::<String>()
+            .trim_start_matches([':', '/', '\\'])
+            .to_string();
+        let msys_home = format!("/{drive}/{rest}");
+
+        let sources = default_skill_sources_for(Some(&msys_home));
+        assert_eq!(sources.len(), 1, "MSYS-spelled home must resolve natively");
+        let cosh_tools::skills::SkillSource::Directory { path } = &sources[0] else {
+            panic!("expected a Directory source");
+        };
+        assert!(
+            std::path::Path::new(path).is_dir(),
+            "source must be the native spelling"
+        );
     }
 }
 
