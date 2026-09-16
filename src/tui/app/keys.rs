@@ -1127,6 +1127,9 @@ impl App {
                         self.dialog.pop();
                     } else if matches!(self.mode(), AppMode::Session) {
                         self.state.current_session_id = None;
+                        // Back to Home: the header widget is gone, so its
+                        // state must not survive into the next session.
+                        self.hypercredit_balance = None;
                         self.state.right_panel =
                             crate::routes::session::right_panel::types::RightPanelState::new();
                     } else if matches!(self.mode(), AppMode::AddProvider) {

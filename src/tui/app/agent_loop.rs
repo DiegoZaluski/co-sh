@@ -172,6 +172,9 @@ impl App {
                     .as_millis() as u64,
             );
             self.state.current_session_id = Some(id);
+            // Fresh session: the header's cost widget starts clean — no
+            // balance carried over from the previous session.
+            self.hypercredit_balance = None;
             // First message from Home/after a deletion: the fresh session
             // starts with a CLEAN right panel, like every other session-
             // selection path (deleting the previous session left a stale,

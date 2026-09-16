@@ -142,10 +142,27 @@ impl App {
                 let budget_str = format!("{}{:>3}%", render_budget_bar(pct), pct);
                 let gap: u16 = 2;
 
-                // Session total cost — the bare "$" makes its meaning obvious,
-                // so only the amount is painted (green). Hidden while the
-                // model's price is still unknown (no guessed $0).
-                let cost_str = self.session_cost().map(|c| format!("${c:.2}"));
+                // Session cost — for USD-billed providers the session's
+                // dollar total (green). For Charm Hyper the header shows the
+                // REMAINING Hypercredit balance instead: credits are not
+                // money, and the balance is the figure the user can verify
+                // against their account — it DECREASES as they spend (same
+                // number Crush shows). Only the ◆ glyph is pink (#FF60FF);
+                // the figure stays in the normal text color. Hidden while
+                // nothing is known yet (no guessed $0 / ◆0).
+                //
+                // Gated on the DATA, not a provider-name string: ONLY Charm
+                // Hyper reports `usage.remaining.hypercredits`, so a
+                // `Some(balance)` is the authoritative signal. String-matching
+                // the provider name would miss custom providers pointed at
+                // the Charm gateway (their name is user-chosen, not "charm")
+                // and the header would wrongly fall back to dollars.
+                let credits_mode = self.hypercredit_balance.is_some();
+                let cost_str = if credits_mode {
+                    self.hypercredit_balance.map(|b| format!("\u{25c6} {b:.0}"))
+                } else {
+                    self.session_cost().map(|c| format!("${c:.2}"))
+                };
                 let cost_w = cost_str.as_ref().map_or(0, |s| s.chars().count()) as u16;
                 let cost_gap = if cost_str.is_some() { gap } else { 0 };
 
@@ -157,11 +174,29 @@ impl App {
 
                 // Session cost — the leftmost element of the header line.
                 if let Some(cost) = &cost_str {
-                    let cost_style = Style::default().fg(rgba_color(self.theme.success));
-                    for (i, ch) in cost.chars().enumerate() {
-                        if let Some(cell) = buf.cell_mut((right_x + i as u16, area.y)) {
-                            cell.set_char(ch);
-                            cell.set_style(cost_style);
+                    if credits_mode {
+                        // ◆ gets its OWN cell in Charm pink; the number is
+                        // drawn after it with the plain default style.
+                        let mut chars = cost.chars();
+                        if let Some(diamond) = chars.next()
+                            && let Some(cell) = buf.cell_mut((right_x, area.y))
+                        {
+                            cell.set_char(diamond);
+                            cell.set_style(Style::default()
+                                .fg(ratatui::style::Color::Rgb(255, 96, 255)));
+                        }
+                        for (i, ch) in chars.enumerate() {
+                            if let Some(cell) = buf.cell_mut((right_x + 1 + i as u16, area.y)) {
+                                cell.set_char(ch);
+                            }
+                        }
+                    } else {
+                        let cost_style = Style::default().fg(rgba_color(self.theme.success));
+                        for (i, ch) in cost.chars().enumerate() {
+                            if let Some(cell) = buf.cell_mut((right_x + i as u16, area.y)) {
+                                cell.set_char(ch);
+                                cell.set_style(cost_style);
+                            }
                         }
                     }
                 }

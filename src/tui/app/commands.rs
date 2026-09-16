@@ -132,6 +132,9 @@ impl App {
         let title = format_session_timestamp(now_ms);
         self.state.add_empty_session(id.clone(), title, now_ms);
         self.state.current_session_id = Some(id);
+        // Fresh session: the header's cost widget starts clean — no
+        // balance carried over from the previous session.
+        self.hypercredit_balance = None;
         // A fresh session starts with a CLEAN right panel: the panel lives
         // on AppState (not inside the Session model), so without this reset
         // the previous session's todos, PTY/subagent sessions, panel focus,

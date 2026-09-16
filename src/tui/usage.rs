@@ -53,6 +53,14 @@ pub struct UsageRecord {
     /// locally. `None` when the provider does not report a cost.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
+    /// REAL cost in the provider's NATIVE prepaid unit when that is not USD
+    /// (Charm Hyper: Hypercredits), parallel to `cost_usd` — both come from
+    /// the same `usage.cost` object in one response. Lets the session view
+    /// render Charm spend in ◆ (the unit the user's balance is denominated
+    /// in) while `cost_usd` still feeds the cross-provider dollar totals.
+    /// `None` for providers that bill natively in USD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_credits: Option<f64>,
 }
 
 /// Appends/reads the global usage log.
@@ -297,6 +305,7 @@ mod tests {
                 ..TokenUsage::default()
             },
             cost_usd: cost,
+            cost_credits: None,
         }
     }
 
@@ -357,6 +366,31 @@ mod tests {
         let line = r#"{"ts":1,"session_id":"s1","provider":"p","model":"m","usage":{"input_tokens":1,"output_tokens":2},"cost_usd":0.5}"#;
         let r: UsageRecord = serde_json::from_str(line).unwrap();
         assert_eq!(r.cost_usd, Some(0.5));
+    }
+
+    #[test]
+    fn charm_credits_round_trip_through_disk() {
+        // A Charm Hyper record carries BOTH the USD figure and the native
+        // Hypercredit figure; both survive the JSONL round trip so the
+        // session view can render ◆ while totals stay in $.
+        let dir = std::env::temp_dir().join(format!("cosh-usage-hc-{}", std::process::id()));
+        let store = UsageStore::with_file(dir.join("usage.jsonl"));
+        let mut r = rec(1, "charm", Some(0.000012), 10, 5);
+        r.cost_credits = Some(12.0);
+        store.append(&r);
+        let loaded = store.load();
+        assert_eq!(loaded[0].cost_usd, Some(0.000012));
+        assert_eq!(loaded[0].cost_credits, Some(12.0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn credits_usd_are_independent_per_record() {
+        // A USD-billed provider never gets a credits figure: the session
+        // view must keep rendering `$` for it (no ◆ leakage across
+        // providers within a mixed session).
+        let r = rec(1, "openrouter", Some(0.95), 10, 5);
+        assert_eq!(r.cost_credits, None);
     }
 
     #[test]

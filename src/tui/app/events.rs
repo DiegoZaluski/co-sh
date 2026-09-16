@@ -997,8 +997,24 @@ impl App {
                     provider,
                     model,
                     reported_cost,
+                    reported_cost_credits,
+                    remaining_credits,
                 } => {
-                    self.record_usage(usage, &provider, &model, reported_cost);
+                    self.record_usage(
+                        usage,
+                        &provider,
+                        &model,
+                        reported_cost,
+                        reported_cost_credits,
+                    );
+                    // The provider's remaining prepaid balance (Charm
+                    // Hypercredits) — the user-facing ◆ figure in the
+                    // session header. Latest request wins. Its PRESENCE is
+                    // what switches the header to credits mode (only Charm
+                    // reports it), so no provider-name matching happens.
+                    if remaining_credits.is_some() {
+                        self.hypercredit_balance = remaining_credits;
+                    }
                 }
             }
         }

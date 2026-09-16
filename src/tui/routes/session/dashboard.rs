@@ -147,8 +147,11 @@ pub fn render(buf: &mut Buffer, area: Rect, data: &DashboardData, theme: &Theme)
         Style::default().fg(text),
     );
     y += 1;
-    // Cost policy: only the provider's REAL reported cost is shown. A
-    // provider without cost reporting gets a muted `—` — no estimate is
+    // Cost policy: only the provider's REAL reported cost is shown, always
+    // in USD — the dashboard's dollar totals must stay comparable across
+    // providers, so native prepaid units (Charm Hypercredits) are NOT
+    // rendered here; the session header shows the ◆ balance instead.
+    // A provider without cost reporting gets a muted `—` — no estimate is
     // ever fabricated, and the absence is NOT a warning (it is the
     // documented behavior for providers that don't vouch for a price).
     let (cost_str, cost_style) = match data.session_cost {

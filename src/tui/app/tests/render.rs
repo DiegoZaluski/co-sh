@@ -83,3 +83,79 @@ async fn session_main_area_ignores_hidden_right_panel() {
     assert_eq!(sa2.right_panel_w, 0);
     assert_eq!(sa2.main.width, 140);
 }
+
+/// The DEFINITIVE check for the Charm header bug: a real HarnessEvent::Usage
+/// carrying `remaining_credits` must (a) land in `hypercredit_balance` after
+/// `poll_events`, and (b) make the rendered header show the ◆ BALANCE — not
+/// the dollar total. Regression for "header stays in dollars while using
+/// Charm".
+#[tokio::test]
+async fn charm_usage_event_switches_header_to_credits_balance() {
+    use cosh_sdk::connector::TokenUsage;
+
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    // The header cost widget only renders once the session has content
+    // (same precondition a real Charm session has after the first exchange).
+    app.state
+        .current_session_mut()
+        .unwrap()
+        .messages
+        .push(crate::types::Message {
+            id: "m1".into(),
+            role: crate::types::MessageRole::User,
+            parts: vec![crate::types::Part::Text(crate::types::TextPart {
+                text: "hi".into(),
+                synthetic: false,
+            })],
+            created_at: 0,
+            agent: None,
+            model: None,
+        });
+
+    let usage = cosh::harness::HarnessEvent::Usage {
+        usage: TokenUsage::default(),
+        provider: "charm".into(),
+        model: "glm-5.3-flash".into(),
+        reported_cost: Some(0.000012),
+        reported_cost_credits: Some(12.0),
+        remaining_credits: Some(88.0),
+    };
+    app.event_tx.send(usage).unwrap();
+    app.poll_events();
+
+    // (a) The balance landed.
+    assert_eq!(app.hypercredit_balance, Some(88.0));
+
+    // (b) The header renders the BALANCE in credits mode — scan the top row
+    // of a real backend render for what was actually drawn.
+    use ratatui::{Terminal, backend::TestBackend};
+    let backend = TestBackend::new(140, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|f| app.render(f, 0.0))
+        .unwrap();
+    let area = terminal.backend().buffer().area;
+    let row: String = (area.x..area.right())
+        .filter_map(|x| {
+            terminal
+                .backend()
+                .buffer()
+                .cell((x, area.y))
+                .map(|c| c.symbol().to_string())
+        })
+        .collect();
+    assert!(
+        row.contains('\u{25c6}'),
+        "header must show the ◆ credit glyph, got: {row:?}"
+    );
+    assert!(
+        !row.contains('$'),
+        "header must NOT show dollars in credits mode, got: {row:?}"
+    );
+    assert!(
+        row.contains(" 88"),
+        "header must show the remaining BALANCE 88, got: {row:?}"
+    );
+}

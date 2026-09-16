@@ -313,6 +313,11 @@ pub struct App {
     /// Monotonic id assigned to each usage record (runtime-only correlation;
     /// never persisted).
     usage_next_id: u64,
+    /// Account's REMAINING prepaid balance (Charm Hypercredits) as of the
+    /// last completed request — the user-facing ◆ figure in the session
+    /// header. Decreases as the user spends. `None` until the provider
+    /// reports one (never for USD-billed providers).
+    hypercredit_balance: Option<f64>,
     /// Stores the theme name that was active when the theme dialog opened (for cancel/restore)
     theme_dialog_original: Option<String>,
     /// Stores the model that was active when the model dialog opened (for cancel/restore)
@@ -520,6 +525,7 @@ impl App {
         let usage_next_id = usage_records.len() as u64;
 
         Self {
+            hypercredit_balance: None,
             state,
             theme_registry,
             theme,
@@ -914,6 +920,7 @@ impl App {
         provider: &str,
         model: &str,
         reported_cost: Option<f64>,
+        reported_cost_credits: Option<f64>,
     ) {
         use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -935,6 +942,7 @@ impl App {
             model: model.to_owned(),
             usage,
             cost_usd: cost,
+            cost_credits: reported_cost_credits,
         };
 
         self.usage_records.push(record.clone());
