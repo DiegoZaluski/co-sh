@@ -146,6 +146,36 @@ fn base_url<'a>(config: &ProviderConfig, params: &'a Parameters) -> &'a str {
     params.base_url.as_deref().unwrap_or(config.base_url)
 }
 
+/// Charm Hyper: remaining Hypercredit balance straight from the account
+/// (`GET /credits` → `{"balance": <f64>}`).
+///
+/// Fallback for when the gateway's streaming usage frames do NOT carry
+/// `usage.remaining.hypercredits` (observed live: glm models via the Prism
+/// router omit the field). Crush uses the same strategy
+/// (`internal/agent/hyper/provider.go` `FetchCredits`). Returns `None` on
+/// any failure — a missing balance must never block or error the turn.
+pub async fn hyper_credits_balance(
+    config: &ProviderConfig,
+    params: &Parameters,
+    service: Option<&str>,
+) -> Option<f64> {
+    let api_key = params
+        .api_key
+        .clone()
+        .or_else(|| get_api_key(config.name, service))?;
+    let body = get_json(
+        config,
+        params,
+        &format!("{}/credits", base_url(config, params)),
+        &api_key,
+    )
+    .await
+    .ok()?;
+    let balance = body.get("balance").and_then(serde_json::Value::as_f64)?;
+    log::debug!("[HYPER] credits endpoint fallback: balance={balance}");
+    (balance.is_finite() && balance >= 0.0).then_some(balance)
+}
+
 fn reported_sum(session_reported_costs: &[f64]) -> f64 {
     session_reported_costs.iter().sum()
 }

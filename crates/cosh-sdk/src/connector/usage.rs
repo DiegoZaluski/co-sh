@@ -57,6 +57,13 @@ pub struct TokenUsage {
     /// the provider is the only source of truth for its own billing.
     #[serde(default)]
     pub reported_cost: Option<f64>,
+    /// REAL cost in the provider's NATIVE prepaid unit when that is not USD
+    /// (Charm Hyper: `usage.cost.hypercredits`). Parallel to
+    /// [`TokenUsage::reported_cost`] — both come from the same
+    /// `usage.cost` object in one response. `None` when the provider bills
+    /// natively in USD (OpenRouter, xAI, …) or reports nothing.
+    #[serde(default)]
+    pub reported_cost_credits: Option<f64>,
 }
 
 impl TokenUsage {
@@ -97,6 +104,12 @@ impl TokenUsage {
                 (Some(a), None) => Some(a),
                 (None, b) => b,
             },
+            reported_cost_credits: match (self.reported_cost_credits, next.reported_cost_credits)
+            {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (Some(a), None) => Some(a),
+                (None, b) => b,
+            },
         }
     }
 }
@@ -116,6 +129,7 @@ mod tests {
             cache_read_input_tokens: 8000,
             reasoning_tokens: 0,
             reported_cost: None,
+            reported_cost_credits: None,
         };
         let delta = TokenUsage {
             input_tokens: 0,
@@ -124,6 +138,7 @@ mod tests {
             cache_read_input_tokens: 0,
             reasoning_tokens: 0,
             reported_cost: None,
+            reported_cost_credits: None,
         };
         let merged = start.merge_stream(delta);
         assert_eq!(merged.input_tokens, 1200);

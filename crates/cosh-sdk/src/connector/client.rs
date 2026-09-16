@@ -603,6 +603,8 @@ impl Connector {
             Family::Gemini => gemini::extract_usage(raw),
         }?;
         usage.reported_cost = super::output::extract_reported_cost(raw).or(usage.reported_cost);
+        usage.reported_cost_credits =
+            super::output::extract_reported_credits(raw).or(usage.reported_cost_credits);
         Some(usage)
     }
 
@@ -673,6 +675,22 @@ impl Connector {
     #[must_use]
     pub fn provider_name(&self) -> Option<&'static str> {
         self.provider.map(|p| p.name)
+    }
+
+    /// Charm Hyper: remaining Hypercredit balance straight from the account
+    /// endpoint (`GET /credits`). Fallback for when the streaming usage
+    /// frames omit `usage.remaining.hypercredits`. `None` on any failure —
+    /// best-effort, never blocks or errors the turn.
+    pub async fn hyper_credits_balance(&self) -> Option<f64> {
+        let Ok(provider) = self.provider() else {
+            return None;
+        };
+        super::cost::hyper_credits_balance(
+            provider,
+            &self.params,
+            self.params.service_keyring.as_deref(),
+        )
+        .await
     }
 
     /// Choose how tool calls are delivered: native structured parts

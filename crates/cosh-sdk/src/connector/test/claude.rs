@@ -757,6 +757,7 @@ async fn token_usage_reads_cache_fields() {
             cache_read_input_tokens: 1800,
             reasoning_tokens: 0,
             reported_cost: None,
+            reported_cost_credits: None,
         })
     );
     // The extractor also works standalone on a minimal usage object.

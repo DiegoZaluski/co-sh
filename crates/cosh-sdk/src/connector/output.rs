@@ -180,6 +180,16 @@ pub struct ChatStream {
     /// Gateways that do not report a cost leave this `None`. Cleared on the
     /// retry middleware's reset marker.
     reported_cost: Option<f64>,
+    /// REAL cost in the provider's NATIVE prepaid unit when that is not USD
+    /// (Charm Hyper `usage.cost.hypercredits`), parallel to
+    /// [`Self::reported_cost`]. Cleared on the retry middleware's reset
+    /// marker.
+    reported_cost_credits: Option<f64>,
+    /// Account's REMAINING balance in the provider's native prepaid unit
+    /// (Charm Hyper `usage.remaining.hypercredits`), as of the LAST frame
+    /// seen. Decreases as requests spend; the user-facing ◆ figure. Cleared
+    /// on the retry middleware's reset marker.
+    remaining_credits: Option<f64>,
     family: Family,
     finished: bool,
 }
@@ -194,6 +204,8 @@ impl ChatStream {
             last_raw: None,
             usage: None,
             reported_cost: None,
+            reported_cost_credits: None,
+            remaining_credits: None,
             family,
             finished: false,
         }
@@ -234,6 +246,36 @@ impl ChatStream {
         self.reported_cost
     }
 
+    /// Returns the REAL cost in the provider's NATIVE prepaid unit when
+    /// that is not USD (Charm Hyper: Hypercredits), if reported.
+    ///
+    /// Same draining and per-request lifetime semantics as
+    /// [`Self::reported_cost`]; `None` for providers that bill natively in
+    /// USD.
+    pub async fn reported_cost_credits(&mut self) -> Option<f64> {
+        if !self.finished {
+            use tokio_stream::StreamExt;
+            while self.next().await.is_some() {}
+        }
+        self.reported_cost_credits
+    }
+
+    /// Returns the account's REMAINING balance in the provider's native
+    /// prepaid unit (Charm Hyper: Hypercredits) as of the last usage frame,
+    /// if reported.
+    ///
+    /// This is the number the user can verify against their account — it
+    /// decreases as requests spend. Same draining semantics as
+    /// [`Self::reported_cost`]; `None` for providers without a prepaid
+    /// balance.
+    pub async fn remaining_credits(&mut self) -> Option<f64> {
+        if !self.finished {
+            use tokio_stream::StreamExt;
+            while self.next().await.is_some() {}
+        }
+        self.remaining_credits
+    }
+
     /// Returns the last raw SSE frame received from the stream.
     ///
     /// If the stream hasn't been fully consumed yet, this drains any
@@ -268,6 +310,8 @@ impl Stream for ChatStream {
                 // the beginning: drop the failed attempt's partial usage.
                 self.usage = None;
                 self.reported_cost = None;
+                self.reported_cost_credits = None;
+                self.remaining_credits = None;
             } else {
                 if let Some(u) = extract_family_usage(self.family, &chunk.raw) {
                     self.usage = Some(match self.usage {
@@ -283,11 +327,24 @@ impl Stream for ChatStream {
                     cost = Some(cost.map_or(c, |prev| prev.max(c)));
                     self.reported_cost = cost;
                 }
+                // Native-unit cost (Hypercredits): same frame, same growth
+                // discipline.
+                if let Some(c) = extract_reported_credits(&chunk.raw) {
+                    self.reported_cost_credits =
+                        Some(self.reported_cost_credits.map_or(c, |prev| prev.max(c)));
+                }
+                // Remaining balance: later frames supersede earlier ones
+                // (the final frame carries the post-request balance).
+                if let Some(b) = extract_remaining_credits(&chunk.raw) {
+                    self.remaining_credits = Some(b);
+                }
                 // Keep the usage object's copy in sync so `usage()`
                 // consumers (the TUI usage panel) see the real billed
                 // amount without a second accessor call.
+                let credits = self.reported_cost_credits;
                 if let Some(u) = &mut self.usage {
                     u.reported_cost = cost;
+                    u.reported_cost_credits = credits;
                 }
             }
             self.last_raw = Some(chunk.raw.clone());
@@ -313,10 +370,15 @@ fn extract_family_usage(family: Family, raw: &str) -> Option<TokenUsage> {
 
 /// Extract the REAL billed cost (USD) from a raw response/SSE frame.
 ///
-/// Two wire shapes are recognized, both carrying what the gateway actually
+/// Three wire shapes are recognized, all carrying what the gateway actually
 /// charged:
 /// - `usage.cost` (a number inside the usage object) — OpenRouter documents
 ///   this field; the Vercel AI Gateway follows the same shape.
+/// - `usage.cost` as an OBJECT with a nested `usd` field — how Charm Hyper
+///   reports it: `{"cost":{"usd":0.000012,"hypercredits":12}}`
+///   (hyper.charm.land/docs/api/openai-chat-completions). The nested USD
+///   figure is preferred; the Hypercredit figure is the same spend in the
+///   provider's prepaid unit and is NOT used here.
 /// - a TOP-LEVEL `cost` — how the OpenCode Zen/Go gateways report it: the
 ///   streamed chat completion ends with a final frame
 ///   `{"choices":[],"cost":"0"}` outside the usage object, typed as a JSON
@@ -327,6 +389,11 @@ fn extract_family_usage(family: Family, raw: &str) -> Option<TokenUsage> {
 /// xAI reports the exact billed amount as `usage.cost_in_usd_ticks`
 /// (1 USD = 10^10 ticks); it is converted to USD here so every consumer
 /// sees one unit.
+///
+/// The Vercel AI Gateway carries the per-request spend OUTSIDE the usage
+/// object, as `providerMetadata.gateway.cost` (stringly typed on the wire,
+/// e.g. `"0.00849"`); it is checked after `usage.cost` so the more specific
+/// location always wins.
 ///
 /// Family-agnostic on purpose. Families whose native response shape has no
 /// `usage`/`cost` object (Claude, Gemini) simply never match.
@@ -348,19 +415,95 @@ pub(crate) fn extract_reported_cost(raw: &str) -> Option<f64> {
             None
         };
     }
-    let value = v
-        .get("usage")
-        .and_then(|usage| usage.get("cost"))
-        .or_else(|| v.get("cost"))?;
-    let cost = match value {
-        serde_json::Value::Number(n) => n.as_f64()?,
-        serde_json::Value::String(s) => s.trim().parse::<f64>().ok()?,
-        _ => return None,
-    };
+    let cost = money_value(cost_field(&v)?)?;
     if cost.is_finite() && cost >= 0.0 {
         Some(cost)
     } else {
         None
+    }
+}
+
+/// Extract the REAL billed cost in the provider's NATIVE prepaid unit when
+/// that is not USD — Charm Hyper's `usage.cost.hypercredits`.
+///
+/// Charm reports BOTH figures in the same `usage.cost` object
+/// (`{"usd":0.000012,"hypercredits":12}`); this returns the credits figure
+/// so Charm users can see their spend in the unit their balance is denominated
+/// in (◆, like Crush renders it). `None` for every provider that bills
+/// natively in USD or reports no cost.
+pub(crate) fn extract_reported_credits(raw: &str) -> Option<f64> {
+    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let credits = json_f64(cost_field(&v)?.get("hypercredits")?)?;
+    if credits.is_finite() && credits >= 0.0 {
+        Some(credits)
+    } else {
+        None
+    }
+}
+
+/// Extract the account's REMAINING Hypercredit balance after a request —
+/// Charm Hyper's `usage.remaining.hypercredits`.
+///
+/// This is the figure the user can verify against their account: it DECREASES
+/// as requests spend credits (the authoritative running balance, exactly what
+/// `GET /v1/credits` reports, delivered for free on every response).
+/// Only the LAST-seen value in a stream matters — later frames supersede
+/// earlier ones. `None` for every other provider.
+pub(crate) fn extract_remaining_credits(raw: &str) -> Option<f64> {
+    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let remaining = v
+        .get("usage")
+        .and_then(|usage| usage.get("remaining"))
+        .and_then(|r| r.get("hypercredits"))
+        .or_else(|| {
+            v.get("usage")
+                .and_then(|usage| usage.get("remaining_hypercredits"))
+        })?;
+    let balance = json_f64(remaining)?;
+    if balance.is_finite() && balance >= 0.0 {
+        Some(balance)
+    } else {
+        None
+    }
+}
+
+/// Locate the provider's cost value in a response frame, in precedence
+/// order: `usage.cost` (OpenRouter, Charm, Vercel-in-usage),
+/// `providerMetadata.gateway.cost` (Vercel), top-level `cost` (OpenCode
+/// Zen/Go trailer). The more specific location always wins.
+fn cost_field(v: &serde_json::Value) -> Option<&serde_json::Value> {
+    v.get("usage")
+        .and_then(|usage| usage.get("cost"))
+        .or_else(|| {
+            // Vercel AI Gateway: spend rides `providerMetadata.gateway.cost`.
+            v.get("providerMetadata")
+                .and_then(|m| m.get("gateway"))
+                .and_then(|g| g.get("cost"))
+        })
+        .or_else(|| v.get("cost"))
+}
+
+/// Number-or-string JSON money field as f64 (some gateways type it as a
+/// string on the wire).
+fn json_f64(value: &serde_json::Value) -> Option<f64> {
+    match value {
+        serde_json::Value::Number(n) => n.as_f64(),
+        serde_json::Value::String(s) => s.trim().parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+/// Parse one money-shaped JSON value into USD.
+///
+/// Accepts a JSON number (`0.95`), a numeric string ("0.95" — OpenCode
+/// types `cost` as a string on the wire), or an object with a nested `usd`
+/// money value (Charm Hyper: `{"usd":0.000012,"hypercredits":12}`).
+fn money_value(value: &serde_json::Value) -> Option<f64> {
+    match value {
+        serde_json::Value::Number(n) => n.as_f64(),
+        serde_json::Value::String(s) => s.trim().parse::<f64>().ok(),
+        serde_json::Value::Object(_) => money_value(value.get("usd")?),
+        _ => None,
     }
 }
 
@@ -408,6 +551,56 @@ mod tests {
         // Streaming final chunk carries the same field.
         let raw = r#"{"choices":[],"usage":{"cost_in_usd_ticks":158500}}"#;
         assert_eq!(extract_reported_cost(raw), Some(0.00001585));
+    }
+
+    /// Charm Hyper types `usage.cost` as an OBJECT carrying BOTH the USD
+    /// figure and the Hypercredit equivalent (docs: OpenAI Chat Completions
+    /// — hyper.charm.land). The nested `usd` must be picked up as USD and
+    /// the nested `hypercredits` as the native-unit figure; before these
+    /// shapes were recognized the object fell through to `None` and Charm
+    /// sessions never showed a price in the usage dashboard.
+    #[test]
+    fn extracts_reported_cost_from_charm_hyper_object() {
+        let raw = r#"{"id":"chatcmpl-abc123","usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15,"cost":{"usd":0.000012,"hypercredits":12},"remaining":{"hypercredits":88}}}"#;
+        assert_eq!(extract_reported_cost(raw), Some(0.000012));
+        assert_eq!(extract_reported_credits(raw), Some(12.0));
+        // Streaming final chunk: same object shape inside the usage frame.
+        let raw = r#"{"choices":[],"usage":{"cost":{"usd":0.000084,"hypercredits":84},"remaining":{"hypercredits":88}}}"#;
+        assert_eq!(extract_reported_cost(raw), Some(0.000084));
+        assert_eq!(extract_reported_credits(raw), Some(84.0));
+        // Object without a nested `usd` (credits-only) is not a USD figure,
+        // but the credits extraction still works off the same object.
+        let raw = r#"{"usage":{"cost":{"hypercredits":12}}}"#;
+        assert_eq!(extract_reported_cost(raw), None);
+        assert_eq!(extract_reported_credits(raw), Some(12.0));
+        // Non-credit providers never yield a credits figure.
+        let raw = r#"{"usage":{"cost":0.95}}"#;
+        assert_eq!(extract_reported_credits(raw), None);
+        // Remaining balance rides `usage.remaining.hypercredits` and DECREASES
+        // as requests spend — the user-facing ◆ figure.
+        let raw = r#"{"usage":{"cost":{"usd":0.000012,"hypercredits":12},"remaining":{"hypercredits":88}}}"#;
+        assert_eq!(extract_remaining_credits(raw), Some(88.0));
+        // Flat alternative shape.
+        let raw = r#"{"usage":{"remaining_hypercredits":77}}"#;
+        assert_eq!(extract_remaining_credits(raw), Some(77.0));
+        // Absent / invalid balance is `None`, never a guess.
+        let raw = r#"{"usage":{"cost":{"usd":0.5}}}"#;
+        assert_eq!(extract_remaining_credits(raw), None);
+        let raw = r#"{"usage":{"remaining":{"hypercredits":-5}}}"#;
+        assert_eq!(extract_remaining_credits(raw), None);
+    }
+
+    /// Vercel AI Gateway: the spend rides OUTSIDE the usage object as
+    /// `providerMetadata.gateway.cost`, stringly typed on the wire
+    /// (e.g. `"0.00849"`), and must be picked up when no `usage.cost` or
+    /// top-level `cost` is present.
+    #[test]
+    fn extracts_reported_cost_from_vercel_provider_metadata() {
+        let raw = r#"{"id":"gen-x","usage":{"prompt_tokens":100,"completion_tokens":50},"providerMetadata":{"gateway":{"cost":"0.00849","generationId":"gen-x"}}}"#;
+        assert!((extract_reported_cost(raw).unwrap() - 0.00849).abs() < 1e-12);
+        // Numeric form (in case the gateway types it later).
+        let raw = r#"{"providerMetadata":{"gateway":{"cost":0.00849}}}"#;
+        assert!((extract_reported_cost(raw).unwrap() - 0.00849).abs() < 1e-12);
     }
 
     /// `usage.cost` wins when both shapes appear in one frame (the usage
@@ -558,6 +751,48 @@ mod tests {
         assert_eq!(usage.input_tokens, 8);
         assert_eq!(usage.output_tokens, 6);
         assert_eq!(usage.reported_cost, Some(0.0));
+    }
+
+    /// End-to-end over the frames Charm Hyper ACTUALLY sends (documented
+    /// wire format): content chunks, then the final usage frame carrying
+    /// `usage.cost.{usd,hypercredits}` AND `usage.remaining.hypercredits`.
+    /// The remaining balance is the user-facing ◆ figure — it must survive
+    /// the drain and land in the usage object's sync copy.
+    #[tokio::test]
+    async fn charm_hyper_remaining_balance_lands_in_stream() {
+        use tokio_stream::StreamExt;
+        let frames = vec![
+            Ok(StreamChunk {
+                raw: r#"{"id":"chatcmpl-abc123","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Hey!"},"finish_reason":null}]}"#.into(),
+                token: "Hey!".into(),
+                reasoning: String::new(),
+                finish_reason: None,
+                thinking_blocks: None,
+                tool_call: None,
+                reset: false,
+            }),
+            // Final usage frame (include_usage): cost object + remaining.
+            Ok(StreamChunk {
+                raw: r#"{"id":"chatcmpl-abc123","object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15,"cost":{"usd":0.000012,"hypercredits":12},"remaining":{"hypercredits":88}}}"#.into(),
+                token: String::new(),
+                reasoning: String::new(),
+                finish_reason: Some("stop".into()),
+                thinking_blocks: None,
+                tool_call: None,
+                reset: false,
+            }),
+        ];
+        let mut stream = ChatStream::new(
+            Box::pin(tokio_stream::iter(frames)),
+            Family::OpenAICompatible,
+        );
+        while stream.next().await.is_some() {}
+        assert_eq!(stream.reported_cost().await, Some(0.000012));
+        assert_eq!(stream.reported_cost_credits().await, Some(12.0));
+        // THE user-facing figure: remaining balance, NOT the spend.
+        assert_eq!(stream.remaining_credits().await, Some(88.0));
+        let usage = stream.usage().await.unwrap();
+        assert_eq!(usage.reported_cost_credits, Some(12.0));
     }
 }
 
