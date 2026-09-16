@@ -19,6 +19,7 @@ use cosh_tools::{
     skills::{
         Skills,
         types::{SkillsMatchInput, SkillsReadAssetInput, SkillsReadInput},
+        SkillSource,
     },
     subagent::{
         SubAgent,
@@ -147,6 +148,29 @@ pub struct CoshTools {
     local_base_urls: std::collections::HashMap<String, String>,
 }
 
+/// Default skill sources: the user's `~/.skills` directory.
+///
+/// A missing (or non-directory) default is NOT registered: discovery is a
+/// hard `InvalidSource` error for unreadable sources, and a default that
+/// does not exist must never break the skills tools — they simply report
+/// an empty list until the directory (or a setup.json override) appears.
+fn default_skill_sources() -> Vec<SkillSource> {
+    default_skill_sources_for(std::env::var("HOME").ok().as_deref())
+}
+
+/// [`default_skill_sources`] with the home directory injected (testable).
+fn default_skill_sources_for(home: Option<&str>) -> Vec<SkillSource> {
+    let Some(home) = home else {
+        return Vec::new();
+    };
+    let dir = format!("{home}/.skills");
+    if std::path::Path::new(&dir).is_dir() {
+        vec![SkillSource::Directory { path: dir }]
+    } else {
+        Vec::new()
+    }
+}
+
 impl CoshTools {
     #[must_use]
     pub fn new(cwd: &str) -> Self {
@@ -169,7 +193,7 @@ impl CoshTools {
             recall: Recall::new(),
             #[cfg(feature = "embed")]
             recall_dbs: Vec::new(),
-            skills: Skills::new(),
+            skills: Skills::new().sources(default_skill_sources()),
             subagent: SubAgent::new(),
             event_tx: None,
             #[cfg(feature = "embed")]
@@ -184,6 +208,20 @@ impl CoshTools {
     pub fn with_local_base_urls(mut self, urls: std::collections::HashMap<String, String>) -> Self {
         self.local_base_urls = urls;
         self
+    }
+
+    /// Replace the skills wrapper (config-driven discovery sources from
+    /// setup.json). Discovery happens at dispatch time on the wrapper,
+    /// so this takes effect for every later `skills_*` call.
+    pub fn set_skills(&mut self, skills: Skills) {
+        self.skills = skills;
+    }
+
+    /// Clone of the skills wrapper — propagated to nested sub-agent
+    /// harnesses so they serve the same skill set as the parent.
+    #[must_use]
+    pub fn skills(&self) -> Skills {
+        self.skills.clone()
     }
 
     /// Get the project root directory (used for path validation).
@@ -1326,6 +1364,30 @@ impl Tools for CoshTools {
 
             _ => Err(format!("unknown cosh tool: {name}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod skills_sources_tests {
+    use super::default_skill_sources_for;
+
+    /// The `~/.skills` default is only registered when the directory
+    /// exists — a missing default must not become a discovery error.
+    #[test]
+    fn missing_default_skills_dir_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(default_skill_sources_for(Some(dir.path().to_str().unwrap())).is_empty());
+        assert!(default_skill_sources_for(None).is_empty());
+    }
+
+    /// An existing `~/.skills` directory registers exactly one source.
+    #[test]
+    fn existing_default_skills_dir_registers_one_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().to_path_buf();
+        std::fs::create_dir_all(home.join(".skills")).unwrap();
+        let sources = default_skill_sources_for(Some(home.to_str().unwrap()));
+        assert_eq!(sources.len(), 1);
     }
 }
 

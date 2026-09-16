@@ -816,6 +816,18 @@ impl Harness {
         self
     }
 
+    /// Configure skill discovery from a prebuilt skills wrapper (built by
+    /// the TUI from the setup.json `skills` section; the plain
+    /// `CoshTools::new` default already covers `~/.skills`). Nested
+    /// sub-agent harnesses inherit the parent's wrapper.
+    #[must_use]
+    pub fn with_skills(mut self, skills: cosh_tools::skills::Skills) -> Self {
+        if let Some(tools) = self.cosh_tools.as_mut() {
+            tools.set_skills(skills);
+        }
+        self
+    }
+
     /// Set lifecycle hooks from config entries: `pre` fires before a tool
     /// call, `post` after its successful execution.
     pub fn with_hooks(
@@ -4916,6 +4928,7 @@ impl Harness {
         let fallbacks = self.fallbacks.clone();
         let summarization_models = self.summarization_models.clone();
         let local_base_urls = self.local_base_urls.clone();
+        let parent_skills = self.cosh_tools.as_ref().map(|c| c.skills());
         let parent_tx = self.cosh_tools.as_ref().and_then(|c| c.event_tx());
         let stop_signal = self
             .stop_signal
@@ -4951,7 +4964,9 @@ impl Harness {
                         .with_instructions(INSTRUCTIONS_SUBAGENT)
                         .with_fallbacks(fallbacks)
                         .with_summarization_models(summarization_models)
-                        .with_local_base_urls(local_base_urls);
+                        .with_local_base_urls(local_base_urls)
+                        // Same skill sources as the parent harness.
+                        .with_skills(parent_skills.unwrap_or_default());
                     // The header (instructions + tool list) is NOT built by
                     // run_agent_loop itself — the TUI does it before every
                     // loop. Build it here so the sub-agent sees its own
