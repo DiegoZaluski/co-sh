@@ -40,6 +40,7 @@ use crate::ToolDescription;
 ///
 /// Holds the discovery configuration (sources, recursion, filters) and
 /// exposes each [`SkillAction`] variant as a dedicated method.
+#[derive(Clone)]
 pub struct Skills {
     sources: Vec<SkillSource>,
     recursive: bool,
