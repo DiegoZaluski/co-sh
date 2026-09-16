@@ -2133,11 +2133,15 @@ impl Harness {
         }
         if let Some(usage) = stream.usage().await {
             let reported_cost = stream.reported_cost().await;
+            let reported_cost_credits = stream.reported_cost_credits().await;
+            let remaining_credits = stream.remaining_credits().await;
             let _ = event_tx.send(super::events::HarnessEvent::Usage {
                 usage,
                 provider: connector.provider_name().unwrap_or("unknown").to_owned(),
                 model: connector.model().unwrap_or("").to_owned(),
                 reported_cost,
+                reported_cost_credits,
+                remaining_credits,
             });
         }
         Self::validate_summary_completion(finish_reason.as_deref())?;
@@ -2438,6 +2442,18 @@ impl Harness {
         };
         // The stream is fully drained by now, so this never blocks.
         let reported_cost = stream.reported_cost().await;
+        let reported_cost_credits = stream.reported_cost_credits().await;
+        let mut remaining_credits = stream.remaining_credits().await;
+        // Fallback (mirrors Crush's FetchCredits): the Charm gateway's
+        // streaming usage frames do NOT always carry
+        // `usage.remaining.hypercredits` (observed live on glm models via
+        // the Prism router), so when the stream reported none, fetch the
+        // balance straight from the account endpoint. Best-effort: a
+        // failure leaves the balance as None and the header stays in USD
+        // mode for this turn.
+        if remaining_credits.is_none() && self.connector.provider_name() == Some("charm") {
+            remaining_credits = self.connector.hyper_credits_balance().await;
+        }
         if let Some(ref tx) = self.reasoning_tx {
             let _ = tx.send(super::events::HarnessEvent::Usage {
                 usage,
@@ -2448,6 +2464,8 @@ impl Harness {
                     .to_owned(),
                 model: self.connector.model().unwrap_or("").to_owned(),
                 reported_cost,
+                reported_cost_credits,
+                remaining_credits,
             });
         }
     }
@@ -2600,11 +2618,16 @@ impl Harness {
         if let Some(usage) = stream.usage().await
             && let Some(tx) = &self.reasoning_tx
         {
+            let reported_cost = stream.reported_cost().await;
+            let reported_cost_credits = stream.reported_cost_credits().await;
+            let remaining_credits = stream.remaining_credits().await;
             let _ = tx.send(super::events::HarnessEvent::Usage {
                 usage,
                 provider: connector.provider_name().unwrap_or("unknown").to_string(),
                 model: connector.effective_model().unwrap_or("").to_string(),
-                reported_cost: stream.reported_cost().await,
+                reported_cost,
+                reported_cost_credits,
+                remaining_credits,
             });
         }
         Self::validate_summary_completion(finish_reason.as_deref())

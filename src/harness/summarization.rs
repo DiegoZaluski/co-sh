@@ -237,6 +237,8 @@ mod tests {
             provider: "chosen".into(),
             model: "summary".into(),
             reported_cost: Some(0.01),
+            reported_cost_credits: None,
+            remaining_credits: None,
         };
         assert!(Harness::forward_nested_accounting(&usage, Some(&tx)));
         let notice = HarnessEvent::Toast {

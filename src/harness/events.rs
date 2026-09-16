@@ -203,6 +203,18 @@ pub enum HarnessEvent {
         /// does not report a cost — the record stays unpriced (excluded
         /// from dollar totals; its tokens still count).
         reported_cost: Option<f64>,
+        /// REAL cost in the provider's NATIVE prepaid unit when that is not
+        /// USD (Charm Hyper: `usage.cost.hypercredits`), parallel to
+        /// `reported_cost` — both come from the same `usage.cost` object.
+        /// Internal bookkeeping (session spend sums); NOT what the header
+        /// renders. `None` for providers that bill natively in USD.
+        reported_cost_credits: Option<f64>,
+        /// Account's REMAINING balance in the provider's native prepaid
+        /// unit (Charm Hyper: `usage.remaining.hypercredits`) as of the
+        /// LAST completed request. The user-facing ◆ figure: it decreases
+        /// as the user spends and matches what their Charm account shows.
+        /// `None` for providers without a prepaid balance.
+        remaining_credits: Option<f64>,
     },
 }
 
