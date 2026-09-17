@@ -333,7 +333,9 @@ fn msg_content_token(
     h
 }
 
-use crate::util::text_region::{TextRegion, extract_text_in_region};
+use crate::util::text_region::{
+    TextRegion, extract_text_in_region, regions_from_full_width_cells, text_from_cell_row,
+};
 
 /// Cached heights per message (avoids duplicate pulldown_cmark parses).
 /// Messages are immutable after receipt, so results are valid until
@@ -969,26 +971,6 @@ impl SessionView {
                 );
             }
         }
-    }
-
-    /// Extract text regions from a slice of rendered cells (flattened row-major).
-    /// Each output region occupies one content row (y2 = y1 + 1).
-    fn cells_to_text_regions(
-        cells: &[ratatui::buffer::Cell],
-        w: usize,
-        h: u16,
-        content_start_y: i32,
-        x_off: u16,
-        text_max_w: u16,
-    ) -> Vec<TextRegion> {
-        crate::util::text_region::cells_to_text_regions(
-            cells,
-            w,
-            h,
-            content_start_y,
-            x_off,
-            text_max_w,
-        )
     }
 
     /// Scan a buffer rectangle [x, x+w) × [y, y+h) and return the
@@ -2941,25 +2923,15 @@ impl SessionView {
                                                     break;
                                                 }
                                                 let base = dy as usize * tc_w;
-                                                let mut line_text = String::with_capacity(tc_w);
-                                                for dx in 0..tc_w {
-                                                    line_text.push(
-                                                        tc_cells[base + dx]
-                                                            .symbol()
-                                                            .chars()
-                                                            .next()
-                                                            .unwrap_or(' '),
-                                                    );
-                                                }
-                                                let trimmed = line_text.trim_end().to_string();
+                                                let trimmed =
+                                                    text_from_cell_row(&tc_cells[base..], tc_w);
                                                 let cy = (screen_line_y as i32) - vp_top + scroll;
-                                                text_regions.push(TextRegion {
-                                                    y1: cy,
-                                                    y2: cy + 1,
-                                                    x1: x_off,
-                                                    x2: x_off + max_w,
-                                                    text: trimmed,
-                                                });
+                                                text_regions.push(TextRegion::one_row(
+                                                    cy,
+                                                    x_off,
+                                                    x_off + max_w,
+                                                    trimmed,
+                                                ));
                                             }
                                         }
                                     }
@@ -2994,13 +2966,12 @@ impl SessionView {
                                             let cs_end = p_end_cs.min(vp_end_cs);
                                             for region in cached {
                                                 if region.y1 >= cs_start && region.y1 < cs_end {
-                                                    text_regions.push(TextRegion {
-                                                        y1: region.y1,
-                                                        y2: region.y1 + 1,
-                                                        x1: x_off,
-                                                        x2: x_off + max_w,
-                                                        text: region.text.clone(),
-                                                    });
+                                                    text_regions.push(TextRegion::one_row(
+                                                        region.y1,
+                                                        x_off,
+                                                        x_off + max_w,
+                                                        region.text.clone(),
+                                                    ));
                                                 }
                                             }
                                             cached.iter().any(|r| r.y1 >= cs_start && r.y1 < cs_end)
@@ -3056,24 +3027,19 @@ impl SessionView {
                                                 break;
                                             }
 
-                                            let mut line_text = String::new();
-                                            for tx in 0..max_w {
-                                                if let Some(cell) = temp.cell((tx, ty)) {
-                                                    line_text.push(
-                                                        cell.symbol().chars().next().unwrap_or(' '),
-                                                    );
-                                                }
-                                            }
-
-                                            let trimmed = line_text.trim_end().to_string();
+                                            let temp_cells = temp.content();
+                                            let row = ty as usize * max_w as usize;
+                                            let trimmed = text_from_cell_row(
+                                                &temp_cells[row..],
+                                                max_w as usize,
+                                            );
                                             let cy = (screen_line_y as i32) - vp_top + scroll;
-                                            text_regions.push(TextRegion {
-                                                y1: cy,
-                                                y2: cy + 1,
-                                                x1: x_off,
-                                                x2: x_off + max_w,
-                                                text: trimmed,
-                                            });
+                                            text_regions.push(TextRegion::one_row(
+                                                cy,
+                                                x_off,
+                                                x_off + max_w,
+                                                trimmed,
+                                            ));
                                         }
                                     }
                                 } else {
@@ -3101,13 +3067,12 @@ impl SessionView {
                                                 skip -= 1;
                                             } else if screen_line_y < screen_end {
                                                 let cy = (screen_line_y as i32) - vp_top + scroll;
-                                                text_regions.push(TextRegion {
-                                                    y1: cy,
-                                                    y2: cy + 1,
-                                                    x1: x_off,
-                                                    x2: x_off + max_w,
-                                                    text: String::new(),
-                                                });
+                                                text_regions.push(TextRegion::one_row(
+                                                    cy,
+                                                    x_off,
+                                                    x_off + max_w,
+                                                    String::new(),
+                                                ));
                                                 screen_line_y += 1;
                                             }
                                             continue;
@@ -3125,13 +3090,12 @@ impl SessionView {
                                                 break;
                                             }
                                             let cy = (screen_line_y as i32) - vp_top + scroll;
-                                            text_regions.push(TextRegion {
-                                                y1: cy,
-                                                y2: cy + 1,
-                                                x1: x_off,
-                                                x2: x_off + max_w,
-                                                text: visual_line.clone(),
-                                            });
+                                            text_regions.push(TextRegion::one_row(
+                                                cy,
+                                                x_off,
+                                                x_off + max_w,
+                                                visual_line.clone(),
+                                            ));
                                             screen_line_y += 1;
                                         }
                                     }
@@ -3210,13 +3174,12 @@ impl SessionView {
                                 if draws_label && label_screen >= vp_top && label_screen < vp_bottom
                                 {
                                     let label = self::tool_render::tool_inline_text(t);
-                                    text_regions.push(TextRegion {
-                                        y1: label_screen - vp_top + scroll,
-                                        y2: label_screen - vp_top + scroll + 1,
-                                        x1: x_off,
-                                        x2: x_off + max_w,
-                                        text: label,
-                                    });
+                                    text_regions.push(TextRegion::one_row(
+                                        label_screen - vp_top + scroll,
+                                        x_off,
+                                        x_off + max_w,
+                                        label,
+                                    ));
                                 }
                                 // Add visible output lines after the label.
                                 // The body mirrors what each tool's renderer
@@ -3271,13 +3234,12 @@ impl SessionView {
                                             break;
                                         }
                                         let cy = out_screen_y - vp_top + scroll;
-                                        text_regions.push(TextRegion {
-                                            y1: cy,
-                                            y2: cy + 1,
-                                            x1: x_off,
-                                            x2: x_off + max_w,
-                                            text: display_line.to_string(),
-                                        });
+                                        text_regions.push(TextRegion::one_row(
+                                            cy,
+                                            x_off,
+                                            x_off + max_w,
+                                            display_line.to_string(),
+                                        ));
                                         out_screen_y += 1;
                                     }
                                 }
@@ -3289,13 +3251,12 @@ impl SessionView {
                                 );
                                 let header = if expanded { "- Thought" } else { "+ Thought" };
                                 if p_top >= vp_top {
-                                    text_regions.push(TextRegion {
-                                        y1: content_offset,
-                                        y2: content_offset + 1,
-                                        x1: x_off,
-                                        x2: x_off + max_w,
-                                        text: header.to_string(),
-                                    });
+                                    text_regions.push(TextRegion::one_row(
+                                        content_offset,
+                                        x_off,
+                                        x_off + max_w,
+                                        header.to_string(),
+                                    ));
                                 }
                                 if expanded && !r.text.is_empty() {
                                     // The body is drawn through the SAME
@@ -3341,23 +3302,17 @@ impl SessionView {
                                         .max(0)
                                         .min(i32::from(body_h));
                                     for k in row_start..row_end {
-                                        let mut line_text = String::new();
-                                        for tx in 0..body_w {
-                                            if let Some(cell) = temp.cell((tx, k as u16)) {
-                                                line_text.push(
-                                                    cell.symbol().chars().next().unwrap_or(' '),
-                                                );
-                                            }
-                                        }
-                                        let trimmed = line_text.trim_end().to_string();
+                                        let temp_cells = temp.content();
+                                        let row = k as usize * body_w as usize;
+                                        let trimmed =
+                                            text_from_cell_row(&temp_cells[row..], body_w as usize);
                                         let cy = body_top + k - vp_top + scroll;
-                                        text_regions.push(TextRegion {
-                                            y1: cy,
-                                            y2: cy + 1,
-                                            x1: x_off + 2,
-                                            x2: x_off + max_w,
-                                            text: trimmed,
-                                        });
+                                        text_regions.push(TextRegion::one_row(
+                                            cy,
+                                            x_off + 2,
+                                            x_off + max_w,
+                                            trimmed,
+                                        ));
                                     }
                                 }
                             }
@@ -3375,13 +3330,12 @@ impl SessionView {
                                     let mut title = if expanded { "- " } else { "+ " }.to_string();
                                     title.push_str("Summarizing");
                                     if p_top >= vp_top {
-                                        text_regions.push(TextRegion {
-                                            y1: cy,
-                                            y2: cy + 1,
-                                            x1: x_off,
-                                            x2: x_off + max_w,
-                                            text: title,
-                                        });
+                                        text_regions.push(TextRegion::one_row(
+                                            cy,
+                                            x_off,
+                                            x_off + max_w,
+                                            title,
+                                        ));
                                     }
                                     cy += 1;
                                     let wrap_w = max_w.saturating_sub(3).max(1);
@@ -3413,33 +3367,26 @@ impl SessionView {
                                     md.render_self(temp, scan_area);
                                     for k in 0..rows {
                                         let src_y = src_start + k;
-                                        let mut line_text = String::new();
-                                        for tx in 0..wrap_w {
-                                            if let Some(cell) = temp.cell((tx, src_y)) {
-                                                line_text.push(
-                                                    cell.symbol().chars().next().unwrap_or(' '),
-                                                );
-                                            }
-                                        }
-                                        let trimmed = line_text.trim_end().to_string();
-                                        text_regions.push(TextRegion {
-                                            y1: cy,
-                                            y2: cy + 1,
-                                            x1: x_off + 2,
-                                            x2: x_off + max_w,
-                                            text: trimmed,
-                                        });
+                                        let temp_cells = temp.content();
+                                        let row = src_y as usize * wrap_w as usize;
+                                        let trimmed =
+                                            text_from_cell_row(&temp_cells[row..], wrap_w as usize);
+                                        text_regions.push(TextRegion::one_row(
+                                            cy,
+                                            x_off + 2,
+                                            x_off + max_w,
+                                            trimmed,
+                                        ));
                                         cy += 1;
                                     }
                                 } else if p_top >= vp_top {
                                     let text = compaction_line(c, crate::types::now_ms());
-                                    text_regions.push(TextRegion {
-                                        y1: content_offset,
-                                        y2: content_offset + 1,
-                                        x1: x_off,
-                                        x2: x_off + max_w,
+                                    text_regions.push(TextRegion::one_row(
+                                        content_offset,
+                                        x_off,
+                                        x_off + max_w,
                                         text,
-                                    });
+                                    ));
                                 }
                             }
                             _ => {}
@@ -3821,22 +3768,14 @@ impl SessionView {
                             let x_off_text = inner_area.x + 3;
                             let temp_cells = temp.content();
                             let total_stride = inner_area.width as usize;
-                            let content_w = (max_w as usize).min(total_stride.saturating_sub(3));
                             let ah = actual_h as u16;
-                            let mut content_cells = Vec::with_capacity(content_w * ah as usize);
-                            for dy in 0..ah as usize {
-                                let base = dy * total_stride;
-                                for dx in 0..content_w {
-                                    content_cells.push(temp_cells[base + 3 + dx].clone());
-                                }
-                            }
-                            let regions = Self::cells_to_text_regions(
-                                &content_cells,
-                                content_w,
-                                ah,
-                                msg_content_top,
+                            let regions = regions_from_full_width_cells(
+                                temp_cells,
+                                total_stride,
+                                3,
                                 x_off_text,
-                                max_w,
+                                x_off_text + max_w,
+                                (0..ah as usize).zip(msg_content_top..),
                             );
                             self.msg_cache_text_regions[idx] = Some(regions);
                         }
@@ -3874,21 +3813,13 @@ impl SessionView {
                             // Text regions are still content-only (no border/margin text).
                             let x_off_text = inner_area.x + 3;
                             let msg_content_top = msg_top - vp_top + self.scroll_y;
-                            let content_w = (max_w as usize).min(total_stride.saturating_sub(3));
-                            let mut text_cells = Vec::with_capacity(content_w * ah as usize);
-                            for dy in 0..ah {
-                                let base = dy as usize * total_stride;
-                                for dx in 0..content_w {
-                                    text_cells.push(temp_cells[base + 3 + dx].clone());
-                                }
-                            }
-                            let regions = Self::cells_to_text_regions(
-                                &text_cells,
-                                content_w,
-                                ah,
-                                msg_content_top,
+                            let regions = regions_from_full_width_cells(
+                                temp_cells,
+                                total_stride,
+                                3,
                                 x_off_text,
-                                max_w,
+                                x_off_text + max_w,
+                                (0..ah as usize).zip(msg_content_top..),
                             );
                             // Re-account the entry's byte cost (old subtracted,
                             // new added) and stamp it most-recently-used. The
@@ -4029,21 +3960,13 @@ impl SessionView {
                                 if self.msg_cache_text_regions[idx].is_none() {
                                     let x_off_text = inner_area.x + 3;
                                     let msg_content_top = msg_top - vp_top + self.scroll_y;
-                                    let content_w = w.saturating_sub(3);
-                                    let mut text_cells = Vec::with_capacity(content_w * h as usize);
-                                    for dy in 0..h as usize {
-                                        let base = dy * w;
-                                        for dx in 0..content_w {
-                                            text_cells.push(cached_cells[base + 3 + dx].clone());
-                                        }
-                                    }
-                                    let regions = Self::cells_to_text_regions(
-                                        &text_cells,
-                                        content_w,
-                                        h,
-                                        msg_content_top,
+                                    let regions = regions_from_full_width_cells(
+                                        cached_cells,
+                                        w,
+                                        3,
                                         x_off_text,
-                                        max_w,
+                                        x_off_text + max_w,
+                                        (0..h as usize).zip(msg_content_top..),
                                     );
                                     self.msg_cache_text_regions[idx] = Some(regions);
                                 }
@@ -4082,27 +4005,20 @@ impl SessionView {
                                     }
                                 }
                                 // Region text is content-only (x1 = inner_area.x + 3):
-                                // sample from column 3 so the border/margin columns
-                                // never enter the text as ghost leading columns
-                                // (they would shift the copy 3 chars left of the
-                                // painted selection and drop the last 3 chars).
+                                // the border/margin columns are stripped by
+                                // regions_from_full_width_cells, so they never enter
+                                // the text as ghost leading columns (they would
+                                // shift the copy 3 chars left of the painted
+                                // selection and drop the last 3 chars).
                                 let x_off_text = inner_area.x + 3;
                                 let msg_content_top = msg_top - vp_top + self.scroll_y;
-                                let content_w = w.saturating_sub(3);
-                                let mut text_cells = Vec::with_capacity(content_w * ah as usize);
-                                for dy in 0..ah {
-                                    let base = dy as usize * w;
-                                    for dx in 0..content_w {
-                                        text_cells.push(cells[base + 3 + dx].clone());
-                                    }
-                                }
-                                let regions = Self::cells_to_text_regions(
-                                    &text_cells,
-                                    content_w,
-                                    ah,
-                                    msg_content_top,
+                                let regions = regions_from_full_width_cells(
+                                    &cells,
+                                    w,
+                                    3,
                                     x_off_text,
-                                    max_w,
+                                    x_off_text + max_w,
+                                    (0..ah as usize).zip(msg_content_top..),
                                 );
                                 self.msg_cache_bytes = self.msg_cache_bytes.saturating_sub(
                                     Self::cache_entry_bytes_of(
@@ -4242,25 +4158,14 @@ impl SessionView {
                                         let x_off_text = inner_area.x + 3;
                                         let temp_cells = temp.content();
                                         let total_stride = inner_area.width as usize;
-                                        let content_w =
-                                            (max_w as usize).min(total_stride.saturating_sub(3));
                                         let ah = actual_h as u16;
-                                        let mut content_cells =
-                                            Vec::with_capacity(content_w * ah as usize);
-                                        for dy in 0..ah as usize {
-                                            let base = dy * total_stride;
-                                            for dx in 0..content_w {
-                                                content_cells
-                                                    .push(temp_cells[base + 3 + dx].clone());
-                                            }
-                                        }
-                                        let regions = Self::cells_to_text_regions(
-                                            &content_cells,
-                                            content_w,
-                                            ah,
-                                            msg_content_top,
+                                        let regions = regions_from_full_width_cells(
+                                            temp_cells,
+                                            total_stride,
+                                            3,
                                             x_off_text,
-                                            max_w,
+                                            x_off_text + max_w,
+                                            (0..ah as usize).zip(msg_content_top..),
                                         );
                                         self.msg_cache_text_regions[idx] = Some(regions);
                                     }
@@ -4297,27 +4202,20 @@ impl SessionView {
                                             }
                                         }
                                         // Region text is content-only (x1 = inner_area.x
-                                        // + 3): sample from column 3 so the border/margin
-                                        // columns never enter the text as ghost leading
-                                        // columns (they would shift the copy 3 chars left
-                                        // of the painted selection and drop the last 3).
+                                        // + 3): the border/margin columns are stripped
+                                        // by regions_from_full_width_cells, so they
+                                        // never enter the text as ghost leading
+                                        // columns (they would shift the copy 3 chars
+                                        // left of the painted selection and drop the
+                                        // last 3).
                                         let x_off_text = inner_area.x + 3;
-                                        let content_w = w.saturating_sub(3);
-                                        let mut text_cells =
-                                            Vec::with_capacity(content_w * ah as usize);
-                                        for dy in 0..ah {
-                                            let base = dy as usize * w;
-                                            for dx in 0..content_w {
-                                                text_cells.push(cells[base + 3 + dx].clone());
-                                            }
-                                        }
-                                        let regions = Self::cells_to_text_regions(
-                                            &text_cells,
-                                            content_w,
-                                            ah,
-                                            msg_content_top,
+                                        let regions = regions_from_full_width_cells(
+                                            &cells,
+                                            w,
+                                            3,
                                             x_off_text,
-                                            max_w,
+                                            x_off_text + max_w,
+                                            (0..ah as usize).zip(msg_content_top..),
                                         );
                                         self.msg_cache_bytes = self.msg_cache_bytes.saturating_sub(
                                             Self::cache_entry_bytes_of(

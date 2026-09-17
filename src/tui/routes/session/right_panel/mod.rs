@@ -8,7 +8,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 
 use crate::theme::{Theme, rgba_color};
-use crate::util::text_region::TextRegion;
+use crate::util::text_region::{TextRegion, text_from_cell_row};
 
 pub mod todo;
 pub mod types;
@@ -444,13 +444,12 @@ fn render_bash_section(
         let text_max_w = max_w.saturating_sub(LEFT_PAD);
         for (i, line) in lines.iter().enumerate() {
             let truncated: String = line.chars().take(text_max_w as usize).collect();
-            state.bash_text_regions.push(TextRegion {
-                y1: i as i32,
-                y2: i as i32 + 1,
-                x1: x + LEFT_PAD,
-                x2: x + LEFT_PAD + text_max_w,
-                text: truncated,
-            });
+            state.bash_text_regions.push(TextRegion::one_row(
+                i as i32,
+                x + LEFT_PAD,
+                x + LEFT_PAD + text_max_w,
+                truncated,
+            ));
         }
     }
 
@@ -815,24 +814,13 @@ fn render_subagent_section(
                 if rebuild_regions {
                     for body_row in 0..body_h_u {
                         let base = body_row as usize * wrap_w as usize;
-                        let mut line_text = String::with_capacity(wrap_w as usize);
-                        for dx in 0..wrap_w {
-                            line_text.push(
-                                cached.cells[base + dx as usize]
-                                    .symbol()
-                                    .chars()
-                                    .next()
-                                    .unwrap_or(' '),
-                            );
-                        }
-                        let trimmed = line_text.trim_end().to_string();
-                        state.subagent_text_regions.push(TextRegion {
-                            y1: body_start + i32::from(body_row),
-                            y2: body_start + i32::from(body_row) + 1,
-                            x1: x + LEFT_PAD,
-                            x2: x + LEFT_PAD + wrap_w,
-                            text: trimmed,
-                        });
+                        let trimmed = text_from_cell_row(&cached.cells[base..], wrap_w as usize);
+                        state.subagent_text_regions.push(TextRegion::one_row(
+                            body_start + i32::from(body_row),
+                            x + LEFT_PAD,
+                            x + LEFT_PAD + wrap_w,
+                            trimmed,
+                        ));
                     }
                 }
             }
@@ -888,13 +876,7 @@ fn push_region_rows(
 ) {
     for (offset, seg) in rows.iter().enumerate() {
         let y = start_row + offset as i32;
-        regions.push(TextRegion {
-            y1: y,
-            y2: y + 1,
-            x1: x,
-            x2: x + wrap_w,
-            text: seg.clone(),
-        });
+        regions.push(TextRegion::one_row(y, x, x + wrap_w, seg.clone()));
     }
 }
 
