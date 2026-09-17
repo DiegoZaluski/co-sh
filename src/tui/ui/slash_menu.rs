@@ -115,6 +115,10 @@ impl SlashMenu {
                 desc: "Compact the session context now".into(),
             },
             SlashCommand {
+                name: "export".into(),
+                desc: "Export the agent-visible transcript to Markdown".into(),
+            },
+            SlashCommand {
                 name: "new".into(),
                 desc: "Start a new session".into(),
             },

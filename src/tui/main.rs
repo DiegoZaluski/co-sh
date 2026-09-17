@@ -14,6 +14,7 @@ mod session_snapshots;
 mod session_store;
 mod state;
 mod theme;
+mod transcript_export;
 mod types;
 mod ui;
 mod update;

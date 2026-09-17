@@ -198,6 +198,8 @@ impl App {
             self.open_tool_call_dialog();
         } else if cmd.name == "compact" {
             self.start_manual_compaction();
+        } else if cmd.name == "export" {
+            self.export_transcript();
         } else if cmd.name == "new" {
             if self.state.status == crate::types::SessionStatus::Idle {
                 self.start_new_session();
@@ -256,6 +258,57 @@ impl App {
             self.prompt_view.cursor_pos = self.prompt_view.input.len();
         }
         self.slash_menu.visible = false;
+    }
+
+    /// User-triggered `/export`: write the CURRENT agent-visible transcript
+    /// of the active session to `{cwd}/{session-name}-{uuid}.md`. The export
+    /// replays the persisted context records through the context manager, so
+    /// only what the agent can see right now (visibility boundary, hidden
+    /// items, checkpoint coverage, masked results) reaches the Markdown file.
+    ///
+    /// The whole load-replay-render-write pipeline runs on a worker thread:
+    /// replaying a long JSONL history on the UI thread would freeze the TUI
+    /// for the duration. The outcome arrives as a toast through the harness
+    /// event channel, the same path the session store's lock notifications
+    /// already use.
+    pub(super) fn export_transcript(&mut self) {
+        use crate::ui::toast::{ToastOptions, ToastVariant};
+        let Some(session) = self.state.current_session().cloned() else {
+            self.toast_state.show(ToastOptions {
+                title: Some("Export".into()),
+                message: "No active session.".into(),
+                variant: ToastVariant::Warning,
+                duration_ms: 4000,
+            });
+            return;
+        };
+        let store = self.session_store.clone();
+        let cwd = std::path::PathBuf::from(&self.state.working_directory);
+        // The export is a snapshot of the PERSISTED records: a running loop's
+        // in-flight turn has not landed on disk yet. Say so on the toast
+        // instead of letting the user assume the live tail is in the file.
+        let still_working = self.state.status != crate::types::SessionStatus::Idle;
+        let event_tx = self.event_tx.clone();
+        std::thread::spawn(move || {
+            let result = crate::transcript_export::export_session_transcript(&store, &session, &cwd);
+            let (message, variant) = match result {
+                Ok(path) => {
+                    let mut message = format!("Export: transcript written to {}.", path.display());
+                    if still_working {
+                        message.push_str(" (snapshot as of the last persisted turn; the agent is still working)");
+                    }
+                    (message, cosh::harness::events::ToastVariant::Info)
+                }
+                Err(error) => {
+                    log::warn!("transcript export failed: {error}");
+                    (
+                        format!("Export: could not write the transcript: {error}"),
+                        cosh::harness::events::ToastVariant::Warning,
+                    )
+                }
+            };
+            let _ = event_tx.send(HarnessEvent::Toast { message, variant });
+        });
     }
 
     /// User-triggered `/compact`: run the LLM summary NOW instead of waiting

@@ -1279,3 +1279,83 @@ fn summary_annotator_runs_on_every_commit_path_and_never_accumulates() {
         "the new content survives: {latest}"
     );
 }
+
+// ── Transcript export (Markdown) ────────────────────────────────────────────
+
+#[test]
+fn export_markdown_mirrors_the_model_view_and_skips_display_only_items() {
+    let mut cm = cm(10_000);
+    cm.add_user("the prompt");
+    cm.add_tool_call("call-1", "fs_read", "{\"path\":\"a.rs\"}");
+    cm.add_tool_result("call-1", "file contents");
+    cm.add_assistant("the answer", true);
+    cm.add_error("Error: HTTP 500");
+
+    let md = cm.export_markdown();
+    assert!(md.contains("## User\n\nthe prompt"));
+    assert!(md.contains("### Tool call: `fs_read`"));
+    assert!(md.contains("```json\n{\"path\":\"a.rs\"}\n```"));
+    assert!(md.contains("### Tool result\n\n```text\nfile contents\n```"));
+    assert!(md.contains("## Assistant\n\nthe answer"));
+    // Display-only error line: the model never sees it, so neither does the export.
+    assert!(!md.contains("HTTP 500"));
+}
+
+#[test]
+fn export_markdown_hides_swept_and_masked_items_like_build_messages() {
+    let mut cm = cm(10_000);
+    cm.add_user("prompt");
+    cm.add_tool_call("call-1", "fs_read", "{}");
+    cm.add_tool_result("call-1", "payload");
+    cm.add_assistant("answer", true);
+    assert!(cm.mask_newest_tool_result().is_some());
+
+    let md = cm.export_markdown();
+    assert!(
+        md.contains("source context item #"),
+        "a masked result renders its typed reference: {md}"
+    );
+    assert!(!md.contains("payload"), "the masked payload stays out: {md}");
+
+    // Hiding (debris sweep) removes the item entirely from the view.
+    let answer_id = cm
+        .items
+        .iter()
+        .find(|item| matches!(item, ContextItem::Assistant { .. }))
+        .map(ContextItem::id)
+        .unwrap();
+    cm.hidden.insert(answer_id);
+    let md = cm.export_markdown();
+    assert!(!md.contains("the answer") && !md.contains("answer"));
+}
+
+#[test]
+fn export_markdown_composes_checkpoints_before_the_raw_tail() {
+    let mut cm = cm(10_000);
+    cm.add_user("old prompt");
+    cm.add_assistant("old answer", true);
+    cm.begin_manual_compaction();
+    assert!(cm.apply_llm_summary("## Objective\n- summarized".to_string()));
+    cm.add_user("new prompt");
+
+    let md = cm.export_markdown();
+    let checkpoint = md.find("## Compaction checkpoint").unwrap();
+    let raw_tail = md.find("new prompt").unwrap();
+    assert!(checkpoint < raw_tail, "checkpoints lead, raw tail follows: {md}");
+    // The folded sources are hidden behind the checkpoint coverage.
+    assert!(!md.contains("old prompt"));
+    assert!(!md.contains("old answer"));
+}
+
+#[test]
+fn push_fenced_never_breaks_out_on_embedded_backtick_runs() {
+    let mut out = String::new();
+    // A payload whose line starts with four backticks must get a five-wide fence.
+    push_fenced(&mut out, "text", "before\n````closed?\nafter");
+    assert!(out.starts_with("`````text\n"), "fence outgrows the payload: {out}");
+    assert!(out.ends_with("\n`````\n"), "closing fence matches: {out}");
+    // The default fence is the CommonMark minimum of three.
+    let mut plain = String::new();
+    push_fenced(&mut plain, "json", "{}");
+    assert_eq!(plain, "```json\n{}\n```\n");
+}

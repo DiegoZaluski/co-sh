@@ -35,6 +35,24 @@ fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, styl
 
 pub struct FooterView;
 
+/// Label of the footer's export button — the mouse twin of the `/export`
+/// slash command. Its display width is also the hit-test width in the mouse
+/// dispatcher (`App::handle_mouse_event`), so both must reference THIS
+/// constant instead of re-deriving the string.
+pub const EXPORT_BUTTON_LABEL: &str = " ⤓ export";
+
+/// Rect of the export button inside the footer row, for click hit-testing.
+/// `None` when the footer shows no session segments (no active session),
+/// matching the render gate exactly.
+pub fn export_button_rect(area: Rect, state: &AppState) -> Option<Rect> {
+    state.current_session()?;
+    let width = unicode_width::UnicodeWidthStr::width(EXPORT_BUTTON_LABEL).max(1) as u16;
+    // Rightmost segment: `render_with_mode` anchors the right-anchored group
+    // at `area.right() - 2` and draws the export button FIRST.
+    let right = area.right().saturating_sub(2);
+    Some(Rect::new(right.saturating_sub(width), area.y, width, 1))
+}
+
 impl FooterView {
     pub fn render_with_mode(
         buf: &mut Buffer,
@@ -71,6 +89,13 @@ impl FooterView {
             let disp_w = |s: &str| unicode_width::UnicodeWidthStr::width(s).max(1) as u16;
 
             let mut rx = area.right().saturating_sub(2);
+
+            // The `/export` button: rightmost footer segment, so the
+            // hit-test rect in `export_button_rect` stays a pure function of
+            // the label width (independent of branch/dir segment lengths).
+            let export_str = EXPORT_BUTTON_LABEL;
+            rx = rx.saturating_sub(disp_w(export_str));
+            draw_text_line(buf, export_str, rx, area.y, disp_w(export_str), accent);
 
             let dir_str = format!(" {dir_display}");
             rx = rx.saturating_sub(disp_w(&dir_str));

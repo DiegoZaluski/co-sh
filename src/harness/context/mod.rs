@@ -441,6 +441,34 @@ fn masked_tool_result(id: u64) -> String {
     )
 }
 
+/// Append a Markdown section to the transcript buffer: heading, blank line,
+/// body, blank line. Adjacent sections stay visually separated.
+fn push_section(out: &mut String, heading: &str, body: &str) {
+    out.push_str(heading);
+    out.push_str("\n\n");
+    out.push_str(body.trim_end_matches('\n'));
+    out.push_str("\n\n");
+}
+
+/// Append a fenced code block whose fence is longer than any backtick run in
+/// the body, so payloads that contain Markdown fences of their own (diffs,
+/// docs, transcripts) never break out of the block.
+fn push_fenced(out: &mut String, lang: &str, body: &str) {
+    let longest = body
+        .split('\n')
+        .map(|line| line.chars().take_while(|c| *c == '`').count())
+        .max()
+        .unwrap_or(0);
+    let fence = "`".repeat((longest + 1).max(3));
+    out.push_str(&fence);
+    out.push_str(lang);
+    out.push('\n');
+    out.push_str(body.trim_matches('\n'));
+    out.push('\n');
+    out.push_str(&fence);
+    out.push('\n');
+}
+
 pub(super) fn coalesce_ranges(ids: &[u64]) -> Vec<ContextItemRange> {
     let mut ids = ids.to_vec();
     ids.sort_unstable();
@@ -1515,6 +1543,79 @@ impl ContextManager {
             }
         }
         messages
+    }
+
+    /// Transpile the CURRENT model-facing view of the session into a Markdown
+    /// transcript. The projection mirrors [`Self::build_messages`] exactly:
+    /// only items the agent can see right now (the `visible_from` boundary,
+    /// the `hidden` set and checkpoint coverage all apply), checkpoints
+    /// composed before the raw tail, masked tool results replaced by their
+    /// typed reference. Display-only `Error` items never reach the model, so
+    /// they are skipped here as well. The harness steering input and the
+    /// TODO/correction tail blocks are per-request scaffolding, not
+    /// transcript, and are left out.
+    pub fn export_markdown(&self) -> String {
+        let visible: Vec<&ContextItem> =
+            self.items.iter().filter(|it| !self.is_hidden(it)).collect();
+        let projected = visible
+            .iter()
+            .copied()
+            .filter(|it| matches!(it, ContextItem::Compaction { .. }))
+            .chain(
+                visible
+                    .iter()
+                    .copied()
+                    .filter(|it| !matches!(it, ContextItem::Compaction { .. })),
+            )
+            .skip_while(|it| matches!(it, ContextItem::ToolResult { .. }));
+        let mut out = String::new();
+        for item in projected {
+            match item {
+                ContextItem::User { original, .. } => {
+                    push_section(&mut out, "## User", original);
+                }
+                ContextItem::Assistant { original, .. } => {
+                    push_section(&mut out, "## Assistant", original);
+                }
+                ContextItem::Closure { content, .. } => {
+                    push_section(&mut out, "## Assistant", content);
+                }
+                ContextItem::Compaction { summary, .. } => {
+                    push_section(&mut out, "## Compaction checkpoint", summary);
+                }
+                ContextItem::ToolCall {
+                    name, arguments, ..
+                } => {
+                    let mut body = String::new();
+                    push_fenced(&mut body, "json", arguments);
+                    push_section(&mut out, &format!("### Tool call: `{name}`"), &body);
+                }
+                ContextItem::ToolResult {
+                    id,
+                    content,
+                    useless,
+                    ..
+                } => {
+                    let rendered = if self.masked.contains(id) {
+                        masked_tool_result(*id)
+                    } else {
+                        content.clone()
+                    };
+                    let heading = if *useless {
+                        "### Tool result (no useful output)"
+                    } else {
+                        "### Tool result"
+                    };
+                    let mut body = String::new();
+                    push_fenced(&mut body, "text", &rendered);
+                    push_section(&mut out, heading, &body);
+                }
+                // Display-only error line: the model never sees it, so the
+                // export of the agent's view skips it too.
+                ContextItem::Error { .. } => {}
+            }
+        }
+        out
     }
 
     /// Cheap snapshot for the TUI: total tokens + budget percentage.
