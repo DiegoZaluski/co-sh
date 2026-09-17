@@ -145,7 +145,9 @@ data: {\"type\":\"message_stop\"}\n\n";
 
     let second = stream.next().await.unwrap().unwrap();
     assert_eq!(second.token(), "");
-    assert_eq!(second.finish_reason(), Some("end_turn"));
+    // Anthropic's raw `end_turn` is canonicalized to the OpenAI-style
+    // `stop` (see `normalize_finish_reason`).
+    assert_eq!(second.finish_reason(), Some("stop"));
 }
 
 #[tokio::test]

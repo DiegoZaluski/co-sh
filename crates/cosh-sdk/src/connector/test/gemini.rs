@@ -54,7 +54,9 @@ async fn stream_parses_real_gemini_crlf_wire_format() {
         }
     }
     assert_eq!(tokens, "Hi there");
-    assert_eq!(last_fr.as_deref(), Some("STOP"));
+    // Gemini's raw `STOP` is canonicalized to the OpenAI-style `stop`
+    // (see `normalize_finish_reason`).
+    assert_eq!(last_fr.as_deref(), Some("stop"));
 }
 
 /// A stream that ends WITHOUT a trailing blank line after the final
@@ -91,7 +93,7 @@ async fn stream_delivers_final_frame_without_trailing_separator() {
         }
     }
     assert_eq!(tokens, "Hi there");
-    assert_eq!(last_fr.as_deref(), Some("STOP"));
+    assert_eq!(last_fr.as_deref(), Some("stop"));
 }
 
 /// A thinking model streams `thought: true` parts (internal reasoning)

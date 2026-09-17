@@ -3,7 +3,9 @@ use super::super::common::{
     send_get_request, send_request, send_request_stream, send_with_retry, shared_client,
 };
 use super::super::error::ConnectorError;
-use super::super::output::{ChatOutput, ChatStream, LsOutput, ModelInfo, StreamChunk};
+use super::super::output::{
+    ChatOutput, ChatStream, LsOutput, ModelInfo, StreamChunk, normalize_finish_reason,
+};
 use super::super::params::{ChatMessage, Parameters, ToolCallMode, ToolDefinition};
 use super::super::provider::{ProviderConfig, get_api_key};
 use crate::extract_action::NativeToolCall;
@@ -851,9 +853,14 @@ fn parse_sse_stream(
                 for data in frames {
                     match serde_json::from_str::<GenerateContentResponse>(&data) {
                         Ok(ccr) => {
-                            let finish_reason = ccr.candidates.first()
-                                .and_then(|c| c.finish_reason.as_deref())
-                                .map(String::from);
+                            // Canonicalize the raw enum (`MAX_TOKENS` →
+                            // `length`, `SAFETY` → `content_filter`, ...).
+                            let finish_reason = normalize_finish_reason(
+                                ccr.candidates
+                                    .first()
+                                    .and_then(|c| c.finish_reason.as_deref())
+                                    .map(String::from),
+                            );
                             let should_stop = finish_reason.is_some();
                             // A thinking model streams its reasoning as
                             // `thought: true` parts (text = the internal
@@ -1207,9 +1214,8 @@ fn parse_sse_stream_messages(
                                         ));
                                     }
                                 }
-                                let finish_reason = candidate
-                                    .finish_reason
-                                    .clone();
+                                let finish_reason =
+                                    normalize_finish_reason(candidate.finish_reason.clone());
                                 let should_stop = finish_reason.is_some();
                                 if should_stop && !pending_tool_calls.is_empty() {
                                     let raw = last_raw.take().unwrap_or_default();

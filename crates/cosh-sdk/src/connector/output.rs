@@ -149,6 +149,39 @@ impl StreamChunk {
     }
 }
 
+/// Canonicalize a provider-native finish/stop reason into the OpenAI-style
+/// vocabulary the harness consumers rely on (`stop`, `length`,
+/// `content_filter`, `tool_calls`).
+///
+/// Provider dialects mapped here (the raw SSE value used to leak through):
+/// - Anthropic `max_tokens`, Gemini `MAX_TOKENS` → `length` (truncation);
+/// - Anthropic `end_turn` / `stop_sequence` / `refusal`, Gemini `STOP` →
+///   `stop` (deliberate completion — a refusal IS the model's answer);
+/// - Gemini filters (`SAFETY`, `RECITATION`, `BLOCKLIST`, `PROHIBITED_CONTENT`,
+///   `SPII`, `LANGUAGE`, `MALFORMED_FUNCTION_CALL`, `OTHER`) → `content_filter`;
+/// - `tool_use` (Anthropic) → `tool_calls`.
+///
+/// Anything else — notably Anthropic's `pause_turn` (a mid-turn pause the
+/// caller MUST continue) — passes through UNCHANGED, so consumers can treat
+/// every unknown value as NOT a completed turn (whitelist semantics).
+#[must_use]
+pub(crate) fn normalize_finish_reason(raw: Option<String>) -> Option<String> {
+    let raw = raw?;
+    let canonical = match raw.to_ascii_lowercase().as_str() {
+        "stop" | "end_turn" | "stop_sequence" | "refusal" => "stop",
+        "length" | "max_tokens" => "length",
+        "content_filter" | "safety" | "recitation" | "language" | "blocklist"
+        | "prohibited_content" | "spii" | "malformed_function_call" | "other" => {
+            "content_filter"
+        }
+        "tool_calls" | "tool_use" => "tool_calls",
+        // Unknown (e.g. Anthropic `pause_turn`): pass the raw value through —
+        // the harness whitelist treats it as not-a-completion.
+        _ => return Some(raw),
+    };
+    Some(canonical.to_string())
+}
+
 /// A streaming chat response that accumulates the last raw frame.
 ///
 /// Yields [`StreamChunk`] items while the stream is active. After the

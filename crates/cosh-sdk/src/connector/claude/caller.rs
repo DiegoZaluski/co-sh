@@ -3,7 +3,9 @@ use super::super::common::{
     send_get_request, send_request, send_request_stream, send_with_retry, shared_client,
 };
 use super::super::error::ConnectorError;
-use super::super::output::{ChatOutput, ChatStream, LsOutput, ModelInfo, StreamChunk};
+use super::super::output::{
+    ChatOutput, ChatStream, LsOutput, ModelInfo, StreamChunk, normalize_finish_reason,
+};
 use super::super::params::{ClaudeThinkingBlock, Parameters, ToolCallMode, ToolDefinition};
 use super::super::provider::{ProviderConfig, get_api_key};
 use crate::extract_action::NativeToolCall;
@@ -917,9 +919,13 @@ fn parse_sse_stream_with_tools(
                                     current_block_index = None;
                                 }
                                 "message_delta" => {
-                                    let finish_reason = v["delta"]["stop_reason"]
-                                        .as_str()
-                                        .map(String::from);
+                                    // Canonicalize the raw stop_reason
+                                    // (`max_tokens` → `length`, ...) — the
+                                    // harness decides on the canonical
+                                    // vocabulary only.
+                                    let finish_reason = normalize_finish_reason(
+                                        v["delta"]["stop_reason"].as_str().map(String::from),
+                                    );
                                     let should_stop = finish_reason.is_some();
 
                                     if should_stop && !pending_tool_uses.is_empty() {
@@ -1100,9 +1106,13 @@ fn parse_sse_stream(
                                     });
                                 }
                                 "message_delta" => {
-                                    let finish_reason = v["delta"]["stop_reason"]
-                                        .as_str()
-                                        .map(String::from);
+                                    // Canonicalize the raw stop_reason
+                                    // (`max_tokens` → `length`, ...) — the
+                                    // harness decides on the canonical
+                                    // vocabulary only.
+                                    let finish_reason = normalize_finish_reason(
+                                        v["delta"]["stop_reason"].as_str().map(String::from),
+                                    );
                                     yield Ok(StreamChunk {
                                         raw: data,
                                         token: String::new(),

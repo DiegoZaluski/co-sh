@@ -3,7 +3,9 @@ use super::super::common::{
     send_get_request, send_request, send_request_stream, send_with_retry, shared_client,
 };
 use super::super::error::ConnectorError;
-use super::super::output::{ChatOutput, ChatStream, LsOutput, ModelInfo, StreamChunk};
+use super::super::output::{
+    ChatOutput, ChatStream, LsOutput, ModelInfo, StreamChunk, normalize_finish_reason,
+};
 use super::super::params::{Parameters, ResponseFormat, ToolCallMode, ToolDefinition};
 use super::super::provider::{ProviderConfig, get_api_key, is_local_provider};
 use crate::extract_action::NativeToolCall;
@@ -503,9 +505,14 @@ fn process_sse_response(
                             .and_then(|c| c.delta.reasoning.as_deref().or(c.delta.reasoning_content.as_deref()))
                             .unwrap_or("")
                             .to_owned();
-                        let finish_reason = ccr.choices.first()
-                            .and_then(|c| c.finish_reason.as_deref())
-                            .map(String::from);
+                        // Idempotent for this provider's canonical values,
+                        // applied for uniformity across callers.
+                        let finish_reason = normalize_finish_reason(
+                            ccr.choices
+                                .first()
+                                .and_then(|c| c.finish_reason.as_deref())
+                                .map(String::from),
+                        );
                         let should_stop = finish_reason.is_some();
 
                         // Emit text token if there is any.
