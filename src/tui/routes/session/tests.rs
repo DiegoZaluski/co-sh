@@ -5365,3 +5365,559 @@ fn write_edit_estimate_matches_render_in_all_states() {
         );
     }
 }
+
+/// Regression: a block tool's copy regions must sit on the rows the renderer
+/// actually draws — the walk's top margin plus the box's internal padding put
+/// the title at part_top+2 and body line 0 at part_top+3 — and rows scrolled
+/// off above the viewport must be skipped, not re-mapped onto visible rows.
+/// The old builder hard-coded +1 and paired screen rows with body line 0, so
+/// with a cold cells cache every tool-box copy was shifted two rows (the last
+/// two output lines unreachable) and a box straddling the viewport top copied
+/// from the head of the body instead of the visible slice.
+#[test]
+fn tool_body_copy_matches_screen_rows() {
+    let theme = test_theme();
+    let mut config = test_config();
+    config.show_tool_details = true;
+    config.show_generic_tool_output = true;
+
+    let out: String = (0..6)
+        .map(|i| format!("shell line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mk_msg = |filler_lines: usize| -> Message {
+        let filler: String = (0..filler_lines)
+            .map(|i| format!("filler paragraph line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        Message {
+            id: "msg-tool".into(),
+            role: MessageRole::Assistant,
+            parts: vec![
+                Part::Tool(ToolPart {
+                    tool: "bash_run".into(),
+                    input: serde_json::json!({"command": "echo hi"}),
+                    output: Some(out.clone()),
+                    status: ToolStatus::Completed,
+                    tool_call_id: Some("b1".into()),
+                    is_start: true,
+                    is_streaming: false,
+                    cached_line_count: None,
+                    lsp_notes: None,
+                }),
+                Part::Text(TextPart {
+                    text: filler,
+                    synthetic: false,
+                }),
+            ],
+            created_at: 0,
+            agent: None,
+            model: None,
+        }
+    };
+
+    let area = Rect::new(0, 0, 80, 30);
+    let inner_area = Rect::new(2, 0, 76, 30);
+    let max_w = inner_area.width.saturating_sub(6).max(2);
+    let content_min_x = inner_area.x + 3;
+
+    let row_text = |buf: &Buffer, row: u16| -> String {
+        let mut s = String::new();
+        for col in content_min_x..content_min_x + max_w {
+            if let Some(cell) = buf.cell((col, row)) {
+                s.push(cell.symbol().chars().next().unwrap_or(' '));
+            }
+        }
+        s.trim_end().to_string()
+    };
+    let find_row = |buf: &Buffer, needle: &str| -> Option<u16> {
+        (0..area.height).find(|&r| row_text(buf, r).contains(needle))
+    };
+    let assert_row_copies = |view: &SessionView, buf: &Buffer, needle: &str, scene: &str| {
+        let row = find_row(buf, needle)
+            .unwrap_or_else(|| panic!("{scene}: {needle:?} must be visible on screen"));
+        let copied = view.get_text_in_region(content_min_x, row, content_min_x + max_w, row);
+        assert_eq!(
+            copied, needle,
+            "{scene}: {needle:?} must copy verbatim from its screen row"
+        );
+    };
+
+    // ── Scene A: short message → scroll clamps to 0, box fully visible
+    let mut state_a = test_state(mk_msg(2));
+    state_a.status = SessionStatus::Idle;
+    let mut view_a = SessionView::new();
+    let mut buf = Buffer::empty(area);
+    view_a.render(&mut buf, area, &state_a, &theme, &config, 0.016);
+    view_a.mouse_down_scroll_y = view_a.scroll_y;
+    for i in 0..6 {
+        assert_row_copies(&view_a, &buf, &format!("shell line {i}"), "scene A");
+    }
+
+    // ── Scene B: long message; warm the caches once (the first render forces
+    // sticky-bottom), then scroll so the box straddles the viewport top and
+    // rebuild regions the way mouse-release does after an auto-scroll drag ──
+    let mut state_b = test_state(mk_msg(40));
+    state_b.status = SessionStatus::Idle;
+    let mut view_b = SessionView::new();
+    let mut warm = Buffer::empty(area);
+    view_b.render(&mut warm, area, &state_b, &theme, &config, 0.016);
+    view_b.scroll_y = 6;
+    let mut buf2 = Buffer::empty(area);
+    view_b.render(&mut buf2, area, &state_b, &theme, &config, 0.016);
+    let (cs_start, cs_end) = view_b.selection_content_range(0, area.height - 1);
+    view_b.build_text_regions_for_content_range(
+        state_b.current_session().unwrap(),
+        inner_area,
+        max_w,
+        &config,
+        &theme,
+        (cs_start, cs_end + 1),
+    );
+    view_b.mouse_down_scroll_y = view_b.scroll_y;
+
+    // Lines scrolled off above the viewport must not be visible…
+    for i in 0..3 {
+        let needle = format!("shell line {i}");
+        assert!(
+            find_row(&buf2, &needle).is_none(),
+            "scene B: {needle:?} is scrolled off and must not be on screen"
+        );
+    }
+    // …and every line that IS visible must copy verbatim from its row.
+    for i in 3..6 {
+        assert_row_copies(&view_b, &buf2, &format!("shell line {i}"), "scene B");
+    }
+}
+
+/// Regression (user text): a user message taller than the viewport must keep
+/// copy regions aligned when it straddles the viewport top — screen row 0
+/// pairs with the part's visual row `vp_top - p_top`, blank lines consume
+/// exactly one row each, and rows past the viewport stay unreachable. The
+/// dead per-line skip this replaced paired screen rows with the head of the
+/// part, so a selection on row N copied text from N rows earlier.
+#[test]
+fn user_text_copy_matches_screen_when_straddling_viewport_top() {
+    let theme = test_theme();
+    let config = test_config();
+
+    // 60 single-token lines with a blank line in the middle: the blank must
+    // consume exactly one row both on screen and in the region walk.
+    let mut lines: Vec<String> = (0..30).map(|i| format!("urow {i}")).collect();
+    lines.push(String::new());
+    lines.extend((31..60).map(|i| format!("urow {i}")));
+    let msg = Message {
+        id: "msg-user-straddle".into(),
+        role: MessageRole::User,
+        parts: vec![Part::Text(TextPart {
+            text: lines.join("\n"),
+            synthetic: false,
+        })],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let mut state = test_state(msg);
+    state.status = SessionStatus::Idle;
+    let mut view = SessionView::new();
+
+    let area = Rect::new(0, 0, 80, 20);
+    let inner_area = Rect::new(2, 0, 76, 20);
+    let max_w = inner_area.width.saturating_sub(6).max(2);
+    let content_min_x = inner_area.x + 3;
+
+    let row_text = |buf: &Buffer, row: u16| -> String {
+        let mut s = String::new();
+        for col in content_min_x..content_min_x + max_w {
+            if let Some(cell) = buf.cell((col, row)) {
+                s.push(cell.symbol().chars().next().unwrap_or(' '));
+            }
+        }
+        s.trim_end().to_string()
+    };
+    let find_row = |buf: &Buffer, needle: &str| -> Option<u16> {
+        (0..area.height).find(|&r| row_text(buf, r).contains(needle))
+    };
+
+    // Warm the caches (the first render forces sticky-bottom), then scroll so
+    // the part straddles the viewport top and rebuild regions the way
+    // mouse-release does after an auto-scroll drag.
+    let mut warm = Buffer::empty(area);
+    view.render(&mut warm, area, &state, &theme, &config, 0.016);
+    view.scroll_y = 30;
+    let mut buf = Buffer::empty(area);
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+    let (cs_start, cs_end) = view.selection_content_range(0, area.height - 1);
+    view.build_text_regions_for_content_range(
+        state.current_session().unwrap(),
+        inner_area,
+        max_w,
+        &config,
+        &theme,
+        (cs_start, cs_end + 1),
+    );
+    view.mouse_down_scroll_y = view.scroll_y;
+
+    // The head of the part is scrolled off above the viewport…
+    for i in [0, 14, 28] {
+        let needle = format!("urow {i}");
+        assert!(
+            find_row(&buf, &needle).is_none(),
+            "straddle: {needle:?} is above the viewport and must not be on screen"
+        );
+    }
+    // …the first line below the viewport is unreachable too…
+    assert!(
+        find_row(&buf, "urow 49").is_none(),
+        "straddle: urow 49 is below the viewport and must not be on screen"
+    );
+    // …and every visible row copies verbatim from the screen.
+    let mut checked = 0usize;
+    for row in 0..area.height {
+        let visible = row_text(&buf, row);
+        if !visible.contains("urow") {
+            continue;
+        }
+        let copied = view.get_text_in_region(content_min_x, row, content_min_x + max_w, row);
+        assert_eq!(
+            copied, visible,
+            "straddle: row {row} must copy exactly what the screen shows"
+        );
+        checked += 1;
+    }
+    assert!(
+        checked > 10,
+        "straddle: expected most viewport rows to carry urow lines, checked {checked}"
+    );
+}
+
+/// Diagnostic: for EVERY visible row of a rich-markdown assistant message, a
+/// row. Checked on all three region sources:
+///   1. regions built during the first render (estimate path),
+///   2. regions rebuilt on a second frame (cells-cache path),
+///   3. regions rebuilt the way mouse-release does after an auto-scroll drag
+///      (`build_text_regions_for_content_range`).
+#[test]
+fn copy_selection_matches_every_visible_row() {
+    let theme = test_theme();
+    let config = test_config();
+
+    let msg = build_streaming_message(150);
+    let mut state = test_state(msg);
+    state.status = SessionStatus::Idle;
+    let mut view = SessionView::new();
+
+    let area = Rect::new(0, 0, 80, 30);
+    let margin = 2;
+    let inner_area = Rect::new(
+        area.x + margin,
+        area.y,
+        area.width.saturating_sub(margin * 2),
+        area.height,
+    );
+    let max_w = inner_area.width.saturating_sub(6).max(2);
+    let content_min_x = inner_area.x + 3;
+
+    let mut buf = Buffer::empty(area);
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+    // The app sets mouse_down_scroll_y = scroll_y on mouse-down (app/mouse.rs);
+    // get_text_in_region converts the anchor with it, so mirror that here or
+    // every single-row probe widens into a multi-row band.
+    view.mouse_down_scroll_y = view.scroll_y;
+
+    let row_text = |buf: &Buffer, row: u16| -> String {
+        let mut s = String::new();
+        for col in content_min_x..content_min_x + max_w {
+            if let Some(cell) = buf.cell((col, row)) {
+                s.push(cell.symbol().chars().next().unwrap_or(' '));
+            }
+        }
+        s.trim_end().to_string()
+    };
+
+    let check_rows = |view: &SessionView, buf: &Buffer, label: &str| {
+        let mut failures: Vec<String> = Vec::new();
+        for row in 0..area.height {
+            let visible = row_text(buf, row);
+            if visible.is_empty() {
+                continue;
+            }
+            let copied = view.get_text_in_region(content_min_x, row, content_min_x + max_w, row);
+            if copied != visible {
+                failures.push(format!("row {row}: copy={copied:?} != screen={visible:?}"));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{label}: {} desynced row(s)\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    };
+
+    // 1) Regions built by the first render (estimate path).
+    check_rows(&view, &buf, "render-built regions (estimate path)");
+
+    // 2) Second frame: regions now come from the cells cache.
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+    view.mouse_down_scroll_y = view.scroll_y;
+    check_rows(&view, &buf, "second-frame regions (cells-cache path)");
+
+    // 3) Rebuild like mouse-release does after a drag with auto-scroll.
+    let (cs_start, cs_end) = view.selection_content_range(0, area.height - 1);
+    view.build_text_regions_for_content_range(
+        state.current_session().unwrap(),
+        inner_area,
+        max_w,
+        &config,
+        &theme,
+        (cs_start, cs_end + 1),
+    );
+    view.mouse_down_scroll_y = view.scroll_y;
+    check_rows(&view, &buf, "rebuilt regions (content-range path)");
+}
+
+/// Word integrity: the drag's focus column must be treated as part of the
+/// selection, exactly like the highlight painters do (`lx1..=lx2` inclusive).
+/// The old exclusive slice made any release ON the final glyph of a word
+/// copy the word minus its last character ("toke" for "token").
+#[test]
+fn copy_selection_word_integrity_on_focus_column() {
+    let theme = test_theme();
+    let config = test_config();
+
+    let msg = Message {
+        id: "msg-bullet".into(),
+        role: MessageRole::Assistant,
+        parts: vec![Part::Text(TextPart {
+            text: "## Heading\n\n- copy_selection_matches_every_visible_row is one long token\n- second item\n"
+                .to_string(),
+            synthetic: false,
+        })],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let mut state = test_state(msg);
+    state.status = SessionStatus::Idle;
+    let mut view = SessionView::new();
+
+    let area = Rect::new(0, 0, 80, 24);
+    let inner_area = Rect::new(2, 0, 76, 24);
+    let max_w = inner_area.width.saturating_sub(6).max(2);
+    let content_min_x = inner_area.x + 3;
+
+    let mut buf = Buffer::empty(area);
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+    view.mouse_down_scroll_y = view.scroll_y;
+
+    let row_text = |buf: &Buffer, row: u16| -> String {
+        let mut s = String::new();
+        for col in content_min_x..content_min_x + max_w {
+            if let Some(cell) = buf.cell((col, row)) {
+                s.push(cell.symbol().chars().next().unwrap_or(' '));
+            }
+        }
+        s.trim_end().to_string()
+    };
+
+    let row = (0..area.height)
+        .find(|&r| row_text(&buf, r).contains("copy_selection"))
+        .expect("token row must be on screen");
+    let visible = row_text(&buf, row);
+    let last_col = (content_min_x..content_min_x + max_w)
+        .rfind(|&col| {
+            buf.cell((col, row))
+                .and_then(|c| c.symbol().chars().next())
+                .is_some_and(|c| c != ' ')
+        })
+        .expect("non-empty row");
+
+    // 1) Release exactly ON the last visible character: the painted selection
+    //    must copy the whole line, final char included.
+    assert_eq!(
+        view.get_text_in_region(content_min_x, row, last_col, row),
+        visible,
+        "release ON the last visible char must copy the whole line"
+    );
+    // 2) Release one column past the end: same result.
+    assert_eq!(
+        view.get_text_in_region(content_min_x, row, last_col + 1, row),
+        visible,
+        "release one column PAST the last char must also copy the whole line"
+    );
+    // 3) Full-row band (end far beyond the text): unchanged behavior.
+    assert_eq!(
+        view.get_text_in_region(content_min_x, row, content_min_x + max_w, row),
+        visible,
+        "full-row band must copy the whole line"
+    );
+    // 4) Any band ending on the token keeps its final glyph (the focus column
+    //    is IN the selection, mirroring the highlight).
+    let copied_mid = view.get_text_in_region(content_min_x, row, last_col, row);
+    assert!(
+        copied_mid.ends_with("token"),
+        "release must keep the focus glyph: got {copied_mid:?}"
+    );
+    // 5) A single-cell band is a plain click, not a drag: copies nothing (a
+    //    click must not trigger the copy toast).
+    assert_eq!(
+        view.get_text_in_region(last_col, row, last_col, row),
+        "",
+        "a single-cell selection is a click and must copy nothing"
+    );
+}
+
+/// The copied text must be EXACTLY what the TUI paints as selected. The
+/// painters invert fg/bg on `lx1..=lx2` (inclusive); this test renders the
+/// same view with and without a live selection, diffs the buffers to recover
+/// the painted glyphs row by row, then simulates the mouse-release copy the
+/// app performs (app/mouse.rs) and requires the two to agree for every
+/// release column swept across the row — the user-visible contract
+/// "what I see highlighted is what I get".
+#[test]
+fn selection_paint_matches_copy_exactly() {
+    let theme = test_theme();
+    let config = test_config();
+
+    let msg = Message {
+        id: "msg-paint-copy".into(),
+        role: MessageRole::Assistant,
+        parts: vec![Part::Text(TextPart {
+            text: "## Heading\n\n- copy_selection_matches_every_visible_row is one long token\n- second item with several more words\n\nClosing paragraph.\n"
+                .to_string(),
+            synthetic: false,
+        })],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let mut state = test_state(msg);
+    state.status = SessionStatus::Idle;
+    let mut view = SessionView::new();
+
+    let area = Rect::new(0, 0, 80, 24);
+    let inner_area = Rect::new(2, 0, 76, 24);
+    let max_w = inner_area.width.saturating_sub(6).max(2);
+    let content_min_x = inner_area.x + 3;
+    let vp_top = i32::from(inner_area.y);
+
+    // Two warm frames: the second frame serves regions from the rendered
+    // cells cache — the source the live app uses after the first paint.
+    let mut warm = Buffer::empty(area);
+    view.render(&mut warm, area, &state, &theme, &config, 0.016);
+    view.render(&mut warm, area, &state, &theme, &config, 0.016);
+    view.mouse_down_scroll_y = view.scroll_y;
+
+    let row_text = |buf: &Buffer, row: u16| -> String {
+        let mut s = String::new();
+        for col in content_min_x..content_min_x + max_w {
+            if let Some(cell) = buf.cell((col, row)) {
+                s.push(cell.symbol().chars().next().unwrap_or(' '));
+            }
+        }
+        s.trim_end().to_string()
+    };
+
+    // Locate two consecutive non-empty text rows of the bullet list.
+    let token_row = (0..area.height)
+        .find(|&r| row_text(&warm, r).contains("copy_selection"))
+        .expect("token row must be on screen");
+    let row_b = token_row + 1;
+    assert!(
+        !row_text(&warm, row_b).trim().is_empty(),
+        "second row must be a text row"
+    );
+
+    // Reference render with NO selection: the paint diff is taken against it.
+    view.drag_selection = None;
+    let mut buf_base = Buffer::empty(area);
+    view.render(&mut buf_base, area, &state, &theme, &config, 0.016);
+
+    let last_col = (content_min_x..content_min_x + max_w)
+        .rfind(|&c| {
+            buf_base
+                .cell((c, token_row))
+                .and_then(|cell| cell.symbol().chars().next())
+                .is_some_and(|ch| ch != ' ')
+        })
+        .expect("token row has glyphs");
+
+    // Sweep: same-row releases at every column (left→right), far past the
+    // end, two-row bands ending on/after the last glyph, and backward drags.
+    // Each entry is (anchor_x, anchor_y, focus_x, focus_y) — exactly the
+    // tuple the app stores on mouse-down and updates on each drag.
+    let mut sweep: Vec<(u16, u16, u16, u16)> = Vec::new();
+    for fx in (content_min_x + 1)..=last_col.saturating_add(2) {
+        sweep.push((content_min_x, token_row, fx, token_row));
+    }
+    sweep.push((content_min_x, token_row, last_col, row_b));
+    sweep.push((content_min_x, token_row, last_col.saturating_add(1), row_b));
+    sweep.push((content_min_x, token_row, content_min_x + 40, row_b));
+    // Backward same-row (anchor right of focus) and backward two-row.
+    sweep.push((last_col, token_row, content_min_x + 5, token_row));
+    sweep.push((content_min_x + 30, row_b, content_min_x, token_row));
+
+    let mut failures: Vec<String> = Vec::new();
+    for &(sx, sy, fx, fy) in &sweep {
+        view.drag_selection = Some((sx, sy, fx, fy));
+        view.selection_anchor_content_y = i32::from(sy) - vp_top + view.mouse_down_scroll_y;
+        view.selection_focus_content_y = i32::from(fy) - vp_top + view.scroll_y;
+
+        let mut buf_sel = Buffer::empty(area);
+        view.render(&mut buf_sel, area, &state, &theme, &config, 0.016);
+
+        // Painted glyph text per screen row: cells whose fg/bg were swapped
+        // by the painter, concatenated in column order, trailing blanks
+        // trimmed (the copy trims each row too).
+        let mut painted: Vec<String> = Vec::new();
+        for r in 0..area.height {
+            let mut s = String::new();
+            for col in content_min_x..content_min_x + max_w {
+                let (b, c) = (buf_base.cell((col, r)), buf_sel.cell((col, r)));
+                let painted_cell = match (b, c) {
+                    (Some(b), Some(c)) => b.fg != c.fg || b.bg != c.bg,
+                    _ => false,
+                };
+                if painted_cell {
+                    s.push(
+                        c.and_then(|cell| cell.symbol().chars().next())
+                            .unwrap_or(' '),
+                    );
+                }
+            }
+            let trimmed = s.trim_end().to_string();
+            if !trimmed.is_empty() {
+                painted.push(trimmed);
+            }
+        }
+        view.drag_selection = None;
+
+        // Simulate the release exactly like app/mouse.rs does.
+        let (cs_start, cs_end) = view.selection_content_range(sy, fy);
+        view.build_text_regions_for_content_range(
+            state.current_session().unwrap(),
+            inner_area,
+            max_w,
+            &config,
+            &theme,
+            (cs_start, cs_end + 1),
+        );
+        view.mouse_down_scroll_y = view.scroll_y;
+        let copied = view.get_text_in_region(sx, sy, fx, fy);
+
+        let expected = painted.join("\n");
+        if copied != expected {
+            failures.push(format!(
+                "anchor=({sx},{sy}) focus=({fx},{fy})\n  painted={expected:?}\n  copied ={copied:?}"
+            ));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{} release point(s) where copy != painted selection:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
