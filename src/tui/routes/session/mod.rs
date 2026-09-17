@@ -3041,8 +3041,16 @@ impl SessionView {
                                         md.render_self(temp, scan_area);
 
                                         let screen_end = p_bottom.min(vp_bottom) as u16;
+                                        // Rows of this part scrolled off ABOVE the viewport
+                                        // still exist in the temp buffer: start scanning at
+                                        // the first VISIBLE row, not at row 0. Pairing
+                                        // screen rows with temp row 0 re-mapped the head of
+                                        // the message onto the viewport (shifted copy) and
+                                        // dropped the tail past the scan window (truncated
+                                        // copy). Same fix as the streaming path's `first_dy`.
+                                        let first_ty = (vp_top - p_top).max(0) as u16;
                                         for (screen_line_y, ty) in
-                                            (p_top.max(vp_top) as u16..).zip(0..generous_h)
+                                            (p_top.max(vp_top) as u16..).zip(first_ty..generous_h)
                                         {
                                             if screen_line_y >= screen_end {
                                                 break;
@@ -3073,9 +3081,25 @@ impl SessionView {
                                     let mut screen_line_y = p_top.max(vp_top) as u16;
                                     let screen_end = p_bottom.min(vp_bottom) as u16;
 
+                                    // Visual rows this part has scrolled off ABOVE the
+                                    // viewport. Computed ONCE from the RAW part top — NOT
+                                    // from `screen_line_y`, which starts pre-clamped at
+                                    // `p_top.max(vp_top)` and would zero the skip — then
+                                    // consumed across empty lines and wrapped rows alike,
+                                    // so screen row `vp_top` pairs with the part's visual
+                                    // row `vp_top - p_top`. Pairing from row 0 re-mapped
+                                    // the head of every straddling part onto the viewport
+                                    // (shifted copy) and dropped the tail (truncated copy).
+                                    let mut skip = (vp_top - p_top).max(0) as usize;
+
                                     for logical_line in content.lines() {
                                         if logical_line.is_empty() {
-                                            if screen_line_y < screen_end {
+                                            // `draw_text_wrap` advances one row per wrapped
+                                            // line, blanks included — the walk must match or
+                                            // every row after a blank line copies shifted.
+                                            if skip > 0 {
+                                                skip -= 1;
+                                            } else if screen_line_y < screen_end {
                                                 let cy = (screen_line_y as i32) - vp_top + scroll;
                                                 text_regions.push(TextRegion {
                                                     y1: cy,
@@ -3084,6 +3108,7 @@ impl SessionView {
                                                     x2: x_off + max_w,
                                                     text: String::new(),
                                                 });
+                                                screen_line_y += 1;
                                             }
                                             continue;
                                         }
@@ -3091,7 +3116,11 @@ impl SessionView {
                                             logical_line,
                                             max_w,
                                         );
-                                        for visual_line in &lines {
+                                        // Consume this logical line's share of the
+                                        // off-screen rows before pairing the rest.
+                                        let take = skip.min(lines.len());
+                                        skip -= take;
+                                        for visual_line in &lines[take..] {
                                             if screen_line_y >= screen_end {
                                                 break;
                                             }
@@ -3140,14 +3169,50 @@ impl SessionView {
                                 let tool_display_name = self::tool_render::tool_display(&t.tool);
                                 let question_summary = tool_display_name == "question"
                                     && self::tool_render::question_markdown(t).is_some();
+                                // Geometry mirror of render_parts + the block
+                                // renderers: block tools take a 1-row top margin
+                                // before the box, whose first row is padding — the
+                                // title lands at +2. The body starts at +3 (todo's
+                                // box has no internal padding: body at +2; a
+                                // completed question summary renders as plain
+                                // markdown at +0). Inline tools draw the label at
+                                // +0 and have no body (the p_bottom clamp below
+                                // drops it). Hardcoding +1 here desynced every
+                                // block-tool copy by two rows — shifted text, last
+                                // two output lines unreachable — whenever the
+                                // cells cache was cold.
+                                let is_block = Self::tool_is_block(t);
+                                let label_off = if is_block { 2 } else { 0 };
+                                let body_off = if question_summary {
+                                    0
+                                } else if tool_display_name == "todo" {
+                                    2
+                                } else if is_block {
+                                    3
+                                } else {
+                                    1
+                                };
+                                // A failed todo with output draws its box (not the
+                                // inline label) — only the empty-output failure
+                                // keeps the label row.
                                 let draws_label = !question_summary
                                     && (tool_display_name != "todo"
-                                        || matches!(t.status, crate::types::ToolStatus::Failed(_)));
-                                if draws_label && p_top >= vp_top {
+                                        || (matches!(
+                                            t.status,
+                                            crate::types::ToolStatus::Failed(_)
+                                        ) && t
+                                            .output
+                                            .as_deref()
+                                            .unwrap_or("")
+                                            .trim()
+                                            .is_empty()));
+                                let label_screen = p_top + label_off;
+                                if draws_label && label_screen >= vp_top && label_screen < vp_bottom
+                                {
                                     let label = self::tool_render::tool_inline_text(t);
                                     text_regions.push(TextRegion {
-                                        y1: content_offset,
-                                        y2: content_offset + 1,
+                                        y1: label_screen - vp_top + scroll,
+                                        y2: label_screen - vp_top + scroll + 1,
                                         x1: x_off,
                                         x2: x_off + max_w,
                                         text: label,
@@ -3190,21 +3255,30 @@ impl SessionView {
                                     })
                                 };
                                 if let Some(display) = display.filter(|d| !d.is_empty()) {
-                                    let first_output_screen = (p_top.max(vp_top) + 1) as u16;
-                                    let screen_end = p_bottom.min(vp_bottom) as u16;
-                                    let mut out_screen_y = first_output_screen;
-                                    for display_line in display.lines() {
-                                        if out_screen_y < screen_end {
-                                            let cy = (out_screen_y as i32) - vp_top + scroll;
-                                            text_regions.push(TextRegion {
-                                                y1: cy,
-                                                y2: cy + 1,
-                                                x1: x_off,
-                                                x2: x_off + max_w,
-                                                text: display_line.to_string(),
-                                            });
-                                            out_screen_y += 1;
+                                    // Body line 0 sits at p_top + body_off on screen;
+                                    // lines scrolled off ABOVE the viewport are skipped
+                                    // (pairing from the part top re-mapped the head of
+                                    // the body and cut the tail off the copy).
+                                    let body_top = p_top + body_off;
+                                    let first_i = (vp_top - body_top).max(0);
+                                    let screen_end = p_bottom.min(vp_bottom);
+                                    let mut out_screen_y = body_top.max(vp_top);
+                                    for (li, display_line) in display.lines().enumerate() {
+                                        if (li as i32) < first_i {
+                                            continue;
                                         }
+                                        if out_screen_y >= screen_end {
+                                            break;
+                                        }
+                                        let cy = out_screen_y - vp_top + scroll;
+                                        text_regions.push(TextRegion {
+                                            y1: cy,
+                                            y2: cy + 1,
+                                            x1: x_off,
+                                            x2: x_off + max_w,
+                                            text: display_line.to_string(),
+                                        });
+                                        out_screen_y += 1;
                                     }
                                 }
                             }
@@ -3924,7 +3998,8 @@ impl SessionView {
                             && !msg_has_running_compaction(msg)
                             && token == self.msg_cache_tokens[idx]
                             && self.msg_cache_w[idx] == inner_area.width
-                            && self.msg_cache_h[idx] > 0;
+                            && self.msg_cache_h[idx] > 0
+                            && self.msg_cache_cells[idx].is_some();
 
                         if cache_hit {
                             if let Some(ref cached_cells) = self.msg_cache_cells[idx] {
@@ -3942,13 +4017,29 @@ impl SessionView {
                                 }
                                 render_actual_h = h as i32;
 
-                                // Ensure text regions are cached for this message
+                                // Ensure text regions are cached for this message.
+                                // `msg_cache_cells` stores FULL-width rows (border/margin
+                                // included) for alignment, but region text must be
+                                // content-only: it is labeled `x1 = inner_area.x + 3`, so
+                                // sampling from column 0 would inject 3 ghost columns at
+                                // the head of every line — the copy then leads with 3
+                                // spaces and loses the last 3 painted characters. Strip
+                                // the 3 leading columns, mirroring the temp-buffer sites
+                                // (`temp_cells[base + 3 + dx]`).
                                 if self.msg_cache_text_regions[idx].is_none() {
                                     let x_off_text = inner_area.x + 3;
                                     let msg_content_top = msg_top - vp_top + self.scroll_y;
+                                    let content_w = w.saturating_sub(3);
+                                    let mut text_cells = Vec::with_capacity(content_w * h as usize);
+                                    for dy in 0..h as usize {
+                                        let base = dy * w;
+                                        for dx in 0..content_w {
+                                            text_cells.push(cached_cells[base + 3 + dx].clone());
+                                        }
+                                    }
                                     let regions = Self::cells_to_text_regions(
-                                        cached_cells,
-                                        w,
+                                        &text_cells,
+                                        content_w,
                                         h,
                                         msg_content_top,
                                         x_off_text,
@@ -3980,8 +4071,6 @@ impl SessionView {
                             if !is_streaming_msg {
                                 let ah = render_actual_h as u16;
                                 let w = inner_area.width as usize;
-                                let x_off_text = inner_area.x + 3;
-                                let msg_content_top = msg_top - vp_top + self.scroll_y;
                                 let mut cells = Vec::with_capacity(w * ah as usize);
                                 for dy in 0..ah {
                                     for dx in 0..w {
@@ -3992,9 +4081,24 @@ impl SessionView {
                                         cells.push(c);
                                     }
                                 }
+                                // Region text is content-only (x1 = inner_area.x + 3):
+                                // sample from column 3 so the border/margin columns
+                                // never enter the text as ghost leading columns
+                                // (they would shift the copy 3 chars left of the
+                                // painted selection and drop the last 3 chars).
+                                let x_off_text = inner_area.x + 3;
+                                let msg_content_top = msg_top - vp_top + self.scroll_y;
+                                let content_w = w.saturating_sub(3);
+                                let mut text_cells = Vec::with_capacity(content_w * ah as usize);
+                                for dy in 0..ah {
+                                    let base = dy as usize * w;
+                                    for dx in 0..content_w {
+                                        text_cells.push(cells[base + 3 + dx].clone());
+                                    }
+                                }
                                 let regions = Self::cells_to_text_regions(
-                                    &cells,
-                                    w,
+                                    &text_cells,
+                                    content_w,
                                     ah,
                                     msg_content_top,
                                     x_off_text,
@@ -4192,10 +4296,24 @@ impl SessionView {
                                                 cells.push(temp_cells[base + dx].clone());
                                             }
                                         }
+                                        // Region text is content-only (x1 = inner_area.x
+                                        // + 3): sample from column 3 so the border/margin
+                                        // columns never enter the text as ghost leading
+                                        // columns (they would shift the copy 3 chars left
+                                        // of the painted selection and drop the last 3).
                                         let x_off_text = inner_area.x + 3;
+                                        let content_w = w.saturating_sub(3);
+                                        let mut text_cells =
+                                            Vec::with_capacity(content_w * ah as usize);
+                                        for dy in 0..ah {
+                                            let base = dy as usize * w;
+                                            for dx in 0..content_w {
+                                                text_cells.push(cells[base + 3 + dx].clone());
+                                            }
+                                        }
                                         let regions = Self::cells_to_text_regions(
-                                            &cells,
-                                            w,
+                                            &text_cells,
+                                            content_w,
                                             ah,
                                             msg_content_top,
                                             x_off_text,

@@ -3072,10 +3072,12 @@ mod tests {
         let text = state.extract_selected_text();
         assert_eq!(text, "ravo");
 
-        // Single-row selection keeps both x bounds on that row.
+        // Single-row selection keeps both x bounds on that row; the focus
+        // column is INCLUSIVE (mirrors the highlight painter, `lx1..=lx2`),
+        // so the glyph under the focus cell is copied too.
         state.begin_selection(1, 3);
         state.update_drag_selection(3, 3);
-        assert_eq!(state.extract_selected_text(), "ra");
+        assert_eq!(state.extract_selected_text(), "rav");
 
         // A click on a TODO row cancels the selection → empty text.
         state.push_section_layout(SectionKind::Todo, 20, 30);
@@ -3105,7 +3107,9 @@ mod tests {
         // Content scrolls down by 2 while dragging (mouse near the edge).
         state.set_section_scroll(SectionKind::Bash, 2);
         state.selection_focus_content_y += 2;
+        // The focus column is inclusive (mirrors the highlight painter), so
+        // the end row contributes the glyph under its focus column.
         let text = state.extract_selected_text();
-        assert_eq!(text, "line0\nline1\nline2\nline3");
+        assert_eq!(text, "line0\nline1\nline2\nline3\nl");
     }
 }

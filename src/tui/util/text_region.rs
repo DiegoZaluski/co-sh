@@ -22,6 +22,11 @@ pub struct TextRegion {
 /// row (following the drag direction). Each row that intersects the band is
 /// sliced by its x overlap and joined with newlines, mirroring the flow-based
 /// selection used by the chat.
+///
+/// Column bounds are INCLUSIVE on both ends: the glyph under the focus cell
+/// is part of the selection, matching what both highlight painters draw
+/// (`lx1..=lx2`). A single-cell band (no drag movement) copies nothing.
+///
 pub fn extract_text_in_region(
     regions: &[TextRegion],
     start_content_y: i32,
@@ -30,6 +35,11 @@ pub fn extract_text_in_region(
     end_x: u16,
 ) -> String {
     let mut result = String::new();
+    // A selection spanning a single cell is a plain click, not a drag —
+    // copy nothing (a click must not trigger the copy toast).
+    if start_content_y == end_content_y && start_x == end_x {
+        return String::new();
+    }
     for region in regions {
         if region.y1 > end_content_y || region.y2 <= start_content_y {
             continue;
@@ -47,7 +57,14 @@ pub fn extract_text_in_region(
         };
 
         let ox1 = region.x1.max(lx1);
-        let ox2 = region.x2.min(lx2);
+        // `lx2` is the drag's focus column. Both selection painters (chat and
+        // right panel) highlight `lx1..=lx2` INCLUSIVELY, so the character the
+        // user sees painted under the release point must be copied too. The
+        // old exclusive slice dropped it — releasing on the last glyph of a
+        // word copied the word minus its final character. Full-width rows
+        // (middle rows and the top row) are unaffected: lx2 = region.x2 there,
+        // and the +1 clamps back to region.x2.
+        let ox2 = region.x2.min(lx2.saturating_add(1));
         if ox1 >= ox2 {
             continue;
         }
@@ -63,11 +80,16 @@ pub fn extract_text_in_region(
         let end = col_end.min(line_len);
 
         let sliced: String = chars[col_start..end].iter().collect();
+        // Defensive: builders pre-trim region text, so this is a no-op today;
+        // it guards the inclusive focus column against future builders that
+        // preserve trailing padding. Per-row only — interior indentation is
+        // untouched.
+        let sliced = sliced.trim_end();
         if !sliced.is_empty() {
             if !result.is_empty() {
                 result.push('\n');
             }
-            result.push_str(&sliced);
+            result.push_str(sliced);
         }
     }
     result
