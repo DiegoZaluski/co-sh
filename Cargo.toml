@@ -98,7 +98,7 @@ features = ["full"]
 
 [dependencies.serde]
 version = "1"
-features = ["derive"]
+features = ["derive", "rc"]
 
 [dependencies.rmcp]
 version = "3.2.0"

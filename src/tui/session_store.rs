@@ -21,8 +21,9 @@
 //! message parts; synthetic text parts never reach the model. Two context
 //! items are display-only in the model-facing direction: `Error` and
 //! `Compaction` have both message and context deltas, but only their message
-//! forms are display state. The `ctx_ids` map on each message delta lets a
-//! reference select the context items backing a displayed prefix.
+//! forms are display state. Modern message boundaries are persisted as
+//! `ContextDelta::MessageBoundary`; the `ctx_ids` map remains display
+//! bookkeeping and a compatibility bridge for older histories.
 //!
 //! Sessions are grouped by CWD (current working directory). The CWD path is
 //! hashed with xxHash32 to produce a deterministic subdirectory name, so
@@ -46,8 +47,8 @@ use cosh::harness::context::{ContextItem, ContextManagerState, MapReduceState};
 use cosh::harness::events::{HarnessEvent, ToastVariant};
 
 use crate::session_history::{
-    BranchMetadata, BranchProjection, ContextDelta, Delta, HistoryEvent, HistoryProjection,
-    MessageDelta, MetadataDelta, Reference, Selection, parse_jsonl,
+    BranchMetadata, BranchProjection, ContextBoundary, ContextDelta, Delta, HistoryEvent,
+    HistoryProjection, MessageDelta, MetadataDelta, Reference, context_groups,
 };
 use crate::types::{MessageRole, Session};
 
@@ -416,12 +417,14 @@ impl SessionStore {
             });
         }
 
+        let previous_messages: HashMap<&str, &crate::types::Message> = current
+            .session
+            .messages
+            .iter()
+            .map(|m| (m.id.as_str(), m))
+            .collect();
         for message in &requested.messages {
-            let previous = current
-                .session
-                .messages
-                .iter()
-                .find(|existing| existing.id == message.id);
+            let previous = previous_messages.get(message.id.as_str()).copied();
             let old_ids = current
                 .session
                 .ctx_ids
@@ -461,6 +464,38 @@ impl SessionStore {
 
         if let Some(context) = requested_context {
             deltas.extend(diff_context(current.context.as_ref(), context));
+            let groups = context_groups(&context.items);
+            for message in &requested.messages {
+                let Some(ids) = requested.ctx_ids.get(&message.id) else {
+                    continue;
+                };
+                let Some(owned) = ids
+                    .iter()
+                    .map(|id| groups.get(id).copied())
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    continue;
+                };
+                let (Some(first_group), Some(last_group)) =
+                    (owned.iter().min(), owned.iter().max())
+                else {
+                    continue;
+                };
+                let boundary = ContextBoundary {
+                    first_group: *first_group,
+                    last_group: *last_group,
+                };
+                // Validate the association against native context ownership.
+                // A stale/partial display map must never invent a boundary.
+                if current.message_boundaries.get(&message.id) != Some(&boundary) {
+                    deltas.push(Delta::Context {
+                        change: ContextDelta::MessageBoundary {
+                            message_id: message.id.clone(),
+                            boundary,
+                        },
+                    });
+                }
+            }
         }
         deltas
     }
@@ -493,30 +528,11 @@ impl SessionStore {
     }
 
     fn load_history_path(&self, path: &std::path::Path) -> Option<(String, HistoryProjection)> {
-        let contents = std::fs::read_to_string(path).ok()?;
-        let root_id = path
-            .file_stem()?
-            .to_str()?
-            .strip_prefix("session-")?
-            .to_string();
-        let parsed = parse_jsonl(&root_id, &contents);
-        if !parsed.corrupt_lines.is_empty() {
-            log::warn!(
-                "session history {} contains corrupt lines {:?}",
-                path.display(),
-                parsed.corrupt_lines
-            );
-        }
-        match HistoryProjection::replay(parsed.legacy, &parsed.events) {
-            Ok(projection) => Some((contents, projection)),
-            Err(error) => {
-                log::warn!(
-                    "failed to replay session history {}: {error:?}",
-                    path.display()
-                );
-                None
-            }
-        }
+        crate::session_snapshots::load(path)
+            .map_err(|error| {
+                log::warn!("failed to load session history {}: {error}", path.display());
+            })
+            .ok()
     }
 
     fn append_title(&self, session_id: &str, title: &str) -> bool {
@@ -608,6 +624,13 @@ impl SessionStore {
         {
             return false;
         }
+        let selection = match branch.context_selection(message_id, false) {
+            Ok(selection) => selection,
+            Err(error) => {
+                log::warn!("cannot resolve context view for revert: {error:?}");
+                return false;
+            }
+        };
         let next_version = projection
             .reverts
             .iter()
@@ -624,7 +647,7 @@ impl SessionStore {
                 target: Reference {
                     branch_id: session_id.to_string(),
                     event_id: branch.head_event_id,
-                    selection: Selection::BeforeMessage(message_id.to_string()),
+                    selection,
                 },
                 undo_label: format!("v{next_version}"),
             },
@@ -678,6 +701,13 @@ impl SessionStore {
         {
             return false;
         }
+        let selection = match parent.context_selection(message_id, true) {
+            Ok(selection) => selection,
+            Err(error) => {
+                log::warn!("cannot resolve context view for fork: {error:?}");
+                return false;
+            }
+        };
         let event = HistoryEvent::new(
             projection.last_event_id.saturating_add(1).max(1),
             &forked.id,
@@ -685,7 +715,7 @@ impl SessionStore {
                 parent: Reference {
                     branch_id: parent_id.to_string(),
                     event_id: parent.head_event_id,
-                    selection: Selection::ThroughMessage(message_id.to_string()),
+                    selection,
                 },
                 metadata: self.branch_metadata(forked),
             },
@@ -744,7 +774,20 @@ impl SessionStore {
             return;
         }
         for (message, ids) in session.messages.iter().zip(groups) {
-            session.ctx_ids.insert(message.id.clone(), ids);
+            // Live associations are emitted by the context producer. The
+            // positional adapter is only for unbound legacy/test transports.
+            if let Some(existing) = session.ctx_ids.get(&message.id)
+                && *existing != ids
+            {
+                // The live binding wins; a mismatch means the positional
+                // fallback disagrees with it and must never overwrite it.
+                log::debug!(
+                    "ctx_ids positional fallback disagrees with live binding for message {} of session {}",
+                    message.id,
+                    session.id
+                );
+            }
+            session.ctx_ids.entry(message.id.clone()).or_insert(ids);
         }
     }
 
@@ -812,12 +855,12 @@ impl SessionStore {
                     .into_values()
                     .filter(|branch| !branch.deleted)
                     .map(|branch| SessionSummary {
-                        session_id: branch.session.id,
-                        title: branch.session.title,
+                        session_id: branch.session.id.clone(),
+                        title: branch.session.title.clone(),
                         created_at: branch.session.created_at,
                         message_count: branch.session.messages.len(),
-                        cwd: branch.cwd,
-                        model: branch.session.model,
+                        cwd: branch.cwd.clone(),
+                        model: branch.session.model.clone(),
                         title_generated: branch.session.title_generated,
                     }),
             );
@@ -985,11 +1028,10 @@ fn diff_context(
         return deltas;
     };
 
+    let previous_items: HashMap<u64, &ContextItem> =
+        current.items.iter().map(|item| (item.id(), item)).collect();
     for item in &requested.items {
-        let previous = current
-            .items
-            .iter()
-            .find(|previous| previous.id() == item.id());
+        let previous = previous_items.get(&item.id()).copied();
         if previous.is_none_or(|previous| !serialized_equal(previous, item)) {
             deltas.push(Delta::Context {
                 change: ContextDelta::ItemUpsert { item: item.clone() },
@@ -1271,7 +1313,14 @@ fn append_events(
     // keeps appended data across a process death, but only an explicit sync
     // orders it onto the storage device. fdatasync flushes the new bytes and
     // the file size they depend on.
-    file.sync_data()
+    file.sync_data()?;
+    // Snapshots are a rebuildable acceleration structure. Once the event
+    // append is durable, a failed snapshot must not report a failed action
+    // (retrying a successful revert would produce a second undo record).
+    if let Err(error) = crate::session_snapshots::checkpoint(path) {
+        log::warn!("session snapshot deferred for {}: {error}", path.display());
+    }
+    Ok(())
 }
 
 impl Default for SessionStore {
@@ -1386,6 +1435,189 @@ mod tests {
     use super::*;
     use crate::types::{Message, Part, ReasoningPart, TextPart, ToolPart, ToolStatus};
     use cosh::harness::context::{ContextItem, SplitState};
+
+    #[test]
+    fn versioned_view_survives_display_only_mapping_loss_and_restores_hidden() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+        let mut session = make_test_session(
+            "view-loss",
+            "View",
+            vec![
+                make_user_msg("m1", "keep"),
+                make_assistant_msg("m2", "already hidden"),
+                make_user_msg("m3", "discard secret"),
+                make_assistant_msg("m4", "discard answer"),
+            ],
+        );
+        let mut context = make_context(vec![
+            user_item(1, "keep"),
+            assistant_item(2, "already hidden"),
+            user_item(3, "discard secret"),
+            assistant_item(4, "discard answer"),
+        ]);
+        context.hidden.insert(2);
+        store.save_session_with_context(&session, &context);
+        session.ctx_ids.clear();
+        store.save_session(&session);
+        let path = store.file_path(&session.id);
+        let prefix = std::fs::read(&path).unwrap();
+        assert!(store.revert_session(&session.id, "m3"));
+        assert!(std::fs::read(&path).unwrap().starts_with(&prefix));
+        let selected = store.load_context(&session.id).unwrap();
+        assert_eq!(
+            selected
+                .items
+                .iter()
+                .map(ContextItem::id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert!(selected.hidden.contains(&2));
+        let mut manager = cosh::harness::context::ContextManager::new(1_000);
+        manager.restore_state(&selected);
+        let model = serde_json::to_string(&manager.build_messages("")).unwrap();
+        assert!(!model.contains("discard secret"));
+        assert!(!model.contains("already hidden"));
+        crate::session_snapshots::force_checkpoint(&path).unwrap();
+        crate::session_snapshots::evict(&path);
+        assert!(store.rollback_session(&session.id, "v1"));
+        let restored = store.load_context(&session.id).unwrap();
+        assert_eq!(
+            serde_json::to_value(restored).unwrap(),
+            serde_json::to_value(context).unwrap()
+        );
+        assert!(
+            std::fs::read_to_string(path)
+                .unwrap()
+                .contains("context_view")
+        );
+    }
+
+    #[test]
+    fn versioned_fork_keeps_interleaved_results_and_internal_items() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+        let call = |id, name: &str| ContextItem::ToolCall {
+            id,
+            call_id: name.into(),
+            name: "fs_read".into(),
+            arguments: "{}".into(),
+            thought_signature: String::new(),
+            thinking_blocks: Vec::new(),
+        };
+        let result = |id, name: &str| ContextItem::ToolResult {
+            id,
+            call_id: name.into(),
+            content: name.into(),
+            useless: false,
+        };
+        let mut session = make_test_session(
+            "view-interleave",
+            "View",
+            vec![
+                make_user_msg("user", "task"),
+                make_assistant_msg("a", "A"),
+                make_assistant_msg("b", "B"),
+            ],
+        );
+        // The internal item has no display message. Native call ownership,
+        // rather than ctx_ids membership, determines the selected context.
+        let context = make_context(vec![
+            user_item(1, "task"),
+            assistant_item(2, "internal"),
+            call(3, "a"),
+            call(4, "b"),
+            result(5, "a"),
+            result(6, "b"),
+        ]);
+        session.ctx_ids.insert("user".into(), vec![1]);
+        session.ctx_ids.insert("a".into(), vec![3, 5]);
+        session.ctx_ids.insert("b".into(), vec![4, 6]);
+        store.save_session_with_context(&session, &context);
+        session.ctx_ids.clear();
+        store.save_session(&session);
+        let mut child = session.clone();
+        child.id = "view-child".into();
+        assert!(store.fork_session(&session.id, "a", &child));
+        assert_eq!(
+            store
+                .load_context(&child.id)
+                .unwrap()
+                .items
+                .iter()
+                .map(ContextItem::id)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 5]
+        );
+        assert_eq!(store.load_context(&session.id).unwrap().items.len(), 6);
+        assert!(store.revert_session(&session.id, "b"));
+        assert_eq!(
+            store
+                .load_context(&session.id)
+                .unwrap()
+                .items
+                .iter()
+                .map(ContextItem::id)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 5]
+        );
+    }
+
+    #[test]
+    fn versioned_view_supports_multiple_context_groups_in_one_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+        let mut session = make_test_session(
+            "view-merged",
+            "View",
+            vec![
+                make_user_msg("u", "task"),
+                make_assistant_msg("merged", "several outputs"),
+                make_user_msg("future", "future"),
+            ],
+        );
+        let context = make_context(vec![
+            user_item(1, "task"),
+            assistant_item(2, "first"),
+            assistant_item(3, "second"),
+            user_item(4, "future"),
+        ]);
+        session.ctx_ids.insert("u".into(), vec![1]);
+        session.ctx_ids.insert("merged".into(), vec![2, 3]);
+        session.ctx_ids.insert("future".into(), vec![4]);
+        store.save_session_with_context(&session, &context);
+        let mut child = session.clone();
+        child.id = "merged-child".into();
+        assert!(store.fork_session(&session.id, "merged", &child));
+        assert_eq!(store.load_context(&child.id).unwrap().items.len(), 3);
+        assert!(store.revert_session(&session.id, "merged"));
+        assert_eq!(store.load_context(&session.id).unwrap().items.len(), 1);
+    }
+
+    #[test]
+    fn missing_context_boundary_refuses_action_without_appending_a_guess() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+        let session = make_test_session(
+            "view-unbound",
+            "View",
+            vec![
+                make_user_msg("u", "task"),
+                make_assistant_msg("a", "answer"),
+            ],
+        );
+        let context = make_context(vec![
+            user_item(1, "task"),
+            assistant_item(2, "answer"),
+            assistant_item(3, "internal"),
+        ]);
+        store.save_session_with_context(&session, &context);
+        let path = store.file_path(&session.id);
+        let before = std::fs::read(&path).unwrap();
+        assert!(!store.revert_session(&session.id, "a"));
+        assert_eq!(std::fs::read(path).unwrap(), before);
+    }
 
     fn make_test_session(id: &str, title: &str, messages: Vec<Message>) -> Session {
         Session {

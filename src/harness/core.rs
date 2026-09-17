@@ -1562,6 +1562,7 @@ impl Harness {
             .set_model(self.connector.effective_model());
 
         self.context_manager.begin_manual_compaction();
+        self.context_manager.set_binding_sender(tx.clone());
         let outcome = self.context_manager.run();
         let ok = if matches!(outcome, RunOutcome::NeedsLlmCompaction) {
             self.llm_compact(tx).await
@@ -3438,6 +3439,7 @@ impl Harness {
         mut queued_input_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
     ) {
         use super::events::{HarnessEvent, ToastVariant};
+        self.context_manager.set_binding_sender(tx.clone());
         use super::guardrails::{PermissionCheck, check_tool_permission};
         use cosh_tools::question::types::{QuestionInput, QuestionOutput};
 
@@ -3631,8 +3633,8 @@ impl Harness {
             let mut injected_any = false;
             while let Ok(text) = queued_input_rx.try_recv() {
                 injected_any = true;
+                let _ = tx.send(HarnessEvent::UserMessageInjected { text: text.clone() });
                 self.context_manager.add_user(&text);
-                let _ = tx.send(HarnessEvent::UserMessageInjected { text });
             }
             if injected_any {
                 current_input.clear();

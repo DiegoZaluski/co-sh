@@ -5,6 +5,7 @@
 //! ordered [`HistoryEvent`] values remain the only source of truth.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 use cosh::harness::context::{ContextItem, ContextManagerState, MapReduceState, SplitState};
 use cosh_tools::plan::types::TodoList;
@@ -61,6 +62,12 @@ pub(crate) enum Selection {
     AtEvent,
     BeforeMessage(String),
     ThroughMessage(String),
+    /// Frozen semantic boundary, independent of mutable display bookkeeping.
+    ContextView {
+        message_id: String,
+        group_id: u64,
+        inclusive: bool,
+    },
 }
 
 /// Immutable metadata needed to begin a root history or identify a branch.
@@ -174,6 +181,11 @@ where
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "field", rename_all = "snake_case")]
 pub(crate) enum ContextDelta {
+    /// Only a context save can bind a message to its semantic group.
+    MessageBoundary {
+        message_id: String,
+        boundary: ContextBoundary,
+    },
     Initialize {
         next_id: u64,
         max_tokens: usize,
@@ -257,7 +269,7 @@ pub(crate) enum ContextDelta {
 }
 
 /// Current state of one logical branch, derived by replay.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct BranchProjection {
     pub session: Session,
     pub cwd: String,
@@ -266,6 +278,18 @@ pub(crate) struct BranchProjection {
     pub deleted: bool,
     /// Derived (context item boundary, plan event ID) references, not plan copies.
     todo_points: Vec<(u64, u64)>,
+    #[serde(default)]
+    pub(crate) message_boundaries: HashMap<String, ContextBoundary>,
+    #[serde(skip)]
+    message_positions: HashMap<String, usize>,
+    #[serde(skip)]
+    item_positions: HashMap<u64, usize>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ContextBoundary {
+    pub first_group: u64,
+    pub last_group: u64,
 }
 
 impl BranchProjection {
@@ -287,14 +311,26 @@ impl BranchProjection {
             head_event_id,
             deleted: false,
             todo_points: Vec::new(),
+            message_boundaries: HashMap::new(),
+            message_positions: HashMap::new(),
+            item_positions: HashMap::new(),
         }
     }
 
     fn apply_selection(&mut self, selection: &Selection) -> Result<(), ReplayError> {
+        if let Selection::ContextView {
+            message_id,
+            group_id,
+            inclusive,
+        } = selection
+        {
+            return self.select_context_view(message_id, *group_id, *inclusive);
+        }
         let (message_id, keep_through) = match selection {
             Selection::AtEvent => return Ok(()),
             Selection::BeforeMessage(message_id) => (message_id, false),
             Selection::ThroughMessage(message_id) => (message_id, true),
+            Selection::ContextView { .. } => unreachable!(),
         };
         let Some(index) = self
             .session
@@ -341,6 +377,10 @@ impl BranchProjection {
         self.session
             .ctx_ids
             .retain(|message_id, _| retained_messages.contains(message_id.as_str()));
+        // Selection materializes a new disposable view; positional indexes
+        // from the source branch are no longer valid after truncation.
+        self.message_positions.clear();
+        self.item_positions.clear();
 
         if let Some(context) = self.context.as_mut() {
             if keep_through {
@@ -354,14 +394,159 @@ impl BranchProjection {
         }
         Ok(())
     }
+
+    /// Resolve before appending the action, while the source view is intact.
+    /// Missing historical identity is an error, never a positional guess.
+    pub(crate) fn context_selection(
+        &self,
+        message_id: &str,
+        inclusive: bool,
+    ) -> Result<Selection, ReplayError> {
+        if self.context.is_none() {
+            return Ok(if inclusive {
+                Selection::ThroughMessage(message_id.into())
+            } else {
+                Selection::BeforeMessage(message_id.into())
+            });
+        }
+        let boundary = self
+            .message_boundaries
+            .get(message_id)
+            .copied()
+            .ok_or_else(|| ReplayError::MissingContextBoundary(message_id.into()))?;
+        let group_id = if inclusive {
+            boundary.last_group
+        } else {
+            boundary.first_group
+        };
+        if self.context.as_ref().is_some_and(|context| {
+            !context_groups(&context.items)
+                .values()
+                .any(|id| *id == group_id)
+        }) {
+            return Err(ReplayError::MissingContextBoundary(message_id.into()));
+        }
+        Ok(Selection::ContextView {
+            message_id: message_id.into(),
+            group_id,
+            inclusive,
+        })
+    }
+
+    /// Catches a positional index that drifted from its collection (a
+    /// mutation that forgot to invalidate). Debug builds only; the indexes
+    /// are lazily rebuilt when empty, so an empty index is always valid.
+    fn debug_assert_positional_indexes(&self) {
+        debug_assert!(
+            self.message_positions.is_empty()
+                || (self.message_positions.len() == self.session.messages.len()
+                    && self
+                        .message_positions
+                        .iter()
+                        .all(|(id, i)| self.session.messages.get(*i).is_some_and(|m| &m.id == id))),
+            "message_positions out of sync with session.messages"
+        );
+        debug_assert!(
+            self.item_positions.is_empty()
+                || self
+                    .context
+                    .as_ref()
+                    .is_none_or(|c| self.item_positions.len() == c.items.len()
+                        && self
+                            .item_positions
+                            .iter()
+                            .all(|(id, i)| c.items.get(*i).is_some_and(|item| &item.id() == id))),
+            "item_positions out of sync with context items"
+        );
+    }
+
+    fn select_context_view(
+        &mut self,
+        message_id: &str,
+        group_id: u64,
+        inclusive: bool,
+    ) -> Result<(), ReplayError> {
+        let index = self
+            .session
+            .messages
+            .iter()
+            .position(|m| m.id == message_id)
+            .ok_or_else(|| ReplayError::MissingMessage(message_id.into()))?;
+        let keep = |id: u64| id < group_id || inclusive && id == group_id;
+        if let Some(context) = self.context.as_mut() {
+            let groups = context_groups(&context.items);
+            if !groups.values().any(|id| *id == group_id) {
+                return Err(ReplayError::MissingContextBoundary(message_id.into()));
+            }
+            // Materialize a disposable view; archived items are never edited.
+            // A result belongs to its call even when it occurs after the cut.
+            context.items.retain(|item| keep(groups[&item.id()]));
+            let live: HashSet<u64> = context.items.iter().map(ContextItem::id).collect();
+            self.todo_points
+                .retain(|(id, _)| *id == 0 || live.contains(id));
+            // A split buffer can contain the excluded future. Its source view
+            // remains available for rollback, but this prefix must rebuild it.
+            context.split = None;
+            if context
+                .map_reduce
+                .as_ref()
+                .is_some_and(|s| s.source_item_ids.iter().any(|id| !live.contains(id)))
+            {
+                context.map_reduce = None;
+            }
+            repair_context_visibility(context);
+        }
+        self.session
+            .messages
+            .truncate(index + usize::from(inclusive));
+        let messages: HashSet<&str> = self
+            .session
+            .messages
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect();
+        self.session
+            .ctx_ids
+            .retain(|id, _| messages.contains(id.as_str()));
+        self.message_boundaries
+            .retain(|id, _| messages.contains(id.as_str()));
+        self.message_positions.clear();
+        self.item_positions.clear();
+        Ok(())
+    }
+}
+
+/// Semantic ownership comes from native call IDs, not display positions.
+pub(crate) fn context_groups(items: &VecDeque<ContextItem>) -> HashMap<u64, u64> {
+    let calls: HashMap<&str, u64> = items
+        .iter()
+        .filter_map(|item| match item {
+            ContextItem::ToolCall { id, call_id, .. } => Some((call_id.as_str(), *id)),
+            _ => None,
+        })
+        .collect();
+    items
+        .iter()
+        .map(|item| {
+            let group = match item {
+                ContextItem::ToolResult { call_id, .. } => {
+                    calls.get(call_id.as_str()).copied().unwrap_or(item.id())
+                }
+                _ => item.id(),
+            };
+            (item.id(), group)
+        })
+        .collect()
 }
 
 /// All live branch heads plus the event-point states needed to resolve future
 /// references. Both maps are derived and may be discarded at any time.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct HistoryProjection {
-    pub branches: HashMap<String, BranchProjection>,
-    event_states: HashMap<(String, u64), BranchProjection>,
+    pub branches: HashMap<String, Arc<BranchProjection>>,
+    #[serde(with = "reference_states")]
+    event_states: HashMap<(String, u64), Arc<BranchProjection>>,
+    #[serde(skip)]
     reference_targets: HashSet<(String, u64)>,
     /// One derived value per plan event, shared by all branch references.
     todo_values: HashMap<u64, Option<TodoList>>,
@@ -376,11 +561,33 @@ pub(crate) struct HistoryProjection {
     pub skipped_non_monotonic: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct RevertRecord {
     pub branch_id: String,
     pub undo_label: String,
     pub previous: Reference,
+}
+
+// JSON object keys cannot be tuples; snapshots encode reference roots as a
+// sequence while keeping the in-memory lookup O(1).
+mod reference_states {
+    use super::*;
+    type StoredStates = HashMap<(String, u64), Arc<BranchProjection>>;
+    pub fn serialize<S: serde::Serializer>(
+        value: &StoredStates,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        value.iter().collect::<Vec<_>>().serialize(serializer)
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<StoredStates, D::Error> {
+        Ok(
+            Vec::<((String, u64), Arc<BranchProjection>)>::deserialize(deserializer)?
+                .into_iter()
+                .collect(),
+        )
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -391,6 +598,7 @@ pub(crate) enum ReplayError {
     MissingBranch(String),
     MissingReference(Reference),
     MissingMessage(String),
+    MissingContextBoundary(String),
     CrossBranchReference { branch: String, target: String },
     InvalidGenesisBranch { envelope: String, metadata: String },
 }
@@ -417,6 +625,7 @@ impl HistoryProjection {
         if let Some(mut branch) = legacy {
             branch.head_event_id = LEGACY_HEAD_EVENT_ID;
             let branch_id = branch.session.id.clone();
+            let branch = Arc::new(branch);
             if projection
                 .reference_targets
                 .contains(&(branch_id.clone(), LEGACY_HEAD_EVENT_ID))
@@ -456,11 +665,60 @@ impl HistoryProjection {
             );
         }
         for branch in projection.branches.values_mut() {
-            if let Some(context) = branch.context.as_mut() {
+            if let Some(context) = Arc::make_mut(branch).context.as_mut() {
                 repair_context_visibility(context);
             }
         }
+        for branch in projection.branches.values() {
+            branch.debug_assert_positional_indexes();
+        }
         Ok(projection)
+    }
+
+    /// Extend a cached/snapshotted projection. References to current roots are
+    /// captured before mutation. A reference to an unavailable older root asks
+    /// the store to fall back to a full replay; it is never approximated.
+    pub(crate) fn extend(&mut self, events: &[HistoryEvent]) -> Result<(), ReplayError> {
+        for event in events {
+            let target = match &event.delta {
+                Delta::Snapshot { target, .. }
+                | Delta::Revert { target, .. }
+                | Delta::Rollback { target, .. } => Some(target),
+                Delta::Fork { parent, .. } => Some(parent),
+                _ => None,
+            };
+            if let Some(target) = target {
+                self.reference_targets
+                    .insert((target.branch_id.clone(), target.event_id));
+                if let Some(branch) = self.branches.get(&target.branch_id)
+                    && branch.head_event_id == target.event_id
+                {
+                    self.event_states
+                        .insert((target.branch_id.clone(), target.event_id), branch.clone());
+                }
+            }
+        }
+        for event in events {
+            match self.apply_event(event) {
+                Err(ReplayError::NonMonotonicEvent { .. }) => self.skipped_non_monotonic += 1,
+                result => result?,
+            }
+        }
+        let touched: HashSet<&str> = events
+            .iter()
+            .map(|event| event.branch_id.as_str())
+            .collect();
+        for id in touched {
+            if let Some(branch) = self.branches.get_mut(id)
+                && let Some(context) = Arc::make_mut(branch).context.as_mut()
+            {
+                repair_context_visibility(context);
+            }
+        }
+        for branch in self.branches.values() {
+            branch.debug_assert_positional_indexes();
+        }
+        Ok(())
     }
 
     fn apply_event(&mut self, event: &HistoryEvent) -> Result<(), ReplayError> {
@@ -517,6 +775,9 @@ impl HistoryProjection {
                         .ok_or_else(|| ReplayError::MissingBranch(event.branch_id.clone()))?
                         .head_event_id,
                 );
+                let previous_state = self.branches[&event.branch_id].clone();
+                self.event_states
+                    .insert((event.branch_id.clone(), previous.event_id), previous_state);
                 self.reverts.push(RevertRecord {
                     branch_id: event.branch_id.clone(),
                     undo_label: undo_label.clone(),
@@ -535,8 +796,8 @@ impl HistoryProjection {
             }
             _ => self
                 .branches
-                .get(&event.branch_id)
-                .cloned()
+                .remove(&event.branch_id)
+                .map(Arc::unwrap_or_clone)
                 .ok_or_else(|| ReplayError::MissingBranch(event.branch_id.clone()))?,
         };
 
@@ -577,6 +838,7 @@ impl HistoryProjection {
         }
         state.head_event_id = event.event_id;
         self.last_event_id = event.event_id;
+        let state = Arc::new(state);
         if self
             .reference_targets
             .contains(&(event.branch_id.clone(), event.event_id))
@@ -592,7 +854,12 @@ impl HistoryProjection {
         let mut state = self
             .event_states
             .get(&(reference.branch_id.clone(), reference.event_id))
-            .cloned()
+            .or_else(|| {
+                self.branches
+                    .get(&reference.branch_id)
+                    .filter(|s| s.head_event_id == reference.event_id)
+            })
+            .map(|state| state.as_ref().clone())
             .ok_or_else(|| ReplayError::MissingReference(reference.clone()))?;
         if let Some(context) = state.context.as_mut() {
             repair_context_visibility(context);
@@ -639,14 +906,36 @@ fn apply_message(state: &mut BranchProjection, change: &MessageDelta) {
             message,
             context_item_ids,
         } => {
-            match state
-                .session
-                .messages
-                .iter()
-                .position(|existing| existing.id == message.id)
+            // Import explicit associations from older logs once. A later
+            // display-only save with [] cannot erase the durable boundary.
+            if let (Some(first_group), Some(last_group)) =
+                (context_item_ids.iter().min(), context_item_ids.iter().max())
             {
+                state
+                    .message_boundaries
+                    .entry(message.id.clone())
+                    .or_insert(ContextBoundary {
+                        first_group: *first_group,
+                        last_group: *last_group,
+                    });
+            }
+            if state.message_positions.len() != state.session.messages.len() {
+                state.message_positions = state
+                    .session
+                    .messages
+                    .iter()
+                    .enumerate()
+                    .map(|(i, m)| (m.id.clone(), i))
+                    .collect();
+            }
+            match state.message_positions.get(&message.id).copied() {
                 Some(index) => state.session.messages[index] = message.clone(),
-                None => state.session.messages.push(message.clone()),
+                None => {
+                    state
+                        .message_positions
+                        .insert(message.id.clone(), state.session.messages.len());
+                    state.session.messages.push(message.clone());
+                }
             }
             if context_item_ids.is_empty() {
                 state.session.ctx_ids.remove(&message.id);
@@ -663,6 +952,8 @@ fn apply_message(state: &mut BranchProjection, change: &MessageDelta) {
                 .messages
                 .retain(|message| message.id != *message_id);
             state.session.ctx_ids.remove(message_id);
+            state.message_boundaries.remove(message_id);
+            state.message_positions.clear();
         }
     }
 }
@@ -675,6 +966,14 @@ fn context_or_default(state: &mut BranchProjection) -> &mut ContextManagerState 
 
 fn apply_context(state: &mut BranchProjection, change: &ContextDelta) {
     match change {
+        ContextDelta::MessageBoundary {
+            message_id,
+            boundary,
+        } => {
+            state
+                .message_boundaries
+                .insert(message_id.clone(), *boundary);
+        }
         ContextDelta::Initialize {
             next_id,
             max_tokens,
@@ -688,6 +987,7 @@ fn apply_context(state: &mut BranchProjection, change: &ContextDelta) {
             last_tool_set,
             ..
         } => {
+            state.item_positions.clear();
             state.context = Some(ContextManagerState {
                 items: VecDeque::new(),
                 next_id: *next_id,
@@ -706,17 +1006,27 @@ fn apply_context(state: &mut BranchProjection, change: &ContextDelta) {
             context_or_default(state).last_tool_set = value.clone();
         }
         ContextDelta::ItemUpsert { item } => {
-            let context = context_or_default(state);
-            match context
-                .items
-                .iter()
-                .position(|existing| existing.id() == item.id())
-            {
+            let context = state
+                .context
+                .get_or_insert_with(ContextManagerState::default);
+            if state.item_positions.len() != context.items.len() {
+                state.item_positions = context
+                    .items
+                    .iter()
+                    .enumerate()
+                    .map(|(i, item)| (item.id(), i))
+                    .collect();
+            }
+            match state.item_positions.get(&item.id()).copied() {
                 Some(index) => context.items[index] = item.clone(),
-                None => context.items.push_back(item.clone()),
+                None => {
+                    state.item_positions.insert(item.id(), context.items.len());
+                    context.items.push_back(item.clone());
+                }
             }
         }
         ContextDelta::ItemRemove { item_id } => {
+            state.item_positions.clear();
             let context = context_or_default(state);
             context.items.retain(|item| item.id() != *item_id);
             repair_context_visibility(context);
@@ -829,6 +1139,14 @@ pub(crate) fn parse_jsonl(session_id: &str, contents: &str) -> ParsedHistory {
             parsed.events.push(event);
             continue;
         }
+        // Derived snapshot pages/commits are not history events. Full replay
+        // deliberately ignores them and remains the source of truth.
+        if line.starts_with("{\"view_page\":")
+            || line.starts_with("{\"view_commit\":")
+            || line.starts_with("{\"view_head\":")
+        {
+            continue;
+        }
         if index == 0
             && let Ok(header) = serde_json::from_str::<LegacyHeader>(line)
         {
@@ -868,6 +1186,21 @@ pub(crate) fn parse_jsonl(session_id: &str, contents: &str) -> ParsedHistory {
             context
         });
         parsed.legacy = Some(BranchProjection {
+            message_positions: HashMap::new(),
+            item_positions: HashMap::new(),
+            message_boundaries: session
+                .ctx_ids
+                .iter()
+                .filter_map(|(id, items)| {
+                    Some((
+                        id.clone(),
+                        ContextBoundary {
+                            first_group: *items.iter().min()?,
+                            last_group: *items.iter().max()?,
+                        },
+                    ))
+                })
+                .collect(),
             session,
             cwd: header.cwd,
             context,

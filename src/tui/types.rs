@@ -21,12 +21,11 @@ pub struct Session {
     /// Reasoning effort (`None` = model default) for the last model used in
     /// this session. Persisted by metadata deltas.
     pub reasoning: Option<String>,
-    /// Mapping of message id → context-manager item ids (see
-    /// `session_store::update_ctx_ids`). Pure bookkeeping: it lets display
-    /// actions (revert, fork) locate the model-facing items that back each
-    /// displayed message, so they can be reflected in the context records
-    /// of the session history. It is NEVER model-facing data and is only used
-    /// when selecting display/context prefixes by reference.
+    /// Legacy display bookkeeping: message id → context-manager item ids.
+    /// New history boundaries are recorded as explicit context deltas, so a
+    /// display-only save cannot erase the semantic view identity. This field
+    /// remains for compatibility with older histories and UI rendering; it is
+    /// never model-facing data.
     #[serde(default)]
     pub ctx_ids: std::collections::HashMap<String, Vec<u64>>,
 }

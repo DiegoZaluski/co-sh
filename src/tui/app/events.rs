@@ -129,6 +129,74 @@ impl App {
 
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
+                HarnessEvent::ContextItemRecorded {
+                    item_id,
+                    user,
+                    call_item_id,
+                    tool_name,
+                    compaction,
+                } => {
+                    let owner = self
+                        .active_loop_session_id
+                        .as_ref()
+                        .or(self.state.current_session_id.as_ref())
+                        .cloned();
+                    let stream_message = self
+                        .stream_msg_id
+                        .as_ref()
+                        .filter(|(sid, _)| Some(sid) == owner.as_ref())
+                        .map(|(_, mid)| mid.clone());
+                    if let Some(owner) = owner
+                        && let Some(session) = self.state.session_cache.get_mut(&owner)
+                    {
+                        let message_id = if let Some(call_id) = call_item_id {
+                            session
+                                .ctx_ids
+                                .iter()
+                                .find(|(_, ids)| ids.contains(&call_id))
+                                .map(|(id, _)| id.clone())
+                        } else if let Some(tool_name) = tool_name {
+                            // Heuristic fallback: with parallel calls of the SAME
+                            // tool this can pick the wrong message. Harmless for
+                            // the model (semantic identity comes from the native
+                            // call_id groups); ctx_ids here is display bookkeeping.
+                            session.messages.iter().rev().find(|m| m.parts.iter().any(|p| matches!(p, Part::Tool(t) if t.tool == tool_name && t.status == ToolStatus::Running))).map(|m| m.id.clone())
+                        } else if compaction {
+                            session
+                                .messages
+                                .iter()
+                                .rev()
+                                .find(|m| {
+                                    m.parts
+                                        .iter()
+                                        .any(|p| matches!(p, Part::Compaction(c) if c.is_running()))
+                                })
+                                .map(|m| m.id.clone())
+                        } else if user {
+                            session
+                                .messages
+                                .iter()
+                                .rev()
+                                .find(|m| m.role == MessageRole::User)
+                                .map(|m| m.id.clone())
+                        } else {
+                            stream_message.or_else(|| {
+                                session
+                                    .messages
+                                    .iter()
+                                    .rev()
+                                    .find(|m| m.role == MessageRole::Assistant)
+                                    .map(|m| m.id.clone())
+                            })
+                        };
+                        if let Some(message_id) = message_id {
+                            let ids = session.ctx_ids.entry(message_id).or_default();
+                            if !ids.contains(&item_id) {
+                                ids.push(item_id);
+                            }
+                        }
+                    }
+                }
                 HarnessEvent::BeginAssistant => {
                     // A new streaming attempt starts: what follows belongs to
                     // THIS attempt. ClearAssistant may later discard only the
@@ -856,6 +924,12 @@ impl App {
                             agent: None,
                             model: self.llm_config.model.clone(),
                         });
+                        if let Some(cosh::harness::context::ContextItem::Error { id, .. }) =
+                            context.as_ref().and_then(|ctx| ctx.items.back())
+                            && let Some(message) = session.messages.last()
+                        {
+                            session.ctx_ids.insert(message.id.clone(), vec![*id]);
+                        }
                     }
 
                     // Persist the styled error line NOW: the loop is over, no

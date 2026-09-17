@@ -10,6 +10,7 @@ mod lsp_colors;
 mod notification;
 mod routes;
 mod session_history;
+mod session_snapshots;
 mod session_store;
 mod state;
 mod theme;

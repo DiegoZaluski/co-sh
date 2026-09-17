@@ -17,6 +17,15 @@ pub struct ModelEntry {
 /// to consume and render in real time.
 #[derive(Debug, Clone)]
 pub enum HarnessEvent {
+    /// Identity emitted by the context producer after the corresponding live
+    /// display event. A result links to the item that opened its tool call.
+    ContextItemRecorded {
+        item_id: u64,
+        user: bool,
+        call_item_id: Option<u64>,
+        tool_name: Option<String>,
+        compaction: bool,
+    },
     /// A text token streamed from the LLM.
     Token { text: String },
     /// A NEW streaming attempt is about to start. The SDK's retry middleware

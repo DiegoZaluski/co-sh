@@ -331,6 +331,7 @@ type SummaryAnnotator = dyn Fn(&str) -> String + Send + Sync;
 /// [`RunOutcome::NeedsLlmCompaction`] and applied by the harness through
 /// [`Self::apply_llm_summary`].
 pub struct ContextManager {
+    binding_tx: Option<tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>>,
     /// Conversation items in display order (oldest first). One item = one
     /// message; positions are stable.
     items: VecDeque<ContextItem>,
@@ -477,6 +478,7 @@ pub(super) fn merge_ranges(mut ranges: Vec<ContextItemRange>) -> Vec<ContextItem
 impl ContextManager {
     pub fn new(max_tokens: usize) -> Self {
         Self {
+            binding_tx: None,
             items: VecDeque::new(),
             next_id: 1,
             max_tokens,
@@ -1629,9 +1631,46 @@ impl ContextManager {
     /// re-tokenizing the whole timeline). The cache is the single source of
     /// truth for `total_tokens()`; every mutation of `items` must update it.
     fn push_item(&mut self, item: ContextItem) {
+        if let Some(tx) = &self.binding_tx {
+            let user = matches!(item, ContextItem::User { .. });
+            // Errors render only after their terminal event; that consumer
+            // binds the included error snapshot after creating the message.
+            if !matches!(item, ContextItem::Error { .. }) {
+                let call_item_id = match &item {
+                    ContextItem::ToolResult { call_id, .. } => {
+                        self.items.iter().rev().find_map(|i| match i {
+                            ContextItem::ToolCall {
+                                id, call_id: owner, ..
+                            } if owner == call_id => Some(*id),
+                            _ => None,
+                        })
+                    }
+                    _ => None,
+                };
+                let tool_name = match &item {
+                    ContextItem::ToolCall { name, .. } => Some(name.clone()),
+                    _ => None,
+                };
+                let compaction = matches!(item, ContextItem::Compaction { .. });
+                let _ = tx.send(super::events::HarnessEvent::ContextItemRecorded {
+                    item_id: item.id(),
+                    user,
+                    call_item_id,
+                    tool_name,
+                    compaction,
+                });
+            }
+        }
         let tokens = item.tokens(self.encoding);
         self.cached_items_tokens = self.cached_items_tokens.saturating_add(tokens);
         self.items.push_back(item);
+    }
+
+    pub(crate) fn set_binding_sender(
+        &mut self,
+        tx: tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
+    ) {
+        self.binding_tx = Some(tx);
     }
 
     /// Rebuild the cached token total from scratch. Called when the encoding
