@@ -144,7 +144,7 @@ impl PermissionDialog {
         border_box.set_border_sides(BorderSidesConfig {
             left: true,
             top: false,
-            right: false,
+            right: true,
             bottom: false,
         });
         border_box.set_custom_border_chars(left_border_chars());
@@ -193,9 +193,11 @@ impl PermissionDialog {
             for (i, opt) in OPTIONS.iter().enumerate() {
                 let is_selected = i == self.selected;
 
-                // Active row highlight (matches question dialog style)
+                // Active row highlight (matches question dialog style). The
+                // band stops one column short of the right edge so the right
+                // `┃` border stays visible on the highlighted row.
                 if is_selected {
-                    for cx in area.x + 1..area.x + area.width {
+                    for cx in area.x + 1..area.x + area.width.saturating_sub(1) {
                         if let Some(cell) = buf.cell_mut((cx, y_pos)) {
                             cell.set_char(' ');
                             cell.set_style(Style::default().bg(theme_bg_element));

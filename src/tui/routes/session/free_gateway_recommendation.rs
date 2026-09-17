@@ -349,7 +349,7 @@ impl FreeGatewayRecommendationDialog {
         border_box.set_border_sides(BorderSidesConfig {
             left: true,
             top: false,
-            right: false,
+            right: true,
             bottom: false,
         });
         border_box.set_custom_border_chars(left_border_chars());

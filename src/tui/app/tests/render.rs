@@ -1,5 +1,76 @@
 use super::{App, format_tokens};
 
+/// Long queued messages must word-wrap across several visual rows instead of
+/// being truncated: `pending_queue_rows` expands every queued message into
+/// one or more `(queue_index, message_index, line)` entries using the same
+/// grapheme-aware `word_wrap` primitive as the chat transcript.
+#[test]
+fn pending_queue_rows_wrap_long_messages() {
+    use crate::state::PendingQueues;
+    use std::collections::VecDeque;
+
+    let queues = PendingQueues {
+        next_loop: VecDeque::new(),
+        next_request: VecDeque::from([
+            "short".to_string(),
+            "uma mensagem bem longa que com certeza nao cabe em uma linha so".to_string(),
+        ]),
+    };
+
+    // Width 30 → text width 24 (┃ + 2 pad left, 2 pad right + ┃), symmetric
+    // like the prompt box's chrome.
+    let rows = App::pending_queue_rows(&queues, 30);
+
+    // Every wrapped line fits within the text width.
+    for (_, _, line) in &rows {
+        assert!(
+            line.chars().count() <= 24,
+            "wrapped line exceeds width: {line:?}"
+        );
+    }
+    // No characters are lost: rejoining the wrapped lines recovers the
+    // message (modulo the injected line breaks).
+    let joined: String = rows
+        .iter()
+        .filter(|(qi, mi, _)| *qi == 1 && *mi == 1)
+        .map(|(_, _, l)| l.as_str())
+        .collect::<Vec<_>>()
+        .join("");
+    assert_eq!(
+        joined.replace(' ', ""),
+        "umamensagembemlongaquecomcertezanaocabeemumalinhaso"
+    );
+    // The short message is a single row; the long one wraps into several.
+    assert_eq!(
+        rows.iter()
+            .filter(|(qi, mi, _)| *qi == 1 && *mi == 0)
+            .count(),
+        1
+    );
+    assert!(
+        rows.iter()
+            .filter(|(qi, mi, _)| *qi == 1 && *mi == 1)
+            .count()
+            > 1
+    );
+}
+
+/// An empty queued message still renders one (blank) row instead of
+/// disappearing from the strip.
+#[test]
+fn pending_queue_rows_keep_empty_messages_visible() {
+    use crate::state::PendingQueues;
+    use std::collections::VecDeque;
+
+    let queues = PendingQueues {
+        next_loop: VecDeque::from([String::new()]),
+        next_request: VecDeque::new(),
+    };
+    let rows = App::pending_queue_rows(&queues, 40);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0], (0, 0, String::new()));
+}
+
 #[test]
 fn format_tokens_small_values_have_no_separator() {
     assert_eq!(format_tokens(0), "0");
@@ -133,9 +204,7 @@ async fn charm_usage_event_switches_header_to_credits_balance() {
     use ratatui::{Terminal, backend::TestBackend};
     let backend = TestBackend::new(140, 30);
     let mut terminal = Terminal::new(backend).unwrap();
-    terminal
-        .draw(|f| app.render(f, 0.0))
-        .unwrap();
+    terminal.draw(|f| app.render(f, 0.0)).unwrap();
     let area = terminal.backend().buffer().area;
     let row: String = (area.x..area.right())
         .filter_map(|x| {

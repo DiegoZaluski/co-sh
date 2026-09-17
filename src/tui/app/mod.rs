@@ -966,7 +966,6 @@ impl App {
         self.usage_store.append(&record);
     }
 
-
     // Telemetry capture points (plan §4). Every helper is a NO-OP while
     // consent is off; only allowlisted/aggregated data is retained — never
     // raw tool output, error text, paths or prompts (audit F01).
@@ -1305,24 +1304,30 @@ impl App {
             return None;
         }
         // When an inline dialog covers the prompt region, the pending rows
-        // are not rendered.
+        // are not rendered (matches the `hide_prompt_and_spinner` logic in
+        // `render()`, which also hides the strip behind the recommendation
+        // dialog).
         if self.question_dialog.visible
             || self.permission_dialog.visible
             || self.queue_choice_dialog.visible
+            || self.free_gateway_dialog.visible
         {
-            return None;
-        }
-        let pending_h = self
-            .state
-            .current_pending_queues()
-            .map_or(0, |q| q.queued_count() as u16);
-        if pending_h == 0 {
             return None;
         }
         let area = self.terminal_size();
         let SessionArea {
             main: main_area, ..
         } = self.session_main_area(area);
+        // Rows are word-wrapped, so a single queued message may occupy
+        // several visual lines — count the same rows the renderer draws.
+        let pending_w = main_area.width.saturating_sub(4);
+        let pending_h = self
+            .state
+            .current_pending_queues()
+            .map_or(0, |q| App::pending_queue_rows(q, pending_w).len() as u16);
+        if pending_h == 0 {
+            return None;
+        }
         let footer_y = main_area.bottom().saturating_sub(1);
 
         let is_empty_session = self
@@ -1365,6 +1370,8 @@ impl App {
             footer_y.saturating_sub(prompt_h)
         };
 
+        // Same clamp as `render()`: the wrapped strip never covers the header.
+        let pending_h = pending_h.min(prompt_area_y.saturating_sub(area.y + 1));
         let pending_area_y = prompt_area_y.saturating_sub(pending_h);
         Some(Rect::new(
             main_area.x + 2,

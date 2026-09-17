@@ -1554,7 +1554,7 @@ impl QuestionDialog {
         border_box.set_border_sides(BorderSidesConfig {
             left: true,
             top: false,
-            right: false,
+            right: true,
             bottom: false,
         });
         border_box.set_custom_border_chars(left_border_chars());
@@ -2853,22 +2853,27 @@ mod tests {
             "question text at row 1:\n{}",
             rows[1]
         );
-        assert_eq!(
-            rows[2].trim(),
-            "┃",
+        // Gap rows are empty except for the box's side borders (┃ … ┃).
+        let border_only = |row: &str| {
+            row.chars()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>()
+                == "┃┃"
+        };
+        assert!(
+            border_only(rows[2]),
             "exactly one blank gap row before the options"
         );
         assert!(rows[3].contains('A'), "first option right after the gap");
-        assert_eq!(
-            rows[4].trim(),
-            "┃",
+        assert!(
+            border_only(rows[4]),
             "breathing gap between options so each item reads apart"
         );
         assert!(rows[5].contains('B'), "second option after its gap");
         // Trailing breathing gap below the custom input: it must never glue
         // to the footer hints.
         assert!(rows[8].contains("Type your custom answer..."));
-        assert_eq!(rows[9].trim(), "┃", "bottom gap below the input");
+        assert!(border_only(rows[9]), "bottom gap below the input");
         assert!(rows[10].contains("enter"), "footer hints after the gap");
     }
 
