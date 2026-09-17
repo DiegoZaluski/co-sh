@@ -117,6 +117,11 @@ version = "0.1"
 version = "0.8"
 features = ["xxh32", "xxh64"]
 
+# OS entropy for telemetry identifiers (audit F04): no time/address-derived
+# fallbacks — when entropy is unavailable the telemetry event is dropped.
+[dependencies.getrandom]
+version = "0.3"
+
 [dependencies.arboard]
 version = "3"
 default-features = false
@@ -137,6 +142,12 @@ version = "0.18"
 [dev-dependencies]
 tempfile = "3"
 parking_lot = "0.12"
+
+# In-process loopback TLS fixture for the telemetry transport tests (no
+# external process, no Python, no openssl CLI).
+rcgen = "0.13"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 
 [patch.crates-io]
 tree-sitter-kotlin = { git = "https://github.com/fwcd/tree-sitter-kotlin", rev = "c8ac3d2627240160b999a2c100de3babbdb8f419" }

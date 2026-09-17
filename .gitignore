@@ -16,3 +16,16 @@ SPEND.md
 /skills/
 ISSUES.md
 NOTE.md
+/.temp/
+
+# Supabase telemetry backend (local dev stack: config, migrations, edge
+# function, .env.local secrets). Kept out of the repo on purpose.
+/supabase/
+
+# Personal telemetry reference notes (not project docs).
+/TELEMETRY.md
+/TELEMETRY_DATA_MODEL.md
+/TELEMETRY_AUDIT.md
+
+# Personal working notes (not part of the repository)
+/src/telemetry/.NOTE/

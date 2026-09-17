@@ -88,6 +88,12 @@ fn settings_items() -> &'static [SettingsItem] {
             description: "Where the skills_* tools look for SKILL.md packs (colon-separated paths, ~ expands to $HOME). Enter: edit. Empty: ~/.skills",
             event: "",
         },
+        SettingsItem {
+            id: "telemetry",
+            label: "Telemetry",
+            description: "Share anonymous usage aggregates (no code, no paths, no prompts). On by default; disable here or via COSH_TELEMETRY=off. Takes effect on the next launch",
+            event: "",
+        },
     ]
 }
 
@@ -127,6 +133,7 @@ fn is_enabled(item: &SettingsItem, setup: &Setup) -> bool {
     if item.event.is_empty() {
         return match item.id {
             "lsp" => setup.lsp,
+            "telemetry" => setup.telemetry,
             _ => false,
         };
     }
@@ -414,6 +421,9 @@ pub enum SettingsAction {
     /// The LSP switch flipped; caller must `setup.save()`, flip the harness's
     /// process-wide LSP flag, and resync the app's `lsp_available` state.
     LspToggled,
+    /// Telemetry consent flipped; caller must `setup.save()`. The new consent
+    /// takes effect when the facade is next resolved (app restart).
+    TelemetryToggled,
     /// Open the registration box: blank when `index` is `None`.
     OpenHookForm {
         event: &'static str,
@@ -606,6 +616,14 @@ impl SettingsView {
                     setup.lsp = !setup.lsp;
                     self.selection.clamp(selectable_rows(setup).len());
                     return Some(SettingsAction::LspToggled);
+                }
+                // Telemetry consent: default-ON switch (opt-out, industry
+                // standard). The caller persists; the change takes effect
+                // on the next launch.
+                if item.event.is_empty() && item.id == "telemetry" {
+                    setup.telemetry = !setup.telemetry;
+                    self.selection.clamp(selectable_rows(setup).len());
+                    return Some(SettingsAction::TelemetryToggled);
                 }
                 // Each category flips only its own event's switch.
                 match item.event {

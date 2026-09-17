@@ -35,6 +35,12 @@ pub struct Setup {
     /// Terminal editor used by the file explorer (Ctrl+F). Empty: fall back
     /// to the first available of `nvim`, `vim`, `nano`.
     pub editor: String,
+    /// Telemetry consent (Settings screen toggle). DEFAULT ON (opt-out,
+    /// like the industry standard): the user can disable it in Settings or
+    /// via `COSH_TELEMETRY=off`; CI environments are hard-off regardless.
+    /// This flag is only the USER's choice — the effective consent still
+    /// goes through `Telemetry::resolve` (env override + CI hard-off).
+    pub telemetry: bool,
 }
 
 impl Default for Setup {
@@ -51,6 +57,7 @@ impl Default for Setup {
             lsp: true,
             mcp: McpConfig::default(),
             editor: String::new(),
+            telemetry: true,
         }
     }
 }
@@ -584,6 +591,28 @@ mod tests {
         assert!(parsed.providers.local.is_empty());
         assert_eq!(parsed.cache.anthropic_ttl_min, 0);
         assert_eq!(parsed.cache.openai_retention_min, 0);
+        // Telemetry is DEFAULT-ON (opt-out, industry standard): absent
+        // field, empty file and corrupt file all resolve to ON. Users who
+        // want out flip the Settings toggle or set COSH_TELEMETRY=off.
+        assert!(parsed.telemetry);
+        let legacy: Setup = serde_json::from_str("{}").unwrap();
+        assert!(legacy.telemetry);
+    }
+
+    /// The telemetry consent flag round-trips and stays default-on: a legacy
+    /// config without the key loads ON (opt-out), a saved `false` (explicit
+    /// opt-out) survives the reload.
+    #[test]
+    fn telemetry_consent_is_opt_out_and_roundtrips() {
+        let mut setup = Setup::default();
+        assert!(setup.telemetry, "default is on");
+        setup.telemetry = false;
+        let json = serde_json::to_string(&setup).unwrap();
+        let loaded: Setup = serde_json::from_str(&json).unwrap();
+        assert!(!loaded.telemetry);
+        // A legacy file that never mentioned telemetry loads ON (opt-out).
+        let legacy: Setup = serde_json::from_str(r#"{"appearance": {}}"#).unwrap();
+        assert!(legacy.telemetry);
     }
 
     /// Free-form duration parsing: bare minutes, unit suffixes, mixed

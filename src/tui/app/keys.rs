@@ -534,6 +534,7 @@ impl App {
                                 self.show_add_provider = true;
                             }
                             HomeAction::OpenSettings => {
+                                self.telemetry_feature(cosh::telemetry::schema::Feature::Settings);
                                 self.show_settings = true;
                             }
                             HomeAction::OpenModelRouter => {
@@ -671,6 +672,11 @@ impl App {
                                 self.open_skills_input();
                             }
                             Some(crate::routes::settings::SettingsAction::McpToggled) => {
+                                self.setup.save();
+                            }
+                            Some(crate::routes::settings::SettingsAction::TelemetryToggled) => {
+                                // Consent persisted; the facade re-resolves it
+                                // (env override + CI hard-off) on next launch.
                                 self.setup.save();
                             }
                             Some(crate::routes::settings::SettingsAction::OpenMcpForm) => {

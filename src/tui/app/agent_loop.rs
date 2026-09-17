@@ -209,6 +209,8 @@ impl App {
 
         self.stop_signal.store(false, Ordering::Relaxed);
         self.state.status = crate::types::SessionStatus::Working;
+        // Telemetry aggregate: one full user-request → final-answer cycle.
+        self.telemetry_turn();
         self.agent_spinner_bass = Some(AgentSpinnerBass::new("Working", &self.theme));
 
         let event_tx = self.event_tx.clone();

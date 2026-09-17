@@ -219,6 +219,8 @@ impl App {
                 }
 
                 HarnessEvent::ToolCall { tool, input } => {
+                    // Telemetry aggregate: allowlisted/normalized tool name.
+                    self.telemetry_tool_call(&tool);
                     // The attempt ended — its message is now transcript
                     // history (tool parts attach below); a future reset must
                     // never reach it.
@@ -400,6 +402,9 @@ impl App {
                 }
 
                 HarnessEvent::ToolError { error } => {
+                    // Telemetry aggregate: fingerprint-only representation,
+                    // raw message discarded inside the accumulator.
+                    self.telemetry_tool_error(&error);
                     let Some(session) = self.state.current_session_mut() else {
                         continue;
                     };
@@ -1007,6 +1012,9 @@ impl App {
                         reported_cost,
                         reported_cost_credits,
                     );
+                    // Telemetry aggregate: hashed model, allowlisted
+                    // provider, saturating token counters, real cost.
+                    self.telemetry_llm_usage(&provider, &model, &usage, reported_cost);
                     // The provider's remaining prepaid balance (Charm
                     // Hypercredits) — the user-facing ◆ figure in the
                     // session header. Latest request wins. Its PRESENCE is

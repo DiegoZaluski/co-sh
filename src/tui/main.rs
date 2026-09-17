@@ -50,6 +50,11 @@ async fn main() {
     if let Err(e) = app.run() {
         eprintln!("Error: {e}");
     }
+    // Telemetry shutdown (AFTER the terminal is restored by `run`): enqueue
+    // the session summary and flush the queue. Awaited so the bounded
+    // upload cannot race process exit; no-op without consent or ingest
+    // configuration.
+    app.telemetry_shutdown().await;
 }
 
 /// Diagnostic for the OS credential store backing the API keys.

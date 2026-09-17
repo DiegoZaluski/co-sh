@@ -330,6 +330,14 @@ pub struct App {
     /// Structured user preferences (theme, tools, routing) persisted in
     /// `~/.config/cosh/setup.json`.
     setup: crate::util::setup::Setup,
+    /// Telemetry facade: consent-resolved state (setup.json flag + env
+    /// override + CI hard-off) plus the local event queue.
+    telemetry: cosh::telemetry::Telemetry,
+    /// Per-session aggregate accumulator — one `session_summary` at exit.
+    session_telemetry: cosh::telemetry::session::SessionTelemetry,
+    /// Persistent random install id (`None`: entropy/fs failed — events are
+    /// dropped, fail closed, audit F04).
+    telemetry_install_id: Option<cosh::telemetry::events::UuidId>,
     /// Session persistence store (JSONL files on disk). `pub(crate)`: the
     /// session route's deletion lifecycle removes the session file from it.
     pub(crate) session_store: SessionStore,
@@ -490,6 +498,12 @@ impl App {
 
         let usage_store = crate::usage::UsageStore::new();
 
+        // Telemetry: resolve consent (setup.json flag + env override + CI
+        // hard-off) and load the persistent install id. Every capture point
+        // is gated on `telemetry.enabled()`; nothing records when off.
+        let telemetry = cosh::telemetry::Telemetry::resolve(setup.telemetry);
+        let telemetry_install_id = cosh::telemetry::install_id();
+
         // (tx, rx) for update-related background tasks, created here so both
         // halves can be moved into the struct below.
         let (update_event_tx, update_event_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -571,6 +585,9 @@ impl App {
             reasoning_dialog_original: None,
             model_cache: crate::util::cache::StaleCache::new("cache", "model.json"),
             setup,
+            telemetry,
+            session_telemetry: cosh::telemetry::session::SessionTelemetry::new(),
+            telemetry_install_id,
             session_store,
             pending_delete_session_id: None,
             pending_gateway_message: None,
@@ -950,6 +967,106 @@ impl App {
     }
 
 
+    // Telemetry capture points (plan §4). Every helper is a NO-OP while
+    // consent is off; only allowlisted/aggregated data is retained — never
+    // raw tool output, error text, paths or prompts (audit F01).
+
+    /// Feature aggregate: a top-level screen was opened.
+    fn telemetry_feature(&mut self, feature: cosh::telemetry::schema::Feature) {
+        if self.telemetry.enabled() {
+            self.session_telemetry.record_feature(feature);
+        }
+    }
+
+    /// Tool aggregate: one tool call dispatched.
+    fn telemetry_tool_call(&mut self, tool: &str) {
+        if self.telemetry.enabled() {
+            self.session_telemetry.record_tool_call(tool);
+        }
+    }
+
+    /// Error aggregate: a tool failed. The raw message is fingerprinted
+    /// (xxh64) and discarded inside the accumulator; the source must be on
+    /// the internal allowlist or the record is dropped.
+    fn telemetry_tool_error(&mut self, raw_error: &str) {
+        if self.telemetry.enabled() {
+            self.session_telemetry.record_error(
+                cosh::telemetry::schema::ErrorCategory::ToolFailed,
+                "harness::core",
+                None,
+                raw_error,
+            );
+        }
+    }
+
+    /// Usage aggregate: one served LLM request (allowlisted provider,
+    /// hashed model, saturating token counters, provider-reported cost).
+    fn telemetry_llm_usage(
+        &mut self,
+        provider: &str,
+        model: &str,
+        usage: &cosh_sdk::connector::TokenUsage,
+        reported_cost: Option<f64>,
+    ) {
+        if self.telemetry.enabled() {
+            self.session_telemetry.record_llm_request(provider, model);
+            self.session_telemetry.record_usage(
+                usage.total_input_tokens(),
+                u64::from(usage.output_tokens),
+                reported_cost,
+            );
+        }
+    }
+
+    /// Turn aggregate: one user submission starts an agent loop.
+    fn telemetry_turn(&mut self) {
+        if self.telemetry.enabled() {
+            self.session_telemetry.record_turn();
+        }
+    }
+
+    /// Telemetry shutdown: build + enqueue the session summary and flush the
+    /// queue. Awaited from `main` AFTER the terminal is restored, so the
+    /// bounded upload never races process exit and never blocks the render
+    /// loop. No-op without consent; the flush itself re-checks consent and
+    /// requires a configured ingest endpoint.
+    pub(crate) async fn telemetry_shutdown(&mut self) {
+        if !self.telemetry.enabled() {
+            return;
+        }
+        let Some(install_id) = self.telemetry_install_id.clone() else {
+            return;
+        };
+        let Some(version) =
+            cosh::telemetry::events::AppVersion::validate(env!("CARGO_PKG_VERSION"))
+        else {
+            return;
+        };
+        // finish() consumes the accumulator — swap in a fresh one.
+        let accumulator = std::mem::replace(
+            &mut self.session_telemetry,
+            cosh::telemetry::session::SessionTelemetry::new(),
+        );
+        let envelope = cosh::telemetry::events::EventEnvelope::new(
+            cosh::telemetry::schema::EventType::SessionSummary,
+            &version,
+            None,
+            &install_id,
+            None,
+            cosh::telemetry::events::OccurredAt::now(),
+            cosh::telemetry::events::EventPayload::SessionSummary(accumulator.finish()),
+        );
+        if let Some(envelope) = envelope {
+            // enqueue re-validates and silently drops when disabled.
+            self.telemetry.enqueue(&envelope);
+        }
+        // Upload through the facade: consent re-checked at call time,
+        // hardened HTTPS-only client, unforgeable consent token (re-audit
+        // C02). Without ingest configuration nothing leaves the machine.
+        if let Some(config) = cosh::telemetry::sink::SinkConfig::from_env() {
+            self.telemetry.flush(&config).await;
+        }
+    }
     /// Ctrl+U: always open the left panel showing the usage dashboard. Not a
     /// toggle — pressing it again keeps showing the dashboard, so the user
     /// never has to know a matching "other" shortcut.
