@@ -974,14 +974,22 @@ impl App {
             && y < pending_area.bottom()
         {
             if let Some(queues) = self.state.current_pending_queues() {
+                // Rows are word-wrapped: map the clicked visual row back to
+                // its (queue, message) using the same row expansion the
+                // renderer uses.
                 let row = (y - pending_area.y) as usize;
-                let loop_len = queues.next_loop.len();
-                let (queue, index, text) = if row < loop_len {
-                    (QueueTarget::NextLoop, row, queues.next_loop[row].clone())
+                let rows = App::pending_queue_rows(queues, pending_area.width);
+                let Some((queue_idx, msg_idx, _)) = rows.get(row) else {
+                    return Ok(true);
+                };
+                let (queue, index, text) = if *queue_idx == 0 {
+                    match queues.next_loop.get(*msg_idx) {
+                        Some(text) => (QueueTarget::NextLoop, *msg_idx, text.clone()),
+                        None => return Ok(true),
+                    }
                 } else {
-                    let idx = row - loop_len;
-                    match queues.next_request.get(idx) {
-                        Some(text) => (QueueTarget::NextRequest, idx, text.clone()),
+                    match queues.next_request.get(*msg_idx) {
+                        Some(text) => (QueueTarget::NextRequest, *msg_idx, text.clone()),
                         None => return Ok(true),
                     }
                 };

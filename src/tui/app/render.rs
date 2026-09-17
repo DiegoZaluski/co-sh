@@ -14,7 +14,9 @@ use crate::logo::LOGO_CHAT;
 use crate::routes::home::footer::HomeFooterView;
 use crate::routes::session::footer::FooterView;
 use crate::routes::session::right_panel::render_right_panel;
+use crate::state::PendingQueues;
 use crate::theme::rgba_color;
+use cosh_tui::core::lib::unicode_util::word_wrap;
 
 /// Render a 10-character budget bar like `▓▓▓▓▓░░░░░` from a 0-100 percentage.
 pub(super) fn render_budget_bar(pct: u8) -> String {
@@ -182,8 +184,9 @@ impl App {
                             && let Some(cell) = buf.cell_mut((right_x, area.y))
                         {
                             cell.set_char(diamond);
-                            cell.set_style(Style::default()
-                                .fg(ratatui::style::Color::Rgb(255, 96, 255)));
+                            cell.set_style(
+                                Style::default().fg(ratatui::style::Color::Rgb(255, 96, 255)),
+                            );
                         }
                         for (i, ch) in chars.enumerate() {
                             if let Some(cell) = buf.cell_mut((right_x + 1 + i as u16, area.y)) {
@@ -369,10 +372,13 @@ impl App {
                 0
             };
             // Pending queued-message region (color-coded rows above the prompt).
+            // Rows are word-wrapped, so a single queued message can occupy
+            // several visual lines.
             let pending_h = if is_session && !hide_prompt_and_spinner {
+                let pending_w = main_area.width.saturating_sub(4);
                 self.state
                     .current_pending_queues()
-                    .map_or(0, |q| (q.next_request.len() + q.next_loop.len()) as u16)
+                    .map_or(0, |q| Self::pending_queue_rows(q, pending_w).len() as u16)
             } else {
                 0
             };
@@ -417,9 +423,9 @@ impl App {
                     && self.agent_spinner_bass.is_some(),
             );
 
-            // The pending region and the dialogs grow upward from the prompt;
-            // clamp their heights so they never cover the header row (area.y + 1)
-            // or run off-screen. Long content scrolls instead.
+            // Long queued messages wrap into several rows; clamp the strip so
+            // it never covers the header row (area.y + 1) or runs off-screen.
+            let pending_h = pending_h.min(prompt_area_y.saturating_sub(area.y + 1));
             let pending_area_y = prompt_area_y.saturating_sub(pending_h);
             // The spinner sits ABOVE the pending queues when they are shown;
             // with no queues (pending_h = 0) it stays in exactly the same spot
@@ -720,16 +726,55 @@ impl App {
         }
     }
 
+    /// Visual rows of the pending queues, word-wrapped to fit `width`
+    /// columns. Each entry is `(queue_index, message_index, line)` where
+    /// `queue_index` is 0 for "next agent loop" and 1 for "next request" and
+    /// `message_index` is the position inside that queue's FIFO. A long
+    /// message yields consecutive entries sharing its indices — one per
+    /// wrapped line. Shared by the renderer and the height/geometry helpers so
+    /// mouse hit-testing always matches what is drawn. Wrapping reuses the
+    /// same `word_wrap` primitive as the chat transcript (grapheme-aware),
+    /// control characters stripped first.
+    pub(super) fn pending_queue_rows(
+        queues: &PendingQueues,
+        width: u16,
+    ) -> Vec<(usize, usize, String)> {
+        let text_w = width.saturating_sub(6) as usize; // ┃ + 2 pad left, 2 pad right + ┃
+        let wrap = |text: &str| -> Vec<String> {
+            let clean: String = text.chars().filter(|c| !c.is_control()).collect();
+            if clean.is_empty() {
+                vec![String::new()]
+            } else {
+                word_wrap(&clean, text_w.max(1) as u16)
+            }
+        };
+        let mut rows = Vec::new();
+        for (qi, queue) in [&queues.next_loop, &queues.next_request]
+            .into_iter()
+            .enumerate()
+        {
+            for (mi, text) in queue.iter().enumerate() {
+                for line in wrap(text) {
+                    rows.push((qi, mi, line));
+                }
+            }
+        }
+        rows
+    }
+
     /// Render the pending queued messages above the prompt, color-coded per
     /// queue: "next agent loop" rows on top (warm amber background), "next
     /// request" rows below (cool cyan/blue background), each preserving FIFO
-    /// order. The two dedicated theme colors switch with the active theme. No
-    /// explicit labels — the background color IS the identity of the queue.
+    /// order. Long messages word-wrap across several visual lines (same
+    /// wrapping as the chat transcript) instead of being truncated. The two
+    /// dedicated theme colors switch with the active theme. No explicit
+    /// labels — the background color IS the identity of the queue.
     pub(super) fn render_pending_queues(&self, buf: &mut ratatui::buffer::Buffer, area: Rect) {
         let Some(queues) = self.state.current_pending_queues() else {
             return;
         };
-        if queues.next_loop.is_empty() && queues.next_request.is_empty() {
+        let rows = Self::pending_queue_rows(queues, area.width);
+        if rows.is_empty() {
             return;
         }
         // The hovered row swaps its queue color for pure WHITE so the focus
@@ -739,39 +784,39 @@ impl App {
         let hover_bg = RGBA::from_hex("#FFFFFF");
         let hover = self.hovered_queue_row;
         let mut y = area.y;
-        let mut row = 0usize;
-        let panel = self.theme.background_panel;
-        let border = self.theme.accent;
-        for text in &queues.next_loop {
+        for (row, (queue_idx, _, line)) in rows.iter().enumerate() {
             let bg = if hover == Some(row) {
                 hover_bg
-            } else {
+            } else if *queue_idx == 0 {
                 self.theme.queue_next_loop
-            };
-            Self::draw_pending_row(buf, text, area.x, y, area.width, bg, panel, border);
-            y += 1;
-            row += 1;
-        }
-        for text in &queues.next_request {
-            let bg = if hover == Some(row) {
-                hover_bg
             } else {
                 self.theme.queue_next_request
             };
-            Self::draw_pending_row(buf, text, area.x, y, area.width, bg, panel, border);
+            Self::draw_pending_row(
+                buf,
+                line,
+                area.x,
+                y,
+                area.width,
+                bg,
+                self.theme.background_panel,
+                self.theme.accent,
+            );
             y += 1;
-            row += 1;
+            if y >= area.bottom() {
+                break;
+            }
         }
     }
 
-    /// Draw one pending-message row: the app's standard `┃` left border (in the
-    /// accent color, like the question/permission dialogs) on the neutral panel
-    /// background, the queue color as the background of the rest of the row
-    /// (starting right after the border, at `x + 1`, so it never covers the
-    /// `┃` glyph), and the message text starting 3 columns in — like a normal
-    /// user message, so queued rows stay visually consistent with the chat. The
-    /// queue identity is carried by the background color only; no marker glyph
-    /// is used on these rows.
+    /// Draw one pending-message line: the app's standard `┃` left border (in
+    /// the accent color, like the question/permission dialogs) on the neutral
+    /// panel background, the queue color as the background of the rest of the
+    /// row (starting right after the border, at `x + 1`, so it never covers
+    /// the `┃` glyph), and the (already wrapped) message text starting 3
+    /// columns in — like a normal user message, so queued rows stay visually
+    /// consistent with the chat. The queue identity is carried by the
+    /// background color only; no marker glyph is used on these rows.
     #[allow(clippy::too_many_arguments)]
     fn draw_pending_row(
         buf: &mut ratatui::buffer::Buffer,
@@ -783,7 +828,7 @@ impl App {
         panel: RGBA,
         border: RGBA,
     ) {
-        if width < 4 {
+        if width < 6 {
             return;
         }
         let fg = Self::contrast_on(bg);
@@ -799,31 +844,54 @@ impl App {
                     .bg(rgba_color(panel)),
             );
         }
-        // Queue-colored background for the rest of the row.
+        // Matching right border (┃), mirroring the prompt box's symmetric
+        // chrome (left: true, right: true): it terminates the row on the
+        // terminal background.
+        if let Some(cell) = buf.cell_mut((x + width - 1, y)) {
+            cell.set_char('┃');
+            cell.set_style(
+                Style::default()
+                    .fg(rgba_color(border))
+                    .bg(rgba_color(panel)),
+            );
+        }
+        // Queue-colored background for the rest of the row — the band stops
+        // one column short of the right edge so the right `┃` sits on the
+        // terminal background (same trick as the prompt's `bg_area`).
         let band_style = Style::default().bg(bg_color);
-        for cx in x + 1..x + width {
+        for cx in x + 1..x + width - 1 {
             if let Some(cell) = buf.cell_mut((cx, y)) {
                 cell.set_char(' ');
                 cell.set_style(band_style);
             }
         }
-        // Message text starts 3 columns in (┃ + 2 pad), like a user message.
+        // Message text starts 3 columns in (┃ + 2 pad) and stops 3 short of
+        // the right edge (2 pad + ┃), symmetric like the prompt box;
+        // `text` is pre-wrapped and pre-filtered by `pending_queue_rows`.
         let text_x = x + 3;
-        let visible: String = text
-            .chars()
-            .filter(|c| !c.is_control())
-            .take(width.saturating_sub(4) as usize)
-            .collect();
+        let text_right = x + width - 3;
         let text_style = Style::default().fg(fg).bg(bg_color);
-        for (i, ch) in visible.chars().enumerate() {
-            let cx = text_x + i as u16;
-            if cx >= x + width {
+        let mut cx = text_x;
+        for (grapheme, w) in cosh_tui::core::lib::unicode_util::graphemes_with_width(text) {
+            if cx + w > text_right {
                 break;
             }
             if let Some(cell) = buf.cell_mut((cx, y)) {
-                cell.set_char(ch);
+                if grapheme.len() == 1 {
+                    cell.set_char(grapheme.chars().next().unwrap());
+                } else {
+                    cell.set_symbol(grapheme);
+                }
                 cell.set_style(text_style);
             }
+            if w > 1 {
+                for dx in 1..w {
+                    if let Some(cell) = buf.cell_mut((cx + dx, y)) {
+                        cell.set_diff_option(ratatui::buffer::CellDiffOption::Skip);
+                    }
+                }
+            }
+            cx += w;
         }
     }
 
