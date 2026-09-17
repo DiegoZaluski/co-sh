@@ -2721,7 +2721,14 @@ impl Harness {
                     }
                     // Tests can simulate a provider-side truncation by queueing
                     // a finish_reason per stream (consumed one at a time).
-                    self.last_finish_reason = self.mock_finish_reasons.pop_front().flatten();
+                    // Match the OUTER option first: an explicitly queued
+                    // `None` (EOF without a finish frame — the whitelist's
+                    // silent "none" continuation path) stays testable; an
+                    // unqueued mock stream ends deliberately (`stop`).
+                    self.last_finish_reason = match self.mock_finish_reasons.pop_front() {
+                        Some(reason) => reason,
+                        None => Some("stop".to_string()),
+                    };
                     return Ok("done".into());
                 }
                 Err(msg) => {
@@ -3000,7 +3007,13 @@ impl Harness {
                     }
                     // Tests can simulate a provider-side truncation by queueing
                     // a finish_reason per stream (consumed one at a time).
-                    self.last_finish_reason = self.mock_finish_reasons.pop_front().flatten();
+                    // Same outer-option match as `stream_chat_with_messages`:
+                    // an unqueued mock stream ends deliberately (`stop`), an
+                    // explicitly queued `None` stays `None`.
+                    self.last_finish_reason = match self.mock_finish_reasons.pop_front() {
+                        Some(reason) => reason,
+                        None => Some("stop".to_string()),
+                    };
                     return Ok("done".into());
                 }
                 Err(msg) => {
@@ -4582,12 +4595,31 @@ impl Harness {
                     current_input.clear();
                     continue;
                 }
-                // The provider cut the response at max_tokens (finish_reason
-                // "length") with no tool calls: the turn is truncated, not
-                // finished. Continue the loop so the model can complete the
-                // answer instead of emitting a silent `Done` mid-sentence.
-                // Bounded by MAX_ITERATIONS above.
-                if self.last_finish_reason.as_deref() == Some("length") {
+                // A truncated, filtered or provider-paused turn is NOT a
+                // completed answer. The old inverted test (`== Some("length")`)
+                // silently emitted Done whenever a provider dialect slipped
+                // through unnormalized (Anthropic `max_tokens`, Gemini
+                // `MAX_TOKENS`/`SAFETY`) or the stream ended without any
+                // finish reason (EOF mid-response) — the loop stopped
+                // mid-action with no error and no user Esc. The whitelist
+                // mirrors `validate_summary_completion`: only a deliberate
+                // text completion counts as finished; anything else
+                // continues the loop (bounded by MAX_ITERATIONS above).
+                let finished = matches!(
+                    self.last_finish_reason.as_deref(),
+                    // `STOP` never arrives from a live provider (the SDK
+                    // normalizes lowercase-first); it survives here only for
+                    // mock-queued raw values — kept deliberately to mirror
+                    // `validate_summary_completion`.
+                    // `tool_calls` is reachable in this no-pending-tools
+                    // branch only when every call of the turn was
+                    // harness-consumed mid-stream (e.g. a lone
+                    // `mask_tool_result`): nothing is left to dispatch, so
+                    // the turn IS complete — continuing would send a bogus
+                    // "cut off" prompt.
+                    Some("stop" | "STOP" | "end_turn" | "tool_calls")
+                );
+                if !finished {
                     if iteration >= MAX_ITERATIONS {
                         // Safety net — emit a terminal event so the TUI does
                         // not stay in a "running" state.
@@ -4598,16 +4630,32 @@ impl Harness {
                         });
                         break;
                     }
-                    // log::debug!("run_agent_loop TRUNCATED (length) — continuing");
+                    let reason = self.last_finish_reason.as_deref().unwrap_or("none");
+                    // Known non-completion dialects get a toast; `none`
+                    // (plain EOF) and `length` stay silent — the continuation
+                    // prompt below is enough for them.
+                    if matches!(
+                        reason,
+                        "content_filter" | "pause_turn" | "model_context_window_exceeded"
+                    ) {
+                        let _ = tx.send(HarnessEvent::Toast {
+                            message: format!(
+                                "Provider cut the response (finish reason: {reason}); continuing."
+                            ),
+                            variant: ToastVariant::Warning,
+                        });
+                    }
+                    // log::debug!("run_agent_loop TRUNCATED (finish reason {reason}) — continuing");
                     current_input =
-                        "Your previous response was cut off by the output token limit. \
+                        "Your previous response was cut off before completion. \
                          Please continue exactly where you left off."
                             .to_string();
                     continue;
                 }
 
-                // No tools and no extraction failures — conversation is complete.
-                // The final text response becomes the loop's Closure.
+                // No tools, no extraction failures, deliberate completion —
+                // conversation is complete. The final text response becomes
+                // the loop's Closure.
                 // log::debug!("run_agent_loop DONE (no tools)");
                 self.context_manager.close_loop();
                 // Final LSP snapshot: this break skips the per-cycle emission
