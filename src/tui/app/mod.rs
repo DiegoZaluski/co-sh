@@ -15,6 +15,7 @@ use cosh_tui::core::lib::rgba::RGBA;
 
 use crate::component::agent_spinner_bass::AgentSpinnerBass;
 use crate::component::prompt::PromptView;
+use crate::component::sparkle::SparkleState;
 use crate::config::{LlmConfig, TuiConfig};
 use crate::fallback;
 use crate::keymap::KeyMap;
@@ -406,6 +407,10 @@ pub struct App {
     sidebar_focused: bool,
     /// Clickable area of the "bug report" header link (None when not drawn).
     bug_link_area: Option<Rect>,
+    /// Astra-style starfield flourish in the session header (see
+    /// `component/sparkle.rs`). Session-router-only: armed per session id,
+    /// drawn exclusively on blank cells of the header row.
+    sparkle: SparkleState,
     /// Receiver for update-related background tasks: the boot-time GitHub
     /// release check and the completion of the update pipeline.
     update_event_rx: tokio::sync::mpsc::UnboundedReceiver<crate::update::UpdateEvent>,
@@ -545,6 +550,7 @@ impl App {
             theme,
             transparent_background,
             session_view: SessionView::new(),
+            sparkle: SparkleState::new(),
             home_view: HomeView::new(),
             internal_tools_view: {
                 let mut v = InternalToolsView::new();

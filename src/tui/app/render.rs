@@ -250,6 +250,39 @@ impl App {
             };
             self.bug_link_area = bug_link_area;
 
+            // Session header sparkle — Astra-style starfield flourish, ported
+            // from the Codex TUI (`chat_composer/sparkle.rs`). Session router
+            // ONLY: the component arms per session id and paints exclusively
+            // on blank cells of the header strip, so the "← esc" hint (and
+            // the cost/token/budget info already drawn above) is never
+            // covered. Other routers never reach this call.
+            let is_session_mode = matches!(self.mode(), AppMode::Session);
+            if is_session_mode {
+                let header_strip = Rect::new(main_area.x, area.y, main_area.width, 1);
+                let hint_w = "← esc".chars().count() as u16;
+                let protected_hint = Rect::new(area.x + 1, area.y, hint_w, 1);
+                let (fg_r, fg_g, fg_b, _) = self.theme.text.to_ints();
+                // Night-window gate (see component/sparkle.rs): local
+                // minutes since midnight, read here so tests can inject
+                // arbitrary times into the component.
+                use chrono::Timelike;
+                let local_minutes =
+                    (chrono::Local::now().time().num_seconds_from_midnight() / 60) as u16;
+                self.sparkle.render(
+                    crate::component::sparkle::SparkleFrame {
+                        area: header_strip,
+                        cursor: None,
+                        protected: Some(protected_hint),
+                        session_key: self.state.current_session_id.as_deref(),
+                        in_session: true,
+                        terminal_focused: self.terminal_focused,
+                        foreground: (fg_r, fg_g, fg_b),
+                        local_minutes,
+                    },
+                    buf,
+                );
+            }
+
             // Right panel (independent of sidebar state)
             if right_panel_w > 0 {
                 render_right_panel(
