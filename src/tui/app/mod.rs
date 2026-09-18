@@ -24,6 +24,7 @@ use crate::routes::add_provider::AddProviderView;
 use crate::routes::home::HomeView;
 use crate::routes::router::RouterView;
 use crate::routes::session::SessionView;
+use crate::routes::session::explorer_status::{GitWatcher, StatusIndex};
 use crate::routes::session::file_explorer::FileExplorerView;
 use crate::routes::session::free_gateway_recommendation::FreeGatewayRecommendationDialog;
 use crate::routes::session::permission::PermissionDialog;
@@ -199,6 +200,13 @@ pub struct App {
     /// [`LeftPanelMode::Explorer`]. Built lazily on first open so a user who
     /// never touches Ctrl+F pays no directory-read cost.
     pub file_explorer: Option<FileExplorerView>,
+    /// Git + LSP status index feeding the explorer's row colors. Refreshed
+    /// from render only while the explorer is visible, and only when one of
+    /// its sources (LSP diagnostics version, git snapshot revision) moved.
+    explorer_statuses: StatusIndex,
+    /// Background `git status` poller started with the explorer (first
+    /// Ctrl+F); `None` until then.
+    explorer_git_watcher: Option<GitWatcher>,
     pub dialog: DialogState,
     pub permission_dialog: PermissionDialog,
     pub question_dialog: QuestionDialog,
@@ -582,6 +590,8 @@ impl App {
             prompt_view: PromptView::new(),
             sidebar: SidebarView::new(),
             file_explorer: None,
+            explorer_statuses: StatusIndex::default(),
+            explorer_git_watcher: None,
             dialog: DialogState::new(),
             permission_dialog: PermissionDialog::new(),
             question_dialog: QuestionDialog::new(),
@@ -1114,6 +1124,14 @@ impl App {
                 std::env::current_dir().unwrap_or(root)
             };
             self.file_explorer = Some(FileExplorerView::new(root));
+            // The status colors need `git status` in the background; the
+            // poller starts once, with the tree, and outlives panel
+            // toggles.
+            if self.explorer_git_watcher.is_none()
+                && let Some(explorer) = self.file_explorer.as_ref()
+            {
+                self.explorer_git_watcher = Some(GitWatcher::start(explorer.root.clone()));
+            }
         }
     }
 

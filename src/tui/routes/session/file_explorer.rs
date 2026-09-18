@@ -5,7 +5,11 @@
 //! Space, Right, Left, or a click); files open in the configured editor.
 //! The tree is lazy: a directory's children are only read when it is
 //! expanded, and the flattened row list is rebuilt whenever expansion or
-//! the root changes.
+//! the root changes. Rows carry git + LSP status colors supplied by the
+//! caller (see [`super::explorer_status`]): modified/added/deleted files
+//! get the diff palette, files and directories with LSP findings get a
+//! trailing `✗`/`⚠` marker, and directories aggregate the states of
+//! everything below them so a collapsed directory already shows its state.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -16,8 +20,9 @@ use cosh_tui::core::types::MouseEvent;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::KeyCode;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 
+use super::explorer_status::{EntryStatus, GitFileStatus, LspFileStatus, StatusIndex};
 use crate::theme::{Theme, rgba_color};
 use crate::util::list_selection::ListSelection;
 
@@ -264,7 +269,7 @@ impl FileExplorerView {
             && mouse.y < area.bottom()
     }
 
-    pub fn render(&mut self, buf: &mut Buffer, area: Rect, theme: &Theme) {
+    pub fn render(&mut self, buf: &mut Buffer, area: Rect, theme: &Theme, statuses: &StatusIndex) {
         if area.width == 0 || area.height == 0 {
             return;
         }
@@ -288,7 +293,20 @@ impl FileExplorerView {
             .iter()
             .skip(self.selection.scroll_offset)
             .take(visible_count)
-            .map(|e| 2 * e.depth + 5 + e.path.file_name().map_or(0, |n| n.to_string_lossy().len()))
+            .map(|e| {
+                let name_len = e.path.file_name().map_or(0, |n| n.to_string_lossy().len());
+                // A status marker (space + glyph) rides after the name and
+                // must count towards the row width or the horizontal-scroll
+                // clamp would let the marker scroll away.
+                let marker_len =
+                    if Self::lsp_marker(&statuses.entry_status(&e.path, e.is_dir), theme).is_some()
+                    {
+                        2
+                    } else {
+                        0
+                    };
+                2 * e.depth + 5 + name_len + marker_len
+            })
             .max()
             .unwrap_or(0)
             .saturating_sub(viewport_w);
@@ -324,12 +342,15 @@ impl FileExplorerView {
         let warning_color = rgba_color(theme.warning);
         let text_color = rgba_color(theme.text);
         let mute_fg = rgba_color(theme.text_muted);
-        // The selection must differ from BOTH row colors: files render
-        // with `text` and directories with `primary`. `warning` is the
-        // tone furthest from both across the themes.
-        let selected_fg = Style::default().fg(warning_color);
-        let normal_fg = Style::default().fg(text_color);
+        // The selection must stand out from every row color: files may now
+        // render in `warning` (modified) or a diff color, so the bold
+        // modifier keeps the selected row distinct even when its status
+        // color coincides with the selection tone.
+        let selected_fg = Style::default()
+            .fg(warning_color)
+            .add_modifier(Modifier::BOLD);
         let dir_fg = Style::default().fg(primary_color);
+        let file_fg = Style::default().fg(text_color);
         let guide_fg = Style::default().fg(mute_fg);
 
         for (i, entry) in self
@@ -344,7 +365,6 @@ impl FileExplorerView {
                 break;
             }
             let is_selected = i == self.selection.selected_index;
-            let style = if is_selected { selected_fg } else { normal_fg };
 
             // Tree gutter: `│ ` guide pairs for every open ancestor level,
             // then the `├─` connector into the node.
@@ -366,11 +386,21 @@ impl FileExplorerView {
                 } => '\u{2574}', // ˄ gutter ▾ marker
                 _ => ' ',
             };
-            let name_style = if entry.is_dir && !is_selected {
+            // Status-driven appearance: a file's git state colors its name
+            // (VS Code-style), LSP findings add a trailing marker, and
+            // directories — which aggregate everything below them — get the
+            // same treatment, so a collapsed directory already shows its
+            // state before it is expanded.
+            let entry_status = statuses.entry_status(&entry.path, entry.is_dir);
+            let name_style = if is_selected {
+                selected_fg
+            } else if entry.is_dir && entry_status.git.is_none() {
                 dir_fg
             } else {
-                style
+                Self::git_name_style(entry_status.git, theme, file_fg)
             };
+            let marker = Self::lsp_marker(&entry_status, theme);
+            let marker_style = marker.map_or(name_style, |(_, style)| style);
             // Row content laid out at its natural columns minus the scroll
             // offset, one char at a time: the arrow rides with the muted
             // guide color (tree chrome, like the `├─` connectors) and the
@@ -380,7 +410,9 @@ impl FileExplorerView {
             let clip_left = area.x as i32 + 1;
             let right = area.right() as i32;
             let base_x = area.x as i32 + 1 + gutter_w as i32;
-            for (ci, ch) in format!("{arrow} {name}").chars().enumerate() {
+            let name_chars = name.chars().count();
+            let marker_str = marker.map_or_else(String::new, |(ch, _)| format!(" {ch}"));
+            for (ci, ch) in format!("{arrow} {name}{marker_str}").chars().enumerate() {
                 if ch.is_control() {
                     // Same guard as `draw_text_line`: a raw control char in
                     // the buffer would crash ratatui's diff on odd names.
@@ -392,9 +424,49 @@ impl FileExplorerView {
                 }
                 if let Some(cell) = buf.cell_mut((cx as u16, y)) {
                     cell.set_char(ch);
-                    cell.set_style(if ci == 0 { guide_fg } else { name_style });
+                    cell.set_style(if ci == 0 {
+                        guide_fg
+                    } else if ci < 2 + name_chars {
+                        name_style
+                    } else {
+                        marker_style
+                    });
                 }
             }
+        }
+    }
+
+    /// Name color for one row's git state — the diff palette the transcript's
+    /// diff view already uses, so "modified/added/deleted" reads the same
+    /// everywhere in the TUI. Clean rows keep the caller's default style
+    /// (`fallback`).
+    ///
+    /// Modified maps to `warning` (amber, the "uncommitted change" tone) and
+    /// added/deleted map to `diff_added`/`diff_removed`, matching how VS Code
+    /// distinguishes dirty (U/amber) from added (A/green) and deleted
+    /// (D/red) files.
+    fn git_name_style(git: Option<GitFileStatus>, theme: &Theme, fallback: Style) -> Style {
+        let fg = match git {
+            Some(GitFileStatus::Modified) => rgba_color(theme.warning),
+            Some(GitFileStatus::Added) => rgba_color(theme.diff_added),
+            Some(GitFileStatus::Deleted) => rgba_color(theme.diff_removed),
+            None => return fallback,
+        };
+        Style::default().fg(fg)
+    }
+
+    /// Trailing LSP marker for a row: `✗` in `error` or `⚠` in `warning` —
+    /// the same glyphs and colors the passive LSP notes below tool output
+    /// use. `None` when the entry has no LSP findings.
+    fn lsp_marker(status: &EntryStatus, theme: &Theme) -> Option<(char, Style)> {
+        match status.lsp {
+            Some(LspFileStatus::Error) => {
+                Some(('\u{2717}', Style::default().fg(rgba_color(theme.error))))
+            }
+            Some(LspFileStatus::Warning) => {
+                Some(('\u{26a0}', Style::default().fg(rgba_color(theme.warning))))
+            }
+            None => None,
         }
     }
 
@@ -608,12 +680,122 @@ mod tests {
         assert_eq!(view.selected_entry(), None);
     }
 
+    /// Build a `StatusIndex` with explicit per-file statuses (the unit-tested
+    /// aggregation in `explorer_status` handles the roll-up; here we only
+    /// need the render mapping).
+    fn status_index_with(entries: Vec<(PathBuf, EntryStatus)>) -> StatusIndex {
+        let mut index = StatusIndex::default();
+        for (path, status) in entries {
+            index.insert_for_test(path, status);
+        }
+        index
+    }
+
+    /// Row content (after the tree gutter) as (char, style) pairs.
+    fn row_cells(buf: &Buffer, y: u16, x_start: u16, x_end: u16) -> Vec<(char, Style)> {
+        (x_start..x_end)
+            .map(|x| {
+                let cell = &buf[(x, y)];
+                (cell.symbol().chars().next().unwrap_or(' '), cell.style())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn modified_file_renders_in_warning_color_with_lsp_error_marker() {
+        let root = temp_root("status-file");
+        fs::write(root.join("a.rs"), "").unwrap();
+        fs::write(root.join("b.rs"), "").unwrap();
+
+        let mut view = FileExplorerView::new(root.clone());
+        let theme = crate::theme::ThemeRegistry::new().default_theme().clone();
+        let statuses = status_index_with(vec![
+            (
+                root.join("a.rs"),
+                EntryStatus {
+                    git: Some(GitFileStatus::Modified),
+                    lsp: Some(LspFileStatus::Error),
+                },
+            ),
+            (root.join("b.rs"), EntryStatus::default()),
+        ]);
+
+        let area = Rect::new(0, 0, 24, 6);
+        let mut buf = Buffer::empty(area);
+        view.render(&mut buf, area, &theme, &statuses);
+
+        // Row 0 is a.rs (selected by default: bold warning): name in
+        // warning color + a trailing ` ✗` in the error color. Row layout:
+        // `├─` gutter at x=1..3, arrow x=3, space x=4, name from x=5.
+        let warning = rgba_color(theme.warning);
+        let error = rgba_color(theme.error);
+        let text = rgba_color(theme.text);
+        let row = row_cells(&buf, 2, 5, 13);
+        assert_eq!(row[0].0, 'a');
+        assert_eq!(row[0].1.fg, Some(warning));
+        // Selected rows render bold so the selection stays distinct from
+        // status-colored rows.
+        assert!(
+            row[0]
+                .1
+                .add_modifier
+                .contains(ratatui::style::Modifier::BOLD)
+        );
+        assert_eq!(row[4].0, ' ');
+        assert_eq!(row[5].0, '✗');
+        assert_eq!(row[5].1.fg, Some(error));
+
+        // Row 1 is b.rs (not selected): clean — plain text color, no marker.
+        let row_b = row_cells(&buf, 3, 5, 13);
+        assert_eq!(row_b[0].0, 'b');
+        assert_eq!(row_b[0].1.fg, Some(text));
+        assert!(row_b.iter().all(|(c, _)| *c != '✗' && *c != '⚠'));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn directory_renders_aggregated_state_before_expansion() {
+        let root = temp_root("status-dir");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/err.rs"), "").unwrap();
+
+        let mut view = FileExplorerView::new(root.clone());
+        let theme = crate::theme::ThemeRegistry::new().default_theme().clone();
+        // Only the FILE has the status; the directory row must reflect it
+        // through aggregation.
+        let statuses = status_index_with(vec![(
+            root.join("src/err.rs"),
+            EntryStatus {
+                git: None,
+                lsp: Some(LspFileStatus::Error),
+            },
+        )]);
+
+        let area = Rect::new(0, 0, 24, 6);
+        let mut buf = Buffer::empty(area);
+        // Aggregate the file status into `src` first (as `refresh` would).
+        view.render(&mut buf, area, &theme, &statuses);
+
+        // The `src` row (row 0, selected: bold) is collapsed, yet carries
+        // the aggregated `✗` marker after its name — the pre-expansion
+        // signal. Name starts at x=5 (gutter + arrow + space).
+        let error = rgba_color(theme.error);
+        let row = row_cells(&buf, 2, 5, 13);
+        assert_eq!(row[0].0, 's');
+        let marker = row.iter().find(|(c, _)| *c == '✗');
+        assert!(marker.is_some(), "collapsed dir shows aggregated LSP state");
+        assert_eq!(marker.unwrap().1.fg, Some(error));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
     /// Render into a fresh buffer and return it plus the panel geometry.
+    /// Statuses default to "clean" — status-color behavior has its own
+    /// dedicated tests below.
     fn rendered(view: &mut FileExplorerView, width: u16, height: u16) -> (Buffer, Rect) {
         let area = Rect::new(0, 0, width, height);
         let mut buf = Buffer::empty(area);
         let theme = crate::theme::ThemeRegistry::new().default_theme().clone();
-        view.render(&mut buf, area, &theme);
+        view.render(&mut buf, area, &theme, &StatusIndex::default());
         (buf, area)
     }
 

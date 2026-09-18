@@ -309,10 +309,19 @@ impl App {
                     // File explorer (Ctrl+F): the tree owns the whole panel,
                     // including the header box.
                     if let Some(explorer) = &mut self.file_explorer {
+                        // Refresh the git + LSP status index first: while the
+                        // explorer is hidden it stays untouched, and `refresh`
+                        // is a no-op (two integer compares) when neither the
+                        // diagnostics version nor the git revision moved.
+                        if let Some(watcher) = self.explorer_git_watcher.as_ref() {
+                            self.explorer_statuses
+                                .refresh(&explorer.root.clone(), watcher);
+                        }
                         explorer.render(
                             buf,
                             Rect::new(area.x, area.y, sidebar_w, area.height),
                             &self.theme,
+                            &self.explorer_statuses,
                         );
                     }
                 } else if matches!(self.left_panel, super::LeftPanelMode::Dashboard) {

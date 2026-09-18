@@ -86,6 +86,26 @@ pub fn global_lsp(cwd: &str) -> Option<Arc<Lsp>> {
     Some(lsp)
 }
 
+/// Peek at the singleton WITHOUT creating it: returns the engine only when
+/// one is already bound to `cwd`. Purely read-side callers (e.g. the file
+/// explorer's status colors) must never spawn servers or runtime tasks as a
+/// side effect of a render loop, so they use this instead of [`global_lsp`].
+pub fn peek_global_lsp(cwd: &str) -> Option<Arc<Lsp>> {
+    // A poisoned lock means some other thread panicked while constructing
+    // an engine — the data it protects (an `Option` and `Arc`s) is still
+    // structurally valid, and this peek runs on the render loop (up to 30×
+    // per second), where propagating the panic would take the whole TUI
+    // down. Degrade to "no engine" instead.
+    let guard = GLOBAL_LSP
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let root = PathBuf::from(cwd);
+    guard
+        .as_ref()
+        .filter(|(bound_root, _)| *bound_root == root)
+        .map(|(_, lsp)| Arc::clone(lsp))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
