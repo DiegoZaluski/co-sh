@@ -215,6 +215,48 @@ pub fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+/// What the agent is doing right now while its loop runs. Drives the
+/// agent spinner's label: the equalizer pulse stays the same, the text
+/// beside it reflects the current activity.
+///
+/// Derived directly from the harness events the TUI already consumes —
+/// no extra state channel: `Reasoning` → [`AgentActivity::Pondering`],
+/// a `ToolCall` → [`AgentActivity::for_tool`], a `Token` / loop start →
+/// [`AgentActivity::Working`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentActivity {
+    /// Default state: the model is streaming a response or between steps.
+    Working,
+    /// The model is emitting a reasoning block.
+    Pondering,
+    /// A web tool (`web_search`, `web_fetch`) is running.
+    Searching,
+    /// A recall tool (`recall_search`) is running.
+    Recalling,
+}
+
+impl AgentActivity {
+    /// Label shown next to the spinner pulse.
+    pub const fn label(self) -> &'static str {
+        match self {
+            AgentActivity::Working => "working",
+            AgentActivity::Pondering => "pondering",
+            AgentActivity::Searching => "searching",
+            AgentActivity::Recalling => "recalling",
+        }
+    }
+
+    /// The activity induced by a running tool call. Unknown tools keep the
+    /// generic working state.
+    pub fn for_tool(tool: &str) -> Self {
+        match tool {
+            "web_search" | "web_fetch" => AgentActivity::Searching,
+            "recall_search" => AgentActivity::Recalling,
+            _ => AgentActivity::Working,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionStatus {
     Idle,
