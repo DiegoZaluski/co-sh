@@ -883,6 +883,10 @@ impl RightPanelState {
     ///   2. Live RUNNING sessions (not superseded), newest first.
     ///   3. Live finished sessions (not superseded), newest first.
     ///
+    /// A pin suppresses only its queue's FINISHED entries: a live RUNNING
+    /// session of a pinned queue still ranks normally, so new work is never
+    /// omitted because of a stale pin on an old, no-longer-running window.
+    ///
     /// Windows are included greedily while they fit `budget_rows`; the
     /// top-ranked window is always kept (scrolling internally when it alone
     /// exceeds the budget). Superseded sessions never enter the default
@@ -924,8 +928,9 @@ impl RightPanelState {
         }
 
         // 1. Pinned queues — most recent manual navigation first. A pinned
-        //    queue contributes exactly ONE window: its selected entry. The
-        //    focused queue is already represented above.
+        //    queue contributes exactly ONE window: its selected entry (its
+        //    live RUNNING sessions are NOT suppressed — see the live loop
+        //    below). The focused queue is already represented above.
         let focused_agent = match &self.panel_focus {
             Some(PanelFocus::Agent(a)) => Some(a.as_str()),
             _ => None,
@@ -944,7 +949,9 @@ impl RightPanelState {
             })
             .collect();
         pinned.sort_by_key(|p| std::cmp::Reverse(p.0));
+        let mut pinned_windows: Vec<usize> = Vec::new();
         for (_, idx) in pinned {
+            pinned_windows.push(idx);
             ranked.push((0, 0, idx));
         }
 
@@ -957,8 +964,13 @@ impl RightPanelState {
                 continue; // already ranked as the focused window
             }
             let agent = s.subagent_agent().unwrap_or("");
-            if is_pinned(agent, &self.agent_navs, &queues) {
-                continue; // this queue already contributed its pinned window
+            if pinned_windows.contains(&idx) {
+                continue; // already ranked as its queue's pinned window
+            }
+            if is_pinned(agent, &self.agent_navs, &queues) && s.is_finished() {
+                continue; // a pin suppresses only finished entries; the
+                          // queue's live RUNNING sessions still rank, so
+                          // new work never hides behind the pin
             }
             let class = if s.is_finished() { 2 } else { 1 };
             ranked.push((class, idx as u64, idx));
@@ -1293,9 +1305,15 @@ impl RightPanelState {
         let dir = self.auto_scroll_direction(y);
         if dir == 0 {
             self.stop_auto_scroll();
-        } else if !self.is_auto_scrolling {
-            self.is_auto_scrolling = true;
-            self.auto_scroll_accumulator = 0.0;
+        } else {
+            if !self.is_auto_scrolling {
+                self.is_auto_scrolling = true;
+                self.auto_scroll_accumulator = 0.0;
+            }
+            // Mirror the chat pane: the speed is re-derived from the cursor
+            // position on EVERY drag move, so pushing the selection deeper
+            // into the edge zone accelerates instead of staying at whatever
+            // speed happened to be captured when auto-scroll first armed.
             self.auto_scroll_speed = self.auto_scroll_speed_for(y);
         }
     }
@@ -1438,12 +1456,23 @@ impl RightPanelState {
                 let color = self.pick_color();
                 self.agent_colors.insert(agent.to_string(), color);
             }
-            // Auto-follow only applies when the user is AT the latest entry
-            // (live or pinned-at-newest). While navigating older entries the
-            // manual selection is never moved.
+            // A pin whose target was just superseded by this new spawn is
+            // stale: that old window left the default display, and keeping
+            // the pin would hide this queue's new RUNNING subagent behind
+            // an old, no-longer-running entry. Release it so the queue
+            // returns to live view (same rule as bash: a new command
+            // returns the section to live). A pin on an entry that is still
+            // running (concurrent same-CLI sessions) is kept, and the new
+            // live session is displayed alongside it.
+            let pin_superseded = self
+                .agent_navs
+                .get(agent)
+                .and_then(|nav| nav.index)
+                .and_then(|i| self.agent_queue(agent).get(i).copied())
+                .is_some_and(|idx| self.pty_sessions[idx].superseded);
             let len = self.queue_len(agent);
             let nav = self.agent_navs.entry(agent.to_string()).or_default();
-            if nav.index.is_none_or(|i| i + 1 >= len) {
+            if pin_superseded || nav.index.is_none_or(|i| i + 1 >= len) {
                 nav.index = None;
             }
         } else {
@@ -2618,9 +2647,10 @@ mod tests {
         assert!(!state.queue_is_pinned("opencode"));
     }
 
-    /// Auto-follow only applies when the user is AT the latest queue entry:
-    /// while navigating older entries, a new same-CLI session never moves
-    /// the manual selection.
+    /// Auto-follow: sessions of OTHER queues never move a manual selection,
+    /// but the same-CLI spawn that SUPERSEDES the pinned entry releases the
+    /// pin — the new RUNNING session must surface, not stay hidden behind a
+    /// stale pin on an old, no-longer-running window.
     #[test]
     fn navigation_pins_queue_against_auto_follow() {
         let mut state = RightPanelState::new();
@@ -2633,19 +2663,59 @@ mod tests {
         state.panel_left(); // pin at v1 (queue [v1, v2], absolute index 0)
         assert!(state.queue_is_pinned("kilo"));
 
-        // New session arrives while navigating → selection stays put.
-        state.start_pty("subagent: kilo".to_string(), None);
-        state.update_last_pty("v3 streaming".to_string());
+        // A session of ANOTHER queue arrives → selection stays put.
+        state.start_pty("subagent: opencode".to_string(), None);
+        state.complete_last_pty("other report".to_string());
         assert_eq!(
             state.pinned_session("kilo"),
             Some(0),
-            "manual selection never moved by new sessions"
+            "other queues never move the manual selection"
         );
 
-        // Returning to the newest re-arms auto-follow.
-        state.panel_right();
-        state.panel_right();
-        assert!(!state.queue_is_pinned("kilo"));
+        // The kilo spawn that supersedes the pinned v1 releases the pin:
+        // v3 is running and takes the display (live view re-armed).
+        state.start_pty("subagent: kilo".to_string(), None);
+        state.update_last_pty("v3 streaming".to_string());
+        assert!(
+            !state.queue_is_pinned("kilo"),
+            "a pin on a superseded entry is released: live work must surface"
+        );
+        assert!(state.pinned_session("kilo").is_none());
+    }
+
+    /// REGRESSION: a queue's pin must never hide its live RUNNING sessions —
+    /// they rank as normal live candidates and are displayed alongside the
+    /// pinned window; only finished entries yield to the pin.
+    #[test]
+    fn pinned_queue_still_displays_its_running_sessions() {
+        // s0 stays RUNNING; s1 runs to completion.
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: kilo".to_string(), None);
+        state.start_pty("subagent: kilo".to_string(), None);
+        state.complete_last_pty("v1 done".to_string());
+        assert!(!state.pty_sessions[0].is_finished());
+        assert!(state.pty_sessions[1].is_finished());
+
+        // Pin the queue on the still-running s0.
+        state.panel_focus = Some(PanelFocus::Agent("kilo".to_string()));
+        state.panel_left();
+        assert!(state.queue_is_pinned("kilo"));
+
+        // A new kilo session spawns (running): the pin survives (its target
+        // is not superseded) and the new RUNNING session is displayed
+        // alongside the pinned window instead of being omitted.
+        state.start_pty("subagent: kilo".to_string(), None);
+        state.update_last_pty("v2 streaming".to_string());
+        assert!(state.queue_is_pinned("kilo"), "running pin target survives");
+
+        state.subagent_rebuild_interval = Duration::ZERO;
+        state.text_regions_w = 38;
+        state.resolve_visible_subagents(38, 1000);
+        assert_eq!(
+            state.visible_subagents,
+            vec![0, 2],
+            "pinned window + new RUNNING session, nothing omitted"
+        );
     }
 
     /// When space is reclaimed among PINNED windows, the ones with the
