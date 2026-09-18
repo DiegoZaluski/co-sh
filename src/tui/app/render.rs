@@ -67,6 +67,10 @@ impl App {
         live = live || has_active_spinner;
         // A running compaction stopwatch must tick every frame.
         live = live || self.has_running_compaction();
+        // The scroll-to-bottom pill's slide/fade must finish even with no
+        // other live source (idle session, mid-history scroll): otherwise the
+        // animation would freeze on a half-drawn frame until the next event.
+        live = live || self.session_view.pill_animating();
         self.live_requested = live;
         let area = frame.area();
 
@@ -537,6 +541,13 @@ impl App {
                 session_bottom.saturating_sub(area.y + 1),
             );
 
+            // The pill only ever animates inside the session view. Leaving
+            // for Home, settings, router etc. mid-animation would freeze
+            // `pill_progress` mid-flight while the mode-independent live gate
+            // keeps redrawing, so park it whenever another route renders.
+            if !matches!(self.mode(), AppMode::Session) {
+                self.session_view.clear_pill();
+            }
             match self.mode() {
                 AppMode::Home => {
                     self.prompt_view.blur();
@@ -662,6 +673,27 @@ impl App {
                     // prompt (never rendered while a dialog covers that spot).
                     if !hide_prompt_and_spinner && pending_h > 0 {
                         self.render_pending_queues(buf, pending_area);
+                    }
+                    // Scroll-to-bottom pill: painted after every inline layer
+                    // sharing its row (transcript, pending queues) so it is
+                    // never buried; the slash menu, modal dialogs and toasts
+                    // render later and legitimately cover it. Hidden while an
+                    // inline dialog replaces the prompt. The anchor is the
+                    // row directly above the pending strip / prompt — the
+                    // exact line the agent spinner occupies when active — so
+                    // the arrow stays aligned with the spinner instead of
+                    // being pushed around when it appears/disappears (the
+                    // spinner shrinks the session viewport by a row, which
+                    // would drag a bottom-anchored pill upward).
+                    if hide_prompt_and_spinner {
+                        self.session_view.clear_pill();
+                    } else {
+                        self.session_view.render_pill_overlay(
+                            buf,
+                            pending_area.y.saturating_sub(1),
+                            session_area,
+                            &self.theme,
+                        );
                     }
                     // Hide spinner and prompt when dialog is visible (like OpenCode)
                     if !self.question_dialog.visible

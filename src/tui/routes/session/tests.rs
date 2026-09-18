@@ -5921,3 +5921,220 @@ fn selection_paint_matches_copy_exactly() {
         failures.join("\n")
     );
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Scroll-to-bottom pill
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Drive `render_pill_overlay` once with the view parked at a known scroll
+/// offset. `total_height`/`visible_height` are what the visibility check
+/// reads, so they are set directly (the real render refreshes them per frame).
+/// The anchor defaults to the row the caller would pin in production when no
+/// spinner/queues are shown: directly above the prompt box.
+fn render_pill_once(view: &mut SessionView, area: Rect) -> Buffer {
+    render_pill_anchored(view, area, area.bottom() - 2)
+}
+
+/// Same, with an explicit anchor row (the spinner's line in production).
+fn render_pill_anchored(view: &mut SessionView, area: Rect, anchor_y: u16) -> Buffer {
+    let mut buf = Buffer::empty(area);
+    let theme = test_theme();
+    view.render_pill_overlay(&mut buf, anchor_y, area, &theme);
+    buf
+}
+
+/// `↓` glyph cell of a rendered frame, if the pill is painted.
+fn pill_cell(buf: &Buffer, area: Rect) -> Option<(u16, u16)> {
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            if let Some(cell) = buf.cell((x, y))
+                && cell.symbol() == "\u{2B9F}"
+            {
+                return Some((x, y));
+            }
+        }
+    }
+    None
+}
+
+/// The pill appears when the user is far from the live content, hides when
+/// they follow it again, and the click rect always matches the painted glyph.
+#[test]
+fn pill_shows_when_scrolled_away_and_hides_at_bottom() {
+    let mut view = SessionView::new();
+    let area = Rect::new(0, 0, 80, 20);
+
+    // Far from the bottom → after the pop-in frames the pill is painted and
+    // hit-testable.
+    view.total_height = 500;
+    view.visible_height = area.height as i32;
+    view.scroll_y = 100;
+    for _ in 0..8 {
+        let buf = render_pill_once(&mut view, area);
+        assert!(pill_cell(&buf, area).is_some(), "pill must paint when scrolled away");
+        assert!(view.pill_area.is_some(), "hit rect must track the painted pill");
+    }
+    assert!
+        (
+            (view.pill_progress() - 1.0).abs() < f32::EPSILON,
+            "progress must settle at 1.0 after enough frames"
+        );
+    let (px, py) = {
+        let rect = view.pill_area.expect("pill rect must be set when settled");
+        (rect.x, rect.y)
+    };
+    let (gx, gy) = pill_cell(&render_pill_once(&mut view, area), area).unwrap();
+    // The hit rect spans the padded pill; the glyph is its centered content.
+    assert!(
+        gx >= px && gx < px + 5 && gy == py,
+        "glyph ({gx},{gy}) must sit inside the hit rect anchored at ({px},{py})"
+    );
+    assert!(py < area.bottom() - 1, "pill must sit above the viewport's last row (prompt starts there)");
+    // Centered horizontally: the 5-column pill's midpoint (px + 2 = the glyph
+    // column) lands on one of the viewport's two center columns.
+    let center = area.width / 2;
+    assert!(
+        gx == center || gx == center - 1,
+        "glyph column {gx} must be centered in an {center}-column viewport"
+    );
+
+    // Back at the bottom → the pill retracts: the hit rect is gone from the
+    // first retract frame (a fading-out button is not a button) while the
+    // glyph fades out naturally.
+    view.scroll_y = view.total_height - area.height as i32;
+    let buf = render_pill_once(&mut view, area);
+    assert!(
+        view.pill_area.is_none(),
+        "hit rect must clear on the first retract frame"
+    );
+    assert!(pill_cell(&buf, area).is_some(), "glyph still fades during retract");
+    for _ in 0..4 {
+        let buf = render_pill_once(&mut view, area);
+        if view.pill_progress() == 0.0 {
+            assert!(pill_cell(&buf, area).is_none(), "no glyph once progress hits 0");
+            break;
+        }
+    }
+    assert_eq!(view.pill_progress(), 0.0, "retract must finish at 0");
+    assert!(view.pill_area.is_none(), "rect must be cleared at the bottom");
+    assert!(pill_cell(&render_pill_once(&mut view, area), area).is_none());
+}
+
+/// One viewport page of reading distance stays pill-free: the button is a
+/// recovery affordance for a genuine drift, not a permanent fixture.
+#[test]
+fn pill_stays_hidden_within_one_page_of_bottom() {
+    let mut view = SessionView::new();
+    let area = Rect::new(0, 0, 80, 20);
+    view.total_height = 500;
+    view.visible_height = area.height as i32;
+
+    for scroll_y in [
+        view.total_height - area.height as i32 - 3, // exactly the threshold
+        view.total_height - area.height as i32 - 2,
+        view.total_height - area.height as i32 - 1,
+        view.total_height - area.height as i32,
+    ] {
+        view.scroll_y = scroll_y;
+        let buf = render_pill_once(&mut view, area);
+        assert!(
+            pill_cell(&buf, area).is_none(),
+            "pill must stay hidden at scroll_y={scroll_y}"
+        );
+        assert!(view.pill_area.is_none());
+        assert_eq!(view.pill_progress(), 0.0);
+    }
+}
+
+/// `jump_to_live` (the pill's action) restores the exact sticky state that a
+/// keyboard `scroll_to_bottom` produces: bottom scroll, no manual scroll, and
+/// sticky re-engaged — which is what keeps the view following the agent.
+#[test]
+fn jump_to_live_restores_sticky_follow() {
+    let mut view = SessionView::new();
+    view.total_height = 500;
+    view.cached_total_height = 500;
+    view.visible_height = 20;
+    view.actual_total_height = 500;
+    view.has_manual_scroll = true;
+    view.is_sticky_bottom = false;
+    view.scroll_y = 200;
+
+    view.jump_to_live();
+
+    assert_eq!(view.scroll_y, 500 - 20, "scroll must aim at the cached bottom");
+    assert!(!view.has_manual_scroll, "manual scroll must clear so sticky re-engages");
+    assert!(view.is_sticky_bottom, "sticky must be re-armed");
+    assert!(view.is_at_bottom(), "view must register as at-bottom again");
+}
+
+/// `clear_pill` (called while an inline dialog hides the prompt) must park the
+/// animation at rest: `pill_animating()` drives the run loop's live redraws,
+/// so a progress value frozen mid-flight would keep the loop redrawing behind
+/// a dialog that never repaints the pill.
+#[test]
+fn clear_pill_parks_animation_so_the_live_loop_can_rest() {
+    let mut view = SessionView::new();
+    let area = Rect::new(0, 0, 80, 20);
+    view.total_height = 500;
+    view.visible_height = area.height as i32;
+    view.scroll_y = 100;
+
+    // Interrupt the pop-in mid-flight, like a permission dialog arriving
+    // while the user reads history.
+    render_pill_once(&mut view, area);
+    assert!(
+        view.pill_animating(),
+        "precondition: pill must be mid-animation after one frame"
+    );
+
+    view.clear_pill();
+
+    assert!(view.pill_area.is_none(), "hit rect must drop immediately");
+    assert_eq!(view.pill_progress(), 0.0, "progress must park at rest");
+    assert!(
+        !view.pill_animating(),
+        "the live loop must be allowed to stop redrawing"
+    );
+}
+
+/// The pill's row comes from the caller's anchor (the spinner's line in
+/// production), not from the viewport's bottom edge: the settled pill sits
+/// exactly on the anchor row with unchanged dimensions, follows a re-anchor,
+/// and the pop-in slide clamps at the viewport's top without shifting the
+/// settled position.
+#[test]
+fn pill_renders_on_the_caller_provided_anchor_row() {
+    let mut view = SessionView::new();
+    let area = Rect::new(0, 0, 80, 20);
+    view.total_height = 500;
+    view.visible_height = area.height as i32;
+    view.scroll_y = 100;
+
+    // Settled pill sits exactly on the anchor row, dimensions unchanged.
+    let anchor = area.bottom() - 3;
+    for _ in 0..6 {
+        render_pill_anchored(&mut view, area, anchor);
+    }
+    let rect = view.pill_area.expect("pill must be visible");
+    assert_eq!(rect.y, anchor, "settled pill must sit on the anchor row");
+    assert_eq!(rect.width, 5, "hit rect keeps the pill's dimensions");
+    assert_eq!(rect.height, 1);
+
+    // Re-anchoring (spinner appearing/disappearing) moves the pill with it.
+    let higher = anchor - 2;
+    for _ in 0..6 {
+        render_pill_anchored(&mut view, area, higher);
+    }
+    assert_eq!(
+        view.pill_area.expect("pill must be visible").y,
+        higher,
+        "pill must follow the anchor row"
+    );
+
+    // A slide from an anchor at the viewport's top clamps inside it.
+    view.pill_progress = 0.0;
+    let buf = render_pill_anchored(&mut view, area, area.y);
+    let (_, gy) = pill_cell(&buf, area).expect("glyph must paint");
+    assert!(gy >= area.y, "slide must clamp inside the viewport");
+}

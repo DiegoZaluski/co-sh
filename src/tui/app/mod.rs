@@ -377,6 +377,11 @@ pub struct App {
     /// Set when a mouse Up was a drag (even if it selected nothing), so the
     /// session click dispatch skips opening Message Actions.
     mouse_up_was_drag: bool,
+    /// A left press that began on the scroll-to-bottom pill: the matching
+    /// release is swallowed so the chat content under the pill's row never
+    /// sees the click (the pill is gone by then — the jump re-attached the
+    /// bottom and the next frame cleared its hit rect).
+    scroll_pill_pressed: bool,
     /// Visual highlight: anchor (sx,sy) and focus (x,y) — stored without normalisation
     /// so the renderer can apply flow-based selection highlighting (top line from `start_x`
     /// to end, bottom line from start to `end_x`, middle lines fully highlighted).
@@ -636,6 +641,7 @@ impl App {
             release_was_drag: false,
             mouse_drag_active: false,
             mouse_up_was_drag: false,
+            scroll_pill_pressed: false,
             drag_selection: None,
             live_requested: false,
             last_frame_time: std::time::Instant::now(),
@@ -796,8 +802,13 @@ impl App {
                 self.render(frame, delta_secs);
             })?;
 
-            if self.live_requested {
+            if self.live_requested || self.session_view.pill_animating() {
                 // When auto-scroll is active, don't block on event::poll.
+                // Same for the scroll-to-bottom pill's slide/fade: it advances
+                // per rendered frame, so blocking on input here would freeze
+                // it half-drawn (the top-of-render live gate reads progress
+                // BEFORE the frame that advances it, so it alone is one frame
+                // late for the frame that first shows the pill).
                 if event::poll(Duration::from_millis(8))? && self.handle_events()? {
                     break;
                 }

@@ -68,6 +68,36 @@ impl App {
         // because they return early below and never reach the component dispatch section.
         match (event_type, button) {
             (MouseEventType::Down, MouseButton::Left) => {
+                // A missed Up (terminal quirk) must never let a stale press
+                // flag swallow an unrelated future release.
+                self.scroll_pill_pressed = false;
+                // Scroll-to-bottom pill: a press on the `↓` button jumps back
+                // to the latest content and re-engages the sticky auto-follow.
+                // Checked before any selection/prompt bookkeeping — the pill
+                // is a button, not a selection anchor. Skipped while a modal
+                // dialog or the slash menu is visible: both paint ABOVE the
+                // pill, so a click there belongs to them.
+                if matches!(self.mode(), AppMode::Session)
+                    && !self.dialog.visible()
+                    && !self.slash_menu.visible
+                    // Inline dialogs replace the prompt (and the pill's row):
+                    // the renderer clears the pill while they are visible, so
+                    // ignore a rect that is stale because a dialog opened
+                    // between the last draw and this press.
+                    && !self.question_dialog.visible
+                    && !self.permission_dialog.visible
+                    && !self.queue_choice_dialog.visible
+                    && !self.free_gateway_dialog.visible
+                    && let Some(pill) = self.session_view.pill_area
+                    && x >= pill.x
+                    && x < pill.right()
+                    && y >= pill.y
+                    && y < pill.bottom()
+                {
+                    self.session_view.jump_to_live();
+                    self.scroll_pill_pressed = true;
+                    return Ok(true);
+                }
                 self.mouse_down_pos = Some((x, y));
                 self.press_started_in_sidebar = x < SIDEBAR_WIDTH;
                 self.release_was_drag = false;
@@ -258,6 +288,14 @@ impl App {
                 return Ok(true);
             }
             (MouseEventType::Up, MouseButton::Left) => {
+                // Release of a scroll-to-bottom pill press: swallow it so the
+                // chat content underneath the pill's old row never sees the
+                // click (the pill is gone by now — the jump re-attached the
+                // bottom and a fresh frame cleared its hit rect).
+                if self.scroll_pill_pressed {
+                    self.scroll_pill_pressed = false;
+                    return Ok(true);
+                }
                 // Stop auto-scroll on any mouse up.
                 self.session_view.stop_auto_scroll();
                 self.state.right_panel.stop_auto_scroll();

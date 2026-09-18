@@ -1,4 +1,4 @@
-use super::{App, format_tokens};
+use super::{App, HOME_LOCK, format_tokens, isolate_home};
 
 /// Long queued messages must word-wrap across several visual rows instead of
 /// being truncated: `pending_queue_rows` expands every queued message into
@@ -227,4 +227,184 @@ async fn charm_usage_event_switches_header_to_credits_balance() {
         row.contains(" 88"),
         "header must show the remaining BALANCE 88, got: {row:?}"
     );
+}
+
+/// End-to-end scroll-to-bottom pill: after wheel-scrolling far up through the
+/// history, a full App render paints the centered `↓` pill just above the
+/// prompt box; clicking it jumps back to the latest content (sticky follow
+/// re-engaged) and the next render hides the pill again. While the user is
+/// following the bottom, nothing is painted.
+#[tokio::test]
+async fn scroll_to_bottom_pill_jumps_back_and_rehides() {
+    use crossterm::event::{
+        KeyModifiers, MouseButton as CBtn, MouseEvent as CMouse, MouseEventKind as CKind,
+    };
+    use ratatui::{Terminal, backend::TestBackend};
+
+    use crate::types::{Message, MessageRole, Part, TextPart};
+
+    fn screen_has_glyph(terminal: &Terminal<TestBackend>) -> bool {
+        let buf = terminal.backend().buffer();
+        let area = buf.area;
+        (area.y..area.bottom()).any(|y| {
+            (area.x..area.right()).any(|x| buf.cell((x, y)).is_some_and(|c| c.symbol() == "\u{2B9F}"))
+        })
+    }
+
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+
+    let mut app = App::new("/tmp".to_string());
+    let id = crate::session_store::generate_session_id();
+    app.state.add_empty_session(id.clone(), "long".into(), 0);
+    app.state.current_session_id = Some(id);
+    if let Some(s) = app.state.current_session_mut() {
+        // One message far taller than the viewport.
+        s.messages.push(Message {
+            id: "msg-0".into(),
+            role: MessageRole::User,
+            parts: vec![Part::Text(TextPart {
+                text: "lorem ipsum dolor sit amet\n".repeat(60),
+                synthetic: false,
+            })],
+            created_at: 0,
+            agent: None,
+            model: None,
+        });
+    }
+
+    let (w, h) = (80u16, 24u16);
+    app.set_test_size(w, h);
+    let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+
+    let mouse = |kind: CKind, x: u16, y: u16| CMouse {
+        kind,
+        column: x,
+        row: y,
+        modifiers: KeyModifiers::NONE,
+    };
+
+    // Following the bottom: no pill anywhere on screen.
+    terminal.draw(|f| app.render(f, 0.016)).unwrap();
+    assert!(
+        !screen_has_glyph(&terminal),
+        "pill must stay hidden while the user follows the bottom"
+    );
+
+    // Scroll far up; render after each wheel notch (the live loop's behavior)
+    // so the pop-in animation runs to completion. The wheel handler debounces
+    // notches within 50ms (tmux/kitty emit several per physical tick), so the
+    // test spaces them out like a real user's wheel does.
+    for _ in 0..6 {
+        app.handle_mouse_event(mouse(CKind::ScrollUp, w / 2, h / 2))
+            .unwrap();
+        terminal.draw(|f| app.render(f, 0.016)).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(60));
+    }
+    let pill = app
+        .session_view
+        .pill_area
+        .expect("pill rect must be set after scrolling away from the bottom");
+    assert!(screen_has_glyph(&terminal), "pill glyph must be painted");
+    // The prompt starts at the session viewport's bottom row: the pill must
+    // sit exactly one row above it — the spinner's line — not on top of the
+    // prompt input.
+    assert_eq!(
+        pill.y,
+        app.session_viewport_area().bottom() - 1,
+        "pill must sit on the row directly above the prompt"
+    );
+
+    // Click the pill: back to the latest content, sticky follow re-engaged.
+    app.handle_mouse_event(mouse(CKind::Down(CBtn::Left), pill.x + 2, pill.y))
+        .unwrap();
+    app.handle_mouse_event(mouse(CKind::Up(CBtn::Left), pill.x + 2, pill.y))
+        .unwrap();
+    assert!(app.session_view.is_at_bottom(), "click must return to the bottom");
+    assert!(
+        !app.session_view.has_manual_scroll,
+        "click must re-engage the sticky follow"
+    );
+
+    // Next frames: the pill retracts — its rect clears on the first rendered
+    // frame (the renderer owns it), the glyph then fades out over a few more.
+    // The user is following again.
+    terminal.draw(|f| app.render(f, 0.016)).unwrap();
+    assert!(app.session_view.pill_area.is_none(), "rect must clear at the bottom");
+    for _ in 0..4 {
+        terminal.draw(|f| app.render(f, 0.016)).unwrap();
+    }
+    assert_eq!(app.session_view.pill_progress(), 0.0, "retract must finish");
+    assert!(!screen_has_glyph(&terminal), "pill must be gone from screen");
+}
+
+/// The pill must stay put when the agent spinner appears: the spinner shrinks
+/// the transcript viewport by one row, which used to drag the bottom-anchored
+/// arrow upward. It must remain exactly where it was — on the spinner's line.
+#[tokio::test]
+async fn scroll_to_bottom_pill_stays_put_when_the_spinner_appears() {
+    use crossterm::event::{KeyModifiers, MouseEvent as CMouse, MouseEventKind as CKind};
+    use ratatui::{Terminal, backend::TestBackend};
+
+    use crate::component::agent_spinner_bass::AgentSpinnerBass;
+    use crate::types::{Message, MessageRole, Part, TextPart};
+
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+
+    let mut app = App::new("/tmp".to_string());
+    let id = crate::session_store::generate_session_id();
+    app.state.add_empty_session(id.clone(), "long".into(), 0);
+    app.state.current_session_id = Some(id);
+    if let Some(s) = app.state.current_session_mut() {
+        s.messages.push(Message {
+            id: "msg-0".into(),
+            role: MessageRole::User,
+            parts: vec![Part::Text(TextPart {
+                text: "lorem ipsum dolor sit amet\n".repeat(60),
+                synthetic: false,
+            })],
+            created_at: 0,
+            agent: None,
+            model: None,
+        });
+    }
+
+    let (w, h) = (80u16, 24u16);
+    app.set_test_size(w, h);
+    let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+
+    // Scroll far up and let the pill settle (wheel notches spaced beyond the
+    // 50 ms debounce, like a real wheel).
+    for _ in 0..6 {
+        app.handle_mouse_event(CMouse {
+            kind: CKind::ScrollUp,
+            column: w / 2,
+            row: h / 2,
+            modifiers: KeyModifiers::NONE,
+        })
+        .unwrap();
+        terminal.draw(|f| app.render(f, 0.016)).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(60));
+    }
+    let before = app
+        .session_view
+        .pill_area
+        .expect("pill must be visible while scrolled away");
+
+    // The agent loop starts: the spinner appears on the line above the
+    // prompt, shrinking the transcript viewport by one row.
+    app.state.status = crate::types::SessionStatus::Working;
+    app.agent_spinner_bass = Some(AgentSpinnerBass::new("Working", &app.theme));
+    terminal.draw(|f| app.render(f, 0.016)).unwrap();
+
+    let after = app
+        .session_view
+        .pill_area
+        .expect("pill must stay visible once the spinner appears");
+    assert_eq!(
+        after.y, before.y,
+        "pill must not shift when the spinner appears"
+    );
+    assert_eq!(after.x, before.x, "pill must stay centered");
 }
