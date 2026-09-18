@@ -2,7 +2,8 @@
 //!
 //! Renders a row of vertical bars whose heights rise and fall like a music
 //! equalizer driven by a bass rhythm, followed by a label and an animated
-//! ellipsis. Each bar is a Unicode block glyph (`▁` … `█`), so the whole
+//! glyph animation reflecting the agent's current activity. Each bar is a
+//! Unicode block glyph (`▁` … `█`), so the whole
 //! equalizer fits in a single terminal row and slots straight into the same
 //! 1-row spinner area the previous agent spinner used.
 //!
@@ -98,12 +99,28 @@ const LIGHT_SHADE_STRENGTH: f32 = 0.30;
 /// (lerp toward black).
 const DARK_SHADE_STRENGTH: f32 = 0.45;
 
-/// Ellipsis animation speed: number of frames per ellipsis step.
+/// Status glyph animation speed: number of frames per glyph step.
 /// At 30 fps, 8 → ~3.75 steps/sec, quick but not distracting.
-const ELLIPSIS_ANIM_SPEED: u32 = 8;
+const STATUS_ANIM_SPEED: u32 = 8;
 
-/// Ellipsis animation frames.
-const ELLIPSIS_FRAMES: &[&str] = &[".", "..", "...", ""];
+/// Status glyph sequences: the animation shown after the status text. Each
+/// agent activity continuously cycles its own sequence while active; the
+/// equalizer pulse is unaffected. Switching activity restarts the new
+/// sequence from its first glyph.
+const WORKING_FRAMES: &[&str] = &["·", "•", "●", "•", "·"];
+const PONDERING_FRAMES: &[&str] = &["·", "+", "×", "+", "·"];
+const SEARCHING_FRAMES: &[&str] = &["›", "»", "›"];
+const RECALLING_FRAMES: &[&str] = &["↶", "↺", "↶"];
+
+/// The glyph sequence owned by an agent activity.
+const fn activity_frames(activity: crate::types::AgentActivity) -> &'static [&'static str] {
+    match activity {
+        crate::types::AgentActivity::Working => WORKING_FRAMES,
+        crate::types::AgentActivity::Pondering => PONDERING_FRAMES,
+        crate::types::AgentActivity::Searching => SEARCHING_FRAMES,
+        crate::types::AgentActivity::Recalling => RECALLING_FRAMES,
+    }
+}
 
 // ── Floor holds ────────────────────────────────────────────────────────────
 // Random rounds in which a bar — or a group of adjacent bars — is pinned
@@ -216,8 +233,8 @@ struct HoldDraw {
 }
 
 /// An animated spinner shaped like a music equalizer: a row of vertical
-/// bars rising and falling on a bass rhythm, followed by a label and an
-/// animated ellipsis.
+/// bars rising and falling on a bass rhythm, followed by a label and a
+/// per-status glyph animation.
 ///
 /// Features:
 /// - **Birth animation**: bars appear one-by-one and ease up to full motion
@@ -244,13 +261,16 @@ pub struct AgentSpinnerBass {
     birth_steps: Vec<u32>,
     /// Total frames elapsed since the spinner was started / reset.
     frames_elapsed: u32,
-    /// Current ellipsis frame index.
-    ellipsis_step: u32,
+    /// Current status-glyph step (ticks at `STATUS_ANIM_SPEED`).
+    status_step: u32,
+    /// Glyph sequence of the current agent activity (see [`activity_frames`]):
+    /// each status cycles its own animation.
+    frames: &'static [&'static str],
     /// Whether the birth animation has finished.
     initialized: bool,
     /// Label text displayed after the equalizer.
     label: String,
-    /// Colour used for the label and ellipsis.
+    /// Colour used for the label and status glyph.
     label_color: RGBA,
     /// Number of characters in the label.
     label_width: usize,
@@ -282,7 +302,11 @@ impl AgentSpinnerBass {
             bar_color_base,
             birth_steps,
             frames_elapsed: 0,
-            ellipsis_step: 0,
+            status_step: 0,
+            // Spun up on the default (working) sequence; `set_activity`
+            // switches — and restarts — the sequence as the loop's activity
+            // changes.
+            frames: activity_frames(crate::types::AgentActivity::Working),
             initialized: false,
             label: label.to_string(),
             label_color,
@@ -301,17 +325,20 @@ impl AgentSpinnerBass {
             self.initialized = true;
         }
 
-        // Advance ellipsis (only after initialization and if there's a label)
+        // Advance the status glyphs (only after initialization and if there's
+        // a label): cycle the CURRENT activity's sequence.
         if self.initialized && self.label_width > 0 {
-            self.ellipsis_step =
-                (self.ellipsis_step + 1) % (ELLIPSIS_ANIM_SPEED * ELLIPSIS_FRAMES.len() as u32);
+            self.status_step = (self.status_step + 1) % (STATUS_ANIM_SPEED * self.frames.len() as u32);
         }
     }
 
     /// Reset the spinner to its initial state, restarting the birth animation.
+    /// The label and glyph sequence are preserved — they describe the loop's
+    /// activity, which survives a reset; construct a fresh spinner for a new
+    /// activity (as `start_agent_loop` does).
     pub const fn reset(&mut self) {
         self.frames_elapsed = 0;
-        self.ellipsis_step = 0;
+        self.status_step = 0;
         self.initialized = false;
     }
 
@@ -322,13 +349,17 @@ impl AgentSpinnerBass {
         self.label_width = label.chars().count();
     }
 
-    /// Switch the label to the given agent activity without disturbing the
-    /// animation state (same contract as [`Self::set_label`]). The loop's
-    /// current activity is tracked by the app's event intake; a repeated
-    /// activity is a cheap no-op.
+    /// Switch the label to the given agent activity and start that status's
+    /// own glyph animation from its first frame. The equalizer animation
+    /// (seed, birth stagger, frame clock) is untouched; a repeated activity
+    /// is a cheap no-op that keeps the current glyph cycle running.
     pub fn set_activity(&mut self, activity: crate::types::AgentActivity) {
         if self.label != activity.label() {
             self.set_label(activity.label());
+            // Immediately switch to the new status's own glyph sequence,
+            // restarting it from the first glyph so the change reads at once.
+            self.frames = activity_frames(activity);
+            self.status_step = 0;
         }
     }
 
@@ -340,14 +371,14 @@ impl AgentSpinnerBass {
         self.bar_color_base = theme.primary;
     }
 
-    /// Total width in terminal cells (bars + gap + label + ellipsis).
+    /// Total width in terminal cells (bars + gap + label + status glyph).
     pub fn width(&self) -> usize {
         let mut w = self.bar_count;
         if self.label_width > 0 {
             w += 1; // gap
             w += self.label_width;
-            // Widest ellipsis frame
-            w += ELLIPSIS_FRAMES.iter().map(|f| f.len()).max().unwrap_or(0);
+            // Widest glyph of the current status's sequence
+            w += self.frames.iter().map(|f| f.chars().count()).max().unwrap_or(0);
         }
         w
     }
@@ -358,9 +389,9 @@ impl AgentSpinnerBass {
     }
 
     #[cfg(test)]
-    pub(crate) fn ellipsis_frame(&self) -> &'static str {
-        let idx = (self.ellipsis_step / ELLIPSIS_ANIM_SPEED) as usize % ELLIPSIS_FRAMES.len();
-        ELLIPSIS_FRAMES[idx]
+    pub(crate) fn status_frame(&self) -> &'static str {
+        let idx = (self.status_step / STATUS_ANIM_SPEED) as usize % self.frames.len();
+        self.frames[idx]
     }
 
     /// Test-only view of the current label (the field is private).
@@ -370,7 +401,7 @@ impl AgentSpinnerBass {
     }
 
     #[cfg(test)]
-    pub(crate) fn ellipsis_x_for_test(&self) -> u16 {
+    pub(crate) fn status_x_for_test(&self) -> u16 {
         self.bar_count as u16 + 1 + self.label_width as u16
     }
 
@@ -637,34 +668,35 @@ impl AgentSpinnerBass {
             }
         }
 
-        // 4. Animated ellipsis (only after birth animation is complete).
-        // The slot is always padded to the widest frame (TUI-C): shrinking
-        // `...` → `""` must clear stale dots instead of ghosting them.
+        // 4. Status glyph animation (only after birth animation is complete).
+        // The slot is always padded to the widest frame of the CURRENT
+        // sequence (TUI-C): a narrower frame must clear stale cells instead
+        // of ghosting them.
         if self.initialized && self.label_width > 0 {
-            let ellipsis_idx =
-                (self.ellipsis_step / ELLIPSIS_ANIM_SPEED) as usize % ELLIPSIS_FRAMES.len();
-            let ellipsis_text = ELLIPSIS_FRAMES[ellipsis_idx];
-            let ellipsis_max = ELLIPSIS_FRAMES
+            let glyph_idx = (self.status_step / STATUS_ANIM_SPEED) as usize % self.frames.len();
+            let glyph_text = self.frames[glyph_idx];
+            let glyph_max = self
+                .frames
                 .iter()
                 .map(|f| f.chars().count())
                 .max()
                 .unwrap_or(0);
-            let ellipsis_x = x
+            let glyph_x = x
                 .saturating_add(self.bar_count as u16)
                 .saturating_add(1)
                 .saturating_add(self.label_width as u16);
-            let ellipsis_style = Style::default().fg(rgba_color(self.label_color));
+            let glyph_style = Style::default().fg(rgba_color(self.label_color));
             let mut written = 0usize;
-            for (i, ch) in ellipsis_text.chars().enumerate() {
-                let cell_x = ellipsis_x.saturating_add(i as u16);
+            for (i, ch) in glyph_text.chars().enumerate() {
+                let cell_x = glyph_x.saturating_add(i as u16);
                 if let Some(cell) = buf.cell_mut((cell_x, y)) {
                     cell.set_char(ch);
-                    cell.set_style(ellipsis_style);
+                    cell.set_style(glyph_style);
                 }
                 written += 1;
             }
-            for i in written..ellipsis_max {
-                let cell_x = ellipsis_x.saturating_add(i as u16);
+            for i in written..glyph_max {
+                let cell_x = glyph_x.saturating_add(i as u16);
                 if let Some(cell) = buf.cell_mut((cell_x, y)) {
                     cell.set_char(' ');
                     cell.set_style(Style::default());
@@ -1101,39 +1133,55 @@ mod tests {
     }
 
     #[test]
-    fn repro_c_ellipsis_shrink_clears_stale_dots() {
+    fn status_glyph_renders_after_label_and_follows_activity() {
+        use crate::types::AgentActivity;
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
         let registry = crate::theme::ThemeRegistry::new();
         let theme = registry.get("opencode").cloned().unwrap();
-        let mut spinner = AgentSpinnerBass::new("W", &theme);
-        // Force birth complete so the ellipsis renders.
+        let mut spinner = AgentSpinnerBass::new(AgentActivity::Working.label(), &theme);
+        // Force birth complete so the status glyph renders.
         for _ in 0..(BIRTH_DELAY_MAX + BIRTH_GROW_FRAMES + 10) {
             spinner.advance();
         }
-        while spinner.ellipsis_frame() != "..." {
-            spinner.advance();
+
+        // Working cycles its own sequence (· • ● • ·) in exact order —
+        // never the old dots. The warmup left the step counter mid-cycle,
+        // so restart the sequence to frame 0 first (switch away and back —
+        // the same path a real status change takes).
+        spinner.set_activity(AgentActivity::Searching);
+        spinner.set_activity(AgentActivity::Working);
+        let mut seen: Vec<&str> = Vec::new();
+        for _ in 0..WORKING_FRAMES.len() {
+            seen.push(spinner.status_frame());
+            for _ in 0..STATUS_ANIM_SPEED {
+                spinner.advance();
+            }
         }
+        assert_eq!(seen, WORKING_FRAMES, "working must cycle its own sequence");
+
+        // Switching status immediately shows the NEW sequence's first glyph.
         let mut buf = Buffer::empty(Rect::new(0, 0, 40, 1));
+        spinner.set_activity(AgentActivity::Searching);
+        assert_eq!(spinner.status_frame(), SEARCHING_FRAMES[0]);
         spinner.render(&mut buf, 0, 0);
-        let ex = spinner.ellipsis_x_for_test();
-        assert_eq!(buf[(ex, 0)].symbol(), ".");
-        assert_eq!(buf[(ex + 2, 0)].symbol(), ".");
-        // Shrink to the empty frame: stale dots must be cleared to spaces.
-        while spinner.ellipsis_frame() != "" {
-            spinner.advance();
+        let ex = spinner.status_x_for_test();
+        assert_eq!(buf[(ex, 0)].symbol(), SEARCHING_FRAMES[0]);
+
+        // Each remaining status owns its sequence and restarts at frame 0.
+        for (activity, seq) in [
+            (AgentActivity::Pondering, PONDERING_FRAMES),
+            (AgentActivity::Recalling, RECALLING_FRAMES),
+            (AgentActivity::Working, WORKING_FRAMES),
+        ] {
+            spinner.set_activity(activity);
+            assert_eq!(spinner.status_frame(), seq[0]);
+            // One full cycle lands back on the first glyph, wrapping cleanly.
+            for _ in 0..seq.len() * STATUS_ANIM_SPEED as usize {
+                spinner.advance();
+            }
+            assert_eq!(spinner.status_frame(), seq[0], "{activity:?} must wrap");
         }
-        spinner.render(&mut buf, 0, 0);
-        assert_eq!(
-            buf[(ex, 0)].symbol(),
-            " ",
-            "BUG TUI-C: ellipsis ghosting — '...'→'' leaves stale dots"
-        );
-        assert_eq!(
-            buf[(ex + 2, 0)].symbol(),
-            " ",
-            "BUG TUI-C: ellipsis ghosting — trailing slot not padded"
-        );
     }
 
     #[test]
@@ -1149,7 +1197,7 @@ mod tests {
         // Far narrower than `width()`: must truncate via `cell_mut`, never panic.
         let mut buf = Buffer::empty(Rect::new(0, 0, 10, 1));
         spinner.render(&mut buf, 0, 0);
-        // Full width still renders the ellipsis slot.
+        // Full width still renders the status glyph slot.
         let mut full = Buffer::empty(Rect::new(0, 0, 40, 1));
         spinner.render(&mut full, 0, 0);
     }
@@ -1159,9 +1207,9 @@ mod tests {
         let registry = crate::theme::ThemeRegistry::new();
         let theme = registry.get("opencode").cloned().unwrap();
 
-        // Bars + gap + "Working" (7) + widest ellipsis (3)
+        // Bars + gap + "Working" (7) + widest glyph of its sequence (1)
         let spinner = AgentSpinnerBass::new("Working", &theme);
-        assert_eq!(spinner.width(), NUM_BARS + 1 + 7 + 3);
+        assert_eq!(spinner.width(), NUM_BARS + 1 + 7 + 1);
 
         // Empty label: bars only
         let spinner = AgentSpinnerBass::new("", &theme);
