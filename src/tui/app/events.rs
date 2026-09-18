@@ -220,6 +220,10 @@ impl App {
                     }
                 }
                 HarnessEvent::Token { text } => {
+                    // Streaming text means the model is generating a response:
+                    // the default spinner state (also restores it after a
+                    // reasoning segment).
+                    self.set_agent_activity(crate::types::AgentActivity::Working);
                     // Whitespace-only deltas are significant MID-STREAM when
                     // they carry a newline (paragraph/line breaks): Gemini's
                     // streamGenerateContent and several OpenAI-compatible
@@ -289,6 +293,9 @@ impl App {
                 HarnessEvent::ToolCall { tool, input } => {
                     // Telemetry aggregate: allowlisted/normalized tool name.
                     self.telemetry_tool_call(&tool);
+                    // The spinner label follows the tool now running; the
+                    // matching ToolResult/ToolError restores the default.
+                    self.set_agent_activity(crate::types::AgentActivity::for_tool(&tool));
                     // The attempt ended — its message is now transcript
                     // history (tool parts attach below); a future reset must
                     // never reach it.
@@ -403,6 +410,11 @@ impl App {
                 }
 
                 HarnessEvent::ToolResult { output } => {
+                    // The tool is done — back to the default working state
+                    // (the model's next response or tool call re-narrows it).
+                    // Before the session borrow: `current_session_mut` below
+                    // holds `self.state` for the rest of the block.
+                    self.set_agent_activity(crate::types::AgentActivity::Working);
                     let Some(session) = self.state.current_session_mut() else {
                         continue;
                     };
@@ -473,6 +485,12 @@ impl App {
                     // Telemetry aggregate: fingerprint-only representation,
                     // raw message discarded inside the accumulator.
                     self.telemetry_tool_error(&error);
+                    // The failed tool is done — back to the default state.
+                    // Before the session borrow (like ToolResult above): the
+                    // reset must also run when the session is gone
+                    // (`current_session_mut` → None) — a deleted session must
+                    // not leave the label stuck on the failed tool's state.
+                    self.set_agent_activity(crate::types::AgentActivity::Working);
                     let Some(session) = self.state.current_session_mut() else {
                         continue;
                     };
@@ -557,6 +575,8 @@ impl App {
                 }
 
                 HarnessEvent::Reasoning { text } => {
+                    // A reasoning block is streaming: the model is thinking.
+                    self.set_agent_activity(crate::types::AgentActivity::Pondering);
                     if text.trim().is_empty() {
                         continue;
                     }

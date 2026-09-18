@@ -322,6 +322,16 @@ impl AgentSpinnerBass {
         self.label_width = label.chars().count();
     }
 
+    /// Switch the label to the given agent activity without disturbing the
+    /// animation state (same contract as [`Self::set_label`]). The loop's
+    /// current activity is tracked by the app's event intake; a repeated
+    /// activity is a cheap no-op.
+    pub fn set_activity(&mut self, activity: crate::types::AgentActivity) {
+        if self.label != activity.label() {
+            self.set_label(activity.label());
+        }
+    }
+
     /// Update the theme colours (bar colour and label colour) without
     /// resetting the animation state. This allows the spinner to
     /// immediately reflect theme changes while a loop is active.
@@ -351,6 +361,12 @@ impl AgentSpinnerBass {
     pub(crate) fn ellipsis_frame(&self) -> &'static str {
         let idx = (self.ellipsis_step / ELLIPSIS_ANIM_SPEED) as usize % ELLIPSIS_FRAMES.len();
         ELLIPSIS_FRAMES[idx]
+    }
+
+    /// Test-only view of the current label (the field is private).
+    #[cfg(test)]
+    pub(crate) fn label_for_test(&self) -> &str {
+        &self.label
     }
 
     #[cfg(test)]
@@ -661,6 +677,47 @@ impl AgentSpinnerBass {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn set_activity_swaps_label_without_disturbing_the_animation() {
+        use crate::types::AgentActivity;
+        let registry = crate::theme::ThemeRegistry::new();
+        let theme = registry.get("opencode").cloned().unwrap();
+
+        let mut spinner = AgentSpinnerBass::new(AgentActivity::Working.label(), &theme);
+        // Age the animation past the birth stagger.
+        for _ in 0..60 {
+            spinner.advance();
+        }
+        let frames_before = spinner.frames_elapsed;
+        let bar_before = spinner.bar_char(0, spinner.frames_elapsed);
+
+        // Unknown tool calls keep the default state (no label change).
+        spinner.set_activity(AgentActivity::for_tool("fs_edit"));
+        assert_eq!(spinner.label, "working");
+
+        // A web search switches the label and the layout width.
+        spinner.set_activity(AgentActivity::for_tool("web_search"));
+        assert_eq!(spinner.label, "searching");
+        assert_eq!(spinner.label_width, "searching".chars().count());
+        assert!(spinner.width() > NUM_BARS);
+
+        // Re-applying the SAME activity is a no-op: no reset, no churn
+        // (set_activity never touches the animation clock).
+        spinner.set_activity(AgentActivity::Searching);
+        assert_eq!(spinner.frames_elapsed, frames_before);
+        assert_eq!(spinner.label, "searching");
+
+        // Back to the default state once the tool result lands.
+        spinner.set_activity(AgentActivity::Working);
+        assert_eq!(spinner.label, "working");
+
+        // The animation is undisturbed: the clock did not move (set_activity
+        // only swaps the label — no reset, no frame skip).
+        assert_eq!(spinner.frames_elapsed, frames_before);
+        assert_eq!(spinner.bar_char(0, spinner.frames_elapsed), bar_before);
+        assert!(spinner.is_initialized(), "birth animation must not restart");
+    }
 
     #[test]
     fn update_theme_changes_bar_color_and_label_color() {

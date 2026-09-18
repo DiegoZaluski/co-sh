@@ -528,3 +528,112 @@ async fn leading_newline_delta_neither_opens_a_bubble_nor_breaks_the_stream() {
         "the stream continues normally after a dropped leading break"
     );
 }
+
+/// The spinner label follows the loop's activity: reasoning narrows it to
+/// "pondering", tool calls to "searching"/"recalling", and tool results /
+/// streamed tokens restore the default "working". Driven through the real
+/// event intake (`poll_events`), like the live loop — no special hooks.
+#[tokio::test]
+async fn spinner_label_follows_agent_activity() {
+    use cosh::harness::HarnessEvent;
+
+    let mut app = App::new("/tmp".to_string());
+    let id = crate::session_store::generate_session_id();
+    app.state
+        .add_empty_session(id.clone(), "activity".into(), 0);
+    app.state.current_session_id = Some(id);
+
+    // No loop yet: the tracked state defaults to Working, no spinner lives.
+    assert_eq!(app.agent_activity, crate::types::AgentActivity::Working);
+    assert!(app.agent_spinner_bass.is_none());
+
+    // Simulate loop start (what `start_agent_loop` does — keep in sync with
+    // the spinner init in `agent_loop.rs`, which cannot run in a test since
+    // it spawns the real harness thread): fresh spinner with the default
+    // label, animation state untouched by later label changes.
+    app.agent_activity = crate::types::AgentActivity::Working;
+    app.agent_spinner_bass = Some(crate::component::agent_spinner_bass::AgentSpinnerBass::new(
+        crate::types::AgentActivity::Working.label(),
+        &app.theme,
+    ));
+    for _ in 0..40 {
+        app.agent_spinner_bass.as_mut().unwrap().advance();
+    }
+
+    // Reasoning streams → pondering.
+    app.event_tx
+        .send(HarnessEvent::Reasoning {
+            text: "thinking it through".into(),
+        })
+        .ok();
+    app.poll_events();
+    assert_eq!(app.agent_activity, crate::types::AgentActivity::Pondering);
+    assert_eq!(
+        app.agent_spinner_bass.as_ref().unwrap().label_for_test(),
+        "pondering"
+    );
+
+    // A web search starts → searching.
+    app.event_tx
+        .send(HarnessEvent::ToolCall {
+            tool: "web_search".into(),
+            input: serde_json::json!({"query": "x"}),
+        })
+        .ok();
+    app.poll_events();
+    assert_eq!(app.agent_activity, crate::types::AgentActivity::Searching);
+    assert_eq!(
+        app.agent_spinner_bass.as_ref().unwrap().label_for_test(),
+        "searching"
+    );
+
+    // The search finishes; a recall tool starts → recalling.
+    app.event_tx
+        .send(HarnessEvent::ToolResult { output: "hits".into() })
+        .ok();
+    app.event_tx
+        .send(HarnessEvent::ToolCall {
+            tool: "recall_search".into(),
+            input: serde_json::json!({"query": "y"}),
+        })
+        .ok();
+    app.poll_events();
+    assert_eq!(app.agent_activity, crate::types::AgentActivity::Recalling);
+    assert_eq!(
+        app.agent_spinner_bass.as_ref().unwrap().label_for_test(),
+        "recalling"
+    );
+
+    // Recall done → back to the default working state.
+    app.event_tx
+        .send(HarnessEvent::ToolResult { output: "found".into() })
+        .ok();
+    app.poll_events();
+    assert_eq!(app.agent_activity, crate::types::AgentActivity::Working);
+    assert_eq!(
+        app.agent_spinner_bass.as_ref().unwrap().label_for_test(),
+        "working"
+    );
+
+    // Unknown tools keep the default state (no spurious label churn).
+    app.event_tx
+        .send(HarnessEvent::ToolCall {
+            tool: "fs_edit".into(),
+            input: serde_json::json!({"path": "a.rs"}),
+        })
+        .ok();
+    app.poll_events();
+    assert_eq!(app.agent_activity, crate::types::AgentActivity::Working);
+
+    // A streamed token also restores the default (e.g. after reasoning).
+    app.event_tx
+        .send(HarnessEvent::Token { text: "Answer: ".into() })
+        .ok();
+    app.poll_events();
+    assert_eq!(app.agent_activity, crate::types::AgentActivity::Working);
+
+    // The label churn must never restart the spinner's animation: the birth
+    // phase completed before the first event and must still be complete.
+    assert!(app.agent_spinner_bass.as_ref().unwrap().is_initialized());
+}
+

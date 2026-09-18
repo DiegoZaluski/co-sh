@@ -299,6 +299,13 @@ pub struct App {
     pub(crate) stream_msg_id: Option<(String, String)>,
     terminal_focused: bool,
     pub(crate) agent_spinner_bass: Option<AgentSpinnerBass>,
+    /// What the running agent loop is doing right now (drives the spinner
+    /// label). Set at loop start, narrowed by the event intake as harness
+    /// events arrive, and re-derived at the NEXT loop start (loop end only
+    /// drops the spinner; the state is invisible while status ≠ Working).
+    /// Last event wins — parallel tool calls are not refcounted; a label
+    /// that overshot self-corrects within one further event.
+    pub(crate) agent_activity: crate::types::AgentActivity,
     /// Latest context manager info for the budget bar (None if no data yet).
     context_info: Option<cosh::harness::ContextDisplayInfo>,
     /// What the left panel shows (history vs dashboard) and its dashboard
@@ -625,6 +632,7 @@ impl App {
             stop_signal: Arc::new(AtomicBool::new(false)),
             terminal_focused: true,
             agent_spinner_bass: None,
+            agent_activity: crate::types::AgentActivity::Working,
             context_info: None,
             left_panel: LeftPanelMode::default(),
             usage_period: crate::usage::UsagePeriod::default(),
@@ -696,6 +704,21 @@ impl App {
         // Update the active spinner's colours to reflect the new theme
         if let Some(spinner) = &mut self.agent_spinner_bass {
             spinner.update_theme(&self.theme);
+        }
+    }
+
+    /// Apply the loop's current activity to the spinner label. The harness-
+    /// event intake calls this as events arrive; a repeated activity is a
+    /// no-op so streaming tokens don't churn the label. With no live spinner
+    /// (loop just ended / session switched) only the tracked state changes —
+    /// the next `start_agent_loop` labels a fresh spinner from it.
+    pub(crate) fn set_agent_activity(&mut self, activity: crate::types::AgentActivity) {
+        if self.agent_activity == activity {
+            return;
+        }
+        self.agent_activity = activity;
+        if let Some(spinner) = &mut self.agent_spinner_bass {
+            spinner.set_activity(activity);
         }
     }
 
