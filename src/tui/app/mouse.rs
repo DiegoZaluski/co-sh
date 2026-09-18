@@ -998,31 +998,6 @@ impl App {
             return Ok(true);
         }
 
-        // 6c. Footer export button (the mouse twin of `/export`). Only a
-        // plain left click counts: drags are text selection, and the inline
-        // dialogs hide the footer text entirely (`hide_text` in render), so
-        // the button must not answer while one is up.
-        if matches!(self.mode(), AppMode::Session)
-            && matches!(event_type, MouseEventType::Up)
-            && button == MouseButton::Left
-            && !self.release_was_drag
-            && !self.dialog.visible()
-            && !self.question_dialog.visible
-            && !self.permission_dialog.visible
-            && !self.queue_choice_dialog.visible
-            && !self.free_gateway_dialog.visible
-            && let Some(rect) = crate::routes::session::footer::export_button_rect(
-                self.session_main_area(self.terminal_size()).main,
-                &self.state,
-            )
-            && x >= rect.x
-            && x < rect.right()
-            && y == rect.y
-        {
-            self.export_transcript();
-            return Ok(true);
-        }
-
         // 7. Session view (tool expand/collapse)
         if matches!(self.mode(), AppMode::Session) {
             let was_drag = std::mem::take(&mut self.mouse_up_was_drag);
