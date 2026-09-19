@@ -1103,6 +1103,7 @@ mod tests {
                 SettingsRow::AddSummarizationModel,
                 SettingsRow::Category(6),
                 SettingsRow::Category(7),
+                SettingsRow::Category(8),
                 SettingsRow::AddMcpServer,
             ]
         );
@@ -1134,6 +1135,7 @@ mod tests {
                 SettingsRow::AddSummarizationModel,
                 SettingsRow::Category(6),
                 SettingsRow::Category(7),
+                SettingsRow::Category(8),
                 SettingsRow::AddMcpServer,
             ]
         );
