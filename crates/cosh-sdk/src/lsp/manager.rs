@@ -6,6 +6,9 @@
 //! * **Keying** — clients are keyed by `(root_path, server_name)`, so the
 //!   same server can run against nested projects and several servers can
 //!   serve one file. opencode's fix for crush's single-server bug (#1751).
+//!   Workspace-aware specs ([`ServerSpec::workspace_aware`]) relax the
+//!   nesting: they anchor at the outermost matching directory so one
+//!   rust-analyzer serves a whole Cargo workspace instead of one per crate.
 //! * **Root resolution** — walks up from the touched file toward the
 //!   workspace root matching the spec's root markers; specs without markers
 //!   always use the workspace root. A spec whose markers appear nowhere in
@@ -708,6 +711,12 @@ fn is_generic_root_marker(marker: &str) -> bool {
 /// always resolve to the workspace root; specs whose markers appear nowhere in
 /// the ancestry resolve to `None` (the spec does not apply here).
 ///
+/// Workspace-aware specs ([`ServerSpec::workspace_aware`]) instead anchor at
+/// the *outermost* matching directory: their servers already understand the
+/// whole workspace, so rooting them at a nested member spawns one process per
+/// nested marker (one rust-analyzer per crate of a Cargo workspace) while each
+/// instance re-indexes the same tree.
+///
 /// The walk is purely lexical (no symlink/canonicalization): a file reached
 /// through a link pointing outside the workspace simply finds no markers and
 /// is skipped — the safe direction. The *returned* root is canonicalized
@@ -722,6 +731,7 @@ fn resolve_project_root(path: &Path, spec: &ServerSpec, workspace_root: &Path) -
     let root_abs = absolute(workspace_root);
 
     let mut current = file_abs.parent();
+    let mut matched: Option<&Path> = None;
     while let Some(dir) = current {
         if !starts_with_fs(dir, &root_abs) {
             break; // left the workspace
@@ -731,11 +741,14 @@ fn resolve_project_root(path: &Path, spec: &ServerSpec, workspace_root: &Path) -
             .iter()
             .any(|marker| dir.join(marker).exists())
         {
-            return Some(canonical_root(dir));
+            matched = Some(dir);
+            if !spec.workspace_aware {
+                break; // nearest marker wins
+            }
         }
         current = dir.parent();
     }
-    None
+    matched.map(canonical_root)
 }
 
 /// `Path::starts_with` tuned for the host filesystem's case semantics:

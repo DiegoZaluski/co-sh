@@ -29,6 +29,12 @@ pub struct ServerSpec {
     /// from the touched file toward the workspace root. Empty = always use
     /// the workspace root.
     pub root_markers: &'static [&'static str],
+    /// Whether the server understands the *whole* workspace and should be
+    /// rooted at its outermost project directory instead of the nearest one.
+    /// Workspace-aware servers (rust-analyzer analyzes an entire Cargo
+    /// workspace from any member) would otherwise be spawned once per
+    /// nested `Cargo.toml`, multiplying indexing load by the member count.
+    pub workspace_aware: bool,
 }
 
 impl ServerSpec {
@@ -80,6 +86,7 @@ pub const CATALOG: &[ServerSpec] = &[
         filenames: &[],
         extensions: &[".rs"],
         root_markers: &["Cargo.toml", "rust-toolchain.toml", ".git"],
+        workspace_aware: true,
     },
     ServerSpec {
         name: "clangd",
@@ -94,6 +101,7 @@ pub const CATALOG: &[ServerSpec] = &[
             "Makefile",
             ".git",
         ],
+        workspace_aware: false,
     },
     ServerSpec {
         name: "zls",
@@ -102,6 +110,7 @@ pub const CATALOG: &[ServerSpec] = &[
         filenames: &[],
         extensions: &[".zig", ".zon"],
         root_markers: &["build.zig", ".git"],
+        workspace_aware: false,
     },
     // ── Web / scripting ─────────────────────────────────────────────────
     ServerSpec {
@@ -111,6 +120,7 @@ pub const CATALOG: &[ServerSpec] = &[
         filenames: &[],
         extensions: &[".go"],
         root_markers: &["go.work", "go.mod", ".git"],
+        workspace_aware: false,
     },
     ServerSpec {
         name: "pyright",
@@ -125,6 +135,7 @@ pub const CATALOG: &[ServerSpec] = &[
             "requirements.txt",
             ".git",
         ],
+        workspace_aware: false,
     },
     ServerSpec {
         name: "typescript-language-server",
@@ -133,6 +144,7 @@ pub const CATALOG: &[ServerSpec] = &[
         filenames: &[],
         extensions: &[".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"],
         root_markers: &["package.json", "tsconfig.json", "jsconfig.json", ".git"],
+        workspace_aware: false,
     },
     ServerSpec {
         name: "ruby-lsp",
@@ -141,6 +153,7 @@ pub const CATALOG: &[ServerSpec] = &[
         filenames: &[],
         extensions: &[".rb", ".erb", ".rake", ".gemspec"],
         root_markers: &["Gemfile", "Rakefile", ".ruby-version", ".git"],
+        workspace_aware: false,
     },
     ServerSpec {
         name: "php-actor",
@@ -149,6 +162,7 @@ pub const CATALOG: &[ServerSpec] = &[
         filenames: &[],
         extensions: &[".php"],
         root_markers: &["composer.json", "composer.lock", ".git"],
+        workspace_aware: false,
     },
     // ── BEAM ────────────────────────────────────────────────────────────
     ServerSpec {
@@ -158,6 +172,7 @@ pub const CATALOG: &[ServerSpec] = &[
         filenames: &[],
         extensions: &[".ex", ".exs"],
         root_markers: &["mix.exs", ".git"],
+        workspace_aware: false,
     },
     ServerSpec {
         name: "erlang-ls",
@@ -166,6 +181,7 @@ pub const CATALOG: &[ServerSpec] = &[
         filenames: &[],
         extensions: &[".erl", ".hrl"],
         root_markers: &["rebar.config", "erlang_ls.config", ".git"],
+        workspace_aware: false,
     },
     // ── JVM ─────────────────────────────────────────────────────────────
     ServerSpec {
@@ -181,6 +197,7 @@ pub const CATALOG: &[ServerSpec] = &[
             "settings.gradle",
             ".git",
         ],
+        workspace_aware: false,
     },
     ServerSpec {
         name: "kotlin-language-server",
@@ -195,6 +212,7 @@ pub const CATALOG: &[ServerSpec] = &[
             "pom.xml",
             ".git",
         ],
+        workspace_aware: false,
     },
     ServerSpec {
         name: "clojure-lsp",
@@ -203,6 +221,7 @@ pub const CATALOG: &[ServerSpec] = &[
         filenames: &[],
         extensions: &[".clj", ".cljs", ".cljc", ".edn"],
         root_markers: &["deps.edn", "project.clj", "shadow-cljs.edn", ".git"],
+        workspace_aware: false,
     },
     // ── Functional ──────────────────────────────────────────────────────
     ServerSpec {
@@ -212,6 +231,7 @@ pub const CATALOG: &[ServerSpec] = &[
         filenames: &[],
         extensions: &[".hs", ".lhs"],
         root_markers: &["stack.yaml", "cabal.project", "*.cabal", ".git"],
+        workspace_aware: false,
     },
     ServerSpec {
         name: "ocamllsp",
@@ -220,6 +240,7 @@ pub const CATALOG: &[ServerSpec] = &[
         filenames: &[],
         extensions: &[".ml", ".mli"],
         root_markers: &["dune-project", "Makefile", ".git"],
+        workspace_aware: false,
     },
     // ── Shell / config ──────────────────────────────────────────────────
     ServerSpec {
@@ -229,6 +250,7 @@ pub const CATALOG: &[ServerSpec] = &[
         filenames: &[],
         extensions: &[".sh", ".bash", ".zsh"],
         root_markers: &[],
+        workspace_aware: false,
     },
     ServerSpec {
         name: "lua-language-server",
@@ -237,6 +259,7 @@ pub const CATALOG: &[ServerSpec] = &[
         filenames: &[],
         extensions: &[".lua"],
         root_markers: &[".luarc.json", ".luacheckrc", ".git"],
+        workspace_aware: false,
     },
     ServerSpec {
         name: "taplo",
@@ -245,6 +268,7 @@ pub const CATALOG: &[ServerSpec] = &[
         filenames: &[],
         extensions: &[".toml"],
         root_markers: &["Cargo.toml", "pyproject.toml", ".git"],
+        workspace_aware: false,
     },
     ServerSpec {
         name: "yaml-language-server",
@@ -253,6 +277,7 @@ pub const CATALOG: &[ServerSpec] = &[
         filenames: &[],
         extensions: &[".yml", ".yaml"],
         root_markers: &[],
+        workspace_aware: false,
     },
     ServerSpec {
         name: "marksman",
@@ -261,6 +286,7 @@ pub const CATALOG: &[ServerSpec] = &[
         filenames: &[],
         extensions: &[".md", ".markdown"],
         root_markers: &[],
+        workspace_aware: false,
     },
     // ── Web markup ──────────────────────────────────────────────────────
     ServerSpec {
@@ -270,6 +296,7 @@ pub const CATALOG: &[ServerSpec] = &[
         filenames: &[],
         extensions: &[".html", ".htm"],
         root_markers: &[],
+        workspace_aware: false,
     },
     ServerSpec {
         name: "vscode-css-language-server",
@@ -278,6 +305,7 @@ pub const CATALOG: &[ServerSpec] = &[
         filenames: &[],
         extensions: &[".css", ".scss", ".less"],
         root_markers: &[],
+        workspace_aware: false,
     },
     ServerSpec {
         name: "dockerfile-language-server-nodejs",
@@ -286,6 +314,7 @@ pub const CATALOG: &[ServerSpec] = &[
         filenames: &["dockerfile"],
         extensions: &[".dockerfile"],
         root_markers: &["Dockerfile", "docker-compose.yml", ".git"],
+        workspace_aware: false,
     },
     // ── Nix ─────────────────────────────────────────────────────────────
     ServerSpec {
@@ -295,6 +324,7 @@ pub const CATALOG: &[ServerSpec] = &[
         filenames: &[],
         extensions: &[".nix"],
         root_markers: &["flake.nix", "shell.nix", "default.nix", ".git"],
+        workspace_aware: false,
     },
 ];
 

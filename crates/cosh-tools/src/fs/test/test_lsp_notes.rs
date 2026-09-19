@@ -67,6 +67,7 @@ fn lsp_with_findings(dir: &std::path::Path, _file: &std::path::Path) -> Lsp {
             extensions: &[".fake"],
             filenames: &[],
             root_markers: &[],
+            workspace_aware: false,
         }],
         fake_factory(),
     );

@@ -75,6 +75,7 @@ fn one_spec_manager(dir: &std::path::Path, factory: ClientFactory) -> Manager {
             extensions: &[".fake"],
             filenames: &[],
             root_markers: &["marker.txt"],
+            workspace_aware: false,
         }],
         factory,
     )
@@ -570,6 +571,7 @@ async fn workspace_symbols_requires_running_servers() {
         extensions: &[".fake"],
         filenames: &[],
         root_markers: &["marker.txt"],
+        workspace_aware: false,
     }];
     let manager = Arc::new(Manager::build(config, catalog, factory));
     let lsp = Lsp::with_manager(manager, Arc::new(DiagnosticsEngine::new()));

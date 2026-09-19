@@ -31,6 +31,7 @@ fn spec(
         extensions,
         filenames: &[],
         root_markers: markers,
+        workspace_aware: false,
     }
 }
 
@@ -154,6 +155,30 @@ async fn root_resolution_walks_up_to_nearest_marker() {
     );
 }
 
+/// Workspace-aware specs anchor at the outermost matching directory, so a
+/// Cargo workspace with per-crate `Cargo.toml`s gets ONE rust-analyzer rooted
+/// at the workspace root instead of one per nested crate.
+#[tokio::test]
+async fn workspace_aware_specs_anchor_at_outermost_marker() {
+    let (_dir, root, pkg) = nested_project_tree();
+    let mut aware = spec("rust-workspace", "unused", &[".rs"], &["Cargo.toml"]);
+    aware.workspace_aware = true;
+    let manager = Manager::build(
+        ManagerConfig::new(root.clone()),
+        vec![aware],
+        never_factory(),
+    );
+
+    let matches = manager.matches_for_file(&pkg.join("lib.rs"));
+
+    assert_eq!(matches.len(), 1);
+    assert_eq!(
+        matches[0].0.root,
+        super::super::manager::canonical_root(&root),
+        "workspace-aware specs ignore nested markers"
+    );
+}
+
 #[tokio::test]
 async fn specs_without_marker_ancestry_are_skipped() {
     let dir = tempfile::tempdir().unwrap();
@@ -272,6 +297,7 @@ async fn extensionless_files_match_by_name() {
             extensions: &[".dockerfile"],
             filenames: &["dockerfile"],
             root_markers: &["Dockerfile"],
+            workspace_aware: false,
         }],
         never_factory(),
     );
