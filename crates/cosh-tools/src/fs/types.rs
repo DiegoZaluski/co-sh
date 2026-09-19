@@ -81,9 +81,13 @@ pub struct EditTarget {
     pub ops: String,
 }
 
-/// Configuration for file edit operations.
+/// Configuration for file edit operations (hashline replace engine).
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct FsEdit {
+    /// Edit targets. Multi-file batching is intentionally NOT advertised by
+    /// the tool schema: single-path calls proved far more reliable in agent
+    /// sessions (batched calls raised schema-error rates). The batch form is
+    /// kept — not removed — for future studies and benchmarks.
     pub targets: Vec<EditTarget>,
     /// Preview mode: apply in memory only, returning the diff and the
     /// syntax-probe verdict without writing anything. Re-issue without
@@ -92,7 +96,11 @@ pub struct FsEdit {
     pub dry_run: bool,
 }
 
-/// One content-anchored replacement for the content edit engine.
+/// One content-anchored replacement.
+///
+/// Public call shape is flat: `fs_edit` unwraps the single advertised
+/// `path/old_string/new_string` object into this struct (batch form kept for
+/// benchmarks).
 ///
 /// `old_string` is a content address: it must match the file exactly (the
 /// match must be unique unless [`Self::replace_all`] is set). The edit is
@@ -119,7 +127,12 @@ pub struct ReplaceEdit {
     pub replace_all: bool,
 }
 
-/// Arguments for the content edit engine (the `edits` argument).
+/// Arguments for the content edit engine.
+///
+/// The tool schema advertises one edit (one path) per call; the `Vec` batch
+/// form is kept — not removed — for future studies and benchmarks (batched
+/// calls raised schema-error rates in agent sessions). Same-file edits in a
+/// batch still chain: follow-ups may omit `file_hash`.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct FsContentEdit {
     pub edits: Vec<ReplaceEdit>,
@@ -149,12 +162,14 @@ pub struct AstEditOp {
     pub out: String,
 }
 
-/// The AST engine argument (arg 2 of the edit tool).
+/// The AST engine argument.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct FsAstEdit {
     /// Structural rewrite operations; applied in order over each matched file.
     pub ops: Vec<AstEditOp>,
-    /// Files, directories, or globs to rewrite.
+    /// Files, directories, or globs to rewrite. The advertised schema is one
+    /// path per call; multi-path glob sweeps are kept for codemods and
+    /// future benchmarks.
     pub paths: Vec<String>,
     /// Hard cap on the number of files edited in one call (defaults to
     /// [`crate::fs::ast_edit::DEFAULT_MAX_FILES`]).

@@ -541,60 +541,52 @@ impl Fs {
         serde_json::json!({
             "name": "fs_edit",
             "description": concat!(
-                "Apply targeted line/block edits to one or more files. Edits are ",
+                "Apply targeted line/block edits to ONE file per call. Edits are ",
                 "anchored by the file's content hash for safety. ",
                 "Supports replace, delete, insert (before/after/head/tail), and ",
-                "syntactic block operations. Successful edits return the ",
+                "syntactic block operations. A successful edit returns the ",
                 "updated \u{00B6}path#TAG header — use it directly for follow-up ",
-                "edits on the same file without re-reading."
+                "edits on the same file without re-reading. ",
+                "Example: {\"path\": \"src/main.rs\", \"file_hash\": \"3C4D\", ",
+                "\"ops\": \"replace 5..7:\\n+fn hello() {\\n+    println!(\\\"hi\\\");\\n+}\"}"
             ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "targets": {
-                        "type": "array",
-                        "description": "List of edit targets",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "path": {
-                                    "type": "string",
-                                    "description": "Path to the file to edit, relative to the project root"
-                                },
-                                "file_hash": {
-                                    "type": "string",
-                                    "description": concat!(
-                                        "4-hex content hash tag: the \u{00B6}path#TAG anchor. ",
-                                        "Get it from your last fs_read OR from a previous ",
-                                        "fs_edit result (the `header` field carries the ",
-                                        "updated tag). Copy verbatim."
-                                    )
-                                },
-                                "ops": {
-                                    "type": "string",
-                                    "description": concat!(
-                                        "Hashline edit operations. Each operation is on its own line:\n",
-                                        "- replace N..M:  replace lines N through M with new content\n",
-                                        "   (prefix each replacement line with +)\n",
-                                        "- delete N..M   delete lines N through M\n",
-                                        "- insert before N:  insert lines before line N\n",
-                                        "- insert after N:   insert lines after line N\n",
-                                        "- insert head:      insert at start of file\n",
-                                        "- insert tail:      insert at end of file\n",
-                                        "- replace block N:  replace syntactic block at line N\n",
-                                        "Example:\n",
-                                        "  replace 5..7:\n",
-                                        "  +fn hello() {\n",
-                                        "  +    println!(\"hi\");\n",
-                                        "  +}\n",
-                                        "  delete 10..12\n",
-                                        "  insert after 15:\n",
-                                        "  +// new comment"
-                                    )
-                                }
-                            },
-                            "required": ["path", "file_hash", "ops"]
-                        }
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the file to edit, relative to the project root"
+                    },
+                    "file_hash": {
+                        "type": "string",
+                        "description": concat!(
+                            "4-hex content hash tag: the \u{00B6}path#TAG anchor. ",
+                            "Get it from your last fs_read OR from a previous ",
+                            "fs_edit result (the `header` field carries the ",
+                            "updated tag). Copy verbatim."
+                        )
+                    },
+                    "ops": {
+                        "type": "string",
+                        "description": concat!(
+                            "Hashline edit operations. Each operation is on its own line:\n",
+                            "- replace N..M:  replace lines N through M with new content\n",
+                            "   (prefix each replacement line with +)\n",
+                            "- delete N..M   delete lines N through M\n",
+                            "- insert before N:  insert lines before line N\n",
+                            "- insert after N:   insert lines after line N\n",
+                            "- insert head:      insert at start of file\n",
+                            "- insert tail:      insert at end of file\n",
+                            "- replace block N:  replace syntactic block at line N\n",
+                            "Example:\n",
+                            "  replace 5..7:\n",
+                            "  +fn hello() {\n",
+                            "  +    println!(\"hi\");\n",
+                            "  +}\n",
+                            "  delete 10..12\n",
+                            "  insert after 15:\n",
+                            "  +// new comment"
+                        )
                     },
                     "dry_run": {
                         "type": "boolean",
@@ -606,7 +598,7 @@ impl Fs {
                         )
                     }
                 },
-                "required": ["targets"]
+                "required": ["path", "file_hash", "ops"]
             }
         })
     }
@@ -619,243 +611,155 @@ impl Fs {
         serde_json::json!({
             "name": "fs_edit",
             "description": concat!(
-                "Apply structural syntax-tree edits to one or more files. ",
-                "Rewrite each match of a pattern (`pat`) to a template (`out`) ",
-                "across the given `paths`. Patterns must be full, structurally ",
-                "valid source snippets; they support metavariables $NAME (matches ",
-                "exactly one node) and $$$NAME (matches zero or more nodes, e.g. an ",
-                "argument list), and the same metavariable must capture identical ",
-                "text in every occurrence to match. A string literal pattern must ",
-                "include its quotes, and a metavariable captures a whole node — it ",
-                "does not match a substring inside a literal. So to change the text ",
-                "of a string, match the whole literal, e.g. `pat` ",
-                "`console.log(\"$M\")` for `out` `console.log(\"[$M]\")`; a pattern ",
-                "like `Hello, $X!` (a bare phrase) matches nothing."
+                "Apply structural syntax-tree edits to ONE file per call. ",
+                "Rewrite each match of a pattern (`pat`) to a template (`out`). ",
+                "Patterns must be full, structurally valid source snippets; they support ",
+                "metavariables $NAME (matches exactly one node) and $$$NAME (matches zero or ",
+                "more nodes, e.g. an argument list), and the same metavariable must capture ",
+                "identical text in every occurrence to match. A string literal pattern must ",
+                "include its quotes, and a metavariable captures a whole node — it does not ",
+                "match a substring inside a literal. So to change the text of a string, match ",
+                "the whole literal. ",
+                "Example: {\"path\": \"src/app.js\", \"ops\": [{\"pat\": ",
+                "\"console.log(\\\"$M\\\")\", \"out\": \"console.log([\\\"$M\\'])\"}]}"
             ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "ast": {
-                        "type": "object",
-                        "description": "Structural rewrite operations.",
-                        "properties": {
-                            "ops": {
-                                "type": "array",
-                                "description": "Rewrite ops applied in order",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "pat": {
-                                            "type": "string",
-                                            "description": concat!(
-                                                "Complete, structurally valid AST pattern. ",
-                                                "Supports metavariables $NAME (exactly one node) ",
-                                                "and $$$NAME (zero or more nodes, e.g. an argument ",
-                                                "list); the same metavariable must capture identical ",
-                                                "text. Include quotes around string literals; a ",
-                                                "metavariable matches a whole node, never a substring ",
-                                                "inside a literal."
-                                            )
-                                        },
-                                        "out": {
-                                            "type": "string",
-                                            "description": "Replacement template; captured metavariables may be referenced"
-                                        }
-                                    },
-                                    "required": ["pat", "out"]
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the file to edit, relative to the project root"
+                    },
+                    "ops": {
+                        "type": "array",
+                        "description": "Rewrite ops applied in order",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "pat": {
+                                    "type": "string",
+                                    "description": concat!(
+                                        "Complete, structurally valid AST pattern. ",
+                                        "Supports metavariables $NAME (exactly one node) ",
+                                        "and $$$NAME (zero or more nodes, e.g. an argument ",
+                                        "list); the same metavariable must capture identical ",
+                                        "text. Include quotes around string literals; a ",
+                                        "metavariable matches a whole node, never a substring ",
+                                        "inside a literal."
+                                    )
+                                },
+                                "out": {
+                                    "type": "string",
+                                    "description": "Replacement template; captured metavariables may be referenced"
                                 }
                             },
-                            "paths": {
-                                "type": "array",
-                                "description": "Files, directories, or globs to rewrite",
-                                "items": { "type": "string" }
-                            }
-                        },
-                        "required": ["ops", "paths"]
+                            "required": ["pat", "out"]
+                        }
                     }
                 },
-                "required": ["ast"]
+                "required": ["path", "ops"]
             }
         })
     }
 
-    /// MCP `fs` tool description for the default auto-dispatch mode.
+    /// MCP `fs_edit` description for the default auto-dispatch mode.
     ///
-    /// All three engines are exposed here (and only here): the agent
-    /// populates exactly one of `targets` / `ast` / `edits` and the tool
-    /// routes accordingly.
+    /// All three engines are exposed here (and only here); the flat argument
+    /// shape selects the engine and the tool routes accordingly.
     fn description_edit_auto() -> ToolDescription {
         serde_json::json!({
             "name": "fs_edit",
             "description": concat!(
-                "Apply targeted edits to one or more files. Three mutually exclusive ",
-                "engines are available; provide exactly one of the three optional ",
-                "arguments. `targets` uses the hashline replace engine (line/block ",
-                "edits anchored by the file's content hash; supports replace, ",
-                "delete, insert before/after/head/tail, and syntactic block ",
-                "operations). `ast` uses the AST structural ",
-                "engine: it matches a syntax-tree pattern (`pat`) that may use ",
-                "metavariables `$NAME` (one node) and `$$$NAME` (a list, e.g. an ",
-                "argument list) and rewrites each match to the template (`out`), ",
-                "enforcing metavariable identity. `pat` must be a complete, ",
-                "structurally valid snippet: string literals need their quotes, and ",
-                "a metavariable captures a whole node (never a substring inside a ",
-                "literal) — to change a string's text, match the whole literal, ",
-                "e.g. `pat` `console.log(\"$M\")` for `out` `console.log(\"[$M]\")`. ",
-                "`edits` uses the content replace engine: it replaces an exact ",
-                "`old_string` (which must occur exactly once, unless `replace_all`) ",
-                "with `new_string` — use it when the text itself identifies the ",
-                "location, with the smallest unique snippet, instead of computing ",
-                "line numbers. If you only need to replace literal text with known ",
-                "line positions, prefer `targets`; if a populated argument is filled ",
-                "with another engine's schema, a correction is returned. ",
-                "Successful edits return the updated \u{00B6}path#TAG header — ",
+                "Apply targeted edits to ONE file per call. Three mutually exclusive ",
+                "engines are available; provide exactly one engine's arguments. ",
+                "1. Content replace — {path, file_hash?, old_string, new_string, ",
+                "replace_all?}: replaces an exact `old_string` (which must occur ",
+                "exactly once, unless `replace_all`) with `new_string`. Use it when ",
+                "the text itself identifies the location, with the smallest unique ",
+                "snippet. Example: {\"path\": \"src/main.rs\", \"file_hash\": \"3C4D\", ",
+                "\"old_string\": \"old_computation(x)\", \"new_string\": ",
+                "\"new_computation(x)\"}. ",
+                "2. Hashline replace — {path, file_hash, ops}: line/block edits ",
+                "(replace, delete, insert before/after/head/tail, syntactic block ",
+                "operations) anchored by the file's content hash. Use it when you ",
+                "know exact line positions. ",
+                "3. AST structural — {path, ops: [{pat, out}]}: matches a ",
+                "syntax-tree pattern that may use metavariables `$NAME` (one node) ",
+                "and `$$$NAME` (a list, e.g. an argument list) and rewrites each ",
+                "match to the template. `pat` must be a complete, structurally valid ",
+                "snippet: string literals need their quotes, and a metavariable ",
+                "captures a whole node (never a substring inside a literal) — to ",
+                "change a string's text, match the whole literal. ",
+                "A successful edit returns the updated \u{00B6}path#TAG header — ",
                 "use it directly for follow-up edits on the same file without ",
                 "re-reading."
             ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "targets": {
-                        "type": "array",
-                        "description": "Hashline replace engine argument. List of edit targets. Mutually exclusive with `ast` and `edits`.",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "path": {
-                                    "type": "string",
-                                    "description": "Path to the file to edit, relative to the project root"
-                                },
-                                "file_hash": {
-                                    "type": "string",
-                                    "description": concat!(
-                                        "4-hex content hash tag: the \u{00B6}path#TAG anchor. ",
-                                        "Get it from your last fs_read OR from a previous ",
-                                        "fs_edit result (the `header` field carries the ",
-                                        "updated tag). Copy verbatim."
-                                    )
-                                },
-                                "ops": {
-                                    "type": "string",
-                                    "description": concat!(
-                                        "Hashline edit operations. Each operation is on its own line:\n",
-                                        "- replace N..M:  replace lines N through M with new content\n",
-                                        "   (prefix each replacement line with +)\n",
-                                        "- delete N..M   delete lines N through M\n",
-                                        "- insert before N:  insert lines before line N\n",
-                                        "- insert after N:   insert lines after line N\n",
-                                        "- insert head:      insert at start of file\n",
-                                        "- insert tail:      insert at end of file\n",
-                                        "- replace block N:  replace syntactic block at line N\n",
-                                        "Example:\n",
-                                        "  replace 5..7:\n",
-                                        "  +fn hello() {\n",
-                                        "  +    println!(\"hi\");\n",
-                                        "  +}\n",
-                                        "  delete 10..12\n",
-                                        "  insert after 15:\n",
-                                        "  +// new comment"
-                                    )
-                                }
-                            },
-                            "required": ["path", "file_hash", "ops"]
-                        }
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the file to edit, relative to the project root. Required by all three engines."
                     },
-                    "ast": {
-                        "type": "object",
+                    "file_hash": {
+                        "type": "string",
                         "description": concat!(
-                            "AST structural engine argument. Rewrites syntax-tree ",
-                            "matches of `ops[].pat` to `ops[].out` across `paths`. ",
-                            "Mutually exclusive with `targets` and `edits`. Example:\n",
-                            "  {\"ast\": {\"ops\": [{\"pat\": \"console.log(\\\"\u{24}M\\\")\", ",
-                            "\"out\": \"console.log([\\\"\u{24}M\\\"])\"}], ",
-                            "\"paths\": [\"src/app.js\"]}}"
-                        ),
-                        "properties": {
-                            "ops": {
-                                "type": "array",
-                                "description": "Rewrite ops applied in order",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "pat": {
-                                            "type": "string",
-                                            "description": concat!(
-                                                "Complete, structurally valid AST pattern. ",
-                                                "Supports metavariables $NAME (exactly one node) ",
-                                                "and $$$NAME (zero or more nodes, e.g. an argument ",
-                                                "list); the same metavariable must capture identical ",
-                                                "text. Include quotes around string literals; a ",
-                                                "metavariable matches a whole node, never a substring ",
-                                                "inside a literal."
-                                            )
-                                        },
-                                        "out": {
-                                            "type": "string",
-                                            "description": "Replacement template; captured metavariables may be referenced"
-                                        }
-                                    },
-                                    "required": ["pat", "out"]
-                                }
-                            },
-                            "paths": {
-                                "type": "array",
-                                "description": "Files, directories, or globs to rewrite",
-                                "items": { "type": "string" }
-                            }
-                        },
-                        "required": ["ops", "paths"]
+                            "4-hex content hash tag: the \u{00B6}path#TAG anchor ",
+                            "from your last read of this file (or a previous ",
+                            "fs_edit result's `header`). Copy verbatim. Required ",
+                            "by the content replace and hashline engines."
+                        )
                     },
-                    "edits": {
-                        "type": "array",
+                    "old_string": {
+                        "type": "string",
                         "description": concat!(
-                            "Content replace engine argument. Replaces an exact ",
-                            "old_string with new_string (unique match required unless ",
-                            "replace_all). Mutually exclusive with `targets` and `ast`. ",
+                            "Content replace engine. Exact text to replace, copied ",
+                            "verbatim including whitespace and newlines. Must occur ",
+                            "exactly once unless replace_all is true; use the smallest ",
+                            "snippet that is unique."
+                        )
+                    },
+                    "new_string": {
+                        "type": "string",
+                        "description": "Content replace engine. Replacement text. Empty deletes the matched text."
+                    },
+                    "replace_all": {
+                        "type": "boolean",
+                        "description": "Content replace engine. Replace every occurrence instead of requiring a unique match (default false)."
+                    },
+                    "ops": {
+                        "description": concat!(
+                            "Engine selector: a STRING selects the hashline replace ",
+                            "engine; an ARRAY of {pat, out} selects the AST structural ",
+                            "engine.\n\n",
+                            "Hashline replace (string). Each operation is on its own line:\n",
+                            "- replace N..M:  replace lines N through M with new content\n",
+                            "   (prefix each replacement line with +)\n",
+                            "- delete N..M   delete lines N through M\n",
+                            "- insert before N:  insert lines before line N\n",
+                            "- insert after N:   insert lines after line N\n",
+                            "- insert head:      insert at start of file\n",
+                            "- insert tail:      insert at end of file\n",
+                            "- replace block N:  replace syntactic block at line N\n",
                             "Example:\n",
-                            "  {\"edits\": [{\"path\": \"src/main.rs\", ",
-                            "\"file_hash\": \"3C4D\", ",
-                            "\"old_string\": \"old_computation(x)\", ",
-                            "\"new_string\": \"new_computation(x)\"}]}"
-                        ),
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "path": {
-                                    "type": "string",
-                                    "description": "Path to the file to edit, relative to the project root"
-                                },
-                                "file_hash": {
-                                    "type": "string",
-                                    "description": concat!(
-                                        "4-hex content hash tag: the \u{00B6}path#TAG anchor ",
-                                        "from your last read of this file (or a previous ",
-                                        "fs_edit result). Required for the first edit of ",
-                                        "each file in the call; omit it on follow-up edits ",
-                                        "to the same file in the same call to chain from ",
-                                        "the previous edit's fresh tag. Copy verbatim."
-                                    )
-                                },
-                                "old_string": {
-                                    "type": "string",
-                                    "description": concat!(
-                                        "Exact text to replace, copied verbatim including ",
-                                        "whitespace and newlines. Must occur exactly once ",
-                                        "unless replace_all is true; use the smallest ",
-                                        "snippet that is unique."
-                                    )
-                                },
-                                "new_string": {
-                                    "type": "string",
-                                    "description": "Replacement text. Empty deletes the matched text."
-                                },
-                                "replace_all": {
-                                    "type": "boolean",
-                                    "description": "Replace every occurrence instead of requiring a unique match (default false)"
-                                }
-                            },
-                            "required": ["path", "old_string", "new_string"]
-                        }
+                            "  replace 5..7:\n",
+                            "  +fn hello() {\n",
+                            "  +    println!(\"hi\");\n",
+                            "  +}\n",
+                            "  delete 10..12\n",
+                            "  insert after 15:\n",
+                            "  +// new comment\n\n",
+                            "AST structural (array of {pat, out}): each rewrite op ",
+                            "replaces every syntax-tree match of `pat` with `out`. ",
+                            "`pat` must be complete and structurally valid; supports ",
+                            "metavariables $NAME (exactly one node) and $$$NAME (zero or ",
+                            "more nodes, e.g. an argument list); the same metavariable ",
+                            "must capture identical text. Include quotes around string ",
+                            "literals; a metavariable matches a whole node, never a ",
+                            "substring inside a literal. ",
+                            "Example: [{\"pat\": \"console.log(\\\"$M\\\")\", ",
+                            "\"out\": \"console.log([\\\"$M\\\"])\"]"
+                        )
                     },
                     "dry_run": {
                         "type": "boolean",
@@ -878,18 +782,24 @@ impl Fs {
         metadata: &FsMetadata,
         args: &serde_json::Value,
     ) -> Result<Vec<EditResult>, String> {
-        let Some(targets_value) = args.get("targets") else {
-            return Err(
-                "no `targets` argument was provided; pass 'targets': [{path, file_hash, ops}]"
-                    .to_string(),
-            );
-        };
-        let targets: Vec<EditTarget> = serde_json::from_value(targets_value.clone())
-            .map_err(|e| format!("invalid `targets` for the replace engine: {e}"))?;
         let dry_run = args
             .get("dry_run")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
+        let targets_value = if let Some(t) = args.get("targets") {
+            // Batch form: kept for benchmarks, not advertised by the schema.
+            t.clone()
+        } else if args.get("path").is_some() && args.get("ops").is_some() {
+            // Advertised single-path shape: a flat {path, file_hash, ops}.
+            serde_json::Value::Array(vec![args.clone()])
+        } else {
+            return Err(
+                "the replace engine requires {path, file_hash, ops} — one file per call"
+                    .to_string(),
+            );
+        };
+        let targets: Vec<EditTarget> = serde_json::from_value(targets_value)
+            .map_err(|e| format!("invalid `path`/`file_hash`/`ops` for the replace engine: {e}"))?;
         edit(metadata.clone(), FsEdit { targets, dry_run })
             .await
             .map_err(|e| e.to_string())
@@ -900,14 +810,26 @@ impl Fs {
         metadata: &FsMetadata,
         args: &serde_json::Value,
     ) -> Result<Vec<EditResult>, String> {
-        let Some(ast_value) = args.get("ast") else {
+        // Advertised single-path shape: a flat {ops: [...], path}. The
+        // multi-path `paths` array form is kept for codemods/benchmarks but
+        // not advertised by the schema.
+        let ast_value = if let Some(ast) = args.get("ast") {
+            ast.clone()
+        } else if args.get("ops").is_some_and(|v| v.is_array()) {
+            let mut flat = args.clone();
+            if let Some(path) = flat.get("path").cloned()
+                && let Some(obj) = flat.as_object_mut()
+            {
+                obj.insert("paths".into(), serde_json::json!([path]));
+            }
+            flat
+        } else {
             return Err(
-                "no `ast` argument was provided; pass 'ast': {ops: [{pat, out}], paths: [...]}"
-                    .to_string(),
+                "the AST engine requires {path, ops: [{pat, out}]} — one file per call".to_string(),
             );
         };
-        let fs_ast: FsAstEdit = serde_json::from_value(ast_value.clone())
-            .map_err(|e| format!("invalid `ast` argument for the AST engine: {e}"))?;
+        let fs_ast: FsAstEdit = serde_json::from_value(ast_value)
+            .map_err(|e| format!("invalid `ops`/`path` arguments for the AST engine: {e}"))?;
         crate::fs::ast_edit::ast_edit(metadata.clone(), fs_ast).await
     }
 
@@ -916,18 +838,29 @@ impl Fs {
         metadata: &FsMetadata,
         args: &serde_json::Value,
     ) -> Result<Vec<EditResult>, String> {
-        let Some(edits_value) = args.get("edits") else {
-            return Err("no `edits` argument was provided; pass 'edits': \
-                 [{path, file_hash, old_string, new_string, replace_all?}]"
-                .to_string());
+        // Advertised single-edit shape: a flat {path, file_hash?, old_string,
+        // new_string, replace_all?}. The array/batch form is kept for
+        // benchmarks but not advertised by the schema.
+        let edits_value = if let Some(arr) = args.get("edits").filter(|v| v.is_array()) {
+            arr.clone()
+        } else if args.get("old_string").is_some() {
+            serde_json::Value::Array(vec![args.clone()])
+        } else {
+            return Err(
+                "the content replace engine requires {path, file_hash?, old_string, \
+                 new_string, replace_all?} — one file per call"
+                    .to_string(),
+            );
         };
-        if !edits_value.is_array() {
-            return Err("invalid `edits` argument: expected an array of \
-                 {path, file_hash, old_string, new_string, replace_all?}"
-                .to_string());
-        }
-        let fs_edits: FsContentEdit = serde_json::from_value(args.clone())
-            .map_err(|e| format!("invalid `edits` for the content replace engine: {e}"))?;
+        let dry_run = args
+            .get("dry_run")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let fs_edits: FsContentEdit =
+            serde_json::from_value(serde_json::json!({ "edits": edits_value, "dry_run": dry_run }))
+                .map_err(|e| {
+                    format!("invalid edit arguments for the content replace engine: {e}")
+                })?;
         replace::content_edit(metadata, &fs_edits.edits, fs_edits.dry_run)
             .await
             .map_err(|e| e.to_string())
@@ -938,63 +871,92 @@ impl Fs {
         metadata: &FsMetadata,
         args: &serde_json::Value,
     ) -> Result<Vec<EditResult>, String> {
-        let has_targets = args
-            .get("targets")
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|a| !a.is_empty());
+        let has_targets = args.get("targets").is_some_and(|v| v.is_array());
         let has_ast = args.get("ast").is_some_and(|v| v.is_object());
-        let has_edits = args
-            .get("edits")
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|a| !a.is_empty());
+        let has_edits = args.get("edits").is_some_and(|v| v.is_array());
+        let has_ops = args.get("ops").is_some();
+        let has_old = args.get("old_string").is_some();
 
         let selected = [has_targets, has_ast, has_edits]
             .into_iter()
             .filter(|has| *has)
             .count();
-        match selected {
-            0 => Err(Self::edit_usage_prompt()),
-            1 if has_targets => {
-                if let Some(correction) = ast_schema_in_targets(args) {
-                    return Err(correction);
-                }
-                if let Some(correction) = content_schema_in_targets(args) {
-                    return Err(correction);
-                }
-                self.edit_replace(metadata, args).await
-            }
-            1 if has_ast => {
-                if let Some(correction) = replace_schema_in_ast(args) {
-                    return Err(correction);
-                }
-                self.edit_ast(metadata, args).await
-            }
-            1 => {
-                if let Some(correction) = hashline_schema_in_edits(args) {
-                    return Err(correction);
-                }
-                self.edit_content(metadata, args).await
-            }
-            _ => Err(
-                "multiple edit engine arguments were provided; pick exactly one engine per \
-                 call: use `targets` (hashline), `ast` (AST), or `edits` (content replace), \
-                 not several."
+        let flat_selected = [has_ops, has_old].into_iter().filter(|has| *has).count();
+        if flat_selected > 1 {
+            return Err(
+                "ambiguous edit arguments: `ops` selects the hashline replace engine while \
+                 `old_string` selects the content replace engine; provide only one."
                     .to_string(),
-            ),
+            );
         }
+        if selected > 0 && flat_selected > 0 {
+            return Err(
+                "mix of engine-array arguments and single-edit arguments; provide exactly \
+                 one edit per call: either `targets`/`ast`/`edits` (batch form) or a flat \
+                 {path, ops | old_string, ...} object — not both."
+                    .to_string(),
+            );
+        }
+        if selected > 1 {
+            return Err(
+                "multiple edit engine arguments were provided; pick exactly one engine per \
+                 call: provide only one of `targets`, `ast`, or `edits`."
+                    .to_string(),
+            );
+        }
+        if selected == 1 {
+            return match (has_targets, has_ast, has_edits) {
+                (true, false, false) => {
+                    if let Some(correction) = ast_schema_in_targets(args) {
+                        return Err(correction);
+                    }
+                    if let Some(correction) = content_schema_in_targets(args) {
+                        return Err(correction);
+                    }
+                    self.edit_replace(metadata, args).await
+                }
+                (false, true, false) => {
+                    if let Some(correction) = replace_schema_in_ast(args) {
+                        return Err(correction);
+                    }
+                    self.edit_ast(metadata, args).await
+                }
+                _ => {
+                    if let Some(correction) = hashline_schema_in_edits(args) {
+                        return Err(correction);
+                    }
+                    self.edit_content(metadata, args).await
+                }
+            };
+        }
+        if flat_selected == 0 {
+            return Err(Self::edit_usage_prompt());
+        }
+        // Flat single-file shape: `ops` (string) → replace engine, `ops`
+        // (array of {pat, out}) → AST engine, `old_string` → content engine.
+        if args.get("ops").is_some_and(|v| v.is_string()) {
+            if let Some(correction) = content_schema_in_flat_ops(args) {
+                return Err(correction);
+            }
+            return self.edit_replace(metadata, args).await;
+        }
+        if has_old {
+            return self.edit_content(metadata, args).await;
+        }
+        self.edit_ast(metadata, args).await
     }
 
-    /// Correction prompt listing the edit tool's three optional arguments.
+    /// Correction prompt listing the edit tool's accepted shapes.
     fn edit_usage_prompt() -> String {
-        "No edit engine arguments were provided. `edit` accepts exactly one of three \
-         optional arguments — each selects an engine:\n\
-         • `targets` (array of {path, file_hash, ops}) — hashline replace engine \
-         (line/block edits, hash-anchored).\n\
-         • `ast` (object {ops: [{pat, out}], paths: [...]}) — AST structural engine \
-         (master metavariable rewrites).\n\
-         • `edits` (array of {path, file_hash, old_string, new_string, replace_all?}) — \
-         content replace engine (exact unique old_string → new_string).\n\
-         Provide whichever matches the edit you intend."
+        "No edit arguments were provided. Edit one file per call with one of three \
+         engines:\n\
+         • hashline replace — {path, file_hash, ops} where `ops` is a string of \
+         line/block operations (replace/delete/insert; see the ops description).\n\
+         • AST structural — {path, ops: [{pat, out}]} rewrites each syntax-tree \
+         match of `pat` to the template `out`.\n\
+         • content replace — {path, file_hash?, old_string, new_string, replace_all?} \
+         replaces an exact, unique `old_string` with `new_string`.\n\
+         Provide exactly one engine's arguments per call."
             .to_string()
     }
 
@@ -1242,6 +1204,22 @@ impl FsCall<'_> {
             .rollback_op(self.lsp, self.include_warnings, path, hash)
             .await
     }
+}
+
+/// Detect when a flat hashline `ops` payload contains content-replace
+/// fields. Returns a correction prompt, or `None` when the arguments look
+/// like a legitimate hashline request.
+fn content_schema_in_flat_ops(args: &serde_json::Value) -> Option<String> {
+    if args.get("old_string").is_some() || args.get("new_string").is_some() {
+        return Some(
+            "The hashline `ops` argument was mixed with content replace fields \
+             (found `old_string`/`new_string`). Content edits use {path, file_hash?, \
+             old_string, new_string, replace_all?} WITHOUT `ops`; hashline edits use \
+             {path, file_hash, ops} WITHOUT `old_string`/`new_string`."
+                .to_string(),
+        );
+    }
+    None
 }
 
 /// Detect when the agent filled the replace `targets` argument with the

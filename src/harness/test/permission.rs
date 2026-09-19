@@ -148,6 +148,23 @@ fn build_fs_edit_always_needs_approval() {
     );
 }
 
+// The advertised single-file form (flat {path, ...}) must surface the same
+// approval args as the batch form — the guard never parses a bespoke string.
+#[test]
+fn build_fs_edit_flat_form_carries_the_path_in_approval() {
+    let args = serde_json::json!({
+        "path": "src/main.rs",
+        "file_hash": "abcd",
+        "old_string": "a",
+        "new_string": "b"
+    });
+    let result = check_tool_permission("fs_edit", &args, Mode::Build, None);
+    assert!(
+        matches!(&result, PermissionCheck::NeedsApproval(req) if req.args == "src/main.rs"),
+        "flat fs_edit approval must name the edited path, got {result:?}"
+    );
+}
+
 #[test]
 fn build_fs_write_always_needs_approval() {
     let args = serde_json::json!({

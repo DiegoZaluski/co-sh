@@ -35,7 +35,7 @@ pub enum PermissionCheck {
 ///
 /// Supports the following argument shapes:
 /// - `{ "targets": [{ "path": "..." }, ...] }` (fs_read, fs_write, fs_edit)
-/// - `{ "path": "..." }` (fs_rollback)
+/// - `{ "path": "..." }` (fs_edit flat single-file form, fs_rollback)
 /// - `{ "path": "..." }` / `{ "paths": [...] }` (find_glob, find_grep)
 pub(crate) fn extract_paths_from_args(tool_name: &str, args: &Value) -> Vec<String> {
     match tool_name {
@@ -47,7 +47,12 @@ pub(crate) fn extract_paths_from_args(tool_name: &str, args: &Value) -> Vec<Stri
                     .map(String::from)
                     .collect()
             } else {
-                Vec::new()
+                // fs_edit's advertised single-file form: a flat {path, ...}.
+                args.get("path")
+                    .and_then(|p| p.as_str())
+                    .map(String::from)
+                    .into_iter()
+                    .collect()
             }
         }
         // find_glob / find_grep: the single `path` plus every entry of the

@@ -128,7 +128,7 @@ async fn only_ast_rejects_targets_argument() {
         .edit(args)
         .await
         .expect_err("should be rejected");
-    assert!(err.contains("`ast` argument"), "got: {err}");
+    assert!(err.contains("the AST engine requires"), "got: {err}");
 }
 
 #[tokio::test]
@@ -138,7 +138,7 @@ async fn only_replace_rejects_ast_argument() {
         .edit(args)
         .await
         .expect_err("should be rejected");
-    assert!(err.contains("`targets`"), "got: {err}");
+    assert!(err.contains("the replace engine requires"), "got: {err}");
 }
 
 #[tokio::test]
@@ -147,7 +147,10 @@ async fn auto_with_no_arguments_returns_usage_prompt() {
         .edit(json!({}))
         .await
         .expect_err("should be rejected");
-    assert!(err.contains("targets") || err.contains("ast"), "got: {err}");
+    assert!(
+        err.contains("hashline replace") && err.contains("content replace"),
+        "got: {err}"
+    );
 }
 
 #[tokio::test]
@@ -275,7 +278,7 @@ async fn usage_prompt_lists_the_content_engine() {
         .await
         .expect_err("should be rejected");
     assert!(
-        err.contains("`edits`") && err.contains("old_string"),
+        err.contains("content replace") && err.contains("old_string"),
         "got: {err}"
     );
 }
@@ -313,22 +316,23 @@ async fn only_replace_rejects_edits_argument() {
         .edit(args)
         .await
         .expect_err("forced replace engine must reject `edits`");
-    assert!(err.contains("`targets`"), "got: {err}");
+    assert!(err.contains("the replace engine requires"), "got: {err}");
 }
 
 #[test]
 fn edit_auto_description_examples_teach_both_engines_argument_shapes() {
     let schema = &Fs::new().description_edit["inputSchema"]["properties"];
-    let ops_text = &schema["targets"]["items"]["properties"]["ops"]["description"];
-    let edits_text = &schema["edits"]["description"];
+    let ops_text = &schema["ops"]["description"];
     assert!(
-        ops_text.as_str().is_some_and(|t| t.contains("Example")),
-        "the hashline ops DSL is taught by example"
-    );
-    assert!(
-        edits_text
+        ops_text
             .as_str()
-            .is_some_and(|t| t.contains("Example") && t.contains("old_string")),
+            .is_some_and(|t| t.contains("Example") && t.contains("pat")),
+        "the ops description teaches both the hashline DSL and the AST engine by example"
+    );
+    let desc = &Fs::new().description_edit["description"];
+    assert!(
+        desc.as_str()
+            .is_some_and(|t| t.contains("old_string") && t.contains("Example")),
         "the content engine is taught by example"
     );
 }
