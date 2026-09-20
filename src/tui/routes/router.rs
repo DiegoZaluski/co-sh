@@ -12,16 +12,23 @@ use crate::util::list_selection::ListSelection;
 
 const FOOTER_MARGIN: u16 = 3;
 const SIDE_PADDING: u16 = 4;
-const MODEL_LIST_TOP_OFFSET: u16 = 3;
+// Title row, one blank gap row, the search bar, then the list.
+const MODEL_LIST_TOP_OFFSET: u16 = 4;
 const FALLBACK_LIST_TOP_OFFSET: u16 = 2;
 const VISIBLE_COUNT: usize = 20;
 const ROUTER_SECTION_GAP: u16 = 1;
 const AUTO_ROUTER_MIN_HEIGHT: u16 = 6;
 const TAB_BAR_HEIGHT: u16 = 1;
 const ACP_LIST_TOP_OFFSET: u16 = 2;
-const PROMPT_CORRECTOR_CHOOSER_TOP_OFFSET: u16 = 3;
+// Title row, one blank gap row, the search bar, then the list.
+const PROMPT_CORRECTOR_CHOOSER_TOP_OFFSET: u16 = 4;
 const TAB_AUTO_TITLE: &str = " Fallback Auto ";
 const TAB_PROMPT_TITLE: &str = " Fallback Prompt Corrector ";
+/// The router shares the header row with the app's "← esc" hint, which
+/// occupies the five columns after the left padding. Tab titles start two
+/// columns past it, and the row fill skips the hint's cells entirely so the
+/// hint stays visible.
+const TAB_BAR_LEFT_PAD: u16 = 8;
 
 fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
     let right = x + max_w;
@@ -703,7 +710,7 @@ impl RouterView {
 
     /// Which tab title sits under the given x coordinate, if any.
     fn tab_at(&self, layout: &RouterLayout, x: u16) -> Option<RouterTab> {
-        let mut cursor = layout.tab_bar.x + 1;
+        let mut cursor = layout.tab_bar.x + TAB_BAR_LEFT_PAD;
         for tab in [RouterTab::Auto, RouterTab::PromptCorrector] {
             let width = tab.title().chars().count() as u16;
             if x >= cursor && x < cursor + width {
@@ -788,15 +795,18 @@ impl RouterView {
         let contrast = primary_contrast_fg(theme);
         let muted = rgba_color(theme.text_muted);
         let bg_full = rgba_color(theme.background);
+        // Fill only past the "← esc" hint: `App::render` draws the hint on
+        // this same row before the router view runs, and the frame-wide
+        // background fill already covers the skipped cells.
         fill_rect(
             buf,
-            layout.tab_bar.x,
+            layout.tab_bar.x + TAB_BAR_LEFT_PAD,
             layout.tab_bar.y,
-            layout.tab_bar.width,
+            layout.tab_bar.width.saturating_sub(TAB_BAR_LEFT_PAD),
             layout.tab_bar.height,
             Style::default().bg(bg_full),
         );
-        let mut x = layout.tab_bar.x + 1;
+        let mut x = layout.tab_bar.x + TAB_BAR_LEFT_PAD;
         for tab in [RouterTab::Auto, RouterTab::PromptCorrector] {
             let active = tab == self.active_tab;
             section_title(
@@ -835,16 +845,37 @@ impl RouterView {
 
         // ── ACP chooser (top of the left column, no filter) ──
         let acp_focused = self.focus == FocusTarget::PromptCorrectorAcp;
-        // Plain title style, matching the "Available Models" heading of the
-        // auto tab — no painted background, no colored font.
-        let title_style = Style::default().fg(muted);
+        // The block carries the prompt input box's `background_element` fill
+        // so it reads as a delimited section above the model catalog (same
+        // color the prompt uses to fake transparency over its inner area).
+        // Transparent themes (`background_element` alpha 0 → `Color::Reset`)
+        // skip the fill, mirroring the prompt's cap-band rule. Text styles
+        // below re-apply the bg because `set_style` replaces it cell-wide.
+        let acp_bg = rgba_color(theme.background_element);
+        let acp_area = layout.prompt_acp;
+        if acp_bg != Color::Reset {
+            fill_rect(
+                buf,
+                acp_area.x,
+                acp_area.y,
+                acp_area.width,
+                acp_area.height,
+                Style::default().bg(acp_bg),
+            );
+        }
+        let acp_row_bg = if acp_bg != Color::Reset {
+            Style::default().bg(acp_bg)
+        } else {
+            Style::default()
+        };
+        let acp_title_style = acp_row_bg.fg(muted);
         draw_text_line(
             buf,
             "ACP Agents",
             choice_x,
             layout.prompt_acp.y,
             choice_w,
-            title_style,
+            acp_title_style,
         );
 
         let installed = cosh_tools::subagent::acp::detect_installed();
@@ -861,12 +892,14 @@ impl RouterView {
                 " (not detected)"
             };
             // Standard TUI selection: 🞴 marker + fg color only, never a
-            // background wash.
+            // background wash. The section fill rides along so the text
+            // never punches a hole in the `background_element` band.
             let style = if selected {
                 Style::default().fg(primary)
             } else {
                 Style::default().fg(fg)
-            };
+            }
+            .patch(acp_row_bg);
             let prefix = if selected { "🞴 " } else { "  " };
             draw_text_line(
                 buf,
@@ -887,12 +920,14 @@ impl RouterView {
                 choice_x,
                 layout.prompt_models.y,
                 choice_w,
-                title_style,
+                // Plain muted heading like the auto tab's "Available Models":
+                // only the ACP block above carries the section fill.
+                Style::default().fg(muted),
             );
             self.prompt_model_search_bar.render(
                 buf,
                 choice_x,
-                layout.prompt_models.y + 1,
+                layout.prompt_models.y + 2,
                 choice_w,
                 theme,
             );
@@ -1086,7 +1121,7 @@ impl RouterView {
             title_style,
         );
 
-        let filter_y = left_area.y + 1;
+        let filter_y = left_area.y + 2;
         let filter_x = left_area.x + text_pad;
         let filter_w = left_area.width.saturating_sub(SIDE_PADDING);
         self.search_bar
@@ -1383,7 +1418,7 @@ mod tests {
         // Clicking the inactive title switches back.
         let area = Rect::new(0, 0, 100, 40);
         let layout = view.compute_layout(area);
-        let auto_x = layout.tab_bar.x + 2; // inside " Fallback Auto "
+        let auto_x = layout.tab_bar.x + TAB_BAR_LEFT_PAD + 2; // inside " Fallback Auto "
         assert!(matches!(
             view.handle_prompt_corrector_mouse(&click(auto_x, layout.tab_bar.y), area),
             Some(PromptCorrectorAction::Consumed)

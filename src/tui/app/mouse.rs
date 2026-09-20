@@ -1210,15 +1210,14 @@ impl App {
         if matches!(self.mode(), AppMode::Router) && !self.dialog.visible() {
             let area = self.terminal_size();
             let main_area = self.session_main_area(area).main;
-            // Match `App::render` exactly: non-session routes reserve the
-            // header row, footer row and the router's final spacer row.
-            // Using the old broader mouse rect shifted the lower correction
-            // route and let clicks focus rows in the automatic router.
+            // Match `App::render` exactly: the router starts ON the header
+            // row (its tab buttons share the line with the "← esc" hint) and
+            // reserves the footer row and the router's final spacer row.
             let router_area = Rect::new(
                 main_area.x,
-                main_area.y + 1,
+                main_area.y,
                 main_area.width,
-                main_area.height.saturating_sub(4),
+                main_area.height.saturating_sub(3),
             );
             if event_type == MouseEventType::Up
                 && button == MouseButton::Left

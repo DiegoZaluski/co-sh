@@ -603,11 +603,14 @@ impl App {
                 }
                 AppMode::Router => {
                     self.prompt_view.blur();
+                    // The router owns the header row too: its tab buttons
+                    // sit on the same line as the "← esc" hint, to the right
+                    // of it. Same bottom row as the other routes.
                     let router_area = Rect::new(
                         session_area.x,
-                        session_area.y,
+                        area.y,
                         session_area.width,
-                        session_area.height.saturating_sub(1),
+                        session_area.height,
                     );
                     let all_models = self.collect_cached_models();
                     self.router_view.render(

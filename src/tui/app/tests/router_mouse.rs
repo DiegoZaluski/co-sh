@@ -39,16 +39,12 @@ async fn auto_tab_body_click_focuses_boxes_through_app_dispatch() {
     app.show_router = true;
     assert!(matches!(app.mode(), AppMode::Router));
 
-    // Mirror the dispatch geometry exactly: the router screen lives one row
-    // below the header and reserves footer + spacer rows.
+    // Mirror the dispatch geometry exactly: the router starts ON the header
+    // row (its tab buttons share the line with the "← esc" hint) and
+    // reserves footer + spacer rows.
     let area = app.terminal_size();
     let main = app.session_main_area(area).main;
-    let router_area = Rect::new(
-        main.x,
-        main.y + 1,
-        main.width,
-        main.height.saturating_sub(4),
-    );
+    let router_area = Rect::new(main.x, main.y, main.width, main.height.saturating_sub(3));
 
     // Right half of the screen, one row below the tab bar and its section
     // gap: the fallbacks box. Focus moves on any row of the column, before
