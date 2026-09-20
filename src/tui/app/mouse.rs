@@ -554,11 +554,23 @@ impl App {
                         let list_area = 20;
                         self.internal_tools_view.select_prev(list_area);
                     } else if matches!(self.mode(), AppMode::Router) {
-                        if self.router_view.focus == FocusTarget::Fallbacks {
-                            self.router_view.select_prev_fallback();
-                        } else {
-                            let all_models = self.collect_cached_models();
-                            self.router_view.select_prev(&all_models);
+                        match self.router_view.focus {
+                            FocusTarget::Fallbacks => self.router_view.select_prev_fallback(),
+                            FocusTarget::Models => {
+                                let all_models = self.collect_cached_models();
+                                self.router_view.select_prev(&all_models);
+                            }
+                            FocusTarget::PromptCorrectorModels => {
+                                let all_models = self.collect_cached_models();
+                                self.router_view
+                                    .select_prev_prompt_corrector_model(&all_models);
+                            }
+                            FocusTarget::PromptCorrectorAcp => {
+                                self.router_view.select_prev_prompt_corrector_acp();
+                            }
+                            FocusTarget::PromptCorrectorFallbacks => {
+                                self.router_view.select_prev_prompt_corrector_fallback();
+                            }
                         }
                     } else if matches!(self.mode(), AppMode::AddProvider) {
                         self.add_provider_view.select_prev();
@@ -628,11 +640,23 @@ impl App {
                         let list_area = 20;
                         self.internal_tools_view.select_next(list_area);
                     } else if matches!(self.mode(), AppMode::Router) {
-                        if self.router_view.focus == FocusTarget::Fallbacks {
-                            self.router_view.select_next_fallback();
-                        } else {
-                            let all_models = self.collect_cached_models();
-                            self.router_view.select_next(&all_models);
+                        match self.router_view.focus {
+                            FocusTarget::Fallbacks => self.router_view.select_next_fallback(),
+                            FocusTarget::Models => {
+                                let all_models = self.collect_cached_models();
+                                self.router_view.select_next(&all_models);
+                            }
+                            FocusTarget::PromptCorrectorModels => {
+                                let all_models = self.collect_cached_models();
+                                self.router_view
+                                    .select_next_prompt_corrector_model(&all_models);
+                            }
+                            FocusTarget::PromptCorrectorAcp => {
+                                self.router_view.select_next_prompt_corrector_acp();
+                            }
+                            FocusTarget::PromptCorrectorFallbacks => {
+                                self.router_view.select_next_prompt_corrector_fallback();
+                            }
                         }
                     } else if matches!(self.mode(), AppMode::AddProvider) {
                         self.add_provider_view.select_next();
@@ -1165,6 +1189,8 @@ impl App {
                     crate::routes::home::HomeAction::OpenModelRouter => {
                         let saved = fallback::load_fallbacks(&self.setup);
                         self.router_view.set_fallbacks(saved);
+                        let saved = fallback::load_prompt_corrector_fallbacks(&self.setup);
+                        self.router_view.set_prompt_corrector_fallbacks(saved);
                         self.show_router = true;
                     }
                     #[cfg(feature = "embed")]
@@ -1179,30 +1205,50 @@ impl App {
             }
         }
 
-        // 8c. Router view — mouse click on a model row adds it to fallback chain
+        // 8c. Router view — the prompt-correction fields own their mouse
+        // rows before the existing agent-loop fallback router sees a click.
         if matches!(self.mode(), AppMode::Router) && !self.dialog.visible() {
             let area = self.terminal_size();
-            let sidebar_w = if self.sidebar.open && area.width >= MIN_WIDTH_FOR_LEFT_PANEL {
-                self.left_panel_width()
-            } else {
-                0
-            };
-            let main_area = Rect::new(
-                area.x + sidebar_w,
-                area.y,
-                area.width.saturating_sub(sidebar_w),
-                area.height,
-            );
-            let tools_area = Rect::new(
+            let main_area = self.session_main_area(area).main;
+            // Match `App::render` exactly: non-session routes reserve the
+            // header row, footer row and the router's final spacer row.
+            // Using the old broader mouse rect shifted the lower correction
+            // route and let clicks focus rows in the automatic router.
+            let router_area = Rect::new(
                 main_area.x,
-                area.y + 1,
+                main_area.y + 1,
                 main_area.width,
-                main_area.height.saturating_sub(1),
+                main_area.height.saturating_sub(4),
             );
+            if event_type == MouseEventType::Up
+                && button == MouseButton::Left
+                && let Some(action) = self
+                    .router_view
+                    .handle_prompt_corrector_mouse(&mouse, router_area)
+            {
+                match action {
+                    crate::routes::router::PromptCorrectorAction::Changed => {
+                        fallback::save_prompt_corrector_fallbacks(
+                            &mut self.setup,
+                            &self.router_view.prompt_corrector_fallbacks,
+                        );
+                    }
+                    crate::routes::router::PromptCorrectorAction::Selected => {
+                        self.toast_state.show(ToastOptions {
+                            title: Some("Backspace to remove".into()),
+                            message: "Select an item and press Backspace".into(),
+                            variant: ToastVariant::Info,
+                            duration_ms: 3000,
+                        });
+                    }
+                    crate::routes::router::PromptCorrectorAction::Consumed => {}
+                }
+                return Ok(true);
+            }
             let all_models = self.collect_cached_models();
             if self
                 .router_view
-                .handle_mouse(&all_models, &mouse, tools_area)
+                .handle_mouse(&all_models, &mouse, router_area)
             {
                 fallback::save_fallbacks(&mut self.setup, &self.router_view.fallbacks);
                 if self.router_view.focus == FocusTarget::Fallbacks

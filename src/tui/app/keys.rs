@@ -541,6 +541,8 @@ impl App {
                                 // Refresh fallbacks from prefs cache and models from model cache
                                 let saved = fallback::load_fallbacks(&self.setup);
                                 self.router_view.set_fallbacks(saved);
+                                let saved = fallback::load_prompt_corrector_fallbacks(&self.setup);
+                                self.router_view.set_prompt_corrector_fallbacks(saved);
                                 self.show_router = true;
                             }
                             #[cfg(feature = "embed")]
@@ -730,30 +732,75 @@ impl App {
                 }
             }
 
-            // Router mode: navigation and add/remove fallbacks
+            // Router mode: navigation and add/remove agent-loop fallbacks,
+            // plus the independent ordered prompt-correction route.
             if matches!(self.mode(), AppMode::Router) && !self.dialog.visible() {
                 let all_models = self.collect_cached_models();
                 match key.code {
                     KeyCode::Up => {
-                        if self.router_view.focus == FocusTarget::Fallbacks {
-                            self.router_view.select_prev_fallback();
-                        } else {
-                            self.router_view.select_prev(&all_models);
+                        match self.router_view.focus {
+                            FocusTarget::Fallbacks => self.router_view.select_prev_fallback(),
+                            FocusTarget::Models => self.router_view.select_prev(&all_models),
+                            FocusTarget::PromptCorrectorModels => {
+                                self.router_view
+                                    .select_prev_prompt_corrector_model(&all_models);
+                            }
+                            FocusTarget::PromptCorrectorAcp => {
+                                self.router_view.select_prev_prompt_corrector_acp();
+                            }
+                            FocusTarget::PromptCorrectorFallbacks => {
+                                self.router_view.select_prev_prompt_corrector_fallback();
+                            }
                         }
                         return Ok(false);
                     }
                     KeyCode::Down => {
-                        if self.router_view.focus == FocusTarget::Fallbacks {
-                            self.router_view.select_next_fallback();
-                        } else {
-                            self.router_view.select_next(&all_models);
+                        match self.router_view.focus {
+                            FocusTarget::Fallbacks => self.router_view.select_next_fallback(),
+                            FocusTarget::Models => self.router_view.select_next(&all_models),
+                            FocusTarget::PromptCorrectorModels => {
+                                self.router_view
+                                    .select_next_prompt_corrector_model(&all_models);
+                            }
+                            FocusTarget::PromptCorrectorAcp => {
+                                self.router_view.select_next_prompt_corrector_acp();
+                            }
+                            FocusTarget::PromptCorrectorFallbacks => {
+                                self.router_view.select_next_prompt_corrector_fallback();
+                            }
                         }
                         return Ok(false);
                     }
                     KeyCode::Enter => {
-                        if self.router_view.focus == FocusTarget::Models {
-                            self.router_view.add_selected_to_fallback(&all_models);
-                            fallback::save_fallbacks(&mut self.setup, &self.router_view.fallbacks);
+                        match self.router_view.focus {
+                            FocusTarget::Models => {
+                                self.router_view.add_selected_to_fallback(&all_models);
+                                fallback::save_fallbacks(
+                                    &mut self.setup,
+                                    &self.router_view.fallbacks,
+                                );
+                            }
+                            FocusTarget::PromptCorrectorModels => {
+                                if self
+                                    .router_view
+                                    .toggle_selected_prompt_corrector_model(&all_models)
+                                {
+                                    fallback::save_prompt_corrector_fallbacks(
+                                        &mut self.setup,
+                                        &self.router_view.prompt_corrector_fallbacks,
+                                    );
+                                }
+                            }
+                            FocusTarget::PromptCorrectorAcp => {
+                                if self.router_view.toggle_selected_acp_agent() {
+                                    fallback::save_prompt_corrector_fallbacks(
+                                        &mut self.setup,
+                                        &self.router_view.prompt_corrector_fallbacks,
+                                    );
+                                }
+                            }
+                            FocusTarget::Fallbacks => {}
+                            FocusTarget::PromptCorrectorFallbacks => {}
                         }
                         return Ok(false);
                     }
@@ -765,8 +812,24 @@ impl App {
                                     &self.router_view.fallbacks,
                                 );
                             }
-                        } else if !self.router_view.search_bar.is_empty() {
+                        } else if matches!(
+                            self.router_view.focus,
+                            FocusTarget::PromptCorrectorFallbacks
+                        ) {
+                            if self.router_view.remove_selected_prompt_corrector() {
+                                fallback::save_prompt_corrector_fallbacks(
+                                    &mut self.setup,
+                                    &self.router_view.prompt_corrector_fallbacks,
+                                );
+                            }
+                        } else if self.router_view.focus == FocusTarget::Models
+                            && !self.router_view.search_bar.is_empty()
+                        {
                             self.router_view.pop_filter_char();
+                        } else if self.router_view.focus == FocusTarget::PromptCorrectorModels
+                            && !self.router_view.prompt_model_search_bar.is_empty()
+                        {
+                            self.router_view.pop_prompt_model_filter_char();
                         } else if let Some(selected) = self.router_view.selected_model(&all_models)
                         {
                             let idx = self.router_view.fallbacks.iter().position(|f| {
@@ -783,20 +846,41 @@ impl App {
                         return Ok(false);
                     }
                     KeyCode::Esc => {
+                        if self.router_view.acp_picker_open() {
+                            self.router_view.close_acp_picker();
+                            return Ok(false);
+                        }
                         self.router_view.clear_num_buffer();
                         self.show_router = false;
                         return Ok(false);
                     }
-                    KeyCode::Char(ch) => {
-                        if self.router_view.focus == FocusTarget::Models {
+                    KeyCode::Tab => {
+                        self.router_view.cycle_focus();
+                        return Ok(false);
+                    }
+                    // Left/Right switch the visible section; the active
+                    // tab's lists own Up/Down.
+                    KeyCode::Left => {
+                        self.router_view.select_prev_tab();
+                        return Ok(false);
+                    }
+                    KeyCode::Right => {
+                        self.router_view.select_next_tab();
+                        return Ok(false);
+                    }
+                    KeyCode::Char(ch) => match self.router_view.focus {
+                        FocusTarget::Models => {
                             if ch.is_ascii_digit() {
                                 self.router_view.handle_number_input(ch);
                             } else {
                                 self.router_view.push_filter_char(ch);
                             }
                         }
-                        return Ok(false);
-                    }
+                        FocusTarget::PromptCorrectorModels => {
+                            self.router_view.push_prompt_model_filter_char(ch);
+                        }
+                        _ => {}
+                    },
                     _ => {}
                 }
             }

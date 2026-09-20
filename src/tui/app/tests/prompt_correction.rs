@@ -21,9 +21,9 @@ async fn correction_failure_keeps_the_original_prompt() {
     app.prompt_view.input = "Texto original".into();
     app.prompt_view.cursor_pos = app.prompt_view.input.len();
     app.prompt_correction_active = true;
-    app.prompt_correction_spinner = Some(
-        crate::component::agent_spinner::AgentSpinner::new("", &app.theme),
-    );
+    app.prompt_correction_spinner = Some(crate::component::agent_spinner::AgentSpinner::new(
+        "", &app.theme,
+    ));
 
     app.event_tx
         .send(HarnessEvent::PromptCorrection {
@@ -96,7 +96,10 @@ async fn incomplete_right_drag_never_starts_a_correction_request() {
     assert!(!app.prompt_correction_active);
     assert!(!app.prompt_view.correction_selection);
     assert_eq!(
-        app.toast_state.current.as_ref().and_then(|toast| toast.title.as_deref()),
+        app.toast_state
+            .current
+            .as_ref()
+            .and_then(|toast| toast.title.as_deref()),
         Some("Operation cancelled")
     );
 }

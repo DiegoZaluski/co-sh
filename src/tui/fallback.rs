@@ -1,4 +1,4 @@
-pub use crate::util::setup::FallbackEntry;
+pub use crate::util::setup::{FallbackEntry, PromptCorrectorFallback};
 
 pub const DEFAULT_FALLBACKS: &[(&str, &str)] = &[
     ("nvidia", "deepseek-ai/deepseek-v4-pro"),
@@ -27,5 +27,19 @@ pub fn load_fallbacks(setup: &crate::util::setup::Setup) -> Vec<FallbackEntry> {
 
 pub fn save_fallbacks(setup: &mut crate::util::setup::Setup, fallbacks: &[FallbackEntry]) {
     setup.routing.fallbacks = fallbacks.to_vec();
+    setup.save();
+}
+
+pub fn load_prompt_corrector_fallbacks(
+    setup: &crate::util::setup::Setup,
+) -> Vec<PromptCorrectorFallback> {
+    setup.routing.fallback_prompt_corrector.clone()
+}
+
+pub fn save_prompt_corrector_fallbacks(
+    setup: &mut crate::util::setup::Setup,
+    fallbacks: &[PromptCorrectorFallback],
+) {
+    setup.routing.fallback_prompt_corrector = fallbacks.to_vec();
     setup.save();
 }

@@ -6,7 +6,7 @@ use cosh::ModelEntry;
 use cosh_tui::core::types::MouseEvent;
 
 use crate::component::search_bar::SearchBar;
-use crate::fallback::{FallbackEntry, default_fallbacks};
+use crate::fallback::{FallbackEntry, PromptCorrectorFallback, default_fallbacks};
 use crate::theme::{Theme, rgba_color};
 use crate::util::list_selection::ListSelection;
 
@@ -15,6 +15,13 @@ const SIDE_PADDING: u16 = 4;
 const MODEL_LIST_TOP_OFFSET: u16 = 3;
 const FALLBACK_LIST_TOP_OFFSET: u16 = 2;
 const VISIBLE_COUNT: usize = 20;
+const ROUTER_SECTION_GAP: u16 = 1;
+const AUTO_ROUTER_MIN_HEIGHT: u16 = 6;
+const TAB_BAR_HEIGHT: u16 = 1;
+const ACP_LIST_TOP_OFFSET: u16 = 2;
+const PROMPT_CORRECTOR_CHOOSER_TOP_OFFSET: u16 = 3;
+const TAB_AUTO_TITLE: &str = " Fallback Auto ";
+const TAB_PROMPT_TITLE: &str = " Fallback Prompt Corrector ";
 
 fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
     let right = x + max_w;
@@ -62,19 +69,86 @@ fn primary_contrast_fg(theme: &Theme) -> Color {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RouterTab {
+    /// Agent-loop fallback chain (the original router screen).
+    Auto,
+    /// Prompt-correction fallback chain.
+    PromptCorrector,
+}
+
+impl RouterTab {
+    pub const fn title(self) -> &'static str {
+        match self {
+            RouterTab::Auto => TAB_AUTO_TITLE,
+            RouterTab::PromptCorrector => TAB_PROMPT_TITLE,
+        }
+    }
+
+    const fn next(self) -> Self {
+        match self {
+            RouterTab::Auto => RouterTab::PromptCorrector,
+            RouterTab::PromptCorrector => RouterTab::Auto,
+        }
+    }
+
+    const fn prev(self) -> Self {
+        self.next()
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FocusTarget {
     Models,
     Fallbacks,
+    PromptCorrectorModels,
+    PromptCorrectorAcp,
+    PromptCorrectorFallbacks,
+}
+
+/// Router interaction that needs the owning [`App`](crate::app::App) to
+/// persist the changed correction chain.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PromptCorrectorAction {
+    Changed,
+    Selected,
+    Consumed,
+}
+
+/// Geometry for the automatic router above and the prompt-correction router
+/// below it. Keeping render and mouse dispatch on this shared layout prevents
+/// clicks from leaking into the section above.
+struct RouterLayout {
+    /// Clickable tab titles across the top row.
+    tab_bar: Rect,
+    automatic_models: Rect,
+    automatic_fallbacks: Rect,
+    /// ACP agent chooser: top of the left column (prompt-corrector tab).
+    prompt_choices: Rect,
+    prompt_acp: Rect,
+    /// Model chooser: below the ACP chooser on the left column.
+    prompt_models: Rect,
+    prompt_fallbacks: Rect,
 }
 
 pub struct RouterView {
     pub selection: ListSelection,
     pub search_bar: SearchBar,
     pub fallbacks: Vec<FallbackEntry>,
+    /// REST-model and ACP candidates in exactly the order the user chose.
+    pub prompt_corrector_fallbacks: Vec<PromptCorrectorFallback>,
+    /// Which of the two tab sections is currently displayed.
+    pub active_tab: RouterTab,
     pub focus: FocusTarget,
     selected_fallback: usize,
     fallback_scroll_offset: usize,
+    /// The correction route's model-chooser selection, independent of the
+    /// automatic router above.
+    pub prompt_model_selection: ListSelection,
+    /// The correction route's model-chooser filter.
+    pub prompt_model_search_bar: SearchBar,
+    selected_acp_agent: usize,
+    selected_prompt_corrector_fallback: usize,
     num_buffer: String,
 }
 
@@ -84,9 +158,15 @@ impl RouterView {
             selection: ListSelection::new(),
             search_bar: SearchBar::new(),
             fallbacks: default_fallbacks(),
+            prompt_corrector_fallbacks: Vec::new(),
+            active_tab: RouterTab::Auto,
             focus: FocusTarget::Models,
             selected_fallback: 0,
             fallback_scroll_offset: 0,
+            prompt_model_selection: ListSelection::new(),
+            prompt_model_search_bar: SearchBar::new(),
+            selected_acp_agent: 0,
+            selected_prompt_corrector_fallback: 0,
             num_buffer: String::new(),
         }
     }
@@ -113,6 +193,211 @@ impl RouterView {
         self.fallback_scroll_offset = 0;
     }
 
+    pub fn set_prompt_corrector_fallbacks(&mut self, fallbacks: Vec<PromptCorrectorFallback>) {
+        self.prompt_corrector_fallbacks = fallbacks;
+        self.clamp_prompt_corrector_fallback_selection();
+    }
+
+    /// Append a model to the correction chain, or remove it when it is
+    /// already selected. Re-selecting a removed item appends it again, which
+    /// gives the user a direct click-only way to adjust its fallback order.
+    pub fn toggle_prompt_corrector_model(&mut self, provider: String, model: String) {
+        if let Some(index) = self.prompt_corrector_fallbacks.iter().position(|entry| {
+            matches!(entry, PromptCorrectorFallback::Model {
+                provider: selected_provider,
+                model: selected_model,
+            } if selected_provider == &provider && selected_model == &model)
+        }) {
+            self.prompt_corrector_fallbacks.remove(index);
+        } else {
+            self.prompt_corrector_fallbacks
+                .push(PromptCorrectorFallback::Model { provider, model });
+        }
+        self.clamp_prompt_corrector_fallback_selection();
+    }
+
+    fn toggle_prompt_corrector_acp(&mut self, agent: &str) {
+        if let Some(index) = self
+            .prompt_corrector_fallbacks
+            .iter()
+            .position(|entry| matches!(entry, PromptCorrectorFallback::Acp { agent: selected } if selected == agent))
+        {
+            self.prompt_corrector_fallbacks.remove(index);
+        } else {
+            self.prompt_corrector_fallbacks
+                .push(PromptCorrectorFallback::Acp {
+                    agent: agent.to_string(),
+                });
+        }
+        self.clamp_prompt_corrector_fallback_selection();
+    }
+
+    /// Filter the correction route's model catalog the same way the
+    /// automatic router filters its own list. Returns owned copies because
+    /// the catalog is filtered (`!= "auto"`) before display.
+    fn filtered_prompt_models(&self, models: &[ModelEntry]) -> Vec<ModelEntry> {
+        let lower = self.prompt_model_search_bar.as_str().to_lowercase();
+        models
+            .iter()
+            .filter(|entry| entry.model != "auto" && !entry.provider.is_empty())
+            .filter(|m| {
+                lower.is_empty()
+                    || m.model.to_lowercase().contains(&lower)
+                    || m.provider.to_lowercase().contains(&lower)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// All registered ACP agents, installed harnesses first so the usable
+    /// options lead the list. No filter: the registry is small and fixed.
+    fn acp_agents_ordered(&self) -> Vec<&'static cosh_tools::subagent::acp::Agent> {
+        let installed = cosh_tools::subagent::acp::detect_installed();
+        let (mut present, mut missing): (Vec<_>, Vec<_>) = cosh_tools::subagent::acp::ACP_AGENTS
+            .iter()
+            .partition(|agent| installed.contains(&agent.name));
+        present.append(&mut missing);
+        present
+    }
+
+    /// Switch to the other tab section. Called by Left/Right keys and tab
+    /// clicks; focus resets to the active tab's first list.
+    pub fn set_active_tab(&mut self, tab: RouterTab) {
+        if self.active_tab == tab {
+            return;
+        }
+        self.active_tab = tab;
+        self.focus = match tab {
+            RouterTab::Auto => FocusTarget::Models,
+            RouterTab::PromptCorrector => FocusTarget::PromptCorrectorAcp,
+        };
+    }
+
+    pub const fn active_tab(&self) -> RouterTab {
+        self.active_tab
+    }
+
+    /// Switch to the next (Right) tab.
+    pub fn select_next_tab(&mut self) {
+        self.set_active_tab(self.active_tab.next());
+    }
+
+    /// Switch to the previous (Left) tab.
+    pub fn select_prev_tab(&mut self) {
+        self.set_active_tab(self.active_tab.prev());
+    }
+
+    pub const fn acp_picker_open(&self) -> bool {
+        false
+    }
+
+    pub fn close_acp_picker(&mut self) {}
+
+    pub fn toggle_acp_picker(&mut self) {
+        self.focus = FocusTarget::PromptCorrectorAcp;
+    }
+
+    pub fn cycle_focus(&mut self) {
+        self.focus = match self.focus {
+            FocusTarget::Models => FocusTarget::Fallbacks,
+            FocusTarget::Fallbacks => FocusTarget::PromptCorrectorAcp,
+            FocusTarget::PromptCorrectorAcp => FocusTarget::PromptCorrectorModels,
+            FocusTarget::PromptCorrectorModels => FocusTarget::PromptCorrectorFallbacks,
+            FocusTarget::PromptCorrectorFallbacks => FocusTarget::Models,
+        };
+    }
+
+    pub fn select_next_acp_agent(&mut self) {
+        let total = self.acp_agents_ordered().len();
+        if total > 0 {
+            self.selected_acp_agent = (self.selected_acp_agent + 1) % total;
+        }
+    }
+
+    pub fn select_prev_acp_agent(&mut self) {
+        let total = self.acp_agents_ordered().len();
+        if total > 0 {
+            self.selected_acp_agent = (self.selected_acp_agent + total - 1) % total;
+        }
+    }
+
+    pub fn toggle_selected_acp_agent(&mut self) -> bool {
+        let agents = self.acp_agents_ordered();
+        let Some(agent) = agents.get(self.selected_acp_agent) else {
+            return false;
+        };
+        let name = agent.name;
+        self.toggle_prompt_corrector_acp(name);
+        true
+    }
+
+    fn clamp_prompt_corrector_fallback_selection(&mut self) {
+        self.selected_prompt_corrector_fallback = self
+            .selected_prompt_corrector_fallback
+            .min(self.prompt_corrector_fallbacks.len().saturating_sub(1));
+    }
+
+    pub fn select_next_prompt_corrector_acp(&mut self) {
+        self.select_next_acp_agent();
+    }
+
+    pub fn select_prev_prompt_corrector_acp(&mut self) {
+        self.select_prev_acp_agent();
+    }
+
+    /// Move the correction route's model selection down one row. The
+    /// visible-count hint comes from the last render, mirroring the
+    /// automatic router's list so the window scrolls instead of letting
+    /// the selector run off-screen.
+    pub fn select_next_prompt_corrector_model(&mut self, models: &[ModelEntry]) {
+        let total = self.filtered_prompt_models(models).len();
+        self.prompt_model_selection.select_next(total);
+    }
+
+    /// Move the correction route's model selection up one row (window
+    /// scroll mirrors the automatic router's list).
+    pub fn select_prev_prompt_corrector_model(&mut self, models: &[ModelEntry]) {
+        let total = self.filtered_prompt_models(models).len();
+        self.prompt_model_selection.select_prev(total);
+    }
+
+    /// Toggle the correction route's currently highlighted model.
+    pub fn toggle_selected_prompt_corrector_model(&mut self, models: &[ModelEntry]) -> bool {
+        let filtered = self.filtered_prompt_models(models);
+        let Some(entry) = filtered.get(self.prompt_model_selection.selected_index) else {
+            return false;
+        };
+        self.toggle_prompt_corrector_model(entry.provider.clone(), entry.model.clone());
+        true
+    }
+
+    pub fn select_next_prompt_corrector_fallback(&mut self) {
+        if !self.prompt_corrector_fallbacks.is_empty() {
+            self.selected_prompt_corrector_fallback = (self.selected_prompt_corrector_fallback + 1)
+                .min(self.prompt_corrector_fallbacks.len() - 1);
+        }
+    }
+
+    pub fn select_prev_prompt_corrector_fallback(&mut self) {
+        self.selected_prompt_corrector_fallback =
+            self.selected_prompt_corrector_fallback.saturating_sub(1);
+    }
+
+    /// Remove the selected correction candidate. Unlike the automatic
+    /// router, an empty correction route is valid and simply disables the
+    /// operation until the user selects another candidate.
+    pub fn remove_selected_prompt_corrector(&mut self) -> bool {
+        if self.focus != FocusTarget::PromptCorrectorFallbacks
+            || self.selected_prompt_corrector_fallback >= self.prompt_corrector_fallbacks.len()
+        {
+            return false;
+        }
+        self.prompt_corrector_fallbacks
+            .remove(self.selected_prompt_corrector_fallback);
+        self.clamp_prompt_corrector_fallback_selection();
+        true
+    }
+
     pub fn push_filter_char(&mut self, ch: char) {
         self.search_bar.push_char(ch);
         self.selection.clamp(self.filtered_models(&[]).len());
@@ -121,6 +406,19 @@ impl RouterView {
     pub fn pop_filter_char(&mut self) {
         self.search_bar.pop_char();
         self.selection.clamp(self.filtered_models(&[]).len());
+    }
+
+    /// Type into the correction route's model filter.
+    pub fn push_prompt_model_filter_char(&mut self, ch: char) {
+        self.prompt_model_search_bar.push_char(ch);
+        self.prompt_model_selection
+            .clamp(self.filtered_prompt_models(&[]).len());
+    }
+
+    pub fn pop_prompt_model_filter_char(&mut self) {
+        self.prompt_model_search_bar.pop_char();
+        self.prompt_model_selection
+            .clamp(self.filtered_prompt_models(&[]).len());
     }
 
     pub fn select_next(&mut self, models: &[ModelEntry]) {
@@ -267,22 +565,167 @@ impl RouterView {
         }
     }
 
-    fn compute_layout(&self, area: Rect) -> (Rect, Rect, u16) {
-        let work_h = area.height.saturating_sub(FOOTER_MARGIN);
-        let work_area = Rect::new(area.x, area.y, area.width, work_h);
-        let panel_w = work_area.width / 2;
-        let left = Rect::new(work_area.x, work_area.y, panel_w, work_area.height);
-        let right = Rect::new(
-            work_area.x + panel_w,
-            work_area.y,
-            work_area.width - panel_w,
-            work_area.height,
+    fn prompt_corrector_height(&self, body_h: u16) -> u16 {
+        body_h
+    }
+
+    /// Tab bar on the first row; the active section fills the rest. Only
+    /// one section is ever visible, so each list gets the full body height
+    /// and no section is ever clipped by the other.
+    fn compute_layout(&self, area: Rect) -> RouterLayout {
+        let body_h = area.height.saturating_sub(FOOTER_MARGIN);
+        let tab_bar = Rect::new(area.x, area.y, area.width, TAB_BAR_HEIGHT);
+        let body = Rect::new(
+            area.x,
+            area.y + TAB_BAR_HEIGHT + ROUTER_SECTION_GAP,
+            area.width,
+            body_h.saturating_sub(TAB_BAR_HEIGHT + ROUTER_SECTION_GAP),
         );
-        (left, right, work_h)
+        let half_w = body.width / 2;
+        let (left, right) = if self.active_tab == RouterTab::Auto {
+            (Rect::new(body.x, body.y, half_w, body.height), true)
+        } else {
+            (Rect::ZERO, false)
+        };
+        let (prompt_choices, prompt_fallbacks) = if self.active_tab == RouterTab::PromptCorrector {
+            (
+                Rect::new(body.x, body.y, half_w, body.height),
+                Rect::new(body.x + half_w, body.y, body.width - half_w, body.height),
+            )
+        } else {
+            (Rect::ZERO, Rect::ZERO)
+        };
+        RouterLayout {
+            tab_bar,
+            automatic_models: left,
+            automatic_fallbacks: if right {
+                Rect::new(body.x + half_w, body.y, body.width - half_w, body.height)
+            } else {
+                Rect::ZERO
+            },
+            prompt_choices,
+            prompt_acp: Rect::new(
+                prompt_choices.x,
+                prompt_choices.y,
+                prompt_choices.width,
+                ACP_LIST_TOP_OFFSET
+                    + cosh_tools::subagent::acp::ACP_AGENTS.len() as u16
+                    + ROUTER_SECTION_GAP,
+            ),
+            prompt_models: Rect::new(
+                prompt_choices.x,
+                prompt_choices.y
+                    + ACP_LIST_TOP_OFFSET
+                    + cosh_tools::subagent::acp::ACP_AGENTS.len() as u16
+                    + ROUTER_SECTION_GAP,
+                prompt_choices.width,
+                prompt_choices
+                    .height
+                    .saturating_sub(ACP_LIST_TOP_OFFSET + 1)
+                    .saturating_sub(cosh_tools::subagent::acp::ACP_AGENTS.len() as u16),
+            ),
+            prompt_fallbacks,
+        }
+    }
+
+    /// Handle clicks on the prompt-corrector tab. Clicking a tab title
+    /// switches sections; the ACP rows toggle agents into the chain and the
+    /// fallback rows select entries for removal.
+    pub fn handle_prompt_corrector_mouse(
+        &mut self,
+        mouse: &MouseEvent,
+        area: Rect,
+    ) -> Option<PromptCorrectorAction> {
+        let layout = self.compute_layout(area);
+        if mouse.x < area.x
+            || mouse.x >= area.right()
+            || mouse.y < area.y
+            || mouse.y >= area.bottom()
+        {
+            return None;
+        }
+
+        // Tab bar spans the full width: a click on a title switches tabs.
+        if mouse.y >= layout.tab_bar.y && mouse.y < layout.tab_bar.bottom() {
+            let clicked = self.tab_at(&layout, mouse.x);
+            if let Some(tab) = clicked {
+                self.set_active_tab(tab);
+            }
+            return Some(PromptCorrectorAction::Consumed);
+        }
+
+        // Left column: the ACP chooser list first, then the model chooser.
+        if mouse.x >= layout.prompt_choices.x && mouse.x < layout.prompt_choices.right() {
+            if mouse.y >= layout.prompt_acp.y && mouse.y < layout.prompt_acp.bottom() {
+                let list_top = layout.prompt_acp.y + ACP_LIST_TOP_OFFSET;
+                if mouse.y >= list_top {
+                    let agent_index = (mouse.y - list_top) as usize;
+                    let agents = self.acp_agents_ordered();
+                    if agent_index < agents.len() {
+                        self.focus = FocusTarget::PromptCorrectorAcp;
+                        self.selected_acp_agent = agent_index;
+                        if self.toggle_selected_acp_agent() {
+                            return Some(PromptCorrectorAction::Changed);
+                        }
+                    }
+                }
+                return Some(PromptCorrectorAction::Consumed);
+            }
+            if mouse.y >= layout.prompt_models.y && mouse.y < layout.prompt_models.bottom() {
+                self.focus = FocusTarget::PromptCorrectorModels;
+                return Some(PromptCorrectorAction::Consumed);
+            }
+            return Some(PromptCorrectorAction::Consumed);
+        }
+
+        if mouse.x < layout.prompt_fallbacks.x || mouse.x >= layout.prompt_fallbacks.right() {
+            return Some(PromptCorrectorAction::Consumed);
+        }
+
+        let list_top = layout.prompt_fallbacks.y + 4;
+        let visible_rows = layout.prompt_fallbacks.height.saturating_sub(5) as usize;
+        let visible = self.prompt_corrector_fallbacks.len().min(visible_rows);
+        if mouse.y >= list_top && (mouse.y - list_top) < visible as u16 {
+            self.focus = FocusTarget::PromptCorrectorFallbacks;
+            self.selected_prompt_corrector_fallback = (mouse.y - list_top) as usize;
+            return Some(PromptCorrectorAction::Selected);
+        }
+        Some(PromptCorrectorAction::Consumed)
+    }
+
+    /// Which tab title sits under the given x coordinate, if any.
+    fn tab_at(&self, layout: &RouterLayout, x: u16) -> Option<RouterTab> {
+        let mut cursor = layout.tab_bar.x + 1;
+        for tab in [RouterTab::Auto, RouterTab::PromptCorrector] {
+            let width = tab.title().chars().count() as u16;
+            if x >= cursor && x < cursor + width {
+                return Some(tab);
+            }
+            cursor += width + 2;
+        }
+        None
     }
 
     pub fn handle_mouse(&mut self, models: &[ModelEntry], mouse: &MouseEvent, area: Rect) -> bool {
-        let (left_area, right_area, work_h) = self.compute_layout(area);
+        let layout = self.compute_layout(area);
+        let left_area = layout.automatic_models;
+        let right_area = layout.automatic_fallbacks;
+        let work_h = left_area.height;
+
+        // The other tab owns its clicks; this handler never sees them
+        // because `handle_prompt_corrector_mouse` runs first in App.
+        if self.active_tab != RouterTab::Auto {
+            return false;
+        }
+
+        // Tab bar spans the full width: a click on a title switches tabs.
+        if mouse.y >= layout.tab_bar.y && mouse.y < layout.tab_bar.bottom() {
+            if let Some(tab) = self.tab_at(&layout, mouse.x) {
+                self.set_active_tab(tab);
+                return true;
+            }
+            return false;
+        }
 
         if mouse.x >= left_area.x && mouse.x < left_area.right() {
             self.focus = FocusTarget::Models;
@@ -293,7 +736,7 @@ impl RouterView {
                 let actual_visible = max_visible.min(filtered.len());
                 let list_bottom = list_top + actual_visible as u16;
 
-                // Only process click if it's within the actual model list area
+                // Only process click if it's within the actual model list area.
                 if mouse.y >= list_top && mouse.y < list_bottom {
                     let row = (mouse.y - list_top) as usize;
                     let idx = self.selection.scroll_offset + row;
@@ -315,7 +758,7 @@ impl RouterView {
                 let actual_visible = max_visible.min(self.fallbacks.len());
                 let list_bottom = list_top + actual_visible as u16;
 
-                // Only process click if it's within the actual fallback list area
+                // Only process click if it's within the actual fallback list area.
                 if mouse.y >= list_top && mouse.y < list_bottom {
                     let row = (mouse.y - list_top) as usize;
                     let idx = self.fallback_scroll_offset + row;
@@ -331,8 +774,264 @@ impl RouterView {
         false
     }
 
+    /// Draw the clickable tab bar: active tab highlighted, inactive muted.
+    fn render_tab_bar(&self, buf: &mut Buffer, layout: &RouterLayout, theme: &Theme) {
+        let primary = rgba_color(theme.primary);
+        let contrast = primary_contrast_fg(theme);
+        let muted = rgba_color(theme.text_muted);
+        let bg_full = rgba_color(theme.background);
+        fill_rect(
+            buf,
+            layout.tab_bar.x,
+            layout.tab_bar.y,
+            layout.tab_bar.width,
+            layout.tab_bar.height,
+            Style::default().bg(bg_full),
+        );
+        let mut x = layout.tab_bar.x + 1;
+        for tab in [RouterTab::Auto, RouterTab::PromptCorrector] {
+            let active = tab == self.active_tab;
+            section_title(
+                buf,
+                x,
+                layout.tab_bar.y,
+                tab.title(),
+                if active { primary } else { bg_full },
+                if active { contrast } else { muted },
+            );
+            x += tab.title().chars().count() as u16 + 2;
+        }
+    }
+
+    fn render_prompt_corrector(
+        &mut self,
+        buf: &mut Buffer,
+        layout: &RouterLayout,
+        theme: &Theme,
+        models: &[ModelEntry],
+    ) {
+        if layout.prompt_choices.is_empty() {
+            return;
+        }
+
+        let fg = rgba_color(theme.text);
+        let muted = rgba_color(theme.text_muted);
+        let primary = rgba_color(theme.primary);
+        let panel_bg = rgba_color(theme.background_panel);
+        let text_pad = SIDE_PADDING / 2;
+
+        self.render_tab_bar(buf, layout, theme);
+
+        let choice_x = layout.prompt_choices.x + text_pad;
+        let choice_w = layout.prompt_choices.width.saturating_sub(SIDE_PADDING);
+
+        // ── ACP chooser (top of the left column, no filter) ──
+        let acp_focused = self.focus == FocusTarget::PromptCorrectorAcp;
+        // Plain title style, matching the "Available Models" heading of the
+        // auto tab — no painted background, no colored font.
+        let title_style = Style::default().fg(muted);
+        draw_text_line(
+            buf,
+            "ACP Agents",
+            choice_x,
+            layout.prompt_acp.y,
+            choice_w,
+            title_style,
+        );
+
+        let installed = cosh_tools::subagent::acp::detect_installed();
+        let acp_list_top = layout.prompt_acp.y + ACP_LIST_TOP_OFFSET;
+        for (index, agent) in self.acp_agents_ordered().into_iter().enumerate() {
+            let y = acp_list_top + index as u16;
+            if y >= layout.prompt_acp.bottom() {
+                break;
+            }
+            let selected = acp_focused && index == self.selected_acp_agent;
+            let availability = if installed.contains(&agent.name) {
+                ""
+            } else {
+                " (not detected)"
+            };
+            // Standard TUI selection: 🞴 marker + fg color only, never a
+            // background wash.
+            let style = if selected {
+                Style::default().fg(primary)
+            } else {
+                Style::default().fg(fg)
+            };
+            let prefix = if selected { "🞴 " } else { "  " };
+            draw_text_line(
+                buf,
+                &format!("{prefix}{}{availability}", agent.name),
+                choice_x,
+                y,
+                choice_w,
+                style,
+            );
+        }
+
+        // ── Model chooser (below the ACP list) ──
+        let models_focused = self.focus == FocusTarget::PromptCorrectorModels;
+        if !layout.prompt_models.is_empty() {
+            draw_text_line(
+                buf,
+                "Models",
+                choice_x,
+                layout.prompt_models.y,
+                choice_w,
+                title_style,
+            );
+            self.prompt_model_search_bar.render(
+                buf,
+                choice_x,
+                layout.prompt_models.y + 1,
+                choice_w,
+                theme,
+            );
+
+            let model_list_top = layout.prompt_models.y + PROMPT_CORRECTOR_CHOOSER_TOP_OFFSET;
+            let filtered = self.filtered_prompt_models(models);
+            let max_visible = layout
+                .prompt_models
+                .height
+                .saturating_sub(PROMPT_CORRECTOR_CHOOSER_TOP_OFFSET)
+                as usize;
+            // Same viewport hint the automatic router feeds its list: the
+            // next select_next/prev keeps the selector inside this window.
+            self.prompt_model_selection
+                .set_visible_count(max_visible.max(1));
+            let scroll = self.prompt_model_selection.scroll_offset;
+            if filtered.is_empty() {
+                let msg = if self.prompt_model_search_bar.is_empty() {
+                    "No models loaded"
+                } else {
+                    "No matching models"
+                };
+                draw_text_line(
+                    buf,
+                    msg,
+                    choice_x,
+                    model_list_top,
+                    choice_w,
+                    Style::default().fg(muted),
+                );
+            } else {
+                for i in 0..max_visible.min(filtered.len()) {
+                    let idx = scroll + i;
+                    if idx >= filtered.len() {
+                        break;
+                    }
+                    let entry = &filtered[idx];
+                    let y = model_list_top + i as u16;
+                    if y >= layout.prompt_models.bottom() {
+                        break;
+                    }
+                    let selected =
+                        models_focused && idx == self.prompt_model_selection.selected_index;
+                    let style = if selected {
+                        Style::default().fg(primary)
+                    } else {
+                        Style::default().fg(fg)
+                    };
+                    let prefix = if selected { "🞴 " } else { "  " };
+                    draw_text_line(
+                        buf,
+                        &format!("{prefix}{}  {}", entry.provider, entry.model),
+                        choice_x,
+                        y,
+                        choice_w,
+                        style,
+                    );
+                }
+            }
+        }
+
+        // ── Fallback chain (right column) ──
+        let fallback_area = layout.prompt_fallbacks;
+        if fallback_area.is_empty() {
+            return;
+        }
+        fill_rect(
+            buf,
+            fallback_area.x,
+            fallback_area.y,
+            fallback_area.width,
+            fallback_area.height,
+            Style::default().bg(panel_bg),
+        );
+        section_title(
+            buf,
+            fallback_area.x + 1,
+            fallback_area.y,
+            " Fallback Chain ",
+            primary,
+            // Same title contrast the auto tab's Fallback Chain box uses.
+            rgba_color(theme.background),
+        );
+        let fallback_x = fallback_area.x + text_pad;
+        let fallback_w = fallback_area.width.saturating_sub(SIDE_PADDING);
+        if fallback_area.y + 1 < fallback_area.bottom() {
+            draw_text_line(
+                buf,
+                "Tried from top to bottom for prompt correction.",
+                fallback_x,
+                fallback_area.y + 1,
+                fallback_w,
+                Style::default().fg(muted).bg(panel_bg),
+            );
+        }
+        let list_top = fallback_area.y + 4;
+        if self.prompt_corrector_fallbacks.is_empty() {
+            if list_top < fallback_area.bottom() {
+                draw_text_line(
+                    buf,
+                    "Pick an agent or model on the left to add",
+                    fallback_x,
+                    list_top,
+                    fallback_w,
+                    Style::default().fg(muted).bg(panel_bg),
+                );
+            }
+            return;
+        }
+        for (index, entry) in self.prompt_corrector_fallbacks.iter().enumerate() {
+            let y = list_top + index as u16;
+            if y >= fallback_area.bottom() {
+                break;
+            }
+            let selected = self.focus == FocusTarget::PromptCorrectorFallbacks
+                && index == self.selected_prompt_corrector_fallback;
+            let style = if selected {
+                Style::default().fg(primary)
+            } else {
+                Style::default().fg(fg)
+            };
+            let text = match entry {
+                PromptCorrectorFallback::Model { provider, model } => {
+                    format!("{provider}  {model}")
+                }
+                PromptCorrectorFallback::Acp { agent } => format!("ACP  {agent}"),
+            };
+            // Order still matters in a chain, so the number stays — but the
+            // row highlight is the standard 🞴 marker, no background wash.
+            let number = format!("{}.", index + 1);
+            let prefix = if selected { "🞴 " } else { "  " };
+            draw_text_line(
+                buf,
+                &format!("{prefix}{number} {text}"),
+                fallback_x,
+                y,
+                fallback_w,
+                style,
+            );
+        }
+    }
+
+    /// Render the active tab. `&mut self` because rendering feeds the
+    /// viewport height back into the list selections (`set_visible_count`),
+    /// exactly as `ListSelection` documents.
     pub fn render(
-        &self,
+        &mut self,
         buf: &mut Buffer,
         area: Rect,
         theme: &Theme,
@@ -342,10 +1041,11 @@ impl RouterView {
         let fg = rgba_color(theme.text);
         let muted = rgba_color(theme.text_muted);
         let primary = rgba_color(theme.primary);
-        let accent = rgba_color(theme.accent);
-        let bg_full = rgba_color(theme.background);
 
-        let (left_area, right_area, work_h) = self.compute_layout(area);
+        let layout = self.compute_layout(area);
+        let left_area = layout.automatic_models;
+        let right_area = layout.automatic_fallbacks;
+        let work_h = left_area.height;
 
         let filtered = self.filtered_models(models);
 
@@ -359,7 +1059,15 @@ impl RouterView {
         let text_pad = SIDE_PADDING / 2;
         let title_pad = 1;
 
+        if self.active_tab == RouterTab::PromptCorrector {
+            // Only the correction section and the tab bar are visible.
+            self.render_prompt_corrector(buf, &layout, theme, models);
+            self.render_router_footer(buf, area, &layout, theme);
+            return;
+        }
+
         // ── Left panel: available models ──
+        self.render_tab_bar(buf, &layout, theme);
         let title_style = Style::default().fg(muted);
         draw_text_line(
             buf,
@@ -411,29 +1119,17 @@ impl RouterView {
                 }
 
                 let is_selected = models_focused && idx == self.selection.selected_index;
-                let row_bg = if is_selected { primary } else { bg_full };
-                for cx in list_x..list_x + list_w {
-                    if let Some(cell) = buf.cell_mut((cx, y)) {
-                        cell.set_char(' ');
-                        cell.set_style(Style::default().bg(row_bg));
-                    }
-                }
-
-                let name_fg = if is_selected {
-                    primary_contrast_fg(theme)
+                // Standard TUI selection: 🞴 marker + fg color only, never a
+                // background wash — same pattern as the prompt-corrector tab.
+                let style = if is_selected {
+                    Style::default().fg(primary)
                 } else {
-                    fg
+                    Style::default().fg(fg)
                 };
+                let prefix = if is_selected { "🞴 " } else { "  " };
 
-                let text = format!("{}  {}", entry.provider, entry.model);
-                draw_text_line(
-                    buf,
-                    &text,
-                    list_x,
-                    y,
-                    list_w,
-                    Style::default().fg(name_fg).bg(row_bg),
-                );
+                let text = format!("{prefix}{}  {}", entry.provider, entry.model);
+                draw_text_line(buf, &text, list_x, y, list_w, style);
             }
         }
 
@@ -486,47 +1182,43 @@ impl RouterView {
                 }
 
                 let is_selected = fallbacks_focused && i == self.selected_fallback;
-                let entry_bg = if is_selected { primary } else { panel_bg };
-
-                let entry_fg = if is_selected {
-                    primary_contrast_fg(theme)
+                // Standard 🞴 selection: fg color only, order number kept
+                // (the chain is tried top to bottom).
+                let style = if is_selected {
+                    Style::default().fg(primary)
                 } else {
-                    fg
+                    Style::default().fg(fg)
                 };
-
-                for cx in fb_list_x..fb_list_x + fb_list_w {
-                    if let Some(cell) = buf.cell_mut((cx, y)) {
-                        cell.set_char(' ');
-                        cell.set_style(Style::default().bg(entry_bg));
-                    }
-                }
+                let prefix = if is_selected { "🞴 " } else { "  " };
 
                 let num_str = format!("{}.", i + 1);
-                draw_text_line(
-                    buf,
-                    &num_str,
-                    fb_list_x,
-                    y,
-                    fb_list_w,
-                    Style::default().fg(accent).bg(entry_bg),
-                );
-
-                let entry_text = format!(" {}  {}", fb.provider, fb.model);
-                let entry_x = fb_list_x + num_str.len() as u16 + 1;
-                draw_text_line(
-                    buf,
-                    &entry_text,
-                    entry_x,
-                    y,
-                    fb_list_w.saturating_sub(num_str.len() as u16 + 1),
-                    Style::default().fg(entry_fg).bg(entry_bg),
-                );
+                let entry_text = format!("{prefix}{num_str}  {}  {}", fb.provider, fb.model);
+                draw_text_line(buf, &entry_text, fb_list_x, y, fb_list_w, style);
             }
         }
 
-        // ── Footer instructions ──
+        self.render_router_footer(buf, area, &layout, theme);
+    }
+
+    /// Centered instruction line under the active section.
+    fn render_router_footer(
+        &self,
+        buf: &mut Buffer,
+        area: Rect,
+        layout: &RouterLayout,
+        theme: &Theme,
+    ) {
+        let muted = rgba_color(theme.text_muted);
         let footer_bg = rgba_color(theme.background);
-        for y in left_area.bottom()..left_area.bottom() + 3 {
+        let text_pad = SIDE_PADDING / 2;
+        // Clear the three footer rows below the section body.
+        let footer_top = layout.tab_bar.bottom()
+            + ROUTER_SECTION_GAP
+            + layout
+                .automatic_models
+                .height
+                .max(layout.prompt_choices.height);
+        for y in footer_top..area.bottom() {
             for cx in area.x..area.right() {
                 if let Some(cell) = buf.cell_mut((cx, y)) {
                     cell.set_char(' ');
@@ -534,10 +1226,10 @@ impl RouterView {
                 }
             }
         }
-        let footer_y = left_area.bottom() + 2;
+        let footer_y = area.bottom().saturating_sub(FOOTER_MARGIN) + 2;
 
         let mut footer = String::from("Enter to add · type number before Enter to position");
-        if self.has_num_buffer() {
+        if self.has_num_buffer() && self.focus == FocusTarget::Models {
             footer = format!(
                 "Position: {} · Enter to confirm · Esc to cancel",
                 self.num_buffer
@@ -552,5 +1244,246 @@ impl RouterView {
             area.width.saturating_sub(text_pad),
             Style::default().fg(muted).bg(footer_bg),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cosh_tui::core::types::{MouseButton, MouseEventType, MouseModifiers};
+
+    fn click(x: u16, y: u16) -> MouseEvent {
+        MouseEvent::new(
+            MouseEventType::Up,
+            MouseButton::Left,
+            x,
+            y,
+            MouseModifiers::none(),
+        )
+    }
+
+    fn render_view(view: &mut RouterView, area: Rect, models: &[ModelEntry]) -> String {
+        use crate::theme::ThemeRegistry;
+        let theme = ThemeRegistry::new().default_theme().clone();
+        let mut buffer = Buffer::empty(area);
+        view.render(
+            &mut buffer,
+            area,
+            &theme,
+            models,
+            std::time::SystemTime::now(),
+        );
+        buffer.content().iter().map(|cell| cell.symbol()).collect()
+    }
+
+    #[test]
+    fn prompt_corrector_entries_keep_the_cross_field_selection_order() {
+        let mut view = RouterView::new();
+
+        view.toggle_prompt_corrector_model("openrouter".into(), "model-a".into());
+        view.toggle_prompt_corrector_acp("codex");
+        view.toggle_prompt_corrector_model("groq".into(), "model-b".into());
+
+        assert_eq!(
+            view.prompt_corrector_fallbacks,
+            vec![
+                PromptCorrectorFallback::Model {
+                    provider: "openrouter".into(),
+                    model: "model-a".into(),
+                },
+                PromptCorrectorFallback::Acp {
+                    agent: "codex".into(),
+                },
+                PromptCorrectorFallback::Model {
+                    provider: "groq".into(),
+                    model: "model-b".into(),
+                },
+            ]
+        );
+
+        // Selecting an existing item removes it. Selecting it again appends
+        // it, giving click-only order adjustment across both fields.
+        view.toggle_prompt_corrector_acp("codex");
+        view.toggle_prompt_corrector_acp("codex");
+        assert!(matches!(
+            view.prompt_corrector_fallbacks.last(),
+            Some(PromptCorrectorFallback::Acp { agent }) if agent == "codex"
+        ));
+    }
+
+    #[test]
+    fn tabs_show_one_section_at_a_time_and_both_titles_render() {
+        let view = RouterView::new();
+        let area = Rect::new(0, 0, 100, 40);
+        let layout = view.compute_layout(area);
+
+        // Auto tab: automatic panels visible, prompt corrector collapsed.
+        assert_eq!(view.active_tab, RouterTab::Auto);
+        assert!(!layout.automatic_models.is_empty());
+        assert!(layout.prompt_choices.is_empty());
+
+        // Switch: prompt corrector visible full-height, automatic collapsed.
+        let mut view = RouterView::new();
+        view.set_active_tab(RouterTab::PromptCorrector);
+        let layout = view.compute_layout(area);
+        assert!(layout.automatic_models.is_empty());
+        assert!(!layout.prompt_choices.is_empty());
+        // The section gets the full body height (no clipping by the other).
+        assert_eq!(
+            layout.prompt_choices.height,
+            layout
+                .automatic_models
+                .height
+                .max(layout.prompt_choices.height)
+        );
+
+        // Both tab titles always render in the bar.
+        let rendered = render_view(&mut view, area, &[]);
+        assert!(rendered.contains("Fallback Auto"));
+        assert!(rendered.contains("Fallback Prompt Corrector"));
+    }
+
+    #[test]
+    fn tab_titles_render_only_the_active_section() {
+        let mut view = RouterView::new();
+        let area = Rect::new(0, 0, 100, 40);
+        let rendered = render_view(&mut view, area, &[]);
+        // Auto tab: no ACP rows leak into the view.
+        assert!(!rendered.contains("ACP Agents"));
+
+        let mut view = RouterView::new();
+        view.set_active_tab(RouterTab::PromptCorrector);
+        let rendered = render_view(&mut view, area, &[]);
+        assert!(rendered.contains("ACP Agents"));
+        assert!(rendered.contains("Fallback Chain"));
+        // ACP needs no filter row: the search prompt must not appear there.
+        assert!(!rendered.contains("Filter:"));
+    }
+
+    #[test]
+    fn left_right_keys_and_clicks_switch_tabs() {
+        let mut view = RouterView::new();
+        view.select_next_tab();
+        assert_eq!(view.active_tab, RouterTab::PromptCorrector);
+        assert!(matches!(view.focus, FocusTarget::PromptCorrectorAcp));
+        view.select_next_tab();
+        assert_eq!(view.active_tab, RouterTab::Auto);
+        assert!(matches!(view.focus, FocusTarget::Models));
+        view.select_prev_tab();
+        assert_eq!(view.active_tab, RouterTab::PromptCorrector);
+
+        // Clicking the inactive title switches back.
+        let area = Rect::new(0, 0, 100, 40);
+        let layout = view.compute_layout(area);
+        let auto_x = layout.tab_bar.x + 2; // inside " Fallback Auto "
+        assert!(matches!(
+            view.handle_prompt_corrector_mouse(&click(auto_x, layout.tab_bar.y), area),
+            Some(PromptCorrectorAction::Consumed)
+        ));
+        assert_eq!(view.active_tab, RouterTab::Auto);
+
+        // A click below the titles never switches tabs (the body panels own
+        // that row and consume it).
+        view.set_active_tab(RouterTab::Auto);
+        let layout = view.compute_layout(area);
+        let _ = view.handle_mouse(&[], &click(auto_x, layout.tab_bar.y + 1), area);
+        assert_eq!(view.active_tab, RouterTab::Auto);
+    }
+
+    #[test]
+    fn prompt_corrector_acp_rows_toggle_from_clicks() {
+        let mut view = RouterView::new();
+        view.set_active_tab(RouterTab::PromptCorrector);
+        let area = Rect::new(0, 0, 100, 40);
+        let layout = view.compute_layout(area);
+        let list_top = layout.prompt_acp.y + ACP_LIST_TOP_OFFSET;
+
+        assert!(matches!(
+            view.handle_prompt_corrector_mouse(&click(layout.prompt_choices.x + 2, list_top), area),
+            Some(PromptCorrectorAction::Changed)
+        ));
+        assert_eq!(view.prompt_corrector_fallbacks.len(), 1);
+        assert!(matches!(view.focus, FocusTarget::PromptCorrectorAcp));
+    }
+
+    #[test]
+    fn prompt_corrector_enter_toggles_model_without_any_dialog() {
+        let mut view = RouterView::new();
+        let models = vec![
+            ModelEntry {
+                provider: "openrouter".into(),
+                model: "model-a".into(),
+            },
+            ModelEntry {
+                provider: "groq".into(),
+                model: "model-b".into(),
+            },
+        ];
+
+        view.focus = FocusTarget::PromptCorrectorModels;
+        assert!(view.toggle_selected_prompt_corrector_model(&models));
+        assert_eq!(view.prompt_corrector_fallbacks.len(), 1);
+        // Toggling the same entry again removes it.
+        assert!(view.toggle_selected_prompt_corrector_model(&models));
+        assert!(view.prompt_corrector_fallbacks.is_empty());
+
+        // ACP agents are ordered installed-first with no filter involved.
+        let agents = view.acp_agents_ordered();
+        assert_eq!(agents.len(), cosh_tools::subagent::acp::ACP_AGENTS.len());
+    }
+
+    #[test]
+    fn selected_prompt_corrector_rows_are_removed_with_backspace_behavior() {
+        let mut view = RouterView::new();
+        view.toggle_prompt_corrector_model("openrouter".into(), "model-a".into());
+        view.toggle_prompt_corrector_acp("codex");
+        view.focus = FocusTarget::PromptCorrectorFallbacks;
+
+        assert!(view.remove_selected_prompt_corrector());
+        assert_eq!(
+            view.prompt_corrector_fallbacks,
+            vec![PromptCorrectorFallback::Acp {
+                agent: "codex".into(),
+            }]
+        );
+    }
+
+    /// Regression: scrolling the correction route's model list must slide
+    /// the window (like the auto tab), not park the selector off-screen.
+    #[test]
+    fn prompt_corrector_model_list_scrolls_with_the_selection() {
+        let mut view = RouterView::new();
+        let area = Rect::new(0, 0, 100, 40);
+        // 30 models, viewport of 5 rows: walking down must move the scroll
+        // offset once the selection passes the window edge.
+        let models: Vec<ModelEntry> = (0..30)
+            .map(|i| ModelEntry {
+                provider: format!("p{i}"),
+                model: format!("m{i}"),
+            })
+            .collect();
+        view.focus = FocusTarget::PromptCorrectorModels;
+        view.set_active_tab(RouterTab::PromptCorrector);
+
+        // Feed the viewport hint exactly as the render does.
+        let layout = view.compute_layout(area);
+        let max_visible = layout
+            .prompt_models
+            .height
+            .saturating_sub(PROMPT_CORRECTOR_CHOOSER_TOP_OFFSET) as usize;
+        view.prompt_model_selection
+            .set_visible_count(max_visible.max(1));
+
+        for _ in 0..max_visible {
+            view.select_next_prompt_corrector_model(&models);
+        }
+        assert_eq!(
+            view.prompt_model_selection.scroll_offset, 1,
+            "selection past the window edge must scroll the list"
+        );
+
+        // And the rendered window must actually show the selected row.
+        let rendered = render_view(&mut view, area, &models);
+        assert!(rendered.contains("🞴"), "the selector must stay visible");
     }
 }

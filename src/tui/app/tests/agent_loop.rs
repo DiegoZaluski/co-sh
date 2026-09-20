@@ -589,7 +589,9 @@ async fn spinner_label_follows_agent_activity() {
 
     // The search finishes; a recall tool starts → recalling.
     app.event_tx
-        .send(HarnessEvent::ToolResult { output: "hits".into() })
+        .send(HarnessEvent::ToolResult {
+            output: "hits".into(),
+        })
         .ok();
     app.event_tx
         .send(HarnessEvent::ToolCall {
@@ -606,7 +608,9 @@ async fn spinner_label_follows_agent_activity() {
 
     // Recall done → back to the default working state.
     app.event_tx
-        .send(HarnessEvent::ToolResult { output: "found".into() })
+        .send(HarnessEvent::ToolResult {
+            output: "found".into(),
+        })
         .ok();
     app.poll_events();
     assert_eq!(app.agent_activity, crate::types::AgentActivity::Working);
@@ -627,7 +631,9 @@ async fn spinner_label_follows_agent_activity() {
 
     // A streamed token also restores the default (e.g. after reasoning).
     app.event_tx
-        .send(HarnessEvent::Token { text: "Answer: ".into() })
+        .send(HarnessEvent::Token {
+            text: "Answer: ".into(),
+        })
         .ok();
     app.poll_events();
     assert_eq!(app.agent_activity, crate::types::AgentActivity::Working);
@@ -636,4 +642,3 @@ async fn spinner_label_follows_agent_activity() {
     // phase completed before the first event and must still be complete.
     assert!(app.agent_spinner_bass.as_ref().unwrap().is_initialized());
 }
-

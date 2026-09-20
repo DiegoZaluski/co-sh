@@ -113,10 +113,13 @@ impl Default for Tools {
 
 /// Model routing / fallback chain.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
 pub struct Routing {
     /// Ordered fallback entries (provider, model).
     pub fallbacks: Vec<FallbackEntry>,
+    /// Ordered correction candidates. Entries may be a direct REST model or
+    /// an external ACP agent; their stored order is the correction fallback
+    /// order without any provider/agent priority.
+    pub fallback_prompt_corrector: Vec<PromptCorrectorFallback>,
     /// Explicit summarization chain. Empty uses the active agent model only.
     pub summarization_models: Vec<FallbackEntry>,
 }
@@ -125,6 +128,7 @@ impl Default for Routing {
     fn default() -> Self {
         Self {
             summarization_models: Vec::new(),
+            fallback_prompt_corrector: Vec::new(),
             fallbacks: crate::fallback::DEFAULT_FALLBACKS
                 .iter()
                 .map(|&(p, m)| FallbackEntry {
@@ -141,6 +145,18 @@ impl Default for Routing {
 pub struct FallbackEntry {
     pub provider: String,
     pub model: String,
+}
+
+/// A correction candidate in the exact order chosen in Router Settings.
+///
+/// The tagged representation keeps provider-backed requests and ACP CLI
+/// turns unambiguous in `setup.json` while allowing both kinds to share one
+/// ordered chain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PromptCorrectorFallback {
+    Model { provider: String, model: String },
+    Acp { agent: String },
 }
 
 /// The last model the user selected, restored for NEW sessions
@@ -558,10 +574,9 @@ impl Setup {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn summarization_routing_defaults_to_agent_and_round_trips_in_order() {
-        let legacy: super::Setup = serde_json::from_str(r#"{"routing":{"fallbacks":[]}}"#).unwrap();
-        assert!(legacy.routing.summarization_models.is_empty());
-        let mut setup = legacy;
+    fn routing_round_trips_summarization_models_in_order() {
+        let mut setup = super::Setup::default();
+        setup.routing.fallbacks.clear();
         setup.routing.summarization_models = vec![
             super::FallbackEntry {
                 provider: "ollama".into(),
@@ -577,6 +592,32 @@ mod tests {
         assert_eq!(restored.routing.summarization_models[0].model, "first");
         assert_eq!(restored.routing.summarization_models[1].model, "second");
         assert!(restored.routing.fallbacks.is_empty());
+    }
+
+    #[test]
+    fn prompt_corrector_routes_round_trip_as_one_ordered_mixed_chain() {
+        let mut setup = super::Setup::default();
+        setup.routing.fallback_prompt_corrector = vec![
+            super::PromptCorrectorFallback::Model {
+                provider: "openrouter".into(),
+                model: "openai/gpt-5".into(),
+            },
+            super::PromptCorrectorFallback::Acp {
+                agent: "codex".into(),
+            },
+            super::PromptCorrectorFallback::Model {
+                provider: "groq".into(),
+                model: "openai/gpt-oss-120b".into(),
+            },
+        ];
+
+        let restored: super::Setup =
+            serde_json::from_str(&serde_json::to_string(&setup).unwrap()).unwrap();
+
+        assert_eq!(
+            restored.routing.fallback_prompt_corrector,
+            setup.routing.fallback_prompt_corrector
+        );
     }
     use super::*;
 

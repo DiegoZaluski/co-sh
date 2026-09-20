@@ -483,6 +483,7 @@ impl App {
 
         // Load saved fallback chain from setup config
         let saved_fallbacks = fallback::load_fallbacks(&setup);
+        let saved_prompt_corrector_fallbacks = fallback::load_prompt_corrector_fallbacks(&setup);
 
         // Load saved disabled tools from setup config
         let saved_disabled_tools = crate::routes::tools::load_disabled_tools(&setup);
@@ -595,6 +596,7 @@ impl App {
             router_view: {
                 let mut rv = RouterView::new();
                 rv.set_fallbacks(saved_fallbacks);
+                rv.set_prompt_corrector_fallbacks(saved_prompt_corrector_fallbacks);
                 rv
             },
             show_router: false,
