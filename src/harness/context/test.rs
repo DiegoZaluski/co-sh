@@ -826,6 +826,41 @@ fn from_window_creates_a_valid_context_manager() {
     );
 }
 
+/// Regression band for the 1M-class budget: a healthy 1M discovery must land
+/// in 200k–209,715 (the 20% effective floor over the 1M–1,048,576 raw range).
+/// A report that lands BELOW the band means a non-token number (e.g. a 413
+/// body's byte payload) leaked into the window pipeline.
+fn assert_one_million_budget(max_tokens: usize) {
+    assert!(
+        (200_000..=209_715).contains(&max_tokens),
+        "1M model budget must be 200k–209,715, got {max_tokens}"
+    );
+}
+
+#[test]
+fn a_one_million_model_never_lands_below_the_200k_band() {
+    assert_one_million_budget(
+        ContextManager::from_window(Some(1_048_576))
+            .display_info()
+            .max_tokens,
+    );
+    assert_one_million_budget(
+        ContextManager::from_window(Some(1_000_000))
+            .display_info()
+            .max_tokens,
+    );
+}
+
+#[test]
+fn provider_window_report_of_a_1m_model_lands_in_the_200k_band() {
+    // The overflow-report path re-sizes the budget exactly like a discovery.
+    // Persistence is skipped under cfg(test), so this never touches the
+    // real error catalog.
+    let mut c = cm(MAX_CONTEXT_TOKENS);
+    c.record_provider_window(Some("gemini-3-pro"), 1_048_576);
+    assert_one_million_budget(c.display_info().max_tokens);
+}
+
 #[tokio::test]
 #[ignore = "hits the real discovery APIs (network) — run explicitly"]
 async fn with_discovered_context_resolves_a_known_model() {
