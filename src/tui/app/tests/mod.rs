@@ -61,4 +61,5 @@ mod prompt_correction;
 mod providers;
 mod rag;
 mod render;
+mod router_mouse;
 mod sidebar_mouse;
