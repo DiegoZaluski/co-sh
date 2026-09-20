@@ -527,6 +527,125 @@ impl UpdatePayload {
     }
 }
 
+/// Maximum length of the optional uninstall feedback message. Anything longer
+/// is truncated before it can enter the payload.
+pub const MAX_UNINSTALL_REASON: usize = 256;
+
+/// Payload for `uninstall` — emitted once, from `cosh uninstall`, right before
+/// the local installation is removed.
+///
+/// The feedback message is the ONE free-form field in the whole schema (a
+/// deliberate product decision: it is exactly what the user typed when asked
+/// "why are you uninstalling?"). It is still guarded at the exit boundary:
+/// the constructor drops any value matching the [`crate::telemetry::sanitize`]
+/// denylist (paths, keys, URLs — fail closed, the field becomes `null` while
+/// `reason_provided` records that the user DID answer).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UninstallPayload {
+    /// The persistent random install id, duplicated INSIDE the payload (in
+    /// addition to the envelope field) so the uninstall row is self-contained
+    /// for cohort joins on the ingest side.
+    install_id: String,
+    /// Optional feedback: why the user is uninstalling. `None` when the user
+    /// skipped (Enter) or when the answer matched a forbidden pattern.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    /// True when the user typed SOMETHING (even if `reason` was dropped by
+    /// the denylist) — distinguishes "skipped" from "answer withheld".
+    reason_provided: bool,
+    os: String,
+    arch: String,
+    /// Whether the binary file itself was successfully removed.
+    binary_removed: bool,
+    /// Whether the cosh data/config/cache directories were successfully
+    /// removed (false when any of them failed or was already gone).
+    data_removed: bool,
+    /// Whether every cosh credential was removed from the OS keyring
+    /// (macOS Keychain, Windows Credential Manager, Linux Secret Service).
+    keyring_removed: bool,
+}
+
+impl UninstallPayload {
+    /// Build from validated components. `reason` is the RAW user answer:
+    /// trimmed, control characters stripped, capped at
+    /// [`MAX_UNINSTALL_REASON`], and finally checked against the
+    /// [`crate::telemetry::sanitize`] denylist — a forbidden value is dropped
+    /// (becomes `None`) while `reason_provided` stays true.
+    pub fn new(
+        install_id: &UuidId,
+        raw_reason: Option<&str>,
+        binary_removed: bool,
+        data_removed: bool,
+        keyring_removed: bool,
+    ) -> Self {
+        let reason_provided = raw_reason.is_some_and(|r| !r.trim().is_empty());
+        let reason = reason_provided
+            .then(|| Self::sanitize_reason(raw_reason.unwrap_or_default()))
+            .flatten();
+        Self {
+            install_id: install_id.as_str().to_string(),
+            reason,
+            reason_provided,
+            os: OS_NAME.to_string(),
+            arch: ARCH_NAME.to_string(),
+            binary_removed,
+            data_removed,
+            keyring_removed,
+        }
+    }
+
+    /// Normalize + guard one raw feedback answer (single source of truth for
+    /// the rules `validate` re-checks on deserialized envelopes).
+    fn sanitize_reason(raw: &str) -> Option<String> {
+        let cleaned: String = raw.trim().chars().filter(|c| !c.is_control()).collect();
+        let cleaned = cleaned.trim();
+        if cleaned.is_empty() {
+            return None;
+        }
+        let cleaned: String = cleaned.chars().take(MAX_UNINSTALL_REASON).collect();
+        crate::telemetry::sanitize::sanitize_string(&cleaned)
+            .map(|ok| ok.to_string())
+    }
+
+    pub fn reason(&self) -> Option<&str> {
+        self.reason.as_deref()
+    }
+
+    pub fn reason_provided(&self) -> bool {
+        self.reason_provided
+    }
+
+    pub fn install_id(&self) -> &str {
+        &self.install_id
+    }
+
+    pub fn binary_removed(&self) -> bool {
+        self.binary_removed
+    }
+
+    pub fn data_removed(&self) -> bool {
+        self.data_removed
+    }
+
+    pub fn keyring_removed(&self) -> bool {
+        self.keyring_removed
+    }
+
+    pub fn validate(&self) -> bool {
+        // Re-checks on purpose: derived Deserialize does NOT run the
+        // constructor, so a tampered queue line could carry free text (or a
+        // fake install id) in these fields.
+        UuidId::validate(&self.install_id).is_some()
+            && self.os == OS_NAME
+            && self.arch == ARCH_NAME
+            && self
+                .reason
+                .as_deref()
+                .map(|r| Self::sanitize_reason(r).is_some_and(|c| c == r))
+                .unwrap_or(true)
+    }
+}
+
 /// Closed payload set — the variant MUST match the envelope's event type.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -536,6 +655,7 @@ pub enum EventPayload {
     Error(ErrorPayload),
     Crash(CrashPayload),
     Update(UpdatePayload),
+    Uninstall(UninstallPayload),
 }
 
 impl EventPayload {
@@ -548,6 +668,7 @@ impl EventPayload {
                 | (EventType::Error, EventPayload::Error(_))
                 | (EventType::Crash, EventPayload::Crash(_))
                 | (EventType::Update, EventPayload::Update(_))
+                | (EventType::Uninstall, EventPayload::Uninstall(_))
         )
     }
 
@@ -560,6 +681,7 @@ impl EventPayload {
             EventPayload::Error(p) => p.validate(),
             EventPayload::Crash(p) => p.validate(),
             EventPayload::Update(p) => p.validate(),
+            EventPayload::Uninstall(p) => p.validate(),
         }
     }
 }
@@ -769,6 +891,13 @@ pub fn synthetic(event_type: EventType) -> EventEnvelope {
             AppVersion::validate("0.2.0").expect("valid version"),
             None,
         )),
+        EventType::Uninstall => EventPayload::Uninstall(UninstallPayload::new(
+            &UuidId::generate().expect("OS entropy"),
+            None,
+            false,
+            false,
+            false,
+        )),
     };
     EventEnvelope::new(
         event_type,
@@ -884,6 +1013,130 @@ mod tests {
         let mut map = BTreeMap::from([("bash".to_string(), u32::MAX)]);
         bump(&mut map, "bash");
         assert_eq!(map["bash"], u32::MAX); // no panic, no wrap
+    }
+
+    // Uninstall payload
+
+    fn uninstall_payload(raw_reason: Option<&str>) -> UninstallPayload {
+        UninstallPayload::new(
+            &UuidId::generate().unwrap(),
+            raw_reason,
+            true,
+            true,
+            true,
+        )
+    }
+
+    #[test]
+    fn uninstall_payload_roundtrip_and_validation() {
+        let payload = uninstall_payload(Some("missing a feature"));
+        assert_eq!(payload.reason(), Some("missing a feature"));
+        assert!(payload.reason_provided());
+        assert!(payload.validate());
+        // The helper builds with all cleanup flags true — assert the new
+        // keyring field made it through the constructor too.
+        assert!(payload.keyring_removed());
+
+        // Serialize → deserialize → re-validate (the sink path).
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["os"], super::super::events::OS_NAME);
+        assert!(UuidId::validate(json["install_id"].as_str().unwrap()).is_some());
+        assert_eq!(json["keyring_removed"], true);
+        let back: UninstallPayload = serde_json::from_value(json).unwrap();
+        assert_eq!(back.reason(), Some("missing a feature"));
+        assert!(back.validate());
+    }
+
+    #[test]
+    fn uninstall_payload_keyring_field_roundtrips_false() {
+        // A failed keyring cleanup must survive the serialize → deserialize
+        // → re-validate path without being "upgraded" to true.
+        let payload = UninstallPayload::new(
+            &UuidId::generate().unwrap(),
+            None,
+            true,
+            true,
+            false,
+        );
+        assert!(!payload.keyring_removed());
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["keyring_removed"], false);
+        let back: UninstallPayload = serde_json::from_value(json).unwrap();
+        assert!(!back.keyring_removed());
+        assert!(back.validate());
+    }
+
+    #[test]
+    fn uninstall_payload_empty_reason_means_skipped() {
+        for raw in [None, Some(""), Some("   \n\t ")] {
+            let payload = uninstall_payload(raw);
+            assert_eq!(payload.reason(), None);
+            assert!(!payload.reason_provided(), "empty answer must mean skipped");
+            assert!(payload.validate());
+        }
+        // Serialized form: skipped reason → no `reason` key at all.
+        let json = serde_json::to_value(uninstall_payload(None)).unwrap();
+        assert!(json.get("reason").is_none());
+        assert_eq!(json["reason_provided"], false);
+    }
+
+    #[test]
+    fn uninstall_payload_reason_is_trimmed_and_capped() {
+        let long = format!("{:>500}", "padded ");
+        let payload = uninstall_payload(Some(&long));
+        assert!(payload.reason().is_some_and(|r| r.len() <= MAX_UNINSTALL_REASON));
+        assert!(payload.validate());
+    }
+
+    #[test]
+    fn uninstall_payload_drops_forbidden_reason_but_keeps_flag() {
+        // A path-like answer must never cross the boundary: the field is
+        // dropped (fail closed) while reason_provided stays true.
+        let payload = uninstall_payload(Some("my key is sk-abcdef123 and I quit"));
+        assert_eq!(payload.reason(), None);
+        assert!(payload.reason_provided(), "the user DID answer — flag must stay");
+        assert!(payload.validate());
+    }
+
+    #[test]
+    fn uninstall_payload_tampered_reason_fails_validation() {
+        let payload = uninstall_payload(Some("honest reason"));
+        let mut json = serde_json::to_value(&payload).unwrap();
+        json["reason"] = serde_json::json!("tampered /home/user/secret");
+        json["install_id"] = serde_json::json!("not-a-uuid");
+        let tampered: UninstallPayload = serde_json::from_value(json).unwrap();
+        assert!(!tampered.validate());
+    }
+
+    #[test]
+    fn uninstall_envelope_matches_and_validates() {
+        let payload = uninstall_payload(Some("bye"));
+        let envelope = EventEnvelope::new(
+            EventType::Uninstall,
+            &AppVersion::validate("0.1.0").unwrap(),
+            None,
+            &UuidId::generate().unwrap(),
+            None,
+            OccurredAt::now(),
+            EventPayload::Uninstall(payload),
+        )
+        .unwrap();
+        assert_eq!(envelope.event_type(), EventType::Uninstall);
+        assert_eq!(envelope.type_name(), "uninstall");
+        assert!(envelope.validate());
+        // Variant/type mismatch is rejected at construction.
+        assert!(EventEnvelope::new(
+            EventType::Install,
+            &AppVersion::validate("0.1.0").unwrap(),
+            None,
+            &UuidId::generate().unwrap(),
+            None,
+            OccurredAt::now(),
+            EventPayload::Uninstall(uninstall_payload(None)),
+        )
+        .is_none());
+        // Synthetic builder covers the new variant too.
+        assert!(synthetic(EventType::Uninstall).validate());
     }
 
     #[test]

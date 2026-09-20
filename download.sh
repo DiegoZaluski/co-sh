@@ -148,7 +148,7 @@ if [ ! -f "$EXTRACT_DIR/$BINARY" ]; then
   exit 1
 fi
 
-chmod +x "$EXTRACT_DIR/$BINARY"
+chmod +x "$EXTRACT_DIR/$BINARY" "$EXTRACT_DIR/cosh-uninstall" 2>/dev/null || true
 
 if [ ! -d "$COSH_BIN_DIR" ]; then
   mkdir -p "$COSH_BIN_DIR"
@@ -165,6 +165,12 @@ if [ -f "$COSH_BIN_DIR/$OUT_FILE" ]; then
   rm -f "$COSH_BIN_DIR/$OUT_FILE.old"
 else
   mv "$EXTRACT_DIR/$BINARY" "$COSH_BIN_DIR/$OUT_FILE"
+fi
+
+# The standalone uninstaller ships next to the main binary (cosh::uninstall
+# deletes BOTH images from the same directory).
+if [ -f "$EXTRACT_DIR/cosh-uninstall" ]; then
+  mv -f "$EXTRACT_DIR/cosh-uninstall" "$COSH_BIN_DIR/cosh-uninstall"
 fi
 
 if [ "$OS" = "win32" ]; then

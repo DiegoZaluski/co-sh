@@ -115,10 +115,11 @@ jobs:
       # The `embed` variant enables the workspace `embed` feature
       # (cosh-tools/embed + fastembed). fastembed pulls the ONNX Runtime
       # shared library as a build-time download, so this job is slower.
-      # Only the `cosh` binary is shipped; `highlight-demo` is a dev-only target.
+      # Both `cosh` and `cosh-uninstall` are shipped; `highlight-demo` is a
+      # dev-only target.
       - name: Build cosh (${{ matrix.variant }})
         shell: bash
-        run: cargo build --release --locked --bin cosh --target ${{ matrix.target }} ${{ steps.vars.outputs.features }}
+        run: cargo build --release --locked --bin cosh --bin cosh-uninstall --target ${{ matrix.target }} ${{ steps.vars.outputs.features }}
 
       - name: Package GitHub Release asset
         shell: bash
@@ -132,10 +133,10 @@ jobs:
 
           if [ "${{ matrix.platform }}" = "win32" ]; then
             ASSET_FILE="${ASSET}.zip"
-            powershell -NoProfile -Command "Compress-Archive -Path 'cosh${EXT}' -DestinationPath '${ASSET_FILE}' -Force"
+            powershell -NoProfile -Command "Compress-Archive -Path 'cosh${EXT}','cosh-uninstall${EXT}' -DestinationPath '${ASSET_FILE}' -Force"
           else
             ASSET_FILE="${ASSET}.tar.gz"
-            tar czf "${ASSET_FILE}" "cosh${EXT}"
+            tar czf "${ASSET_FILE}" "cosh${EXT}" "cosh-uninstall${EXT}"
           fi
 
           if [ "${{ matrix.platform }}" = "win32" ]; then

@@ -47,6 +47,10 @@ name = "cosh"
 path = "src/tui/main.rs"
 
 [[bin]]
+name = "cosh-uninstall"
+path = "src/bin/cosh_uninstall.rs"
+
+[[bin]]
 name = "highlight-demo"
 path = "src/bin/highlight_demo.rs"
 

@@ -70,24 +70,37 @@ impl Log for FileLogger {
 /// # Panics
 ///
 /// Panics if the log directory/file cannot be created (e.g. permission
-/// denied) or if a logger has already been registered.
+/// denied) or if a logger has already been registered. Entry points that
+/// must never abort on a logging failure (the standalone uninstaller) use
+/// [`try_init`] instead.
 pub fn init(scope: &str) {
-    let log_dir = crate::harness::truncate::scratch_log_dir().join("log");
-    if let Err(err) = std::fs::create_dir_all(&log_dir) {
-        panic!("cannot create log directory {}: {err}", log_dir.display());
+    if let Err(reason) = try_init(scope) {
+        panic!("{reason}");
     }
+}
+
+/// Non-panicking variant of [`init`] for entry points that must continue
+/// running even when logging cannot be set up (e.g. `cosh-uninstall`, whose
+/// documented invariant is that nothing panics before the cleanup). Returns
+/// `Err(reason)` when the log directory/file cannot be created or a logger
+/// has already been registered; logging simply stays off in that case.
+pub fn try_init(scope: &str) -> Result<(), String> {
+    let log_dir = crate::harness::truncate::scratch_log_dir().join("log");
+    std::fs::create_dir_all(&log_dir)
+        .map_err(|err| format!("cannot create log directory {}: {err}", log_dir.display()))?;
     let log_path = log_dir.join("stdout.log");
     let file = OpenOptions::new()
         .create(true)
         .append(true)
         .open(&log_path)
-        .unwrap_or_else(|e| panic!("cannot open {}: {e}", log_path.display()));
+        .map_err(|e| format!("cannot open {}: {e}", log_path.display()))?;
 
     let logger = FileLogger {
         file: Mutex::new(file),
     };
 
-    log::set_boxed_logger(Box::new(logger)).expect("logger already initialized");
+    log::set_boxed_logger(Box::new(logger))
+        .map_err(|_| "logger already initialized".to_string())?;
 
     #[cfg(debug_assertions)]
     log::set_max_level(log::LevelFilter::Debug);
@@ -102,4 +115,5 @@ pub fn init(scope: &str) {
         "──── cosh logger init (scope={scope}, pid={}) ────",
         std::process::id()
     );
+    Ok(())
 }
