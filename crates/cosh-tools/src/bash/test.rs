@@ -107,6 +107,98 @@ async fn test_spawn_bash_nonexistent_cwd() {
     assert!(got_error);
 }
 
+/// Regression: `Bash::new()` (default cwd "") used to produce a SILENTLY
+/// EMPTY stream — the spawn failed on `current_dir("")` and the error was
+/// dropped. The empty cwd must mean "inherit the parent's working
+/// directory" and the command must run.
+#[tokio::test]
+async fn test_spawn_bash_empty_cwd_inherits_parent() {
+    let mut stream = spawn_bash(None, "", "echo empty-cwd-works", None);
+    let mut got_output = false;
+    while let Some(result) = stream.next().await {
+        let output = result.unwrap();
+        if !output.stdout.is_empty() {
+            assert_eq!(output.stdout, b"empty-cwd-works\n");
+            got_output = true;
+        }
+    }
+    assert!(
+        got_output,
+        "empty cwd must inherit the parent's cwd, not fail"
+    );
+}
+
+/// Regression: stream/spawn errors (invalid env var, read failures) used to
+/// be swallowed by the outer `run` wrapper — the stream just ended with zero
+/// items. The inner PTY stream yields the `Err` and the public `run` wrapper
+/// converts it into a stderr-bearing item so callers always see why nothing
+/// was produced. (A bad cwd is NOT an error in the PTY path: portable_pty
+/// spawns the child anyway and it runs elsewhere.)
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn test_spawn_bash_pty_error_is_surfaced() {
+    let mut stream = spawn_bash_pty(
+        Some(vec![("BAD-KEY!".to_string(), "x".to_string())]),
+        ".",
+        "echo hello",
+        None,
+    );
+    let mut got_error = false;
+    while let Some(result) = stream.next().await {
+        if let Err(e) = result {
+            let text = e.to_string();
+            assert!(
+                text.contains("invalid env variable name"),
+                "expected the env validation error, got: {text:?}"
+            );
+            got_error = true;
+        }
+    }
+    assert!(
+        got_error,
+        "a failed spawn must surface an error item, not end silently"
+    );
+}
+
+/// The public `run` wrapper must convert inner stream errors into a
+/// stderr-bearing item (never swallow them into a silent empty stream).
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn test_run_surfaces_stream_error_as_stderr_item() {
+    use super::bsh::run;
+    use tokio_stream::StreamExt;
+
+    let mut stream = match run(
+        None,
+        &Some(vec![("BAD-KEY!".to_string(), "x".to_string())]),
+        true,
+        "echo hello",
+        ".",
+    ) {
+        Ok(s) => s,
+        Err(e) => panic!(
+            "validation passed, spawn error expected later: {:?}",
+            e.text_err.as_deref()
+        ),
+    };
+
+    let mut got_error_text = false;
+    while let Some(output) = stream.next().await {
+        if !output.stderr.is_empty() {
+            let text = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                text.contains("bash stream error") && text.contains("invalid env variable name"),
+                "expected the surfaced stream error in stderr, got: {text:?}"
+            );
+            got_error_text = true;
+        }
+    }
+    assert!(
+        got_error_text,
+        "run() must surface the inner stream error as a stderr item"
+    );
+}
+
 #[tokio::test]
 async fn test_spawn_bash_large_output() {
     let n = BUFFER_SIZE * 2 + 100;
@@ -520,7 +612,7 @@ async fn test_spawn_bash_pty_timeout_large_output_before_timeout() {
     }
     #[cfg(unix)]
     {
-        assert!(raw.len() > 0, "expected some data before PTY timeout");
+        assert!(!raw.is_empty(), "expected some data before PTY timeout");
         assert_eq!(raw.len(), n, "expected all pre-sleep output");
     }
 }

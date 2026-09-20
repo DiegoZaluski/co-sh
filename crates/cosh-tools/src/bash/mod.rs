@@ -27,6 +27,27 @@ use crate::ToolDescription;
 use crate::bash::bsh::BashError;
 use crate::bash::bsh::SpawnOutput;
 
+/// Clean PTY output for display and model consumption.
+///
+/// PTY chunks carry ANSI escape sequences (colors, cursor moves) and CRLF
+/// line endings (the PTY line discipline turns `\n` into `\r\n`). Strip the
+/// escapes and normalize the line endings so the text is plain, newline-
+/// separated output.
+///
+/// Only feed this function data ending on a **complete line** (see the
+/// carry-buffer loop in the harness dispatch): a byte stream can split an
+/// escape sequence, a multi-byte UTF-8 char, or a CRLF pair across read
+/// boundaries, and a fresh parser per call would corrupt them.
+#[must_use]
+pub fn strip_ansi(bytes: &[u8]) -> String {
+    let clean = strip_ansi_escapes::strip(bytes);
+    let text = String::from_utf8_lossy(&clean);
+    // Normalize CRLF, then drop lone `\r` (progress-bar redraw frames:
+    // `cargo`, `wget`, …) so redraws merge into one line instead of
+    // accumulating invisible carrier returns in the output.
+    text.replace("\r\n", "\n").replace('\r', "")
+}
+
 /// Shared-state wrapper for bash execution.
 ///
 /// Use the builder methods after [`new`](Self::new) to configure the
@@ -140,5 +161,26 @@ impl Bash {
         command: &'a str,
     ) -> Result<Pin<Box<dyn Stream<Item = SpawnOutput> + Send + 'a>>, BashError> {
         bsh::run(self.timeout, &self.env, self.pty, command, &self.cwd)
+    }
+}
+
+#[cfg(test)]
+mod strip_ansi_tests {
+    use super::strip_ansi;
+
+    #[test]
+    fn strips_escapes_and_normalizes_crlf() {
+        assert_eq!(strip_ansi(b"\x1b[32mfoo\x1b[0m\r\nbar\r\n"), "foo\nbar\n");
+    }
+
+    #[test]
+    fn drops_lone_carriage_returns() {
+        // Progress-bar redraw frames merge into one line.
+        assert_eq!(strip_ansi(b"10%\r50%\r100%\n"), "10%50%100%\n");
+    }
+
+    #[test]
+    fn keeps_non_ascii_text() {
+        assert_eq!(strip_ansi("café ☕\r\n".as_bytes()), "café ☕\n");
     }
 }

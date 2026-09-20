@@ -305,8 +305,23 @@ pub fn run<'a>(
             spawn_bash(env, cwd, command, timeout_ms)
         };
         while let Some(item) = stream.next().await {
-            if let Ok(output) = item {
-                yield output;
+            match item {
+                Ok(output) => yield output,
+                Err(e) => {
+                    // Surface stream/spawn errors instead of dropping them:
+                    // a failed spawn (e.g. an invalid cwd) or a mid-stream
+                    // read error used to end the stream SILENTLY with zero
+                    // items, leaving callers with no output and no
+                    // explanation. Convert the error into a stderr-bearing
+                    // item so consumers always see what went wrong.
+                    yield SpawnOutput {
+                        stdout: vec![],
+                        stderr: format!("bash stream error: {e}").into_bytes(),
+                        exit_code: None,
+                        signal: None,
+                        truncated: false,
+                    };
+                }
             }
         }
     }))
@@ -347,7 +362,12 @@ pub(crate) fn spawn_bash<'a>(
             }
         }
 
-        cmd.current_dir(cwd);
+        // Empty cwd means "inherit the parent process's working directory".
+        // `current_dir("")` would fail the spawn and (before the stream-error
+        // surfacing fix) produced a silently EMPTY stream.
+        if !cwd.is_empty() {
+            cmd.current_dir(cwd);
+        }
         cmd.arg("-c").arg(command);
         cmd.stdin(Stdio::null());
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -593,7 +613,11 @@ pub(crate) fn spawn_bash_pty(
             let mut cmd_builder = CommandBuilder::new("bash");
             cmd_builder.arg("-c");
             cmd_builder.arg(&command);
-            cmd_builder.cwd(&cwd);
+            // Empty cwd → inherit the parent's working directory (same
+            // semantics as the piped path; an empty cwd fails the spawn).
+            if !cwd.is_empty() {
+                cmd_builder.cwd(&cwd);
+            }
 
             if let Some(env) = env {
                 for (key, value) in env {
@@ -901,7 +925,11 @@ pub(crate) fn spawn_bash_pty(
         let mut cmd_builder = CommandBuilder::new(resolve_bash());
         cmd_builder.arg("-c");
         cmd_builder.arg(&command);
-        cmd_builder.cwd(&cwd);
+        // Empty cwd → inherit the parent's working directory (same
+        // semantics as the piped path; an empty cwd fails the spawn).
+        if !cwd.is_empty() {
+            cmd_builder.cwd(&cwd);
+        }
 
         if let Some(env) = env {
             for (key, value) in env {
