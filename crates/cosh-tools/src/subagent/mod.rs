@@ -1,32 +1,31 @@
 //! Tool for calling sub-agents.
 //!
 //! The model sees a single `subagent_call` tool, but the harness dispatches
-//! it to two implementations (see [`SubAgent`]): an external agent CLI —
-//! spawned as a child process with the input passed as a command-line
-//! argument, streamed in real time, accumulating the result until exit —
-//! or, when `agent` is omitted/empty, an internal agent (a nested harness
-//! that reports only its final answer).
+//! it to two implementations (see [`SubAgent`]): an external agent harness —
+//! driven through the [Agent Client Protocol (ACP)](https://agentclientprotocol.com/)
+//! as a full client turn (initialize → session/new → session/prompt), with
+//! agent message chunks streamed in real time and accumulated until the turn
+//! ends — or, when `agent` is omitted/empty, an internal agent (a nested
+//! harness that reports only its final answer).
 //!
 //! # Supported agents
 //!
-//! Each agent must support a **non-interactive / headless mode** (e.g. `-p`,
-//! `--message`, `run`, `exec`) — purely interactive TUIs cannot be driven.
+//! Each agent must speak ACP over stdio — the protocol contract replaces the
+//! fragile per-CLI flag scraping. See [`acp::ACP_AGENTS`] for the registry.
+//! Agents without ACP support are not registered.
 //!
-//! | Name | Binary | Invocation |
-//! |------|--------|------------|
-//! | `opencode` | `opencode` | `opencode run --auto "<input>"` |
-//! | `claude` | `claude` | `claude -p --permission-mode bypassPermissions "<input>"` |
-//! | `codex` | `codex` | `codex exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox "<input>"` |
-//! | `cursor` | `agent` | `agent -p --force "<input>"` |
-//! | `aider` | `aider` | `aider --yes-always --no-auto-commits --message "<input>"` |
-//! | `goose` | `goose` | `goose run --no-session -t "<input>"` |
-//! | `kilo` | `kilo` | `kilo run --auto "<input>"` |
-//! | `gemini` | `gemini` | `gemini --skip-trust --approval-mode yolo -p "<input>"` |
-//! | `interpreter` | `interpreter` | `interpreter exec --sandbox danger-full-access --ask-for-approval never "<input>"` |
-//!
-//! See [`AGENTS`](call::AGENTS) for the full list.
+//! | Name | ACP invocation |
+//! |------|----------------|
+//! | `gemini` | `gemini --experimental-acp` |
+//! | `goose` | `goose acp` |
+//! | `opencode` | `opencode acp` |
+//! | `kilo` | `kilo acp` |
+//! | `cline` | `cline --acp` |
+//! | `devin` | `devin acp` |
+//! | `claude` | `npx -y @agentclientprotocol/claude-agent-acp@latest` (official adapter) |
+//! | `codex` | `npx -y @agentclientprotocol/codex-acp@latest` (official adapter) |
 
-pub mod call;
+pub mod acp;
 pub mod types;
 
 use std::sync::Mutex;
@@ -37,12 +36,12 @@ pub use types::{SubAgentCallInput, SubAgentCallOutput};
 /// Tool for calling sub-agents.
 ///
 /// A SINGLE visible tool dispatches to two implementations — the model
-/// sees only one: an external agent CLI when `agent` is provided, or an
-/// internal agent (a nested harness: fresh empty context, auto-approve,
-/// no persistence, final report only) when `agent` is omitted or empty.
-/// The harness routes the call; this struct owns the visible schema, the
-/// optional description `note` (see [`set_note`](Self::set_note)) and the
-/// last-input storage.
+/// sees only one: an external ACP agent harness when `agent` is provided,
+/// or an internal agent (a nested harness: fresh empty context,
+/// auto-approve, no persistence, final report only) when `agent` is omitted
+/// or empty. The harness routes the call; this struct owns the visible
+/// schema, the optional description `note` (see [`set_note`](Self::set_note))
+/// and the last-input storage.
 ///
 /// Each instance keeps the last input message sent to a sub-agent, so a
 /// retry after a failed call does not require re-writing the whole prompt.
@@ -67,7 +66,7 @@ impl Default for SubAgent {
 
 impl SubAgent {
     /// Create a new `SubAgent` with a tool description tailored to
-    /// only the agent CLIs that are actually installed in PATH.
+    /// only the ACP agent harnesses that are actually installed in PATH.
     /// Detection runs once per process (cached by `detect_installed()`).
     #[must_use]
     pub fn new() -> Self {
@@ -82,7 +81,7 @@ impl SubAgent {
     /// tool description (inside the description prose — not prepended as a
     /// notice). The harness uses this to tell the model that omitting
     /// `agent` routes the call to an internal agent instead of an external
-    /// CLI.
+    /// ACP harness.
     ///
     /// Rebuilds [`Self::description_call`] with the new chunk; an empty
     /// chunk keeps the original description byte-for-byte.
@@ -92,17 +91,17 @@ impl SubAgent {
     }
 
     /// Build the full tool description (prose + input schema), tailoring the
-    /// agent list to the CLIs actually installed in PATH, and interpolating
-    /// the given `note` into the description's natural flow.
+    /// agent list to the ACP harnesses actually installed in PATH, and
+    /// interpolating the given `note` into the description's natural flow.
     ///
     /// # Panics
     ///
     /// Panics if an agent returned by `detect_installed()` is not present
-    /// in [`AGENTS`](call::AGENTS). This is a logic invariant — detection
-    /// only returns names that exist in the table.
+    /// in [`ACP_AGENTS`](acp::ACP_AGENTS). This is a logic invariant —
+    /// detection only returns names that exist in the table.
     #[allow(clippy::expect_used, clippy::format_collect)]
     fn build_tool_description(note: &str) -> ToolDescription {
-        let installed = call::detect_installed();
+        let installed = acp::detect_installed();
 
         // The note lands as the tail of the FIRST paragraph, so it reads as
         // part of the instructions ("...return its output. When the `agent`
@@ -114,7 +113,7 @@ impl SubAgent {
             format!(" {note}")
         };
         let common = format!(
-            "Call a supported agent CLI with the given input message and \
+            "Call a supported agent ACP harness with the given input message and \
              return its output.{note}\n\
              `input` is optional: if omitted, the last message sent to a \
              sub-agent in this session is reused automatically, so a failed \
@@ -123,10 +122,10 @@ impl SubAgent {
         );
         let usage = "## When to use\n\
                      - Use `subagent_call` with `agent` (and optionally `input`) \
-                     to delegate a task to another agent CLI.\n\
+                     to delegate a task to another agent ACP harness.\n\
                      - Omit `input` to reuse the last message sent to a sub-agent.\n\
                      - Omit `agent` (or pass an empty string) to call the internal \
-                     agent instead of an external CLI.\n\
+                     agent instead of an external ACP harness.\n\
                      - Use `bash_run` for regular shell commands. \
                      These are separate tools with different purposes.";
 
@@ -136,8 +135,8 @@ impl SubAgent {
             format!(
                 "{common}\n\
                  ## Supported agents\n\
-                 (None detected — install one of: opencode, claude, aider, etc.\n\
-                  and restart cosh.)\n\
+                 (None detected — install one of the ACP-capable agents \
+                  (gemini, goose, opencode, kilo, claude, codex) and restart cosh.)\n\
                  {usage}"
             )
         } else {
@@ -145,11 +144,11 @@ impl SubAgent {
                 .iter()
                 .map(|name| {
                     // SAFETY: `name` comes from detect_installed() which only
-                    // returns entries present in AGENTS.
-                    let entry = call::AGENTS
+                    // returns entries present in ACP_AGENTS.
+                    let entry = acp::ACP_AGENTS
                         .iter()
                         .find(|a| a.name == *name)
-                        .expect("installed agent must be in AGENTS");
+                        .expect("installed agent must be in ACP_AGENTS");
                     let invocation = entry.invocation();
                     format!("- `{name}` → `{invocation}`\n")
                 })
@@ -166,7 +165,7 @@ impl SubAgent {
         let enum_values: Vec<serde_json::Value> = if installed.is_empty() {
             // Even with no agents detected, keep the full enum so the
             // LLM can still attempt the tool if we missed one.
-            call::AGENTS
+            acp::ACP_AGENTS
                 .iter()
                 .map(|a| serde_json::Value::String(a.name.to_string()))
                 .collect()
@@ -185,7 +184,7 @@ impl SubAgent {
                 "properties": {
                     "agent": {
                         "type": "string",
-                        "description": "The agent CLI to call. Optional: if omitted (or empty), an internal agent with an empty context runs the task instead and returns only its final report.",
+                        "description": "The agent ACP harness to call. Optional: if omitted (or empty), an internal agent with an empty context runs the task instead and returns only its final report.",
                         "enum": enum_values,
                     },
                     "input": {
@@ -243,155 +242,4 @@ impl SubAgent {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::SubAgent;
-
-    #[test]
-    fn fresh_instance_without_input_errors() {
-        let sub = SubAgent::new();
-        let err = sub.resolve_input(None).unwrap_err();
-        assert!(err.contains("no stored sub-agent message"), "{err}");
-    }
-
-    #[test]
-    fn fresh_instance_with_empty_input_errors() {
-        let sub = SubAgent::new();
-        let err = sub.resolve_input(Some(String::new())).unwrap_err();
-        assert!(err.contains("no stored sub-agent message"), "{err}");
-    }
-
-    #[test]
-    fn first_call_stores_input_and_returns_it() {
-        let sub = SubAgent::new();
-        let resolved = sub
-            .resolve_input(Some("review this PR".to_string()))
-            .unwrap();
-        assert_eq!(resolved, "review this PR");
-    }
-
-    #[test]
-    fn omitted_input_reuses_last_message() {
-        let sub = SubAgent::new();
-        let first = sub
-            .resolve_input(Some("review this PR".to_string()))
-            .unwrap();
-        assert_eq!(first, "review this PR");
-
-        let reused = sub.resolve_input(None).unwrap();
-        assert_eq!(reused, "review this PR");
-    }
-
-    #[test]
-    fn empty_input_after_a_call_reuses_last_message() {
-        let sub = SubAgent::new();
-        sub.resolve_input(Some("review this PR".to_string()))
-            .unwrap();
-
-        let reused = sub.resolve_input(Some(String::new())).unwrap();
-        assert_eq!(reused, "review this PR");
-    }
-
-    #[test]
-    fn new_input_overwrites_stored_message() {
-        let sub = SubAgent::new();
-        sub.resolve_input(Some("first message".to_string()))
-            .unwrap();
-        sub.resolve_input(Some("second message".to_string()))
-            .unwrap();
-
-        let reused = sub.resolve_input(None).unwrap();
-        assert_eq!(reused, "second message");
-    }
-
-    #[test]
-    fn instances_do_not_share_stored_input() {
-        // Each session owns its SubAgent, so stored input never leaks
-        // across instances (no .clean() needed).
-        let first = SubAgent::new();
-        let second = SubAgent::new();
-        first
-            .resolve_input(Some("first session".to_string()))
-            .unwrap();
-
-        assert!(second.resolve_input(None).is_err());
-    }
-
-    #[test]
-    fn empty_note_keeps_original_description() {
-        let fresh = SubAgent::new();
-        let mut with_note = SubAgent::new();
-        with_note.set_note("");
-        assert_eq!(with_note.description_call, fresh.description_call);
-    }
-
-    #[test]
-    fn note_is_interpolated_inside_the_description_flow() {
-        let mut sub = SubAgent::new();
-        let fresh = sub.description_call.clone();
-        let before = fresh["description"].as_str().unwrap();
-        assert!(
-            !before.contains("internal agent runs the task instead"),
-            "the note must be absent by default"
-        );
-
-        sub.set_note(
-            "When the `agent` argument is omitted or empty, an internal \
-             agent runs the task instead.",
-        );
-        let after = sub.description_call["description"].as_str().unwrap();
-
-        // Interpolated as the tail of the FIRST paragraph: right after the
-        // opening sentence and BEFORE the `input` paragraph — not prepended
-        // at the top.
-        assert!(after.contains(
-            "return its output. When the `agent` argument is omitted or \
-             empty, an internal agent runs the task instead.\n`input` is \
-             optional"
-        ));
-        assert!(
-            after.starts_with("Call a supported agent CLI"),
-            "the description must still start with the original prose"
-        );
-    }
-
-    #[test]
-    fn schema_agent_is_optional_and_required_is_empty() {
-        let sub = SubAgent::new();
-        let schema = &sub.description_call["inputSchema"];
-        let required = schema["required"].as_array().unwrap();
-        assert!(
-            required.is_empty(),
-            "neither `agent` nor `input` is required (empty required array)"
-        );
-        assert!(
-            schema["properties"]["agent"]["enum"].is_array(),
-            "the agent enum (installed CLIs) must still be present"
-        );
-    }
-
-    #[test]
-    fn input_parses_without_agent_as_none() {
-        let input: super::SubAgentCallInput =
-            serde_json::from_value(serde_json::json!({ "input": "hi" })).unwrap();
-        assert!(input.agent.is_none());
-        assert_eq!(input.input.as_deref(), Some("hi"));
-    }
-
-    #[test]
-    fn input_parses_empty_agent_as_some_empty() {
-        let input: super::SubAgentCallInput =
-            serde_json::from_value(serde_json::json!({ "agent": "" })).unwrap();
-        assert_eq!(input.agent.as_deref(), Some(""));
-    }
-
-    #[test]
-    fn input_parses_with_agent() {
-        let input: super::SubAgentCallInput = serde_json::from_value(serde_json::json!({
-            "agent": "opencode",
-            "input": "review this"
-        }))
-        .unwrap();
-        assert_eq!(input.agent.as_deref(), Some("opencode"));
-        assert_eq!(input.input.as_deref(), Some("review this"));
-    }
-}
+mod test;

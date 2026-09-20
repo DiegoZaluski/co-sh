@@ -5,11 +5,11 @@ use serde::{Deserialize, Serialize};
 /// Input for calling a sub-agent.
 ///
 /// The same visible tool dispatches to TWO implementations: an external
-/// agent CLI when `agent` is provided, or the internal sub-agent (a nested
-/// harness) when `agent` is omitted or empty.
+/// ACP agent harness when `agent` is provided, or the internal sub-agent
+/// (a nested harness) when `agent` is omitted or empty.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubAgentCallInput {
-    /// The agent CLI to call (e.g. "opencode").
+    /// The agent harness to call (e.g. "gemini").
     /// Must be one of the supported agents listed in the tool description.
     ///
     /// Optional: if omitted (or empty), an internal agent runs the task
@@ -25,11 +25,13 @@ pub struct SubAgentCallInput {
     pub input: Option<String>,
 }
 
-/// Output from calling a sub-agent CLI.
+/// Output from calling a sub-agent over ACP.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubAgentCallOutput {
     /// Accumulated output from the sub-agent.
     pub output: String,
-    /// Exit code of the process.
-    pub exit_code: i32,
+    /// Why the prompt turn ended (the ACP stop reason, e.g. `EndTurn`), or
+    /// one of the client-side terminal markers `timeout` / `error` when the
+    /// harness was torn down or failed mid-turn.
+    pub stop_reason: String,
 }

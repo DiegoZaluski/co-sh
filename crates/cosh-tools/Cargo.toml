@@ -21,6 +21,7 @@ regex = "1"
 strip-ansi-escapes = "0.2"
 libc = "0.2"
 tokio-stream = "0.1"
+agent-client-protocol = "2.2"
 
 [dev-dependencies]
 cosh-sdk = { path = "../cosh-sdk" }

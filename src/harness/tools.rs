@@ -1272,24 +1272,28 @@ impl Tools for CoshTools {
                     serde_json::from_value(args).map_err(|e| e.to_string())?;
                 // The harness routes `subagent_call` calls with a missing or
                 // empty `agent` to the INTERNAL sub-agent before reaching this
-                // arm, so reaching here means an external CLI was requested.
+                // arm, so reaching here means an external ACP harness was
+                // requested.
                 let agent = input
                     .agent
                     .clone()
                     .ok_or_else(|| "missing 'agent'".to_string())?;
-                // Resolve the effective input before spawning the blocking
-                // call: when `input` is omitted, reuse the last message sent
-                // to a sub-agent in this session (stored on `self.subagent`).
+                // Resolve the effective input before driving the ACP turn:
+                // when `input` is omitted, reuse the last message sent to a
+                // sub-agent in this session (stored on `self.subagent`).
                 let call_input = self.subagent.resolve_input(input.input)?;
                 let event_tx_during = self.event_tx.clone();
+                // The ACP session is rooted at the workspace directory.
+                let cwd = self.project_root().clone();
 
                 let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
-                let mut call_handle = tokio::task::spawn_blocking(move || {
-                    cosh_tools::subagent::call::call(&agent, &call_input, chunk_tx)
-                });
+                let mut call_handle =
+                    tokio::task::spawn(async move {
+                        cosh_tools::subagent::acp::call(&agent, &call_input, cwd, chunk_tx).await
+                    });
 
-                // Stream chunks while waiting for the blocking call to complete.
+                // Stream chunks while waiting for the ACP turn to complete.
                 let call_result = loop {
                     tokio::select! {
                         result = &mut call_handle => {
@@ -1308,7 +1312,7 @@ impl Tools for CoshTools {
                     }
                 };
 
-                let (accumulated, exit_code) = call_result.map_err(|e| e.to_string())??;
+                let (accumulated, stop_reason) = call_result.map_err(|e| e.to_string())??;
 
                 if let Some(ref tx) = self.event_tx {
                     let _ = tx.send(HarnessEvent::ToolOutput {
@@ -1320,7 +1324,7 @@ impl Tools for CoshTools {
 
                 let result = SubAgentCallOutput {
                     output: accumulated,
-                    exit_code,
+                    stop_reason,
                 };
                 serde_json::to_string(&result).map_err(|e| e.to_string())
             }

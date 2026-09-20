@@ -1,12 +1,13 @@
 //! Demonstrate `subagent`: the `SubAgent` wrapper — the tool schema, the
 //! input-reuse lifecycle (`resolve_input`), the description-note
-//! interpolation (`set_note`), PATH-based agent detection, and agent-name
-//! validation against the registry.
+//! interpolation (`set_note`), PATH-based ACP harness detection, and
+//! agent-name validation against the ACP registry.
 //!
-//! This example deliberately does NOT invoke a real agent CLI: `call()`
-//! spawns external AI agents (e.g. `opencode run --auto "…"`), which is a
-//! heavyweight, side-effecting operation. Everything stateful and
-//! deterministic is demonstrated instead.
+//! This example deliberately does NOT invoke a real agent harness: `call()`
+//! drives an external ACP agent (e.g. `gemini --experimental-acp`) through a
+//! full protocol turn (initialize → session/new → session/prompt), which is
+//! a heavyweight, side-effecting operation requiring an authenticated
+//! harness. Everything stateful and deterministic is demonstrated instead.
 //!
 //! Run with:
 //!
@@ -15,7 +16,7 @@
 //! ```
 
 use cosh_tools::subagent::SubAgent;
-use cosh_tools::subagent::call::{AGENTS, detect_installed, validate_agent};
+use cosh_tools::subagent::acp::{ACP_AGENTS, detect_installed, validate_agent};
 
 fn main() {
     // ── 1. The tool schema ------------------------------------------------
@@ -30,11 +31,11 @@ fn main() {
     let agent_enum = schema["properties"]["agent"]["enum"].as_array().unwrap();
     println!("  agent enum: {:?}\n", agent_enum);
 
-    // ── 2. Which CLIs are installed ----------------------------------------
+    // ── 2. Which ACP harnesses are installed -------------------------------
     let installed = detect_installed();
-    println!("== 2. detect_installed ==");
+    println!("== 2. detect_installed (ACP) ==");
     if installed.is_empty() {
-        println!("  no supported agent CLIs found in PATH");
+        println!("  no supported ACP agent harnesses found in PATH");
     } else {
         println!("  installed: {}", installed.join(", "));
     }
@@ -91,16 +92,16 @@ fn main() {
 
     // ── 5. Agent-name validation -------------------------------------------
     println!("== 5. validate_agent ==");
-    println!("  opencode -> {:?}", validate_agent("opencode").is_ok());
+    println!("  gemini -> {:?}", validate_agent("gemini").is_ok());
     let err = validate_agent("nope").unwrap_err();
     println!("  nope -> error: {err}\n");
 
-    // ── 6. The registry (display only — nothing is executed) ----------------
-    println!("== 6. sample AGENTS invocations ==");
-    for name in ["opencode", "claude", "aider"] {
-        if let Some(entry) = AGENTS.iter().find(|a| a.name == name) {
+    // ── 6. The ACP registry (display only — nothing is executed) -----------
+    println!("== 6. sample ACP_AGENTS invocations ==");
+    for name in ["gemini", "goose", "claude"] {
+        if let Some(entry) = ACP_AGENTS.iter().find(|a| a.name == name) {
             println!("  {name}: {}", entry.invocation());
         }
     }
-    println!("\n  ({} agents registered)", AGENTS.len());
+    println!("\n  ({} ACP harnesses registered)", ACP_AGENTS.len());
 }

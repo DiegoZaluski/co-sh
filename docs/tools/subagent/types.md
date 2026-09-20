@@ -10,7 +10,7 @@ JSON directly.
 
 ```rust
 pub struct SubAgentCallInput {
-    /// The agent CLI to call (e.g. "opencode"). Must be one of the
+    /// The agent harness to call (e.g. "gemini"). Must be one of the
     /// supported agents listed in the tool description.
     ///
     /// Optional: if omitted (or empty), an internal agent runs the task
@@ -34,14 +34,14 @@ and what is missing selects the behavior:
 
 | `agent` | `input` | Behavior |
 |---|---|---|
-| `"opencode"` | `"…"` | External CLI `opencode`, with the message. |
-| `"opencode"` | omitted / `""` | External CLI `opencode`, reusing the last message. |
+| `"gemini"` | `"…"` | External ACP harness `gemini`, with the message. |
+| `"gemini"` | omitted / `""` | External ACP harness `gemini`, reusing the last message. |
 | omitted / `""` | `"…"` | **Internal** agent, with the message. |
 | omitted / `""` | omitted / `""` | **Internal** agent, reusing the last message. |
 
 The `agent` value must be one of the names in the
-[agent registry](call.md#the-agent-registry) (`AGENTS`); anything else is
-rejected by [`validate_agent`](call.md#validate_agent) with a
+[agent registry](acp.md#the-agent-registry) (`ACP_AGENTS`); anything else is
+rejected by [`validate_agent`](acp.md#validate_agent) with a
 `"Unsupported agent …"` error.
 
 ---
@@ -52,20 +52,24 @@ rejected by [`validate_agent`](call.md#validate_agent) with a
 pub struct SubAgentCallOutput {
     /// Accumulated output from the sub-agent.
     pub output: String,
-    /// Exit code of the process.
-    pub exit_code: i32,
+    /// Why the prompt turn ended (the ACP stop reason, e.g. `EndTurn`), or
+    /// one of the client-side terminal markers `timeout` / `error` when the
+    /// harness was torn down or failed mid-turn.
+    pub stop_reason: String,
 }
 ```
 
 The harness returns this as JSON after the sub-agent finishes. The two fields
 tell the caller everything needed to judge the outcome:
 
-- `output` — the full accumulated stdout/stderr of the external CLI, or the
-  internal agent's final report.
-- `exit_code` — `0` on success; a non-zero process exit code on failure; or
-  `-1` when the process was killed by a timeout (partial output may still be
-  present, and the harness logs a warning in that case).
+- `output` — the full accumulated agent message chunks of the external ACP
+  harness, or the internal agent's final report.
+- `stop_reason` — the ACP stop reason of the completed turn (e.g. `EndTurn`,
+  `Cancelled`, `Refusal`); or `"timeout"` when the harness was torn down
+  after exceeding `COSH_SUBAGENT_TIMEOUT_SECS` (partial output may still be
+  present, and the harness logs a warning in that case); or `"error"` when
+  the ACP turn failed mid-flight with partial output already produced.
 
-For the external path, a **hard failure** (spawn error, or a timeout with no
-output at all) is returned as an `Err` string instead of an output struct —
-see the [call page](call.md#errors) for the exact cases.
+For the external path, a **hard failure** (validation error, or a timeout /
+turn failure with no output at all) is returned as an `Err` string instead
+of an output struct — see the [acp page](acp.md#errors) for the exact cases.

@@ -1,22 +1,24 @@
 # The `subagent` module: calling sub-agents
 
 `subagent` lets the agent delegate a task to another agent — either an
-**external agent CLI** (opencode, claude, aider, …) spawned as a child
-process, or the **internal sub-agent** (a nested harness that runs the task
-with a fresh, empty context). Both are reached through a *single* visible
-tool, `subagent_call`; the model never sees two tools.
+**external ACP agent harness** (gemini, goose, opencode, kilo, claude, codex,
+…) driven through the [Agent Client Protocol](https://agentclientprotocol.com/),
+or the **internal sub-agent** (a nested harness that runs the task with a
+fresh, empty context). Both are reached through a *single* visible tool,
+`subagent_call`; the model never sees two tools.
 
 | Tool | What it does |
 |---|---|
-| [`subagent_call`](call.md) | Delegate a task to a sub-agent. `agent` names the CLI to run; omitting it routes to the internal agent. |
+| [`subagent_call`](acp.md) | Delegate a task to a sub-agent. `agent` names the ACP harness to run; omitting it routes to the internal agent. |
 
 The module has three pieces:
 
 - [`SubAgent`](#the-subagent-wrapper) — the wrapper. Owns the tool
-  description (tailored to the CLIs actually installed) and the last-input
-  storage.
-- [`call`](call.md) — the external-CLI engine: the agent registry, PATH
-  detection, and the spawn/stream/wait pipeline.
+  description (tailored to the harnesses actually installed) and the
+  last-input storage.
+- [`acp`](acp.md) — the external-harness engine: the ACP registry, PATH
+  detection, and the full ACP client turn (initialize → session/new →
+  session/prompt).
 - [`types`](types.md) — the input and output structs.
 
 ---
@@ -67,24 +69,27 @@ argument is required**:
   When omitted (or empty), the call routes to the internal agent.
 - `input` — optional string; falls back to the stored last message.
 
-The `enum` is computed from [`detect_installed()`](call.md#detect_installed):
-only CLIs found in `PATH` are listed. If none are installed, the enum keeps
-the full agent list anyway (so the model can still attempt a call) and the
-description says to install one.
+The `enum` is computed from [`detect_installed()`](acp.md#detect_installed):
+only harnesses found in `PATH` are listed. If none are installed, the enum
+keeps the full agent list anyway (so the model can still attempt a call) and
+the description says to install one.
 
 ---
 
 ## Two implementations, one tool
 
-### External CLI (when `agent` is provided)
+### External ACP harness (when `agent` is provided)
 
-The named agent's binary is spawned with its static arguments and the input
-message — passed either as the final positional argument (e.g.
-`opencode run --auto "<input>"`) or, for CLIs whose prompt is a named flag
-(e.g. `aider --message`, via `input_flag`), as the value of that flag. The
-output is streamed back. The engine is documented on the
-[call page](call.md). Only agents with a **non-interactive / headless mode**
-are supported — purely interactive TUIs cannot be driven this way.
+The named harness is spawned in ACP server mode and driven through a full
+[Agent Client Protocol](https://agentclientprotocol.com/) turn as a client:
+`initialize` (advertising the `fs` capability) → `authenticate` (when the
+harness advertises auth methods) → `session/new` (rooted at the workspace
+directory) → `session/prompt` with the task as the user message. Agent
+message chunks stream back in real time; the turn ends when the prompt
+response arrives with a stop reason. The engine is documented on the
+[acp page](acp.md). Only agents with **ACP support** are registered — the
+protocol contract replaces the fragile per-CLI flag scraping of the old
+one-shot integration, so any harness in the official ACP registry works.
 
 ### Internal agent (when `agent` is omitted or empty)
 
@@ -120,13 +125,13 @@ The harness wires the module together:
 
 ## Summary
 
-- One tool, two targets: an external agent CLI (`agent` set) or the internal
-  sub-agent (agent omitted/empty).
+- One tool, two targets: an external ACP harness (`agent` set) or the
+  internal sub-agent (agent omitted/empty).
 - `agent` and `input` are both optional; `input` falls back to the last
   message sent in this session.
 - The tool description adapts to what is installed on `PATH`.
 - The internal sub-agent is a clean-room nested harness: empty context,
   auto-approve, no persistence, final report only.
 
-Next: the [data types](types.md), then the [call engine](call.md) — the
-agent registry and the spawn/stream/wait pipeline.
+Next: the [data types](types.md), then the [acp engine](acp.md) — the agent
+registry and the ACP client turn.
