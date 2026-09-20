@@ -90,6 +90,20 @@ pub(crate) fn sanitize_subagent_text(text: &str) -> String {
         .collect()
 }
 
+/// Convert the persisted ACP tool result into the text the live panel
+/// receives through `HarnessEvent::ToolOutput`. During a live call the panel
+/// gets only the streamed text, while the transcript stores the final
+/// `SubAgentCallOutput` JSON envelope. Rehydration must remove that envelope
+/// so a restart renders the same body as the original live session.
+///
+/// Internal subagents and older persisted entries store their report as plain
+/// text, which deliberately passes through unchanged.
+fn subagent_display_output(output: String) -> String {
+    serde_json::from_str::<cosh_tools::subagent::SubAgentCallOutput>(&output)
+        .map(|result| result.output)
+        .unwrap_or(output)
+}
+
 /// Parse a plan tool's JSON result into the flat todo list shown in the
 /// panel: `{"list": {"items": [{"status", "description"}]}}`.
 /// Shared by the live `ToolResult` path (events) and the rehydration from
@@ -1722,7 +1736,7 @@ impl RightPanelState {
                             .get("input")
                             .and_then(|v| v.as_str())
                             .map(str::to_string);
-                        subs.push((agent, input, output, failed));
+                        subs.push((agent, input, subagent_display_output(output), failed));
                     }
                     _ => {}
                 }
@@ -2215,6 +2229,29 @@ mod tests {
         // The "→ cosh:" input line is reconstructed as the first line.
         assert!(opencodes[0].output.starts_with("→ cosh: other task\n"));
         assert_eq!(opencodes[0].status, PtyStatus::Completed);
+    }
+
+    #[test]
+    fn rehydrate_unwraps_the_persisted_acp_output_envelope() {
+        let mut state = RightPanelState::new();
+        let persisted = serde_json::json!({
+            "output": "Oi! Como posso ajudar?",
+            "stop_reason": "EndTurn"
+        })
+        .to_string();
+        let session = session_with(vec![tool_part(
+            "subagent_call",
+            serde_json::json!({"agent": "opencode", "input": "oi"}),
+            Some(persisted),
+        )]);
+
+        state.rehydrate_from_session(&session);
+
+        assert_eq!(
+            state.pty_sessions[0].output,
+            "→ cosh: oi\nOi! Como posso ajudar?"
+        );
+        assert!(!state.pty_sessions[0].output.contains("stop_reason"));
     }
 
     #[test]
