@@ -440,10 +440,11 @@ impl BranchProjection {
         debug_assert!(
             self.message_positions.is_empty()
                 || (self.message_positions.len() == self.session.messages.len()
-                    && self
-                        .message_positions
-                        .iter()
-                        .all(|(id, i)| self.session.messages.get(*i).is_some_and(|m| &m.id == id))),
+                    && self.message_positions.iter().all(|(id, i)| self
+                        .session
+                        .messages
+                        .get(*i)
+                        .is_some_and(|m| &m.id == id))),
             "message_positions out of sync with session.messages"
         );
         debug_assert!(

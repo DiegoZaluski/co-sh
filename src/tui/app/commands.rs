@@ -290,12 +290,15 @@ impl App {
         let still_working = self.state.status != crate::types::SessionStatus::Idle;
         let event_tx = self.event_tx.clone();
         std::thread::spawn(move || {
-            let result = crate::transcript_export::export_session_transcript(&store, &session, &cwd);
+            let result =
+                crate::transcript_export::export_session_transcript(&store, &session, &cwd);
             let (message, variant) = match result {
                 Ok(path) => {
                     let mut message = format!("Export: transcript written to {}.", path.display());
                     if still_working {
-                        message.push_str(" (snapshot as of the last persisted turn; the agent is still working)");
+                        message.push_str(
+                            " (snapshot as of the last persisted turn; the agent is still working)",
+                        );
                     }
                     (message, cosh::harness::events::ToastVariant::Info)
                 }

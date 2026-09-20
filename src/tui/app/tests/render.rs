@@ -247,7 +247,8 @@ async fn scroll_to_bottom_pill_jumps_back_and_rehides() {
         let buf = terminal.backend().buffer();
         let area = buf.area;
         (area.y..area.bottom()).any(|y| {
-            (area.x..area.right()).any(|x| buf.cell((x, y)).is_some_and(|c| c.symbol() == "\u{2B9F}"))
+            (area.x..area.right())
+                .any(|x| buf.cell((x, y)).is_some_and(|c| c.symbol() == "\u{2B9F}"))
         })
     }
 
@@ -320,7 +321,10 @@ async fn scroll_to_bottom_pill_jumps_back_and_rehides() {
         .unwrap();
     app.handle_mouse_event(mouse(CKind::Up(CBtn::Left), pill.x + 2, pill.y))
         .unwrap();
-    assert!(app.session_view.is_at_bottom(), "click must return to the bottom");
+    assert!(
+        app.session_view.is_at_bottom(),
+        "click must return to the bottom"
+    );
     assert!(
         !app.session_view.has_manual_scroll,
         "click must re-engage the sticky follow"
@@ -330,12 +334,18 @@ async fn scroll_to_bottom_pill_jumps_back_and_rehides() {
     // frame (the renderer owns it), the glyph then fades out over a few more.
     // The user is following again.
     terminal.draw(|f| app.render(f, 0.016)).unwrap();
-    assert!(app.session_view.pill_area.is_none(), "rect must clear at the bottom");
+    assert!(
+        app.session_view.pill_area.is_none(),
+        "rect must clear at the bottom"
+    );
     for _ in 0..4 {
         terminal.draw(|f| app.render(f, 0.016)).unwrap();
     }
     assert_eq!(app.session_view.pill_progress(), 0.0, "retract must finish");
-    assert!(!screen_has_glyph(&terminal), "pill must be gone from screen");
+    assert!(
+        !screen_has_glyph(&terminal),
+        "pill must be gone from screen"
+    );
 }
 
 /// The pill must stay put when the agent spinner appears: the spinner shrinks

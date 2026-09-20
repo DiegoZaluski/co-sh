@@ -5971,14 +5971,19 @@ fn pill_shows_when_scrolled_away_and_hides_at_bottom() {
     view.scroll_y = 100;
     for _ in 0..8 {
         let buf = render_pill_once(&mut view, area);
-        assert!(pill_cell(&buf, area).is_some(), "pill must paint when scrolled away");
-        assert!(view.pill_area.is_some(), "hit rect must track the painted pill");
-    }
-    assert!
-        (
-            (view.pill_progress() - 1.0).abs() < f32::EPSILON,
-            "progress must settle at 1.0 after enough frames"
+        assert!(
+            pill_cell(&buf, area).is_some(),
+            "pill must paint when scrolled away"
         );
+        assert!(
+            view.pill_area.is_some(),
+            "hit rect must track the painted pill"
+        );
+    }
+    assert!(
+        (view.pill_progress() - 1.0).abs() < f32::EPSILON,
+        "progress must settle at 1.0 after enough frames"
+    );
     let (px, py) = {
         let rect = view.pill_area.expect("pill rect must be set when settled");
         (rect.x, rect.y)
@@ -5989,7 +5994,10 @@ fn pill_shows_when_scrolled_away_and_hides_at_bottom() {
         gx >= px && gx < px + 5 && gy == py,
         "glyph ({gx},{gy}) must sit inside the hit rect anchored at ({px},{py})"
     );
-    assert!(py < area.bottom() - 1, "pill must sit above the viewport's last row (prompt starts there)");
+    assert!(
+        py < area.bottom() - 1,
+        "pill must sit above the viewport's last row (prompt starts there)"
+    );
     // Centered horizontally: the 5-column pill's midpoint (px + 2 = the glyph
     // column) lands on one of the viewport's two center columns.
     let center = area.width / 2;
@@ -6007,16 +6015,25 @@ fn pill_shows_when_scrolled_away_and_hides_at_bottom() {
         view.pill_area.is_none(),
         "hit rect must clear on the first retract frame"
     );
-    assert!(pill_cell(&buf, area).is_some(), "glyph still fades during retract");
+    assert!(
+        pill_cell(&buf, area).is_some(),
+        "glyph still fades during retract"
+    );
     for _ in 0..4 {
         let buf = render_pill_once(&mut view, area);
         if view.pill_progress() == 0.0 {
-            assert!(pill_cell(&buf, area).is_none(), "no glyph once progress hits 0");
+            assert!(
+                pill_cell(&buf, area).is_none(),
+                "no glyph once progress hits 0"
+            );
             break;
         }
     }
     assert_eq!(view.pill_progress(), 0.0, "retract must finish at 0");
-    assert!(view.pill_area.is_none(), "rect must be cleared at the bottom");
+    assert!(
+        view.pill_area.is_none(),
+        "rect must be cleared at the bottom"
+    );
     assert!(pill_cell(&render_pill_once(&mut view, area), area).is_none());
 }
 
@@ -6062,8 +6079,15 @@ fn jump_to_live_restores_sticky_follow() {
 
     view.jump_to_live();
 
-    assert_eq!(view.scroll_y, 500 - 20, "scroll must aim at the cached bottom");
-    assert!(!view.has_manual_scroll, "manual scroll must clear so sticky re-engages");
+    assert_eq!(
+        view.scroll_y,
+        500 - 20,
+        "scroll must aim at the cached bottom"
+    );
+    assert!(
+        !view.has_manual_scroll,
+        "manual scroll must clear so sticky re-engages"
+    );
     assert!(view.is_sticky_bottom, "sticky must be re-armed");
     assert!(view.is_at_bottom(), "view must register as at-bottom again");
 }

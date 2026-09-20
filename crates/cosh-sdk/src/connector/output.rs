@@ -170,10 +170,15 @@ pub(crate) fn normalize_finish_reason(raw: Option<String>) -> Option<String> {
     let canonical = match raw.to_ascii_lowercase().as_str() {
         "stop" | "end_turn" | "stop_sequence" | "refusal" => "stop",
         "length" | "max_tokens" => "length",
-        "content_filter" | "safety" | "recitation" | "language" | "blocklist"
-        | "prohibited_content" | "spii" | "malformed_function_call" | "other" => {
-            "content_filter"
-        }
+        "content_filter"
+        | "safety"
+        | "recitation"
+        | "language"
+        | "blocklist"
+        | "prohibited_content"
+        | "spii"
+        | "malformed_function_call"
+        | "other" => "content_filter",
         "tool_calls" | "tool_use" => "tool_calls",
         // Unknown (e.g. Anthropic `pause_turn`): pass the raw value through —
         // the harness whitelist treats it as not-a-completion.
@@ -579,7 +584,8 @@ mod tests {
     #[test]
     fn extracts_reported_cost_from_xai_ticks() {
         // 37_756_000 ticks (docs.x.ai example, printed there as $0.0038).
-        let raw = r#"{"usage":{"input_tokens":199,"output_tokens":1,"cost_in_usd_ticks":37756000}}"#;
+        let raw =
+            r#"{"usage":{"input_tokens":199,"output_tokens":1,"cost_in_usd_ticks":37756000}}"#;
         assert!((extract_reported_cost(raw).unwrap() - 0.0037756).abs() < 1e-12);
         // Streaming final chunk carries the same field.
         let raw = r#"{"choices":[],"usage":{"cost_in_usd_ticks":158500}}"#;

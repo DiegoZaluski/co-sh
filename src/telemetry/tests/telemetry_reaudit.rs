@@ -53,7 +53,12 @@ fn c01_private_project_identifiers_cannot_enter_error_source() {
 
     // And the session accumulator drops the event instead of serializing it.
     let mut session = SessionTelemetry::new();
-    session.record_error(ErrorCategory::FsIo, "acme::confidential_merger", None, "failed");
+    session.record_error(
+        ErrorCategory::FsIo,
+        "acme::confidential_merger",
+        None,
+        "failed",
+    );
     let envelope = wrap(
         EventType::SessionSummary,
         EventPayload::SessionSummary(session.finish()),
@@ -89,8 +94,14 @@ fn c04_update_versions_with_the_10_fragment_validate() {
 fn c05_impossible_calendar_dates_and_wrong_uuid_variants_are_rejected() {
     // Was repro_invalid_calendar_date_and_uuid_variant_are_accepted.
     // (1) The install date is calendar-validated, not just shape-checked.
-    assert!(InstallPayload::new("2026-99-99").is_none(), "month 99 must fail");
-    assert!(InstallPayload::new("2026-02-30").is_none(), "Feb 30 must fail");
+    assert!(
+        InstallPayload::new("2026-99-99").is_none(),
+        "month 99 must fail"
+    );
+    assert!(
+        InstallPayload::new("2026-02-30").is_none(),
+        "Feb 30 must fail"
+    );
     let envelope = wrap(
         EventType::Install,
         EventPayload::Install(InstallPayload::new("2025-06-01").expect("a real date")),

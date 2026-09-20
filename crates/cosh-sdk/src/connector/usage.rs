@@ -104,8 +104,7 @@ impl TokenUsage {
                 (Some(a), None) => Some(a),
                 (None, b) => b,
             },
-            reported_cost_credits: match (self.reported_cost_credits, next.reported_cost_credits)
-            {
+            reported_cost_credits: match (self.reported_cost_credits, next.reported_cost_credits) {
                 (Some(a), Some(b)) => Some(a.max(b)),
                 (Some(a), None) => Some(a),
                 (None, b) => b,

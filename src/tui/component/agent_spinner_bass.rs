@@ -328,7 +328,8 @@ impl AgentSpinnerBass {
         // Advance the status glyphs (only after initialization and if there's
         // a label): cycle the CURRENT activity's sequence.
         if self.initialized && self.label_width > 0 {
-            self.status_step = (self.status_step + 1) % (STATUS_ANIM_SPEED * self.frames.len() as u32);
+            self.status_step =
+                (self.status_step + 1) % (STATUS_ANIM_SPEED * self.frames.len() as u32);
         }
     }
 
@@ -378,7 +379,12 @@ impl AgentSpinnerBass {
             w += 1; // gap
             w += self.label_width;
             // Widest glyph of the current status's sequence
-            w += self.frames.iter().map(|f| f.chars().count()).max().unwrap_or(0);
+            w += self
+                .frames
+                .iter()
+                .map(|f| f.chars().count())
+                .max()
+                .unwrap_or(0);
         }
         w
     }

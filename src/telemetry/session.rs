@@ -18,9 +18,11 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 use crate::telemetry::events::{
-    bump_capped, bump_feature, ErrorRepr, SessionSummaryPayload, MAX_ERRORS,
+    ErrorRepr, MAX_ERRORS, SessionSummaryPayload, bump_capped, bump_feature,
 };
-use crate::telemetry::sanitize::{fingerprint_error, normalize_provider, normalize_tool, round_duration};
+use crate::telemetry::sanitize::{
+    fingerprint_error, normalize_provider, normalize_tool, round_duration,
+};
 use crate::telemetry::schema::{ErrorCategory, ErrorSource, Feature, SCHEMA_VERSION};
 
 /// Full grouping key for an error representation: identical
@@ -101,7 +103,10 @@ impl SessionTelemetry {
     /// sanitizers: allowlisted names pass, anything else is hashed/normalized.
     pub fn record_llm_request(&mut self, provider: &str, model: &str) {
         bump_capped(&mut self.providers, &normalize_provider(provider));
-        bump_capped(&mut self.models, &crate::telemetry::sanitize::hash_identifier(model));
+        bump_capped(
+            &mut self.models,
+            &crate::telemetry::sanitize::hash_identifier(model),
+        );
     }
 
     /// Feature usage (route opened, dialog shown, command run).
@@ -140,7 +145,10 @@ impl SessionTelemetry {
         if !self.errors.contains_key(&key) && self.errors.len() >= MAX_ERRORS {
             return; // cardinality cap: fail closed
         }
-        let slot = self.errors.entry(key).or_insert(ErrorSlot { occurrence: 0 });
+        let slot = self
+            .errors
+            .entry(key)
+            .or_insert(ErrorSlot { occurrence: 0 });
         slot.occurrence = slot.occurrence.saturating_add(1);
     }
 
@@ -179,11 +187,8 @@ impl SessionTelemetry {
     /// add is saturating: even a u64::MAX micro-USD accumulator must never
     /// panic or wrap (saturating invariant).
     pub fn finish(self) -> SessionSummaryPayload {
-        let cost_usd_cents = (self
-            .cost_usd_micros
-            .saturating_add(5_000)
-            / 10_000)
-            .min(u32::MAX as u64) as u32;
+        let cost_usd_cents =
+            (self.cost_usd_micros.saturating_add(5_000) / 10_000).min(u32::MAX as u64) as u32;
         let errors = self
             .errors
             .into_iter()
@@ -192,7 +197,11 @@ impl SessionTelemetry {
                     key.category,
                     &key.fingerprint,
                     key.source,
-                    if key.provider.is_empty() { None } else { Some(key.provider) },
+                    if key.provider.is_empty() {
+                        None
+                    } else {
+                        Some(key.provider)
+                    },
                     slot.occurrence,
                 )
             })
@@ -291,7 +300,12 @@ mod tests {
         let mut s = SessionTelemetry::new();
         // private-looking but syntactically valid identifiers
         // must be REJECTED — the source field is a closed allowlist.
-        s.record_error(ErrorCategory::FsIo, "acme::confidential_merger", None, "failed");
+        s.record_error(
+            ErrorCategory::FsIo,
+            "acme::confidential_merger",
+            None,
+            "failed",
+        );
         s.record_error(ErrorCategory::FsIo, "alice@example.test", None, "failed");
         s.record_error(ErrorCategory::FsIo, "/home/alice/mod.rs", None, "failed");
         assert!(s.finish().errors().is_empty());
@@ -302,8 +316,18 @@ mod tests {
         // same message, different category/provider/source stay
         // distinct representations.
         let mut s = SessionTelemetry::new();
-        s.record_error(ErrorCategory::ProviderAuth, "harness::a", Some("openai"), "request failed");
-        s.record_error(ErrorCategory::ProviderNetwork, "harness::b", Some("claude"), "request failed");
+        s.record_error(
+            ErrorCategory::ProviderAuth,
+            "harness::a",
+            Some("openai"),
+            "request failed",
+        );
+        s.record_error(
+            ErrorCategory::ProviderNetwork,
+            "harness::b",
+            Some("claude"),
+            "request failed",
+        );
         let payload = s.finish();
         assert_eq!(payload.errors().len(), 2);
         assert_eq!(payload.errors()[0].occurrence(), 1);

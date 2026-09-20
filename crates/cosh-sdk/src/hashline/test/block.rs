@@ -214,9 +214,7 @@ fn apply_to_errors_when_block_edit_has_no_resolver() {
     .unwrap();
     // Clean Err, never a panic — apply_to's Throw path returns the
     // diagnostic through the same channel as every other malformed edit.
-    let msg = section
-        .apply_to(text, None)
-        .unwrap_err();
+    let msg = section.apply_to(text, None).unwrap_err();
     assert!(msg.contains("replace block"), "{msg}");
 }
 
@@ -328,10 +326,7 @@ async fn patcher_returns_error_when_resolver_returns_null() {
     // A clean Err carrying the diagnostic — never a panic (the patcher's
     // apply path has no catch_unwind; a panic would kill the agent loop).
     let msg = patcher.apply(&patch).await.unwrap_err().to_string();
-    assert!(
-        msg.contains("could not resolve a syntactic block"),
-        "{msg}"
-    );
+    assert!(msg.contains("could not resolve a syntactic block"), "{msg}");
 }
 
 #[test]

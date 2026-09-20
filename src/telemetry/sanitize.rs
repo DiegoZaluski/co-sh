@@ -6,46 +6,46 @@
 //! escape — the field is dropped (with a local warning) rather than rewritten.
 
 use crate::telemetry::schema::{
-    ErrorCategory, EventType, Feature, FEATURE_ALLOWLIST, PROVIDER_ALLOWLIST, TOOL_ALLOWLIST,
+    ErrorCategory, EventType, FEATURE_ALLOWLIST, Feature, PROVIDER_ALLOWLIST, TOOL_ALLOWLIST,
 };
 use xxhash_rust::xxh64::xxh64;
 
 /// Forbidden patterns for any string leaving the client. A match means the
 /// value could identify a user, a machine or a project — the field is dropped.
 const FORBIDDEN_PATTERNS: &[&str] = &[
-    "/home/",         // unix home dir
-    "/users/",        // macOS home dir (matched against the lowercased value)
-    "/root/",         // root home dir
-    "c:\\",            // windows drive paths (checked against the lowercased value)
-    "~/.ssh",         // ssh material
+    "/home/",  // unix home dir
+    "/users/", // macOS home dir (matched against the lowercased value)
+    "/root/",  // root home dir
+    "c:\\",    // windows drive paths (checked against the lowercased value)
+    "~/.ssh",  // ssh material
     "id_rsa",
-    "localhost",      // local infra
-    ".local",         // mDNS-style hostnames (with or without port)
-    ".internal",      // internal DNS domains
-    "127.0.0.1",      // loopback (v4 and v6)
+    "localhost", // local infra
+    ".local",    // mDNS-style hostnames (with or without port)
+    ".internal", // internal DNS domains
+    "127.0.0.1", // loopback (v4 and v6)
     "::1",
-    "fe80::",         // v6 link-local
+    "fe80::", // v6 link-local
     "0.0.0.0",
-    "192.168.",       // private ranges
+    "192.168.", // private ranges
     "172.16.",
     "172.17.",
     "172.18.",
     "172.19.",
-    "172.2",          // covers 172.20-172.29 prefixes coarsely
+    "172.2", // covers 172.20-172.29 prefixes coarsely
     "172.30.",
     "172.31.",
-    "169.254.",       // link-local
-    "10.",             // full 10.0.0.0/8 (a version string like "10.1.0" is
-                       // never a payload value at this boundary — all numeric
-                       // fields are integers, not strings)
-    "sk-",            // API key shapes
+    "169.254.", // link-local
+    "10.",      // full 10.0.0.0/8 (a version string like "10.1.0" is
+    // never a payload value at this boundary — all numeric
+    // fields are integers, not strings)
+    "sk-", // API key shapes
     "ghp_",
     "github_pat_",
     "xox",
     "akia",
-    "eyj",            // JWT prefix (base64 of {" — lowercase form)
+    "eyj", // JWT prefix (base64 of {" — lowercase form)
     "bearer ",
-    "-----begin ",    // PEM blocks (lowercased)
+    "-----begin ", // PEM blocks (lowercased)
     "postgresql://",
     "http://",
     "https://",
@@ -128,7 +128,11 @@ pub fn normalize_tool(name: &str) -> &'static str {
     let lower = name.trim().to_lowercase();
     if TOOL_ALLOWLIST.contains(&lower.as_str()) {
         // Safe: the name is in TOOL_ALLOWLIST.
-        TOOL_ALLOWLIST.iter().find(|t| **t == lower).copied().unwrap_or("other")
+        TOOL_ALLOWLIST
+            .iter()
+            .find(|t| **t == lower)
+            .copied()
+            .unwrap_or("other")
     } else {
         "other"
     }
@@ -249,12 +253,21 @@ mod tests {
 
     #[test]
     fn fingerprint_is_stable_and_strips_sensitive_fragments() {
-        let a = fingerprint_error("Failed to reach https://api.acme.com/v1: 500 (internal) after 3 retries");
-        let b = fingerprint_error("failed to reach https://api.other.com/v2: 503 (oops) after 9 retries");
+        let a = fingerprint_error(
+            "Failed to reach https://api.acme.com/v1: 500 (internal) after 3 retries",
+        );
+        let b = fingerprint_error(
+            "failed to reach https://api.other.com/v2: 503 (oops) after 9 retries",
+        );
         // Same structure → same fingerprint, raw URLs/digits gone from the hash input.
         assert_eq!(a, b);
         // Deterministic.
-        assert_eq!(a, fingerprint_error("Failed to reach https://api.acme.com/v1: 500 (internal) after 3 retries"));
+        assert_eq!(
+            a,
+            fingerprint_error(
+                "Failed to reach https://api.acme.com/v1: 500 (internal) after 3 retries"
+            )
+        );
     }
 
     #[test]

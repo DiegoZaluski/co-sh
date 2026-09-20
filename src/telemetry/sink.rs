@@ -167,7 +167,10 @@ pub(crate) async fn flush(
     }
     // drain_batch never returns more than MAX_BATCH; guard the invariant so a
     // future constant change cannot silently drop the tail.
-    debug_assert!(batch.len() <= MAX_BATCH, "drain_batch returned more than MAX_BATCH");
+    debug_assert!(
+        batch.len() <= MAX_BATCH,
+        "drain_batch returned more than MAX_BATCH"
+    );
     let payload = &batch[..batch.len().min(MAX_BATCH)];
     match send_batch(payload, config, client).await {
         Ok(()) => FlushOutcome::Sent(payload.len()),
@@ -257,12 +260,14 @@ mod tests {
 
     #[test]
     fn endpoint_validation_requires_https() {
-        let ok = |endpoint: &str| SinkConfig {
-            endpoint: endpoint.into(),
-            publishable_key: "sb_publishable_x".into(),
-            max_attempts: 1,
-        }
-        .validate();
+        let ok = |endpoint: &str| {
+            SinkConfig {
+                endpoint: endpoint.into(),
+                publishable_key: "sb_publishable_x".into(),
+                max_attempts: 1,
+            }
+            .validate()
+        };
         assert!(ok("https://ref.supabase.co/functions/v1/telemetry-ingest"));
         assert!(!ok("http://ref.supabase.co/functions/v1/telemetry-ingest"));
         assert!(!ok(""));
@@ -284,7 +289,10 @@ mod tests {
         let secs = retry_after_secs(&later)
             .expect("HTTP-date form must be parsed")
             .as_secs();
-        assert!((100..=120).contains(&secs), "120s HTTP-date must resolve to ~120s, got {secs}");
+        assert!(
+            (100..=120).contains(&secs),
+            "120s HTTP-date must resolve to ~120s, got {secs}"
+        );
         assert_eq!(
             retry_after_secs("Mon, 01 Jan 2035 00:00:00 GMT"),
             Some(Duration::from_secs(MAX_RETRY_AFTER_SECS)),
@@ -297,7 +305,6 @@ mod tests {
         );
     }
 
-
     #[tokio::test]
     async fn flush_is_idle_on_empty_queue_or_disabled() {
         let dir = tempfile::tempdir().unwrap();
@@ -308,13 +315,19 @@ mod tests {
             max_attempts: 1,
         };
         let cl = client();
-        assert_eq!(flush(&queue, &config, &cl, Consent::granted()).await, FlushOutcome::Idle);
+        assert_eq!(
+            flush(&queue, &config, &cl, Consent::granted()).await,
+            FlushOutcome::Idle
+        );
         // Invalid (non-https) endpoint → Idle, never attempted.
         let config = SinkConfig {
             endpoint: "http://localhost:1/never".into(),
             publishable_key: "sb_publishable_test".into(),
             max_attempts: 1,
         };
-        assert_eq!(flush(&queue, &config, &cl, Consent::granted()).await, FlushOutcome::Idle);
+        assert_eq!(
+            flush(&queue, &config, &cl, Consent::granted()).await,
+            FlushOutcome::Idle
+        );
     }
 }

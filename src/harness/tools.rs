@@ -1288,10 +1288,9 @@ impl Tools for CoshTools {
 
                 let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
-                let mut call_handle =
-                    tokio::task::spawn(async move {
-                        cosh_tools::subagent::acp::call(&agent, &call_input, cwd, chunk_tx).await
-                    });
+                let mut call_handle = tokio::task::spawn(async move {
+                    cosh_tools::subagent::acp::call(&agent, &call_input, cwd, chunk_tx).await
+                });
 
                 // Stream chunks while waiting for the ACP turn to complete.
                 let call_result = loop {
@@ -1412,7 +1411,10 @@ mod skills_sources_tests {
         // Re-spell the native temp path ("C:/...") as MSYS ("/c/...").
         let mut chars = home.chars();
         let drive = chars.next().unwrap().to_ascii_lowercase();
-        assert!(drive.is_ascii_alphabetic(), "tempdir must yield a plain drive path");
+        assert!(
+            drive.is_ascii_alphabetic(),
+            "tempdir must yield a plain drive path"
+        );
         let rest = chars
             .collect::<String>()
             .trim_start_matches([':', '/', '\\'])

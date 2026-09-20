@@ -37,7 +37,9 @@ pub struct EventQueue {
 impl EventQueue {
     /// Queue rooted at `dir` (the app data dir). The file is created lazily.
     pub fn new(dir: impl AsRef<Path>) -> Self {
-        Self { path: dir.as_ref().join("telemetry-events.jsonl") }
+        Self {
+            path: dir.as_ref().join("telemetry-events.jsonl"),
+        }
     }
 
     /// Queue file path (exposed for tests and `/telemetry export`).
@@ -111,7 +113,11 @@ impl EventQueue {
             log::debug!("telemetry: queue full, oldest events trimmed to make room");
         }
 
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&self.path) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+        {
             let _ = f.write_all(line.as_bytes());
             let _ = f.write_all(b"\n");
         }
@@ -137,7 +143,11 @@ impl EventQueue {
             let expired = event
                 .occurred_at()
                 .parse::<chrono::DateTime<chrono::Utc>>()
-                .map(|t| now.duration_since(t.into()).map(|age| age > ttl).unwrap_or(false))
+                .map(|t| {
+                    now.duration_since(t.into())
+                        .map(|age| age > ttl)
+                        .unwrap_or(false)
+                })
                 .unwrap_or_else(|_| {
                     log::warn!("telemetry: queue line has an unparsable timestamp; dropping");
                     true // fail closed: an undatable event is not worth keeping
@@ -261,8 +271,14 @@ mod tests {
             q.push(&env());
         }
         let size = std::fs::metadata(q.path()).unwrap().len();
-        assert!(size <= QUEUE_MAX_BYTES + 4096, "queue grew past the byte cap: {size}");
-        assert!(q.pending_count() <= QUEUE_MAX_LINES, "queue grew past the line cap");
+        assert!(
+            size <= QUEUE_MAX_BYTES + 4096,
+            "queue grew past the byte cap: {size}"
+        );
+        assert!(
+            q.pending_count() <= QUEUE_MAX_LINES,
+            "queue grew past the line cap"
+        );
     }
 
     #[test]

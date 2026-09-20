@@ -9,12 +9,12 @@
 //! only; the throwaway certificate is explicitly trusted by the test client
 //! and never installed globally.
 
+use crate::telemetry::Telemetry;
 use crate::telemetry::events::synthetic;
 use crate::telemetry::queue::EventQueue;
 use crate::telemetry::schema::EventType;
-use crate::telemetry::sink::{client, flush, Consent, FlushOutcome, SinkConfig};
-use crate::telemetry::Telemetry;
-use serde_json::{json, Value};
+use crate::telemetry::sink::{Consent, FlushOutcome, SinkConfig, client, flush};
+use serde_json::{Value, json};
 use std::{
     process::Command,
     sync::{Arc, Mutex},
@@ -48,16 +48,12 @@ impl Fixture {
 
         // Throwaway self-signed certificate (loopback only): trusted by the
         // test client via `add_root_certificate`, never installed globally.
-        let certified_key = rcgen::generate_simple_self_signed(vec![
-            "127.0.0.1".into(),
-            "localhost".into(),
-        ])
-        .expect("rcgen key generation is infallible for these inputs");
+        let certified_key =
+            rcgen::generate_simple_self_signed(vec!["127.0.0.1".into(), "localhost".into()])
+                .expect("rcgen key generation is infallible for these inputs");
         let cert_der = certified_key.cert.der().clone();
         let key_der = rustls::pki_types::PrivateKeyDer::Pkcs8(
-            rustls::pki_types::PrivatePkcs8KeyDer::from(
-                certified_key.key_pair.serialize_der(),
-            ),
+            rustls::pki_types::PrivatePkcs8KeyDer::from(certified_key.key_pair.serialize_der()),
         );
         let server_config = Arc::new(
             // Explicit provider: reqwest pulls aws-lc-rs into the test binary,
@@ -79,7 +75,10 @@ impl Fixture {
             let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
                 .await
                 .expect("loopback bind cannot fail in tests");
-            let endpoint = format!("https://127.0.0.1:{}/ingest", listener.local_addr().unwrap().port());
+            let endpoint = format!(
+                "https://127.0.0.1:{}/ingest",
+                listener.local_addr().unwrap().port()
+            );
             (listener, endpoint)
         };
 
@@ -113,7 +112,8 @@ impl Fixture {
                         .lines()
                         .find_map(|line| {
                             let (name, value) = line.split_once(':')?;
-                            name.trim().eq_ignore_ascii_case("content-length")
+                            name.trim()
+                                .eq_ignore_ascii_case("content-length")
                                 .then(|| value.trim().parse::<usize>().ok())?
                         })
                         .unwrap_or(0);
@@ -123,10 +123,9 @@ impl Fixture {
                             Ok(n) => buf.extend_from_slice(&chunk[..n]),
                         }
                     }
-                    let body = String::from_utf8_lossy(
-                        &buf[header_end..header_end + content_length],
-                    )
-                    .to_string();
+                    let body =
+                        String::from_utf8_lossy(&buf[header_end..header_end + content_length])
+                            .to_string();
 
                     let spec = {
                         let mut idx = next.lock().unwrap();
@@ -140,10 +139,7 @@ impl Fixture {
                         "body": body,
                     }));
 
-                    let status = spec
-                        .get("status")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(200);
+                    let status = spec.get("status").and_then(Value::as_u64).unwrap_or(200);
                     let reason = match status {
                         204 => "No Content",
                         307 => "Temporary Redirect",
@@ -242,7 +238,13 @@ async fn control_actual_5xx_responses_preserve_events() {
         let event = synthetic(EventType::Error);
         queue.push(&event);
         assert_eq!(
-            flush(&queue, &fixture.config(1), &fixture.client(), Consent::granted()).await,
+            flush(
+                &queue,
+                &fixture.config(1),
+                &fixture.client(),
+                Consent::granted()
+            )
+            .await,
             FlushOutcome::Failed
         );
         assert_eq!(fixture.receipts().len(), 1);
@@ -262,7 +264,13 @@ async fn control_503_retry_sends_identical_event_then_succeeds() {
     let queue = fixture.queue();
     queue.push(&synthetic(EventType::Error));
     assert_eq!(
-        flush(&queue, &fixture.config(2), &fixture.client(), Consent::granted()).await,
+        flush(
+            &queue,
+            &fixture.config(2),
+            &fixture.client(),
+            Consent::granted()
+        )
+        .await,
         FlushOutcome::Sent(1)
     );
     let receipts = fixture.receipts();
@@ -288,7 +296,12 @@ async fn retry_after_http_date_is_honored() {
     queue.push(&synthetic(EventType::Error));
     let outcome = tokio::time::timeout(
         Duration::from_secs(5),
-        flush(&queue, &fixture.config(2), &fixture.client(), Consent::granted()),
+        flush(
+            &queue,
+            &fixture.config(2),
+            &fixture.client(),
+            Consent::granted(),
+        ),
     )
     .await
     .expect("flush must finish well inside the timeout");
@@ -312,9 +325,17 @@ async fn https_redirect_to_plain_http_is_refused() {
         "an unfollowed redirect must NOT count as delivered"
     );
     let receipts = fixture.receipts();
-    assert_eq!(receipts.len(), 1, "exactly one hop: the redirect is not followed");
+    assert_eq!(
+        receipts.len(),
+        1,
+        "exactly one hop: the redirect is not followed"
+    );
     assert_eq!(receipts[0]["transport"], "tls");
-    assert_eq!(queue.pending_count(), 1, "the event stays queued for the real endpoint");
+    assert_eq!(
+        queue.pending_count(),
+        1,
+        "the event stays queued for the real endpoint"
+    );
 }
 
 #[tokio::test]

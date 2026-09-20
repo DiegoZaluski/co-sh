@@ -534,12 +534,7 @@ impl App {
                 .saturating_sub(prompt_padding);
 
             let prompt_area = Rect::new(prompt_area_x, prompt_area_y, prompt_area_w, prompt_h);
-            let spinner_area = Rect::new(
-                prompt_area_x,
-                spinner_area_y,
-                prompt_area_w,
-                spinner_h,
-            );
+            let spinner_area = Rect::new(prompt_area_x, spinner_area_y, prompt_area_w, spinner_h);
             let permission_area = Rect::new(
                 main_area.x + 2,
                 permission_area_y,
@@ -721,9 +716,7 @@ impl App {
                         && !self.permission_dialog.visible
                         && !self.queue_choice_dialog.visible
                     {
-                        if agent_spinner_active
-                            && let Some(spinner) = &self.agent_spinner_bass
-                        {
+                        if agent_spinner_active && let Some(spinner) = &self.agent_spinner_bass {
                             spinner.render(buf, spinner_area.x + 1, spinner_area.y);
                         } else if correction_spinner_active
                             && let Some(spinner) = &self.prompt_correction_spinner

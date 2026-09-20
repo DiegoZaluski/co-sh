@@ -60,7 +60,10 @@ impl Telemetry {
         let env = std::env::var("COSH_TELEMETRY").unwrap_or_default();
         let ci = std::env::var("CI").is_ok();
         let enabled = resolve_enabled(&env, ci, consented_in_config);
-        Self { queue: EventQueue::new(queue_dir()), enabled }
+        Self {
+            queue: EventQueue::new(queue_dir()),
+            enabled,
+        }
     }
 
     /// Is telemetry currently enabled (consented and not force-disabled)?
@@ -103,7 +106,13 @@ impl Telemetry {
         if !self.enabled {
             return sink::FlushOutcome::Idle;
         }
-        sink::flush(&self.queue, config, &sink::client(), sink::Consent::granted()).await
+        sink::flush(
+            &self.queue,
+            config,
+            &sink::client(),
+            sink::Consent::granted(),
+        )
+        .await
     }
 }
 
@@ -127,7 +136,9 @@ pub fn install_id() -> Option<events::UuidId> {
 
 /// Directory holding the local queue file (platform data dir).
 fn queue_dir() -> std::path::PathBuf {
-    if let Some(dir) = directories::ProjectDirs::from("", "", "cosh").map(|d| d.data_dir().to_path_buf()) {
+    if let Some(dir) =
+        directories::ProjectDirs::from("", "", "cosh").map(|d| d.data_dir().to_path_buf())
+    {
         dir.join("telemetry")
     } else {
         std::env::temp_dir().join("cosh-telemetry")
@@ -152,7 +163,10 @@ mod tests {
 
     #[test]
     fn disabled_telemetry_never_enqueues() {
-        let t = Telemetry { queue: EventQueue::new(std::env::temp_dir().join("cosh-tel-test-disabled")), enabled: false };
+        let t = Telemetry {
+            queue: EventQueue::new(std::env::temp_dir().join("cosh-tel-test-disabled")),
+            enabled: false,
+        };
         assert!(!t.enqueue(&envelope()));
         assert_eq!(t.queue().pending_count(), 0);
     }

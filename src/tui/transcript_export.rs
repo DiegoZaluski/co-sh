@@ -48,9 +48,8 @@ pub fn export_session_transcript(
             "the agent-visible transcript is empty",
         ));
     }
-    let uuid = cosh::telemetry::events::uuid_v4().ok_or_else(|| {
-        std::io::Error::other("OS entropy unavailable for the export file name")
-    })?;
+    let uuid = cosh::telemetry::events::uuid_v4()
+        .ok_or_else(|| std::io::Error::other("OS entropy unavailable for the export file name"))?;
     let path = cwd.join(format!("{}-{uuid}.md", slugify(&session.title)));
     std::fs::write(&path, transcript)?;
     Ok(path)
@@ -183,8 +182,7 @@ mod tests {
         };
         store.save_session_with_context(&session, &context);
 
-        let path =
-            export_session_transcript(&store, &session, dir.path()).unwrap();
+        let path = export_session_transcript(&store, &session, dir.path()).unwrap();
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         assert!(name.starts_with("export-me-"), "slug prefix, got {name}");
         assert!(name.ends_with(".md"));

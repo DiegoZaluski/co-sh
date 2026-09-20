@@ -1315,7 +1315,10 @@ fn export_markdown_hides_swept_and_masked_items_like_build_messages() {
         md.contains("source context item #"),
         "a masked result renders its typed reference: {md}"
     );
-    assert!(!md.contains("payload"), "the masked payload stays out: {md}");
+    assert!(
+        !md.contains("payload"),
+        "the masked payload stays out: {md}"
+    );
 
     // Hiding (debris sweep) removes the item entirely from the view.
     let answer_id = cm
@@ -1341,7 +1344,10 @@ fn export_markdown_composes_checkpoints_before_the_raw_tail() {
     let md = cm.export_markdown();
     let checkpoint = md.find("## Compaction checkpoint").unwrap();
     let raw_tail = md.find("new prompt").unwrap();
-    assert!(checkpoint < raw_tail, "checkpoints lead, raw tail follows: {md}");
+    assert!(
+        checkpoint < raw_tail,
+        "checkpoints lead, raw tail follows: {md}"
+    );
     // The folded sources are hidden behind the checkpoint coverage.
     assert!(!md.contains("old prompt"));
     assert!(!md.contains("old answer"));
@@ -1352,7 +1358,10 @@ fn push_fenced_never_breaks_out_on_embedded_backtick_runs() {
     let mut out = String::new();
     // A payload whose line starts with four backticks must get a five-wide fence.
     push_fenced(&mut out, "text", "before\n````closed?\nafter");
-    assert!(out.starts_with("`````text\n"), "fence outgrows the payload: {out}");
+    assert!(
+        out.starts_with("`````text\n"),
+        "fence outgrows the payload: {out}"
+    );
     assert!(out.ends_with("\n`````\n"), "closing fence matches: {out}");
     // The default fence is the CommonMark minimum of three.
     let mut plain = String::new();

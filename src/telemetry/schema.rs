@@ -57,7 +57,9 @@ pub const PROVIDER_ALLOWLIST: &[&str] = &[
 
 /// Error categories. Closed set — an error is represented by its category plus
 /// a fingerprint of its normalized message, never by the raw message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCategory {
     ProviderAuth,
@@ -94,7 +96,9 @@ impl ErrorCategory {
 /// private project name like `acme::confidential_merger` through).
 /// Construct only through [`ErrorSource::validate`]; anything outside the
 /// allowlist is rejected (fail closed).
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct ErrorSource(String);
 
 /// Closed set of telemetry-visible internal modules (wire names). Adding a
@@ -133,7 +137,14 @@ impl ErrorSource {
 /// Feature wire names (mirror of `Feature::as_str`), for re-validation of
 /// deserialized aggregate-map keys.
 pub const FEATURE_ALLOWLIST: &[&str] = &[
-    "session", "home", "settings", "tools", "rag", "add_provider", "prompt", "other",
+    "session",
+    "home",
+    "settings",
+    "tools",
+    "rag",
+    "add_provider",
+    "prompt",
+    "other",
 ];
 
 /// Features (routes, dialogs, commands) instrumented in the TUI. Closed set;
@@ -169,6 +180,18 @@ impl Feature {
 /// Known tool names (allowlist). Unknown tool names are NOT shipped raw — they
 /// fall into the `other` bucket, since a tool name can embed project context.
 pub const TOOL_ALLOWLIST: &[&str] = &[
-    "bash", "fs_read", "fs_write", "fs_edit", "find_glob", "find_grep", "plan", "skills",
-    "web_search", "web_fetch", "lsp", "recall", "subagent", "question",
+    "bash",
+    "fs_read",
+    "fs_write",
+    "fs_edit",
+    "find_glob",
+    "find_grep",
+    "plan",
+    "skills",
+    "web_search",
+    "web_fetch",
+    "lsp",
+    "recall",
+    "subagent",
+    "question",
 ];

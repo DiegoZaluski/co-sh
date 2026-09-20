@@ -4646,10 +4646,9 @@ impl Harness {
                         });
                     }
                     // log::debug!("run_agent_loop TRUNCATED (finish reason {reason}) — continuing");
-                    current_input =
-                        "Your previous response was cut off before completion. \
+                    current_input = "Your previous response was cut off before completion. \
                          Please continue exactly where you left off."
-                            .to_string();
+                        .to_string();
                     continue;
                 }
 

@@ -14,8 +14,8 @@
 //! Only synthetic data and temporary directories are used.
 
 use crate::telemetry::events::{
-    bump, synthetic, uuid_v4, AppVersion, EventEnvelope, EventPayload, InstallPayload,
-    OccurredAt, UuidId,
+    AppVersion, EventEnvelope, EventPayload, InstallPayload, OccurredAt, UuidId, bump, synthetic,
+    uuid_v4,
 };
 use crate::telemetry::queue::EventQueue;
 use crate::telemetry::sanitize::sanitize_string;
@@ -33,7 +33,10 @@ fn f01_denylist_matches_lowercase_inputs() {
         "/Users/alice/private.txt",
         "eyJhbGciOiJIUzI1NiJ9.synthetic.signature",
     ] {
-        assert!(sanitize_string(value).is_none(), "denylist must reject {value}");
+        assert!(
+            sanitize_string(value).is_none(),
+            "denylist must reject {value}"
+        );
     }
     // Positive control: plain content still passes.
     assert!(sanitize_string("plain text ok").is_some());
@@ -59,7 +62,10 @@ fn f01_typed_payloads_cannot_carry_private_content() {
     // An error record with a free-text (email) source is dropped fail-closed.
     let mut s = SessionTelemetry::new();
     s.record_error(ErrorCategory::FsIo, "alice@example.test", None, "failed");
-    assert!(s.finish().errors().is_empty(), "free-text source must be dropped");
+    assert!(
+        s.finish().errors().is_empty(),
+        "free-text source must be dropped"
+    );
 
     // Tampering with persisted content fails re-validation (F02 belt):
     // a private string in `source` or `first_run_day` invalidates the event.
@@ -82,7 +88,10 @@ fn f01_schema_ids_and_timestamps_are_validated() {
     value["schema_version"] = serde_json::json!(u16::MAX);
     value["occurred_at"] = serde_json::json!("2026-09-16T12:34:56.123456Z");
     let tampered: EventEnvelope = serde_json::from_value(value).unwrap();
-    assert!(!tampered.validate(), "invalid ids/schema/timestamp must fail validation");
+    assert!(
+        !tampered.validate(),
+        "invalid ids/schema/timestamp must fail validation"
+    );
 
     // Timestamps are coarsened to the minute at construction.
     let now = OccurredAt::now();
@@ -153,7 +162,11 @@ async fn f02_flush_is_consent_gated() {
         max_attempts: 1,
     };
     assert_eq!(t.flush(&config).await, FlushOutcome::Idle);
-    assert_eq!(t.queue().pending_count(), 1, "disabled flush must not consume the queue");
+    assert_eq!(
+        t.queue().pending_count(),
+        1,
+        "disabled flush must not consume the queue"
+    );
 }
 
 // f03 (server failures are transient and re-queued) moved to
@@ -185,7 +198,10 @@ fn f07_single_oversized_event_is_rejected() {
     let queue = EventQueue::new(dir.path());
     queue.push(&synthetic(EventType::Error).with_padding(600 * 1024));
     assert!(
-        std::fs::metadata(queue.path()).map(|m| m.len()).unwrap_or(0) <= 512 * 1024,
+        std::fs::metadata(queue.path())
+            .map(|m| m.len())
+            .unwrap_or(0)
+            <= 512 * 1024,
         "the queue file must stay within its cap"
     );
     assert_eq!(queue.pending_count(), 0);
@@ -238,12 +254,19 @@ fn f13_errors_group_by_full_dimension_set() {
         "request failed",
     );
     let payload = session.finish();
-    assert_eq!(payload.errors().len(), 2, "distinct dimensions must stay distinct");
+    assert_eq!(
+        payload.errors().len(),
+        2,
+        "distinct dimensions must stay distinct"
+    );
     assert_eq!(payload.errors()[0].category(), ErrorCategory::ProviderAuth);
     assert_eq!(payload.errors()[0].provider(), Some("openai"));
     assert_eq!(payload.errors()[0].source().as_str(), "harness::a");
     assert_eq!(payload.errors()[0].occurrence(), 1);
-    assert_eq!(payload.errors()[1].category(), ErrorCategory::ProviderNetwork);
+    assert_eq!(
+        payload.errors()[1].category(),
+        ErrorCategory::ProviderNetwork
+    );
     assert_eq!(payload.errors()[1].occurrence(), 1);
 }
 

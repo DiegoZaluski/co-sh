@@ -132,8 +132,7 @@ async fn get_json(
     url: &str,
     api_key: &str,
 ) -> Result<serde_json::Value, CostError> {
-    let mut headers: Vec<(&str, String)> =
-        vec![("Authorization", format!("Bearer {api_key}"))];
+    let mut headers: Vec<(&str, String)> = vec![("Authorization", format!("Bearer {api_key}"))];
     if let Some(sid) = params.session_id.as_deref() {
         headers.push(("x-session-id", sid.to_string()));
         headers.push(("x-session-affinity", sid.to_string()));
@@ -279,8 +278,11 @@ async fn xai_cost(
     )
     .await
     {
-        Ok(key_info) => f64_field(&key_info, "remaining_balance")
-            .or_else(|| key_info.get("api_key").and_then(|k| f64_field(k, "remaining_balance"))),
+        Ok(key_info) => f64_field(&key_info, "remaining_balance").or_else(|| {
+            key_info
+                .get("api_key")
+                .and_then(|k| f64_field(k, "remaining_balance"))
+        }),
         Err(_) => None,
     };
     Ok(ProviderCost {
@@ -306,9 +308,8 @@ async fn vercel_cost(
     )
     .await?;
     let session_cost_usd = if session_reported_costs.is_empty() {
-        f64_field(&credits, "total_used").ok_or_else(|| {
-            CostError::CostUnavailable("missing `total_used`".to_string())
-        })?
+        f64_field(&credits, "total_used")
+            .ok_or_else(|| CostError::CostUnavailable("missing `total_used`".to_string()))?
     } else {
         reported_sum(session_reported_costs)
     };
@@ -330,22 +331,14 @@ mod tests {
 
     #[test]
     fn support_matrix_matches_module_docs() {
-        for provider in [
-            "openrouter",
-            "zen",
-            "opencode-go",
-            "charm",
-            "xai",
-            "vercel",
-        ] {
+        for provider in ["openrouter", "zen", "opencode-go", "charm", "xai", "vercel"] {
             assert!(
                 supports_cost_reporting(provider),
                 "{provider} must report costs"
             );
         }
         for provider in [
-            "openai", "claude", "gemini", "groq", "mistral", "deepseek", "together",
-            "ollama",
+            "openai", "claude", "gemini", "groq", "mistral", "deepseek", "together", "ollama",
         ] {
             assert!(
                 !supports_cost_reporting(provider),

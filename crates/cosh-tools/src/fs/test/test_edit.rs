@@ -549,7 +549,10 @@ async fn edit_error_carries_current_anchor_and_line_context() {
         msg.contains("Live content at the referenced line(s)"),
         "got: {msg}"
     );
-    assert!(msg.contains("*1| alpha"), "starred anchor line missing: {msg}");
+    assert!(
+        msg.contains("*1| alpha"),
+        "starred anchor line missing: {msg}"
+    );
     assert!(msg.contains("beta"), "live content missing: {msg}");
 }
 

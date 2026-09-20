@@ -983,8 +983,8 @@ impl RightPanelState {
             }
             if is_pinned(agent, &self.agent_navs, &queues) && s.is_finished() {
                 continue; // a pin suppresses only finished entries; the
-                          // queue's live RUNNING sessions still rank, so
-                          // new work never hides behind the pin
+                // queue's live RUNNING sessions still rank, so
+                // new work never hides behind the pin
             }
             let class = if s.is_finished() { 2 } else { 1 };
             ranked.push((class, idx as u64, idx));
