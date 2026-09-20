@@ -408,3 +408,63 @@ async fn scroll_to_bottom_pill_stays_put_when_the_spinner_appears() {
     );
     assert_eq!(after.x, before.x, "pill must stay centered");
 }
+
+/// Prompt correction uses the same row as the loop spinner, but must yield
+/// completely whenever the agent loop owns that row.
+#[tokio::test]
+async fn prompt_correction_spinner_yields_to_the_agent_loop_spinner() {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    use crate::component::agent_spinner::AgentSpinner;
+    use crate::component::agent_spinner_bass::AgentSpinnerBass;
+
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+
+    let mut app = App::new("/tmp".to_string());
+    let id = crate::session_store::generate_session_id();
+    app.state.add_empty_session(id.clone(), "session".into(), 0);
+    app.state.current_session_id = Some(id);
+    app.prompt_view.input = "correct this text".into();
+    app.prompt_correction_active = true;
+    app.prompt_correction_spinner = Some(AgentSpinner::new("", &app.theme));
+
+    let (w, h) = (80u16, 24u16);
+    app.set_test_size(w, h);
+    let prompt_area = app.compute_prompt_area().unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+    terminal.draw(|frame| app.render(frame, 0.016)).unwrap();
+    let rendered: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(!rendered.contains("correcting"));
+    // The empty session centers the prompt, so the spinner must begin relative
+    // to that narrow prompt area rather than the full session width.
+    let correction_spinner_x = prompt_area.x + 1;
+    let spinner_y = prompt_area.y.saturating_sub(1);
+    assert_ne!(
+        terminal
+            .backend()
+            .buffer()
+            .cell((correction_spinner_x, spinner_y))
+            .map(|cell| cell.symbol()),
+        Some(" ")
+    );
+
+    app.state.status = crate::types::SessionStatus::Working;
+    app.agent_spinner_bass = Some(AgentSpinnerBass::new("Working", &app.theme));
+    terminal.draw(|frame| app.render(frame, 0.016)).unwrap();
+    let rendered: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+
+    assert!(rendered.contains("Working"));
+}

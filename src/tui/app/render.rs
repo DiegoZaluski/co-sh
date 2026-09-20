@@ -63,6 +63,12 @@ impl App {
             || self.state.right_panel.is_auto_scrolling
             || (self.state.status == crate::types::SessionStatus::Working
                 && self.session_view.is_sticky_bottom);
+        // Keep the one-off correction spinner animated whenever the agent
+        // loop is not already using that shared row above the prompt.
+        live = live
+            || (self.prompt_correction_active
+                && !(self.state.status == crate::types::SessionStatus::Working
+                    && self.agent_spinner_bass.is_some()));
         live = live || self.rag_spinner_active();
         live = live || has_active_spinner;
         // A running compaction stopwatch must tick every frame.
@@ -461,12 +467,15 @@ impl App {
                 (footer_y.saturating_sub(prompt_h), 0)
             };
 
-            // Spinner line (1 row when the agent loop is active, hidden when questions are visible)
+            // Both spinners share the row above the prompt. The correction
+            // indicator yields to the agent loop rather than replacing it.
+            let agent_spinner_active = self.state.status == crate::types::SessionStatus::Working
+                && self.agent_spinner_bass.is_some();
+            let correction_spinner_active = self.prompt_correction_active && !agent_spinner_active;
             let spinner_h = u16::from(
                 is_session
                     && !hide_prompt_and_spinner
-                    && self.state.status == crate::types::SessionStatus::Working
-                    && self.agent_spinner_bass.is_some(),
+                    && (agent_spinner_active || correction_spinner_active),
             );
 
             // Long queued messages wrap into several rows; clamp the strip so
@@ -526,9 +535,9 @@ impl App {
 
             let prompt_area = Rect::new(prompt_area_x, prompt_area_y, prompt_area_w, prompt_h);
             let spinner_area = Rect::new(
-                main_area.x + 2,
+                prompt_area_x,
                 spinner_area_y,
-                main_area.width.saturating_sub(4),
+                prompt_area_w,
                 spinner_h,
             );
             let permission_area = Rect::new(
@@ -642,9 +651,12 @@ impl App {
                         .tool_state
                         .advance_tool_spinners(delta_time);
 
-                    // Advance the agent spinner when working
-                    if self.state.status == crate::types::SessionStatus::Working
-                        && let Some(spinner) = &mut self.agent_spinner_bass
+                    // The correction spinner occupies this row only while the
+                    // agent-loop spinner is absent.
+                    if agent_spinner_active && let Some(spinner) = &mut self.agent_spinner_bass {
+                        spinner.advance();
+                    } else if correction_spinner_active
+                        && let Some(spinner) = &mut self.prompt_correction_spinner
                     {
                         spinner.advance();
                     }
@@ -709,9 +721,12 @@ impl App {
                         && !self.permission_dialog.visible
                         && !self.queue_choice_dialog.visible
                     {
-                        // Agent spinner rendered above the prompt when the loop is active
-                        if let Some(spinner) = &self.agent_spinner_bass
-                            && self.state.status == crate::types::SessionStatus::Working
+                        if agent_spinner_active
+                            && let Some(spinner) = &self.agent_spinner_bass
+                        {
+                            spinner.render(buf, spinner_area.x + 1, spinner_area.y);
+                        } else if correction_spinner_active
+                            && let Some(spinner) = &self.prompt_correction_spinner
                         {
                             spinner.render(buf, spinner_area.x + 1, spinner_area.y);
                         }

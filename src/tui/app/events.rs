@@ -919,6 +919,40 @@ impl App {
                     });
                 }
 
+                HarnessEvent::PromptCorrection { original, result } => {
+                    self.prompt_correction_active = false;
+                    self.prompt_correction_spinner = None;
+                    match result {
+                        Ok(corrected) if corrected.trim().is_empty() => {
+                            self.toast_state.show(ToastOptions {
+                                title: Some("Prompt correction".into()),
+                                message:
+                                    "The model returned an empty correction; the prompt was kept."
+                                        .into(),
+                                variant: ToastVariant::Error,
+                                duration_ms: 5000,
+                            });
+                        }
+                        Ok(corrected) if self.prompt_view.input == original => {
+                            self.prompt_view.replace_with_correction(corrected);
+                            self.slash_menu.update(&self.prompt_view.input);
+                        }
+                        Ok(_) => {
+                            // The user edited or sent the draft while the
+                            // request was in flight. Never overwrite newer
+                            // input with an obsolete correction.
+                        }
+                        Err(error) => {
+                            self.toast_state.show(ToastOptions {
+                                title: Some("Prompt correction".into()),
+                                message: format!("Could not correct the prompt: {error}"),
+                                variant: ToastVariant::Error,
+                                duration_ms: 8000,
+                            });
+                        }
+                    }
+                }
+
                 HarnessEvent::Error { message, context } => {
                     self.state.status = SessionStatus::Retry {
                         message: message.clone(),

@@ -184,6 +184,16 @@ pub enum HarnessEvent {
         /// Severity/color variant.
         variant: ToastVariant,
     },
+    /// A one-off, non-streaming correction of the editable prompt. This is
+    /// separate from the agent-loop transcript: its result only replaces the
+    /// prompt draft when that draft still matches `original`.
+    PromptCorrection {
+        /// Prompt text as it was when the correction was requested.
+        original: String,
+        /// Corrected text, or the provider/request error to surface as a
+        /// TUI toast while preserving the original draft.
+        result: Result<String, String>,
+    },
     /// The async title generator produced a semantic title for the session.
     /// The TUI updates the in-memory session and sidebar.
     TitleGenerated {

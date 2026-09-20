@@ -194,6 +194,10 @@ pub struct PromptView {
     pub cursor: Cursor,
     pub sel_start: Option<usize>,
     pub sel_end: Option<usize>,
+    /// `true` while a right-button drag is selecting the whole prompt for
+    /// model-assisted correction. The byte range is shared with ordinary
+    /// copy selection; only its intent and visual treatment differ.
+    pub correction_selection: bool,
     /// Pasted text parts that were compressed into virtual-text placeholders.
     /// Each entry maps a placeholder like `[Pasted ~N lines]` to the original text.
     pub pasted_parts: Vec<PastedPart>,
@@ -222,6 +226,7 @@ impl PromptView {
             cursor: Cursor::new(),
             sel_start: None,
             sel_end: None,
+            correction_selection: false,
             pasted_parts: Vec::new(),
             logo: ChatLogo::new(),
             last_input_snapshot: None,
@@ -327,6 +332,30 @@ impl PromptView {
         self.sel_start.is_some() && self.sel_end.is_some() && self.sel_start != self.sel_end
     }
 
+    /// Start a mouse selection. Both copy and correction use the same mature
+    /// byte-offset selection machinery; `for_correction` only changes the
+    /// highlight and what happens when the mouse button is released.
+    pub fn begin_selection(&mut self, pos: usize, for_correction: bool) {
+        self.cursor_pos = pos;
+        self.sel_start = Some(pos);
+        self.sel_end = Some(pos);
+        self.correction_selection = for_correction;
+    }
+
+    /// A correction request is valid only when the drag covers every byte of
+    /// the visible prompt. Mouse offsets are character boundaries, so this
+    /// exact byte check also safely covers UTF-8 input.
+    pub fn has_complete_correction_selection(&self) -> bool {
+        if !self.correction_selection || self.input.is_empty() {
+            return false;
+        }
+        matches!(
+            (self.sel_start, self.sel_end),
+            (Some(start), Some(end))
+                if start.min(end) == 0 && start.max(end) == self.input.len()
+        )
+    }
+
     pub fn selected_text(&self) -> String {
         match (self.sel_start, self.sel_end) {
             (Some(s), Some(e)) if s != e => {
@@ -344,6 +373,19 @@ impl PromptView {
     pub const fn clear_selection(&mut self) {
         self.sel_start = None;
         self.sel_end = None;
+        self.correction_selection = false;
+    }
+
+    /// Replace the complete editable draft with a successful model
+    /// correction. A correction is plain text, so any compressed-paste
+    /// placeholders from the old draft are no longer applicable.
+    pub fn replace_with_correction(&mut self, corrected: String) {
+        self.input = corrected;
+        self.cursor_pos = self.input.len();
+        self.history_index = -1;
+        self.pasted_parts.clear();
+        self.clear_selection();
+        self.note_activity();
     }
 
     /// Backspace: if the cursor is within or at the end of a pasted virtual-text placeholder,
@@ -972,10 +1014,19 @@ impl PromptView {
                         if cx < input_area.right()
                             && let Some(cell) = buf.cell_mut((cx, ly))
                         {
-                            let fg = cell.fg;
-                            let bg = cell.bg;
-                            cell.set_fg(bg);
-                            cell.set_bg(fg);
+                            if self.correction_selection {
+                                // Use the active theme's accent as a vivid,
+                                // unmistakably different selection intended
+                                // for correction. The prompt's normal copy
+                                // selection remains the familiar inversion.
+                                cell.set_fg(contrast_on(theme.accent));
+                                cell.set_bg(rgba_color(theme.accent));
+                            } else {
+                                let fg = cell.fg;
+                                let bg = cell.bg;
+                                cell.set_fg(bg);
+                                cell.set_bg(fg);
+                            }
                         }
                     }
                 }
@@ -1371,6 +1422,74 @@ mod tests {
         let total = 10;
         assert_eq!(prompt_scroll_top(total - 1, total, window), total - window);
         assert_eq!(prompt_scroll_top(0, total, window), 0);
+    }
+
+    #[test]
+    fn correction_selection_requires_the_complete_prompt() {
+        let mut view = PromptView::new();
+        view.input = "Olá, mundó".into();
+
+        // Selecting all but the final UTF-8 character is still incomplete.
+        view.begin_selection(0, true);
+        let last_char = view.input.floor_char_boundary(view.input.len() - 1);
+        view.sel_end = Some(last_char);
+        assert!(!view.has_complete_correction_selection());
+
+        // Reversing the drag direction must still count as a complete range.
+        view.begin_selection(view.input.len(), true);
+        view.sel_end = Some(0);
+        assert!(view.has_complete_correction_selection());
+
+        view.clear_selection();
+        assert!(!view.correction_selection);
+        assert!(!view.has_complete_correction_selection());
+    }
+
+    #[test]
+    fn successful_correction_replaces_plain_text_and_drops_paste_mappings() {
+        let mut view = PromptView::new();
+        view.handle_paste("first\nsecond\nthird");
+        assert!(!view.pasted_parts.is_empty());
+
+        view.replace_with_correction("First, second, and third.".into());
+
+        assert_eq!(view.input, "First, second, and third.");
+        assert_eq!(view.cursor_pos, view.input.len());
+        assert!(view.pasted_parts.is_empty());
+        assert!(!view.has_selection());
+    }
+
+    #[test]
+    fn correction_selection_uses_the_theme_accent_background() {
+        use crate::theme::ThemeRegistry;
+
+        let theme = ThemeRegistry::new().default_theme().clone();
+        let state = AppState::new();
+        let mut view = PromptView::new();
+        view.input = "abc".into();
+        view.cursor_pos = view.input.len();
+        view.begin_selection(0, true);
+        view.sel_end = Some(view.input.len());
+
+        let area = Rect::new(0, 0, 80, 10);
+        let mut buf = Buffer::empty(area);
+        view.render(
+            &mut buf,
+            area,
+            &state,
+            &theme,
+            &AgentColors::from_theme(&theme),
+            &[],
+            SystemTime::now(),
+            "",
+            "",
+            None,
+            0.0,
+            false,
+        );
+
+        // Prompt text starts three columns inside the left border.
+        assert_eq!(buf[(3, 1)].bg, rgba_color(theme.accent));
     }
 
     #[test]

@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 use cosh::harness::HarnessEvent;
 use cosh_tui::core::lib::rgba::RGBA;
 
+use crate::component::agent_spinner::AgentSpinner;
 use crate::component::agent_spinner_bass::AgentSpinnerBass;
 use crate::component::prompt::PromptView;
 use crate::component::sparkle::SparkleState;
@@ -51,6 +52,7 @@ mod gateway_recommendation;
 mod keys;
 mod mouse;
 mod paste_burst;
+mod prompt_correction;
 mod providers;
 mod rag;
 mod render;
@@ -235,6 +237,12 @@ pub struct App {
     pub keymap: KeyMap,
     pub config: TuiConfig,
     pub toast_state: ToastState,
+    /// Prevent overlapping one-off prompt-correction requests. The original
+    /// draft remains editable while this is true and is never cleared first.
+    prompt_correction_active: bool,
+    /// One-off correction activity indicator. It only renders while the
+    /// agent-loop spinner is not using the shared row above the prompt.
+    prompt_correction_spinner: Option<AgentSpinner>,
     pub slash_menu: crate::ui::slash_menu::SlashMenu,
     pub should_quit: bool,
     pub tokio_handle: Handle,
@@ -607,6 +615,8 @@ impl App {
             keymap: KeyMap::default_vim(),
             config: TuiConfig::default(),
             toast_state: ToastState::new(),
+            prompt_correction_active: false,
+            prompt_correction_spinner: None,
             slash_menu: crate::ui::slash_menu::SlashMenu::new(),
             theme_dialog_original: None,
             model_dialog_original: None,
@@ -719,6 +729,9 @@ impl App {
         self.config.theme_gen += 1;
         // Update the active spinner's colours to reflect the new theme
         if let Some(spinner) = &mut self.agent_spinner_bass {
+            spinner.update_theme(&self.theme);
+        }
+        if let Some(spinner) = &mut self.prompt_correction_spinner {
             spinner.update_theme(&self.theme);
         }
     }
@@ -1237,10 +1250,11 @@ impl App {
         } else {
             0
         };
+        let agent_spinner_active = matches!(self.state.status, SessionStatus::Working)
+            && self.agent_spinner_bass.is_some();
+        let correction_spinner_active = self.prompt_correction_active && !agent_spinner_active;
         let spinner_h = u16::from(
-            matches!(self.state.status, SessionStatus::Working)
-                && self.agent_spinner_bass.is_some()
-                && !self.question_dialog.visible,
+            (agent_spinner_active || correction_spinner_active) && !self.question_dialog.visible,
         );
         let prompt_area_y = footer_y.saturating_sub(prompt_h);
         let spinner_area_y = prompt_area_y.saturating_sub(spinner_h);

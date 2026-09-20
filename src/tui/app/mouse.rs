@@ -16,6 +16,7 @@ use crate::routes::session::queue_choice::QueueTarget;
 use crate::routes::session::right_panel::should_show_right_panel;
 use crate::routes::session::sidebar::SidebarAction;
 use crate::ui::dialogs::{DialogAction, DialogType};
+use crate::ui::toast::{ToastOptions, ToastVariant};
 use crate::util::selection;
 
 impl App {
@@ -131,9 +132,7 @@ impl App {
                     // over from the right panel.
                     self.state.right_panel.panel_focus = None;
                     if let Some(pos) = self.prompt_view.char_pos_at_mouse(x, y, prompt_area) {
-                        self.prompt_view.cursor_pos = pos;
-                        self.prompt_view.sel_start = Some(pos);
-                        self.prompt_view.sel_end = Some(pos);
+                        self.prompt_view.begin_selection(pos, false);
                     }
                     return Ok(true);
                 }
@@ -206,6 +205,25 @@ impl App {
                     let content_y = (y as i32) - vp_top + self.session_view.mouse_down_scroll_y;
                     self.session_view.selection_anchor_content_y = content_y;
                     self.session_view.selection_focus_content_y = content_y;
+                }
+            }
+            (MouseEventType::Down, MouseButton::Right) => {
+                // A right-button drag owns only the prompt's correction
+                // selection. It deliberately does not enter the ordinary
+                // session/right-panel copy-selection paths below.
+                if matches!(self.mode(), AppMode::Session)
+                    && let Some(prompt_area) = self.compute_prompt_area()
+                    && x >= prompt_area.x
+                    && x < prompt_area.right()
+                    && y >= prompt_area.y
+                    && y < prompt_area.bottom()
+                    && let Some(pos) = self.prompt_view.char_pos_at_mouse(x, y, prompt_area)
+                {
+                    self.prompt_view.focus();
+                    self.prompt_view.note_activity();
+                    self.state.right_panel.panel_focus = None;
+                    self.prompt_view.begin_selection(pos, true);
+                    return Ok(true);
                 }
             }
             (MouseEventType::Drag, MouseButton::Left) => {
@@ -284,6 +302,19 @@ impl App {
                     if matches!(self.mode(), AppMode::Session) && !is_prompt_drag {
                         self.session_view.update_auto_scroll(x, y);
                     }
+                }
+                return Ok(true);
+            }
+            (MouseEventType::Drag, MouseButton::Right) => {
+                if matches!(self.mode(), AppMode::Session)
+                    && self.prompt_view.correction_selection
+                    && let Some(prompt_area) = self.compute_prompt_area()
+                    && y >= prompt_area.y
+                    && y < prompt_area.bottom()
+                    && let Some(pos) = self.prompt_view.char_pos_at_mouse(x, y, prompt_area)
+                {
+                    self.prompt_view.cursor_pos = pos;
+                    self.prompt_view.sel_end = Some(pos);
                 }
                 return Ok(true);
             }
@@ -414,6 +445,24 @@ impl App {
                 // section leaves a stale single-cell selection highlighted;
                 // clear it (drag-copy paths already returned above).
                 self.state.right_panel.cancel_selection();
+            }
+            (MouseEventType::Up, MouseButton::Right) if self.prompt_view.correction_selection => {
+                // The model sees a correction request only after the entire
+                // prompt was selected. Partial right drags do not write to the
+                // clipboard, issue a request, or mutate the prompt.
+                let is_complete = self.prompt_view.has_complete_correction_selection();
+                self.prompt_view.clear_selection();
+                if is_complete {
+                    self.start_prompt_correction();
+                } else {
+                    self.toast_state.show(ToastOptions {
+                        title: Some("Operation cancelled".into()),
+                        message: "Select the entire prompt to correct it.".into(),
+                        variant: ToastVariant::Warning,
+                        duration_ms: 3000,
+                    });
+                }
+                return Ok(true);
             }
             _ => {}
         }
