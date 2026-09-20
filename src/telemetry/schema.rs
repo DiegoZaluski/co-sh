@@ -22,6 +22,7 @@ pub enum EventType {
     Error,
     Crash,
     Update,
+    Uninstall,
 }
 
 impl EventType {
@@ -33,6 +34,7 @@ impl EventType {
             EventType::Error => "error",
             EventType::Crash => "crash",
             EventType::Update => "update",
+            EventType::Uninstall => "uninstall",
         }
     }
 }
