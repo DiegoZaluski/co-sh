@@ -121,6 +121,7 @@ fn looks_like_context_window(body: &str) -> bool {
         "maximum context",
         "context window",
         "context_window",
+        "context limit",
         "prompt is too long",
         "too many tokens",
         "token limit",
@@ -136,15 +137,53 @@ fn looks_like_context_window(body: &str) -> bool {
     MARKERS.iter().any(|m| lower.contains(m))
 }
 
+/// Whether the number ending at byte offset `i` is immediately followed by a
+/// BYTE unit (`262144 bytes`, `256KB`, `2mb`…). Such numbers are payload or
+/// quota sizes, never token counts: reading a byte size as a token window
+/// once collapsed a 1M-token model's budget to ~50k (262,144 B ≈ 50k tokens,
+/// then the effective-window floor clamped it to 20%).
+fn is_byte_unit(lower: &str, i: usize) -> bool {
+    let bytes = lower.as_bytes();
+    let mut i = i;
+    while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b':') {
+        i += 1;
+    }
+    let Some(rest) = lower.get(i..) else {
+        return false;
+    };
+    for unit in ["bytes", "byte", "kb", "mb", "gb", "tb", "b"] {
+        if let Some(after) = rest.strip_prefix(unit) {
+            // A bare `b` only counts at a word boundary: `262144b` is a byte
+            // size, `262144base64` is not.
+            if unit == "b"
+                && after
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_alphanumeric() || c == '_')
+            {
+                continue;
+            }
+            return true;
+        }
+    }
+    false
+}
+
 /// Parse the model's context-window size from an error body.
 ///
-/// Heuristic: the SMALLEST token-sized number (>= 1000) near a size keyword
-/// ("maximum", "limit", "window", "context", "max") is the window — the
-/// requested/used count is usually larger and/or farther away (OpenAI:
-/// "maximum context length is 128000 ... resulted in 150000"; Anthropic:
-/// "18000 tokens > 16000 maximum"). Falls back to the largest number in the
-/// whole body when no keyword is present. Used only as a local-elimination
-/// hint, never as a hard contract.
+/// Strategy, most to least specific:
+/// 1. The overflow inequality `requested > window` — the RIGHT side of `>` is
+///    the provider's limit (Anthropic: `18000 tokens > 16000 maximum`;
+///    combined limit: `680001 + 320000 > 1000000 tokens`). This must win over
+///    a numeric-min heuristic: min() over a combined-limit body reads the
+///    `max_tokens` reservation (320000) as the window.
+/// 2. Explicit limit phrasings ("maximum context length is N", "maximum
+///    number of tokens allowed (N)", …).
+/// 3. Legacy heuristic: the SMALLEST token-sized number (>= 1000) near a size
+///    keyword. Falls back to the largest token-sized number in the body.
+///
+/// Every number is byte-unit filtered (`is_byte_unit`) and used only as a
+/// local-elimination hint, never as a hard contract.
 fn parse_window_tokens(body: &str) -> Option<usize> {
     let lower = body.to_lowercase();
     let bytes = lower.as_bytes();
@@ -154,11 +193,23 @@ fn parse_window_tokens(body: &str) -> Option<usize> {
         while i < range.end.min(bytes.len()) {
             if bytes[i].is_ascii_digit() {
                 let start = i;
-                while i < range.end.min(bytes.len()) && bytes[i].is_ascii_digit() {
-                    i += 1;
+                while i < range.end.min(bytes.len()) {
+                    if bytes[i].is_ascii_digit() {
+                        i += 1;
+                    } else if bytes[i] == b','
+                        && bytes
+                            .get(i + 1..i + 4)
+                            .is_some_and(|g| g.iter().all(|b| b.is_ascii_digit()))
+                    {
+                        // Comma thousands group: `1,048,576` is one number.
+                        i += 4;
+                    } else {
+                        break;
+                    }
                 }
-                if let Ok(n) = lower[start..i].parse::<usize>()
+                if let Ok(n) = lower[start..i].replace(',', "").parse::<usize>()
                     && n >= 1000
+                    && !is_byte_unit(&lower, i)
                 {
                     out.push(n);
                 }
@@ -169,6 +220,32 @@ fn parse_window_tokens(body: &str) -> Option<usize> {
         out
     };
 
+    // 1) The overflow inequality: the right side of `>` is the limit.
+    if let Some(gt) = lower.find('>')
+        && let Some(&w) = numbers_in(gt + 1..bytes.len()).first()
+    {
+        return Some(w);
+    }
+
+    // 2) Explicit limit phrasings — the next number after the phrase.
+    const WINDOW_PATTERNS: &[&str] = &[
+        "maximum context length is",
+        "maximum number of tokens allowed",
+        "max input tokens of",
+        "context length is",
+        "tokens allowed",
+        "maximum of",
+    ];
+    for pat in WINDOW_PATTERNS {
+        if let Some(pos) = lower.find(pat) {
+            let hi = (pos + pat.len() + 60).min(bytes.len());
+            if let Some(&w) = numbers_in(pos + pat.len()..hi).first() {
+                return Some(w);
+            }
+        }
+    }
+
+    // 3) Legacy keyword-window heuristic.
     const KEYWORDS: &[&str] = &["maximum", "limit", "window", "context", "max input", "max"];
     let mut candidates: Vec<usize> = Vec::new();
     for kw in KEYWORDS {
@@ -262,6 +339,64 @@ mod tests {
             )
             .is_context_window()
         );
+    }
+
+    // ── REGRESSION: 1M model budget collapsed to ~50K ──────────────────────
+    // A 413-style body mixes a BYTE payload size with a context marker. The
+    // payload size (262144 B ≈ 50–60k tokens) was parsed as a TOKEN window,
+    // and effective_context_window clamped it to 20% (≈52.7k) — collapsing a
+    // 1M-token model's budget to ~50K. A byte size is never a token count.
+
+    #[test]
+    fn byte_payload_sizes_are_never_parsed_as_token_windows() {
+        let err = ConnectorError::classify_http(
+            413,
+            "request body too large: 262144 bytes exceeds the maximum context length".into(),
+        );
+        assert!(err.is_context_window(), "the marker still classifies 413");
+        let ConnectorError::ContextWindowExceeded { window_tokens, .. } = err else {
+            panic!("expected ContextWindowExceeded");
+        };
+        assert_eq!(
+            window_tokens, None,
+            "262144 is a BYTE payload size (~50k tokens), not a token window — \
+             parsing it shrank a 1M model to a ~52k budget"
+        );
+    }
+
+    #[test]
+    fn byte_units_in_any_position_are_ignored() {
+        // KB/MB-suffixed sizes must not leak in as token counts either.
+        for body in [
+            "request body too large: 256KB exceeds the maximum context length",
+            "payload of 2.5MB rejected: maximum context length exceeded",
+        ] {
+            let err = ConnectorError::classify_http(413, body.to_string());
+            let ConnectorError::ContextWindowExceeded { window_tokens, .. } = err else {
+                panic!("expected ContextWindowExceeded for {body}");
+            };
+            assert_eq!(window_tokens, None, "byte size leaked in from: {body}");
+        }
+    }
+
+    #[test]
+    fn combined_input_output_limit_bodies_report_the_full_window() {
+        // Anthropic's combined-limit body reports input + max_tokens
+        // reservation vs the limit. min() over all numbers would pick the
+        // max_tokens reservation (320000) — the window is 1M.
+        let err = ConnectorError::classify_http(
+            400,
+            "input length and `max_tokens` exceed context limit: 680001 + 320000 > 1000000 tokens"
+                .into(),
+        );
+        assert!(
+            err.is_context_window(),
+            "the combined-limit body must be classified"
+        );
+        let ConnectorError::ContextWindowExceeded { window_tokens, .. } = err else {
+            panic!("expected ContextWindowExceeded");
+        };
+        assert_eq!(window_tokens, Some(1_000_000));
     }
 
     #[test]
