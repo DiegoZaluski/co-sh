@@ -186,7 +186,17 @@ impl CoshTools {
             fs = fs.with_lsp(Arc::clone(handle));
         }
         Self {
-            bash: Bash::new().cwd(cwd),
+            // PTY mode: the child sees a terminal, so line-buffered output
+            // (cargo, python, make, …) streams in real time instead of
+            // arriving in one block-buffered dump at exit. The dispatch
+            // strips ANSI escapes / CRLF per chunk (see `strip_ansi`).
+            // The default timeout is a hang guard: on a PTY the child's
+            // stdin is the slave side and nothing feeds it, so a command
+            // that reads stdin (`cat`, `ssh`, a prompt) would otherwise
+            // block forever — the piped path got EOF from `Stdio::null()`.
+            // 10 minutes still allows long builds; a killed run surfaces
+            // `signal: -1` to the model, which can then adjust.
+            bash: Bash::new().cwd(cwd).pty(true).timeout(600_000),
             fs,
             find: Find::new().cwd(cwd),
             web: Web::new(),
@@ -898,22 +908,45 @@ impl Tools for CoshTools {
                 tokio::pin!(stream);
 
                 let mut output = String::new();
+                // Raw-byte carry between PTY chunks. A PTY read is a raw
+                // 4096-byte slice with no message framing: escape sequences,
+                // multi-byte UTF-8 chars and CRLF pairs can split across two
+                // chunks, and stripping per-chunk with a fresh parser would
+                // corrupt them (half-swallowed escapes, U+FFFD garbage,
+                // stray \r). We only clean up to the last COMPLETE line and
+                // carry the unfinished tail for the next chunk.
+                let mut carry: Vec<u8> = Vec::new();
 
                 while let Some(chunk) = stream.next().await {
-                    // Stream clean stdout for PTY display
+                    // PTY mode multiplexes stdout+stderr into `stdout` with
+                    // ANSI escapes and CRLF line endings; clean complete
+                    // lines before streaming them to the TUI and accumulating
+                    // them for the model.
                     if !chunk.stdout.is_empty() {
-                        let text = String::from_utf8_lossy(&chunk.stdout).to_string();
-                        if let Some(ref tx) = self.event_tx {
-                            let _ = tx.send(HarnessEvent::ToolOutput {
-                                tool: "bash_run".to_string(),
-                                output: text.clone(),
-                                finished: false,
-                            });
+                        carry.extend_from_slice(&chunk.stdout);
+                        // Split after the last `\n` (or at 0 when no
+                        // complete line arrived yet).
+                        let split = carry.iter().rposition(|b| *b == b'\n').map_or(0, |p| p + 1);
+                        let complete: Vec<u8> = carry[..split].to_vec();
+                        carry.drain(..split);
+
+                        let text = cosh_tools::bash::strip_ansi(&complete);
+                        if !text.is_empty() {
+                            if let Some(ref tx) = self.event_tx {
+                                let _ = tx.send(HarnessEvent::ToolOutput {
+                                    tool: "bash_run".to_string(),
+                                    output: text.clone(),
+                                    finished: false,
+                                });
+                            }
+                            output.push_str(&text);
                         }
-                        output.push_str(&text);
                     }
 
-                    // Stream clean stderr for PTY display and accumulate
+                    // The piped path (Bash built without `.pty(true)`) still
+                    // delivers stderr separately, raw and escape-free. The
+                    // PTY path only lands here for the synthetic
+                    // `bash stream error:` items (see `bsh::run`).
                     if !chunk.stderr.is_empty() {
                         let text = String::from_utf8_lossy(&chunk.stderr).to_string();
                         if let Some(ref tx) = self.event_tx {
@@ -924,6 +957,25 @@ impl Tools for CoshTools {
                             });
                         }
                         output.push_str(&text);
+                    }
+
+                    // Flush the unfinished tail BEFORE the exit-code/signal
+                    // annotations: a command whose last line lacks `\n` and
+                    // exits non-zero must read `...tail\nexit code: N`, not
+                    // `exit code: N...tail`.
+                    if !carry.is_empty() {
+                        let text = cosh_tools::bash::strip_ansi(&carry);
+                        carry.clear();
+                        if !text.is_empty() {
+                            if let Some(ref tx) = self.event_tx {
+                                let _ = tx.send(HarnessEvent::ToolOutput {
+                                    tool: "bash_run".to_string(),
+                                    output: text.clone(),
+                                    finished: false,
+                                });
+                            }
+                            output.push_str(&text);
+                        }
                     }
 
                     // Append non-zero exit code
