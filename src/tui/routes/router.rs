@@ -645,6 +645,14 @@ impl RouterView {
             return None;
         }
 
+        // Only the prompt-corrector tab owns its rows. On the auto tab every
+        // section rect collapses to `Rect::ZERO` (x = 0, width = 0), so the
+        // column checks below would match any x and consume clicks that
+        // belong to the automatic lists, leaving their boxes without focus.
+        if self.active_tab != RouterTab::PromptCorrector {
+            return None;
+        }
+
         // Tab bar spans the full width: a click on a title switches tabs.
         if mouse.y >= layout.tab_bar.y && mouse.y < layout.tab_bar.bottom() {
             let clicked = self.tab_at(&layout, mouse.x);
@@ -1388,6 +1396,35 @@ mod tests {
         let layout = view.compute_layout(area);
         let _ = view.handle_mouse(&[], &click(auto_x, layout.tab_bar.y + 1), area);
         assert_eq!(view.active_tab, RouterTab::Auto);
+    }
+
+    #[test]
+    fn auto_tab_clicks_focus_the_automatic_boxes() {
+        // Regression: on the auto tab the prompt-corrector handler used to
+        // consume every body click (the collapsed section rects sit at x=0,
+        // so the fallback-column check matched any x), and the automatic
+        // boxes never took focus.
+        let mut view = RouterView::new();
+        let area = Rect::new(0, 0, 100, 40);
+        let layout = view.compute_layout(area);
+        let body_y = layout.automatic_models.y + 6;
+
+        // A body click on the auto tab must not be swallowed by the
+        // prompt-corrector handler.
+        let right_x = layout.automatic_fallbacks.x + 2;
+        assert!(
+            view.handle_prompt_corrector_mouse(&click(right_x, body_y), area)
+                .is_none()
+        );
+        // And the automatic router takes the click: the right (fallbacks)
+        // box gains focus.
+        assert!(view.handle_mouse(&[], &click(right_x, body_y), area));
+        assert!(matches!(view.focus, FocusTarget::Fallbacks));
+
+        // The left (models) box gains focus the same way.
+        let left_x = layout.automatic_models.x + 2;
+        assert!(view.handle_mouse(&[], &click(left_x, body_y), area));
+        assert!(matches!(view.focus, FocusTarget::Models));
     }
 
     #[test]
