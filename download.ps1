@@ -124,6 +124,17 @@ if (Test-Path $DEST) {
 }
 Move-Item -Path $SOURCE -Destination $DEST -Force
 
+# The standalone uninstaller ships next to the main binary (cosh::uninstall
+# deletes BOTH images from the same directory).
+$UNINSTALL_SOURCE = Join-Path $EXTRACT_DIR "cosh-uninstall.exe"
+if (Test-Path $UNINSTALL_SOURCE) {
+    $UNINSTALL_DEST = Join-Path $env:COSH_BIN_DIR "cosh-uninstall.exe"
+    if (Test-Path $UNINSTALL_DEST) {
+        Remove-Item -Path $UNINSTALL_DEST -Force
+    }
+    Move-Item -Path $UNINSTALL_SOURCE -Destination $UNINSTALL_DEST -Force
+}
+
 # Copy runtime DLLs if any
 $DLL_FILES = Get-ChildItem -Path $EXTRACT_DIR -Filter "*.dll" -ErrorAction SilentlyContinue
 foreach ($dll in $DLL_FILES) {
