@@ -316,6 +316,7 @@ fn build_messages(prompt: &str, system_prompt: Option<&str>) -> Vec<ApiChatMessa
             tool_calls: None,
             tool_call_id: None,
             thinking_blocks: None,
+            images: None,
         });
     }
     messages.push(pub_user_message(prompt));

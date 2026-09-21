@@ -13,6 +13,7 @@ pub mod question;
 pub mod recall;
 pub mod skills;
 pub mod subagent;
+pub mod computer;
 pub mod util;
 pub mod web;
 

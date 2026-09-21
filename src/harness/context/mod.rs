@@ -444,6 +444,7 @@ fn assistant_message(text: &str) -> ChatMessage {
         tool_calls: None,
         tool_call_id: None,
         thinking_blocks: None,
+        images: None,
     }
 }
 
