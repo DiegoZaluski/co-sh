@@ -136,6 +136,9 @@ version = "5"
 [dependencies.notify-rust]
 version = "4"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
+
 [dependencies.pulldown-cmark]
 version = "0.13"
 
