@@ -76,6 +76,83 @@ fn primary_contrast_fg(theme: &Theme) -> Color {
     }
 }
 
+/// Whether a click on a list row lands on the row's visible text. Rows are
+/// rendered from `row_x` one cell per char, so the text occupies exactly
+/// `text.chars().count()` columns; a click past it hits the row's empty
+/// trailing space and means a focus switch only — never a selection. The
+/// two-char selection prefix ("🞴 " / "  ") must be included in `text` so
+/// the length matches what the render drew.
+fn click_lands_on_text(mouse_x: u16, row_x: u16, text: &str) -> bool {
+    mouse_x >= row_x && ((mouse_x - row_x) as usize) < text.chars().count()
+}
+
+// ── Row text builders ────────────────────────────────────────────
+// Every list row's visible text is built here and ONLY here: the render
+// draws these strings and the mouse hit-test measures a click's column
+// against their exact length, so the two sides must never drift.
+
+/// The two-column marker every row starts with: the 🞴 selection
+/// indicator or a same-width blank.
+fn row_marker(selected: bool) -> &'static str {
+    if selected { "🞴 " } else { "  " }
+}
+
+/// `provider  model` rows — shared by the automatic list and the
+/// correction tab's model catalog.
+fn model_row_text(marker: &str, entry: &ModelEntry) -> String {
+    format!("{marker}{}  {}", entry.provider, entry.model)
+}
+
+fn auto_fallback_row_text(marker: &str, position: usize, entry: &FallbackEntry) -> String {
+    format!(
+        "{marker}{}.  {}  {}",
+        position + 1,
+        entry.provider,
+        entry.model
+    )
+}
+
+fn acp_row_text(marker: &str, agent_name: &str, detected: bool) -> String {
+    let availability = if detected { "" } else { " (not detected)" };
+    format!("{marker}{agent_name}{availability}")
+}
+
+fn prompt_fallback_row_text(
+    marker: &str,
+    position: usize,
+    entry: &PromptCorrectorFallback,
+) -> String {
+    let number = position + 1;
+    match entry {
+        PromptCorrectorFallback::Model { provider, model } => {
+            format!("{marker}{number}. {provider}  {model}")
+        }
+        PromptCorrectorFallback::Acp { agent } => format!("{marker}{number}. ACP  {agent}"),
+    }
+}
+
+/// Resolve a click inside a scrolled list to the absolute entry index.
+/// `None` when the click is above the rows or past the rendered rows
+/// (empty space under a short list) — such clicks mean "focus the box"
+/// only, never a selection.
+fn clicked_row_index(
+    mouse_y: u16,
+    list_top: u16,
+    visible_rows: usize,
+    total: usize,
+    scroll: usize,
+) -> Option<usize> {
+    if mouse_y < list_top {
+        return None;
+    }
+    let row = (mouse_y - list_top) as usize;
+    if row >= visible_rows {
+        return None;
+    }
+    let idx = scroll + row;
+    (idx < total).then_some(idx)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RouterTab {
     /// Agent-loop fallback chain (the original router screen).
@@ -637,9 +714,13 @@ impl RouterView {
 
     /// Handle clicks on the prompt-corrector tab. Clicking a tab title
     /// switches sections; the ACP rows toggle agents into the chain and the
-    /// fallback rows select entries for removal.
+    /// fallback rows select entries for removal. Selections trigger only
+    /// when the click lands on the row's visible text (`models` is needed
+    /// to resolve the model chooser rows); clicks past the text are plain
+    /// focus switches.
     pub fn handle_prompt_corrector_mouse(
         &mut self,
+        models: &[ModelEntry],
         mouse: &MouseEvent,
         area: Rect,
     ) -> Option<PromptCorrectorAction> {
@@ -670,14 +751,27 @@ impl RouterView {
         }
 
         // Left column: the ACP chooser list first, then the model chooser.
+        let choice_x = layout.prompt_choices.x + SIDE_PADDING / 2;
         if mouse.x >= layout.prompt_choices.x && mouse.x < layout.prompt_choices.right() {
             if mouse.y >= layout.prompt_acp.y && mouse.y < layout.prompt_acp.bottom() {
-                let list_top = layout.prompt_acp.y + ACP_LIST_TOP_OFFSET;
-                if mouse.y >= list_top {
-                    let agent_index = (mouse.y - list_top) as usize;
-                    let agents = self.acp_agents_ordered();
-                    if agent_index < agents.len() {
-                        self.focus = FocusTarget::PromptCorrectorAcp;
+                let agents = self.acp_agents_ordered();
+                if let Some(agent_index) = clicked_row_index(
+                    mouse.y,
+                    layout.prompt_acp.y + ACP_LIST_TOP_OFFSET,
+                    agents.len(),
+                    agents.len(),
+                    0,
+                ) {
+                    self.focus = FocusTarget::PromptCorrectorAcp;
+                    // Selecting only on the row's text: past it the
+                    // click is a focus switch, not a chain toggle.
+                    let agent = agents[agent_index];
+                    let text = acp_row_text(
+                        "  ",
+                        agent.name,
+                        cosh_tools::subagent::acp::detect_installed().contains(&agent.name),
+                    );
+                    if click_lands_on_text(mouse.x, choice_x, &text) {
                         self.selected_acp_agent = agent_index;
                         if self.toggle_selected_acp_agent() {
                             return Some(PromptCorrectorAction::Changed);
@@ -688,6 +782,31 @@ impl RouterView {
             }
             if mouse.y >= layout.prompt_models.y && mouse.y < layout.prompt_models.bottom() {
                 self.focus = FocusTarget::PromptCorrectorModels;
+                let filtered = self.filtered_prompt_models(models);
+                let visible = layout
+                    .prompt_models
+                    .height
+                    .saturating_sub(PROMPT_CORRECTOR_CHOOSER_TOP_OFFSET)
+                    as usize;
+                if let Some(idx) = clicked_row_index(
+                    mouse.y,
+                    layout.prompt_models.y + PROMPT_CORRECTOR_CHOOSER_TOP_OFFSET,
+                    visible,
+                    filtered.len(),
+                    self.prompt_model_selection.scroll_offset,
+                ) {
+                    // Same selection rule as every other list: the click
+                    // must land on the rendered row text. Within it, the
+                    // click mirrors Enter — the model toggles into the
+                    // correction route.
+                    let text = model_row_text("  ", &filtered[idx]);
+                    if click_lands_on_text(mouse.x, choice_x, &text) {
+                        self.prompt_model_selection.selected_index = idx;
+                        if self.toggle_selected_prompt_corrector_model(models) {
+                            return Some(PromptCorrectorAction::Changed);
+                        }
+                    }
+                }
                 return Some(PromptCorrectorAction::Consumed);
             }
             return Some(PromptCorrectorAction::Consumed);
@@ -699,11 +818,20 @@ impl RouterView {
 
         let list_top = layout.prompt_fallbacks.y + 4;
         let visible_rows = layout.prompt_fallbacks.height.saturating_sub(5) as usize;
-        let visible = self.prompt_corrector_fallbacks.len().min(visible_rows);
-        if mouse.y >= list_top && (mouse.y - list_top) < visible as u16 {
+        if let Some(idx) = clicked_row_index(
+            mouse.y,
+            list_top,
+            self.prompt_corrector_fallbacks.len().min(visible_rows),
+            self.prompt_corrector_fallbacks.len(),
+            0,
+        ) {
             self.focus = FocusTarget::PromptCorrectorFallbacks;
-            self.selected_prompt_corrector_fallback = (mouse.y - list_top) as usize;
-            return Some(PromptCorrectorAction::Selected);
+            let text = prompt_fallback_row_text("  ", idx, &self.prompt_corrector_fallbacks[idx]);
+            if click_lands_on_text(mouse.x, layout.prompt_fallbacks.x + SIDE_PADDING / 2, &text) {
+                self.selected_prompt_corrector_fallback = idx;
+                return Some(PromptCorrectorAction::Selected);
+            }
+            return Some(PromptCorrectorAction::Consumed);
         }
         Some(PromptCorrectorAction::Consumed)
     }
@@ -742,24 +870,29 @@ impl RouterView {
             return false;
         }
 
+        let text_pad = SIDE_PADDING / 2;
+
         if mouse.x >= left_area.x && mouse.x < left_area.right() {
             self.focus = FocusTarget::Models;
             let filtered = self.filtered_models(models);
-            if !filtered.is_empty() {
-                let list_top = left_area.y + MODEL_LIST_TOP_OFFSET;
-                let max_visible = (work_h.saturating_sub(MODEL_LIST_TOP_OFFSET + 1)) as usize;
-                let actual_visible = max_visible.min(filtered.len());
-                let list_bottom = list_top + actual_visible as u16;
-
-                // Only process click if it's within the actual model list area.
-                if mouse.y >= list_top && mouse.y < list_bottom {
-                    let row = (mouse.y - list_top) as usize;
-                    let idx = self.selection.scroll_offset + row;
-                    if idx < filtered.len() {
-                        self.selection.selected_index = idx;
-                        self.add_selected_to_fallback(models);
-                        return true;
-                    }
+            let visible =
+                (work_h.saturating_sub(MODEL_LIST_TOP_OFFSET + 1) as usize).min(filtered.len());
+            if let Some(idx) = clicked_row_index(
+                mouse.y,
+                left_area.y + MODEL_LIST_TOP_OFFSET,
+                visible,
+                filtered.len(),
+                self.selection.scroll_offset,
+            ) {
+                // Selecting (which adds to the fallback chain) only when
+                // the click lands on the row's rendered text; past it the
+                // click is a directed focus switch and must not touch the
+                // selection or the chain.
+                let entry = filtered[idx];
+                let text = model_row_text("  ", entry);
+                if click_lands_on_text(mouse.x, left_area.x + text_pad, &text) {
+                    self.selection.selected_index = idx;
+                    self.add_selected_to_fallback(models);
                 }
             }
             return true;
@@ -767,20 +900,21 @@ impl RouterView {
 
         if mouse.x >= right_area.x && mouse.x < right_area.right() {
             self.focus = FocusTarget::Fallbacks;
-            if !self.fallbacks.is_empty() {
-                let list_top = right_area.y + FALLBACK_LIST_TOP_OFFSET;
-                let max_visible = (work_h.saturating_sub(FALLBACK_LIST_TOP_OFFSET + 1)) as usize;
-                let actual_visible = max_visible.min(self.fallbacks.len());
-                let list_bottom = list_top + actual_visible as u16;
-
-                // Only process click if it's within the actual fallback list area.
-                if mouse.y >= list_top && mouse.y < list_bottom {
-                    let row = (mouse.y - list_top) as usize;
-                    let idx = self.fallback_scroll_offset + row;
-                    if idx < self.fallbacks.len() {
-                        self.selected_fallback = idx;
-                        return true;
-                    }
+            let visible = (work_h.saturating_sub(FALLBACK_LIST_TOP_OFFSET + 1) as usize)
+                .min(self.fallbacks.len());
+            if let Some(idx) = clicked_row_index(
+                mouse.y,
+                right_area.y + FALLBACK_LIST_TOP_OFFSET,
+                visible,
+                self.fallbacks.len(),
+                self.fallback_scroll_offset,
+            ) {
+                // Same text-boundary rule as the models list: only the
+                // row's string selects; empty row space just moves focus
+                // to the box.
+                let text = auto_fallback_row_text("  ", idx, &self.fallbacks[idx]);
+                if click_lands_on_text(mouse.x, right_area.x + text_pad, &text) {
+                    self.selected_fallback = idx;
                 }
             }
             return true;
@@ -886,11 +1020,6 @@ impl RouterView {
                 break;
             }
             let selected = acp_focused && index == self.selected_acp_agent;
-            let availability = if installed.contains(&agent.name) {
-                ""
-            } else {
-                " (not detected)"
-            };
             // Standard TUI selection: 🞴 marker + fg color only, never a
             // background wash. The section fill rides along so the text
             // never punches a hole in the `background_element` band.
@@ -900,15 +1029,12 @@ impl RouterView {
                 Style::default().fg(fg)
             }
             .patch(acp_row_bg);
-            let prefix = if selected { "🞴 " } else { "  " };
-            draw_text_line(
-                buf,
-                &format!("{prefix}{}{availability}", agent.name),
-                choice_x,
-                y,
-                choice_w,
-                style,
+            let text = acp_row_text(
+                row_marker(selected),
+                agent.name,
+                installed.contains(&agent.name),
             );
+            draw_text_line(buf, &text, choice_x, y, choice_w, style);
         }
 
         // ── Model chooser (below the ACP list) ──
@@ -976,15 +1102,8 @@ impl RouterView {
                     } else {
                         Style::default().fg(fg)
                     };
-                    let prefix = if selected { "🞴 " } else { "  " };
-                    draw_text_line(
-                        buf,
-                        &format!("{prefix}{}  {}", entry.provider, entry.model),
-                        choice_x,
-                        y,
-                        choice_w,
-                        style,
-                    );
+                    let text = model_row_text(row_marker(selected), entry);
+                    draw_text_line(buf, &text, choice_x, y, choice_w, style);
                 }
             }
         }
@@ -1049,24 +1168,10 @@ impl RouterView {
             } else {
                 Style::default().fg(fg)
             };
-            let text = match entry {
-                PromptCorrectorFallback::Model { provider, model } => {
-                    format!("{provider}  {model}")
-                }
-                PromptCorrectorFallback::Acp { agent } => format!("ACP  {agent}"),
-            };
             // Order still matters in a chain, so the number stays — but the
             // row highlight is the standard 🞴 marker, no background wash.
-            let number = format!("{}.", index + 1);
-            let prefix = if selected { "🞴 " } else { "  " };
-            draw_text_line(
-                buf,
-                &format!("{prefix}{number} {text}"),
-                fallback_x,
-                y,
-                fallback_w,
-                style,
-            );
+            let text = prompt_fallback_row_text(row_marker(selected), index, entry);
+            draw_text_line(buf, &text, fallback_x, y, fallback_w, style);
         }
     }
 
@@ -1169,9 +1274,8 @@ impl RouterView {
                 } else {
                     Style::default().fg(fg)
                 };
-                let prefix = if is_selected { "🞴 " } else { "  " };
 
-                let text = format!("{prefix}{}  {}", entry.provider, entry.model);
+                let text = model_row_text(row_marker(is_selected), entry);
                 draw_text_line(buf, &text, list_x, y, list_w, style);
             }
         }
@@ -1232,10 +1336,8 @@ impl RouterView {
                 } else {
                     Style::default().fg(fg)
                 };
-                let prefix = if is_selected { "🞴 " } else { "  " };
 
-                let num_str = format!("{}.", i + 1);
-                let entry_text = format!("{prefix}{num_str}  {}  {}", fb.provider, fb.model);
+                let entry_text = auto_fallback_row_text(row_marker(is_selected), i, fb);
                 draw_text_line(buf, &entry_text, fb_list_x, y, fb_list_w, style);
             }
         }
@@ -1420,7 +1522,7 @@ mod tests {
         let layout = view.compute_layout(area);
         let auto_x = layout.tab_bar.x + TAB_BAR_LEFT_PAD + 2; // inside " Fallback Auto "
         assert!(matches!(
-            view.handle_prompt_corrector_mouse(&click(auto_x, layout.tab_bar.y), area),
+            view.handle_prompt_corrector_mouse(&[], &click(auto_x, layout.tab_bar.y), area),
             Some(PromptCorrectorAction::Consumed)
         ));
         assert_eq!(view.active_tab, RouterTab::Auto);
@@ -1448,7 +1550,7 @@ mod tests {
         // prompt-corrector handler.
         let right_x = layout.automatic_fallbacks.x + 2;
         assert!(
-            view.handle_prompt_corrector_mouse(&click(right_x, body_y), area)
+            view.handle_prompt_corrector_mouse(&[], &click(right_x, body_y), area)
                 .is_none()
         );
         // And the automatic router takes the click: the right (fallbacks)
@@ -1471,11 +1573,142 @@ mod tests {
         let list_top = layout.prompt_acp.y + ACP_LIST_TOP_OFFSET;
 
         assert!(matches!(
-            view.handle_prompt_corrector_mouse(&click(layout.prompt_choices.x + 2, list_top), area),
+            view.handle_prompt_corrector_mouse(
+                &[],
+                &click(layout.prompt_choices.x + 2, list_top),
+                area,
+            ),
             Some(PromptCorrectorAction::Changed)
         ));
         assert_eq!(view.prompt_corrector_fallbacks.len(), 1);
         assert!(matches!(view.focus, FocusTarget::PromptCorrectorAcp));
+    }
+
+    #[test]
+    fn prompt_corrector_model_rows_toggle_from_clicks() {
+        // Regression: clicking the correction tab's model list only moved
+        // focus — Enter toggled the highlighted model but the mouse could
+        // not. A click on the row text must mirror Enter.
+        let mut view = RouterView::new();
+        view.set_active_tab(RouterTab::PromptCorrector);
+        let models = vec![
+            ModelEntry {
+                provider: "openrouter".into(),
+                model: "model-a".into(),
+            },
+            ModelEntry {
+                provider: "groq".into(),
+                model: "model-b".into(),
+            },
+        ];
+        let area = Rect::new(0, 0, 100, 40);
+        let layout = view.compute_layout(area);
+        let choice_x = layout.prompt_choices.x + SIDE_PADDING / 2;
+        let list_top = layout.prompt_models.y + PROMPT_CORRECTOR_CHOOSER_TOP_OFFSET;
+
+        // Click on the row text: the model toggles into the correction
+        // route, like pressing Enter on the highlighted row.
+        assert!(matches!(
+            view.handle_prompt_corrector_mouse(&models, &click(choice_x + 3, list_top), area),
+            Some(PromptCorrectorAction::Changed)
+        ));
+        assert_eq!(view.prompt_corrector_fallbacks.len(), 1);
+        assert!(matches!(view.focus, FocusTarget::PromptCorrectorModels));
+
+        // Click past the row text: focus switch only, nothing toggles.
+        assert!(matches!(
+            view.handle_prompt_corrector_mouse(&models, &click(choice_x + 40, list_top), area),
+            Some(PromptCorrectorAction::Consumed)
+        ));
+        assert!(matches!(view.focus, FocusTarget::PromptCorrectorModels));
+        assert_eq!(view.prompt_corrector_fallbacks.len(), 1);
+
+        // Clicking the same text again toggles the entry back out.
+        assert!(matches!(
+            view.handle_prompt_corrector_mouse(&models, &click(choice_x + 3, list_top), area),
+            Some(PromptCorrectorAction::Changed)
+        ));
+        assert!(view.prompt_corrector_fallbacks.is_empty());
+    }
+
+    #[test]
+    fn acp_clicks_past_the_row_text_only_move_focus() {
+        let mut view = RouterView::new();
+        view.set_active_tab(RouterTab::PromptCorrector);
+        let area = Rect::new(0, 0, 100, 40);
+        let layout = view.compute_layout(area);
+        let choice_x = layout.prompt_choices.x + SIDE_PADDING / 2;
+        let list_top = layout.prompt_acp.y + ACP_LIST_TOP_OFFSET;
+        let name = view.acp_agents_ordered()[0].name;
+        let text_len = format!("  {name}").chars().count() as u16;
+
+        assert!(matches!(
+            view.handle_prompt_corrector_mouse(
+                &[],
+                &click(choice_x + text_len + 3, list_top),
+                area,
+            ),
+            Some(PromptCorrectorAction::Consumed)
+        ));
+        assert!(matches!(view.focus, FocusTarget::PromptCorrectorAcp));
+        assert!(view.prompt_corrector_fallbacks.is_empty());
+    }
+
+    #[test]
+    fn auto_tab_click_selection_is_bounded_by_the_row_text() {
+        // Regression: a click used to apply to the whole row, so clicking
+        // the empty space after a model's name added it to the fallback
+        // chain — ambiguous with the click-to-switch-focus gesture. A
+        // selection must be bound to the exact rendered string; anything
+        // past it behaves like a directed Tab (focus moves, nothing else).
+        let mut view = RouterView::new();
+        // `new()` seeds persisted defaults; the test wants a clean chain.
+        view.fallbacks.clear();
+        let models = vec![
+            ModelEntry {
+                provider: "openrouter".into(),
+                model: "model-a".into(),
+            },
+            ModelEntry {
+                provider: "groq".into(),
+                model: "model-b".into(),
+            },
+        ];
+        let area = Rect::new(0, 0, 100, 40);
+        let layout = view.compute_layout(area);
+        let text_pad = SIDE_PADDING / 2;
+        let list_x = layout.automatic_models.x + text_pad;
+        let row_y = layout.automatic_models.y + MODEL_LIST_TOP_OFFSET;
+        let text_len = "  openrouter  model-a".chars().count() as u16;
+
+        // Click on the row's empty trailing space: focus moves to the box
+        // but the chain stays untouched.
+        assert!(view.handle_mouse(&models, &click(list_x + text_len + 2, row_y), area));
+        assert!(matches!(view.focus, FocusTarget::Models));
+        assert!(view.fallbacks.is_empty());
+
+        // Click on the text itself: the model is selected and added.
+        assert!(view.handle_mouse(&models, &click(list_x + 2, row_y), area));
+        assert_eq!(view.fallbacks.len(), 1);
+
+        // Same rule for the fallback rows: two entries make the selection
+        // index observable. Past the text the click only moves focus; on
+        // the text it selects the entry.
+        assert!(view.handle_mouse(&models, &click(list_x + 2, row_y + 1), area));
+        assert_eq!(view.fallbacks.len(), 2);
+        let fb_x = layout.automatic_fallbacks.x + text_pad;
+        let fb_y = layout.automatic_fallbacks.y + FALLBACK_LIST_TOP_OFFSET;
+        let fb_text_len = "  2.  groq  model-b".chars().count() as u16;
+
+        // Adding moved the selection to the newest entry (row 1); a click
+        // past row 1's text must leave that selection untouched.
+        assert!(view.handle_mouse(&models, &click(fb_x + fb_text_len + 2, fb_y + 1), area));
+        assert!(matches!(view.focus, FocusTarget::Fallbacks));
+        assert_eq!(view.selected_fallback, 1);
+
+        // Click on row 0's text selects that entry.
+        assert!(view.handle_mouse(&models, &click(fb_x + 2, fb_y), area));
+        assert_eq!(view.selected_fallback, 0);
     }
 
     #[test]

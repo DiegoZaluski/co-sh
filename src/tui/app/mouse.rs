@@ -1219,11 +1219,12 @@ impl App {
                 main_area.width,
                 main_area.height.saturating_sub(3),
             );
+            let all_models = self.collect_cached_models();
             if event_type == MouseEventType::Up
                 && button == MouseButton::Left
-                && let Some(action) = self
-                    .router_view
-                    .handle_prompt_corrector_mouse(&mouse, router_area)
+                && let Some(action) =
+                    self.router_view
+                        .handle_prompt_corrector_mouse(&all_models, &mouse, router_area)
             {
                 match action {
                     crate::routes::router::PromptCorrectorAction::Changed => {
@@ -1244,7 +1245,6 @@ impl App {
                 }
                 return Ok(true);
             }
-            let all_models = self.collect_cached_models();
             if self
                 .router_view
                 .handle_mouse(&all_models, &mouse, router_area)
