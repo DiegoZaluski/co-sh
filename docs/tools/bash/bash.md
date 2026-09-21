@@ -31,7 +31,7 @@ use cosh_tools::bash::Bash;
 let bash = Bash::new()
     .cwd("/home/user/project")     // working directory
     .env(Some(vec![("RUST_BACKTRACE".into(), "1".into())]))
-    .timeout(10_000);              // ms; None = no timeout
+    .timeout(10_000);              // ms; overrides the 10-minute default
 
 let mut stream = bash.run("cargo test")?;   // returns an async stream
 ```
@@ -48,7 +48,7 @@ The builder methods, and their defaults from `Bash::new()`:
 |---|---|---|
 | `cwd(path)` | Working directory for the child. | `""` — inherits the parent process's directory. |
 | `env(Some(vec![(k, v)]))` | Environment variables for the child. | `None` — inherit the parent environment. |
-| `timeout(ms)` | Kill the child after `ms` milliseconds. | `None` — no timeout. |
+| `timeout(ms)` | Kill the child after `ms` milliseconds. | [`DEFAULT_TIMEOUT_MS`](#the-bash-wrapper) — 10 minutes (600 000 ms). |
 | `pty(true)` | Run the child in a pseudo-terminal (see below). | `false` — separate piped streams. |
 
 All four consume `self` and return it, so they chain; `Bash` implements
@@ -66,14 +66,20 @@ All four consume `self` and return it, so they chain; `Bash` implements
 
 `Bash` also carries a ready-to-serve MCP tool description in the public field
 `description_run` — a `ToolDescription` with `name: "bash_run"`, a description
-covering the security validation and the truncation behavior, and an
-`inputSchema` requiring a single `command` string.
+covering the security validation, the truncation behavior, and the timeout
+default (the [`DEFAULT_TIMEOUT_MS`](#the-bash-wrapper) value is interpolated
+into the text), plus an `inputSchema` with the `command` string and the
+optional per-call `timeout_ms` override.
 
-> **The tool is configured once, per-call it takes only `command`.** The
-> harness constructs a single `Bash` scoped to the project root and the
-> `bash_run` tool's input is just `{ "command": "…" }` (see
-> [`BashRunInput`](types.md)). Timeout, environment, and PTY mode are harness
-> configuration, not per-call arguments.
+> **The wrapper is configured once; per-call the tool takes `command` and an
+> optional `timeout_ms`.** The harness constructs a single `Bash` scoped to
+> the project root, and the `bash_run` tool's input is
+> `{ "command": "…", "timeout_ms": …? }` (see [`BashRunInput`](types.md)).
+> Timeout default, environment, and PTY mode are wrapper configuration, not
+> per-call arguments — with one exception: `timeout_ms` may **raise** the
+> configured timeout for that single call (it must be strictly greater than
+> the default; lower-or-equal values are rejected and the default itself is
+> never changed).
 
 ---
 
@@ -171,7 +177,8 @@ mode (regardless of path), and only Yolo mode runs it without asking.
 
 ## Summary
 
-- Configure one `Bash`, call `run` — the tool input is just a `command`.
+- Configure one `Bash`, call `run` — the tool input is a `command` plus an
+  optional per-call `timeout_ms` that can only raise the timeout.
 - The stream is chunks then one final status item; `exit_code` and `signal`
   are mutually exclusive; a timeout ends the stream with `signal: -1`.
 - `pty: true` multiplexes stdout/stderr through a pseudo-terminal (stderr

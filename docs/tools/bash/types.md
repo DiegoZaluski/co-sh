@@ -18,12 +18,20 @@ pub struct BashRunInput {
     /// The bash command to execute. Must not be an absolute path
     /// and must not match dangerous security patterns.
     pub command: String,
+    /// Optional per-call timeout override in milliseconds. May only RAISE
+    /// the harness-configured timeout: it must be an integer strictly
+    /// greater than the default (interpolated into the tool description);
+    /// values equal to or below the default are rejected. It never
+    /// changes the configured default.
+    pub timeout_ms: Option<u64>,
 }
 ```
 
-This is the **entire** per-call input. Configuration that changes execution —
-`cwd`, `env`, `timeout`, `pty` — lives on the [`Bash`](bash.md#the-bash-wrapper)
-wrapper and is fixed when the harness builds its tool set. It derives
+`command` is the only required field; `timeout_ms` is optional and may be
+omitted (the call then runs with the wrapper's configured timeout). All other
+execution configuration — `cwd`, `env`, the timeout default, `pty` — lives on
+the [`Bash`](bash.md#the-bash-wrapper) wrapper and is fixed when the harness
+builds its tool set. It derives
 `Deserialize` and `JsonSchema`, so the same struct both parses the tool
 arguments and can generate their schema (the `inputSchema` on
 `description_run` mirrors it by hand).
