@@ -154,6 +154,14 @@ pub fn check_tool_permission(
         return PermissionCheck::Allowed;
     }
 
+    // Command mode: the USER typed the command directly — the TUI is a plain
+    // terminal and every dispatch is user-initiated. No dialog can be shown
+    // (there is no agent loop asking); treat everything as pre-approved,
+    // exactly like Yolo.
+    if mode == Mode::Command {
+        return PermissionCheck::Allowed;
+    }
+
     // Ask mode should only expose read-only tools.
     if mode == Mode::Ask && is_restricted_in_ask_mode(tool_name) {
         return PermissionCheck::Denied(format!("`{tool_name}` is not available in Ask mode"));

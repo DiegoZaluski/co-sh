@@ -85,7 +85,7 @@ Rules:
 /// LLM compaction sends to the model.
 pub(super) fn serialize_item(item: &ContextItem) -> String {
     // Display-only error lines never reach a summarizer prompt.
-    if matches!(item, ContextItem::Error { .. }) {
+    if matches!(item, ContextItem::Error { .. } | ContextItem::UserCommand { .. }) {
         return String::new();
     }
     match item {
@@ -114,7 +114,7 @@ pub(super) fn serialize_item(item: &ContextItem) -> String {
                 .join(", ")
         ),
         // Unreachable (filtered above) but exhaustive for the compiler.
-        ContextItem::Error { .. } => String::new(),
+        ContextItem::Error { .. } | ContextItem::UserCommand { .. } => String::new(),
     }
 }
 

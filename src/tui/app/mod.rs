@@ -374,6 +374,12 @@ pub struct App {
     /// Set to `false` when a new session is created; set to `true` after
     /// the async title generation task is spawned.
     title_generated: bool,
+    /// The turn being finished was a Command-mode execution (the TUI as a
+    /// plain terminal). The Done handler uses it to skip ALL LLM work —
+    /// notably the async title generation — without latching
+    /// [`Self::title_generated`], so a session that later receives real
+    /// agent turns still gets its semantic title.
+    command_mode_turn: bool,
     /// When set, the current Confirm dialog is asking about deleting a RAG database.
     #[cfg(feature = "embed")]
     pending_delete_db_name: Option<String>,
@@ -632,6 +638,7 @@ impl App {
             pending_delete_session_id: None,
             pending_gateway_message: None,
             title_generated: false,
+            command_mode_turn: false,
             manual_compaction_active: false,
             paste_burst: paste_burst::PasteBurstState::default(),
             stream_msg_id: None,

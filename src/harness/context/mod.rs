@@ -141,6 +141,14 @@ pub enum ContextItem {
     /// the error line with its own display semantics (the TUI's styled error
     /// box) instead of collapsing it into plain assistant prose.
     Error { id: u64, content: String },
+    /// A shell command typed by the USER in Command mode (the TUI as a plain
+    /// terminal). DISPLAY-ONLY, like [`ContextItem::Error`]: zero tokens,
+    /// skipped by [`ContextManager::build_messages`] and the summarizers —
+    /// the model never sees it. Named `UserCommand` (not `Command`) because
+    /// the agent itself has a separate notion of shell commands (bash tool
+    /// calls) and there must be no ambiguity. Persisted so the transcript
+    /// restores the command line; recorded hidden from birth.
+    UserCommand { id: u64, content: String },
 }
 
 impl ContextItem {
@@ -152,7 +160,8 @@ impl ContextItem {
             | ContextItem::ToolResult { id, .. }
             | ContextItem::Closure { id, .. }
             | ContextItem::Compaction { id, .. }
-            | ContextItem::Error { id, .. } => *id,
+            | ContextItem::Error { id, .. }
+            | ContextItem::UserCommand { id, .. } => *id,
         }
     }
 
@@ -184,6 +193,9 @@ impl ContextItem {
             ContextItem::Compaction { summary, .. } => enc.estimate(summary),
             // Display-only: never delivered to the model, never budgeted.
             ContextItem::Error { .. } => 0,
+            // User-typed Command-mode command: display-only for the model
+            // (the TUI is a plain terminal there), zero token cost.
+            ContextItem::UserCommand { .. } => 0,
         }
     }
 
@@ -675,6 +687,59 @@ impl ContextManager {
             id,
             content: text.to_string(),
         });
+    }
+
+    /// Record a USER-TYPED shell command (Command mode) as a HIDDEN
+    /// display-only timeline item: persisted to the session JSONL for the
+    /// user, but immediately registered in the `hidden` set so
+    /// [`Self::build_messages`], the token budget and every summarizer skip
+    /// it — the model never sees it. Returns the item id.
+    pub fn add_hidden_user_command(&mut self, text: &str) -> u64 {
+        let id = self.next_id();
+        self.push_item(ContextItem::UserCommand {
+            id,
+            content: text.to_string(),
+        });
+        // hide_at (not a bare hidden.insert): it also drops the item's cost
+        // from the cached token total, keeping the debug drift check honest.
+        self.hide_at(self.items.len() - 1);
+        id
+    }
+
+    /// Record the RESULT of a user-typed Command-mode execution as a HIDDEN
+    /// `bash_run` tool-call/tool-result pair: persisted to the session JSONL
+    /// (the transcript shows what the "terminal" ran and produced), but both
+    /// ids are immediately registered in the `hidden` set so the model never
+    /// sees them. Returns `(call_id, result_id)`.
+    pub fn add_hidden_command_execution(
+        &mut self,
+        call_id: &str,
+        command: &str,
+        result: &str,
+    ) -> (u64, u64) {
+        let call = self.next_id();
+        self.push_item(ContextItem::ToolCall {
+            id: call,
+            call_id: call_id.to_string(),
+            name: "bash_run".to_string(),
+            arguments: serde_json::json!({ "command": command }).to_string(),
+            thought_signature: String::new(),
+            thinking_blocks: Vec::new(),
+        });
+        let result_id = self.next_id();
+        self.push_item(ContextItem::ToolResult {
+            id: result_id,
+            call_id: call_id.to_string(),
+            content: result.to_string(),
+            useless: false,
+        });
+        // hide_at (not a bare hidden.insert): it also drops each item's cost
+        // from the cached token total, keeping the debug drift check honest.
+        let call_idx = self.items.len() - 2;
+        let result_idx = self.items.len() - 1;
+        self.hide_at(call_idx);
+        self.hide_at(result_idx);
+        (call, result_id)
     }
 
     /// Add a tool CALL. Structural, never prose-compressed. Renders as an
@@ -1490,6 +1555,9 @@ impl ContextManager {
                 // Display-only error line: never part of the model-facing
                 // conversation.
                 ContextItem::Error { .. } => {}
+                // User-typed Command-mode command: display-only, never part
+                // of the model-facing conversation.
+                ContextItem::UserCommand { .. } => {}
             }
         }
         // Append the harness steering input unless it duplicates the trailing
@@ -1613,6 +1681,9 @@ impl ContextManager {
                 // Display-only error line: the model never sees it, so the
                 // export of the agent's view skips it too.
                 ContextItem::Error { .. } => {}
+                // User-typed Command-mode command: display-only for the
+                // model, so the export of the agent's view skips it too.
+                ContextItem::UserCommand { .. } => {}
             }
         }
         out

@@ -648,7 +648,11 @@ impl App {
                         // Trigger async title generation for the first response.
                         // The session title starts as a timestamp; the LLM produces
                         // a semantic title from the first user message.
-                        if !self.title_generated {
+                        // Command-mode turns are LLM work and are NEVER
+                        // generated here (the TUI is a plain terminal there);
+                        // the flag is per-turn, so a later real agent turn in
+                        // the same session still gets its semantic title.
+                        if !self.title_generated && !self.command_mode_turn {
                             // Extract the first user message text.
                             let first_user = session.messages.iter().find_map(|m| {
                                 if m.role == MessageRole::User {

@@ -759,7 +759,11 @@ impl SessionStore {
                 ContextItem::Assistant { id, .. }
                 | ContextItem::Closure { id, .. }
                 | ContextItem::Compaction { id, .. }
-                | ContextItem::Error { id, .. } => groups.push(vec![*id]),
+                | ContextItem::Error { id, .. }
+                // UserCommand items are display-only timeline entries; they
+                // still occupy one display-message group so the group↔
+                // message count invariant holds in Command mode.
+                | ContextItem::UserCommand { id, .. } => groups.push(vec![*id]),
             }
         }
 

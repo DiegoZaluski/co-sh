@@ -1276,7 +1276,8 @@ impl App {
                         self.state.mode = match self.state.mode {
                             Mode::Build => Mode::Ask,
                             Mode::Ask => Mode::Yolo,
-                            Mode::Yolo => Mode::Build,
+                            Mode::Yolo => Mode::Command,
+                            Mode::Command => Mode::Build,
                         };
                     }
                 }

@@ -54,6 +54,14 @@ pub enum Mode {
     Build,
     Ask,
     Yolo,
+    /// Direct-shell mode: the TUI becomes a plain terminal. Every prompt
+    /// input is dispatched straight to the bash tool — NO LLM call is ever
+    /// made. The command and its output are recorded in the context manager
+    /// as HIDDEN items ([`super::context::ContextItem::UserCommand`]): they
+    /// persist to the session JSONL for the user, but the model never sees
+    /// them (a future feature may expose them; for now the TUI is simply a
+    /// terminal and the harness loop never runs in this mode).
+    Command,
 }
 
 /// Result of the user-triggered `/compact`
@@ -999,7 +1007,7 @@ impl Harness {
         let instructions = match self.instructions {
             Some(ins) => ins,
             None => match self.mode {
-                Mode::Build | Mode::Yolo => INSTRUCTIONS_BUILD,
+                Mode::Build | Mode::Yolo | Mode::Command => INSTRUCTIONS_BUILD,
                 Mode::Ask => INSTRUCTIONS_ASK,
             },
         };
@@ -1066,7 +1074,7 @@ impl Harness {
         if let Some(ref cosh) = self.cosh_tools {
             let _ = write!(out, "### System Tools\n\n");
             match self.mode {
-                Mode::Build | Mode::Yolo => cosh.write_tool_descriptions_enabled(
+                Mode::Build | Mode::Yolo | Mode::Command => cosh.write_tool_descriptions_enabled(
                     &mut out,
                     &self.disabled_tools,
                     include_inline_schemas,
@@ -1158,7 +1166,7 @@ impl Harness {
         }
         if let Some(ref cosh) = self.cosh_tools {
             let schemas = match self.mode {
-                Mode::Build | Mode::Yolo => cosh.schemas_enabled(&self.disabled_tools),
+                Mode::Build | Mode::Yolo | Mode::Command => cosh.schemas_enabled(&self.disabled_tools),
                 Mode::Ask => cosh.schemas_filtered(&self.disabled_tools),
             };
             log::debug!(
@@ -1198,7 +1206,7 @@ impl Harness {
         }
         if let Some(ref cosh) = self.cosh_tools {
             let schemas = match self.mode {
-                Mode::Build | Mode::Yolo => cosh.schemas_enabled(&self.disabled_tools),
+                Mode::Build | Mode::Yolo | Mode::Command => cosh.schemas_enabled(&self.disabled_tools),
                 Mode::Ask => cosh.schemas_filtered(&self.disabled_tools),
             };
             for schema in schemas {
@@ -3162,7 +3170,7 @@ impl Harness {
         // tools the model is allowed to call in the current mode.
         if let Some(ref cosh) = self.cosh_tools {
             let descriptions: Vec<serde_json::Value> = match self.mode {
-                Mode::Build | Mode::Yolo => {
+                Mode::Build | Mode::Yolo | Mode::Command => {
                     // All tools minus disabled
                     cosh.tool_descriptions()
                         .into_iter()
@@ -4918,7 +4926,7 @@ impl Harness {
     fn schema_input(&self, tool_name: &str) -> Option<serde_json::Value> {
         if let Some(cosh) = &self.cosh_tools {
             let schemas = match self.mode {
-                Mode::Build | Mode::Yolo => cosh.schemas_enabled(&self.disabled_tools),
+                Mode::Build | Mode::Yolo | Mode::Command => cosh.schemas_enabled(&self.disabled_tools),
                 Mode::Ask => cosh.schemas_filtered(&self.disabled_tools),
             };
             for schema in schemas {

@@ -18,6 +18,18 @@ use cosh::harness::HarnessEvent;
 /// edit or delete a message that sits ahead of the effective send order.
 pub(super) const QUEUE_ACTIONS_GRACE: Duration = Duration::from_secs(5);
 
+/// Unique `call_id` suffix for Command-mode executions: one per dispatch, so
+/// the hidden call/result pairs never collide in `update_ctx_ids` grouping or
+/// any future call-id-uniqueness assumption (masking, chain-hiding).
+static COMMAND_CALL_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// One tokio runtime for the whole process, shared by the agent loop and the
+/// Command-mode executor: the LSP singleton's ingestion/auto-discovery tasks
+/// and the language servers' transport tasks must outlive individual turns —
+/// a per-turn runtime would kill them (and, via `kill_on_drop`, the server
+/// processes) the moment a turn ends.
+static AGENT_RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+
 impl App {
     /// True while the loop must not consume the next queued message: either
     /// a Queue Actions box is open (the queued indexes it carries must stay
@@ -148,6 +160,18 @@ impl App {
     /// stay queued: [`App::pump_queued_messages`] hands them to the loop's
     /// queued-input channel one at a time (honoring the queue-actions hold).
     pub(super) fn start_agent_loop(&mut self, msg: String) {
+        // A real agent turn: the Done handler may do LLM work again (title
+        // generation) — the per-turn Command-mode suppression ends here.
+        self.command_mode_turn = false;
+
+        // Command mode: the TUI is a plain terminal. The input is dispatched
+        // straight to the bash tool — the agent loop (and with it the LLM)
+        // never runs, so there is no connector to build either.
+        if self.state.mode == cosh::harness::Mode::Command {
+            self.start_command_execution(msg);
+            return;
+        }
+
         // Free gateway recommendation gate: a keyless send that would hit
         // a provider without credentials asks ONCE whether to use the free
         // gateway. The message is parked and only replayed on opt-in;
@@ -561,9 +585,156 @@ impl App {
         });
     }
 
+    /// Command-mode executor: the TUI as a plain terminal. Dispatches the
+    /// user-typed input straight to the bash tool — NO LLM call, no agent
+    /// loop, no connector. The command and its output are recorded in the
+    /// session context as HIDDEN items (persisted to the JSONL, never shown
+    /// to the model), and the TUI renders the run through the existing
+    /// bash_run event flow (ToolCall → ToolOutput stream → ToolResult).
+    pub(super) fn start_command_execution(&mut self, cmd: String) {
+        use cosh::harness::Tools;
+
+        // Session bootstrap identical to the agent-loop path: the first
+        // command still needs a session to live in.
+        if self.state.current_session_id.is_none() {
+            let id = generate_session_id();
+            let title: String = cmd.chars().take(40).collect();
+            self.state.add_empty_session(
+                id.clone(),
+                title,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64,
+            );
+            self.state.current_session_id = Some(id);
+            self.hypercredit_balance = None;
+            self.state.right_panel =
+                crate::routes::session::right_panel::types::RightPanelState::new();
+        }
+        // Command-mode turn: the Done handler skips ALL LLM work (notably
+        // the async title generation — the mode's contract is that NO LLM
+        // call is ever made) via `command_mode_turn`, WITHOUT latching
+        // `title_generated`: a session that later receives real agent turns
+        // still gets its semantic title.
+        self.command_mode_turn = true;
+
+        // C1: route the Done save to THIS session. Without an owner the
+        // handler falls back to a stale `active_loop_session_id` from a
+        // previous agent loop and would write this session's context records
+        // into that unrelated session's JSONL.
+        self.active_loop_session_id = self.state.current_session_id.clone();
+
+        // Display transcript: the command line as a user message (the
+        // "terminal echo").
+        if let Some(session) = self.state.current_session_mut() {
+            session.messages.push(crate::types::Message {
+                id: format!("msg-{}", session.messages.len()),
+                role: crate::types::MessageRole::User,
+                parts: vec![crate::types::Part::Text(crate::types::TextPart {
+                    text: cmd.clone(),
+                    synthetic: false,
+                })],
+                created_at: 0,
+                agent: None,
+                model: None,
+            });
+            self.session_view.scroll_to_bottom();
+        }
+
+        self.stop_signal.store(false, Ordering::Relaxed);
+        self.state.status = SessionStatus::Working;
+        self.agent_activity = crate::types::AgentActivity::for_tool("bash_run");
+        self.agent_spinner_bass = Some(AgentSpinnerBass::new(
+            crate::types::AgentActivity::for_tool("bash_run").label(),
+            &self.theme,
+        ));
+        // The PTY panel entry is created by the ToolCall event handler below
+        // (exactly like an agent-loop bash_run) — starting it here too would
+        // leave a second, forever-Running entry in the panel.
+
+        let event_tx = self.event_tx.clone();
+        let stop_signal = self.stop_signal.clone();
+        let cwd = self.state.working_directory.clone();
+        let session_id = self.state.current_session_id.clone();
+        let command = cmd;
+        // Unique per-execution call_id: the hidden pairs must never collide
+        // (grouping, masking and any call-id-uniqueness assumption).
+        let call_id = format!(
+            "cmd-user-{}",
+            COMMAND_CALL_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+
+        // The authoritative context state is loaded on the UI thread (the
+        // session store is not shared with the worker task); the hidden
+        // recording happens inside the task, on top of the restored state.
+        let ctx_state = session_id
+            .as_ref()
+            .and_then(|id| self.session_store.load_context(id));
+
+        let rt = AGENT_RUNTIME.get_or_init(|| {
+            tokio::runtime::Runtime::new().expect("shared agent runtime")
+        });
+        rt.spawn(async move {
+            // Command-mode context: the restored session history plus the
+            // hidden command item. The model never sees any of it.
+            let mut context = cosh::harness::ContextManager::new(
+                cosh::harness::context::MAX_CONTEXT_TOKENS,
+            );
+            if let Some(state) = ctx_state {
+                context.restore_state(&state);
+            }
+            context.add_hidden_user_command(&command);
+
+            // Emit the ToolCall event so the TUI attaches the running tool
+            // part exactly like an agent-loop bash_run dispatch.
+            let _ = event_tx.send(HarnessEvent::ToolCall {
+                tool: "bash_run".to_string(),
+                input: serde_json::json!({ "command": command }),
+            });
+
+            let mut tools = cosh::harness::CoshTools::new(&cwd);
+            tools.set_event_tx(event_tx.clone());
+
+            // ESC/Interrupt sets the stop signal; racing it against the
+            // dispatch makes the command cancellable (the losing branch is
+            // dropped, which tears down the PTY stream).
+            let stop_wait = async {
+                while !stop_signal.load(Ordering::Relaxed) {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            };
+            let result = tokio::select! {
+                r = tools.dispatch("bash_run", serde_json::json!({ "command": command })) => r,
+                _ = stop_wait => Err("interrupted".to_string()),
+            };
+
+            // Record the execution (call + result) as HIDDEN items in both
+            // paths: persisted to the session JSONL, never model-visible.
+            match result {
+                Ok(output) => {
+                    let _ = event_tx.send(HarnessEvent::ToolResult {
+                        output: output.clone(),
+                    });
+                    context.add_hidden_command_execution(&call_id, &command, &output);
+                }
+                Err(err) => {
+                    let _ = event_tx.send(HarnessEvent::ToolError { error: err.clone() });
+                    context.add_hidden_command_execution(&call_id, &command, &err);
+                }
+            }
+
+            // Finish through the standard Done path: the TUI persists the
+            // session WITH this context snapshot (hidden items included) and
+            // resets the status — no LLM was ever involved.
+            let _ = event_tx.send(HarnessEvent::Done {
+                context: context.save_state(),
+            });
+        });
+    }
+
     /// A persisted session whose context records went missing (deleted session
     /// file, corrupt payload) would silently "forget" the whole conversation —
-    /// surface that instead of resuming quietly. The gate is the on-disk
     /// JSONL: a brand-new session's FIRST prompt also has a message on screen
     /// with no context records yet (they are only written by Done/Stopped/
     /// snapshot saves) — that is normal, not data loss. Known interim noise:

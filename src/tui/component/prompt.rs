@@ -886,12 +886,16 @@ impl PromptView {
             cosh::harness::Mode::Build => "build",
             cosh::harness::Mode::Ask => "ask",
             cosh::harness::Mode::Yolo => "yolo",
+            cosh::harness::Mode::Command => "command",
         };
 
         let agent_color = match state.mode {
             cosh::harness::Mode::Build => agent_colors.get("build", unique_agents),
             cosh::harness::Mode::Ask => theme.info,
             cosh::harness::Mode::Yolo => theme.warning,
+            // Command mode turns the TUI into a plain terminal: a distinct,
+            // calm green signals "no model attached, input goes to the shell".
+            cosh::harness::Mode::Command => theme.success,
         };
 
         let mut border_box = BoxRenderable::new();
