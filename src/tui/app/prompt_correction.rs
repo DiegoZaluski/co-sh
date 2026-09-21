@@ -33,6 +33,7 @@ impl App {
         let text = self.prompt_view.expand_pasted_text(&original);
         let request = format!("{CORRECTION_INSTRUCTION}{text}");
         let fallbacks = self.router_view.prompt_corrector_fallbacks.clone();
+        let session_route = self.session_correction_route();
         let local_base_urls = self.configured_local_base_urls();
         let cwd = self.state.working_directory.clone();
         let event_tx = self.event_tx.clone();
@@ -49,6 +50,7 @@ impl App {
             let result = run_prompt_corrector_fallbacks(
                 &request,
                 &fallbacks,
+                session_route.as_ref(),
                 &cwd,
                 &local_base_urls,
                 &cancelled,
@@ -97,18 +99,35 @@ impl App {
 
 /// Run each configured correction candidate in its persisted order. A route
 /// is successful only when it returns non-empty text; transport failures and
-/// empty answers move on to the next REST model or ACP harness.
+/// empty answers move on to the next REST model or ACP harness. When the
+/// user configured no correction route at all, `session_route` (the
+/// session's own agent-loop model) is tried as the default — correction then
+/// always works out of the box instead of erroring.
 async fn run_prompt_corrector_fallbacks(
     request: &str,
     fallbacks: &[PromptCorrectorFallback],
+    session_route: Option<&(String, String)>,
     cwd: &str,
     local_base_urls: &std::collections::HashMap<String, String>,
     cancelled: &AtomicBool,
 ) -> Result<String, String> {
     if fallbacks.is_empty() {
-        return Err(
-            "Configure Models or ACP in Router Settings before correcting a prompt.".into(),
-        );
+        let Some((provider, model)) = session_route else {
+            return Err(
+                "No model available: configure correction models or ACP in Router \
+                 Settings, or pick a concrete model for the session."
+                    .into(),
+            );
+        };
+        // Same cooperative cancel as the fallback loop below: Esc aborts the
+        // shared task, and this keeps a cancelled request from starting the
+        // one-shot REST call at all.
+        if cancelled.load(Ordering::Relaxed) {
+            return Err("cancelled".into());
+        }
+        return correct_with_model(provider, model, request, cwd, local_base_urls)
+            .await
+            .map_err(|error| format!("{provider}/{model}: {error}"));
     }
 
     let mut failures = Vec::with_capacity(fallbacks.len());
@@ -186,6 +205,24 @@ async fn correct_with_acp(
     }
 }
 
+impl App {
+    /// Build the default correction route from the session's own agent-loop
+    /// selection (the same `provider`/`model` the next agent turn would use).
+    /// `None` when the session has no concrete model (empty provider or the
+    /// symbolic `auto` — the router's fallback list is the contract there).
+    pub(super) fn session_correction_route(&self) -> Option<(String, String)> {
+        let provider = self.llm_config.provider.trim();
+        if provider.is_empty() {
+            return None;
+        }
+        let model = self.llm_config.model.as_deref()?.trim();
+        if model.is_empty() || model == "auto" {
+            return None;
+        }
+        Some((provider.to_string(), model.to_string()))
+    }
+}
+
 /// Build a concrete connector selected in Router Settings. Prompt correction
 /// does not inherit symbolic `auto`, the agent loop's fallback list, or a
 /// reasoning choice: the saved sequence is the full routing contract.
@@ -218,10 +255,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_empty_route_is_a_configuration_error() {
+    async fn an_empty_route_without_a_session_model_is_an_error() {
         let err = run_prompt_corrector_fallbacks(
             "correct this",
             &[],
+            None,
             "/tmp",
             &Default::default(),
             &Default::default(),
@@ -229,7 +267,54 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert!(err.contains("Configure Models or ACP"));
+        assert!(err.contains("No model available"));
+    }
+
+    #[tokio::test]
+    async fn the_session_model_serves_as_the_default_correction_route() {
+        // No corrector fallback configured: the session's own agent-loop
+        // selection becomes the default route (no "configure a model" error).
+        // An unknown provider fails synchronously inside `Connector::new`
+        // (offline, no network) and surfaces the ROUTE's error — labeled with
+        // the provider/model — instead of the configuration one.
+        let err = run_prompt_corrector_fallbacks(
+            "correct this",
+            &[],
+            Some(&("not-a-provider".into(), "test/model".into())),
+            "/tmp",
+            &Default::default(),
+            &Default::default(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(!err.contains("No model available"));
+        assert!(err.contains("not-a-provider/test/model"));
+    }
+
+    #[tokio::test]
+    async fn a_configured_fallback_list_never_defers_to_the_session_route() {
+        // With correction fallbacks configured, the session route must be
+        // ignored entirely. The preset cancel flag proves it: the loop is
+        // entered (and returns "cancelled") BEFORE any route — including the
+        // session default — could run.
+        let fallbacks = vec![PromptCorrectorFallback::Model {
+            provider: "openrouter".into(),
+            model: "test/model".into(),
+        }];
+        let cancelled = AtomicBool::new(true);
+        let err = run_prompt_corrector_fallbacks(
+            "correct this",
+            &fallbacks,
+            Some(&("not-a-provider".into(), "test/model".into())),
+            "/tmp",
+            &Default::default(),
+            &cancelled,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err, "cancelled");
     }
 
     #[tokio::test]
@@ -244,6 +329,7 @@ mod tests {
         let err = run_prompt_corrector_fallbacks(
             "correct this",
             &fallbacks,
+            None,
             "/tmp",
             &Default::default(),
             &cancelled,
