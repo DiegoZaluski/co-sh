@@ -8,6 +8,12 @@ The core [`ExtractAction`] type plus the data types it produces.
 pub struct ToolSchema {
     pub name: String,
     pub input_schema: serde_json::Value,   // JSON Schema subset (see below)
+    // Canonical, hand-curated example of valid arguments (optional). When
+    // present, schema-rejection hints show it instead of the derived
+    // type-only skeleton, so the model can copy a complete, correct payload
+    // (optional fields, conditional rules and all) on retry. The harness
+    // feeds this from a tool description's `exampleArgs` field.
+    pub example_args: Option<serde_json::Value>,
 }
 
 pub struct ToolCallData {
@@ -72,10 +78,19 @@ A candidate is validated against this flexible shape:
 
 - **Arguments as a JSON string** (OpenAI-style): a string value is parsed as
   JSON first so validation sees the real object.
+- **String-encoded field repair** (`repair_string_encoded`): before schema
+  validation, any field the schema types as `array`/`object` whose value is
+  a *string containing valid JSON of that shape* is parsed back into
+  structured form — recursively, schema-directed (objects via `properties`,
+  arrays via `items`). This recovers double-encoded emissions such as
+  `"questions": "[{...}]"` without weakening validation: a string is only
+  coerced when it parses AND matches the declared type. Applied identically
+  on the enveloped path, native calls (which share `validate_tool_call`),
+  and the bare-arguments fallback.
 - **Bare-arguments fallback**: an object with *no* name field that matches
-  **exactly one** registered tool's input schema is treated as that tool's
-  bare arguments. (The `id` and `thought_signature` fields are read from the
-  same object when present.)
+  **exactly one** registered tool's input schema (after the same repair) is
+  treated as that tool's bare arguments. (The `id` and `thought_signature`
+  fields are read from the same object when present.)
 
 ## Streaming mode: `extract_stream`
 
@@ -115,6 +130,11 @@ pub fn take_last_failed_raw(&mut self) -> String // drain the last failed JSON
 ```
 
 ## Validation rules
+
+Before validation runs, `repair_string_encoded` coerces string-encoded
+array/object fields back to structured form (see [Envelope
+aliases](#envelope-aliases)); the repaired value is what `validate_against_schema`
+sees — and what `ToolCallData.arguments` carries downstream.
 
 `validate_against_schema` implements the JSON Schema subset the tools
 actually use:
@@ -159,6 +179,7 @@ Next: [jsonish — the tolerant parser](jsonish.md).
 - Streaming mode: `extract_stream` processes tokens incrementally, returning `Text` (safe text), `ToolCall` (complete validated call), or `Pending` (still buffering).
 - Envelope aliases accept flexible shapes: name/tool/function for tool name, arguments/input/args/parameters for arguments; bare-arguments fallback matches exactly one registered tool's schema.
 - Streaming safety behaviors: early exit on unknown top-level keys (prevents explanatory JSON from hanging in Pending limbo) and fence tracking across tokens (backticks only toggle fence state if first backtick was at line start).
-- Validation rules implement a JSON Schema subset: oneOf, type checking, required fields, properties with const/type/oneOf; unknown extra fields are allowed (permissive by design).
+- Validation rules implement a JSON Schema subset: oneOf, type checking, required fields, properties with const/type/oneOf; unknown extra fields are allowed (permissive by design). Before validation, string-encoded array/object fields are repaired back to structured form (`repair_string_encoded`) on every call path.
+- `ToolSchema.example_args` (optional): a curated example embedded in the tool description (`exampleArgs`); rejection hints prefer it over the derived skeleton, capped at the same 240-char payload limit.
 - `find_json_objects` is a standalone helper that scans text for balanced `{...}` spans and returns byte offsets.
 - Errors are represented (failure warning text, failure count) rather than thrown; only `jsonish::parse` returns `Result`.

@@ -46,6 +46,7 @@ pub fn tool_to_schema(tool: &Tool) -> ToolSchema {
     ToolSchema {
         name: tool.name.to_string(),
         input_schema: serde_json::Value::Object((*tool.input_schema).clone()),
+        example_args: None,
     }
 }
 

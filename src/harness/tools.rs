@@ -685,6 +685,9 @@ fn extract_schema(desc: &serde_json::Value) -> ToolSchema {
     ToolSchema {
         name: desc["name"].as_str().unwrap_or_default().to_string(),
         input_schema: desc["inputSchema"].clone(),
+        // Tools may embed a curated example (`exampleArgs`, e.g.
+        // `ask_questions`) that the extractor shows in rejection hints.
+        example_args: desc.get("exampleArgs").filter(|v| v.is_object()).cloned(),
     }
 }
 

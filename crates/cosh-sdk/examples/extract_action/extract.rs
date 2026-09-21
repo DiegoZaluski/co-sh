@@ -60,6 +60,7 @@ fn main() {
             "properties": { "path": { "type": "string" } },
             "required": ["path"],
         }),
+        example_args: None,
     };
     let ask_tool = ToolSchema {
         name: "ask_questions".into(),
@@ -81,6 +82,7 @@ fn main() {
             },
             "required": ["questions"],
         }),
+        example_args: None,
     };
 
     let mut ex = ExtractAction::new()
@@ -174,6 +176,7 @@ fn main() {
             "properties": { "path": { "type": "string" } },
             "required": ["path"],
         }),
+        example_args: None,
     });
     let mut actions = Vec::new();
     for token in [
@@ -194,6 +197,7 @@ fn main() {
             "properties": { "path": { "type": "string" } },
             "required": ["path"],
         }),
+        example_args: None,
     });
     let mut actions = Vec::new();
     for token in ["I think ", r#"{"result": "sure""#, " the answer is 42"] {

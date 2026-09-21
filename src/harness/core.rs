@@ -1186,6 +1186,9 @@ impl Harness {
             extractor.add_tool(ToolSchema {
                 name: tool.name.clone(),
                 input_schema: tool.input_schema.clone(),
+                // Built-in harness tools carry no curated example; tool
+                // crate examples flow through `extract_schema` instead.
+                example_args: None,
             });
         }
         #[cfg(test)]
@@ -5214,6 +5217,7 @@ impl Harness {
         self.test_tools.push(ToolSchema {
             name: name.to_string(),
             input_schema: schema,
+            example_args: None,
         });
         self
     }
