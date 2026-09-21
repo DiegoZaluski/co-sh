@@ -263,6 +263,10 @@ pub struct PointerOutput {
 
 /// Input for `computer_keyboard` — synthetic keystrokes into the FOCUSED element
 /// (focus it first with computer_touch `focus`).
+///
+/// A step may chain a NEXT step via `then` (a keyboard pipeline): the steps
+/// run sequentially in a single tool call — the first failing step aborts the
+/// chain. Depth is capped (`KEYBOARD_CHAIN_MAX_DEPTH`).
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct ComputerKeyboard {
     /// Key to tap, by name: single characters (`a`, `5`, `.` — lowercase;
@@ -276,6 +280,10 @@ pub struct ComputerKeyboard {
     /// Literal text to type into the focused element (any characters,
     /// including uppercase). Mutually exclusive with `key`.
     pub text: Option<String>,
+    /// Optional NEXT step of the pipeline, executed after this step succeeds
+    /// (e.g. text `"olá"` → then key `enter`). Same shape as this step, same
+    /// exclusivity rules, recursively.
+    pub then: Option<Box<ComputerKeyboard>>,
 }
 
 /// Output of `computer_keyboard`.

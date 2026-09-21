@@ -402,43 +402,59 @@ impl Computer {
                 "name": "computer_keyboard",
                 "description": concat!(
                     "Send synthetic keystrokes to the currently FOCUSED element — ",
-                    "focus a field first with computer_touch action `focus`. Two modes ",
-                    "(exactly one): `key` + optional `held` modifiers (e.g. key ",
+                    "focus a field first with computer_touch action `focus`. Per step, ",
+                    "two modes (exactly one): `key` + optional `held` modifiers (e.g. key ",
                     "`a` + held [\"ctrl\"] = select all; keys are lowercase — for ",
                     "uppercase hold `shift`), or `text` to type a literal string ",
-                    "(any characters, including uppercase; `held` is rejected)."
+                    "(any characters, including uppercase; `held` is rejected). ",
+                    "A step may chain the NEXT step via `then` (a keyboard pipeline, ",
+                    "same shape recursively, max 8 steps total): all steps run ",
+                    "sequentially in this ONE call — e.g. {\"text\": \"hello\", \"then\": ",
+                    "{\"key\": \"enter\"}} types and submits in a single round-trip. ",
+                    "The first failing step aborts the chain (earlier steps stay ",
+                    "applied — they were real input events)."
                 ),
                 "inputSchema": {
                     "type": "object",
-                    "properties": {
-                        "key": {
-                            "type": "string",
-                            "description": "Key to tap: single lowercase character (`a`, `5`, `.`), `enter`, `escape`, `esc`, `tab`, `space`, `backspace`, `delete`, `insert`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`, or `f1`..`f12`."
-                        },
-                        "held": {
-                            "type": "array",
-                            "items": { "type": "string", "enum": ["shift", "ctrl", "alt", "meta"] },
-                            "description": "Modifier keys held while tapping `key`."
-                        },
-                        "text": {
-                            "type": "string",
-                            "description": "Literal text to type (handles uppercase/shift itself). Mutually exclusive with `key`."
+                    "$defs": {
+                        "step": {
+                            "type": "object",
+                            "properties": {
+                                "key": {
+                                    "type": "string",
+                                    "description": "Key to tap: single lowercase character (`a`, `5`, `.`), `enter`, `escape`, `esc`, `tab`, `space`, `backspace`, `delete`, `insert`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`, or `f1`..`f12`."
+                                },
+                                "held": {
+                                    "type": "array",
+                                    "items": { "type": "string", "enum": ["shift", "ctrl", "alt", "meta"] },
+                                    "description": "Modifier keys held while tapping `key`."
+                                },
+                                "text": {
+                                    "type": "string",
+                                    "description": "Literal text to type (handles uppercase/shift itself). Mutually exclusive with `key`."
+                                },
+                                "then": {
+                                    "$ref": "#/$defs/step",
+                                    "description": "Optional NEXT pipeline step, run after this step succeeds. Same shape recursively (max 8 steps total)."
+                                }
+                            },
+                            "allOf": [
+                                {
+                                    "if": { "required": ["text"] },
+                                    "then": { "properties": { "key": { "not": {} }, "held": { "not": {} } } }
+                                },
+                                {
+                                    "if": { "required": ["key"] },
+                                    "then": { "properties": { "text": { "not": {} } } }
+                                }
+                            ],
+                            "anyOf": [
+                                { "required": ["key"] },
+                                { "required": ["text"] }
+                            ]
                         }
                     },
-                    "allOf": [
-                        {
-                            "if": { "required": ["text"] },
-                            "then": { "properties": { "key": { "not": {} }, "held": { "not": {} } } }
-                        },
-                        {
-                            "if": { "required": ["key"] },
-                            "then": { "properties": { "text": { "not": {} } } }
-                        }
-                    ],
-                    "anyOf": [
-                        { "required": ["key"] },
-                        { "required": ["text"] }
-                    ]
+                    "allOf": [ { "$ref": "#/$defs/step" } ]
                 }
             }),
         }
