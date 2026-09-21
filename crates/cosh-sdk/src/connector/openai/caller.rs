@@ -190,10 +190,31 @@ fn message_to_input_items(msg: &ChatMessage, out: &mut Vec<Value>) {
     // Tool result → `function_call_output` (must link back via call_id).
     if msg.role == "tool" {
         if let Some(call_id) = &msg.tool_call_id {
+            // Multimodal tool result: `output` accepts a content-part ARRAY
+            // (`input_text` / `input_image`) instead of a plain string —
+            // the documented shape for functions that return images. An
+            // EMPTY image vector is treated as no images, preserving the
+            // text content instead of collapsing it to `""`.
+            let has_images = msg.images.as_ref().is_some_and(|i| !i.is_empty());
+            let output = if has_images {
+                let mut parts = Vec::with_capacity(msg.images.as_ref().map_or(0, Vec::len) + 1);
+                if let Some(text) = msg.content.as_deref().filter(|t| !t.is_empty()) {
+                    parts.push(serde_json::json!({"type": "input_text", "text": text}));
+                }
+                for image in msg.images.as_ref().into_iter().flatten() {
+                    parts.push(serde_json::json!({
+                        "type": "input_image",
+                        "image_url": format!("data:{};base64,{}", image.media_type, image.data),
+                    }));
+                }
+                Value::Array(parts)
+            } else {
+                Value::String(msg.content.clone().unwrap_or_default())
+            };
             out.push(serde_json::json!({
                 "type": "function_call_output",
                 "call_id": call_id,
-                "output": msg.content.clone().unwrap_or_default(),
+                "output": output,
             }));
         }
         return;
@@ -222,8 +243,30 @@ fn message_to_input_items(msg: &ChatMessage, out: &mut Vec<Value>) {
         }
         return;
     }
-    // Plain message. System/user content is `input_text`.
+    // Plain message. System/user content is `input_text`; attached images
+    // become sibling `input_image` parts (data URLs).
+    let has_images = msg.images.as_ref().is_some_and(|i| !i.is_empty());
     let Some(content) = &msg.content else {
+        if has_images {
+            let role = if msg.role == "user" { "user" } else { "assistant" };
+            let parts: Vec<Value> = msg
+                .images
+                .as_ref()
+                .into_iter()
+                .flatten()
+                .map(|image| {
+                    serde_json::json!({
+                        "type": "input_image",
+                        "image_url": format!("data:{};base64,{}", image.media_type, image.data),
+                    })
+                })
+                .collect();
+            out.push(serde_json::json!({
+                "type": "message",
+                "role": role,
+                "content": parts,
+            }));
+        }
         return;
     };
     let (role, content_type) = match msg.role.as_str() {
@@ -231,15 +274,27 @@ fn message_to_input_items(msg: &ChatMessage, out: &mut Vec<Value>) {
         "user" => ("user", "input_text"),
         _ => ("assistant", "output_text"),
     };
-    let block = if content_type == "output_text" {
-        serde_json::json!({"type": "output_text", "text": content, "annotations": []})
-    } else {
-        serde_json::json!({"type": "input_text", "text": content})
-    };
+    let mut blocks = Vec::new();
+    if !content.is_empty() {
+        blocks.push(if content_type == "output_text" {
+            serde_json::json!({"type": "output_text", "text": content, "annotations": []})
+        } else {
+            serde_json::json!({"type": "input_text", "text": content})
+        });
+    }
+    // Attached images become sibling `input_image` parts — a message may
+    // carry BOTH text and images ("analyse this screenshot: ..."); the
+    // images must not be dropped just because text is present.
+    for image in msg.images.as_ref().into_iter().flatten() {
+        blocks.push(serde_json::json!({
+            "type": "input_image",
+            "image_url": format!("data:{};base64,{}", image.media_type, image.data),
+        }));
+    }
     out.push(serde_json::json!({
         "type": "message",
         "role": role,
-        "content": [block],
+        "content": blocks,
     }));
 }
 
@@ -644,6 +699,7 @@ pub async fn chat(
         tool_calls: None,
         tool_call_id: None,
         thinking_blocks: None,
+        images: None,
     }];
     let request = build_request(&model, system, &messages, params, false);
     let base_url = params.base_url.as_deref().unwrap_or(config.base_url);
@@ -753,6 +809,7 @@ pub async fn chat_stream(
         tool_calls: None,
         tool_call_id: None,
         thinking_blocks: None,
+        images: None,
     }];
     stream_responses(config, params, system, messages, service).await
 }

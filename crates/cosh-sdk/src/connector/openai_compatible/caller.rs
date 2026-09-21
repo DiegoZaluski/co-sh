@@ -48,7 +48,13 @@ struct StreamOptions {
 #[derive(serde::Serialize)]
 struct ChatRequest {
     model: String,
-    messages: Vec<ApiChatMessage>,
+    /// Pre-serialized message array. Typed in Rust (`Vec<ChatMessage>`),
+    /// lowered to JSON by [`lower_images_to_wire`] right before the request:
+    /// a message carrying inline images becomes a multimodal content-parts
+    /// array (`[{type: "text"...}, {type: "image_url"...}]`) — the plain
+    /// `skip_serializing` on `ChatMessage.images` means the typed struct
+    /// alone would silently drop the bytes.
+    messages: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
     /// Only meaningful together with `stream: true` (some servers reject
@@ -316,6 +322,7 @@ fn build_messages(prompt: &str, system_prompt: Option<&str>) -> Vec<ApiChatMessa
             tool_calls: None,
             tool_call_id: None,
             thinking_blocks: None,
+            images: None,
         });
     }
     messages.push(pub_user_message(prompt));
@@ -360,6 +367,72 @@ fn strip_internal_fields(messages: &[ApiChatMessage]) -> Vec<ApiChatMessage> {
         out.push(msg);
     }
     out
+}
+
+// ── Multimodal image lowering (chat-completions wire) ─────────────────
+
+/// Lower the internal `images` channel onto the chat-completions wire.
+///
+/// The chat-completions schema allows content-parts arrays (text +
+/// `image_url` data URLs) on user messages — but NOT on `role: "tool"`
+/// messages, whose content may only contain text parts. So an image-bearing
+/// tool result keeps its plain text content and the images are emitted as a
+/// SEPARATE user message immediately after it, which every VLM backend
+/// (OpenAI, vLLM, llama.cpp, …) accepts:
+///
+/// ```json
+/// [{"role":"tool","tool_call_id":"c1","content":"screenshot 1568x882 …"},
+///  {"role":"user","content":[{"type":"text","text":"[computer_screenshot call_1]"},
+///                            {"type":"image_url","image_url":{"url":"data:image/png;base64,..."}}]}]
+/// ```
+///
+/// The internal `ChatMessage.images` field never serializes itself
+/// (`skip_serializing`), so this pass runs in Rust before the request body
+/// is built — without it the bytes would be silently dropped and a VLM
+/// would only ever see the text envelope. Messages without images pass
+/// through unchanged (plain string content), so the common text-only
+/// conversation pays nothing.
+fn lower_images_to_wire(messages: &[ApiChatMessage]) -> serde_json::Value {
+    let has_images = messages
+        .iter()
+        .any(|m| m.images.as_ref().is_some_and(|imgs| !imgs.is_empty()));
+    if !has_images {
+        return serde_json::to_value(messages).unwrap_or_else(|_| serde_json::json!([]));
+    }
+    let mut out = Vec::<serde_json::Value>::with_capacity(messages.len() + 1);
+    for msg in messages {
+        let Some(images) = msg.images.as_ref().filter(|imgs| !imgs.is_empty()) else {
+            out.push(serde_json::to_value(msg).unwrap_or_else(|_| serde_json::json!({})));
+            continue;
+        };
+        // The image-bearing message itself stays exactly as it serializes
+        // (text-only) — never an inline image part.
+        out.push(serde_json::to_value(msg).unwrap_or_else(|_| serde_json::json!({})));
+        // Follow-up user message carrying the pixels: one text part naming
+        // the source tool call, then one image part per image.
+        let mut parts = Vec::with_capacity(images.len() + 1);
+        let label = match msg.tool_call_id.as_deref() {
+            Some(id) => format!("[{id}]"),
+            None => String::new(),
+        };
+        parts.push(serde_json::json!({
+            "type": "text",
+            "text": format!("Image attached from tool result {label}")
+        }));
+        for image in images {
+            parts.push(serde_json::json!({
+                "type": "image_url",
+                "image_url": {
+                    "url": format!("data:{};base64,{}", image.media_type, image.data)
+                }
+            }));
+        }
+        out.push(serde_json::json!({
+            "role": "user",
+            "content": parts
+        }));
+    }
+    serde_json::Value::Array(out)
 }
 
 /// Shared SSE processing loop for streaming chat completions.
@@ -630,6 +703,11 @@ fn build_chat_request(
     // openai connector pointed at a NIM base URL will not receive it.
     let chat_template_kwargs = (provider == "nvidia" && params.reasoning_effort.is_some())
         .then_some(ChatTemplateKwargs { thinking: true });
+    // Lower the internal image channel onto the chat-completions wire
+    // BEFORE building the request: a tool result carrying a screenshot
+    // becomes a multimodal content-parts array here (see
+    // [`lower_images_to_wire`]).
+    let messages = lower_images_to_wire(&messages);
     // In inline mode the request must NOT carry the native `tools` array:
     // the model is instructed to write tool calls as JSON into its text
     // response, and the harness parses them. Without `tools` the API can
@@ -977,3 +1055,112 @@ pub async fn list_models(
 
     Ok(LsOutput::new(response_text, models))
 }
+
+#[cfg(test)]
+mod image_lowering_tests {
+    use crate::connector::params::{ChatMessage, ImageBlock, tool_result_message_with_images};
+    use super::lower_images_to_wire;
+
+    fn sample_image() -> ImageBlock {
+        ImageBlock::png(b"\x89PNG fake bytes")
+    }
+
+    /// Regression: the openai_compatible caller serializes `ChatMessage`
+    /// directly, and `images` is `skip_serializing` — without the lowering
+    /// pass the screenshot bytes were silently dropped and a VLM only ever
+    /// saw the text envelope (width/height/bytes metadata).
+    ///
+    /// The chat-completions schema allows content-parts (with `image_url`)
+    /// ONLY on user messages — a `role: "tool"` message may carry text
+    /// parts exclusively — so the lowering must keep the tool result
+    /// text-only and emit the pixels as a follow-up user message.
+    #[test]
+    fn tool_result_with_images_becomes_tool_plus_user_image_message() {
+        let msg = tool_result_message_with_images(
+            "call_1",
+            "screenshot 1568x882",
+            vec![sample_image()],
+        );
+        let lowered = lower_images_to_wire(std::slice::from_ref(&msg));
+        let arr = lowered.as_array().expect("messages array");
+        assert_eq!(arr.len(), 2, "tool result + follow-up user message");
+
+        // Message 1: the tool result, TEXT-ONLY (schema: no image parts).
+        assert_eq!(arr[0]["role"], "tool");
+        assert_eq!(arr[0]["tool_call_id"], "call_1");
+        assert_eq!(arr[0]["content"], "screenshot 1568x882");
+        assert!(arr[0].get("images").is_none(), "images must never leak");
+        assert!(arr[0]["content"].is_string(), "tool content stays a string");
+
+        // Message 2: the synthesized user message carrying the pixels.
+        assert_eq!(arr[1]["role"], "user");
+        let content = arr[1]["content"].as_array().expect("content parts");
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "text");
+        let label = content[0]["text"].as_str().unwrap();
+        assert!(label.contains("call_1"), "label names the source: {label}");
+        assert_eq!(content[1]["type"], "image_url");
+        let url = content[1]["image_url"]["url"].as_str().unwrap();
+        assert!(url.starts_with("data:image/png;base64,"), "url: {url}");
+    }
+
+    /// Text-only messages keep their plain string content (no parts array,
+    /// no data-URL inflation of the common path).
+    #[test]
+    fn text_only_messages_serialize_unchanged() {
+        let msg = ChatMessage {
+            role: "user".to_string(),
+            content: Some("hello".to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+            thinking_blocks: None,
+            images: None,
+        };
+        let lowered = lower_images_to_wire(std::slice::from_ref(&msg));
+        assert_eq!(lowered[0]["content"], "hello");
+        assert!(lowered[0].get("images").is_none());
+    }
+
+    /// A conversation where ONLY one message carries images: the plain
+    /// message stays string-content and is NOT followed by anything; the
+    /// image-bearing tool result gains exactly one follow-up user message
+    /// (no extra empty parts, no double emission).
+    #[test]
+    fn mixed_conversation_appends_user_message_only_after_tool_result() {
+        let plain = ChatMessage {
+            role: "user".to_string(),
+            content: Some("take a screenshot".to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+            thinking_blocks: None,
+            images: None,
+        };
+        let tool = tool_result_message_with_images("call_2", "shot", vec![sample_image()]);
+        let both = [plain, tool];
+        let lowered = lower_images_to_wire(&both);
+        assert_eq!(lowered.as_array().map(Vec::len), Some(3));
+        assert_eq!(lowered[0]["content"], "take a screenshot");
+        assert_eq!(lowered[1]["role"], "tool");
+        assert_eq!(lowered[1]["content"], "shot");
+        assert_eq!(lowered[2]["role"], "user");
+        assert!(lowered[2]["content"].is_array());
+    }
+
+    /// A tool result whose image list is EMPTY (payload drained or never
+    /// staged): no follow-up message is synthesized for it.
+    #[test]
+    fn empty_image_list_keeps_string_content() {
+        let msg = ChatMessage {
+            role: "tool".to_string(),
+            content: Some("plain".to_string()),
+            tool_calls: None,
+            tool_call_id: Some("c".to_string()),
+            thinking_blocks: None,
+            images: Some(Vec::new()),
+        };
+        let lowered = lower_images_to_wire(std::slice::from_ref(&msg));
+        assert_eq!(lowered.as_array().map(Vec::len), Some(1));
+        assert_eq!(lowered[0]["content"], "plain");
+    }
+}
+

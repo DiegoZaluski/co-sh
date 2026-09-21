@@ -37,9 +37,9 @@ pub use provider::Family;
 // reaching into the private claude module path.
 mod usage;
 pub use params::{
-    ChatMessage, ClaudeThinkingBlock, ResponseFormat, ToolCallFunctionMsg, ToolCallMode,
-    ToolCallMsg, ToolDefinition, ToolFunction, assistant_tool_call_message, system_message,
-    tool_result_message, user_message,
+    ChatMessage, ClaudeThinkingBlock, ImageBlock, ResponseFormat, ToolCallFunctionMsg,
+    ToolCallMode, ToolCallMsg, ToolDefinition, ToolFunction, assistant_tool_call_message,
+    system_message, tool_result_message, tool_result_message_with_images, user_message,
 };
 pub use provider::{
     COSH_SERVICE, OPENCODE_GO_PROVIDER, OPENCODE_ZEN_PROVIDER, clear_api_key_cache,

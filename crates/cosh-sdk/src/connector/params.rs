@@ -17,6 +17,47 @@ pub struct ClaudeThinkingBlock {
     pub signature: String,
 }
 
+/// An image attached to a chat message (multimodal delivery channel).
+///
+/// Carries the bytes directly as base64 — no file references. Each provider
+/// caller lowers it to its native image part; `skip_serializing_if` keeps
+/// it off wire formats that have no image slot, so text-only backends
+/// gracefully degrade to the message's text content.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ImageBlock {
+    /// IANA media type of the encoded bytes (e.g. `image/png`).
+    pub media_type: String,
+    /// Base64-encoded image bytes (standard alphabet, padded).
+    pub data: String,
+}
+
+impl ImageBlock {
+    /// Build a PNG image block from raw PNG bytes (base64-encoded here).
+    #[must_use]
+    pub fn png(bytes: &[u8]) -> Self {
+        use base64::Engine as _;
+        Self {
+            media_type: "image/png".to_string(),
+            data: base64::engine::general_purpose::STANDARD.encode(bytes),
+        }
+    }
+
+    /// Build an image block from already-encoded bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when `media_type` does not start with `image/`.
+    pub fn encoded(media_type: &str, data: impl Into<String>) -> Result<Self, String> {
+        if !media_type.starts_with("image/") {
+            return Err(format!("unsupported media type: {media_type}"));
+        }
+        Ok(Self {
+            media_type: media_type.to_string(),
+            data: data.into(),
+        })
+    }
+}
+
 /// A chat message for structured conversation history with native tool call support.
 ///
 /// This mirrors the `OpenAI` Chat Completion message format so the model
@@ -37,6 +78,15 @@ pub struct ChatMessage {
     /// OpenAI-compatible wire format.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking_blocks: Option<Vec<ClaudeThinkingBlock>>,
+    /// Images delivered WITH this message (multimodal channel). The
+    /// intended use is a `tool` result carrying a screenshot. Internal
+    /// transport detail: every caller lowers it to its provider's native
+    /// image part in Rust, and `skip_serializing` keeps the field off the
+    /// chat-completions wire, where an unknown message field would be
+    /// rejected by strict OpenAI-compatible servers (text-only providers
+    /// gracefully degrade to the message's text content).
+    #[serde(skip_serializing)]
+    pub images: Option<Vec<ImageBlock>>,
 }
 
 /// A tool call within an assistant message (OpenAI-compatible format).
@@ -74,6 +124,25 @@ pub fn tool_result_message(tool_call_id: &str, content: &str) -> ChatMessage {
         tool_calls: None,
         tool_call_id: Some(tool_call_id.to_string()),
         thinking_blocks: None,
+        images: None,
+    }
+}
+
+/// Builder for `ChatMessage` with `role: "tool"` carrying images
+/// (e.g. a screenshot tool result delivered to a multimodal model).
+#[must_use]
+pub fn tool_result_message_with_images(
+    tool_call_id: &str,
+    content: &str,
+    images: Vec<ImageBlock>,
+) -> ChatMessage {
+    ChatMessage {
+        role: "tool".to_string(),
+        content: Some(content.to_string()),
+        tool_calls: None,
+        tool_call_id: Some(tool_call_id.to_string()),
+        thinking_blocks: None,
+        images: Some(images),
     }
 }
 
@@ -86,6 +155,7 @@ pub fn assistant_tool_call_message(tool_calls: Vec<ToolCallMsg>) -> ChatMessage 
         tool_calls: Some(tool_calls),
         tool_call_id: None,
         thinking_blocks: None,
+        images: None,
     }
 }
 
@@ -98,6 +168,7 @@ pub fn user_message(content: &str) -> ChatMessage {
         tool_calls: None,
         tool_call_id: None,
         thinking_blocks: None,
+        images: None,
     }
 }
 
@@ -110,6 +181,7 @@ pub fn system_message(content: &str) -> ChatMessage {
         tool_calls: None,
         tool_call_id: None,
         thinking_blocks: None,
+        images: None,
     }
 }
 
