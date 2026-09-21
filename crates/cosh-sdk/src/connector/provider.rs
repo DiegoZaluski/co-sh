@@ -49,17 +49,26 @@ pub fn is_opencode_gateway(name: &str) -> bool {
     matches!(name, OPENCODE_ZEN_PROVIDER | OPENCODE_GO_PROVIDER)
 }
 
-/// Process-lifetime cache mapping `(service, env_var)` to the resolved key.
-type KeyringCache = HashMap<(String, String), Zeroizing<String>>;
+/// A missing credential is cached briefly so a UI render does not query the
+/// OS keyring on every frame. Explicit saves/removals invalidate the entry.
+const KEYRING_MISS_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+enum CachedKeyringValue {
+    Found(Zeroizing<String>),
+    Missing(std::time::Instant),
+}
+
+/// Process-lifetime cache mapping `(service, env_var)` to a key or recent miss.
+type KeyringCache = HashMap<(String, String), CachedKeyringValue>;
 
 /// Process-lifetime cache of resolved keyring keys, keyed by
 /// `(service, env_var)`.
 ///
 /// The first successful keyring lookup for a given key stays alive in process
 /// memory, so repeated resolutions (model listing, chat, provider detection)
-/// avoid re-hitting the OS credential store on every call. Only successful
-/// lookups are cached — misses still consult the keyring each time, keeping
-/// keys added/updated outside the app visible immediately.
+/// avoid re-hitting the OS credential store on every call. Successful
+/// lookups are cached for the process lifetime. Misses expire after 30 seconds;
+/// keys saved through cosh invalidate their entry immediately.
 ///
 /// Cache omitting Zeroizing would hold keys in plain `String` for the whole
 /// process too; `Zeroizing` makes sure the memory is wiped when an entry is
@@ -73,22 +82,33 @@ static KEYRING_CACHE: LazyLock<Mutex<KeyringCache>> = LazyLock::new(|| Mutex::ne
 /// resolutions don't re-hit the credential store.
 fn keyring_lookup(service: &str, env_var: &str) -> Option<String> {
     let key = (service.to_owned(), env_var.to_owned());
-    if let Some(cached) = KEYRING_CACHE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(&key)
     {
-        return Some((**cached).clone());
+        let cache = KEYRING_CACHE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match cache.get(&key) {
+            Some(CachedKeyringValue::Found(value)) => return Some((**value).clone()),
+            Some(CachedKeyringValue::Missing(at)) if at.elapsed() < KEYRING_MISS_TTL => {
+                return None;
+            }
+            _ => {}
+        }
     }
 
     let found = Entry::new(service, env_var)
         .and_then(|e| e.get_password())
-        .ok()?;
+        .ok();
     KEYRING_CACHE
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(key, Zeroizing::new(found.clone()));
-    Some(found)
+        .insert(
+            key,
+            match &found {
+                Some(value) => CachedKeyringValue::Found(Zeroizing::new(value.clone())),
+                None => CachedKeyringValue::Missing(std::time::Instant::now()),
+            },
+        );
+    found
 }
 
 /// Forget cached keys for an env var, e.g. right after saving/updating that

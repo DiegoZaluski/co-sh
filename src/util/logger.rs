@@ -7,9 +7,9 @@
 //!
 //! # Build behaviour
 //!
-//! - **Debug builds**: `log::debug!()` and `log::trace!()` are compiled in and
-//!   routed to the file logger. All crates in the workspace that use `log` will
-//!   have their output captured here — just call `init()` once at startup.
+//! - **Debug builds**: cosh workspace `log::debug!()` calls are routed to the
+//!   file logger. Dependency debug chatter is filtered out. The shared file
+//!   is truncated at 16 MiB so a long session cannot fill the disk.
 //! - **Release builds**: `log::debug!()` and `log::trace!()` are stripped at
 //!   compile time by Cargo's default `release` profiles. Only `info!()`,
 //!   `warn!()`, and `error!()` calls survive — the logger caps at `Info`, so
@@ -21,13 +21,20 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::sync::Mutex;
 
+const MAX_LOG_BYTES: u64 = 16 * 1024 * 1024;
+
 struct FileLogger {
     file: Mutex<std::fs::File>,
 }
 
 impl Log for FileLogger {
     fn enabled(&self, metadata: &Metadata) -> bool {
-        metadata.level() <= Level::Debug
+        metadata.level() <= Level::Info
+            || (metadata.level() == Level::Debug
+                && matches!(
+                    metadata.target().split("::").next(),
+                    Some("cosh" | "cosh_sdk" | "cosh_tui" | "cosh_tools" | "cosh_recall")
+                ))
     }
 
     fn log(&self, record: &Record) {
@@ -35,6 +42,12 @@ impl Log for FileLogger {
             return;
         }
         if let Ok(mut f) = self.file.lock() {
+            // The shared debug log can otherwise grow for the entire lifetime
+            // of an interactive session. Truncation also reclaims an oversized
+            // log left by a previous run without reading it into memory.
+            if f.metadata().is_ok_and(|m| m.len() >= MAX_LOG_BYTES) {
+                let _ = f.set_len(0);
+            }
             let _ = writeln!(
                 f,
                 "[{}] [{}] {}",
@@ -62,8 +75,8 @@ impl Log for FileLogger {
 /// into the session's first line, so appends from different entry points
 /// stay attributable.
 ///
-/// - **Debug builds**: sets the max log level to `Debug` — all `debug!()`,
-///   `info!()`, `warn!()`, and `error!()` calls are captured.
+/// - **Debug builds**: sets the max log level to `Debug` — workspace debug
+///   calls and all `info!()`, `warn!()`, and `error!()` calls are captured.
 /// - **Release builds**: sets the max log level to `Info` — info, warnings
 ///   and errors are recorded (the MCP lifecycle logs are Info).
 ///
@@ -116,4 +129,59 @@ pub fn try_init(scope: &str) -> Result<(), String> {
         std::process::id()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dependency_debug_is_filtered() {
+        let path = std::env::temp_dir().join(format!("cosh-logger-test-{}", std::process::id()));
+        let logger = FileLogger {
+            file: Mutex::new(
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                    .unwrap(),
+            ),
+        };
+        let own = Metadata::builder()
+            .level(Level::Debug)
+            .target("cosh::app")
+            .build();
+        let dependency = Metadata::builder()
+            .level(Level::Debug)
+            .target("keyring::entry")
+            .build();
+        assert!(logger.enabled(&own));
+        assert!(!logger.enabled(&dependency));
+        drop(logger);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn oversized_log_is_truncated_before_write() {
+        let path =
+            std::env::temp_dir().join(format!("cosh-logger-cap-test-{}", std::process::id()));
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.set_len(MAX_LOG_BYTES).unwrap();
+        let logger = FileLogger {
+            file: Mutex::new(file),
+        };
+        let record = Record::builder()
+            .args(format_args!("bounded"))
+            .level(Level::Info)
+            .target("cosh")
+            .build();
+        logger.log(&record);
+        assert!(std::fs::metadata(&path).unwrap().len() < 100);
+        drop(logger);
+        let _ = std::fs::remove_file(path);
+    }
 }

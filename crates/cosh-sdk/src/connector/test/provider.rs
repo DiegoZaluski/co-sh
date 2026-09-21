@@ -26,7 +26,7 @@ async fn detect_provider_env() {
 
 /// Successful keyring lookups are cached for the process lifetime and served
 /// without re-hitting the OS store; invalidating the env var forces a fresh
-/// read. Misses are not cached, so a later write is visible immediately.
+/// read. A new key written through cosh becomes visible after invalidation.
 #[tokio::test]
 async fn get_api_key_caches_hits_until_invalidated() {
     let _lock = ENV_LOCK.lock().await;
@@ -62,6 +62,38 @@ async fn get_api_key_caches_hits_until_invalidated() {
         Some("second")
     );
 
+    let _ = entry.delete_credential();
+    clear_api_key_cache();
+}
+
+/// Repeated absent-key checks must not hit the OS store on every UI frame.
+/// An explicit save invalidates the cached miss immediately.
+#[tokio::test]
+async fn keyring_miss_is_cached_until_invalidated() {
+    let _lock = ENV_LOCK.lock().await;
+    let _guard = EnvGuard::remove("OPENAI_API_KEY");
+    let service = format!("cosh-tests-miss-{}", std::process::id());
+    let entry = match keyring::Entry::new(&service, "OPENAI_API_KEY") {
+        Ok(entry) => entry,
+        Err(_) => return,
+    };
+    if entry.set_password("probe").is_err() {
+        return;
+    }
+    if entry.delete_credential().is_err() {
+        return;
+    }
+
+    clear_api_key_cache();
+    assert_eq!(get_api_key("openai", Some(&service)), None);
+    entry.set_password("new-key").unwrap();
+    assert_eq!(get_api_key("openai", Some(&service)), None);
+
+    invalidate_api_key("OPENAI_API_KEY");
+    assert_eq!(
+        get_api_key("openai", Some(&service)).as_deref(),
+        Some("new-key")
+    );
     let _ = entry.delete_credential();
     clear_api_key_cache();
 }
