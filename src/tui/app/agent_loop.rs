@@ -672,15 +672,13 @@ impl App {
             .as_ref()
             .and_then(|id| self.session_store.load_context(id));
 
-        let rt = AGENT_RUNTIME.get_or_init(|| {
-            tokio::runtime::Runtime::new().expect("shared agent runtime")
-        });
+        let rt = AGENT_RUNTIME
+            .get_or_init(|| tokio::runtime::Runtime::new().expect("shared agent runtime"));
         rt.spawn(async move {
             // Command-mode context: the restored session history plus the
             // hidden command item. The model never sees any of it.
-            let mut context = cosh::harness::ContextManager::new(
-                cosh::harness::context::MAX_CONTEXT_TOKENS,
-            );
+            let mut context =
+                cosh::harness::ContextManager::new(cosh::harness::context::MAX_CONTEXT_TOKENS);
             if let Some(state) = ctx_state {
                 context.restore_state(&state);
             }

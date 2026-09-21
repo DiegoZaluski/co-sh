@@ -66,8 +66,10 @@ fn command_execution_is_recorded_hidden() {
     assert!(hidden.contains(&result_id), "the result must be hidden");
     // The pair is a structural bash_run call/result, persisted for the user.
     let items = ctx.items_snapshot();
-    assert!(matches!(&items[0], ContextItem::ToolCall { name, call_id: cid, .. }
-        if name == "bash_run" && cid == "cmd-user-exec"));
+    assert!(
+        matches!(&items[0], ContextItem::ToolCall { name, call_id: cid, .. }
+        if name == "bash_run" && cid == "cmd-user-exec")
+    );
     assert!(matches!(
         &items[1],
         ContextItem::ToolResult { content, call_id, .. }
@@ -116,10 +118,9 @@ fn command_items_survive_save_restore_as_hidden() {
     restored.restore_state(&state);
 
     assert!(
-        restored
-            .items_snapshot()
-            .iter()
-            .any(|it| matches!(it, ContextItem::UserCommand { content, .. } if content == "echo hi")),
+        restored.items_snapshot().iter().any(
+            |it| matches!(it, ContextItem::UserCommand { content, .. } if content == "echo hi")
+        ),
         "the UserCommand item persists to the session JSONL"
     );
     let messages = restored.build_messages("");

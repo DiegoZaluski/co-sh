@@ -603,8 +603,7 @@ impl UninstallPayload {
             return None;
         }
         let cleaned: String = cleaned.chars().take(MAX_UNINSTALL_REASON).collect();
-        crate::telemetry::sanitize::sanitize_string(&cleaned)
-            .map(|ok| ok.to_string())
+        crate::telemetry::sanitize::sanitize_string(&cleaned).map(|ok| ok.to_string())
     }
 
     pub fn reason(&self) -> Option<&str> {
@@ -1018,13 +1017,7 @@ mod tests {
     // Uninstall payload
 
     fn uninstall_payload(raw_reason: Option<&str>) -> UninstallPayload {
-        UninstallPayload::new(
-            &UuidId::generate().unwrap(),
-            raw_reason,
-            true,
-            true,
-            true,
-        )
+        UninstallPayload::new(&UuidId::generate().unwrap(), raw_reason, true, true, true)
     }
 
     #[test]
@@ -1051,13 +1044,7 @@ mod tests {
     fn uninstall_payload_keyring_field_roundtrips_false() {
         // A failed keyring cleanup must survive the serialize → deserialize
         // → re-validate path without being "upgraded" to true.
-        let payload = UninstallPayload::new(
-            &UuidId::generate().unwrap(),
-            None,
-            true,
-            true,
-            false,
-        );
+        let payload = UninstallPayload::new(&UuidId::generate().unwrap(), None, true, true, false);
         assert!(!payload.keyring_removed());
         let json = serde_json::to_value(&payload).unwrap();
         assert_eq!(json["keyring_removed"], false);
@@ -1084,7 +1071,11 @@ mod tests {
     fn uninstall_payload_reason_is_trimmed_and_capped() {
         let long = format!("{:>500}", "padded ");
         let payload = uninstall_payload(Some(&long));
-        assert!(payload.reason().is_some_and(|r| r.len() <= MAX_UNINSTALL_REASON));
+        assert!(
+            payload
+                .reason()
+                .is_some_and(|r| r.len() <= MAX_UNINSTALL_REASON)
+        );
         assert!(payload.validate());
     }
 
@@ -1094,7 +1085,10 @@ mod tests {
         // dropped (fail closed) while reason_provided stays true.
         let payload = uninstall_payload(Some("my key is sk-abcdef123 and I quit"));
         assert_eq!(payload.reason(), None);
-        assert!(payload.reason_provided(), "the user DID answer — flag must stay");
+        assert!(
+            payload.reason_provided(),
+            "the user DID answer — flag must stay"
+        );
         assert!(payload.validate());
     }
 
@@ -1125,16 +1119,18 @@ mod tests {
         assert_eq!(envelope.type_name(), "uninstall");
         assert!(envelope.validate());
         // Variant/type mismatch is rejected at construction.
-        assert!(EventEnvelope::new(
-            EventType::Install,
-            &AppVersion::validate("0.1.0").unwrap(),
-            None,
-            &UuidId::generate().unwrap(),
-            None,
-            OccurredAt::now(),
-            EventPayload::Uninstall(uninstall_payload(None)),
-        )
-        .is_none());
+        assert!(
+            EventEnvelope::new(
+                EventType::Install,
+                &AppVersion::validate("0.1.0").unwrap(),
+                None,
+                &UuidId::generate().unwrap(),
+                None,
+                OccurredAt::now(),
+                EventPayload::Uninstall(uninstall_payload(None)),
+            )
+            .is_none()
+        );
         // Synthetic builder covers the new variant too.
         assert!(synthetic(EventType::Uninstall).validate());
     }

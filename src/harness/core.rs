@@ -1166,7 +1166,9 @@ impl Harness {
         }
         if let Some(ref cosh) = self.cosh_tools {
             let schemas = match self.mode {
-                Mode::Build | Mode::Yolo | Mode::Command => cosh.schemas_enabled(&self.disabled_tools),
+                Mode::Build | Mode::Yolo | Mode::Command => {
+                    cosh.schemas_enabled(&self.disabled_tools)
+                }
                 Mode::Ask => cosh.schemas_filtered(&self.disabled_tools),
             };
             log::debug!(
@@ -1206,7 +1208,9 @@ impl Harness {
         }
         if let Some(ref cosh) = self.cosh_tools {
             let schemas = match self.mode {
-                Mode::Build | Mode::Yolo | Mode::Command => cosh.schemas_enabled(&self.disabled_tools),
+                Mode::Build | Mode::Yolo | Mode::Command => {
+                    cosh.schemas_enabled(&self.disabled_tools)
+                }
                 Mode::Ask => cosh.schemas_filtered(&self.disabled_tools),
             };
             for schema in schemas {
@@ -4926,7 +4930,9 @@ impl Harness {
     fn schema_input(&self, tool_name: &str) -> Option<serde_json::Value> {
         if let Some(cosh) = &self.cosh_tools {
             let schemas = match self.mode {
-                Mode::Build | Mode::Yolo | Mode::Command => cosh.schemas_enabled(&self.disabled_tools),
+                Mode::Build | Mode::Yolo | Mode::Command => {
+                    cosh.schemas_enabled(&self.disabled_tools)
+                }
                 Mode::Ask => cosh.schemas_filtered(&self.disabled_tools),
             };
             for schema in schemas {
