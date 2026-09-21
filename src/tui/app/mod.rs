@@ -168,6 +168,39 @@ enum AppMode {
     Rag,
 }
 
+/// Keep interactive frames smooth while leaving headroom for the agent when
+/// drawing a large transcript becomes expensive. Hysteresis avoids switching
+/// rates on every frame near the threshold.
+#[derive(Default)]
+struct FramePacer {
+    average_draw_ms: f64,
+    economical: bool,
+}
+
+impl FramePacer {
+    fn interval(&self) -> Duration {
+        if self.economical {
+            Duration::from_micros(33_333)
+        } else {
+            Duration::from_micros(16_667)
+        }
+    }
+
+    fn record_draw(&mut self, elapsed: Duration) {
+        let draw_ms = elapsed.as_secs_f64() * 1_000.0;
+        self.average_draw_ms = if self.average_draw_ms == 0.0 {
+            draw_ms
+        } else {
+            self.average_draw_ms * 0.875 + draw_ms * 0.125
+        };
+        if self.average_draw_ms > 8.0 {
+            self.economical = true;
+        } else if self.average_draw_ms < 6.0 {
+            self.economical = false;
+        }
+    }
+}
+
 /// Result of `App::session_main_area`: the session chat's content area plus
 /// the sidebar/right-panel widths that were subtracted, so `render` and the
 /// mouse dispatch cannot drift apart.
@@ -421,10 +454,12 @@ pub struct App {
     live_requested: bool,
     /// Timestamp of the previous frame (for delta_time calculation).
     last_frame_time: std::time::Instant,
+    /// Fractional 30 Hz animation tick, independent of the draw cadence.
+    animation_tick_remainder: f64,
     /// Rate-limited resolver for the git branch shown in the session footer.
     branch_tracker: crate::util::git::BranchTracker,
     /// Per-frame counter — rate-limits the PERF debug logs in the render hot
-    /// path (bg_fill etc.) to one sample per ~30 frames (~1/sec) instead of
+    /// path (bg_fill etc.) to one sample per ~60 frames (~1/sec) instead of
     /// one write per frame.
     perf_frame: u64,
     /// Last known mouse X position (for keyboard scroll targeting).
@@ -682,6 +717,7 @@ impl App {
             drag_selection: None,
             live_requested: false,
             last_frame_time: std::time::Instant::now(),
+            animation_tick_remainder: 0.0,
             branch_tracker: crate::util::git::BranchTracker::default(),
             perf_frame: 0,
             last_mouse_x: 0,
@@ -783,11 +819,9 @@ impl App {
 
     pub fn run(&mut self) -> io::Result<()> {
         let mut terminal = init_terminal()?;
-        // Target 30 fps during streaming to give agents time to produce tokens
-        // before we spend cycles re-rendering (reduces jank, lowers CPU usage).
-        let frame_interval = Duration::from_micros(33_333); // ~30 fps
+        let mut pacer = FramePacer::default();
 
-        while !self.should_quit {
+        'main: while !self.should_quit {
             // ESC sovereign: pre-render event check
             // During streaming, terminal.draw() can take hundreds of milliseconds.
             // Do a quick non-blocking poll for pending events BEFORE spending time
@@ -806,25 +840,22 @@ impl App {
                 }
             }
 
-            // Frame-rate limiting during streaming
-            // Skip rendering if not enough time has elapsed. This reduces CPU usage
-            // and prevents jitter from rendering too frequently (which would compete
-            // with the agent's token production). Events are still polled.
+            // Wait for the next frame while still handling input immediately.
+            // A costly transcript draw switches to 30 fps; light draws get 60.
             if self.live_requested {
-                let elapsed = self.last_frame_time.elapsed();
-                if elapsed < frame_interval {
-                    let wait = frame_interval.saturating_sub(elapsed);
-                    // Still poll events while waiting (non-blocking)
-                    if event::poll(Duration::from_millis(0))? && self.handle_events()? {
+                let deadline = self.last_frame_time + pacer.interval();
+                loop {
+                    let wait = deadline.saturating_duration_since(Instant::now());
+                    if wait.is_zero() {
                         break;
                     }
-                    // If stop was requested, drain events and skip render
+                    if event::poll(wait)? && self.handle_events()? {
+                        break 'main;
+                    }
                     if self.stop_signal.load(Ordering::Relaxed) {
                         self.poll_events();
-                        continue;
+                        continue 'main;
                     }
-                    // Sleep for the remaining frame interval
-                    std::thread::sleep(wait);
                 }
             }
 
@@ -853,9 +884,11 @@ impl App {
                 terminal.clear()?;
             }
 
+            let draw_started = Instant::now();
             terminal.draw(|frame| {
                 self.render(frame, delta_secs);
             })?;
+            pacer.record_draw(draw_started.elapsed());
 
             if self.live_requested || self.session_view.pill_animating() {
                 // When auto-scroll is active, don't block on event::poll.

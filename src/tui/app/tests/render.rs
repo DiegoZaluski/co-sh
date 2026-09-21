@@ -1,4 +1,26 @@
 use super::{App, HOME_LOCK, format_tokens, isolate_home};
+use crate::app::FramePacer;
+use std::time::Duration;
+
+#[test]
+fn frame_pacer_uses_60_fps_when_cheap_and_30_fps_under_load() {
+    let mut pacer = FramePacer::default();
+    assert_eq!(pacer.interval(), Duration::from_micros(16_667));
+
+    for _ in 0..16 {
+        pacer.record_draw(Duration::from_millis(12));
+    }
+    assert_eq!(pacer.interval(), Duration::from_micros(33_333));
+
+    // A brief improvement should not make the rate oscillate.
+    pacer.record_draw(Duration::from_millis(7));
+    assert_eq!(pacer.interval(), Duration::from_micros(33_333));
+
+    for _ in 0..16 {
+        pacer.record_draw(Duration::from_millis(2));
+    }
+    assert_eq!(pacer.interval(), Duration::from_micros(16_667));
+}
 
 /// Long queued messages must word-wrap across several visual rows instead of
 /// being truncated: `pending_queue_rows` expands every queued message into

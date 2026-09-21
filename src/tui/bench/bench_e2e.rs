@@ -21,8 +21,8 @@ use cosh::harness::HarnessEvent;
 
 const W: u16 = 160;
 const H: u16 = 48;
-/// ~30 fps pacing used by App::run while live.
-const FRAME_MS_BUDGET: f64 = 33.333;
+/// Fast-path pacing used by App::run while a frame is inexpensive.
+const FRAME_MS_BUDGET: f64 = 16.667;
 
 struct FrameStats {
     name: &'static str,
@@ -348,7 +348,7 @@ async fn bench_e2e_agent_loop() {
                 app.poll_events();
                 let drained = t.elapsed().as_secs_f64() * 1000.0;
                 let t2 = std::time::Instant::now();
-                terminal.draw(|frame| app.render(frame, 0.033)).unwrap();
+                terminal.draw(|frame| app.render(frame, 0.016_667)).unwrap();
                 let draw = t2.elapsed();
                 ft.drain_ms.push(drained);
                 ft.draw_ms.push(draw.as_secs_f64() * 1000.0);

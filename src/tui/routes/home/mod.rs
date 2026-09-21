@@ -237,10 +237,12 @@ impl HomeView {
         None
     }
 
-    pub fn render(&mut self, buf: &mut Buffer, area: Rect, theme: &Theme) {
+    pub fn render(&mut self, buf: &mut Buffer, area: Rect, theme: &Theme, animation_ticks: u32) {
         let cx = area.x + area.width / 2;
 
-        self.advance();
+        for _ in 0..animation_ticks {
+            self.advance();
+        }
 
         let primary = rgba_color(theme.primary);
         let muted = rgba_color(theme.text_muted);

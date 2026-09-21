@@ -46,6 +46,13 @@ pub(super) fn format_tokens(n: usize) -> String {
 
 impl App {
     pub(super) fn render(&mut self, frame: &mut Frame<'_>, delta_time: f64) {
+        // The draw loop can run at 60 fps, but frame-counted animations were
+        // designed for 30 fps. Advance them by elapsed time so they keep the
+        // same visual speed at either pacing rate.
+        self.animation_tick_remainder =
+            (self.animation_tick_remainder + delta_time.max(0.0)).min(4.0 / 30.0);
+        let animation_ticks = (self.animation_tick_remainder * 30.0) as u32;
+        self.animation_tick_remainder -= f64::from(animation_ticks) / 30.0;
         // Sync live_requested — keeps the render loop running smoothly.
         // Session: during streaming, sticky scroll needs continuous re-rendering.
         // RAG: when the spinner is active (fetching/embedding), enable live mode
@@ -77,6 +84,16 @@ impl App {
         // other live source (idle session, mid-history scroll): otherwise the
         // animation would freeze on a half-drawn frame until the next event.
         live = live || self.session_view.pill_animating();
+        // Keep the lightweight landing and empty-session logo animations
+        // moving even when there is no input or agent activity.
+        live = live || (matches!(self.mode(), AppMode::Home) && self.home_view.anim_active);
+        live = live
+            || (matches!(self.mode(), AppMode::Session)
+                && self.anim_enabled
+                && self
+                    .state
+                    .current_session()
+                    .is_some_and(|session| session.messages.is_empty()));
         self.live_requested = live;
         let area = frame.area();
 
@@ -103,7 +120,7 @@ impl App {
             // log would receive one line per frame for the whole session
             // lifetime (a 400+ MB stdout.log in 8 hours).
             self.perf_frame = self.perf_frame.wrapping_add(1);
-            if _bg_us > 200 && self.perf_frame.is_multiple_of(30) {
+            if _bg_us > 200 && self.perf_frame.is_multiple_of(60) {
                 log::debug!(
                     "[PERF] bg_fill: {_bg_us}us area={}x{}",
                     area.width,
@@ -564,7 +581,8 @@ impl App {
             match self.mode() {
                 AppMode::Home => {
                     self.prompt_view.blur();
-                    self.home_view.render(buf, session_area, &self.theme);
+                    self.home_view
+                        .render(buf, session_area, &self.theme, animation_ticks);
                 }
                 AppMode::InternalTools => {
                     self.prompt_view.blur();
@@ -652,11 +670,15 @@ impl App {
                     // The correction spinner occupies this row only while the
                     // agent-loop spinner is absent.
                     if agent_spinner_active && let Some(spinner) = &mut self.agent_spinner_bass {
-                        spinner.advance();
+                        for _ in 0..animation_ticks {
+                            spinner.advance();
+                        }
                     } else if correction_spinner_active
                         && let Some(spinner) = &mut self.prompt_correction_spinner
                     {
-                        spinner.advance();
+                        for _ in 0..animation_ticks {
+                            spinner.advance();
+                        }
                     }
 
                     let unique_agents = self.state.unique_agents();
@@ -794,7 +816,9 @@ impl App {
                 // being fetched through the API (frame advances only when
                 // the loading dialog is on top).
                 if let DialogType::ModelList { loading: true, .. } = &d.dialog_type {
-                    d.spinner.advance();
+                    for _ in 0..animation_ticks {
+                        d.spinner.advance();
+                    }
                 }
             }
             // The slash menu renders first so modal dialogs (e.g. the Ctrl+C
