@@ -190,13 +190,14 @@ impl CoshTools {
             // (cargo, python, make, …) streams in real time instead of
             // arriving in one block-buffered dump at exit. The dispatch
             // strips ANSI escapes / CRLF per chunk (see `strip_ansi`).
-            // The default timeout is a hang guard: on a PTY the child's
-            // stdin is the slave side and nothing feeds it, so a command
-            // that reads stdin (`cat`, `ssh`, a prompt) would otherwise
-            // block forever — the piped path got EOF from `Stdio::null()`.
-            // 10 minutes still allows long builds; a killed run surfaces
-            // `signal: -1` to the model, which can then adjust.
-            bash: Bash::new().cwd(cwd).pty(true).timeout(600_000),
+            // The timeout default is owned by the tool (`Bash::new`, 10
+            // minutes): it is the hang guard for a PTY child whose stdin is
+            // the slave side and nothing feeds it — a command that reads
+            // stdin (`cat`, `ssh`, a prompt) would otherwise block forever.
+            // The value is interpolated into the `bash_run` tool description,
+            // and the model can raise it per call via the optional
+            // `timeout_ms` argument (validated inside the tool).
+            bash: Bash::new().cwd(cwd).pty(true),
             fs,
             find: Find::new().cwd(cwd),
             web: Web::new(),
@@ -897,14 +898,19 @@ impl Tools for CoshTools {
             "bash_run" => {
                 let input: BashRunInput =
                     serde_json::from_value(args).map_err(|e| e.to_string())?;
-                let stream = self.bash.run(&input.command).map_err(|e| {
-                    e.text_err.unwrap_or_else(|| {
-                        format!(
-                            "exec error (signal={:?})",
-                            e.exec_err.as_ref().map(|ee| ee.signal)
-                        )
-                    })
-                })?;
+                // `timeout_ms` is optional and validated inside the tool: it
+                // may only raise the configured timeout for this call.
+                let stream = self
+                    .bash
+                    .run_with_timeout(&input.command, input.timeout_ms)
+                    .map_err(|e| {
+                        e.text_err.unwrap_or_else(|| {
+                            format!(
+                                "exec error (signal={:?})",
+                                e.exec_err.as_ref().map(|ee| ee.signal)
+                            )
+                        })
+                    })?;
                 tokio::pin!(stream);
 
                 let mut output = String::new();
