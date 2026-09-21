@@ -1,4 +1,4 @@
-use super::super::App;
+use super::super::{App, HOME_LOCK, isolate_home};
 
 fn click(app: &mut App, column: u16, row: u16) {
     use crossterm::event::{
@@ -21,6 +21,8 @@ fn click(app: &mut App, column: u16, row: u16) {
 /// spans x=35..38 (opts_x = 25 + (30-9)/2 = 35).
 #[tokio::test]
 async fn confirm_quit_yes_click_quits_even_with_slash_menu_open() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     let mut app = App::new("/tmp".to_string());
     // Pin the geometry: the click below assumes the 80x24 fallback layout
     // (dialog centered at x=25, "Yes" at x=35..38, row 12). Without the pin,
@@ -57,6 +59,8 @@ async fn confirm_quit_yes_click_quits_even_with_slash_menu_open() {
 /// click Yes).
 #[tokio::test]
 async fn confirm_quit_yes_click_in_session_with_live_slash_menu() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     let mut app = App::new("/tmp".to_string());
     // Pin the geometry — same reason as the first confirm test: the click
     // at (36, 12) assumes the 80x24 fallback layout.
@@ -99,6 +103,8 @@ async fn confirm_quit_yes_click_in_session_with_live_slash_menu() {
 /// through the key handler, then click "Yes". No direct state manipulation.
 #[tokio::test]
 async fn confirm_quit_full_real_input_flow_with_slash_menu() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     use crossterm::event::{KeyCode as K, KeyEvent, KeyModifiers};
 
     let mut app = App::new("/tmp".to_string());
@@ -138,6 +144,8 @@ async fn confirm_quit_full_real_input_flow_with_slash_menu() {
 /// instead of confirming). The modal must be sovereign: Enter decides.
 #[tokio::test]
 async fn confirm_quit_sovereign_enter_beats_slash_menu() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     use crossterm::event::{KeyCode as K, KeyEvent, KeyModifiers};
 
     let mut app = App::new("/tmp".to_string());
@@ -174,6 +182,8 @@ async fn confirm_quit_sovereign_enter_beats_slash_menu() {
 /// in particular the slash menu must not swallow Esc or run anything.
 #[tokio::test]
 async fn confirm_quit_sovereign_esc_cancels_without_menu_reaction() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     use crossterm::event::{KeyCode as K, KeyEvent, KeyModifiers};
 
     let mut app = App::new("/tmp".to_string());
@@ -200,6 +210,8 @@ async fn confirm_quit_sovereign_esc_cancels_without_menu_reaction() {
 /// swallowed — they must not reach the prompt input or the menu filter.
 #[tokio::test]
 async fn confirm_quit_swallows_other_keys() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     use crossterm::event::{KeyCode as K, KeyEvent, KeyModifiers};
 
     let mut app = App::new("/tmp".to_string());

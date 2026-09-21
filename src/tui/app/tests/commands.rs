@@ -11,6 +11,8 @@ fn slash_cmd(name: &str) -> crate::ui::slash_menu::SlashCommand {
 
 #[tokio::test]
 async fn compaction_progress_targets_the_running_box_and_final_output_replaces_status() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     use crate::types::{Message, MessageRole, Part, TextPart};
     use cosh::harness::events::{LlmCompactionEvent, LlmCompactionPhase};
     let mut app = App::new("/tmp".to_string());
@@ -60,6 +62,8 @@ async fn compaction_progress_targets_the_running_box_and_final_output_replaces_s
 /// intercepts Enter.
 #[tokio::test]
 async fn slash_toolcall_command_opens_tool_call_dialog() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     let mut app = App::new("/tmp".to_string());
     let cmd = crate::ui::slash_menu::SlashCommand {
         name: "toolcall".into(),
@@ -77,6 +81,8 @@ async fn slash_toolcall_command_opens_tool_call_dialog() {
 /// dialog (the fallback branch of `run_slash_command`).
 #[tokio::test]
 async fn slash_unknown_command_fills_prompt() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     let mut app = App::new("/tmp".to_string());
     let cmd = crate::ui::slash_menu::SlashCommand {
         name: "nonexistent".into(),
@@ -92,6 +98,8 @@ async fn slash_unknown_command_fills_prompt() {
 /// no detour through Home.
 #[tokio::test]
 async fn slash_new_creates_and_selects_a_fresh_session() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     let mut app = App::new("/tmp".to_string());
     assert!(app.state.current_session_id.is_none());
     let cmd = crate::ui::slash_menu::SlashCommand {
@@ -122,6 +130,8 @@ async fn slash_new_creates_and_selects_a_fresh_session() {
 /// didn't).
 #[tokio::test]
 async fn slash_new_resets_right_panel_state() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     let mut app = App::new("/tmp".to_string());
     // Simulate a used panel from the "old" session: todos, a PTY session,
     // panel focus and a manually scrolled-away flag.
@@ -178,6 +188,8 @@ async fn slash_new_resets_right_panel_state() {
 /// events into it.
 #[tokio::test]
 async fn slash_new_refuses_while_agent_is_working() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     let mut app = App::new("/tmp".to_string());
     app.state.status = crate::types::SessionStatus::Working;
     let cmd = crate::ui::slash_menu::SlashCommand {
@@ -200,6 +212,8 @@ async fn slash_new_refuses_while_agent_is_working() {
 /// sidebar) and closes the dialog.
 #[tokio::test]
 async fn slash_rename_edits_and_applies_the_session_title() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     let mut app = App::new("/tmp".to_string());
     app.start_new_session();
     let id = app.state.current_session_id.clone().unwrap();
@@ -239,6 +253,8 @@ async fn slash_rename_edits_and_applies_the_session_title() {
 /// Esc on the rename dialog cancels without touching the title.
 #[tokio::test]
 async fn slash_rename_esc_cancels_without_changes() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     let mut app = App::new("/tmp".to_string());
     app.start_new_session();
     let id = app.state.current_session_id.clone().unwrap();
@@ -262,6 +278,8 @@ async fn slash_rename_esc_cancels_without_changes() {
 /// mirroring opencode's prompt behavior.
 #[tokio::test]
 async fn slash_rename_empty_title_applies_nothing() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     let mut app = App::new("/tmp".to_string());
     app.start_new_session();
     let id = app.state.current_session_id.clone().unwrap();
@@ -292,6 +310,8 @@ async fn slash_rename_empty_title_applies_nothing() {
 /// but were invisible and unreachable by arrow keys.
 #[tokio::test]
 async fn slash_menu_scrolls_so_the_selection_stays_visible() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     let mut app = App::new("/tmp".to_string());
     app.prompt_view.input = "/".into();
     app.slash_menu.update(&app.prompt_view.input);
@@ -326,6 +346,8 @@ async fn slash_menu_scrolls_so_the_selection_stays_visible() {
 /// cleared (no task spawned).
 #[tokio::test]
 async fn slash_compact_refuses_while_agent_is_working() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     let mut app = App::new("/tmp".to_string());
     app.state.status = crate::types::SessionStatus::Working;
     let cmd = crate::ui::slash_menu::SlashCommand {
@@ -351,6 +373,8 @@ async fn slash_compact_refuses_while_agent_is_working() {
 /// there is no timeline snapshot to rebuild the summarizer from.
 #[tokio::test]
 async fn slash_compact_refuses_without_a_session_context() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     let mut app = App::new("/tmp".to_string());
     let cmd = crate::ui::slash_menu::SlashCommand {
         name: "compact".into(),
@@ -448,6 +472,8 @@ async fn background_preference_loads_from_setup_on_startup() {
 /// The slash menu offers `/background` and filters down to it.
 #[tokio::test]
 async fn slash_menu_lists_background_command() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     let mut app = App::new("/tmp".to_string());
     app.prompt_view.input = "/back".into();
     app.slash_menu.update(&app.prompt_view.input);

@@ -1,4 +1,4 @@
-use super::super::App;
+use super::super::{App, HOME_LOCK, isolate_home};
 
 /// Regression: the picker box must be wide enough to show each option's
 /// full description — the inline row used to truncate at
@@ -7,6 +7,8 @@ use super::super::App;
 /// with 'y' at x=63 and the native one with ')' at x=58.
 #[tokio::test]
 async fn tool_call_dialog_render_shows_full_description_text() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     let mut app = App::new("/tmp".to_string());
@@ -42,7 +44,12 @@ async fn tool_call_dialog_render_shows_full_description_text() {
 /// the dialog's Up/Down handler; the dialog stays open while cycling the
 /// two options. Sleeps straddle the 50ms scroll debounce.
 #[tokio::test]
+// The HOME guard is intentionally held across the debounce sleeps: serializing
+// env access across awaits is the whole point of the lock here.
+#[allow(clippy::await_holding_lock)]
 async fn tool_call_dialog_mouse_wheel_changes_selection() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     use crossterm::event::{KeyModifiers, MouseEvent as CMouse, MouseEventKind as CKind};
     let mut app = App::new("/tmp".to_string());
     let cmd = crate::ui::slash_menu::SlashCommand {
@@ -87,6 +94,8 @@ async fn tool_call_dialog_mouse_wheel_changes_selection() {
 /// test sends Down then Up.
 #[tokio::test]
 async fn tool_call_dialog_mouse_click_applies_mode() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     use crossterm::event::{
         KeyModifiers, MouseButton as CBtn, MouseEvent as CMouse, MouseEventKind as CKind,
     };

@@ -1,4 +1,4 @@
-use super::super::App;
+use super::super::{App, HOME_LOCK, isolate_home};
 use crate::routes::session::queue_choice::QueueTarget;
 use crate::types::{Message, SessionStatus};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -22,6 +22,7 @@ fn text_of(msg: &Message) -> String {
 // ── Queue Actions (Edit/Delete/Copy on pending queued messages) ─────────
 
 fn app_with_queues() -> App {
+    isolate_home();
     let mut app = App::new("/tmp".to_string());
     let session = crate::types::Session {
         id: "t".into(),
@@ -54,6 +55,7 @@ fn open_queue_actions(app: &mut App, queue: QueueTarget, index: usize, preview: 
 
 #[tokio::test]
 async fn queue_actions_keyboard_cycles_three_options() {
+    let _guard = HOME_LOCK.lock();
     let mut app = app_with_queues();
     open_queue_actions(&mut app, QueueTarget::NextLoop, 0, "loop-one");
     assert!(app.handle_queue_actions_dialog_key(KeyCode::Down));
@@ -70,6 +72,7 @@ async fn queue_actions_keyboard_cycles_three_options() {
 
 #[tokio::test]
 async fn queue_actions_edit_moves_message_into_prompt_in_place() {
+    let _guard = HOME_LOCK.lock();
     let mut app = app_with_queues();
     app.run_queue_action(0, QueueTarget::NextRequest, 0);
     assert_eq!(app.prompt_view.input, "request-one");
@@ -85,6 +88,7 @@ async fn queue_actions_edit_moves_message_into_prompt_in_place() {
 
 #[tokio::test]
 async fn queue_actions_delete_removes_only_target_row() {
+    let _guard = HOME_LOCK.lock();
     let mut app = app_with_queues();
     app.run_queue_action(1, QueueTarget::NextLoop, 0);
     let queues = app.state.current_pending_queues().unwrap();
@@ -98,6 +102,7 @@ async fn queue_actions_delete_removes_only_target_row() {
 
 #[tokio::test]
 async fn queue_actions_copy_missing_index_is_noop() {
+    let _guard = HOME_LOCK.lock();
     let mut app = app_with_queues();
     app.run_queue_action(2, QueueTarget::NextRequest, 99);
     // No panic, queues untouched, dialog stack untouched.
@@ -109,6 +114,7 @@ async fn queue_actions_copy_missing_index_is_noop() {
 
 #[tokio::test]
 async fn edited_message_requeued_into_same_queue_restores_position() {
+    let _guard = HOME_LOCK.lock();
     let mut app = app_with_queues();
     // Edit "loop-two" (index 1 of next_loop) and send it back unchanged.
     app.run_queue_action(0, QueueTarget::NextLoop, 1);
@@ -125,6 +131,7 @@ async fn edited_message_requeued_into_same_queue_restores_position() {
 
 #[tokio::test]
 async fn edited_message_moved_to_other_queue_goes_to_the_end() {
+    let _guard = HOME_LOCK.lock();
     let mut app = app_with_queues();
     // Edit "request-one" (index 0 of next_request) but re-queue it into the
     // OTHER queue: it must be appended at the end.
@@ -143,6 +150,7 @@ async fn edited_message_moved_to_other_queue_goes_to_the_end() {
 
 #[tokio::test]
 async fn edited_text_change_still_restores_position_in_same_queue() {
+    let _guard = HOME_LOCK.lock();
     let mut app = app_with_queues();
     // Edit "loop-two" (index 1) and re-queue an EDITED version of it into
     // the same queue: editing is the point, so the slot is preserved.
@@ -161,6 +169,7 @@ async fn edited_text_change_still_restores_position_in_same_queue() {
 
 #[tokio::test]
 async fn full_edit_resend_flow_restores_position_via_keys() {
+    let _guard = HOME_LOCK.lock();
     let mut app = app_with_queues();
     app.state.status = SessionStatus::Working;
     app.active_loop_session_id = Some("t".into());
@@ -203,6 +212,7 @@ async fn full_edit_resend_flow_restores_position_via_keys() {
 
 #[tokio::test]
 async fn requeue_position_tracks_delivered_heads() {
+    let _guard = HOME_LOCK.lock();
     use std::time::{Duration, Instant};
     let mut app = app_with_queues();
     // A third survivor makes insert-at-0 distinguishable from append.
@@ -242,6 +252,7 @@ async fn requeue_position_tracks_delivered_heads() {
 
 #[tokio::test]
 async fn injection_ack_without_in_flight_marker_pops_nothing() {
+    let _guard = HOME_LOCK.lock();
     let mut app = app_with_queues();
     app.state.status = SessionStatus::Working;
     app.active_loop_session_id = Some("t".into());
@@ -265,6 +276,7 @@ async fn injection_ack_without_in_flight_marker_pops_nothing() {
 
 #[tokio::test]
 async fn promotion_remaps_the_edit_hint_to_next_loop() {
+    let _guard = HOME_LOCK.lock();
     let mut app = app_with_queues();
     app.run_queue_action(0, QueueTarget::NextRequest, 1);
     match &app.edit_requeue_hint {
@@ -288,6 +300,7 @@ async fn promotion_remaps_the_edit_hint_to_next_loop() {
 
 #[tokio::test]
 async fn deleting_a_row_before_the_hint_shifts_its_home_slot() {
+    let _guard = HOME_LOCK.lock();
     let mut app = app_with_queues();
     // Edit "request-two" (index 1): queue becomes ["request-one"].
     app.run_queue_action(0, QueueTarget::NextRequest, 1);
@@ -310,6 +323,7 @@ async fn deleting_a_row_before_the_hint_shifts_its_home_slot() {
 
 #[tokio::test]
 async fn edit_hint_is_dropped_when_submitting_from_another_session() {
+    let _guard = HOME_LOCK.lock();
     let mut app = app_with_queues();
     app.run_queue_action(0, QueueTarget::NextRequest, 0);
     assert!(app.edit_requeue_hint.is_some());
@@ -346,6 +360,7 @@ async fn edit_hint_is_dropped_when_submitting_from_another_session() {
 
 #[tokio::test]
 async fn opening_queue_actions_holds_the_next_effective_message() {
+    let _guard = HOME_LOCK.lock();
     use std::time::{Duration, Instant};
     let mut app = app_with_queues();
     app.state.status = SessionStatus::Working;
@@ -415,6 +430,7 @@ async fn opening_queue_actions_holds_the_next_effective_message() {
 
 #[tokio::test]
 async fn in_flight_message_survives_loop_end_without_injection() {
+    let _guard = HOME_LOCK.lock();
     let mut app = app_with_queues();
     app.state.status = SessionStatus::Working;
     app.active_loop_session_id = Some("t".into());
@@ -441,6 +457,7 @@ async fn in_flight_message_survives_loop_end_without_injection() {
 
 #[tokio::test]
 async fn loop_end_while_held_defers_the_auto_start() {
+    let _guard = HOME_LOCK.lock();
     use std::time::{Duration, Instant};
     let mut app = app_with_queues();
     app.active_loop_session_id = Some("t".into());
@@ -480,6 +497,7 @@ async fn loop_end_while_held_defers_the_auto_start() {
 
 #[tokio::test]
 async fn queue_actions_dialog_renders_title_and_options() {
+    let _guard = HOME_LOCK.lock();
     let mut app = app_with_queues();
     open_queue_actions(&mut app, QueueTarget::NextRequest, 0, "request-one");
     let theme = app.theme.clone();
@@ -503,6 +521,7 @@ async fn queue_actions_dialog_renders_title_and_options() {
 
 #[tokio::test]
 async fn hovered_queue_row_background_is_white() {
+    let _guard = HOME_LOCK.lock();
     let mut app = app_with_queues();
     app.hovered_queue_row = Some(0);
     let area = ratatui::layout::Rect::new(2, 10, 60, 4);
@@ -523,6 +542,7 @@ async fn hovered_queue_row_background_is_white() {
 
 #[tokio::test]
 async fn edited_submit_after_loop_end_requeues_instead_of_direct_send() {
+    let _guard = HOME_LOCK.lock();
     let mut app = app_with_queues();
     // Edit "request-two" (index 1 of next_request): it leaves the queue and
     // the edit hint is armed.
@@ -554,6 +574,7 @@ async fn edited_submit_after_loop_end_requeues_instead_of_direct_send() {
 
 #[tokio::test]
 async fn edited_next_loop_submit_after_loop_end_starts_from_queue_head() {
+    let _guard = HOME_LOCK.lock();
     let mut app = app_with_queues();
     // Edit the HEAD of next_loop.
     app.run_queue_action(0, QueueTarget::NextLoop, 0);
@@ -581,6 +602,7 @@ async fn edited_next_loop_submit_after_loop_end_starts_from_queue_head() {
 
 #[tokio::test]
 async fn edited_submit_during_hold_defers_the_chain_start() {
+    let _guard = HOME_LOCK.lock();
     use std::time::{Duration, Instant};
     let mut app = app_with_queues();
     app.run_queue_action(0, QueueTarget::NextRequest, 1);
@@ -622,6 +644,7 @@ async fn edited_submit_during_hold_defers_the_chain_start() {
 
 #[tokio::test]
 async fn plain_submit_without_outstanding_edit_still_sends_directly() {
+    let _guard = HOME_LOCK.lock();
     let mut app = app_with_queues();
     app.state.status = SessionStatus::Idle;
 

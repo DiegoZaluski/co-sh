@@ -124,6 +124,8 @@ fn format_tokens_handles_large_values() {
 /// "boxes can't be expanded while the agent loop is active").
 #[tokio::test]
 async fn session_main_area_matches_render_width_with_right_panel() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     use ratatui::layout::Rect;
 
     use super::RIGHT_PANEL_WIDTH;
@@ -153,6 +155,8 @@ async fn session_main_area_matches_render_width_with_right_panel() {
 /// Hidden panel (narrow terminal or no content) must not shrink the area.
 #[tokio::test]
 async fn session_main_area_ignores_hidden_right_panel() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     use ratatui::layout::Rect;
 
     use crate::routes::session::right_panel::types::RightPanelState;
@@ -184,6 +188,8 @@ async fn session_main_area_ignores_hidden_right_panel() {
 /// Charm".
 #[tokio::test]
 async fn charm_usage_event_switches_header_to_credits_balance() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     use cosh_sdk::connector::TokenUsage;
 
     let mut app = App::new("/tmp".to_string());

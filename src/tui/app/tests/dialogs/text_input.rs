@@ -126,6 +126,8 @@ async fn cache_ttl_input_parses_and_persists_minutes() {
 /// moves the insertion point (app-level path: Up-event gate included).
 #[tokio::test]
 async fn hook_input_click_positions_cursor() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     let mut app = App::new("/tmp".to_string());
     app.dialog.show(DialogType::HookInput {
         event: crate::routes::settings::PRE_TOOL_USE_EVENT,

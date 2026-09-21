@@ -1,4 +1,4 @@
-use super::super::{App, key};
+use super::super::{App, HOME_LOCK, isolate_home, key};
 use crate::routes::add_provider::ProviderEntry;
 use crate::ui::dialogs::DialogType;
 use crossterm::event::KeyCode;
@@ -17,6 +17,8 @@ fn fake_cloud_entry() -> ProviderEntry {
 /// picker is reserved for providers whose key is already in the keyring).
 #[tokio::test]
 async fn open_provider_dialog_without_key_shows_api_key_input() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     let mut app = App::new("/tmp".to_string());
     app.open_provider_dialog(&fake_cloud_entry());
     assert!(matches!(
@@ -28,6 +30,8 @@ async fn open_provider_dialog_without_key_shows_api_key_input() {
 /// Local providers keep going to the server-URL box, never the key picker.
 #[tokio::test]
 async fn open_provider_dialog_local_shows_url_input() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     let mut app = App::new("/tmp".to_string());
     let entry = ProviderEntry {
         name: "ollama",
@@ -45,6 +49,8 @@ async fn open_provider_dialog_local_shows_url_input() {
 /// sovereign modal and Esc closes the picker.
 #[tokio::test]
 async fn provider_key_choice_navigation_and_esc() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     let mut app = App::new("/tmp".to_string());
     app.dialog.show(DialogType::ProviderKeyChoice {
         provider: "testprovider".into(),
@@ -72,6 +78,8 @@ async fn provider_key_choice_navigation_and_esc() {
 /// API-key input carrying the same provider/env var.
 #[tokio::test]
 async fn provider_key_choice_overwrite_swaps_to_api_key_input() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     let mut app = App::new("/tmp".to_string());
     app.dialog.show(DialogType::ProviderKeyChoice {
         provider: "testprovider".into(),
@@ -99,6 +107,8 @@ async fn provider_key_choice_overwrite_swaps_to_api_key_input() {
 /// picker; cancelling the Confirm (Esc) pops back to the picker untouched.
 #[tokio::test]
 async fn provider_key_choice_forget_gates_behind_confirm() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     let mut app = App::new("/tmp".to_string());
     app.dialog.show(DialogType::ProviderKeyChoice {
         provider: "testprovider".into(),
@@ -125,6 +135,8 @@ async fn provider_key_choice_forget_gates_behind_confirm() {
 /// machine — but the flow must still close cleanly.
 #[tokio::test]
 async fn forget_confirmation_closes_confirm_and_picker() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     let mut app = App::new("/tmp".to_string());
     app.dialog.show(DialogType::ProviderKeyChoice {
         provider: "testprovider".into(),

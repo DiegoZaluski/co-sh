@@ -1,5 +1,5 @@
 #[allow(unused_imports)]
-use super::App;
+use super::{App, HOME_LOCK, isolate_home};
 
 /// The full create-db field drag selection flow through the app's real
 /// mouse dispatch: Down anchors, Drag extends, the render paints the
@@ -7,6 +7,8 @@ use super::App;
 #[tokio::test]
 #[cfg(feature = "embed")]
 async fn rag_field_drag_selection_through_app_mouse_events() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     use crate::routes::rag::models::CreateDbFocus;
     use crossterm::event::{
         KeyModifiers, MouseButton as CBtn, MouseEvent as CMouse, MouseEventKind as CKind,

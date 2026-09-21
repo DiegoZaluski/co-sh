@@ -1,4 +1,4 @@
-use super::App;
+use super::{App, HOME_LOCK, isolate_home};
 use crate::app::session_affinity_id;
 use crate::session_store::generate_session_id;
 
@@ -36,6 +36,8 @@ fn session_affinity_id_is_deterministic_opaque_hash() {
 /// promoted message joins the back of the secondary queue.
 #[tokio::test]
 async fn loop_end_promotes_unconsumed_next_request_to_next_loop() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     let mut app = App::new("/tmp".to_string());
     let id = crate::session_store::generate_session_id();
     app.state.add_empty_session(
@@ -86,6 +88,8 @@ async fn loop_end_promotes_unconsumed_next_request_to_next_loop() {
 /// spawn a real agent loop.
 #[tokio::test]
 async fn loop_end_orphaned_next_request_becomes_first_next_loop_candidate() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     let mut app = App::new("/tmp".to_string());
     let id = crate::session_store::generate_session_id();
     app.state.add_empty_session(
@@ -125,6 +129,8 @@ async fn loop_end_orphaned_next_request_becomes_first_next_loop_candidate() {
 /// prompt remained on screen.
 #[tokio::test]
 async fn mid_stream_reset_never_eats_the_previous_iteration_transcript() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     use cosh::harness::HarnessEvent;
 
     let mut app = App::new("/tmp".to_string());
@@ -252,6 +258,8 @@ async fn mid_stream_reset_never_eats_the_previous_iteration_transcript() {
 /// silently as if the model remembered nothing on purpose.
 #[tokio::test]
 async fn resuming_without_a_ctx_file_warns_and_starts_with_empty_context() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     let mut app = App::new("/tmp".to_string());
     // Isolate the store in a temp dir — persisting tests must never leak
     // session files into the real user data dir.
@@ -312,6 +320,8 @@ async fn resuming_without_a_ctx_file_warns_and_starts_with_empty_context() {
 /// gate (persisted session vs fresh one) is what keeps this quiet.
 #[tokio::test]
 async fn fresh_session_first_prompt_does_not_warn() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     let mut app = App::new("/tmp".to_string());
     let id = format!("{}-fresh", generate_session_id());
     app.state.add_empty_session(
@@ -349,6 +359,8 @@ async fn fresh_session_first_prompt_does_not_warn() {
 /// reserved for sessions that visibly lost context they once had.
 #[tokio::test]
 async fn resuming_with_a_ctx_file_stays_silent() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     let mut app = App::new("/tmp".to_string());
     // Isolate the store in a temp dir — persisting tests must never leak
     // session files into the real user data dir.
@@ -535,6 +547,8 @@ async fn leading_newline_delta_neither_opens_a_bubble_nor_breaks_the_stream() {
 /// event intake (`poll_events`), like the live loop — no special hooks.
 #[tokio::test]
 async fn spinner_label_follows_agent_activity() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     use cosh::harness::HarnessEvent;
 
     let mut app = App::new("/tmp".to_string());
