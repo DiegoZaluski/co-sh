@@ -86,6 +86,26 @@ impl App {
                 self.stop_signal.store(true, Ordering::Relaxed);
             }
 
+            // ESC cancels an in-flight prompt correction the same way it
+            // interrupts the agent loop: abort the request, drop the spinner
+            // and keep the draft exactly as it is (the correction never
+            // mutates the prompt before its answer is applied, so "restoring
+            // the original text" is the natural result of the abort). Only
+            // effective while the request is still running — after the
+            // model's answer arrived the flag is already down and Esc keeps
+            // its normal meanings below.
+            //
+            // Priority note: this gate sits BEFORE the selection-clearing
+            // gate on purpose. A left-drag selection made while the
+            // correction is in flight survives the first Esc (cancel is the
+            // more urgent action); a second Esc then clears the selection,
+            // mirroring how the agent-loop stop block above composes with
+            // the same gates.
+            if key.code == KeyCode::Esc && self.prompt_correction_active {
+                self.cancel_prompt_correction();
+                return Ok(false);
+            }
+
             // Escape clears selection if there is one.
             if key.code == KeyCode::Esc && self.prompt_view.has_selection() {
                 self.prompt_view.clear_selection();

@@ -3,6 +3,8 @@
 //! This intentionally lives outside the agent loop: correcting a draft must
 //! neither create a transcript message nor alter the running agent's context.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use super::App;
 use cosh::harness::{Harness, HarnessEvent};
 use cosh_sdk::connector::{Connector, ToolCallMode};
@@ -34,16 +36,61 @@ impl App {
         let local_base_urls = self.configured_local_base_urls();
         let cwd = self.state.working_directory.clone();
         let event_tx = self.event_tx.clone();
+        let cancelled = self.prompt_correction_cancel.clone();
 
         self.prompt_correction_active = true;
+        self.prompt_correction_cancel
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         self.prompt_correction_spinner = Some(crate::component::agent_spinner::AgentSpinner::new(
             "",
             &self.theme,
         ));
-        self.tokio_handle.spawn(async move {
-            let result =
-                run_prompt_corrector_fallbacks(&request, &fallbacks, &cwd, &local_base_urls).await;
+        self.prompt_correction_task = Some(self.tokio_handle.spawn(async move {
+            let result = run_prompt_corrector_fallbacks(
+                &request,
+                &fallbacks,
+                &cwd,
+                &local_base_urls,
+                &cancelled,
+            )
+            .await;
+            // A cancelled correction must never surface: the flag is checked
+            // right before the event is published so a response that arrived
+            // in the same poll cycle as the cancel is dropped.
+            if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
             let _ = event_tx.send(HarnessEvent::PromptCorrection { original, result });
+        }));
+    }
+
+    /// Cancel the in-flight prompt correction (the Esc path). Only effective
+    /// while the correction is still running — once the model's answer has
+    /// been applied the flag is already down and this is a no-op.
+    ///
+    /// The original draft is the thing being "restored":
+    /// `start_prompt_correction` never mutates the prompt (the draft stays
+    /// visible and editable for the whole request), so cancelling never
+    /// needs to write text back — it only aborts the task, clears the
+    /// spinner and lowers the flag. Any response the model still manages to
+    /// emit is dropped by the cancel-flag check in the spawned task and by
+    /// the event handler.
+    pub(super) fn cancel_prompt_correction(&mut self) {
+        if !self.prompt_correction_active {
+            return;
+        }
+        self.prompt_correction_cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(task) = self.prompt_correction_task.take() {
+            task.abort();
+        }
+        self.prompt_correction_active = false;
+        self.prompt_correction_spinner = None;
+        self.toast_state.show(crate::ui::toast::ToastOptions {
+            title: Some("Prompt correction".into()),
+            message: "Correction cancelled; the original prompt was kept.".into(),
+            variant: crate::ui::toast::ToastVariant::Info,
+            duration_ms: 3000,
         });
     }
 }
@@ -56,6 +103,7 @@ async fn run_prompt_corrector_fallbacks(
     fallbacks: &[PromptCorrectorFallback],
     cwd: &str,
     local_base_urls: &std::collections::HashMap<String, String>,
+    cancelled: &AtomicBool,
 ) -> Result<String, String> {
     if fallbacks.is_empty() {
         return Err(
@@ -65,6 +113,14 @@ async fn run_prompt_corrector_fallbacks(
 
     let mut failures = Vec::with_capacity(fallbacks.len());
     for fallback in fallbacks {
+        // Cooperative cancel between routes: Esc aborts the shared task, but
+        // the ACP route's blocking runtime below ignores that abort — this
+        // keeps a cancelled request from re-queueing the NEXT route. The
+        // sentinel error is never surfaced: the task's post-await cancel
+        // check drops it before any toast could show it.
+        if cancelled.load(Ordering::Relaxed) {
+            return Err("cancelled".into());
+        }
         let (label, result) = match fallback {
             PromptCorrectorFallback::Model { provider, model } => {
                 let label = format!("{provider}/{model}");
@@ -163,10 +219,38 @@ mod tests {
 
     #[tokio::test]
     async fn an_empty_route_is_a_configuration_error() {
-        let err = run_prompt_corrector_fallbacks("correct this", &[], "/tmp", &Default::default())
-            .await
-            .unwrap_err();
+        let err = run_prompt_corrector_fallbacks(
+            "correct this",
+            &[],
+            "/tmp",
+            &Default::default(),
+            &Default::default(),
+        )
+        .await
+        .unwrap_err();
 
         assert!(err.contains("Configure Models or ACP"));
+    }
+
+    #[tokio::test]
+    async fn a_preset_cancel_flag_stops_the_fallback_loop() {
+        // The flag is checked at the top of every route iteration, so even a
+        // configured route never runs once cancellation was requested.
+        let fallbacks = vec![PromptCorrectorFallback::Model {
+            provider: "openrouter".into(),
+            model: "test/model".into(),
+        }];
+        let cancelled = AtomicBool::new(true);
+        let err = run_prompt_corrector_fallbacks(
+            "correct this",
+            &fallbacks,
+            "/tmp",
+            &Default::default(),
+            &cancelled,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err, "cancelled");
     }
 }

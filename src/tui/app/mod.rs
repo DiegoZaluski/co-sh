@@ -276,6 +276,15 @@ pub struct App {
     /// One-off correction activity indicator. It only renders while the
     /// agent-loop spinner is not using the shared row above the prompt.
     prompt_correction_spinner: Option<AgentSpinner>,
+    /// Handle of the in-flight prompt-correction task. Aborted by Esc so the
+    /// correction can be cancelled before the model's answer arrives (the
+    /// draft is never mutated, so aborting alone already restores it).
+    prompt_correction_task: Option<tokio::task::JoinHandle<()>>,
+    /// Cooperative cancel flag shared with that task. The ACP route spawns a
+    /// nested blocking runtime whose future ignores the ambient runtime's
+    /// abort, so the fallback loop polls this flag between routes and the
+    /// spawned task itself exits without emitting a late `PromptCorrection`.
+    prompt_correction_cancel: Arc<AtomicBool>,
     pub slash_menu: crate::ui::slash_menu::SlashMenu,
     pub should_quit: bool,
     pub tokio_handle: Handle,
@@ -660,6 +669,8 @@ impl App {
             toast_state: ToastState::new(),
             prompt_correction_active: false,
             prompt_correction_spinner: None,
+            prompt_correction_task: None,
+            prompt_correction_cancel: Arc::new(AtomicBool::new(false)),
             slash_menu: crate::ui::slash_menu::SlashMenu::new(),
             theme_dialog_original: None,
             model_dialog_original: None,

@@ -924,8 +924,18 @@ impl App {
                 }
 
                 HarnessEvent::PromptCorrection { original, result } => {
+                    // A cancelled correction never applies: Esc drops the
+                    // flag (and aborts the task) BEFORE this event can be
+                    // drained, so any response that raced the cancel is
+                    // dropped here instead of overwriting the draft.
+                    if !self.prompt_correction_active {
+                        continue;
+                    }
                     self.prompt_correction_active = false;
                     self.prompt_correction_spinner = None;
+                    // The task finished on its own: drop its handle so the
+                    // field keeps meaning "in-flight task" (not last task).
+                    self.prompt_correction_task = None;
                     match result {
                         Ok(corrected) if corrected.trim().is_empty() => {
                             self.toast_state.show(ToastOptions {

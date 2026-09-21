@@ -1,7 +1,8 @@
 use super::{App, HOME_LOCK, isolate_home};
 use cosh::harness::HarnessEvent;
 use crossterm::event::{
-    KeyModifiers, MouseButton as CBtn, MouseEvent as CMouse, MouseEventKind as CKind,
+    KeyCode, KeyEvent, KeyModifiers, MouseButton as CBtn, MouseEvent as CMouse,
+    MouseEventKind as CKind,
 };
 
 fn mouse(kind: CKind, x: u16, y: u16) -> CMouse {
@@ -102,4 +103,64 @@ async fn incomplete_right_drag_never_starts_a_correction_request() {
             .and_then(|toast| toast.title.as_deref()),
         Some("Operation cancelled")
     );
+}
+
+#[tokio::test]
+async fn esc_cancels_the_in_flight_correction_and_keeps_the_draft() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.prompt_view.input = "rascunho original".into();
+    app.prompt_view.cursor_pos = app.prompt_view.input.len();
+    app.prompt_correction_active = true;
+    app.prompt_correction_spinner = Some(crate::component::agent_spinner::AgentSpinner::new(
+        "", &app.theme,
+    ));
+
+    app.process_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+
+    // The original text is intact (a correction never mutates the draft
+    // before its answer, so cancelling "restores" it), the spinner is gone
+    // and a new correction can be requested right away.
+    assert_eq!(app.prompt_view.input, "rascunho original");
+    assert!(!app.prompt_correction_active);
+    assert!(app.prompt_correction_spinner.is_none());
+    assert_eq!(
+        app.toast_state
+            .current
+            .as_ref()
+            .and_then(|toast| toast.title.as_deref()),
+        Some("Prompt correction")
+    );
+
+    // A late response that raced the cancel is dropped: the draft is never
+    // replaced and the correction flag stays down.
+    app.event_tx
+        .send(HarnessEvent::PromptCorrection {
+            original: "rascunho original".into(),
+            result: Ok("Rascunho corrigido.".into()),
+        })
+        .unwrap();
+    app.poll_events();
+
+    assert_eq!(app.prompt_view.input, "rascunho original");
+    assert!(!app.prompt_correction_active);
+}
+
+#[tokio::test]
+async fn esc_without_a_running_correction_changes_nothing() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.prompt_view.input = "rascunho".into();
+
+    // No correction is running: the dedicated gate must be a no-op (Esc
+    // falls through to its normal meanings — none of which touch the
+    // draft here).
+    app.process_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+
+    assert_eq!(app.prompt_view.input, "rascunho");
+    assert!(!app.prompt_correction_active);
 }
