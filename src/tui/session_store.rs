@@ -1515,6 +1515,7 @@ mod tests {
             call_id: name.into(),
             content: name.into(),
             useless: false,
+            images: Vec::new(),
         };
         let mut session = make_test_session(
             "view-interleave",
@@ -3181,6 +3182,7 @@ mod tests {
                 call_id: "call-1".into(),
                 content: "complete immutable payload".into(),
                 useless: false,
+                images: Vec::new(),
             },
         ]);
         context.masked.insert(2);
@@ -3764,6 +3766,7 @@ mod tests {
                 call_id: "call-a".into(),
                 content: "--- a.rs\n+++ b.rs\n@@ -1 +1 @@\n-old\n+new".into(),
                 useless: false,
+                images: Vec::new(),
             },
             assistant_item(4, "editing"),
         ]);
@@ -3828,12 +3831,14 @@ mod tests {
                 call_id: "call-a".into(),
                 content: "contents of a".into(),
                 useless: false,
+                images: Vec::new(),
             },
             ContextItem::ToolResult {
                 id: 5,
                 call_id: "call-b".into(),
                 content: "contents of b".into(),
                 useless: false,
+                images: Vec::new(),
             },
             assistant_item(6, "chain a"),
             assistant_item(7, "chain b"),

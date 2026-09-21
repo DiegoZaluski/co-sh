@@ -528,6 +528,12 @@ pub struct Harness {
     system_prompts: Vec<PromptSystem>,
     harness_tools: Vec<HarnessTool>,
     cosh_tools: Option<CoshTools>,
+    /// Image payload drained from the last Tier-1 dispatch (a
+    /// `computer_screenshot`'s PNG, as base64 `ImageBlock`s). Consumed by
+    /// [`Self::push_tool_history`] when it records that dispatch's result;
+    /// dropped on any other path (hook halt, stop, MCP fallback), so the
+    /// bytes can never leak onto a later tool result.
+    pending_images: Vec<cosh_sdk::connector::ImageBlock>,
     mode: Mode,
     /// Override for the mode-based base instructions (see
     /// [`Self::with_instructions`]). The internal sub-agent uses its own
@@ -729,6 +735,7 @@ impl Harness {
             system_prompts: Vec::new(),
             harness_tools: default_harness_tools(),
             cosh_tools: Some(cosh_tools),
+            pending_images: Vec::new(),
             mode: Mode::Build,
             instructions: None,
             stop_signal: None,
@@ -3293,10 +3300,16 @@ impl Harness {
             signature,
             thinking_blocks,
         );
-        self.context_manager.add_tool_result_flagged(
+        // Multimodal channel: the Tier-1 dispatch (`dispatch_next`) drained
+        // this dispatch's staged PNG payload into `self.pending_images`
+        // right after the call returned. Consume it here so the images ride
+        // on THIS result's `ChatMessage`; a payload drained by any other
+        // path (hook halt, stop, MCP fallback) is dropped there instead.
+        self.context_manager.add_tool_result_with_images(
             &tool_id,
             result,
             result_is_useless(name, result),
+            std::mem::take(&mut self.pending_images),
         );
     }
 
@@ -4839,20 +4852,37 @@ impl Harness {
 
         // Tier 1: cosh tools
         let mut dispatched: Option<String> = None;
+        // Drop any image payload abandoned by an earlier dispatch (permission
+        // hook halt, user stop, MCP fallback): it can never be attached to
+        // the result it belonged to anymore, so carrying it forward would
+        // risk leaking an old screenshot onto a later tool result.
+        self.pending_images.clear();
+        let mut images = Vec::new();
         if let Some(ref cosh) = self.cosh_tools {
+            // Clear any stale staged payload BEFORE dispatching: if a previous
+            // screenshot was staged but its caller bailed out early (permission
+            // hook halt, user stop), this reset guarantees the bytes never
+            // surface on an unrelated tool result.
+            let _ = cosh.take_pending_images();
             let args = serde_json::Value::Object(args_map.clone());
             match cosh.dispatch(&tool_name, args).await {
                 Ok(result) => {
                     self.tool_issuer.pop_front();
+                    images = cosh.take_pending_images();
                     dispatched = Some(result);
                 }
                 Err(err) if err.starts_with("unknown cosh tool") => {}
                 Err(err) => {
                     self.tool_issuer.pop_front();
+                    // Drop any staged payload: the error string returned to
+                    // the caller has no image channel, and a stale PNG must
+                    // never leak onto a later tool result.
+                    let _ = cosh.take_pending_images();
                     return Err(self.enrich_with_schema_hint(&tool_name, err));
                 }
             }
         }
+        self.pending_images = images;
         if let Some(result) = dispatched {
             // Any plan tool may have changed the TODO list; mirror the
             // authoritative Plan state into the protected TODO block so the
@@ -5155,6 +5185,7 @@ impl Harness {
             system_prompts: Vec::new(),
             harness_tools: default_harness_tools(),
             cosh_tools: None,
+            pending_images: Vec::new(),
             mode: Mode::Build,
             instructions: None,
             stop_signal: None,

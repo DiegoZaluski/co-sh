@@ -62,6 +62,18 @@ fn internal_tools() -> &'static [(&'static str, &'static str)] {
         ("skills_read_asset", "Read a skill asset"),
         ("skills_match_skills", "Match skills to task"),
         ("subagent_call", "Run a sub-agent for a delegated task"),
+        ("computer_apps", "List desktop apps with PIDs (accessibility tree)"),
+        ("computer_snapshot", "Capture an app's accessibility tree"),
+        (
+            "computer_screenshot",
+            "Capture the screen, a region or an element as an image",
+        ),
+        (
+            "computer_touch",
+            "Perform actions on accessibility-tree elements by selector",
+        ),
+        ("computer_pointer", "Click/scroll/move the pointer at coordinates"),
+        ("computer_keyboard", "Send synthetic keystrokes or type text"),
         (
             "lsp",
             "Language server tools (diagnostics, definitions, references, rename, ...)",
