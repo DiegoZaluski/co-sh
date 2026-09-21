@@ -62,6 +62,8 @@ const SHORTCUTS: &[ShortcutLine] = &[
     ShortcutLine::Header("Session"),
     ShortcutLine::Key("Tab", "Cycle mode (Build/Ask/Yolo)"),
     ShortcutLine::Key("Ctrl+\u{2191}/\u{2193}", "Prompt history"),
+    ShortcutLine::Key("Ctrl+Z", "Undo prompt edit / revert correction"),
+    ShortcutLine::Key("Ctrl+Y", "Redo prompt edit / reapply correction"),
     ShortcutLine::Gap,
     ShortcutLine::Header("Left panel"),
     ShortcutLine::Key("Ctrl+U", "Usage dashboard"),

@@ -2,6 +2,7 @@ pub mod agent_spinner;
 pub mod agent_spinner_bass;
 pub mod cursor;
 pub mod prompt;
+pub mod prompt_history;
 pub mod rag_input;
 pub mod search_bar;
 pub mod sparkle;

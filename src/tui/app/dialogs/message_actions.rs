@@ -136,8 +136,8 @@ impl App {
                 self.finalize_stale_compaction_lines();
                 self.session_view.hovered_msg_idx = None;
                 if !prompt_text.is_empty() {
-                    self.prompt_view.input = prompt_text;
-                    self.prompt_view.cursor_pos = self.prompt_view.input.len();
+                    // One Replace group: a single Ctrl+Z undoes the load.
+                    self.prompt_view.set_draft(prompt_text);
                 }
                 self.prompt_view.focus();
             }

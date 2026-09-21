@@ -163,8 +163,8 @@ impl App {
 
     /// Load `text` into the prompt input for editing/resending.
     fn load_into_prompt(&mut self, text: String) {
-        self.prompt_view.input = text;
-        self.prompt_view.cursor_pos = self.prompt_view.input.len();
+        // One Replace group: a single Ctrl+Z undoes the load.
+        self.prompt_view.set_draft(text);
         self.prompt_view.focus();
         self.hovered_queue_row = None;
     }

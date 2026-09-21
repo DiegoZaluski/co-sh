@@ -6,6 +6,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use super::{App, AppMode};
 use crate::component::prompt::PromptView;
+use crate::component::prompt_history::{RedoOutcome, UndoOutcome};
 use crate::fallback;
 use crate::routes::home::HomeAction;
 use crate::routes::router::FocusTarget;
@@ -958,9 +959,9 @@ impl App {
                     }
                     KeyCode::Esc => {
                         self.prompt_view.note_activity();
-                        self.prompt_view.input.clear();
-                        self.prompt_view.pasted_parts.clear();
-                        self.prompt_view.cursor_pos = 0;
+                        // Draft context ends: the edit history is dropped
+                        // with it (nothing to undo back to).
+                        self.prompt_view.clear_draft();
                         self.slash_menu.visible = false;
                     }
                     KeyCode::Backspace => {
@@ -979,21 +980,33 @@ impl App {
                         }
                     }
                     KeyCode::Char(ch) => {
+                        // A Ctrl-combo (Ctrl+Z undo, Ctrl+Y redo, Ctrl+J
+                        // newline, Ctrl+W delete-word) must NEVER type its
+                        // letter into the filtered command — the menu sits
+                        // BEFORE the Session-mode Char handler, so handle
+                        // the known combos here and swallow the rest.
+                        if key.modifiers.contains(KeyModifiers::CONTROL) {
+                            match ch {
+                                'z' => self.prompt_undo(),
+                                'y' => self.prompt_redo(),
+                                'j' => self.prompt_view.insert_newline(),
+                                'w' => self.prompt_view.delete_word_before_cursor(),
+                                _ => {}
+                            }
+                            return Ok(false);
+                        }
                         // Typing hands keyboard control back
                         // from the right panel to the prompt.
                         self.state.right_panel.panel_focus = None;
                         self.prompt_view.note_activity();
-                        self.prompt_view.input.push(ch);
-                        self.prompt_view.cursor_pos += ch.len_utf8();
+                        self.prompt_view.type_char(ch);
                         let was_visible = self.slash_menu.visible;
                         self.slash_menu.update(&self.prompt_view.input);
                         if was_visible
                             && !self.slash_menu.visible
                             && self.prompt_view.input.starts_with('/')
                         {
-                            self.prompt_view.input.remove(0);
-                            self.prompt_view.cursor_pos =
-                                self.prompt_view.cursor_pos.saturating_sub(1);
+                            self.prompt_view.strip_leading_slash();
                         }
                     }
                     _ => {}
@@ -1344,9 +1357,9 @@ impl App {
                             }
                             KeyCode::Esc => {
                                 self.prompt_view.note_activity();
-                                self.prompt_view.input.clear();
-                                self.prompt_view.pasted_parts.clear();
-                                self.prompt_view.cursor_pos = 0;
+                                // Draft context ends: the edit history is
+                                // dropped with it (nothing to undo back to).
+                                self.prompt_view.clear_draft();
                                 self.slash_menu.visible = false;
                             }
                             KeyCode::Backspace => {
@@ -1356,19 +1369,31 @@ impl App {
                                 } else {
                                     self.prompt_view.note_activity();
                                     if !self.prompt_view.input.is_empty() {
-                                        self.prompt_view.input.pop();
-                                        self.prompt_view.cursor_pos = self.prompt_view.input.len();
+                                        // Route through `backspace()` so the
+                                        // deletion lands in the edit history.
+                                        self.prompt_view.backspace();
                                         self.slash_menu.update(&self.prompt_view.input);
                                     }
                                 }
                             }
                             KeyCode::Char(ch) => {
+                                // Same Ctrl-combo rule as the first menu
+                                // arm above: modifiers never type.
+                                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                    match ch {
+                                        'z' => self.prompt_undo(),
+                                        'y' => self.prompt_redo(),
+                                        'j' => self.prompt_view.insert_newline(),
+                                        'w' => self.prompt_view.delete_word_before_cursor(),
+                                        _ => {}
+                                    }
+                                    return Ok(false);
+                                }
                                 // Typing hands keyboard control back
                                 // from the right panel to the prompt.
                                 self.state.right_panel.panel_focus = None;
                                 self.prompt_view.note_activity();
-                                self.prompt_view.input.push(ch);
-                                self.prompt_view.cursor_pos += ch.len_utf8();
+                                self.prompt_view.type_char(ch);
                                 let was_visible = self.slash_menu.visible;
                                 self.slash_menu.update(&self.prompt_view.input);
                                 // If menu closed (e.g., user typed space), remove the leading "/"
@@ -1376,9 +1401,7 @@ impl App {
                                     && !self.slash_menu.visible
                                     && self.prompt_view.input.starts_with('/')
                                 {
-                                    self.prompt_view.input.remove(0);
-                                    self.prompt_view.cursor_pos =
-                                        self.prompt_view.cursor_pos.saturating_sub(1);
+                                    self.prompt_view.strip_leading_slash();
                                 }
                             }
                             _ => {}
@@ -1546,9 +1569,7 @@ impl App {
 
                                 // Ctrl+J is the universal newline (^J = \n) — works in every terminal
                                 if ch == 'j' && key.modifiers.contains(KeyModifiers::CONTROL) {
-                                    let pos = self.prompt_view.cursor_pos;
-                                    self.prompt_view.input.insert(pos, '\n');
-                                    self.prompt_view.cursor_pos = pos + 1;
+                                    self.prompt_view.insert_newline();
                                     return Ok(false);
                                 }
 
@@ -1556,6 +1577,26 @@ impl App {
                                 if ch == 'w' && key.modifiers.contains(KeyModifiers::CONTROL) {
                                     self.prompt_view.delete_word_before_cursor();
                                     return Ok(false);
+                                }
+
+                                // Ctrl+Z / Ctrl+Y: prompt edit-history undo /
+                                // redo. Raw mode means the terminal never maps
+                                // ^Z to SIGTSTP — the key always reaches this
+                                // handler, so the universal convention works
+                                // with NO Shift fallback needed. A Ctrl+Z right
+                                // after a prompt correction restores the
+                                // ORIGINAL pre-correction draft (the correction
+                                // is one atomic history group); the toast
+                                // reports that transition, Ctrl+Y reapplies.
+                                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                    if ch == 'z' {
+                                        self.prompt_undo();
+                                        return Ok(false);
+                                    }
+                                    if ch == 'y' {
+                                        self.prompt_redo();
+                                        return Ok(false);
+                                    }
                                 }
 
                                 // Vim-style scroll: j/k scroll the chat view only when
@@ -1573,12 +1614,12 @@ impl App {
                                     return Ok(false);
                                 }
 
-                                // Insert character normally
-                                let pos = self.prompt_view.cursor_pos;
-                                self.prompt_view.input.insert(pos, ch);
-                                // Use len_utf8() so cursor stays on a valid UTF-8 boundary
-                                // for multi-byte chars (e.g. á, é, emoji).
-                                self.prompt_view.cursor_pos = pos + ch.len_utf8();
+                                // Insert character normally — recorded into
+                                // the edit history (one Ctrl+Z undoes the
+                                // coalesced burst; len_utf8() keeps the cursor
+                                // on a valid UTF-8 boundary for multi-byte
+                                // chars, e.g. á, é, emoji).
+                                self.prompt_view.type_char(ch);
 
                                 // Typing modifies input, exit history browsing
                                 self.prompt_view.reset_history_index();
@@ -1600,9 +1641,45 @@ impl App {
     /// identical cursor/activity semantics).
     fn insert_newline_in_prompt(&mut self) {
         self.prompt_view.note_activity();
-        let pos = self.prompt_view.cursor_pos;
-        self.prompt_view.input.insert(pos, '\n');
-        self.prompt_view.cursor_pos = pos + 1;
+        self.prompt_view.insert_newline();
+    }
+
+    /// Ctrl+Z on the chat prompt: step back one edit-history group (last
+    /// typing/deletion burst, paste, programmatic load, or a WHOLE prompt
+    /// correction back to the original draft). The slash menu re-syncs
+    /// because the draft text just changed under it.
+    fn prompt_undo(&mut self) {
+        let outcome = self.prompt_view.undo();
+        if outcome != UndoOutcome::Noop {
+            self.prompt_view.note_activity();
+        }
+        if outcome == UndoOutcome::OriginalBeforeCorrection {
+            self.toast_state.show(crate::ui::toast::ToastOptions {
+                title: Some("Prompt correction".into()),
+                message: "Original prompt restored — Ctrl+Y reapplies the correction.".into(),
+                variant: crate::ui::toast::ToastVariant::Info,
+                duration_ms: 3000,
+            });
+        }
+        self.slash_menu.update(&self.prompt_view.input);
+    }
+
+    /// Ctrl+Y on the chat prompt: reapply the most recently undone edit —
+    /// including the corrector's rewrite, reported with a toast.
+    fn prompt_redo(&mut self) {
+        let outcome = self.prompt_view.redo();
+        if outcome != RedoOutcome::Noop {
+            self.prompt_view.note_activity();
+        }
+        if outcome == RedoOutcome::Correction {
+            self.toast_state.show(crate::ui::toast::ToastOptions {
+                title: Some("Prompt correction".into()),
+                message: "Correction reapplied.".into(),
+                variant: crate::ui::toast::ToastVariant::Info,
+                duration_ms: 3000,
+            });
+        }
+        self.slash_menu.update(&self.prompt_view.input);
     }
 
     /// Paste the system clipboard's TEXT into the chat prompt through the
