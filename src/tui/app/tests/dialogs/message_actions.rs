@@ -1,4 +1,4 @@
-use super::super::App;
+use super::super::{App, HOME_LOCK, isolate_home};
 use crate::ui::dialogs::DialogType;
 use crossterm::event::KeyCode;
 
@@ -87,6 +87,8 @@ fn message_prompt_text_joins_non_synthetic_parts() {
 
 #[tokio::test]
 async fn message_actions_keyboard_cycles_three_options() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     let mut app = app_with_user_message();
     app.dialog.replace(DialogType::MessageActions {
         message_id: "u2".into(), // A user message
@@ -107,6 +109,8 @@ async fn message_actions_keyboard_cycles_three_options() {
 
 #[tokio::test]
 async fn message_actions_revert_works_at_a_non_last_user_message() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     // The legacy rule only allowed reverting the LAST user message; with
     // append-only context the whole timeline is addressable. Reverting the
     // FIRST message drops everything (the entire tail) and restores its
@@ -122,7 +126,10 @@ async fn message_actions_revert_works_at_a_non_last_user_message() {
     assert_eq!(app.prompt_view.cursor_pos, app.prompt_view.input.len());
 }
 
+#[tokio::test]
 async fn message_actions_revert_truncates_and_restores_prompt() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     let mut app = app_with_user_message();
     app.run_message_action(0, "u2"); // Revert at a user message
     let session = app.state.current_session().unwrap();
@@ -139,6 +146,8 @@ async fn message_actions_revert_truncates_and_restores_prompt() {
 
 #[tokio::test]
 async fn message_actions_fork_branches_new_session_up_to_message() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     let mut app = app_with_user_message();
     app.run_message_action(2, "u2"); // Fork at a user message
     let old = app.state.current_session().unwrap();
@@ -151,8 +160,13 @@ async fn message_actions_fork_branches_new_session_up_to_message() {
     assert!(old.title.contains("(fork)"));
     assert_ne!(old.id, "t", "the fork is a brand-new session id");
     // Regression: the fork must be persisted to disk so it survives restarts.
-    // The save runs on the FIFO writer thread, so poll briefly for it.
+    // The save runs on the FIFO writer thread, so poll briefly for it — but
+    // with the lock RELEASED: holding HOME_LOCK across ~2s of sleeps would
+    // stall every other isolated test behind this one. The store captured
+    // its absolute sessions dir at App::new, so the poll below does not
+    // depend on the (now unlocked) process environment.
     let fork_id = old.id.clone();
+    drop(_guard);
     let mut saved = false;
     for _ in 0..200 {
         if app.session_store.load_session(&fork_id).is_some() {
@@ -168,6 +182,8 @@ async fn message_actions_fork_branches_new_session_up_to_message() {
 async fn message_actions_copy_writes_clipboard_text() {
     // Clipboard may be unavailable in headless CI; only assert the text
     // extraction path via a missing-message no-op and the toast for empty.
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     let mut app = app_with_user_message();
     app.run_message_action(1, "does-not-exist");
     // No panic; dialog stack untouched.
@@ -176,6 +192,8 @@ async fn message_actions_copy_writes_clipboard_text() {
 
 #[tokio::test]
 async fn message_actions_dialog_renders_title_and_options() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     let mut app = app_with_user_message();
     app.dialog.replace(DialogType::MessageActions {
         message_id: "u2".into(), // A user message
@@ -205,6 +223,8 @@ async fn message_actions_dialog_renders_title_and_options() {
 async fn message_actions_older_user_message_shows_all_options() {
     // Append-only context: ANY user message can be reverted/forked — the
     // legacy "last user message only" restriction is gone.
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     let mut app = app_with_user_message();
     app.dialog.replace(DialogType::MessageActions {
         message_id: "u1".into(), // Not the last user message
@@ -236,6 +256,8 @@ async fn message_actions_older_user_message_shows_all_options() {
 #[tokio::test]
 async fn message_actions_single_user_message_shows_all_options() {
     use crate::types::{Message, MessageRole, Part, TextPart};
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     let mut app = App::new("/tmp".to_string());
     let now = 1_000u64;
     let session = crate::types::Session {
@@ -316,6 +338,8 @@ fn message_action_index_maps_correctly() {
 
 #[tokio::test]
 async fn message_actions_older_user_message_keyboard_cycles_three_options() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     let mut app = app_with_user_message();
     app.dialog.replace(DialogType::MessageActions {
         message_id: "u1".into(),
@@ -341,6 +365,8 @@ async fn message_actions_older_user_message_keyboard_cycles_three_options() {
 /// hides on this path — reproduces in CI.
 #[tokio::test]
 async fn clicking_a_user_message_opens_message_actions_without_panicking() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     use crossterm::event::{
         KeyCode, KeyModifiers, MouseButton as CBtn, MouseEvent as CMouse, MouseEventKind as CKind,
     };
@@ -389,6 +415,8 @@ async fn clicking_a_user_message_opens_message_actions_without_panicking() {
 /// real disk load path.
 #[tokio::test]
 async fn clicking_multiline_user_message_opens_message_actions_without_panicking() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
     use crossterm::event::{
         KeyCode, KeyModifiers, MouseButton as CBtn, MouseEvent as CMouse, MouseEventKind as CKind,
     };
