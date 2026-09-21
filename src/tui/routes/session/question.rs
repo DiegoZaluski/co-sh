@@ -199,7 +199,7 @@ impl LineEdit {
 /// Per-question state tracked by the dialog.
 #[derive(Debug, Clone)]
 struct QuestionState {
-    /// For SingleChoice/YesNo: which option index is selected (None = nothing selected).
+    /// For choice questions: which option index is selected (None = nothing selected).
     /// For SingleChoice the virtual custom row lives at index
     /// `options.len()` (see [`QuestionDialog::custom_index`]).
     single_selection: Option<usize>,
@@ -309,7 +309,7 @@ impl QuestionDialog {
         if q.question_type != QuestionType::SingleChoice {
             return None;
         }
-        Some(q.options.as_ref().map_or(0, Vec::len))
+        Some(q.options.as_ref().map_or(0, std::vec::Vec::len))
     }
 
     /// Whether the custom-answer input field should be drawn for `tab`.
@@ -325,6 +325,18 @@ impl QuestionDialog {
     /// badge when it matches `q.recommended`. Robust to payloads that were
     /// not normalized (old sessions / tests): the badge is matched by value,
     /// not by position.
+    /// Option labels as plain strings for rendering/hit-testing.
+    ///
+    /// (The badge contract lives in [`Self::display_option`] below: it is
+    /// robust to payloads that were not normalized — old sessions / tests —
+    /// because the badge is matched by value, not by position.)
+    fn option_labels(q: &QuestionItem) -> Vec<&str> {
+        q.options
+            .as_ref()
+            .map(|o| o.iter().map(|op| op.label.as_str()).collect())
+            .unwrap_or_default()
+    }
+
     fn display_option(q: &QuestionItem, opt: &str) -> String {
         if q.question_type == QuestionType::SingleChoice
             && q.recommended.as_deref() == Some(opt)
@@ -359,9 +371,9 @@ impl QuestionDialog {
                                 (None, Some(vec![s.custom.value().to_owned()]))
                             }
                         } else {
-                            let sel = s
-                                .single_selection
-                                .and_then(|i| q.options.as_ref()?.get(i).cloned());
+                            let sel = s.single_selection.and_then(|i| {
+                                q.options.as_ref()?.get(i).map(|op| op.label.clone())
+                            });
                             (None, sel.map(|s| vec![s]))
                         }
                     }
@@ -369,7 +381,7 @@ impl QuestionDialog {
                         let sel: Option<Vec<String>> = s
                             .multi_selection
                             .iter()
-                            .filter_map(|&i| q.options.as_ref()?.get(i).cloned())
+                            .filter_map(|&i| q.options.as_ref()?.get(i).map(|op| op.label.clone()))
                             .collect::<Vec<_>>()
                             .into();
                         (
@@ -380,12 +392,6 @@ impl QuestionDialog {
                                 sel
                             },
                         )
-                    }
-                    QuestionType::YesNo => {
-                        let ans = s
-                            .single_selection
-                            .map(|i| if i == 0 { "Yes".into() } else { "No".into() });
-                        (ans, None)
                     }
                 };
                 AnswerItem {
@@ -417,8 +423,7 @@ impl QuestionDialog {
             return 0;
         };
         match q.question_type {
-            QuestionType::Text => 1,  // just the text input field
-            QuestionType::YesNo => 2, // Yes / No
+            QuestionType::Text => 1, // just the text input field
             // SingleChoice always appends the virtual custom row so the user
             // can personalize even when the model did not offer that option.
             QuestionType::SingleChoice => q.options.as_ref().map_or(1, |o| o.len() + 1),
@@ -895,7 +900,7 @@ impl QuestionDialog {
                         match q.question_type {
                             // Text-answer tabs are handled by the edit block above.
                             QuestionType::Text => return true,
-                            QuestionType::SingleChoice | QuestionType::YesNo => {
+                            QuestionType::SingleChoice => {
                                 if let Some(s) = self.state.get_mut(self.current_tab) {
                                     s.single_selection = Some(self.selected_row);
                                     s.answered = true;
@@ -1119,19 +1124,6 @@ impl QuestionDialog {
                                     }
                                     return true;
                                 }
-                                QuestionType::YesNo => {
-                                    if let Some(s) = self.state.get_mut(tab) {
-                                        s.single_selection = Some(row);
-                                        s.answered = true;
-                                    }
-                                    // Move to next tab
-                                    if tab_count > 1 {
-                                        self.current_tab = (self.current_tab + 1) % tab_count;
-                                        self.selected_row = 0;
-                                        self.text_scroll = 0;
-                                    }
-                                    return true;
-                                }
                                 QuestionType::MultiChoice => {
                                     if let Some(s) = self.state.get_mut(tab) {
                                         if let Some(pos) =
@@ -1289,7 +1281,7 @@ impl QuestionDialog {
         let is_options_tab = self.questions.get(self.current_tab).is_some_and(|q| {
             matches!(
                 q.question_type,
-                QuestionType::SingleChoice | QuestionType::YesNo | QuestionType::MultiChoice
+                QuestionType::SingleChoice | QuestionType::MultiChoice
             )
         });
         if is_options_tab && y >= option_y && y < footer_y {
@@ -1416,24 +1408,14 @@ impl QuestionDialog {
             // keeps `option_row_count`/hit-testing consistent with the other
             // question types.
             QuestionType::Text => vec![vec![String::new()]],
-            QuestionType::YesNo => vec!["Yes", "No"]
-                .into_iter()
-                .map(|o| Self::wrap_text(o, opt_w))
-                .collect(),
-            QuestionType::MultiChoice => q
-                .options
-                .as_deref()
-                .map(|o| o.iter().map(String::as_str).collect::<Vec<_>>())
-                .unwrap_or_default()
+            QuestionType::MultiChoice => Self::option_labels(q)
                 .into_iter()
                 .map(|o| Self::wrap_text(o, opt_w))
                 .collect(),
             QuestionType::SingleChoice => {
                 let mut out: Vec<Vec<String>> = Vec::new();
-                if let Some(opts) = q.options.as_deref() {
-                    for opt in opts {
-                        out.push(Self::wrap_text(&Self::display_option(q, opt), opt_w));
-                    }
+                for opt in Self::option_labels(q) {
+                    out.push(Self::wrap_text(&Self::display_option(q, opt), opt_w));
                 }
                 out.push(Self::wrap_text(CUSTOM_RESPONSE_LABEL, opt_w));
                 out
@@ -1742,7 +1724,7 @@ impl QuestionDialog {
                         }
                     }
                 }
-                QuestionType::YesNo | QuestionType::SingleChoice | QuestionType::MultiChoice => {
+                QuestionType::SingleChoice | QuestionType::MultiChoice => {
                     self.render_options(buf, inner_x, inner_w, option_y, footer_y, theme, now);
                     let capacity = footer_y.saturating_sub(option_y) as usize;
                     opt_overflow = self.options_overflow(self.current_tab, inner_w, capacity);
@@ -1925,7 +1907,7 @@ impl QuestionDialog {
         out
     }
 
-    /// Render YesNo / SingleChoice / MultiChoice options inside a viewport of
+    /// Render SingleChoice / MultiChoice options inside a viewport of
     /// `bottom - start_y` rows. The focused row uses the standard `🞴`
     /// marker (same pattern as the permission box) — no background wash —
     /// and a committed-but-unfocused row keeps its `🞴` in the accent color,
@@ -1983,7 +1965,7 @@ impl QuestionDialog {
                     );
 
                     let (indicator, indicator_color) = match q.question_type {
-                        QuestionType::YesNo | QuestionType::SingleChoice => {
+                        QuestionType::SingleChoice => {
                             let is_committed = self
                                 .state
                                 .get(tab)
@@ -2157,11 +2139,6 @@ impl QuestionDialog {
                     s.text.value().to_owned()
                 }
             }
-            QuestionType::YesNo => match s.single_selection {
-                Some(0) => "Yes".into(),
-                Some(1) => "No".into(),
-                _ => "(not answered)".into(),
-            },
             QuestionType::SingleChoice => {
                 let custom = q.options.as_ref().map_or(0, Vec::len);
                 if s.single_selection == Some(custom) {
@@ -2174,7 +2151,7 @@ impl QuestionDialog {
                     }
                 } else {
                     s.single_selection
-                        .and_then(|i| q.options.as_ref()?.get(i).cloned())
+                        .and_then(|i| q.options.as_ref()?.get(i).map(|op| op.label.clone()))
                         .unwrap_or_else(|| {
                             if s.custom.is_empty() {
                                 "(not answered)".into()
@@ -2189,7 +2166,7 @@ impl QuestionDialog {
                 let selected: Vec<&str> = s
                     .multi_selection
                     .iter()
-                    .filter_map(|&i| q.options.as_ref()?.get(i).map(std::string::String::as_str))
+                    .filter_map(|&i| q.options.as_ref()?.get(i).map(|op| op.label.as_str()))
                     .collect();
                 if selected.is_empty() {
                     "(none selected)".into()
@@ -2222,9 +2199,14 @@ mod tests {
             question: "test".to_string(),
             question_type,
             purpose: None,
-            options,
+            options: options.map(|o| {
+                o.into_iter()
+                    .map(|label| cosh_tools::question::types::QuestionOption::from_label(label))
+                    .collect()
+            }),
             required: true,
             recommended: None,
+            ..QuestionItem::default()
         }
     }
 
@@ -2391,7 +2373,7 @@ mod tests {
         let mut d = QuestionDialog::new();
         d.show_questions(vec![
             question("t1", QuestionType::Text, None),
-            question("s2", QuestionType::YesNo, None),
+            question("s2", QuestionType::SingleChoice, Some(vec!["A".into()])),
         ]);
         d.handle_key(KeyCode::Char('y')); // types 'y' immediately
         d.handle_key(KeyCode::Enter); // commit, move to next tab
@@ -2461,7 +2443,11 @@ mod tests {
         d.handle_paste("XY");
         assert_eq!(d.build_answers()[0].answer.as_deref(), Some("aXYb"));
         // Pasting on a non-Text tab is ignored.
-        d.show_questions(vec![question("s1", QuestionType::YesNo, None)]);
+        d.show_questions(vec![question(
+            "s1",
+            QuestionType::SingleChoice,
+            Some(vec!["A".into()]),
+        )]);
         d.handle_paste("ignored");
         assert_eq!(d.build_answers()[0].answer, None);
     }
@@ -2507,10 +2493,14 @@ mod tests {
             id: id.to_string(),
             question: "pick?".to_string(),
             question_type: QuestionType::SingleChoice,
-            purpose: None,
-            options: Some(options.into_iter().map(str::to_string).collect()),
-            required: true,
+            options: Some(
+                options
+                    .into_iter()
+                    .map(cosh_tools::question::types::QuestionOption::from_label)
+                    .collect(),
+            ),
             recommended: recommended.map(str::to_string),
+            ..QuestionItem::default()
         }
     }
 
@@ -2532,9 +2522,9 @@ mod tests {
         )]);
         assert_eq!(d.custom_index(0), None);
         assert_eq!(d.row_count(0), 1);
-        d.show_questions(vec![question("y1", QuestionType::YesNo, None)]);
+        d.show_questions(vec![question("t2", QuestionType::Text, None)]);
         assert_eq!(d.custom_index(0), None);
-        assert_eq!(d.row_count(0), 2);
+        assert_eq!(d.row_count(0), 1);
     }
 
     #[test]
@@ -2786,10 +2776,12 @@ mod tests {
             id: "big".to_string(),
             question: "pick?".to_string(),
             question_type: QuestionType::SingleChoice,
-            purpose: None,
-            options: Some(opts),
-            required: true,
-            recommended: None,
+            options: Some(
+                opts.into_iter()
+                    .map(cosh_tools::question::types::QuestionOption::from_label)
+                    .collect(),
+            ),
+            ..QuestionItem::default()
         }]);
         let theme = test_theme();
         let area = Rect::new(0, 0, 40, 14);
@@ -2898,10 +2890,12 @@ mod tests {
             id: "big".to_string(),
             question: "pick?".to_string(),
             question_type: QuestionType::SingleChoice,
-            purpose: None,
-            options: Some(many),
-            required: true,
-            recommended: None,
+            options: Some(
+                many.into_iter()
+                    .map(cosh_tools::question::types::QuestionOption::from_label)
+                    .collect(),
+            ),
+            ..QuestionItem::default()
         }]);
         assert_eq!(d2.required_height(80), 3 + 64 + 1);
     }
@@ -3102,9 +3096,14 @@ mod tests {
             question: "pick?".to_string(),
             question_type: QuestionType::SingleChoice,
             purpose: Some("porque ".repeat(100)),
-            options: Some(vec!["A".to_string(), "B".to_string()]),
-            required: true,
+            options: Some(
+                ["A", "B"]
+                    .into_iter()
+                    .map(cosh_tools::question::types::QuestionOption::from_label)
+                    .collect(),
+            ),
             recommended: Some("A".to_string()),
+            ..QuestionItem::default()
         }]);
         let area = Rect::new(0, 0, 80, 14);
         let option_y = test_option_y(&d, area);
@@ -3132,10 +3131,7 @@ mod tests {
             id: "t1".to_string(),
             question: "explique ".repeat(80),
             question_type: QuestionType::Text,
-            purpose: None,
-            options: None,
-            required: true,
-            recommended: None,
+            ..QuestionItem::default()
         }]);
         let area = Rect::new(0, 0, 80, 12);
         let option_y = test_option_y(&d, area);

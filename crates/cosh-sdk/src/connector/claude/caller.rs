@@ -28,6 +28,14 @@ enum ClaudeContentBlock {
         kind: String,
         text: String,
     },
+    /// Inline base64 image (multimodal delivery). Valid both as a top-level
+    /// block in a user message and as an item inside a `tool_result` content
+    /// array (screenshot tool results).
+    Image {
+        #[serde(rename = "type")]
+        kind: String,
+        source: ClaudeImageSource,
+    },
     ToolUse {
         #[serde(rename = "type")]
         kind: String,
@@ -41,6 +49,15 @@ enum ClaudeContentBlock {
         tool_use_id: String,
         content: String,
     },
+    /// `tool_result` whose content is a BLOCK ARRAY (text + inline images)
+    /// instead of a plain string — how the Anthropic API carries images in
+    /// tool results.
+    ToolResultWithImages {
+        #[serde(rename = "type")]
+        kind: String,
+        tool_use_id: String,
+        content: Vec<ClaudeContentBlock>,
+    },
     /// A thinking block from a PREVIOUS response, replayed verbatim (text +
     /// signature) at the start of the assistant message so the API can
     /// validate the reasoning continuity.
@@ -50,6 +67,27 @@ enum ClaudeContentBlock {
         thinking: String,
         signature: String,
     },
+}
+
+/// `source` object of a Claude base64 image block.
+#[derive(Clone, serde::Serialize)]
+struct ClaudeImageSource {
+    #[serde(rename = "type")]
+    kind: String,
+    media_type: String,
+    data: String,
+}
+
+/// Build a Claude image block from a connector [`ImageBlock`].
+fn claude_image_block(image: &crate::connector::params::ImageBlock) -> ClaudeContentBlock {
+    ClaudeContentBlock::Image {
+        kind: "image".to_string(),
+        source: ClaudeImageSource {
+            kind: "base64".to_string(),
+            media_type: image.media_type.clone(),
+            data: image.data.clone(),
+        },
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -521,11 +559,34 @@ fn convert_to_claude_messages(history: &[ApiChatMessage]) -> Vec<ClaudeMessage> 
                 });
             }
             "tool" => {
-                let content = vec![ClaudeContentBlock::ToolResult {
-                    kind: "tool_result".to_string(),
-                    tool_use_id: msg.tool_call_id.clone().unwrap_or_default(),
-                    content: msg.content.clone().unwrap_or_default(),
-                }];
+                let text = msg.content.clone().unwrap_or_default();
+                let content = match &msg.images {
+                    // Multimodal tool result: text + inline images travel as
+                    // a block array (the Anthropic shape for screenshots).
+                    Some(images) if !images.is_empty() => {
+                        let mut blocks = Vec::with_capacity(images.len() + 1);
+                        if !text.is_empty() {
+                            blocks.push(ClaudeContentBlock::Text {
+                                kind: "text".to_string(),
+                                text,
+                            });
+                        }
+                        for image in images {
+                            blocks.push(claude_image_block(image));
+                        }
+                        vec![ClaudeContentBlock::ToolResultWithImages {
+                            kind: "tool_result".to_string(),
+                            tool_use_id: msg.tool_call_id.clone().unwrap_or_default(),
+                            content: blocks,
+                        }]
+                    }
+                    // Plain text result keeps the original string shape.
+                    _ => vec![ClaudeContentBlock::ToolResult {
+                        kind: "tool_result".to_string(),
+                        tool_use_id: msg.tool_call_id.clone().unwrap_or_default(),
+                        content: text,
+                    }],
+                };
                 out.push(ClaudeMessage {
                     role: "user".to_string(),
                     content,
@@ -533,12 +594,27 @@ fn convert_to_claude_messages(history: &[ApiChatMessage]) -> Vec<ClaudeMessage> 
             }
             _ => {
                 // user or plain assistant messages
+                let mut content = Vec::new();
+                if let Some(text) = msg.content.as_deref().filter(|t| !t.is_empty()) {
+                    content.push(ClaudeContentBlock::Text {
+                        kind: "text".to_string(),
+                        text: text.to_string(),
+                    });
+                }
+                if let Some(images) = &msg.images {
+                    for image in images {
+                        content.push(claude_image_block(image));
+                    }
+                }
+                if content.is_empty() {
+                    content.push(ClaudeContentBlock::Text {
+                        kind: "text".to_string(),
+                        text: String::new(),
+                    });
+                }
                 out.push(ClaudeMessage {
                     role: msg.role.clone(),
-                    content: vec![ClaudeContentBlock::Text {
-                        kind: "text".to_string(),
-                        text: msg.content.clone().unwrap_or_default(),
-                    }],
+                    content,
                 });
             }
         }

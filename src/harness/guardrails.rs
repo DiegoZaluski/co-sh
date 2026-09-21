@@ -130,6 +130,8 @@ fn needs_path_approval(paths: &[String], project_root: Option<&Path>) -> Option<
 /// Tools that always need user approval (regardless of path):
 /// - `bash_run`, `subagent_call` (execute external commands/code)
 /// - `fs_edit`, `fs_rollback` (write/restore file operations)
+/// - `computer_touch`, `computer_pointer`, `computer_keyboard` (synthetic
+///   input acts on the whole desktop — outside any project-root sandbox)
 ///
 /// Tools that need approval when targeting paths outside the project root:
 /// - `fs_read` (read outside cwd)
@@ -218,6 +220,53 @@ pub fn check_tool_permission(
                 args: format!("agent: {agent}"),
             });
         }
+        // Synthetic desktop input: acts on whatever the OS currently has
+        // focused/under the cursor — there is no project-root sandbox to
+        // fall back on, so every call asks (like bash_run).
+        "computer_touch" => {
+            let target = args
+                .get("selector")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let app = if let Some(name) = args.get("name").and_then(|v| v.as_str()) {
+                name.to_string()
+            } else {
+                args.get("pid")
+                    .and_then(|v| v.as_u64())
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "?".to_string())
+            };
+            return PermissionCheck::NeedsApproval(PermissionRequest {
+                tool: "computer_touch".to_string(),
+                description: format!("perform an action on a desktop UI element ({app})"),
+                args: target.to_string(),
+            });
+        }
+        "computer_pointer" => {
+            let x = args.get("x").and_then(|v| v.as_i64()).unwrap_or(0);
+            let y = args.get("y").and_then(|v| v.as_i64()).unwrap_or(0);
+            let action = args
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("click");
+            return PermissionCheck::NeedsApproval(PermissionRequest {
+                tool: "computer_pointer".to_string(),
+                description: format!("{action} the mouse pointer on the desktop"),
+                args: format!("({x}, {y})"),
+            });
+        }
+        "computer_keyboard" => {
+            let what = args
+                .get("text")
+                .and_then(|v| v.as_str())
+                .or_else(|| args.get("key").and_then(|v| v.as_str()))
+                .unwrap_or("?");
+            return PermissionCheck::NeedsApproval(PermissionRequest {
+                tool: "computer_keyboard".to_string(),
+                description: "send synthetic keystrokes to the desktop".to_string(),
+                args: what.to_string(),
+            });
+        }
         _ => {}
     }
 
@@ -246,9 +295,14 @@ pub fn check_tool_permission(
 }
 
 /// Returns `true` for tools that are restricted in Ask mode (write/execute/external).
+/// The synthetic-input computer tools are included: even though their schemas are
+/// hidden in Ask mode, a call supplied despite that (stale handoff, hallucination)
+/// must be outright DENIED — Ask mode is read-only, and an approval dialog would
+/// defeat the mode's contract.
 fn is_restricted_in_ask_mode(name: &str) -> bool {
     matches!(
         name,
         "fs_write" | "fs_edit" | "fs_rollback" | "bash_run" | "plan_todo_write" | "subagent_call"
+            | "computer_touch" | "computer_pointer" | "computer_keyboard"
     )
 }

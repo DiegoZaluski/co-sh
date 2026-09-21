@@ -24,6 +24,13 @@ use cosh_tools::{
         SubAgent,
         types::{SubAgentCallInput, SubAgentCallOutput},
     },
+    computer::{
+        Computer,
+        types::{
+            ComputerApps, ComputerKeyboard, ComputerPointer, ComputerScreenshot, ComputerSnapshot,
+            ComputerTouch,
+        },
+    },
     web::{Web, WebFetch, WebSearchInput},
 };
 
@@ -140,6 +147,12 @@ pub struct CoshTools {
     recall_dbs: Vec<RecallDb>,
     skills: Skills,
     subagent: SubAgent,
+    computer: Computer,
+    /// PNG payload staged by the last `computer_screenshot` dispatch
+    /// (`dispatch` takes `&self`, so staging is interior-mutable). The
+    /// harness drains it right after the dispatch returns `Ok` and lowers
+    /// it into the tool-result `ChatMessage` — see `push_tool_history`.
+    pending_images: Mutex<Option<Vec<cosh_sdk::connector::ImageBlock>>>,
     /// Optional event sender for streaming tool output.
     event_tx: Option<tokio::sync::mpsc::UnboundedSender<HarnessEvent>>,
     /// Configured base URLs for local providers (used by the cloud embedder).
@@ -210,6 +223,8 @@ impl CoshTools {
             recall_dbs: Vec::new(),
             skills: Skills::new().sources(default_skill_sources()),
             subagent: SubAgent::new(),
+            computer: Computer::new(),
+            pending_images: Mutex::new(None),
             event_tx: None,
             #[cfg(feature = "embed")]
             local_base_urls: std::collections::HashMap::new(),
@@ -318,6 +333,19 @@ impl CoshTools {
         self.event_tx.clone()
     }
 
+    /// Drain the image payload staged by the last `computer_screenshot`
+    /// dispatch (empty when the last dispatch was another tool or carried
+    /// no images). Called by the harness immediately after the dispatch
+    /// `Ok` so the bytes reach the tool-result `ChatMessage`; a payload
+    /// left unconsumed (dispatch error path) is dropped here too.
+    pub fn take_pending_images(&self) -> Vec<cosh_sdk::connector::ImageBlock> {
+        self.pending_images
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .unwrap_or_default()
+    }
+
     /// Interpolate an informational chunk into the `subagent_call` tool
     /// description (the harness tells the model that omitting `agent`
     /// routes the call to an internal agent).
@@ -390,6 +418,9 @@ impl CoshTools {
         v.push(self.skills.description_read.clone());
         v.push(self.skills.description_read_asset.clone());
         v.push(self.skills.description_match_skills.clone());
+        v.push(self.computer.description_apps.clone());
+        v.push(self.computer.description_snapshot.clone());
+        v.push(self.computer.description_screenshot.clone());
         if let Some(lsp) = &self.lsp {
             v.push(lsp.description_definitions.clone());
             v.push(lsp.description_references.clone());
@@ -512,6 +543,28 @@ impl CoshTools {
             &self.skills.description_match_skills,
             include_schema,
         );
+        // Ask mode exposes the READ-ONLY observation tools of the computer
+        // set (apps/snapshot/screenshot) — no synthetic input, so they are
+        // as safe as a web search. touch/pointer/keyboard stay out (they
+        // need approval even in Build mode).
+        write_tool_if_enabled(
+            out,
+            disabled_tools,
+            &self.computer.description_apps,
+            include_schema,
+        );
+        write_tool_if_enabled(
+            out,
+            disabled_tools,
+            &self.computer.description_snapshot,
+            include_schema,
+        );
+        write_tool_if_enabled(
+            out,
+            disabled_tools,
+            &self.computer.description_screenshot,
+            include_schema,
+        );
     }
 
     /// All schemas, skipping disabled ones.
@@ -550,6 +603,12 @@ impl CoshTools {
         v.push(extract_schema(&self.skills.description_read));
         v.push(extract_schema(&self.skills.description_read_asset));
         v.push(extract_schema(&self.skills.description_match_skills));
+        // Ask mode exposes the READ-ONLY observation tools of the computer
+        // set (apps/snapshot/screenshot) — mirroring
+        // `tool_descriptions_filtered`/`write_tool_descriptions_filtered`.
+        v.push(extract_schema(&self.computer.description_apps));
+        v.push(extract_schema(&self.computer.description_snapshot));
+        v.push(extract_schema(&self.computer.description_screenshot));
         if let Some(lsp) = &self.lsp {
             v.push(extract_schema(&lsp.description_definitions));
             v.push(extract_schema(&lsp.description_references));
@@ -685,6 +744,9 @@ fn extract_schema(desc: &serde_json::Value) -> ToolSchema {
     ToolSchema {
         name: desc["name"].as_str().unwrap_or_default().to_string(),
         input_schema: desc["inputSchema"].clone(),
+        // Tools may embed a curated example (`exampleArgs`, e.g.
+        // `ask_questions`) that the extractor shows in rejection hints.
+        example_args: desc.get("exampleArgs").filter(|v| v.is_object()).cloned(),
     }
 }
 
@@ -804,6 +866,12 @@ impl Tools for CoshTools {
         write_single_tool(out, &self.skills.description_read, true);
         write_single_tool(out, &self.skills.description_read_asset, true);
         write_single_tool(out, &self.skills.description_match_skills, true);
+        write_single_tool(out, &self.computer.description_apps, true);
+        write_single_tool(out, &self.computer.description_snapshot, true);
+        write_single_tool(out, &self.computer.description_screenshot, true);
+        write_single_tool(out, &self.computer.description_touch, true);
+        write_single_tool(out, &self.computer.description_pointer, true);
+        write_single_tool(out, &self.computer.description_keyboard, true);
         if let Some(lsp) = &self.lsp {
             write_single_tool(out, &lsp.description_definitions, true);
             write_single_tool(out, &lsp.description_references, true);
@@ -841,6 +909,12 @@ impl Tools for CoshTools {
         v.push(self.skills.description_read.clone());
         v.push(self.skills.description_read_asset.clone());
         v.push(self.skills.description_match_skills.clone());
+        v.push(self.computer.description_apps.clone());
+        v.push(self.computer.description_snapshot.clone());
+        v.push(self.computer.description_screenshot.clone());
+        v.push(self.computer.description_touch.clone());
+        v.push(self.computer.description_pointer.clone());
+        v.push(self.computer.description_keyboard.clone());
         if let Some(lsp) = &self.lsp {
             v.push(lsp.description_definitions.clone());
             v.push(lsp.description_references.clone());
@@ -879,6 +953,12 @@ impl Tools for CoshTools {
         v.push(extract_schema(&self.skills.description_read));
         v.push(extract_schema(&self.skills.description_read_asset));
         v.push(extract_schema(&self.skills.description_match_skills));
+        v.push(extract_schema(&self.computer.description_apps));
+        v.push(extract_schema(&self.computer.description_snapshot));
+        v.push(extract_schema(&self.computer.description_screenshot));
+        v.push(extract_schema(&self.computer.description_touch));
+        v.push(extract_schema(&self.computer.description_pointer));
+        v.push(extract_schema(&self.computer.description_keyboard));
         if let Some(lsp) = &self.lsp {
             v.push(extract_schema(&lsp.description_definitions));
             v.push(extract_schema(&lsp.description_references));
@@ -1425,6 +1505,58 @@ impl Tools for CoshTools {
                 let output =
                     dispatch_recall_search(db, query, limit, &self.local_base_urls).await?;
                 Ok(output)
+            }
+
+            "computer_apps" => {
+                let _input: ComputerApps = serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let output = self.computer.apps().await?;
+                serde_json::to_string(&output).map_err(|e| e.to_string())
+            }
+
+            "computer_snapshot" => {
+                let input: ComputerSnapshot =
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let output = self.computer.snapshot(&input).await?;
+                serde_json::to_string(&output).map_err(|e| e.to_string())
+            }
+
+            "computer_screenshot" => {
+                let input: ComputerScreenshot =
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let output = self.computer.screenshot(&input).await?;
+                // The PNG travels as a staged image payload (base64
+                // ImageBlocks): `dispatch` takes `&self`, so the bytes are
+                // parked here and drained by the harness right after this
+                // `Ok` — see `take_pending_images` in `core.rs` — before
+                // being lowered into the tool-result `ChatMessage`. The
+                // JSON the model parses for coordinates never carries them.
+                *self
+                    .pending_images
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                    (!output.images.is_empty()).then(|| output.images.clone());
+                serde_json::to_string(&output).map_err(|e| e.to_string())
+            }
+
+            "computer_touch" => {
+                let input: ComputerTouch =
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let output = self.computer.touch(&input).await?;
+                serde_json::to_string(&output).map_err(|e| e.to_string())
+            }
+
+            "computer_pointer" => {
+                let input: ComputerPointer =
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let output = self.computer.pointer(&input).await?;
+                serde_json::to_string(&output).map_err(|e| e.to_string())
+            }
+
+            "computer_keyboard" => {
+                let input: ComputerKeyboard =
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let output = self.computer.keyboard(&input).await?;
+                serde_json::to_string(&output).map_err(|e| e.to_string())
             }
 
             _ => Err(format!("unknown cosh tool: {name}")),

@@ -31,8 +31,8 @@ impl App {
     /// dialog closes WITHOUT an opt-in so the user never loses what they typed.
     pub(in crate::app) fn restore_pending_gateway_message(&mut self) {
         if let Some(msg) = self.pending_gateway_message.take() {
-            self.prompt_view.input = msg;
-            self.prompt_view.cursor_pos = self.prompt_view.input.len();
+            // One Replace group: a single Ctrl+Z undoes the restore.
+            self.prompt_view.set_draft(msg);
         }
     }
 

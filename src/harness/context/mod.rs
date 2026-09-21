@@ -35,7 +35,7 @@ use crate::util::TokenEncoding;
 use cosh_sdk::connector::{
     ChatMessage, ClaudeThinkingBlock, ToolCallFunctionMsg, ToolCallMsg,
     assistant_tool_call_message, discover_context_window, effective_context_window,
-    tool_result_message, user_message,
+    tool_result_message, tool_result_message_with_images, user_message,
 };
 use cosh_tools::plan::types::TodoList;
 use error_catalog::save_error_catalog_window;
@@ -117,6 +117,14 @@ pub enum ContextItem {
         /// The newest chain is kept until the model reacts — an explicit
         /// `mask_tool_result` call counts as that reaction.
         useless: bool,
+        /// Inline images attached to this result (multimodal channel —
+        /// e.g. a `computer_screenshot` PNG). Internal transport detail for
+        /// the CURRENT run's provider requests only: never serialized to
+        /// the session JSONL (the base64 bytes would bloat every delta) and
+        /// empty after a restore. Defaults for contexts persisted before
+        /// this field.
+        #[serde(skip)]
+        images: Vec<cosh_sdk::connector::ImageBlock>,
     },
     /// The final text response of a completed agent loop. Replaces the raw
     /// assistant text in place.
@@ -444,6 +452,7 @@ fn assistant_message(text: &str) -> ChatMessage {
         tool_calls: None,
         tool_call_id: None,
         thinking_blocks: None,
+        images: None,
     }
 }
 
@@ -732,6 +741,7 @@ impl ContextManager {
             call_id: call_id.to_string(),
             content: result.to_string(),
             useless: false,
+            images: Vec::new(),
         });
         // hide_at (not a bare hidden.insert): it also drops each item's cost
         // from the cached token total, keeping the debug drift check honest.
@@ -783,12 +793,28 @@ impl ContextManager {
     /// the `useless` field); everything else behaves exactly like
     /// [`Self::add_tool_result`].
     pub fn add_tool_result_flagged(&mut self, call_id: &str, content: &str, useless: bool) {
+        self.add_tool_result_with_images(call_id, content, useless, Vec::new());
+    }
+
+    /// Add a tool RESULT carrying inline images (multimodal channel — e.g.
+    /// a `computer_screenshot` PNG delivered as base64 `ImageBlock`s).
+    /// Structural, never prose-compressed. The images ride ONLY on the
+    /// provider requests built by [`Self::build_messages`]; they are never
+    /// serialized to the session JSONL.
+    pub fn add_tool_result_with_images(
+        &mut self,
+        call_id: &str,
+        content: &str,
+        useless: bool,
+        images: Vec<cosh_sdk::connector::ImageBlock>,
+    ) {
         let id = self.next_id();
         self.push_item(ContextItem::ToolResult {
             id,
             call_id: call_id.to_string(),
             content: content.to_string(),
             useless,
+            images,
         });
     }
 
@@ -1537,14 +1563,29 @@ impl ContextManager {
                     id,
                     call_id,
                     content,
+                    images,
                     ..
                 } => {
-                    let rendered = if self.masked.contains(id) {
-                        masked_tool_result(*id)
+                    // Masking replaces the WHOLE result payload (text + any
+                    // inline images) with a typed reference: continuing to
+                    // send the PNG of a masked screenshot would defeat the
+                    // mask's purpose (context relief) at full token cost.
+                    if self.masked.contains(id) {
+                        messages.push(tool_result_message(call_id, &masked_tool_result(*id)));
+                    } else if images.is_empty() {
+                        messages.push(tool_result_message(call_id, content));
                     } else {
-                        content.clone()
-                    };
-                    messages.push(tool_result_message(call_id, &rendered));
+                        // Multimodal channel: a screenshot result carries its
+                        // PNG inline (base64 ImageBlocks) next to the text
+                        // payload. Every caller lowers the images to its
+                        // provider's native image part; text-only backends
+                        // degrade to the text.
+                        messages.push(tool_result_message_with_images(
+                            call_id,
+                            content,
+                            images.clone(),
+                        ));
+                    }
                 }
                 ContextItem::Closure { content, .. } => {
                     messages.push(assistant_message(content));

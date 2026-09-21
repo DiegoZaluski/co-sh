@@ -58,6 +58,7 @@ mod keys;
 mod model_persistence;
 mod paste_burst;
 mod prompt_correction;
+mod prompt_undo;
 mod providers;
 mod rag;
 mod render;

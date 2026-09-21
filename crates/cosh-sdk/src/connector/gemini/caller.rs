@@ -32,6 +32,11 @@ enum Part {
     Text {
         text: String,
     },
+    /// Inline base64 image (multimodal delivery: screenshot tool results).
+    InlineData {
+        #[serde(rename = "inlineData")]
+        inline_data: InlineDataPart,
+    },
     FunctionCall {
         #[serde(rename = "functionCall")]
         function_call: FunctionCallPart,
@@ -44,9 +49,26 @@ enum Part {
     },
 }
 
+/// Gemini `inlineData` part (request side): base64 media with a MIME type.
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InlineDataPart {
+    mime_type: String,
+    data: String,
+}
+
 impl Part {
     fn text(s: impl Into<String>) -> Self {
         Part::Text { text: s.into() }
+    }
+
+    fn inline_data(mime_type: &str, data: &str) -> Self {
+        Part::InlineData {
+            inline_data: InlineDataPart {
+                mime_type: mime_type.to_string(),
+                data: data.to_string(),
+            },
+        }
     }
 
     fn function_call(fc: FunctionCallPart) -> Self {
@@ -968,6 +990,13 @@ fn convert_messages(messages: &[ChatMessage]) -> Vec<Content> {
             && let Some(text) = msg.content.as_deref().filter(|t| !t.is_empty())
         {
             parts.push(Part::text(text));
+        }
+        // Attached images (multimodal delivery) become sibling `inlineData`
+        // parts — for tool results they ride in the same user content right
+        // after the `functionResponse` part, which is where Gemini requires
+        // binary media to live.
+        for image in msg.images.as_ref().into_iter().flatten() {
+            parts.push(Part::inline_data(&image.media_type, &image.data));
         }
         if let Some(tcs) = &msg.tool_calls {
             for tc in tcs {

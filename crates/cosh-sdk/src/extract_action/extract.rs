@@ -6,6 +6,11 @@ use serde_json::Value as JsonValue;
 pub struct ToolSchema {
     pub name: String,
     pub input_schema: JsonValue,
+    /// Canonical, hand-curated example of valid arguments. When present,
+    /// schema-rejection hints show this example instead of the derived
+    /// type-only skeleton, so the model can copy a complete, correct
+    /// payload (optional fields, conditional rules and all) on retry.
+    pub example_args: Option<JsonValue>,
 }
 
 /// A validated tool call extracted from LLM output.
@@ -318,6 +323,19 @@ impl ExtractAction {
                 .iter()
                 .find(|t| &t.name == name)
                 .map(|t| {
+                    // A curated example teaches the full contract (optional
+                    // fields, exact values, conditional rules); the derived
+                    // skeleton only renders types and cannot express
+                    // conditionally-required fields.
+                    if let Some(example) = &t.example_args {
+                        // Same cap as the rejected-payload echo: an MCP-supplied
+                        // example must never flood the context on a failure streak.
+                        return format!(
+                            "> Expected `{}` arguments, e.g.: {}\n",
+                            t.name,
+                            truncate_payload(&example.to_string())
+                        );
+                    }
                     format!(
                         "> Expected `{}` arguments — minimal shape: {}\n",
                         t.name,
@@ -790,6 +808,12 @@ fn validate_tool_call(
             JsonValue::String(s) => serde_json::from_str(s).unwrap_or_else(|_| args_ref.clone()),
             _ => args_ref.clone(),
         };
+        // Models sometimes double-encode individual fields while the
+        // envelope itself is fine (`"questions": "[{...}]"`). Coerce every
+        // string-encoded array/object back into its structured form before
+        // validating — and return the coerced value so downstream consumers
+        // deserialize the repaired payload, not the raw string.
+        let args = repair_string_encoded(&args, &tool.input_schema);
 
         if !validate_against_schema(&args, &tool.input_schema) {
             return Err(ToolCallRejection::SchemaMismatch {
@@ -811,20 +835,72 @@ fn validate_tool_call(
     // LLM outputs the arguments directly without an envelope.
     let mut matches: Vec<&ToolSchema> = Vec::new();
     for tool in tools {
-        if validate_against_schema(value, &tool.input_schema) {
+        // Same repair as the envelope path: a bare call with a
+        // string-encoded field must recover identically to the enveloped
+        // form, instead of failing schema validation here.
+        if validate_against_schema(
+            &repair_string_encoded(value, &tool.input_schema),
+            &tool.input_schema,
+        ) {
             matches.push(tool);
         }
     }
     if matches.len() == 1 {
+        let repaired = repair_string_encoded(value, &matches[0].input_schema);
         return Ok(ToolCallData {
             id,
             name: matches[0].name.clone(),
-            arguments: value.clone(),
+            arguments: repaired,
             thought_signature,
         });
     }
 
     Err(ToolCallRejection::NoToolMatch)
+}
+
+/// Coerce string-encoded fields back into their structured form, guided by
+/// `schema`. Recurses into object properties and array items; a string value
+/// in a position whose schema says `array`/`object` is parsed as JSON and
+/// kept only when it parses to the expected kind. This repairs the common
+/// model mistake of double-encoding a single field
+/// (`{"questions": "[{...}]"}`) without burning a round-trip on the model.
+fn repair_string_encoded(value: &JsonValue, schema: &JsonValue) -> JsonValue {
+    if let JsonValue::String(s) = value
+        && let Some(kind) = schema.get("type").and_then(JsonValue::as_str)
+        && matches!(kind, "array" | "object")
+        && let Ok(parsed) = serde_json::from_str::<JsonValue>(s)
+        && value_type_matches(&parsed, kind)
+    {
+        return repair_string_encoded(&parsed, schema);
+    }
+
+    match value {
+        JsonValue::Object(map) => {
+            let properties = schema.get("properties").and_then(JsonValue::as_object);
+            let mut out = serde_json::Map::new();
+            for (key, val) in map {
+                let repaired = match properties.and_then(|p| p.get(key)) {
+                    Some(prop_schema) => repair_string_encoded(val, prop_schema),
+                    None => val.clone(),
+                };
+                out.insert(key.clone(), repaired);
+            }
+            JsonValue::Object(out)
+        }
+        JsonValue::Array(items) => {
+            let item_schema = schema.get("items");
+            JsonValue::Array(
+                items
+                    .iter()
+                    .map(|item| match item_schema {
+                        Some(item_schema) => repair_string_encoded(item, item_schema),
+                        None => item.clone(),
+                    })
+                    .collect(),
+            )
+        }
+        other => other.clone(),
+    }
 }
 
 fn validate_against_schema(value: &JsonValue, schema: &JsonValue) -> bool {

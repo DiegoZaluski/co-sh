@@ -58,6 +58,15 @@ streaming mode the same warning is flushed as text. The failure is countable:
 the raw JSON of the most recent failure so you can feed it back to the model
 as correction feedback.
 
+For schema failures the warning carries a **repair hint**: the rejected
+payload (truncated) plus an "expected arguments" line. When the failing
+tool's `ToolSchema.example_args` is set — the harness populates it from a
+tool description's curated `exampleArgs` — the hint shows that complete,
+copy-pasteable example; otherwise it falls back to a type-only skeleton
+derived from the schema. The example is the stronger feedback: it encodes
+optional fields and conditional rules the skeleton cannot express, letting
+the model fix the call in one retry instead of two.
+
 ## Where it comes from
 
 The `jsonish` submodule is a direct port of BoundaryML's
@@ -89,5 +98,5 @@ parser](jsonish.md).
 - Supports batch mode (`extract_batch`) over full responses and streaming mode (`extract_stream`) for incremental processing as tokens arrive.
 - Built for LLM reality: tolerant JSON parsing through [`jsonish`](jsonish.md), flexible envelope shapes (name/tool/function, arguments/input/args/parameters), and fence awareness (JSON inside real markdown fences is display text, never tool calls).
 - Schema validation: candidates must match registered tool's input schema (required fields, type/const/oneOf checks) before being surfaced as calls.
-- Failure handling: invalid tool calls become failure warning text and are counted; `take_tool_failures()` and `take_last_failed_raw()` provide feedback for correction.
+- Failure handling: invalid tool calls become failure warning text and are counted; `take_tool_failures()` and `take_last_failed_raw()` provide feedback for correction. Schema-rejection hints show the tool's curated `example_args` (from the description's `exampleArgs`) when present, falling back to a derived skeleton; string-encoded fields are repaired before validation, recovering double-encoded emissions on every call path.
 - The module is self-contained with re-exports from both `extract_action` and `jsonish`; the jsonish parser is a direct port of BoundaryML's baml (Apache 2.0).

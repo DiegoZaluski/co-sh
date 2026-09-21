@@ -132,6 +132,7 @@ pub(crate) fn realistic_context(rounds: usize) -> cosh::harness::context::Contex
             call_id: format!("call_{r}"),
             content: big_rust_file(600),
             useless: false,
+            images: Vec::new(),
         });
         next_id += 1;
     }

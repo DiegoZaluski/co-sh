@@ -11,6 +11,7 @@ fn make_extractor() -> ExtractAction {
             },
             "required": ["server", "namespace"]
         }),
+        example_args: None,
     };
     let read_tool = ToolSchema {
         name: "fs.read".into(),
@@ -21,6 +22,7 @@ fn make_extractor() -> ExtractAction {
             },
             "required": ["path"]
         }),
+        example_args: None,
     };
     ExtractAction::new()
         .with_tool(test_tool)
@@ -438,6 +440,7 @@ fn batch_ask_questions_tool_call() {
             },
             "required": ["questions"]
         }),
+        example_args: None,
     };
 
     let mut ex = ExtractAction::new().with_tool(ask_schema);
@@ -489,6 +492,7 @@ fn batch_ask_questions_bare_args() {
             },
             "required": ["questions"]
         }),
+        example_args: None,
     };
 
     let mut ex = ExtractAction::new().with_tool(ask_schema);
@@ -623,6 +627,7 @@ fn native_call_empty_arguments_defaults_to_empty_object() {
     let mut ex = ExtractAction::new().with_tool(ToolSchema {
         name: "no_args".into(),
         input_schema: serde_json::json!({"type": "object"}),
+        example_args: None,
     });
     let call = NativeToolCall {
         id: String::new(),
@@ -926,4 +931,160 @@ fn skeleton_is_stable_on_degenerate_schemas() {
         "required": ["a"]
     });
     assert!(schema_skeleton(&deep).contains("<...>"), "depth is capped");
+}
+
+// ---------------------------------------------------------------------------
+// String-encoded field repair (double-encoding) + curated example hints
+// ---------------------------------------------------------------------------
+
+fn market_ask_schema() -> ToolSchema {
+    ToolSchema {
+        name: "ask_questions".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "questions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "question": { "type": "string" },
+                            "header": { "type": "string" },
+                            "multiSelect": { "type": "boolean" },
+                            "options": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "label": { "type": "string" },
+                                        "description": { "type": "string" }
+                                    },
+                                    "required": ["label"]
+                                }
+                            }
+                        },
+                        "required": ["question"]
+                    }
+                }
+            },
+            "required": ["questions"]
+        }),
+        example_args: None,
+    }
+}
+
+#[test]
+fn batch_ask_questions_string_encoded_field_is_repaired() {
+    // The model double-encodes the `questions` field (observed with
+    // glm-5.3-flash): the envelope is fine but the field arrives as a
+    // JSON-encoded string. The extractor must repair it BEFORE schema
+    // validation and hand the repaired arguments downstream.
+    let mut ex = ExtractAction::new().with_tool(market_ask_schema());
+    // `questions` arrives as a JSON-encoded STRING inside valid args.
+    let text = r#"{"name": "ask_questions", "arguments": {"questions": "[{\"question\": \"Auth?\", \"options\": [{\"label\": \"A\"}]}]"}}"#;
+    let result = ex.extract_batch(text);
+
+    let tool_items: Vec<_> = result
+        .items
+        .iter()
+        .filter_map(|i| {
+            if let Item::ToolCall(tc) = i {
+                Some(tc)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    assert!(
+        !tool_items.is_empty(),
+        "double-encoded field must be repaired, got: {result:?}"
+    );
+    assert_eq!(ex.take_tool_failures(), 0, "repair, not rejection");
+    assert_eq!(tool_items[0].name, "ask_questions");
+    // The repaired arguments carry a real array downstream.
+    assert!(
+        tool_items[0].arguments["questions"].is_array(),
+        "questions must be a repaired array: {:?}",
+        tool_items[0].arguments
+    );
+}
+
+#[test]
+fn native_call_string_encoded_field_is_repaired() {
+    // Same repair on the native path: the provider streams valid JSON args
+    // whose inner `questions` field is a string-encoded array.
+    let mut ex = ExtractAction::new().with_tool(market_ask_schema());
+    let call = NativeToolCall {
+        id: "call_1".into(),
+        name: "ask_questions".into(),
+        arguments: r#"{"questions": "[{\"question\": \"Proceed?\"}]"}"#.into(),
+        thought_signature: String::new(),
+    };
+    match ex.register_native_call(&call) {
+        StreamAction::ToolCall(tc) => {
+            assert!(
+                tc.arguments["questions"].is_array(),
+                "native path must repair the field: {:?}",
+                tc.arguments
+            );
+            assert_eq!(ex.take_tool_failures(), 0);
+        }
+        other => panic!("expected ToolCall, got {other:?}"),
+    }
+}
+
+#[test]
+fn schema_failure_hint_prefers_curated_example() {
+    // With a curated example registered, the rejection hint shows the full
+    // example (which can express conditional rules the derived type-only
+    // skeleton cannot).
+    let mut tool = market_ask_schema();
+    tool.example_args = Some(serde_json::json!({
+        "questions": [{"question": "Which auth method?", "header": "Auth"}]
+    }));
+    let mut ex = ExtractAction::new().with_tool(tool);
+    let result = ex.extract_batch(r#"{"name": "ask_questions", "arguments": {"foo": 1}}"#);
+    let texts: Vec<&str> = result
+        .items
+        .iter()
+        .filter_map(|i| {
+            if let Item::Text(t) = i {
+                Some(t.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+    let hint = texts.join("");
+    assert!(
+        hint.contains("e.g.:"),
+        "hint must prefer the curated example: {hint}"
+    );
+    assert!(
+        hint.contains("Which auth method?"),
+        "hint must contain the example payload: {hint}"
+    );
+}
+
+#[test]
+fn schema_failure_without_example_still_uses_skeleton() {
+    let mut ex = ExtractAction::new().with_tool(market_ask_schema());
+    let result = ex.extract_batch(r#"{"name": "ask_questions", "arguments": {"foo": 1}}"#);
+    let texts: Vec<&str> = result
+        .items
+        .iter()
+        .filter_map(|i| {
+            if let Item::Text(t) = i {
+                Some(t.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+    let hint = texts.join("");
+    assert!(
+        hint.contains("minimal shape"),
+        "no example → derived skeleton: {hint}"
+    );
 }

@@ -14,6 +14,7 @@ use crate::logo::ChatLogo;
 use crate::lsp_colors;
 use crate::state::AppState;
 use crate::theme::{Theme, rgba_color};
+use super::prompt_history::{EditKind, PromptHistory, RedoOutcome, UndoOutcome};
 use crate::types::{AgentColors, MessageRole, Part, Session};
 
 const BASE_H: u16 = 2;
@@ -201,6 +202,10 @@ pub struct PromptView {
     /// Pasted text parts that were compressed into virtual-text placeholders.
     /// Each entry maps a placeholder like `[Pasted ~N lines]` to the original text.
     pub pasted_parts: Vec<PastedPart>,
+    /// Edit history for the draft (Ctrl+Z / Ctrl+Y). Private on purpose:
+    /// every draft mutation must go through the recording methods below so
+    /// the mirror never diverges from `input` for longer than one operation.
+    history: PromptHistory,
     /// The chat-logo animation (a single "O" with a red center and a laser beam).
     pub logo: ChatLogo,
     /// Snapshot of `(input.len(), cursor_pos)` from the previous frame, used to
@@ -228,6 +233,7 @@ impl PromptView {
             sel_end: None,
             correction_selection: false,
             pasted_parts: Vec::new(),
+            history: PromptHistory::new(),
             logo: ChatLogo::new(),
             last_input_snapshot: None,
             was_visible: false,
@@ -244,6 +250,9 @@ impl PromptView {
     }
 
     pub fn send_message(&mut self) -> String {
+        // The draft context ends here: the edit history is dropped with it
+        // (sent text stays reachable through the ↑/↓ message history).
+        self.history.clear();
         let raw = self.input.clone();
         if !raw.is_empty() {
             // Expand any paste placeholders back to the original text before sending
@@ -276,6 +285,7 @@ impl PromptView {
         }
         self.input = user_msgs[usize::try_from(self.history_index).unwrap_or(0)].clone();
         self.cursor_pos = self.input.len();
+        self.record_edit(EditKind::Replace);
     }
 
     /// Navigate down through user messages from the current session.
@@ -291,6 +301,7 @@ impl PromptView {
             self.input = user_msgs[usize::try_from(self.history_index).unwrap_or(0)].clone();
         }
         self.cursor_pos = self.input.len();
+        self.record_edit(EditKind::Replace);
     }
 
     /// Reset history index so the next Ctrl+Down goes to the most recent
@@ -385,7 +396,109 @@ impl PromptView {
         self.history_index = -1;
         self.pasted_parts.clear();
         self.clear_selection();
+        // One atomic, marked group: the first Ctrl+Z after a correction
+        // restores the exact pre-correction draft (never a mid-state), and
+        // the marker lets the key handler toast the transition.
+        self.history
+            .record_correction(self.input.clone(), self.cursor_pos);
         self.note_activity();
+    }
+
+    /// Insert a character at the cursor — the normal typing path — and
+    /// record it into the edit history (consecutive Type ops coalesce into
+    /// one Ctrl+Z group, matching universal editor granularity).
+    pub fn type_char(&mut self, ch: char) {
+        let pos = self.cursor_pos;
+        self.input.insert(pos, ch);
+        // len_utf8() keeps the cursor on a valid UTF-8 boundary for
+        // multi-byte chars (e.g. á, é, emoji).
+        self.cursor_pos = pos + ch.len_utf8();
+        self.record_edit(EditKind::Type);
+    }
+
+    /// Insert a newline at the cursor (Ctrl+J / Shift+Enter paths) and
+    /// record it as a typing operation.
+    pub fn insert_newline(&mut self) {
+        let pos = self.cursor_pos;
+        self.input.insert(pos, '\n');
+        self.cursor_pos = pos + 1;
+        self.record_edit(EditKind::Type);
+    }
+
+    /// Replace the whole draft programmatically (queue re-edit, message
+    /// actions, slash command, gateway restore) and record it as one
+    /// atomic Replace group — a single Ctrl+Z reverts the whole load.
+    pub fn set_draft(&mut self, text: String) {
+        self.input = text;
+        self.cursor_pos = self.input.len();
+        // The new draft is unrelated to the old one's compressed-paste
+        // placeholders. The pre-load snapshot keeps the old mappings, so a
+        // Ctrl+Z across the load still restores them correctly.
+        self.pasted_parts.clear();
+        self.record_edit(EditKind::Replace);
+    }
+
+    /// Ctrl+Z: step back one edit group and apply the restored snapshot
+    /// (text, cursor, paste mappings). A group boundary is always a whole
+    /// state: mid-group intermediate states are never surfaced.
+    pub fn undo(&mut self) -> UndoOutcome {
+        let outcome = self.history.undo();
+        self.apply_snapshot();
+        outcome
+    }
+
+    /// Ctrl+Y: step forward again and apply the restored snapshot.
+    pub fn redo(&mut self) -> RedoOutcome {
+        let outcome = self.history.redo();
+        self.apply_snapshot();
+        outcome
+    }
+
+    /// Copy the history's mirrored state back into the live draft fields.
+    fn apply_snapshot(&mut self) {
+        let (text, cursor, parts) = self.history.snapshot();
+        self.input = text.to_string();
+        self.cursor_pos = cursor.min(self.input.len());
+        self.pasted_parts = parts
+            .iter()
+            .map(|(virtual_text, actual_text)| PastedPart {
+                virtual_text: virtual_text.clone(),
+                actual_text: actual_text.clone(),
+            })
+            .collect();
+        self.clear_selection();
+    }
+
+    /// Dismiss-path clear (slash-menu Esc): the draft context ended, so the
+    /// edit history is dropped with it — nothing to undo back to.
+    pub fn clear_draft(&mut self) {
+        self.input.clear();
+        self.cursor_pos = 0;
+        self.history_index = -1;
+        self.pasted_parts.clear();
+        self.history.clear();
+    }
+
+    /// Remove the leading `/` after the slash menu closes on a space
+    /// (the key handler's command-typing flow). Recorded so the history
+    /// mirror never drifts from the real draft.
+    pub fn strip_leading_slash(&mut self) {
+        if self.input.starts_with('/') {
+            self.input.remove(0);
+            self.cursor_pos = self.cursor_pos.saturating_sub(1);
+            self.record_edit(EditKind::Delete);
+        }
+    }
+
+    /// Record the current (post-mutation) draft state into the edit history.
+    fn record_edit(&mut self, kind: EditKind) {
+        let parts = self
+            .pasted_parts
+            .iter()
+            .map(|p| (p.virtual_text.clone(), p.actual_text.clone()))
+            .collect();
+        self.history
+            .record(self.input.clone(), self.cursor_pos, parts, kind);
     }
 
     /// Backspace: if the cursor is within or at the end of a pasted virtual-text placeholder,
@@ -406,11 +519,13 @@ impl PromptView {
             self.input.drain(vt_pos..vt_end);
             self.cursor_pos = vt_pos;
             self.pasted_parts.remove(idx);
+            self.record_edit(EditKind::Delete);
             return;
         }
         // Normal backspace: delete one character before the cursor.
         self.input.remove(char_start);
         self.cursor_pos = char_start;
+        self.record_edit(EditKind::Delete);
     }
 
     /// Delete (forward): if the cursor is within or at the start of a pasted virtual-text
@@ -432,10 +547,12 @@ impl PromptView {
                 self.cursor_pos = vt_pos;
             }
             self.pasted_parts.remove(idx);
+            self.record_edit(EditKind::Delete);
             return;
         }
         // Normal forward-delete: delete one character at the cursor.
         self.input.drain(self.cursor_pos..next);
+        self.record_edit(EditKind::Delete);
     }
 
     /// Returns `(byte_start, byte_end, part_index)` if any pasted virtual-text placeholder
@@ -478,6 +595,7 @@ impl PromptView {
             }
             self.input.drain(from..to);
             self.cursor_pos = from;
+            self.record_edit(EditKind::Delete);
         }
     }
 
@@ -514,6 +632,9 @@ impl PromptView {
             self.input.insert_str(pos, &normalized);
             self.cursor_pos = pos + normalized.len();
         }
+        // One atomic group per paste: a single Ctrl+Z removes the whole
+        // inserted block (compressed or not).
+        self.record_edit(EditKind::Paste);
     }
 
     /// Expand any virtual-text placeholders in `input` back to their original pasted text.

@@ -23,6 +23,12 @@ libc = "0.2"
 tokio-stream = "0.1"
 agent-client-protocol = "2.2"
 
+# Desktop UI tools: OS accessibility tree, screenshots and input synthesis
+# (always use the newest published version — the crate is under active
+# development and adds capabilities frequently).
+[dependencies.xa11y]
+version = "0.15"
+
 [dev-dependencies]
 cosh-sdk = { path = "../cosh-sdk" }
 tempfile = "3"

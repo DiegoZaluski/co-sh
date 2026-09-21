@@ -254,8 +254,7 @@ impl App {
             self.setup.save();
         } else {
             let cmd_name = format!("/{} ", cmd.name);
-            self.prompt_view.input = cmd_name;
-            self.prompt_view.cursor_pos = self.prompt_view.input.len();
+            self.prompt_view.set_draft(cmd_name);
         }
         self.slash_menu.visible = false;
     }
