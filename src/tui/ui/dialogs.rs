@@ -328,9 +328,16 @@ fn render_rename_session_dialog(
 
 /// Width for the shared Confirm dialog: the classic hardcoded 30 is the
 /// minimum, but the box grows to fit `message` (borders plus one cell of
-/// padding on each side), capped to the available area width.
+/// padding on each side), capped to the available area width. A multi-line
+/// message (`\n`) sizes the box to its LONGEST line, so a wrapped confirm
+/// stays narrow instead of stretching to the combined length.
 fn confirm_dialog_w(message: &str, area_width: u16) -> u16 {
-    let needed = message.len() as u16 + 4;
+    let longest = message
+        .lines()
+        .map(|line| line.chars().count() as u16)
+        .max()
+        .unwrap_or(0);
+    let needed = longest + 4;
     30u16.max(needed).min(area_width.saturating_sub(4)).max(16)
 }
 
@@ -1473,16 +1480,22 @@ impl DialogState {
                 }
 
                 // Content is INSIDE the border (1 row padding top/bottom)
-                // Center the message at row dialog_y + 2
-                let msg_x = dialog_x + (dialog_w.saturating_sub(message.len() as u16)) / 2;
-                draw_text_line(
-                    buf,
-                    message,
-                    msg_x,
-                    dialog_y + 2,
-                    dialog_w.saturating_sub(2),
-                    Style::default().fg(rgba_color(theme.text)),
-                );
+                // Center each message line at rows dialog_y + 2.. — a `\n`
+                // in the message wraps it onto the next row, keeping the box
+                // narrow (confirm_dialog_w sizes to the longest line).
+                let lines: Vec<&str> = message.lines().collect();
+                for (i, line) in lines.iter().enumerate() {
+                    let line_w = line.chars().count() as u16;
+                    let msg_x = dialog_x + (dialog_w.saturating_sub(line_w)) / 2;
+                    draw_text_line(
+                        buf,
+                        line,
+                        msg_x,
+                        dialog_y + 2 + i as u16,
+                        dialog_w.saturating_sub(2),
+                        Style::default().fg(rgba_color(theme.text)),
+                    );
+                }
 
                 // Yes / No side by side, centered at row dialog_y + 4
                 let opt_yes = "Yes";

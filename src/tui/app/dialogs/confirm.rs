@@ -1,4 +1,4 @@
-use super::super::App;
+use super::super::{App, PendingSessionDelete};
 use crossterm::event::KeyCode;
 
 use crate::ui::dialogs::DialogType;
@@ -28,7 +28,7 @@ impl App {
                 true
             }
             KeyCode::Esc => {
-                self.pending_delete_session_id = None;
+                self.pending_delete = None;
                 self.clear_rag_pending_state();
                 self.dialog.pop();
                 true
@@ -50,16 +50,24 @@ impl App {
             if self.resolve_forget_key_confirmation() {
                 return;
             }
-            if let Some(session_id) = self.pending_delete_session_id.take() {
-                self.delete_session(&session_id);
-                self.dialog.pop();
+            if let Some(pending) = self.pending_delete.take() {
+                match pending {
+                    PendingSessionDelete::One(session_id) => {
+                        self.delete_session(&session_id);
+                        self.dialog.pop();
+                    }
+                    PendingSessionDelete::AllOfCwd => {
+                        self.delete_all_sessions();
+                        self.dialog.pop();
+                    }
+                }
             } else if self.handle_rag_confirm_delete() {
                 // handled (pops the dialog itself)
             } else {
                 self.should_quit = true;
             }
         } else {
-            self.pending_delete_session_id = None;
+            self.pending_delete = None;
             self.clear_rag_pending_state();
             self.dialog.pop();
         }

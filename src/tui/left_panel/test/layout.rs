@@ -100,3 +100,33 @@ fn control_characters_do_not_count_as_visible_width() {
         SessionListLayout::trash_x(AREA, "ab")
     );
 }
+
+#[test]
+fn footer_span_covers_exactly_the_button_label() {
+    // AREA (y 10..30, width 22): footer row = 29; the 10-char label is
+    // centered — (22 - 10) / 2 = 6 -> columns 6..16.
+    assert_eq!(SessionListLayout::footer_row(AREA), 29);
+    assert_eq!(SessionListLayout::footer_span(AREA), Some(6..16));
+}
+
+#[test]
+fn footer_span_is_none_when_the_label_or_row_does_not_fit() {
+    // Panel narrower than the label: the button is not drawn, so the
+    // hit-test must not accept clicks in its phantom columns.
+    let narrow = Rect::new(0, 0, 9, 10);
+    assert_eq!(SessionListLayout::footer_span(narrow), None);
+    // Exactly wide enough: flush at the left edge.
+    let exact = Rect::new(0, 0, 10, 10);
+    assert_eq!(SessionListLayout::footer_span(exact), Some(0..10));
+    // Panel too short: the footer row would sit on the header — not drawn.
+    let short = Rect::new(0, 0, 22, 2);
+    assert_eq!(SessionListLayout::footer_span(short), None);
+}
+
+#[test]
+fn item_index_at_excludes_the_reserved_footer_row() {
+    // AREA: items 12..29 (footer row 29 is the button's). Last item row is
+    // 28; the footer row itself maps to no item.
+    assert_eq!(SessionListLayout::item_index_at(AREA, 0, 28), Some(16));
+    assert_eq!(SessionListLayout::item_index_at(AREA, 0, 29), None);
+}

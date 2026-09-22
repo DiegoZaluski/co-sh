@@ -44,6 +44,8 @@ pub enum SessionsAction {
     SwitchTo(String),
     /// Request deletion of the given session.
     RequestDelete(String),
+    /// Request deletion of every session of the current working directory.
+    RequestDeleteAll,
     /// No action.
     None,
 }
@@ -100,8 +102,17 @@ impl SessionsView {
             return SessionsAction::None;
         }
 
+        // Footer button first: it lives on its own reserved row, where the
+        // item hit-test below can never reach.
+        if my == SessionListLayout::footer_row(area)
+            && SessionListLayout::footer_span(area).is_some_and(|span| span.contains(&mx))
+        {
+            return SessionsAction::RequestDeleteAll;
+        }
+
         // Compute which item was clicked, accounting for scroll offset —
-        // None outside the list rows (header, separator, past bottom).
+        // None outside the list rows (header, separator, footer, past
+        // bottom).
         let Some(clicked_idx) =
             SessionListLayout::item_index_at(area, self.selection.scroll_offset, my)
         else {
@@ -192,7 +203,8 @@ impl SessionsView {
 
         // ── Clamp and scroll ──
         let content_start_y = SessionListLayout::content_start_y(area);
-        let visible_count = area.bottom().saturating_sub(content_start_y) as usize;
+        let content_end_y = SessionListLayout::content_end_y(area);
+        let visible_count = content_end_y.saturating_sub(content_start_y) as usize;
         let total_items = summaries.len();
 
         self.selection.set_visible_count(visible_count);
@@ -220,7 +232,7 @@ impl SessionsView {
         {
             let local_idx = i - self.selection.scroll_offset;
             let y = content_start_y + local_idx as u16;
-            if y >= area.bottom() {
+            if y >= content_end_y {
                 break;
             }
 
@@ -265,6 +277,36 @@ impl SessionsView {
                     cell.set_style(Style::default());
                 }
             }
+        }
+
+        // ── Footer: delete all ──
+        // Deletes every session of the current working directory (the
+        // store's sessions dir is cwd-scoped by construction) — never other
+        // directories' sessions. The whole panel-wide row is painted red
+        // with white text on the label; only the label span is clickable.
+        if let Some(span) = SessionListLayout::footer_span(area) {
+            let footer_y = SessionListLayout::footer_row(area);
+            let red_bg = Style::default().bg(rgba_color(theme.error));
+            // Paint the full row red so list leftovers (a scrolled row
+            // previously drawn there) never bleed into the button.
+            for x in area.x..area.right() {
+                if let Some(cell) = buf.cell_mut((x, footer_y)) {
+                    cell.set_char(' ');
+                    cell.set_style(red_bg);
+                }
+            }
+            draw_text_line(
+                buf,
+                SessionListLayout::DELETE_ALL_TEXT,
+                span.start,
+                footer_y,
+                span.end - span.start,
+                // set_style replaces the whole style: the label keeps the
+                // red background under its white glyphs.
+                Style::default()
+                    .fg(rgba_color(theme.text))
+                    .bg(rgba_color(theme.error)),
+            );
         }
     }
 }

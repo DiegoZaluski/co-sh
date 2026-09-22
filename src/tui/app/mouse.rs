@@ -9,7 +9,7 @@ use crossterm::event::{
 };
 use ratatui::layout::Rect;
 
-use super::{App, AppMode, MIN_PROMPT_RESERVE_ROWS};
+use super::{App, AppMode, MIN_PROMPT_RESERVE_ROWS, PendingSessionDelete};
 use crate::fallback;
 use crate::left_panel::sessions::SessionsAction;
 use crate::left_panel::{LEFT_PANEL_WIDTH, MIN_WIDTH_FOR_LEFT_PANEL, Mode};
@@ -743,14 +743,20 @@ impl App {
                             if self.resolve_forget_key_confirmation() {
                                 return Ok(true);
                             }
-                            if let Some(session_id) = self.pending_delete_session_id.take() {
-                                self.delete_session(&session_id);
-                            } else if self.handle_rag_confirm_delete() {
-                            } else {
-                                self.should_quit = true;
+                            match self.pending_delete.take() {
+                                Some(PendingSessionDelete::One(session_id)) => {
+                                    self.delete_session(&session_id);
+                                }
+                                Some(PendingSessionDelete::AllOfCwd) => {
+                                    self.delete_all_sessions();
+                                }
+                                None if self.handle_rag_confirm_delete() => {}
+                                None => {
+                                    self.should_quit = true;
+                                }
                             }
                         } else {
-                            self.pending_delete_session_id = None;
+                            self.pending_delete = None;
                             self.clear_rag_pending_state();
                         }
                         self.dialog.pop();
@@ -1547,9 +1553,22 @@ impl App {
                 true
             }
             SessionsAction::RequestDelete(session_id) => {
-                self.pending_delete_session_id = Some(session_id);
+                self.pending_delete = Some(PendingSessionDelete::One(session_id));
                 self.dialog.show(DialogType::Confirm {
                     message: "Delete this session?".into(),
+                });
+                if let Some(d) = self.dialog.current_mut() {
+                    d.selected = 1;
+                }
+                true
+            }
+            SessionsAction::RequestDeleteAll => {
+                // cwd-scoped by construction: the store's sessions dir is
+                // `{data_dir}/sessions/{cwd_hash}`, so "all" never reaches
+                // other directories' sessions.
+                self.pending_delete = Some(PendingSessionDelete::AllOfCwd);
+                self.dialog.show(DialogType::Confirm {
+                    message: "Delete ALL sessions".into(),
                 });
                 if let Some(d) = self.dialog.current_mut() {
                     d.selected = 1;

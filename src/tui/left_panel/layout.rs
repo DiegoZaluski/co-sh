@@ -23,11 +23,37 @@ impl SessionListLayout {
     pub const TRASH_W: u16 = 2;
     /// Cleared cell after the wide emoji.
     pub const CLEAR_W: u16 = 1;
+    /// `"delete all"` footer button row (see [`Self::footer_row`]).
+    pub const FOOTER_ROWS: u16 = 1;
+    pub const DELETE_ALL_TEXT: &str = "delete all";
     pub const RIGHT_PAD: u16 = 2;
 
     /// First row of list items (below header + separator).
     pub fn content_start_y(area: Rect) -> u16 {
         area.y + Self::HEADER_ROWS
+    }
+
+    /// First row NOT usable by list items: the reserved footer button row.
+    /// List items, scrolling and the item hit-test all stop here.
+    pub fn content_end_y(area: Rect) -> u16 {
+        area.bottom().saturating_sub(Self::FOOTER_ROWS)
+    }
+
+    /// Row of the `delete all` footer button (the panel's last).
+    pub fn footer_row(area: Rect) -> u16 {
+        area.bottom().saturating_sub(1)
+    }
+
+    /// Exact columns of the `delete all` footer button, centered
+    /// horizontally in the panel. `None` when it is not drawn: a panel
+    /// narrower than the label, or a panel so short the footer row would sit
+    /// on the header.
+    pub fn footer_span(area: Rect) -> Option<std::ops::Range<u16>> {
+        let label_w = Self::DELETE_ALL_TEXT.chars().count() as u16;
+        let start = area.x + area.width.saturating_sub(label_w) / 2;
+        let end = start + label_w;
+        (end <= area.right() && Self::footer_row(area) >= Self::content_start_y(area))
+            .then_some(start..end)
     }
 
     /// Max character columns a session title may occupy.
@@ -96,10 +122,11 @@ impl SessionListLayout {
     }
 
     /// Index of the list item under row `y`, accounting for the scroll
-    /// offset. `None` outside the list rows (header, separator, past bottom).
+    /// offset. `None` outside the list rows (header, separator, footer
+    /// button row, past bottom).
     pub fn item_index_at(area: Rect, scroll: usize, y: u16) -> Option<usize> {
         let start = Self::content_start_y(area);
-        if y < start || y >= area.bottom() {
+        if y < start || y >= Self::content_end_y(area) {
             return None;
         }
         Some(scroll + (y - start) as usize)

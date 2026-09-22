@@ -201,6 +201,15 @@ pub(super) struct EditRequeueHint {
     pub(super) index: usize,
 }
 
+/// What the currently open Confirm dialog is asking to delete.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingSessionDelete {
+    /// One specific session.
+    One(String),
+    /// Every session of the current working directory.
+    AllOfCwd,
+}
+
 pub struct App {
     pub state: AppState,
     pub theme: Theme,
@@ -388,8 +397,9 @@ pub struct App {
     /// Session persistence store (JSONL files on disk). `pub(crate)`: the
     /// session route's deletion lifecycle removes the session file from it.
     pub(crate) session_store: SessionStore,
-    /// When set, the current Confirm dialog is asking about deleting a session.
-    pending_delete_session_id: Option<String>,
+    /// What the current Confirm dialog is asking to delete, if any: one
+    /// session, or every session of the current working directory.
+    pending_delete: Option<PendingSessionDelete>,
     /// Message captured while the one-time Zen free-gateway prompt was open;
     /// replayed through `start_agent_loop` when the user opts in.
     pending_gateway_message: Option<String>,
@@ -662,7 +672,7 @@ impl App {
             session_telemetry: cosh::telemetry::session::SessionTelemetry::new(),
             telemetry_install_id,
             session_store,
-            pending_delete_session_id: None,
+            pending_delete: None,
             pending_gateway_message: None,
             title_generated: false,
             command_mode_turn: false,

@@ -119,6 +119,28 @@ impl App {
         self.state.remove_session(session_id);
         self.session_store.delete_session(session_id);
     }
+
+    /// Delete every session of the current working directory.
+    ///
+    /// The store is cwd-scoped by construction — its sessions dir is
+    /// `{data_dir}/sessions/{cwd_hash}` — so "all sessions" here means all
+    /// sessions of the directory the CLI is running in, never other
+    /// directories'. Each session goes through the same [`App::delete_session`]
+    /// path as a single deletion, so loop-owner teardown, state removal and
+    /// the store tombstone cannot drift from the single-delete semantics.
+    /// The ids are cloned first: `delete_session` mutates
+    /// `state.session_summaries` while we iterate it.
+    pub fn delete_all_sessions(&mut self) {
+        let ids: Vec<String> = self
+            .state
+            .session_summaries
+            .iter()
+            .map(|s| s.session_id.clone())
+            .collect();
+        for id in ids {
+            self.delete_session(&id);
+        }
+    }
 }
 
 #[cfg(test)]

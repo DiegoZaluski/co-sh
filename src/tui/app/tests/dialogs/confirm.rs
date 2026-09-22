@@ -34,7 +34,7 @@ async fn confirm_quit_yes_click_quits_even_with_slash_menu_open() {
     app.slash_menu.visible = true;
 
     // Show the quit confirm exactly like the Ctrl+C handler does.
-    app.pending_delete_session_id = None;
+    app.pending_delete = None;
     app.dialog.show(crate::ui::dialogs::DialogType::Confirm {
         message: "Quit cosh?".into(),
     });
@@ -79,7 +79,7 @@ async fn confirm_quit_yes_click_in_session_with_live_slash_menu() {
     assert!(app.slash_menu.visible, "slash menu is open with '/'");
 
     // Ctrl+C: show the quit confirm (mirrors the key handler).
-    app.pending_delete_session_id = None;
+    app.pending_delete = None;
     app.dialog.show(crate::ui::dialogs::DialogType::Confirm {
         message: "Quit cosh?".into(),
     });

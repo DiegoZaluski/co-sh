@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use super::{App, AppMode};
+use super::{App, AppMode, PendingSessionDelete};
 use crate::component::prompt::PromptView;
 use crate::component::prompt_history::{RedoOutcome, UndoOutcome};
 use crate::fallback;
@@ -168,7 +168,7 @@ impl App {
                     self.copy_registration_form_field();
                     return Ok(false);
                 }
-                self.pending_delete_session_id = None;
+                self.pending_delete = None;
                 self.dialog.show(DialogType::Confirm {
                     message: "Quit cosh?".into(),
                 });
@@ -512,7 +512,9 @@ impl App {
                             self.finalize_stale_compaction_lines();
                             return Ok(false);
                         }
-                        SessionsAction::RequestDelete(_) | SessionsAction::None => {}
+                        SessionsAction::RequestDelete(_)
+                        | SessionsAction::RequestDeleteAll
+                        | SessionsAction::None => {}
                     },
                     _ => {}
                 }
@@ -1165,16 +1167,24 @@ impl App {
                         && matches!(dialog.dialog_type, DialogType::Confirm { .. })
                     {
                         if dialog.selected == 0 {
-                            if let Some(session_id) = self.pending_delete_session_id.take() {
-                                self.delete_session(&session_id);
-                                self.dialog.pop();
-                            } else if self.handle_rag_confirm_delete() {
-                                // handled
-                            } else {
-                                self.should_quit = true;
+                            match self.pending_delete.take() {
+                                Some(PendingSessionDelete::One(session_id)) => {
+                                    self.delete_session(&session_id);
+                                    self.dialog.pop();
+                                }
+                                Some(PendingSessionDelete::AllOfCwd) => {
+                                    self.delete_all_sessions();
+                                    self.dialog.pop();
+                                }
+                                None if self.handle_rag_confirm_delete() => {
+                                    // handled
+                                }
+                                None => {
+                                    self.should_quit = true;
+                                }
                             }
                         } else {
-                            self.pending_delete_session_id = None;
+                            self.pending_delete = None;
                             self.clear_rag_pending_state();
                             self.dialog.pop();
                         }
@@ -1217,7 +1227,7 @@ impl App {
                         self.free_gateway_dialog.hide();
                         self.restore_pending_gateway_message();
                     } else if self.dialog.visible() {
-                        self.pending_delete_session_id = None;
+                        self.pending_delete = None;
                         self.clear_rag_pending_state();
                         self.dialog.pop();
                     }
@@ -1252,7 +1262,7 @@ impl App {
                         self.free_gateway_dialog.hide();
                         self.restore_pending_gateway_message();
                     } else if self.dialog.visible() {
-                        self.pending_delete_session_id = None;
+                        self.pending_delete = None;
                         self.clear_rag_pending_state();
                         self.dialog.pop();
                     } else if matches!(self.mode(), AppMode::Session) {
@@ -1269,7 +1279,7 @@ impl App {
                     } else if self.is_rag_mode() {
                         self.handle_rag_cancel_action();
                     } else if matches!(self.mode(), AppMode::Home) {
-                        self.pending_delete_session_id = None;
+                        self.pending_delete = None;
                         self.dialog.show(DialogType::Confirm {
                             message: "Quit cosh?".into(),
                         });

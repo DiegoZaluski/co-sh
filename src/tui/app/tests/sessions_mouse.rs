@@ -3,8 +3,10 @@ use crate::left_panel::LEFT_PANEL_WIDTH;
 use crate::left_panel::Mode;
 use crate::session_store::generate_session_id;
 use crate::types::{Message, MessageRole, Part, TextPart};
+use crate::ui::dialogs::DialogType;
 use crossterm::event::{
-    KeyModifiers, MouseButton as CBtn, MouseEvent as CMouse, MouseEventKind as CKind,
+    KeyCode, KeyEvent, KeyModifiers, MouseButton as CBtn, MouseEvent as CMouse,
+    MouseEventKind as CKind,
 };
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -546,4 +548,131 @@ async fn leaving_chat_content_to_sidebar_clears_focus_highlight() {
         app.session_view.hovered_msg_idx.is_none(),
         "moving over the sidebar must clear the chat focus highlight"
     );
+}
+
+/// The `delete all` footer button: pinned geometry (terminal 140x40 →
+/// sidebar rows 0..40, footer row 39, centered button columns 6..16).
+#[tokio::test]
+async fn delete_all_button_click_opens_the_confirm() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = build_small();
+    app.set_test_size(140, 40);
+
+    let _ = app
+        .handle_mouse_event(mouse(CKind::Down(CBtn::Left), 10, 39))
+        .unwrap();
+    let _ = app
+        .handle_mouse_event(mouse(CKind::Up(CBtn::Left), 10, 39))
+        .unwrap();
+
+    assert!(
+        app.dialog.visible(),
+        "the click must open the Confirm dialog"
+    );
+    let dialog = app.dialog.current().expect("confirm dialog");
+    let DialogType::Confirm { message } = &dialog.dialog_type else {
+        panic!("expected a Confirm dialog");
+    };
+    assert_eq!(
+        message, "Delete ALL sessions",
+        "the confirm must name the cwd scope, not a single session"
+    );
+    // Default must be "No" — a destructive bulk action never defaults to yes.
+    assert_eq!(dialog.selected, 1, "the confirm must default to No");
+}
+
+/// Confirming the delete-all dialog removes every cwd session from the
+/// sidebar (the store is cwd-scoped by construction, so disk-wise the same
+/// set is tombstoned).
+#[tokio::test]
+async fn delete_all_confirm_removes_every_session() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = build_small();
+    app.set_test_size(140, 40);
+
+    // Click the button, then confirm with the keyboard: select Yes, Enter.
+    let _ = app
+        .handle_mouse_event(mouse(CKind::Down(CBtn::Left), 10, 39))
+        .unwrap();
+    let _ = app
+        .handle_mouse_event(mouse(CKind::Up(CBtn::Left), 10, 39))
+        .unwrap();
+    assert!(app.dialog.visible());
+    if let Some(d) = app.dialog.current_mut() {
+        d.selected = 0;
+    }
+    app.process_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+
+    assert!(
+        app.state.session_summaries.is_empty(),
+        "every cwd session must be removed from the sidebar"
+    );
+    assert!(
+        !app.dialog.visible(),
+        "the confirm must pop after resolving"
+    );
+    // The viewed session is the unsaved in-memory one (not a persisted
+    // summary), so it stays — exactly the single-delete semantics.
+    assert!(app.state.current_session_id.is_some());
+}
+
+/// The default "No" keeps every session: the confirm is a real gate.
+#[tokio::test]
+async fn delete_all_cancel_keeps_every_session() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = build_small();
+    app.set_test_size(140, 40);
+    let before = app.state.session_summaries.len();
+
+    // Open the confirm (default No) and dismiss it with Esc.
+    let _ = app
+        .handle_mouse_event(mouse(CKind::Down(CBtn::Left), 10, 39))
+        .unwrap();
+    let _ = app
+        .handle_mouse_event(mouse(CKind::Up(CBtn::Left), 10, 39))
+        .unwrap();
+    assert!(app.dialog.visible());
+    app.process_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+
+    assert!(!app.dialog.visible());
+    assert_eq!(
+        app.state.session_summaries.len(),
+        before,
+        "cancelling must not delete anything"
+    );
+}
+
+/// The footer row outside the button span is dead: no dialog, no selection
+/// change — the reserved row is not a list row and the button is exact-span.
+/// The centered button occupies 6..16 of the 22-wide panel, so x=0 is a dead
+/// in-panel column; x=23 additionally exercises the outside-the-panel guard.
+#[tokio::test]
+async fn delete_all_footer_row_outside_the_button_does_nothing() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = build_small();
+    app.set_test_size(140, 40);
+    let selected = app.sidebar.selection.selected_index;
+
+    for (x, why) in [(0u16, "in-panel dead column"), (23, "outside the panel")] {
+        let _ = app
+            .handle_mouse_event(mouse(CKind::Down(CBtn::Left), x, 39))
+            .unwrap();
+        let _ = app
+            .handle_mouse_event(mouse(CKind::Up(CBtn::Left), x, 39))
+            .unwrap();
+        assert!(
+            !app.dialog.visible(),
+            "click at x={x} ({why}) must not open the confirm"
+        );
+        assert_eq!(
+            app.sidebar.selection.selected_index, selected,
+            "the footer row is not a list row: no selection change at x={x}"
+        );
+    }
 }
