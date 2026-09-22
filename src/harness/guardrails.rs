@@ -248,10 +248,7 @@ pub fn check_tool_permission(
         // focused/under the cursor — there is no project-root sandbox to
         // fall back on, so every call asks (like bash_run).
         "computer_touch" => {
-            let target = args
-                .get("selector")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
+            let target = args.get("selector").and_then(|v| v.as_str()).unwrap_or("?");
             let app = if let Some(name) = args.get("name").and_then(|v| v.as_str()) {
                 name.to_string()
             } else {
@@ -313,7 +310,14 @@ pub fn check_tool_permission(
 fn is_restricted_in_ask_mode(name: &str) -> bool {
     matches!(
         name,
-        "fs_write" | "fs_edit" | "fs_rollback" | "bash_run" | "plan_todo_write" | "subagent_call"
-            | "computer_touch" | "computer_pointer" | "computer_keyboard"
+        "fs_write"
+            | "fs_edit"
+            | "fs_rollback"
+            | "bash_run"
+            | "plan_todo_write"
+            | "subagent_call"
+            | "computer_touch"
+            | "computer_pointer"
+            | "computer_keyboard"
     )
 }

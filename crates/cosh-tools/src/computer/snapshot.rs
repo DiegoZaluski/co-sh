@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use xa11y::{App, AppExt, TreeNode};
 
-use super::types::{SnapshotFormat, SnapshotOutput, ComputerSnapshot};
+use super::types::{ComputerSnapshot, SnapshotFormat, SnapshotOutput};
 
 /// Default auto-wait for the application to appear.
 pub(crate) const DEFAULT_TIMEOUT_MS: u64 = 3000;
@@ -41,7 +41,12 @@ const MAX_NODES: usize = 4000;
 /// snapshot exceeds [`MAX_NODES`], or when the platform accessibility API
 /// is unreachable.
 pub async fn snapshot(input: &ComputerSnapshot) -> Result<SnapshotOutput, String> {
-    let has_name = input.name.as_deref().map(str::trim).filter(|s| !s.is_empty()).is_some();
+    let has_name = input
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_some();
     if has_name && input.pid.is_some() {
         return Err("computer_snapshot: provide `name` or `pid`, not both".into());
     }
@@ -63,7 +68,11 @@ pub async fn snapshot(input: &ComputerSnapshot) -> Result<SnapshotOutput, String
 
 fn snapshot_blocking(input: &ComputerSnapshot) -> Result<SnapshotOutput, String> {
     let timeout = Duration::from_millis(input.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
-    let name = input.name.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let name = input
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
 
     let app = match (name, input.pid) {
         (Some(name), None) => App::by_name(name, timeout),
@@ -116,7 +125,9 @@ fn render_app(
     app: &App,
     max_depth: Option<usize>,
 ) -> Result<(String, usize), String> {
-    let tree = app.tree(max_depth).map_err(|e| format!("computer_snapshot: {e}"))?;
+    let tree = app
+        .tree(max_depth)
+        .map_err(|e| format!("computer_snapshot: {e}"))?;
     let count = checked_node_count(&tree)?;
     Ok((render_tree(format, &tree), count))
 }

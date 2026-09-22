@@ -1058,8 +1058,8 @@ pub async fn list_models(
 
 #[cfg(test)]
 mod image_lowering_tests {
-    use crate::connector::params::{ChatMessage, ImageBlock, tool_result_message_with_images};
     use super::lower_images_to_wire;
+    use crate::connector::params::{ChatMessage, ImageBlock, tool_result_message_with_images};
 
     fn sample_image() -> ImageBlock {
         ImageBlock::png(b"\x89PNG fake bytes")
@@ -1076,11 +1076,8 @@ mod image_lowering_tests {
     /// text-only and emit the pixels as a follow-up user message.
     #[test]
     fn tool_result_with_images_becomes_tool_plus_user_image_message() {
-        let msg = tool_result_message_with_images(
-            "call_1",
-            "screenshot 1568x882",
-            vec![sample_image()],
-        );
+        let msg =
+            tool_result_message_with_images("call_1", "screenshot 1568x882", vec![sample_image()]);
         let lowered = lower_images_to_wire(std::slice::from_ref(&msg));
         let arr = lowered.as_array().expect("messages array");
         assert_eq!(arr.len(), 2, "tool result + follow-up user message");
@@ -1163,4 +1160,3 @@ mod image_lowering_tests {
         assert_eq!(lowered[0]["content"], "plain");
     }
 }
-

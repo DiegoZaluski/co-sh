@@ -5,9 +5,9 @@
 //! coordinates come from a `computer_screenshot` image mapped to the desktop via
 //! its `desktop_origin`/`desktop_scale`. Every call is blocking (synthetic
 //! input event), so it runs on tokio's blocking pool.
-use xa11y::{input_sim, MouseButton, Point, ScrollDelta};
+use xa11y::{MouseButton, Point, ScrollDelta, input_sim};
 
-use super::types::{PointerAction, PointerOutput, ComputerPointer};
+use super::types::{ComputerPointer, PointerAction, PointerOutput};
 
 /// Click / move / scroll at desktop coordinates.
 ///
@@ -48,15 +48,9 @@ fn pointer_blocking(input: &ComputerPointer) -> Result<PointerOutput, String> {
     };
 
     let result = match action {
-        PointerAction::Click => {
-            sim.mouse().click(point.unwrap_or(Point::new(0, 0)))
-        }
-        PointerAction::DoubleClick => {
-            sim.mouse().double_click(point.unwrap_or(Point::new(0, 0)))
-        }
-        PointerAction::RightClick => {
-            sim.mouse().right_click(point.unwrap_or(Point::new(0, 0)))
-        }
+        PointerAction::Click => sim.mouse().click(point.unwrap_or(Point::new(0, 0))),
+        PointerAction::DoubleClick => sim.mouse().double_click(point.unwrap_or(Point::new(0, 0))),
+        PointerAction::RightClick => sim.mouse().right_click(point.unwrap_or(Point::new(0, 0))),
         PointerAction::Move => sim.mouse().move_to(point.unwrap_or(Point::new(0, 0))),
         // `down` presses at the CURRENT cursor position, so an explicit
         // target must be moved to FIRST — otherwise a drag would start at
@@ -125,4 +119,3 @@ fn action_name(action: PointerAction) -> &'static str {
         PointerAction::Scroll => "scroll",
     }
 }
-

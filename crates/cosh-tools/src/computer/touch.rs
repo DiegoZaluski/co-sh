@@ -20,7 +20,7 @@ use std::time::Duration;
 use xa11y::{App, AppExt};
 
 use super::snapshot::DEFAULT_TIMEOUT_MS;
-use super::types::{TouchAction, TouchOutput, ComputerTouch};
+use super::types::{ComputerTouch, TouchAction, TouchOutput};
 
 /// Perform an action on the element matched by `selector`.
 ///
@@ -42,7 +42,12 @@ pub async fn touch(input: &ComputerTouch) -> Result<TouchOutput, String> {
     if input.selector.trim().is_empty() {
         return Err("computer_touch: `selector` is required".into());
     }
-    let has_name = input.name.as_deref().map(str::trim).filter(|s| !s.is_empty()).is_some();
+    let has_name = input
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_some();
     if has_name && input.pid.is_some() {
         return Err("computer_touch: provide `name` or `pid`, not both".into());
     }
@@ -65,11 +70,15 @@ pub async fn touch(input: &ComputerTouch) -> Result<TouchOutput, String> {
             ));
         }
         TouchAction::SetNumericValue if input.numeric_value.is_none() => {
-            return Err("computer_touch: action `set_numeric_value` requires `numeric_value`".into());
+            return Err(
+                "computer_touch: action `set_numeric_value` requires `numeric_value`".into(),
+            );
         }
         TouchAction::SelectText => {
             let Some(range) = &input.range else {
-                return Err("computer_touch: action `select_text` requires `range` [start, end]".into());
+                return Err(
+                    "computer_touch: action `select_text` requires `range` [start, end]".into(),
+                );
             };
             if range.len() != 2 {
                 return Err(format!(
@@ -95,7 +104,11 @@ pub async fn touch(input: &ComputerTouch) -> Result<TouchOutput, String> {
 
 fn touch_blocking(input: &ComputerTouch) -> Result<TouchOutput, String> {
     let timeout = Duration::from_millis(input.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
-    let name = input.name.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let name = input
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     let app = match (name, input.pid) {
         (Some(name), None) => App::by_name(name, timeout),
         (None, Some(pid)) => App::by_pid(pid, timeout),
@@ -122,15 +135,16 @@ fn touch_blocking(input: &ComputerTouch) -> Result<TouchOutput, String> {
         TouchAction::Increment => locator.increment(),
         TouchAction::Decrement => locator.decrement(),
         TouchAction::ScrollIntoView => locator.scroll_into_view(),
-        TouchAction::SetValue => {
-            locator.set_value(input.value.as_deref().unwrap_or_default())
-        }
+        TouchAction::SetValue => locator.set_value(input.value.as_deref().unwrap_or_default()),
         TouchAction::SetNumericValue => {
             locator.set_numeric_value(input.numeric_value.unwrap_or_default())
         }
         TouchAction::SelectText => {
             let range = input.range.as_deref().unwrap_or_default();
-            locator.select_text(range.first().copied().unwrap_or(0), range.get(1).copied().unwrap_or(0))
+            locator.select_text(
+                range.first().copied().unwrap_or(0),
+                range.get(1).copied().unwrap_or(0),
+            )
         }
         TouchAction::TypeText => locator.type_text(input.value.as_deref().unwrap_or_default()),
         TouchAction::PerformAction => {

@@ -248,7 +248,11 @@ fn message_to_input_items(msg: &ChatMessage, out: &mut Vec<Value>) {
     let has_images = msg.images.as_ref().is_some_and(|i| !i.is_empty());
     let Some(content) = &msg.content else {
         if has_images {
-            let role = if msg.role == "user" { "user" } else { "assistant" };
+            let role = if msg.role == "user" {
+                "user"
+            } else {
+                "assistant"
+            };
             let parts: Vec<Value> = msg
                 .images
                 .as_ref()

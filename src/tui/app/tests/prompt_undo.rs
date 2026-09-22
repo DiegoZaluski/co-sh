@@ -153,7 +153,10 @@ async fn ctrl_z_works_while_the_slash_menu_is_open() {
     let mut app = session_app();
 
     type_text(&mut app, "/he");
-    assert!(app.slash_menu.visible, "typing a slash command opens the menu");
+    assert!(
+        app.slash_menu.visible,
+        "typing a slash command opens the menu"
+    );
 
     app.process_key_event(ctrl(KeyCode::Char('z'))).unwrap();
     assert_eq!(app.prompt_view.input, "");

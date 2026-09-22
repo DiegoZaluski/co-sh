@@ -12,7 +12,7 @@ use xa11y::{
 };
 
 use super::snapshot::DEFAULT_TIMEOUT_MS;
-use super::types::{ScreenshotOutput, ComputerScreenshot};
+use super::types::{ComputerScreenshot, ScreenshotOutput};
 
 /// Default maximum width of the delivered image, in pixels.
 ///
@@ -70,7 +70,8 @@ pub async fn screenshot(input: &ComputerScreenshot) -> Result<ScreenshotOutput, 
     }
     if input.selector.is_some() && input.app.is_none() && input.pid.is_none() {
         return Err(
-            "computer_screenshot: element capture requires `app` or `pid` together with `selector`".into(),
+            "computer_screenshot: element capture requires `app` or `pid` together with `selector`"
+                .into(),
         );
     }
     if input.nth == Some(0) {
@@ -156,7 +157,7 @@ fn screenshot_blocking(input: &ComputerScreenshot) -> Result<ScreenshotOutput, S
     let capture = if capture.width > max_width {
         let target_height = ((f64::from(capture.height) * f64::from(max_width)
             / f64::from(capture.width))
-            .round() as u32)
+        .round() as u32)
             .max(1);
         capture
             .resize(max_width, target_height)
@@ -213,7 +214,11 @@ fn screenshot_blocking(input: &ComputerScreenshot) -> Result<ScreenshotOutput, S
 fn resolve_app(input: &ComputerScreenshot) -> Result<App, String> {
     use std::time::Duration;
     let timeout = Duration::from_millis(input.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
-    let name = input.app.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let name = input
+        .app
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     match (name, input.pid) {
         (Some(name), None) => App::by_name(name, timeout)
             .map_err(|e| format!("computer_screenshot: resolve application: {e}")),

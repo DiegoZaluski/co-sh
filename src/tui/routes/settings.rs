@@ -981,7 +981,11 @@ fn in_window(idx: Option<usize>, visible: usize, scroll: usize) -> bool {
 }
 
 fn content_start_y(area: Rect, setup: &Setup) -> u16 {
-    area.y + (area.height.saturating_sub(content_height(setup, area.width))) / 2
+    area.y
+        + (area
+            .height
+            .saturating_sub(content_height(setup, area.width)))
+            / 2
 }
 
 fn max_row_width(setup: &Setup, width: u16) -> usize {
@@ -1624,7 +1628,11 @@ mod tests {
         });
         let desc_y = abs_y(&setup, area, |l| matches!(l, Line::Description(_)));
         // row_x mirrors find_row_for_mouse's centering.
-        let row_x = area.x + (area.width.saturating_sub(max_row_width(&setup, area.width) as u16)) / 2;
+        let row_x = area.x
+            + (area
+                .width
+                .saturating_sub(max_row_width(&setup, area.width) as u16))
+                / 2;
 
         assert_eq!(
             view.handle_mouse(&mouse_at(row_x + 6, hook_y), area, &setup),
@@ -1682,7 +1690,10 @@ mod tests {
         // Zero width degrades to a single empty row instead of looping.
         assert_eq!(wrap_words("anything", 0), vec![""]);
         // Multi-column characters count display width, not bytes or chars.
-        assert_eq!(wrap_words("日本語 テスト", 4), vec!["日本", "語", "テス", "ト"]);
+        assert_eq!(
+            wrap_words("日本語 テスト", 4),
+            vec!["日本", "語", "テス", "ト"]
+        );
     }
 
     /// Narrow terminal: descriptions wrap word-wise onto following rows
@@ -1729,8 +1740,11 @@ mod tests {
                 .find(|l| matches!(l.line, Line::Category { item: 4 }))
                 .expect("lsp layout row")
                 .y;
-        let row_x =
-            area.x + (area.width.saturating_sub(max_row_width(&setup, area.width) as u16)) / 2;
+        let row_x = area.x
+            + (area
+                .width
+                .saturating_sub(max_row_width(&setup, area.width) as u16))
+                / 2;
         assert_eq!(
             view.handle_mouse(&mouse_at(row_x + 4, row_y), area, &setup),
             Some(lsp_index)

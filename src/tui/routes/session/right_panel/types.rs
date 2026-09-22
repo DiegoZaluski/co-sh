@@ -945,8 +945,13 @@ impl RightPanelState {
         // drops to class 2 (above finished live entries, below every
         // running one) so it is displayed whenever space remains but never
         // steals space from an in-flight subagent.
-        let focus_pin_class =
-            |idx: usize| if self.pty_sessions[idx].is_finished() { 2 } else { 0 };
+        let focus_pin_class = |idx: usize| {
+            if self.pty_sessions[idx].is_finished() {
+                2
+            } else {
+                0
+            }
+        };
         let mut ranked: Vec<(u8, u64, usize)> = Vec::new();
         if let Some(idx) = focused_window {
             let class = focus_pin_class(idx);

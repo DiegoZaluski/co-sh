@@ -1218,16 +1218,6 @@ impl RouterView {
         );
         let fallback_x = fallback_area.x + text_pad;
         let fallback_w = fallback_area.width.saturating_sub(SIDE_PADDING);
-        if fallback_area.y + 1 < fallback_area.bottom() {
-            draw_text_line(
-                buf,
-                "Tried from top to bottom for prompt correction.",
-                fallback_x,
-                fallback_area.y + 1,
-                fallback_w,
-                Style::default().fg(muted).bg(panel_bg),
-            );
-        }
         let list_top = fallback_area.y + 4;
         if self.prompt_corrector_fallbacks.is_empty() {
             if list_top < fallback_area.bottom() {

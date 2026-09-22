@@ -9,12 +9,12 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
+use super::prompt_history::{EditKind, PromptHistory, RedoOutcome, UndoOutcome};
 use crate::component::cursor::{Cursor, CursorState};
 use crate::logo::ChatLogo;
 use crate::lsp_colors;
 use crate::state::AppState;
 use crate::theme::{Theme, rgba_color};
-use super::prompt_history::{EditKind, PromptHistory, RedoOutcome, UndoOutcome};
 use crate::types::{AgentColors, MessageRole, Part, Session};
 
 const BASE_H: u16 = 2;

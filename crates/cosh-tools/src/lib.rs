@@ -31,6 +31,7 @@
 // with instructions guarding against a mistake most sessions never make.
 
 pub mod bash;
+pub mod computer;
 pub mod find;
 pub mod fs;
 pub mod lsp;
@@ -40,7 +41,6 @@ pub mod question;
 pub mod recall;
 pub mod skills;
 pub mod subagent;
-pub mod computer;
 pub mod util;
 pub mod web;
 

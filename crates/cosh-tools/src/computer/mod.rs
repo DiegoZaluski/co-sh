@@ -36,9 +36,9 @@ pub use screenshot::screenshot;
 pub use snapshot::snapshot;
 pub use touch::touch;
 pub use types::{
-    AppInfo, AppsOutput, KeyboardOutput, PointerAction, PointerOutput, SnapshotFormat,
-    SnapshotOutput, ScreenshotOutput, TouchAction, TouchOutput, ComputerApps, ComputerKeyboard, ComputerPointer,
-    ComputerScreenshot, ComputerSnapshot, ComputerTouch,
+    AppInfo, AppsOutput, ComputerApps, ComputerKeyboard, ComputerPointer, ComputerScreenshot,
+    ComputerSnapshot, ComputerTouch, KeyboardOutput, PointerAction, PointerOutput,
+    ScreenshotOutput, SnapshotFormat, SnapshotOutput, TouchAction, TouchOutput,
 };
 
 use crate::ToolDescription;
@@ -494,10 +494,7 @@ impl Computer {
     /// Returns `Err` for invalid input, an app/selector that never matches,
     /// a failed capture (e.g. missing screen-recording permission), or an
     /// encode failure.
-    pub async fn screenshot(
-        &self,
-        input: &ComputerScreenshot,
-    ) -> Result<ScreenshotOutput, String> {
+    pub async fn screenshot(&self, input: &ComputerScreenshot) -> Result<ScreenshotOutput, String> {
         screenshot::screenshot(input).await
     }
 

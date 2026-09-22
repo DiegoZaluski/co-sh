@@ -244,8 +244,11 @@ fn exe_in_path(binary: &str) -> bool {
 #[cfg(windows)]
 fn script_shim_in_path(binary: &str) -> bool {
     std::env::var_os("PATH").is_some_and(|path| {
-        std::env::split_paths(&path)
-            .any(|dir| ["cmd", "bat"].into_iter().any(|ext| dir.join(format!("{binary}.{ext}")).is_file()))
+        std::env::split_paths(&path).any(|dir| {
+            ["cmd", "bat"]
+                .into_iter()
+                .any(|ext| dir.join(format!("{binary}.{ext}")).is_file())
+        })
     })
 }
 

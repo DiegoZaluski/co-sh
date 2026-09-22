@@ -11,6 +11,13 @@ use cosh_sdk::extract_action::ToolSchema;
 use cosh_sdk::find::{GlobMatch, GrepMatch};
 use cosh_tools::{
     bash::{Bash, BashRunInput},
+    computer::{
+        Computer,
+        types::{
+            ComputerApps, ComputerKeyboard, ComputerPointer, ComputerScreenshot, ComputerSnapshot,
+            ComputerTouch,
+        },
+    },
     find::{Find, GlobCallOptions, GlobMatchCallback, GrepMatchCallback},
     fs::{Fs, FsRollbackInput, LspNotes, Target, TargetFile},
     lsp::Lsp,
@@ -23,13 +30,6 @@ use cosh_tools::{
     subagent::{
         SubAgent,
         types::{SubAgentCallInput, SubAgentCallOutput},
-    },
-    computer::{
-        Computer,
-        types::{
-            ComputerApps, ComputerKeyboard, ComputerPointer, ComputerScreenshot, ComputerSnapshot,
-            ComputerTouch,
-        },
     },
     web::{Web, WebFetch, WebSearchInput},
 };
@@ -1144,24 +1144,24 @@ impl Tools for CoshTools {
                         // Mixed shapes are ambiguous: fs_edit's auto-dispatch
                         // rejects them too. A silent "flat wins" choice would
                         // write one file when the model asked for a batch.
-                        return Err(
-                            "fs_write accepts ONE file per call: provide either a flat \
+                        return Err("fs_write accepts ONE file per call: provide either a flat \
                              {path, content, file_hash?} or the legacy single-element \
                              {targets: [...]}, never both."
-                                .to_string()
-                        );
+                            .to_string());
                     }
                     vec![serde_json::from_value(args.clone()).map_err(|e| e.to_string())?]
                 } else {
                     let parsed: Vec<TargetFile> = serde_json::from_value(
-                        args.get("targets").cloned().unwrap_or(serde_json::Value::Null),
+                        args.get("targets")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null),
                     )
                     .map_err(|e| e.to_string())?;
                     if parsed.len() > 1 {
                         return Err(
                             "fs_write accepts ONE file per call: {path, content, file_hash?}. \
                              Issue one call per file."
-                                .to_string()
+                                .to_string(),
                         );
                     }
                     parsed
@@ -1573,7 +1573,8 @@ impl Tools for CoshTools {
             }
 
             "computer_apps" => {
-                let _input: ComputerApps = serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let _input: ComputerApps =
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let output = self.computer.apps().await?;
                 serde_json::to_string(&output).map_err(|e| e.to_string())
             }

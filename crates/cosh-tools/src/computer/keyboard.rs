@@ -4,9 +4,9 @@
 //! holds keyboard focus (focus a target first with `computer_touch` action
 //! `focus`). Uses `xa11y::input_sim()`'s keyboard backend; every call is
 //! blocking, so it runs on tokio's blocking pool.
-use xa11y::{input_sim, Key};
+use xa11y::{Key, input_sim};
 
-use super::types::{KeyboardOutput, ComputerKeyboard};
+use super::types::{ComputerKeyboard, KeyboardOutput};
 
 /// Maximum number of STEPS a `then` chain may contain (the root step counts).
 /// A pathological chain would otherwise let one tool call drive an unbounded
@@ -78,7 +78,12 @@ fn validate_chain(step: &ComputerKeyboard, remaining: usize) -> Result<(), Strin
         parse_key(key)?;
     }
     if let Some(held) = &step.held {
-        parse_keys(&held.iter().map(|s| s.to_ascii_lowercase()).collect::<Vec<_>>())?;
+        parse_keys(
+            &held
+                .iter()
+                .map(|s| s.to_ascii_lowercase())
+                .collect::<Vec<_>>(),
+        )?;
     }
     if let Some(next) = &step.then {
         validate_chain(next, remaining - 1)?;
@@ -182,7 +187,9 @@ fn parse_key(name: &str) -> Result<Key, String> {
         }
         _ if lower.starts_with('f')
             && lower.len() <= 3
-            && lower[1..].parse::<u8>().is_ok_and(|n| (1..=12).contains(&n)) =>
+            && lower[1..]
+                .parse::<u8>()
+                .is_ok_and(|n| (1..=12).contains(&n)) =>
         {
             Key::F(lower[1..].parse::<u8>().unwrap_or(1))
         }
@@ -223,7 +230,7 @@ fn key_name(key: &Key) -> String {
 
 #[cfg(test)]
 mod chain_validation_tests {
-    use super::{validate_chain, KEYBOARD_CHAIN_MAX_DEPTH};
+    use super::{KEYBOARD_CHAIN_MAX_DEPTH, validate_chain};
     use crate::computer::types::ComputerKeyboard;
 
     fn key_step(key: &str) -> ComputerKeyboard {

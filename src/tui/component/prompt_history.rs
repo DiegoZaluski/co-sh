@@ -174,9 +174,7 @@ impl PromptHistory {
         parts: PartsSnapshot,
         kind: EditKind,
     ) {
-        if text == self.current.text
-            && cursor == self.current.cursor
-            && parts == self.current.parts
+        if text == self.current.text && cursor == self.current.cursor && parts == self.current.parts
         {
             return;
         }
