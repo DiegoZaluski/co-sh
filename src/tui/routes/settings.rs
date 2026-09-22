@@ -4,6 +4,9 @@
 //! carries an explanatory description rendered directly above it, telling
 //! the user what the setting controls.
 //!
+//! Narrow terminals wrap those descriptions word-wise onto following rows
+//! instead of clipping them at the right edge.
+//!
 //! The hook entries own sub-lists: while hooks are enabled every configured
 //! hook plus an "Add hook" action appears below its category; disabling
 //! hooks hides the sub-lists entirely. Activating a hook opens the shared
@@ -12,6 +15,7 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use cosh_tui::core::types::MouseEvent;
 
@@ -158,6 +162,57 @@ fn truncate(s: &str, max_chars: usize) -> String {
     }
 }
 
+/// Word-aware wrap: breaks `text` into rows of at most `max_width` display
+/// columns, splitting only on spaces (the break consumes the space). A
+/// single word wider than `max_width` is hard-truncated at the boundary;
+/// blank text or a zero width still yields one (empty) row so callers can
+/// rely on at least one line.
+fn wrap_words(text: &str, max_width: usize) -> Vec<String> {
+    if max_width == 0 {
+        return vec![String::new()];
+    }
+    let mut rows = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0usize;
+    for word in text.split(' ') {
+        let word_width = word.width();
+        if word_width > max_width {
+            // Unbreakable: flush what is pending, then chunk the word
+            // itself at the width boundary.
+            if !current.is_empty() {
+                rows.push(std::mem::take(&mut current));
+            }
+            let mut start = 0;
+            let mut taken = 0usize;
+            for (i, ch) in word.char_indices() {
+                let char_width = ch.width().unwrap_or(0);
+                if taken + char_width > max_width {
+                    rows.push(word[start..i].to_string());
+                    start = i;
+                    taken = char_width;
+                } else {
+                    taken += char_width;
+                }
+            }
+            current = word[start..].to_string();
+            current_width = taken;
+        } else if current_width == 0 {
+            current = word.to_string();
+            current_width = word_width;
+        } else if current_width + 1 + word_width <= max_width {
+            current.push(' ');
+            current.push_str(word);
+            current_width += 1 + word_width;
+        } else {
+            rows.push(std::mem::take(&mut current));
+            current = word.to_string();
+            current_width = word_width;
+        }
+    }
+    rows.push(current);
+    rows
+}
+
 /// List label for a hook: friendly name, falling back to the command like the
 /// engine's own `display_name`.
 fn hook_display_name(entry: &HookEntry) -> String {
@@ -239,7 +294,9 @@ enum Line {
     AddSummarizationModel,
     Title,
     Blank,
-    Description(&'static str),
+    /// One wrapped row of a section description; consecutive rows form a
+    /// single logical description block.
+    Description(String),
     /// A non-selectable URL rendered under a description (e.g. the Zen free
     /// gateway's terms).
     Link(&'static str),
@@ -284,7 +341,12 @@ impl Line {
 const MCP_SECTION_DESCRIPTION: &str =
     "Connect external MCP servers for extra model tools (stdio or HTTP)";
 
-fn build_layout(setup: &Setup) -> Vec<LayoutLine> {
+/// Builds the vertical layout for a `width`-column terminal. Description
+/// lines wrap (word-aligned) into consecutive rows at that width, so content
+/// height, scroll offset and mouse hit-testing all see the same multi-row
+/// blocks. Callers that only need the selection order pass `u16::MAX`, which
+/// keeps every description on a single row.
+fn build_layout(setup: &Setup, width: u16) -> Vec<LayoutLine> {
     let mut lines = Vec::new();
     let mut y = 0u16;
     lines.push(LayoutLine {
@@ -293,11 +355,13 @@ fn build_layout(setup: &Setup) -> Vec<LayoutLine> {
     });
     y += 1;
     for item in 0..settings_items().len() {
-        lines.push(LayoutLine {
-            y,
-            line: Line::Description(settings_items()[item].description),
-        });
-        y += 1;
+        for text in wrap_words(settings_items()[item].description, width as usize) {
+            lines.push(LayoutLine {
+                y,
+                line: Line::Description(text),
+            });
+            y += 1;
+        }
         lines.push(LayoutLine {
             y,
             line: Line::Category { item },
@@ -365,11 +429,13 @@ fn build_layout(setup: &Setup) -> Vec<LayoutLine> {
         line: Line::Blank,
     });
     y += 1;
-    lines.push(LayoutLine {
-        y,
-        line: Line::Description(MCP_SECTION_DESCRIPTION),
-    });
-    y += 1;
+    for text in wrap_words(MCP_SECTION_DESCRIPTION, width as usize) {
+        lines.push(LayoutLine {
+            y,
+            line: Line::Description(text),
+        });
+        y += 1;
+    }
     for index in 0..setup.mcp.servers.len() {
         lines.push(LayoutLine {
             y,
@@ -400,14 +466,17 @@ fn mcp_server_preview(entry: &cosh::mcp::McpServerEntry) -> String {
 }
 
 fn selectable_rows(setup: &Setup) -> Vec<SettingsRow> {
-    build_layout(setup)
+    // Width-independent: only non-selectable description rows wrap, so the
+    // selectable order (and every saved selection index) never changes with
+    // the terminal width.
+    build_layout(setup, u16::MAX)
         .iter()
         .filter_map(|l| l.line.row())
         .collect()
 }
 
-fn content_height(setup: &Setup) -> u16 {
-    build_layout(setup).len() as u16
+fn content_height(setup: &Setup, width: u16) -> u16 {
+    build_layout(setup, width).len() as u16
 }
 
 /// What happened after the user activated a row.
@@ -527,7 +596,7 @@ impl SettingsView {
         let selected = selectable_rows(setup)
             .get(self.selection.selected_index)
             .copied();
-        build_layout(setup)
+        build_layout(setup, area.width)
             .iter()
             .find(|line| line.line.row() == selected && selected.is_some())
             .map_or(0, |line| {
@@ -681,7 +750,7 @@ impl SettingsView {
     }
 
     fn find_row_for_mouse(&self, mouse: &MouseEvent, area: Rect, setup: &Setup) -> Option<usize> {
-        let max_row_w = max_row_width(setup);
+        let max_row_w = max_row_width(setup, area.width);
         if max_row_w == 0 {
             return None;
         }
@@ -696,7 +765,7 @@ impl SettingsView {
         }
         let start_y = content_start_y(area, setup);
         let offset = self.viewport_offset(area, setup);
-        build_layout(setup)
+        build_layout(setup, area.width)
             .iter()
             .find(|l| l.y as u32 + start_y as u32 == mouse.y as u32 + offset as u32)
             .and_then(|l| l.line.row())
@@ -709,9 +778,9 @@ impl SettingsView {
         let primary = rgba_color(theme.primary);
 
         let start_y = content_start_y(area, setup);
-        let layout = build_layout(setup);
+        let layout = build_layout(setup, area.width);
 
-        let max_w = max_row_width(setup);
+        let max_w = max_row_width(setup, area.width);
         if max_w == 0 || area.width == 0 || area.height == 0 {
             return;
         }
@@ -912,10 +981,13 @@ fn in_window(idx: Option<usize>, visible: usize, scroll: usize) -> bool {
 }
 
 fn content_start_y(area: Rect, setup: &Setup) -> u16 {
-    area.y + (area.height.saturating_sub(content_height(setup))) / 2
+    area.y + (area.height.saturating_sub(content_height(setup, area.width))) / 2
 }
 
-fn max_row_width(setup: &Setup) -> usize {
+fn max_row_width(setup: &Setup, width: u16) -> usize {
+    // Descriptions wrap to the terminal width, so their widest rendered row
+    // never exceeds it.
+    let width_cap = width as usize;
     let mut width = settings_items()
         .iter()
         .map(|item| {
@@ -924,7 +996,7 @@ fn max_row_width(setup: &Setup) -> usize {
             if let Some(v) = cache_choice_value(item.id, setup) {
                 len = len.max(2 + item.label.len() + 2 + v.len());
             }
-            len
+            len.min(width_cap)
         })
         .max()
         .unwrap_or(0);
@@ -947,7 +1019,7 @@ fn max_row_width(setup: &Setup) -> usize {
     }
     // MCP section: description plus one toggle row per server and the Add
     // action (indented like hook sub-rows).
-    width = width.max(MCP_SECTION_DESCRIPTION.len());
+    width = width.max(MCP_SECTION_DESCRIPTION.len().min(width_cap));
     for entry in &setup.mcp.servers {
         // Full drawn line: indent + "✔ " + name + " — target…".
         let len =
@@ -1078,7 +1150,7 @@ mod tests {
 
     /// Absolute Y of a layout line matching `pred`.
     fn abs_y(setup: &Setup, area: Rect, pred: impl Fn(&Line) -> bool) -> u16 {
-        let layout = build_layout(setup);
+        let layout = build_layout(setup, area.width);
         let start_y = content_start_y(area, setup);
         start_y
             + layout
@@ -1466,7 +1538,7 @@ mod tests {
             setup_with_mcp_server("docs", true),
         ];
         for setup in &setups {
-            let layout = build_layout(setup);
+            let layout = build_layout(setup, u16::MAX);
 
             // Strictly sequential y: no duplicate rows, no skipped rows.
             for (i, line) in layout.iter().enumerate() {
@@ -1552,7 +1624,7 @@ mod tests {
         });
         let desc_y = abs_y(&setup, area, |l| matches!(l, Line::Description(_)));
         // row_x mirrors find_row_for_mouse's centering.
-        let row_x = area.x + (area.width.saturating_sub(max_row_width(&setup) as u16)) / 2;
+        let row_x = area.x + (area.width.saturating_sub(max_row_width(&setup, area.width) as u16)) / 2;
 
         assert_eq!(
             view.handle_mouse(&mouse_at(row_x + 6, hook_y), area, &setup),
@@ -1580,6 +1652,88 @@ mod tests {
         assert_eq!(
             view.handle_mouse(&mouse_at(row_x + 6, toggle_y), area, &disabled),
             Some(0)
+        );
+    }
+
+    #[test]
+    fn wrap_words_breaks_on_spaces_within_the_width() {
+        // Short text stays on one row.
+        assert_eq!(wrap_words("one two three", 20), vec!["one two three"]);
+        // Breaks happen at spaces; the space is consumed by the break.
+        assert_eq!(wrap_words("aaa bb cccc", 7), vec!["aaa bb", "cccc"]);
+        // Continuation rows keep words whole, never splitting mid-word.
+        assert_eq!(
+            wrap_words("alpha beta gamma", 9),
+            vec!["alpha", "beta", "gamma"]
+        );
+        // No trailing space leaks onto the next row.
+        assert_eq!(wrap_words("aa bb", 2), vec!["aa", "bb"]);
+    }
+
+    #[test]
+    fn wrap_words_hard_truncates_only_unbreakable_words() {
+        // A single word longer than the limit is cut at the boundary.
+        assert_eq!(wrap_words("abcdefgh", 3), vec!["abc", "def", "gh"]);
+        // Pending content flushes before the oversized word starts.
+        assert_eq!(
+            wrap_words("hi abcdefghij", 4),
+            vec!["hi", "abcd", "efgh", "ij"]
+        );
+        // Zero width degrades to a single empty row instead of looping.
+        assert_eq!(wrap_words("anything", 0), vec![""]);
+        // Multi-column characters count display width, not bytes or chars.
+        assert_eq!(wrap_words("日本語 テスト", 4), vec!["日本", "語", "テス", "ト"]);
+    }
+
+    /// Narrow terminal: descriptions wrap word-wise onto following rows
+    /// instead of being clipped at the right edge, every drawn row stays
+    /// inside the width, and mouse hit-testing keeps matching the rendered
+    /// (wrapped) layout.
+    #[test]
+    fn narrow_width_wraps_descriptions_instead_of_clipping() {
+        let theme = test_theme();
+        let area = Rect::new(0, 0, 60, 40);
+        let setup = Setup::default();
+        let mut view = SettingsView::new();
+        let mut buf = Buffer::empty(area);
+        view.render(&mut buf, area, &theme, &setup);
+
+        // The telemetry description exceeds 60 columns; without wrapping its
+        // tail would be cut off at the right edge.
+        let all: String = (area.y..area.bottom())
+            .map(|y| format!("{}\n", line_text(&buf, area, y)))
+            .collect();
+        assert!(all.contains("COSH_TELEMETRY=off"));
+        assert!(all.contains("Takes effect on the next launch"));
+        // No drawn row overflows the terminal width.
+        for y in area.y..area.bottom() {
+            assert!(
+                line_text(&buf, area, y).width() <= area.width as usize,
+                "row {y} overflows the {w}-column terminal",
+                w = area.width
+            );
+        }
+
+        // Clicking the Language-servers toggle row (below its wrapped
+        // description) still selects it: offset and start_y derive from the
+        // same wrapped layout the render used.
+        let lsp_index = selectable_rows(&setup)
+            .iter()
+            .position(|r| matches!(r, SettingsRow::Category(4)))
+            .expect("lsp category row exists");
+        view.selection.selected_index = lsp_index;
+        let layout = build_layout(&setup, area.width);
+        let row_y = content_start_y(area, &setup)
+            + layout
+                .iter()
+                .find(|l| matches!(l.line, Line::Category { item: 4 }))
+                .expect("lsp layout row")
+                .y;
+        let row_x =
+            area.x + (area.width.saturating_sub(max_row_width(&setup, area.width) as u16)) / 2;
+        assert_eq!(
+            view.handle_mouse(&mouse_at(row_x + 4, row_y), area, &setup),
+            Some(lsp_index)
         );
     }
 }
