@@ -8,9 +8,10 @@ use super::{App, AppMode};
 use crate::component::prompt::PromptView;
 use crate::component::prompt_history::{RedoOutcome, UndoOutcome};
 use crate::fallback;
+use crate::left_panel::sessions::SessionsAction;
+use crate::left_panel::{MIN_WIDTH_FOR_LEFT_PANEL, Mode};
 use crate::routes::home::HomeAction;
 use crate::routes::router::FocusTarget;
-use crate::routes::session::sidebar::SidebarAction;
 use crate::ui::dialogs::DialogType;
 use crate::util::selection;
 
@@ -48,7 +49,7 @@ impl App {
             }
 
             // Modal sovereignty: while a Confirm dialog is on screen it owns
-            // the ENTIRE keyboard — the slash menu, the prompt, the sidebar
+            // the ENTIRE keyboard — the slash menu, the prompt, the left panel
             // and every panel must not react to any key until the user
             // decides. Left/Right/Enter/Esc drive the dialog; any other key
             // is swallowed. (Without this gate a "/"-open slash menu used to
@@ -67,7 +68,7 @@ impl App {
 
             // ESC sovereign while an agent loop is running: whatever
             // incidental UI state is active (a prompt/field text selection,
-            // the sidebar focus, the slash menu, the permission dialog, an
+            // the left panel focus, the slash menu, the permission dialog, an
             // overlay), the FIRST job of ESC is to interrupt the loop.
             // Flag the shared stop signal here — before any gate below can
             // swallow the key — then let ESC fall through so it still
@@ -120,7 +121,7 @@ impl App {
                 return Ok(false);
             }
 
-            // Escape also unfocuses the sidebar.
+            // Escape also unfocuses the left panel.
             if key.code == KeyCode::Esc && self.sidebar_focused {
                 self.sidebar_focused = false;
                 return Ok(false);
@@ -418,19 +419,19 @@ impl App {
                 return Ok(false);
             }
 
-            // Sidebar-focused arrow key scrolling (runs for ALL modes)
+            // Left-panel-focused arrow key scrolling (runs for ALL modes)
             // Must come before mode-specific handlers (Home, InternalTools,
             // Session) which also consume Up/Down before the action dispatch.
             if self.sidebar_focused
                 && self.sidebar.open
-                && self.terminal_size().width >= super::MIN_WIDTH_FOR_LEFT_PANEL
+                && self.terminal_size().width >= MIN_WIDTH_FOR_LEFT_PANEL
             {
                 // File explorer (Ctrl+F): the panel owns the keys while it
                 // is the active left-panel view — but never while a modal
                 // dialog is open (Enter on a file must not launch the
                 // editor under a dialog). Navigation works while the agent
                 // runs; it never touches session state.
-                if matches!(self.left_panel, super::LeftPanelMode::Explorer)
+                if matches!(self.left_panel, Mode::Explorer)
                     && !self.dialog.visible()
                     && !self.question_dialog.visible
                     && !self.permission_dialog.visible
@@ -452,12 +453,12 @@ impl App {
                         KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right => {
                             if let Some(explorer) = &mut self.file_explorer {
                                 match explorer.handle_key(key.code) {
-                                    crate::routes::session::file_explorer::ExplorerAction::
-                                        OpenFile(path) => {
+                                    crate::left_panel::file_explorer::ExplorerAction::OpenFile(
+                                        path,
+                                    ) => {
                                         self.open_file_in_editor(&path);
                                     }
-                                    crate::routes::session::file_explorer::ExplorerAction::None => {
-                                    }
+                                    crate::left_panel::file_explorer::ExplorerAction::None => {}
                                 }
                             }
                             return Ok(false);
@@ -480,8 +481,11 @@ impl App {
                         }
                         return Ok(false);
                     }
-                    KeyCode::Enter => match self.sidebar.handle_key(key.code, &self.state) {
-                        SidebarAction::SwitchTo(session_id) => {
+                    KeyCode::Enter => match self
+                        .sidebar
+                        .handle_key(key.code, &self.state.session_summaries)
+                    {
+                        SessionsAction::SwitchTo(session_id) => {
                             if self.state.status != crate::types::SessionStatus::Idle {
                                 use crate::ui::toast::{ToastOptions, ToastVariant};
                                 self.toast_state.show(ToastOptions {
@@ -508,7 +512,7 @@ impl App {
                             self.finalize_stale_compaction_lines();
                             return Ok(false);
                         }
-                        SidebarAction::RequestDelete(_) | SidebarAction::None => {}
+                        SessionsAction::RequestDelete(_) | SessionsAction::None => {}
                     },
                     _ => {}
                 }
@@ -1018,8 +1022,8 @@ impl App {
             // period selector instead of toggling mode focus. (Shift+Tab
             // arrives as BackTab, which the keymap doesn't bind.)
             if self.sidebar.open
-                && matches!(self.left_panel, super::LeftPanelMode::Dashboard)
-                && self.terminal_size().width >= super::MIN_WIDTH_FOR_LEFT_PANEL
+                && matches!(self.left_panel, Mode::Dashboard)
+                && self.terminal_size().width >= MIN_WIDTH_FOR_LEFT_PANEL
                 && self.state.right_panel.panel_focus.is_none()
             {
                 match key.code {
@@ -1039,7 +1043,7 @@ impl App {
                 Some(crate::keymap::Action::ScrollUp) => {
                     if self.sidebar_focused
                         && self.sidebar.open
-                        && self.terminal_size().width >= super::MIN_WIDTH_FOR_LEFT_PANEL
+                        && self.terminal_size().width >= MIN_WIDTH_FOR_LEFT_PANEL
                     {
                         self.sidebar.select_prev(self.state.session_summaries.len());
                     } else if self.is_in_right_panel(self.last_mouse_x) {
@@ -1054,7 +1058,7 @@ impl App {
                 Some(crate::keymap::Action::ScrollDown) => {
                     if self.sidebar_focused
                         && self.sidebar.open
-                        && self.terminal_size().width >= super::MIN_WIDTH_FOR_LEFT_PANEL
+                        && self.terminal_size().width >= MIN_WIDTH_FOR_LEFT_PANEL
                     {
                         self.sidebar.select_next(self.state.session_summaries.len());
                     } else if self.is_in_right_panel(self.last_mouse_x) {
@@ -1069,7 +1073,7 @@ impl App {
                 Some(crate::keymap::Action::ScrollUpPage) => {
                     if self.sidebar_focused
                         && self.sidebar.open
-                        && self.terminal_size().width >= super::MIN_WIDTH_FOR_LEFT_PANEL
+                        && self.terminal_size().width >= MIN_WIDTH_FOR_LEFT_PANEL
                     {
                         self.sidebar
                             .select_first(self.state.session_summaries.len());
@@ -1088,7 +1092,7 @@ impl App {
                 Some(crate::keymap::Action::ScrollDownPage) => {
                     if self.sidebar_focused
                         && self.sidebar.open
-                        && self.terminal_size().width >= super::MIN_WIDTH_FOR_LEFT_PANEL
+                        && self.terminal_size().width >= MIN_WIDTH_FOR_LEFT_PANEL
                     {
                         self.sidebar.select_last(self.state.session_summaries.len());
                     } else if self.is_in_right_panel(self.last_mouse_x) {

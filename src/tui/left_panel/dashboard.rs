@@ -112,7 +112,7 @@ pub fn render(buf: &mut Buffer, area: Rect, data: &DashboardData, theme: &Theme)
     let amt_x = area.right().saturating_sub(9);
     let name_w = amt_x.saturating_sub(inner).saturating_sub(1);
 
-    // ── Title (matches the session sidebar) ──
+    // ── Title (matches the sessions list) ──
     clear_row(buf, area.x, area.y, area.width, panel_bg);
     draw_text(
         buf,

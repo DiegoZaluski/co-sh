@@ -5,6 +5,7 @@ mod component;
 mod config;
 mod fallback;
 mod keymap;
+mod left_panel;
 mod logo;
 mod lsp_colors;
 mod notification;

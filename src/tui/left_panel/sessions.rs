@@ -5,8 +5,10 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 
-use crate::state::AppState;
+use crate::left_panel::layout::SessionListLayout;
+use crate::session_store::SessionSummary;
 use crate::theme::{Theme, rgba_color};
+use crate::types::SessionStatus;
 use crate::util::list_selection::ListSelection;
 use ratatui::crossterm::event::KeyCode;
 
@@ -35,9 +37,9 @@ fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, styl
     }
 }
 
-/// Action returned by the sidebar after a mouse click.
+/// Action returned by the left panel after a mouse click.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SidebarAction {
+pub enum SessionsAction {
     /// Switch to the given session.
     SwitchTo(String),
     /// Request deletion of the given session.
@@ -46,13 +48,13 @@ pub enum SidebarAction {
     None,
 }
 
-pub struct SidebarView {
+pub struct SessionsView {
     pub open: bool,
     /// Shared list-selection state: selected_index + scroll_offset.
     pub selection: ListSelection,
 }
 
-impl SidebarView {
+impl SessionsView {
     pub const fn new() -> Self {
         Self {
             open: false,
@@ -80,74 +82,77 @@ impl SidebarView {
         self.selection.select_last(total);
     }
 
-    /// Handle a mouse click on the sidebar. Returns an action to perform.
+    /// Handle a mouse click on the sessions list. Returns an action to perform.
     pub fn handle_mouse(
         &mut self,
         mouse: &MouseEvent,
         area: Rect,
-        state: &AppState,
-    ) -> SidebarAction {
+        summaries: &[SessionSummary],
+        status: &SessionStatus,
+    ) -> SessionsAction {
         if !self.open {
-            return SidebarAction::None;
+            return SessionsAction::None;
         }
         let my = mouse.y;
         let mx = mouse.x;
 
         if mx < area.x || mx >= area.right() {
-            return SidebarAction::None;
+            return SessionsAction::None;
         }
 
-        // Click must be within the list area (below header + separator)
-        if my < area.y + 2 || my >= area.bottom() {
-            return SidebarAction::None;
-        }
-
-        // Compute which item was clicked, accounting for scroll offset
-        let list_offset = i32::from(my) - i32::from(area.y + 2);
-        let clicked_idx = self.selection.scroll_offset + list_offset as usize;
-        let Some(summary) = state.session_summaries.get(clicked_idx) else {
-            return SidebarAction::None;
+        // Compute which item was clicked, accounting for scroll offset —
+        // None outside the list rows (header, separator, past bottom).
+        let Some(clicked_idx) =
+            SessionListLayout::item_index_at(area, self.selection.scroll_offset, my)
+        else {
+            return SessionsAction::None;
+        };
+        let Some(summary) = summaries.get(clicked_idx) else {
+            return SessionsAction::None;
         };
 
         // Update selection to clicked item
-        let total = state.session_summaries.len();
-        if clicked_idx < total && state.status == crate::types::SessionStatus::Idle {
+        let total = summaries.len();
+        if clicked_idx < total && *status == SessionStatus::Idle {
             self.selection.selected_index = clicked_idx;
         }
 
-        // 🗑 hit-test: same calculation as render (left_pad + prefix + text + gap)
-        let label_len = summary.title.chars().count();
-        let max_text_w = area.width.saturating_sub(10) as usize;
-        let visible = label_len.min(max_text_w);
-        let trash_x = area.x + 2 + 2 + visible as u16 + 1;
+        // 🗑 hit-test: same x the renderer draws the glyph at
+        let trash_x = SessionListLayout::trash_x(area, &summary.title);
 
         // Click on 🗑 or the cleared cell after it
         if mx >= trash_x && mx < area.right() {
-            return SidebarAction::RequestDelete(summary.session_id.clone());
+            return SessionsAction::RequestDelete(summary.session_id.clone());
         }
 
         // Otherwise, switch to this session
-        SidebarAction::SwitchTo(summary.session_id.clone())
+        SessionsAction::SwitchTo(summary.session_id.clone())
     }
 
-    /// Handle a key press on the sidebar. Returns an action to perform.
-    pub fn handle_key(&mut self, key: KeyCode, state: &AppState) -> SidebarAction {
+    /// Handle a key press on the sessions list. Returns an action to perform.
+    pub fn handle_key(&mut self, key: KeyCode, summaries: &[SessionSummary]) -> SessionsAction {
         if !self.open {
-            return SidebarAction::None;
+            return SessionsAction::None;
         }
         match key {
             KeyCode::Enter => {
                 let idx = self.selection.selected_index;
-                let Some(summary) = state.session_summaries.get(idx) else {
-                    return SidebarAction::None;
+                let Some(summary) = summaries.get(idx) else {
+                    return SessionsAction::None;
                 };
-                SidebarAction::SwitchTo(summary.session_id.clone())
+                SessionsAction::SwitchTo(summary.session_id.clone())
             }
-            _ => SidebarAction::None,
+            _ => SessionsAction::None,
         }
     }
 
-    pub fn render(&mut self, buf: &mut Buffer, area: Rect, state: &AppState, theme: &Theme) {
+    pub fn render(
+        &mut self,
+        buf: &mut Buffer,
+        area: Rect,
+        summaries: &[SessionSummary],
+        theme: &Theme,
+    ) {
         if !self.open {
             return;
         }
@@ -173,9 +178,9 @@ impl SidebarView {
         }
 
         // ── Clamp and scroll ──
-        let content_start_y = area.y + 2;
+        let content_start_y = SessionListLayout::content_start_y(area);
         let visible_count = area.bottom().saturating_sub(content_start_y) as usize;
-        let total_items = state.session_summaries.len();
+        let total_items = summaries.len();
 
         self.selection.set_visible_count(visible_count);
         self.selection.clamp(total_items);
@@ -188,17 +193,14 @@ impl SidebarView {
         let selected_fg = Style::default().fg(primary_color);
         let normal_fg = Style::default().fg(text_color);
 
-        // Layout: left_pad(2) + prefix(2) + text + gap(1) + 🗑(2) + clear(1) + right_pad(2)
-        //   text max = width - 10
-        let left_pad: u16 = 2;
-        let prefix_w: u16 = 2;
+        // Layout: left_pad + prefix + text + gap + 🗑 + clear + right_pad —
+        // the full column budget lives in SessionListLayout.
+        let left_pad = SessionListLayout::LEFT_PAD;
+        let prefix_w = SessionListLayout::PREFIX_W;
         let text_x = area.x + left_pad + prefix_w;
-        let max_text_w = area
-            .width
-            .saturating_sub(left_pad + prefix_w + 1 + 2 + 1 + 2);
+        let max_text_w = SessionListLayout::max_text_w(area);
 
-        for (i, summary) in state
-            .session_summaries
+        for (i, summary) in summaries
             .iter()
             .enumerate()
             .skip(self.selection.scroll_offset)
@@ -236,10 +238,8 @@ impl SidebarView {
             let label = &summary.title;
             draw_text_line(buf, label, text_x, y, max_text_w, style);
 
-            let label_visible = label.chars().count().min(max_text_w as usize) as u16;
-
-            // 🗑 after 1 gap (NO bg)
-            let trash_x = text_x + label_visible + 1;
+            // 🗑 after 1 gap (NO bg) — same x the hit-test computes
+            let trash_x = SessionListLayout::trash_x(area, label);
             if trash_x + 1 < area.right()
                 && let Some(cell) = buf.cell_mut((trash_x, y))
             {

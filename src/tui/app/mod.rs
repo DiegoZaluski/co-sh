@@ -20,20 +20,21 @@ use crate::component::sparkle::SparkleState;
 use crate::config::{LlmConfig, TuiConfig};
 use crate::fallback;
 use crate::keymap::KeyMap;
+use crate::left_panel::explorer_status::{GitWatcher, StatusIndex};
+use crate::left_panel::file_explorer::FileExplorerView;
+use crate::left_panel::sessions::SessionsView;
+use crate::left_panel::{LEFT_PANEL_WIDTH, MIN_WIDTH_FOR_LEFT_PANEL, Mode};
 use crate::logo::LOGO_CHAT;
 use crate::routes::add_provider::AddProviderView;
 use crate::routes::home::HomeView;
 use crate::routes::router::RouterView;
 use crate::routes::session::SessionView;
-use crate::routes::session::explorer_status::{GitWatcher, StatusIndex};
-use crate::routes::session::file_explorer::FileExplorerView;
 use crate::routes::session::free_gateway_recommendation::FreeGatewayRecommendationDialog;
 use crate::routes::session::permission::PermissionDialog;
 use crate::routes::session::question::QuestionDialog;
 use crate::routes::session::queue_choice::QueueChoiceDialog;
 use crate::routes::session::queue_choice::QueueTarget;
 use crate::routes::session::right_panel::{RIGHT_PANEL_WIDTH, should_show_right_panel};
-use crate::routes::session::sidebar::SidebarView;
 use crate::routes::settings::SettingsView;
 use crate::routes::tools::InternalToolsView;
 use crate::session_store::SessionStore;
@@ -122,26 +123,6 @@ fn apply_background_preference(mut t: Theme, transparent_background: bool) -> Th
     t
 }
 
-const SIDEBAR_WIDTH: u16 = 22;
-/// Minimum terminal width to show the left panel. Below this width, the sidebar
-/// is auto-hidden to prevent layout conflicts with home/session content.
-const MIN_WIDTH_FOR_LEFT_PANEL: u16 = 80;
-
-/// What the left panel currently shows. Ctrl+U jumps straight to the usage
-/// dashboard; Ctrl+B jumps straight back to the session history — the two
-/// keys are NOT a toggle, so a user only ever needs to know the one that
-/// shows what they want.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(super) enum LeftPanelMode {
-    /// The session history list (Ctrl+B).
-    #[default]
-    History,
-    /// The usage dashboard (Ctrl+U).
-    Dashboard,
-    /// The file explorer tree (Ctrl+F).
-    Explorer,
-}
-
 /// Header link that opens the project's bug-report page.
 /// TODO: replace the URL with the real GitHub issues URL.
 const BUG_REPORT_TEXT: &str = "𓆦 bug";
@@ -202,7 +183,7 @@ impl FramePacer {
 }
 
 /// Result of `App::session_main_area`: the session chat's content area plus
-/// the sidebar/right-panel widths that were subtracted, so `render` and the
+/// the left panel/right-panel widths that were subtracted, so `render` and the
 /// mouse dispatch cannot drift apart.
 struct SessionArea {
     main: Rect,
@@ -230,9 +211,9 @@ pub struct App {
     pub transparent_background: bool,
     pub session_view: SessionView,
     pub prompt_view: PromptView,
-    pub sidebar: SidebarView,
+    pub sidebar: SessionsView,
     /// Ctrl+F file explorer shown in the left panel while `left_panel` is
-    /// [`LeftPanelMode::Explorer`]. Built lazily on first open so a user who
+    /// [`Mode::Explorer`]. Built lazily on first open so a user who
     /// never touches Ctrl+F pays no directory-read cost.
     pub file_explorer: Option<FileExplorerView>,
     /// Git + LSP status index feeding the explorer's row colors. Refreshed
@@ -368,7 +349,7 @@ pub struct App {
     context_info: Option<cosh::harness::ContextDisplayInfo>,
     /// What the left panel shows (history vs dashboard) and its dashboard
     /// period selection.
-    left_panel: LeftPanelMode,
+    left_panel: Mode,
     usage_period: crate::usage::UsagePeriod,
     /// Every usage record loaded from disk (for period/provider aggregation).
     /// Kept in RAM and refreshed on new events so the dashboard never re-reads
@@ -436,12 +417,12 @@ pub struct App {
     /// Position where the mouse was pressed down (for detecting drag selections).
     mouse_down_pos: Option<(u16, u16)>,
     /// Whether the current/last mouse press began inside the left panel
-    /// (x < SIDEBAR_WIDTH). Checked on release so a text-selection drag
-    /// that started in the chat can never act on the sidebar (a stray
+    /// (x < LEFT_PANEL_WIDTH). Checked on release so a text-selection drag
+    /// that started in the chat can never act on the left panel (a stray
     /// click there could otherwise launch the editor).
     press_started_in_sidebar: bool,
     /// Whether the last release was a drag (moved since the press). Set in
-    /// the release handler, consulted by the sidebar dispatch below it.
+    /// the release handler, consulted by the left panel dispatch below it.
     release_was_drag: bool,
     /// Whether a drag-selection is in progress.
     mouse_drag_active: bool,
@@ -480,8 +461,8 @@ pub struct App {
     /// Set after the external editor returned: the next frame must be a
     /// full repaint (the editor wrote arbitrary content over the screen).
     needs_full_redraw: bool,
-    /// Whether the sidebar is focused to receive scroll events.
-    /// Set to true when the user clicks inside the sidebar; false on outside clicks.
+    /// Whether the left panel is focused to receive scroll events.
+    /// Set to true when the user clicks inside the left panel; false on outside clicks.
     sidebar_focused: bool,
     /// Clickable area of the "bug report" header link (None when not drawn).
     bug_link_area: Option<Rect>,
@@ -655,7 +636,7 @@ impl App {
             #[cfg(feature = "embed")]
             show_rag: false,
             prompt_view: PromptView::new(),
-            sidebar: SidebarView::new(),
+            sidebar: SessionsView::new(),
             file_explorer: None,
             explorer_statuses: StatusIndex::default(),
             explorer_git_watcher: None,
@@ -714,7 +695,7 @@ impl App {
             agent_spinner_bass: None,
             agent_activity: crate::types::AgentActivity::Working,
             context_info: None,
-            left_panel: LeftPanelMode::default(),
+            left_panel: Mode::default(),
             usage_period: crate::usage::UsagePeriod::default(),
             usage_records,
             usage_store,
@@ -928,7 +909,7 @@ impl App {
         Ok(())
     }
 
-    /// The session view's content area: full terminal minus the open sidebar
+    /// The session view's content area: full terminal minus the open left panel
     /// and (in Session mode) the visible right panel. Shared by `render` and
     /// the mouse dispatch so click hit-testing uses the EXACT width the view
     /// rendered at — a wider mouse area would re-wrap every message, shifting
@@ -958,18 +939,19 @@ impl App {
         }
     }
 
-    /// Width of the left panel. The usage dashboard shares the session
-    /// sidebar's width, so geometry is consistent regardless of view. Shared
-    /// by render and mouse dispatch for exact click hit-testing.
+    /// Width of the left panel. The usage dashboard and the file explorer
+    /// share the sessions list's width, so geometry is consistent regardless
+    /// of view. Shared by render and mouse dispatch for exact click
+    /// hit-testing.
     fn left_panel_width(&self) -> u16 {
-        SIDEBAR_WIDTH
+        LEFT_PANEL_WIDTH
     }
 
     /// Assemble the snapshot the usage dashboard renders. The session block
     /// comes from the live per-session records (each already carries the
     /// cost the provider reported); the spend-by-period block aggregates the
     /// full on-disk log.
-    fn dashboard_data(&self) -> crate::routes::session::dashboard::DashboardData {
+    fn dashboard_data(&self) -> crate::left_panel::dashboard::DashboardData {
         use crate::usage::summarize;
         use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -984,7 +966,7 @@ impl App {
 
         let period = summarize(&self.usage_records, self.usage_period, now_ms);
 
-        crate::routes::session::dashboard::DashboardData {
+        crate::left_panel::dashboard::DashboardData {
             session_tokens,
             session_cost,
             period,
@@ -1186,14 +1168,14 @@ impl App {
     /// toggle — pressing it again keeps showing the dashboard, so the user
     /// never has to know a matching "other" shortcut.
     fn show_dashboard(&mut self) {
-        self.left_panel = LeftPanelMode::Dashboard;
+        self.left_panel = Mode::Dashboard;
         self.sidebar.open = true;
     }
 
     /// Ctrl+S: always open the left panel showing the session history. Also
     /// not a toggle — it just points the panel at the session list.
     fn show_session_history(&mut self) {
-        self.left_panel = LeftPanelMode::History;
+        self.left_panel = Mode::History;
         self.sidebar.open = true;
     }
 
@@ -1201,7 +1183,7 @@ impl App {
     /// at the working directory. Not a toggle — same one-key-shows-it
     /// contract as Ctrl+U/Ctrl+S.
     fn show_file_explorer(&mut self) {
-        self.left_panel = LeftPanelMode::Explorer;
+        self.left_panel = Mode::Explorer;
         self.sidebar.open = true;
         if self.file_explorer.is_none() {
             let root = PathBuf::from(&self.state.working_directory);

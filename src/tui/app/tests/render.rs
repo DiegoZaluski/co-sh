@@ -147,7 +147,7 @@ async fn session_main_area_matches_render_width_with_right_panel() {
     let sa = app.session_main_area(area);
     assert_eq!(
         sa.main.width,
-        140 - super::SIDEBAR_WIDTH - RIGHT_PANEL_WIDTH,
+        140 - crate::left_panel::LEFT_PANEL_WIDTH - RIGHT_PANEL_WIDTH,
         "open sidebar + right panel must both be subtracted"
     );
 }

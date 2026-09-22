@@ -10,6 +10,7 @@ use super::{
     App, AppMode, BUG_REPORT_TEXT, EMPTY_SESSION_PROMPT_MIN_WIDTH, EMPTY_SESSION_PROMPT_RATIO,
     MIN_PROMPT_RESERVE_ROWS, SessionArea,
 };
+use crate::left_panel::{MIN_WIDTH_FOR_LEFT_PANEL, Mode};
 use crate::logo::LOGO_CHAT;
 use crate::routes::home::footer::HomeFooterView;
 use crate::routes::session::footer::FooterView;
@@ -310,7 +311,7 @@ impl App {
                 );
             }
 
-            // Right panel (independent of sidebar state)
+            // Right panel (independent of left panel state)
             if right_panel_w > 0 {
                 render_right_panel(
                     buf,
@@ -327,8 +328,8 @@ impl App {
                 self.state.right_panel.handle_auto_scroll(delta_time);
             }
 
-            if self.sidebar.open && area.width >= super::MIN_WIDTH_FOR_LEFT_PANEL {
-                if matches!(self.left_panel, super::LeftPanelMode::Explorer) {
+            if self.sidebar.open && area.width >= MIN_WIDTH_FOR_LEFT_PANEL {
+                if matches!(self.left_panel, Mode::Explorer) {
                     // File explorer (Ctrl+F): the tree owns the whole panel,
                     // including the header box.
                     if let Some(explorer) = &mut self.file_explorer {
@@ -347,11 +348,11 @@ impl App {
                             &self.explorer_statuses,
                         );
                     }
-                } else if matches!(self.left_panel, super::LeftPanelMode::Dashboard) {
+                } else if matches!(self.left_panel, Mode::Dashboard) {
                     // Usage dashboard: a self-contained panel (session usage
                     // + spend per provider/total for the selected period).
                     let data = self.dashboard_data();
-                    crate::routes::session::dashboard::render(
+                    crate::left_panel::dashboard::render(
                         buf,
                         Rect::new(area.x, area.y, sidebar_w, area.height),
                         &data,
@@ -361,31 +362,33 @@ impl App {
                     self.sidebar.render(
                         buf,
                         Rect::new(area.x, area.y, sidebar_w, area.height),
-                        &self.state,
+                        &self.state.session_summaries,
                         &self.theme,
                     );
 
-                    // Hover tooltip: when the mouse is over a sidebar item
-                    // whose title was LLM-generated, show the full title as
-                    // a toast.  Checked every frame so it works even when
+                    // Hover tooltip: when the mouse is over a sessions-list
+                    // item whose title was LLM-generated, show the full title
+                    // as a toast.  Checked every frame so it works even when
                     // the terminal doesn't send Move events.
                     let mx = self.last_mouse_x;
                     let my = self.last_mouse_y;
-                    let content_start_y = area.y + 2;
-                    if my >= content_start_y && my < area.y + area.height && mx < sidebar_w {
-                        let idx =
-                            self.sidebar.selection.scroll_offset + (my - content_start_y) as usize;
-                        if let Some(summary) = self.state.session_summaries.get(idx)
-                            && summary.title_generated
-                            && self.state.status == crate::types::SessionStatus::Idle
-                        {
-                            self.toast_state.show(crate::ui::toast::ToastOptions {
-                                title: None,
-                                message: summary.title.clone(),
-                                variant: crate::ui::toast::ToastVariant::Info,
-                                duration_ms: 3000,
-                            });
-                        }
+                    if mx < sidebar_w
+                        && let Some(idx) =
+                            crate::left_panel::layout::SessionListLayout::item_index_at(
+                                area,
+                                self.sidebar.selection.scroll_offset,
+                                my,
+                            )
+                        && let Some(summary) = self.state.session_summaries.get(idx)
+                        && summary.title_generated
+                        && self.state.status == crate::types::SessionStatus::Idle
+                    {
+                        self.toast_state.show(crate::ui::toast::ToastOptions {
+                            title: None,
+                            message: summary.title.clone(),
+                            variant: crate::ui::toast::ToastVariant::Info,
+                            duration_ms: 3000,
+                        });
                     }
                 }
             }

@@ -126,7 +126,7 @@ async fn slash_new_creates_and_selects_a_fresh_session() {
 /// panel. The panel lives on AppState (not inside the Session model), so
 /// without the reset in `start_new_session` the old session's todos,
 /// PTY/subagent sessions, panel focus and scroll state leaked into the new
-/// session (the sidebar/Esc switch paths already reset it — this path
+/// session (the panel/Esc switch paths already reset it — this path
 /// didn't).
 #[tokio::test]
 async fn slash_new_resets_right_panel_state() {
@@ -209,7 +209,7 @@ async fn slash_new_refuses_while_agent_is_working() {
 
 /// `/rename` opens the rename dialog prefilled with the current title;
 /// editing and pressing Enter applies it to the session (in-memory +
-/// sidebar) and closes the dialog.
+/// panel) and closes the dialog.
 #[tokio::test]
 async fn slash_rename_edits_and_applies_the_session_title() {
     let _guard = HOME_LOCK.lock();

@@ -9,12 +9,13 @@ use crossterm::event::{
 };
 use ratatui::layout::Rect;
 
-use super::{App, AppMode, MIN_PROMPT_RESERVE_ROWS, MIN_WIDTH_FOR_LEFT_PANEL, SIDEBAR_WIDTH};
+use super::{App, AppMode, MIN_PROMPT_RESERVE_ROWS};
 use crate::fallback;
+use crate::left_panel::sessions::SessionsAction;
+use crate::left_panel::{LEFT_PANEL_WIDTH, MIN_WIDTH_FOR_LEFT_PANEL, Mode};
 use crate::routes::router::FocusTarget;
 use crate::routes::session::queue_choice::QueueTarget;
 use crate::routes::session::right_panel::should_show_right_panel;
-use crate::routes::session::sidebar::SidebarAction;
 use crate::ui::dialogs::{DialogAction, DialogType};
 use crate::ui::toast::{ToastOptions, ToastVariant};
 use crate::util::selection;
@@ -100,7 +101,7 @@ impl App {
                     return Ok(true);
                 }
                 self.mouse_down_pos = Some((x, y));
-                self.press_started_in_sidebar = x < SIDEBAR_WIDTH;
+                self.press_started_in_sidebar = x < LEFT_PANEL_WIDTH;
                 self.release_was_drag = false;
                 self.mouse_drag_active = false;
                 self.drag_selection = None;
@@ -339,13 +340,13 @@ impl App {
                 self.release_was_drag = is_drag;
 
                 // Clicks that start and land over the open session-list
-                // sidebar belong to the sidebar — never to whatever occupies
+                // left panel belong to the left panel — never to whatever occupies
                 // the same row in the chat (the prompt input or a user
                 // message). Route them there before any chat handling below
                 // so a session click is not stolen by the prompt's focus
                 // logic or opens Message actions, even when the click
                 // arrived as a tiny drag.
-                let started_in_sidebar = drag_start_x.is_none_or(|sx| sx < SIDEBAR_WIDTH);
+                let started_in_sidebar = drag_start_x.is_none_or(|sx| sx < LEFT_PANEL_WIDTH);
                 if self.is_over_open_sidebar(x)
                     && started_in_sidebar
                     && !self.dialog.visible()
@@ -358,7 +359,7 @@ impl App {
                 }
 
                 // A drag that began inside the prompt/chat but was released
-                // over the open sidebar must not leave the prompt focused:
+                // over the open left panel must not leave the prompt focused:
                 // the cursor is now outside the prompt's area.
                 if self.is_over_open_sidebar(x) && !started_in_sidebar {
                     self.prompt_view.blur();
@@ -519,18 +520,18 @@ impl App {
                             _ => {}
                         }
                     } else if self.sidebar_focused
-                        && matches!(self.left_panel, super::LeftPanelMode::History)
+                        && matches!(self.left_panel, Mode::History)
                         && self.sidebar.open
                         && self.terminal_size().width >= MIN_WIDTH_FOR_LEFT_PANEL
-                        && x < SIDEBAR_WIDTH
+                        && x < LEFT_PANEL_WIDTH
                         && self.state.status == crate::types::SessionStatus::Idle
                     {
                         self.sidebar.select_prev(self.state.session_summaries.len());
                     } else if self.sidebar_focused
-                        && matches!(self.left_panel, super::LeftPanelMode::Explorer)
+                        && matches!(self.left_panel, Mode::Explorer)
                         && self.sidebar.open
                         && self.terminal_size().width >= MIN_WIDTH_FOR_LEFT_PANEL
-                        && x < SIDEBAR_WIDTH
+                        && x < LEFT_PANEL_WIDTH
                     {
                         // Explorer navigation works while the agent runs:
                         // it is pure UI, it never touches the session.
@@ -607,18 +608,18 @@ impl App {
                             _ => {}
                         }
                     } else if self.sidebar_focused
-                        && matches!(self.left_panel, super::LeftPanelMode::History)
+                        && matches!(self.left_panel, Mode::History)
                         && self.sidebar.open
                         && self.terminal_size().width >= MIN_WIDTH_FOR_LEFT_PANEL
-                        && x < SIDEBAR_WIDTH
+                        && x < LEFT_PANEL_WIDTH
                         && self.state.status == crate::types::SessionStatus::Idle
                     {
                         self.sidebar.select_next(self.state.session_summaries.len());
                     } else if self.sidebar_focused
-                        && matches!(self.left_panel, super::LeftPanelMode::Explorer)
+                        && matches!(self.left_panel, Mode::Explorer)
                         && self.sidebar.open
                         && self.terminal_size().width >= MIN_WIDTH_FOR_LEFT_PANEL
-                        && x < SIDEBAR_WIDTH
+                        && x < LEFT_PANEL_WIDTH
                     {
                         if let Some(explorer) = &mut self.file_explorer {
                             explorer.select_next();
@@ -673,7 +674,7 @@ impl App {
         // Only handle left-click UP events (standard "click" action)
         if event_type != MouseEventType::Up || button != MouseButton::Left {
             // Hover tracking for user messages and pending-queue rows
-            // (opencode-style highlight). Moving over the sidebar clears any
+            // (opencode-style highlight). Moving over the left panel clears any
             // leftover chat highlight instead of leaving it "lit".
             if matches!(event_type, MouseEventType::Move)
                 && matches!(self.mode(), AppMode::Session)
@@ -940,7 +941,7 @@ impl App {
         // 4. Question dialog (inline, between session and prompt)
         if self.question_dialog.visible && matches!(self.mode(), AppMode::Session) {
             // Same geometry as render (`session_main_area` + helper): a
-            // sidebar-only rect would admit clicks over the right panel and
+            // left panel-only rect would admit clicks over the right panel and
             // mis-offset the hit-test against the drawn rows.
             let question_area = self.question_dialog_area();
             // Don't dispatch to question dialog if text selection is in progress
@@ -1053,20 +1054,17 @@ impl App {
             }
         }
 
-        // 6. Sidebar
-        // Focus management: clicking the sidebar focuses it for scroll;
+        // 6. Left panel
+        // Focus management: clicking the left panel focuses it for scroll;
         // clicking anywhere else unfocuses it.
         if matches!(event_type, MouseEventType::Down) || matches!(event_type, MouseEventType::Up) {
             self.sidebar_focused = self.sidebar.open
-                && matches!(
-                    self.left_panel,
-                    super::LeftPanelMode::History | super::LeftPanelMode::Explorer
-                )
+                && matches!(self.left_panel, Mode::History | Mode::Explorer)
                 && self.terminal_size().width >= MIN_WIDTH_FOR_LEFT_PANEL
-                && x < SIDEBAR_WIDTH;
+                && x < LEFT_PANEL_WIDTH;
         }
 
-        // A press that began in the chat must not act on the sidebar when
+        // A press that began in the chat must not act on the left panel when
         // released there (e.g. a text-selection drag): the explorer branch
         // would otherwise toggle directories or even launch the editor.
         let drag_started_in_chat = self.release_was_drag && !self.press_started_in_sidebar;
@@ -1440,9 +1438,9 @@ impl App {
     /// queues and spinner, which is exactly the layout assumed here.
     pub(crate) fn question_dialog_area(&self) -> Rect {
         let area = self.terminal_size();
-        // The same content area render uses (open sidebar AND right panel
+        // The same content area render uses (open left panel AND right panel
         // subtracted) so the rect always matches the drawn geometry — a
-        // sidebar-only main area would draw and hit-test over the panel.
+        // left panel-only main area would draw and hit-test over the panel.
         let main_area = self.session_main_area(area).main;
         // When question dialog is visible, prompt is hidden (like OpenCode)
         let footer_y = main_area.bottom().saturating_sub(1);
@@ -1469,19 +1467,16 @@ impl App {
         )
     }
 
-    /// Whether the given column lies over the open session-list sidebar.
+    /// Whether the given column lies over the open session-list left panel.
     fn is_over_open_sidebar(&self, x: u16) -> bool {
         self.sidebar.open
-            && matches!(
-                self.left_panel,
-                super::LeftPanelMode::History | super::LeftPanelMode::Explorer
-            )
+            && matches!(self.left_panel, Mode::History | Mode::Explorer)
             && self.terminal_size().width >= MIN_WIDTH_FOR_LEFT_PANEL
-            && x < SIDEBAR_WIDTH
+            && x < LEFT_PANEL_WIDTH
     }
 
-    /// Route a left-click to the sidebar if it landed on a session.
-    /// Returns `true` when the click was consumed by the sidebar.
+    /// Route a left-click to the left panel if it landed on a session.
+    /// Returns `true` when the click was consumed by the left panel.
     fn dispatch_sidebar_up(
         &mut self,
         button: MouseButton,
@@ -1504,8 +1499,8 @@ impl App {
             return false;
         }
         let mouse = MouseEvent::new(MouseEventType::Up, button, x, y, modifiers);
-        let sidebar_area = Rect::new(0, 0, SIDEBAR_WIDTH, self.terminal_height());
-        if matches!(self.left_panel, super::LeftPanelMode::Explorer) {
+        let sidebar_area = Rect::new(0, 0, LEFT_PANEL_WIDTH, self.terminal_height());
+        if matches!(self.left_panel, Mode::Explorer) {
             // Explorer click: expand/collapse a directory or open a file
             // in the editor. Clicks never steal focus semantics from the
             // session list — the explorer owns the panel while active.
@@ -1513,14 +1508,19 @@ impl App {
                 .file_explorer
                 .as_mut()
                 .map(|e| e.handle_mouse(&mouse, sidebar_area))
-                .unwrap_or(crate::routes::session::file_explorer::ExplorerAction::None);
-            if let crate::routes::session::file_explorer::ExplorerAction::OpenFile(path) = action {
+                .unwrap_or(crate::left_panel::file_explorer::ExplorerAction::None);
+            if let crate::left_panel::file_explorer::ExplorerAction::OpenFile(path) = action {
                 self.open_file_in_editor(&path);
             }
             return true;
         }
-        match self.sidebar.handle_mouse(&mouse, sidebar_area, &self.state) {
-            SidebarAction::SwitchTo(session_id) => {
+        match self.sidebar.handle_mouse(
+            &mouse,
+            sidebar_area,
+            &self.state.session_summaries,
+            &self.state.status,
+        ) {
+            SessionsAction::SwitchTo(session_id) => {
                 if self.state.status != crate::types::SessionStatus::Idle {
                     use crate::ui::toast::{ToastOptions, ToastVariant};
                     self.toast_state.show(ToastOptions {
@@ -1546,7 +1546,7 @@ impl App {
                 self.finalize_stale_compaction_lines();
                 true
             }
-            SidebarAction::RequestDelete(session_id) => {
+            SessionsAction::RequestDelete(session_id) => {
                 self.pending_delete_session_id = Some(session_id);
                 self.dialog.show(DialogType::Confirm {
                     message: "Delete this session?".into(),
@@ -1556,7 +1556,7 @@ impl App {
                 }
                 true
             }
-            SidebarAction::None => false,
+            SessionsAction::None => false,
         }
     }
 }

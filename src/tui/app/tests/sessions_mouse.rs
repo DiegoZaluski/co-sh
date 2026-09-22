@@ -1,5 +1,6 @@
-use super::super::LeftPanelMode;
-use super::{App, HOME_LOCK, SIDEBAR_WIDTH, isolate_home};
+use super::{App, HOME_LOCK, isolate_home};
+use crate::left_panel::LEFT_PANEL_WIDTH;
+use crate::left_panel::Mode;
 use crate::session_store::generate_session_id;
 use crate::types::{Message, MessageRole, Part, TextPart};
 use crossterm::event::{
@@ -53,7 +54,7 @@ fn build_many() -> App {
     app.prompt_view.input = "y".repeat(400);
     app.prompt_view.cursor_pos = app.prompt_view.input.len();
     app.sidebar.open = true;
-    app.left_panel = LeftPanelMode::History;
+    app.left_panel = Mode::History;
     app.state.session_summaries.clear();
     for i in 0..40 {
         app.state
@@ -73,7 +74,7 @@ fn build_many() -> App {
 }
 
 /// Current session with a single user message (no scrolling) and only a few
-/// sidebar sessions, mirroring a small real session.
+/// left panel sessions, mirroring a small real session.
 fn build_small() -> App {
     let mut app = App::new("/tmp".to_string());
     let cur = generate_session_id();
@@ -94,7 +95,7 @@ fn build_small() -> App {
         });
     }
     app.sidebar.open = true;
-    app.left_panel = LeftPanelMode::History;
+    app.left_panel = Mode::History;
     app.state.session_summaries.clear();
     for i in 0..3 {
         app.state
@@ -144,7 +145,7 @@ async fn sidebar_click_on_prompt_row_switches_session() {
     let prompt_area = app.compute_prompt_area().unwrap();
 
     // A row that sits inside the prompt (chat) geometry AND maps to a valid
-    // sidebar session (row y -> summary index scroll_offset + (y-2)).
+    // left panel session (row y -> summary index scroll_offset + (y-2)).
     let y = prompt_area.y + 1;
     assert!(y >= 2, "row must reference a sidebar session");
     let _ = app
@@ -199,7 +200,7 @@ async fn prompt_drag_released_over_sidebar_blurs_prompt() {
     let prompt_area = app.compute_prompt_area().unwrap();
 
     // Drag starts inside the prompt box (focusing it), then releases over a
-    // sidebar session. The prompt must lose focus once the cursor leaves its
+    // left panel session. The prompt must lose focus once the cursor leaves its
     // area — it must not stay "lit".
     let down_x = prompt_area.x + 3; // inside the prompt's text area
     let down_y = prompt_area.y + 1; // first content row of the prompt
@@ -233,8 +234,8 @@ async fn sidebar_drag_started_in_chat_keeps_selecting_text() {
     let mut app = build_many();
     let guard = app.state.current_session_id.clone();
 
-    // Drag from inside the chat (x=30) into the sidebar region: this must
-    // NOT be routed to the sidebar (the click did not start on a session).
+    // Drag from inside the chat (x=30) into the left panel region: this must
+    // NOT be routed to the left panel (the click did not start on a session).
     let _ = app
         .handle_mouse_event(mouse(CKind::Down(CBtn::Left), 30, 4))
         .unwrap();
@@ -256,7 +257,7 @@ async fn sidebar_click_below_list_does_nothing() {
     let guard = app.state.current_session_id.clone();
     let prompt_area = app.compute_prompt_area().unwrap();
 
-    // Row inside the prompt geometry but beyond the 3 sidebar sessions.
+    // Row inside the prompt geometry but beyond the 3 left panel sessions.
     let y = 12u16.max(prompt_area.y + 1);
     let _ = app
         .handle_mouse_event(mouse(CKind::Down(CBtn::Left), 5, y))
@@ -278,10 +279,10 @@ async fn chat_message_click_still_opens_message_actions() {
     // Click the user message at the top of the chat (x inside the session
     // view, y at the first content row). Must still open Message actions.
     let _ = app
-        .handle_mouse_event(mouse(CKind::Down(CBtn::Left), SIDEBAR_WIDTH + 4, 1))
+        .handle_mouse_event(mouse(CKind::Down(CBtn::Left), LEFT_PANEL_WIDTH + 4, 1))
         .unwrap();
     let _ = app
-        .handle_mouse_event(mouse(CKind::Up(CBtn::Left), SIDEBAR_WIDTH + 4, 1))
+        .handle_mouse_event(mouse(CKind::Up(CBtn::Left), LEFT_PANEL_WIDTH + 4, 1))
         .unwrap();
 
     assert!(
@@ -302,7 +303,7 @@ async fn chat_prompt_click_still_focuses() {
     let mut app = build_many();
     let prompt_area = app.compute_prompt_area().unwrap();
 
-    // Click inside the prompt box (x clear of the sidebar): must focus.
+    // Click inside the prompt box (x clear of the left panel): must focus.
     let _ = app
         .handle_mouse_event(mouse(
             CKind::Down(CBtn::Left),
@@ -330,7 +331,7 @@ async fn hover_over_sidebar_does_not_highlight_chat() {
     isolate_home();
     let mut app = build_many();
 
-    // Hovering over a sidebar session at a row that (chat-side) belongs to a
+    // Hovering over a left panel session at a row that (chat-side) belongs to a
     // message must not set chat hover state.
     let _ = app.handle_mouse_event(mouse(CKind::Moved, 5, 10)).unwrap();
 
@@ -354,7 +355,7 @@ async fn leaving_chat_content_to_sidebar_clears_focus_highlight() {
         "hovering the user message must light its highlight"
     );
 
-    // Move sideways out of the chat content, over the sidebar: the highlight
+    // Move sideways out of the chat content, over the left panel: the highlight
     // must turn off, not stay lit.
     let _ = app.handle_mouse_event(mouse(CKind::Moved, 5, 10)).unwrap();
 

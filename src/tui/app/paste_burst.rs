@@ -69,7 +69,8 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::{App, AppMode, LeftPanelMode};
+use super::{App, AppMode};
+use crate::left_panel::Mode;
 
 /// Maximum gap between two keys of the same paste burst. Console pastes are
 /// drained back-to-back (well under 1ms per record); the fastest human
@@ -283,7 +284,7 @@ impl App {
             && !self.show_add_provider
             && !self.show_router
             && !self.show_internal_tools
-            && !matches!(self.left_panel, LeftPanelMode::Explorer)
+            && !matches!(self.left_panel, Mode::Explorer)
             && !self.is_rag_mode()
             && !self.is_theme_dialog_visible()
             && !self.is_tool_call_dialog_visible()

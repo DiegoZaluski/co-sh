@@ -1,7 +1,7 @@
-//! File explorer view for the left sidebar (Ctrl+F).
+//! File explorer view for the left panel (Ctrl+F).
 //!
 //! A VS Code-style tree of the project directory, rendered inside the same
-//! sidebar box the session history uses. Directories expand/collapse (Enter,
+//! left panel box the session history uses. Directories expand/collapse (Enter,
 //! Space, Right, Left, or a click); files open in the configured editor.
 //! The tree is lazy: a directory's children are only read when it is
 //! expanded, and the flattened row list is rebuilt whenever expansion or
@@ -185,7 +185,7 @@ impl FileExplorerView {
     }
 
     /// Handle a key press. `Up`/`Down` are handled by the caller (shared
-    /// with the session-list sidebar); everything else lives here.
+    /// with the session-list left panel); everything else lives here.
     pub fn handle_key(&mut self, key: KeyCode) -> ExplorerAction {
         if !matches!(
             key,
@@ -261,7 +261,7 @@ impl FileExplorerView {
         }
     }
 
-    /// The list starts below header + separator, like the session sidebar.
+    /// The list starts below header + separator, like the sessions list.
     fn in_list_area(mouse: &MouseEvent, area: Rect) -> bool {
         mouse.x >= area.x
             && mouse.x < area.right()
@@ -510,7 +510,7 @@ impl FileExplorerView {
         }
     }
 
-    /// Same cell-writer the session sidebar uses (control chars skipped, so
+    /// Same cell-writer the sessions list uses (control chars skipped, so
     /// ratatui's buffer diff never panics on odd file names).
     fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
         let Some(right) = x.checked_add(max_w) else {

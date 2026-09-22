@@ -252,7 +252,7 @@ async fn esc_while_working_sets_stop_signal_despite_prompt_selection() {
 }
 
 /// Regression: ESC while Working must flag the stop signal even when the
-/// sidebar has focus (the old gate only unfocused the sidebar).
+/// left panel has focus (the old gate only unfocused the left panel).
 #[tokio::test]
 async fn esc_while_working_sets_stop_signal_despite_sidebar_focus() {
     let _home = HOME_LOCK.lock();

@@ -293,10 +293,10 @@ impl HomeView {
         // anchored BOTTOM-UP — it sits just above the footer with a 2-line
         // gap, not right below the menu. Its height comes from the banner's
         // own internal items (BannerView::height), never hardcoded here.
-        const SIDEBAR_RESERVE: u16 = 22;
         const BANNER_FOOTER_GAP: u16 = 2;
         let key_hints = "show session history ctrl+B | show keyboard shortcuts ctrl+K";
-        let hints_visible = (key_hints.len() as u16) + SIDEBAR_RESERVE <= area.width;
+        let hints_visible =
+            (key_hints.len() as u16) + crate::left_panel::LEFT_PANEL_WIDTH <= area.width;
         let hints_y = area.bottom().saturating_sub(2);
         // First row BELOW the menu: neither the footer nor the banner may
         // ever encroach on it. The menu always wins on short terminals.
@@ -321,8 +321,8 @@ impl HomeView {
         }
 
         // Hide the hints once the terminal is too narrow to also fit the left
-        // panel: expanding the sidebar narrows the usable width by
-        // SIDEBAR_WIDTH (22), so only show them while they'd still fit in that
+        // panel: the panel narrows the usable width by LEFT_PANEL_WIDTH, so
+        // only show them while they'd still fit in that
         // worst case. They are ALSO hidden when the terminal is too short and
         // the menu would reach their row (shrink-height policy above).
         if hints_fits {
