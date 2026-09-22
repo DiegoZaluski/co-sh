@@ -3,6 +3,33 @@
 // These cannot be unified without breaking upstream crates.
 #![allow(clippy::multiple_crate_versions)]
 
+// TOOL DESCRIPTION CONVENTION (applies to every tool in this crate)
+//
+// A tool description tells the model HOW to use the tool and WHEN to reach
+// for it. It never explains the tool's internals. Do not document
+// implementation details in descriptions — no dispatch modes, engine names,
+// internal batching or fallback behavior, error-handling strategy, or
+// "one file per call" style rules that the input schema already expresses
+// structurally (a flat {path, content} schema says it plainly). The model
+// gets the advertised schema and the description; anything the schema can
+// communicate on its own belongs to the schema, not to prose.
+//
+// What belongs in a description:
+//   - what the tool does, in direct language ("Write content to one file")
+//   - required usage the schema cannot enforce by itself (e.g. "you MUST
+//     include the `file_hash` from a previous read before overwriting")
+//   - useful cases and disambiguation vs. sibling tools
+//
+// What does NOT belong:
+//   - how the tool works internally (engines, modes, dispatch, fallbacks)
+//   - rules that restate the schema's structure in words
+//   - history or rationale ("we changed this from X because Y") — that lives
+//     in code comments and commit messages, where maintainers will find it
+//
+// When a model misuses a tool, correct it at the rejection site with a
+// targeted, actionable message; do not pre-pollute every session's context
+// with instructions guarding against a mistake most sessions never make.
+
 pub mod bash;
 pub mod find;
 pub mod fs;

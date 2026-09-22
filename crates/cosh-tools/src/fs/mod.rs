@@ -195,7 +195,7 @@ impl Fs {
                 "name": "fs_write",
                 "description": concat!(
                     "Write content to one file. Creates new files or overwrites ",
-                    "existing ones entirely. One file per call.\n\n",
+                    "existing ones entirely.\n\n",
                     "IMPORTANT: When overwriting an existing file, you MUST include the ",
                     "`file_hash` from a previous `fs_read` call. This proves you have ",
                     "read the file before overwriting it. If you omit `file_hash` on an ",
