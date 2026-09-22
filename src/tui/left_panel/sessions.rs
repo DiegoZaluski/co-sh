@@ -117,16 +117,29 @@ impl SessionsView {
             self.selection.selected_index = clicked_idx;
         }
 
-        // 🗑 hit-test: same x the renderer draws the glyph at
-        let trash_x = SessionListLayout::trash_x(area, &summary.title);
+        // 🗑 hit-test: exactly the columns the glyph occupies — never a
+        // half-row region.
+        let trash_hit = SessionListLayout::trash_span(area, &summary.title)
+            .is_some_and(|span| span.contains(&mx));
 
-        // Click on 🗑 or the cleared cell after it
-        if mx >= trash_x && mx < area.right() {
+        if trash_hit {
             return SessionsAction::RequestDelete(summary.session_id.clone());
         }
 
-        // Otherwise, switch to this session
-        SessionsAction::SwitchTo(summary.session_id.clone())
+        // Switch hit-test: only the visible title text enters the session.
+        // The span is the string clamped to what the renderer actually
+        // displays — the string's own length is irrelevant once the panel
+        // truncates it. Clicks on the row outside the string (selection
+        // prefix, gap, the pad past the glyph) do nothing.
+        let title_hit = SessionListLayout::title_span(area, &summary.title)
+            .is_some_and(|span| span.contains(&mx));
+
+        if title_hit {
+            return SessionsAction::SwitchTo(summary.session_id.clone());
+        }
+
+        // On the row, but not on the title and not on the glyph.
+        SessionsAction::None
     }
 
     /// Handle a key press on the sessions list. Returns an action to perform.
@@ -238,20 +251,19 @@ impl SessionsView {
             let label = &summary.title;
             draw_text_line(buf, label, text_x, y, max_text_w, style);
 
-            // 🗑 after 1 gap (NO bg) — same x the hit-test computes
-            let trash_x = SessionListLayout::trash_x(area, label);
-            if trash_x + 1 < area.right()
-                && let Some(cell) = buf.cell_mut((trash_x, y))
-            {
-                cell.set_char('\u{1F5D1}');
-                cell.set_style(Style::default().fg(mute_fg));
-            }
-            // Clear the cell after the wide emoji
-            if trash_x + 1 < area.right()
-                && let Some(cell) = buf.cell_mut((trash_x + 1, y))
-            {
-                cell.set_char(' ');
-                cell.set_style(Style::default());
+            // 🗑 + cleared cell — one span drives both writes and the
+            // hit-test, so a visible glyph is always clickable and vice
+            // versa.
+            if let Some(span) = SessionListLayout::trash_span(area, label) {
+                if let Some(cell) = buf.cell_mut((span.start, y)) {
+                    cell.set_char('\u{1F5D1}');
+                    cell.set_style(Style::default().fg(mute_fg));
+                }
+                // Clear the cell after the wide emoji
+                if let Some(cell) = buf.cell_mut((span.end - 1, y)) {
+                    cell.set_char(' ');
+                    cell.set_style(Style::default());
+                }
             }
         }
     }
