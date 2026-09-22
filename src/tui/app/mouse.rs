@@ -676,43 +676,59 @@ impl App {
             // Hover tracking for user messages and pending-queue rows
             // (opencode-style highlight). Moving over the left panel clears any
             // leftover chat highlight instead of leaving it "lit".
-            if matches!(event_type, MouseEventType::Move)
-                && matches!(self.mode(), AppMode::Session)
-                && !self.dialog.visible()
-                && !self.question_dialog.visible
-            {
-                if self.is_over_open_sidebar(x) {
-                    self.session_view.clear_hover();
-                    self.hovered_queue_row = None;
-                } else if matches!(self.mode(), AppMode::Session)
-                    && should_show_right_panel(self.terminal_size().width, &self.state.right_panel)
-                    && self.is_in_right_panel(x)
+            if matches!(event_type, MouseEventType::Move) {
+                // Router mode: remember the cursor so the block under it
+                // lightens on the next frame (see `RouterView::update_hover`).
+                // Cleared while a dialog owns the input surface so no block
+                // stays lit behind the overlay.
+                if matches!(self.mode(), AppMode::Router) {
+                    if self.dialog.visible() {
+                        self.router_view.clear_hover();
+                    } else {
+                        self.router_view.update_hover(x, y);
+                    }
+                }
+                if matches!(event_type, MouseEventType::Move)
+                    && matches!(self.mode(), AppMode::Session)
+                    && !self.dialog.visible()
+                    && !self.question_dialog.visible
                 {
-                    // The cursor is over the right panel, not chat content:
-                    // clear any leftover chat highlight.
-                    self.session_view.clear_hover();
-                    self.hovered_queue_row = None;
-                } else {
-                    let session_area = self.session_viewport_area();
-                    self.session_view
-                        .update_hover(y, session_area, &self.state, &self.config);
-                    // Hover tracking for the pending queued rows above the prompt.
-                    self.hovered_queue_row =
-                        if self.state.status == crate::types::SessionStatus::Idle {
-                            match self.compute_pending_queues_area() {
-                                Some(area)
-                                    if x >= area.x
-                                        && x < area.right()
-                                        && y >= area.y
-                                        && y < area.bottom() =>
-                                {
-                                    Some((y - area.y) as usize)
+                    if self.is_over_open_sidebar(x) {
+                        self.session_view.clear_hover();
+                        self.hovered_queue_row = None;
+                    } else if matches!(self.mode(), AppMode::Session)
+                        && should_show_right_panel(
+                            self.terminal_size().width,
+                            &self.state.right_panel,
+                        )
+                        && self.is_in_right_panel(x)
+                    {
+                        // The cursor is over the right panel, not chat content:
+                        // clear any leftover chat highlight.
+                        self.session_view.clear_hover();
+                        self.hovered_queue_row = None;
+                    } else {
+                        let session_area = self.session_viewport_area();
+                        self.session_view
+                            .update_hover(y, session_area, &self.state, &self.config);
+                        // Hover tracking for the pending queued rows above the prompt.
+                        self.hovered_queue_row =
+                            if self.state.status == crate::types::SessionStatus::Idle {
+                                match self.compute_pending_queues_area() {
+                                    Some(area)
+                                        if x >= area.x
+                                            && x < area.right()
+                                            && y >= area.y
+                                            && y < area.bottom() =>
+                                    {
+                                        Some((y - area.y) as usize)
+                                    }
+                                    _ => None,
                                 }
-                                _ => None,
-                            }
-                        } else {
-                            None
-                        };
+                            } else {
+                                None
+                            };
+                    }
                 }
             }
             return Ok(true);

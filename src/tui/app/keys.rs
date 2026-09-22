@@ -878,6 +878,9 @@ impl App {
                             return Ok(false);
                         }
                         self.router_view.clear_num_buffer();
+                        // Leave no stale hover wash behind: the route is gone
+                        // from the screen, so the block highlight must be too.
+                        self.router_view.clear_hover();
                         self.show_router = false;
                         return Ok(false);
                     }

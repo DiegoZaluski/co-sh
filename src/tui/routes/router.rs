@@ -76,6 +76,63 @@ fn primary_contrast_fg(theme: &Theme) -> Color {
     }
 }
 
+/// Perceived luminance of an RGB color on the same 0.5 pivot
+/// [`primary_contrast_fg`] uses: below it the theme surface is "dark".
+fn luma(color: Color) -> f32 {
+    let (r, g, b) = match color {
+        Color::Rgb(r, g, b) => (r, g, b),
+        _ => return 0.0,
+    };
+    (0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b)) / 255.0
+}
+
+/// Nudge a block's background one step toward legibility for the hover
+/// highlight: dark surfaces blend toward white, light ones toward black
+/// (same pivot as `primary_contrast_fg`). `Color::Reset` — the transparent
+/// theme convention for "no fill" — is returned untouched so the wash is a
+/// no-op there.
+fn lightened(color: Color) -> Color {
+    let (r, g, b) = match color {
+        Color::Rgb(r, g, b) => (r, g, b),
+        _ => return color,
+    };
+    let toward = if luma(color) > 0.5 { 0.0 } else { 255.0 };
+    // ~7.5% per channel: clearly visible next to the resting fill, still
+    // reading as "the same block".
+    const STEP: f32 = 0.075;
+    let mix = |c: u8| -> u8 { (f32::from(c) + (toward - f32::from(c)) * STEP).round() as u8 };
+    Color::Rgb(mix(r), mix(g), mix(b))
+}
+
+/// Paint the hover wash over one block. `idle_bg` is the block's resting
+/// background fill; a cell is touched ONLY while its current bg still equals
+/// that fill, so overlays painted with their own background (the primary
+/// title bands) keep their color. `Cell::set_style` patches — `None` fields
+/// keep the cell's values — so the glyphs the block already drew stay put
+/// and only the background lightens. The cursor is the last known mouse
+/// position (`None` when the pointer left the router).
+fn paint_block_hover(buf: &mut Buffer, block: Rect, cursor: Option<(u16, u16)>, idle_bg: Color) {
+    if block.is_empty() {
+        return;
+    }
+    let hovered = cursor.is_some_and(|(cx, cy)| {
+        cx >= block.x && cx < block.right() && cy >= block.y && cy < block.bottom()
+    });
+    if !hovered {
+        return;
+    }
+    let style = Style::default().bg(lightened(idle_bg));
+    for y in block.y..block.bottom() {
+        for x in block.x..block.right() {
+            if let Some(cell) = buf.cell_mut((x, y))
+                && cell.bg == idle_bg
+            {
+                cell.set_style(style);
+            }
+        }
+    }
+}
+
 /// Whether a click on a list row lands on the row's visible text. Rows are
 /// rendered from `row_x` one cell per char, so the text occupies exactly
 /// `text.chars().count()` columns; a click past it hits the row's empty
@@ -234,6 +291,10 @@ pub struct RouterView {
     selected_acp_agent: usize,
     selected_prompt_corrector_fallback: usize,
     num_buffer: String,
+    /// Last known mouse position (fed by `App` from Move events) driving
+    /// the block hover highlight. `None` when the pointer left the router
+    /// or the route was closed.
+    hover_cell: Option<(u16, u16)>,
 }
 
 impl RouterView {
@@ -252,7 +313,20 @@ impl RouterView {
             selected_acp_agent: 0,
             selected_prompt_corrector_fallback: 0,
             num_buffer: String::new(),
+            hover_cell: None,
         }
+    }
+
+    /// Feed the last known mouse position so the block under the pointer
+    /// lightens for the next frame. Call with `None` when the pointer leaves
+    /// the router area.
+    pub fn update_hover(&mut self, x: u16, y: u16) {
+        self.hover_cell = Some((x, y));
+    }
+
+    /// Drop the hover highlight (pointer left the route, or the route closed).
+    pub fn clear_hover(&mut self) {
+        self.hover_cell = None;
     }
 
     fn filtered_models<'a>(&self, models: &'a [ModelEntry]) -> Vec<&'a ModelEntry> {
@@ -1036,6 +1110,10 @@ impl RouterView {
             );
             draw_text_line(buf, &text, choice_x, y, choice_w, style);
         }
+        // The ACP block owns its `background_element` band — hover lightens
+        // exactly that band (and only its cells; overlays like row text
+        // carry no bg of their own here, so the wash reads through).
+        paint_block_hover(buf, layout.prompt_acp, self.hover_cell, acp_bg);
 
         // ── Model chooser (below the ACP list) ──
         let models_focused = self.focus == FocusTarget::PromptCorrectorModels;
@@ -1106,6 +1184,14 @@ impl RouterView {
                     draw_text_line(buf, &text, choice_x, y, choice_w, style);
                 }
             }
+            // Hover for the model-chooser block: its resting surface is the
+            // route background (the tab has no fill of its own here).
+            paint_block_hover(
+                buf,
+                layout.prompt_models,
+                self.hover_cell,
+                rgba_color(theme.background),
+            );
         }
 
         // ── Fallback chain (right column) ──
@@ -1154,6 +1240,9 @@ impl RouterView {
                     Style::default().fg(muted).bg(panel_bg),
                 );
             }
+            // The empty chain skips the row loop below; it still has to get
+            // the hover wash before this early return.
+            paint_block_hover(buf, fallback_area, self.hover_cell, panel_bg);
             return;
         }
         for (index, entry) in self.prompt_corrector_fallbacks.iter().enumerate() {
@@ -1173,6 +1262,10 @@ impl RouterView {
             let text = prompt_fallback_row_text(row_marker(selected), index, entry);
             draw_text_line(buf, &text, fallback_x, y, fallback_w, style);
         }
+
+        // Hover for the fallback-chain block, painted after its rows so the
+        // wash covers the panel's exact final area (fill, title band, rows).
+        paint_block_hover(buf, fallback_area, self.hover_cell, panel_bg);
     }
 
     /// Render the active tab. `&mut self` because rendering feeds the
@@ -1342,6 +1435,14 @@ impl RouterView {
             }
         }
 
+        // Hover highlight for the exact blocks on this tab: wash the
+        // available-models surface and the fallback-chain panel — rows,
+        // titles and the primary title band included, everything that
+        // still carries the block's resting background.
+        let cursor = self.hover_cell;
+        paint_block_hover(buf, left_area, cursor, rgba_color(theme.background));
+        paint_block_hover(buf, right_area, cursor, panel_bg);
+
         self.render_router_footer(buf, area, &layout, theme);
     }
 
@@ -1395,6 +1496,7 @@ impl RouterView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::ThemeRegistry;
     use cosh_tui::core::types::{MouseButton, MouseEventType, MouseModifiers};
 
     fn click(x: u16, y: u16) -> MouseEvent {
@@ -1419,6 +1521,148 @@ mod tests {
             std::time::SystemTime::now(),
         );
         buffer.content().iter().map(|cell| cell.symbol()).collect()
+    }
+
+    /// Render into a buffer pre-filled the way `App::render` fills the frame
+    /// (every cell carrying the theme background). The hover wash only lights
+    /// cells already carrying a block's resting background, so tests need that
+    /// underlying fill to exist — the real app always provides it.
+    fn render_buffer_with_frame_bg(
+        view: &mut RouterView,
+        area: Rect,
+        models: &[ModelEntry],
+        theme: &Theme,
+    ) -> Buffer {
+        let bg = rgba_color(theme.background);
+        let mut blank = ratatui::buffer::Cell::EMPTY;
+        blank.set_char(' ');
+        blank.set_style(Style::default().bg(bg));
+        let mut buffer = Buffer::filled(area, blank);
+        view.render(
+            &mut buffer,
+            area,
+            theme,
+            models,
+            std::time::SystemTime::now(),
+        );
+        buffer
+    }
+
+    fn test_model(provider: &str, model: &str) -> ModelEntry {
+        ModelEntry {
+            provider: provider.into(),
+            model: model.into(),
+        }
+    }
+
+    #[test]
+    fn hover_lightens_the_models_block_under_the_pointer() {
+        let mut view = RouterView::new();
+        let area = Rect::new(0, 0, 100, 40);
+        let models = vec![test_model("openrouter", "model-a")];
+        let theme = ThemeRegistry::new().default_theme().clone();
+        let bg = rgba_color(theme.background);
+
+        let clean = render_buffer_with_frame_bg(&mut view, area, &models, &theme);
+        let layout = view.compute_layout(area);
+        let left = layout.automatic_models;
+        let right = layout.automatic_fallbacks;
+        assert!(!left.is_empty() && !right.is_empty());
+        // Baseline: the block surface carries the plain frame background.
+        assert_eq!(clean[(left.x + 2, left.y + 6)].bg, bg);
+
+        view.update_hover(left.x + 2, left.y + 6);
+        let lit = render_buffer_with_frame_bg(&mut view, area, &models, &theme);
+
+        // The hovered block's body lightens away from the resting fill...
+        assert_eq!(lit[(left.x + 2, left.y + 6)].bg, lightened(bg));
+        // ...while the untouched fallback panel keeps its own fill.
+        assert_eq!(
+            lit[(right.x + 2, right.y + 2)].bg,
+            rgba_color(theme.background_panel)
+        );
+    }
+
+    #[test]
+    fn hover_wash_covers_the_fallback_block_but_spares_the_title_band() {
+        let mut view = RouterView::new();
+        let area = Rect::new(0, 0, 100, 40);
+        let models = vec![test_model("openrouter", "model-a")];
+        let theme = ThemeRegistry::new().default_theme().clone();
+        let panel_bg = rgba_color(theme.background_panel);
+
+        view.update_hover(60, 20); // inside the fallback-chain panel
+        let lit = render_buffer_with_frame_bg(&mut view, area, &models, &theme);
+
+        let layout = view.compute_layout(area);
+        let right = layout.automatic_fallbacks;
+        assert!(!right.is_empty());
+        // The title band is painted with `primary` as its bg: an overlay with
+        // its own background, the wash must leave it alone.
+        assert_eq!(lit[(right.x + 1, right.y)].bg, rgba_color(theme.primary));
+        // A body cell (first fallback row's text) carries the lightened fill.
+        assert_eq!(lit[(right.x + 2, right.y + 2)].bg, lightened(panel_bg));
+    }
+
+    #[test]
+    fn hover_on_the_prompt_corrector_tab_lights_its_three_blocks() {
+        let mut view = RouterView::new();
+        view.set_active_tab(RouterTab::PromptCorrector);
+        let area = Rect::new(0, 0, 100, 40);
+        let theme = ThemeRegistry::new().default_theme().clone();
+        let bg = rgba_color(theme.background);
+        let element_bg = rgba_color(theme.background_element);
+
+        let layout = view.compute_layout(area);
+        let acp = layout.prompt_acp;
+        let prompt_models = layout.prompt_models;
+        let chain = layout.prompt_fallbacks;
+        assert!(!acp.is_empty() && !prompt_models.is_empty() && !chain.is_empty());
+
+        // Pointer on the ACP band: it lightens (its fill is the
+        // `background_element` band), the model chooser below and the chain
+        // panel keep their resting fills.
+        view.update_hover(acp.x + 2, acp.y + 2);
+        let lit = render_buffer_with_frame_bg(&mut view, area, &[], &theme);
+        assert_eq!(lit[(acp.x + 2, acp.y + 2)].bg, lightened(element_bg));
+        assert_eq!(lit[(prompt_models.x + 2, prompt_models.y + 8)].bg, bg);
+        assert_eq!(
+            lit[(chain.x + 2, chain.y + 5)].bg,
+            rgba_color(theme.background_panel)
+        );
+
+        // Pointer on the model chooser: only that block lightens.
+        view.update_hover(prompt_models.x + 2, prompt_models.y + 8);
+        let lit = render_buffer_with_frame_bg(&mut view, area, &[], &theme);
+        assert_eq!(
+            lit[(prompt_models.x + 2, prompt_models.y + 8)].bg,
+            lightened(bg)
+        );
+        assert_eq!(lit[(acp.x + 2, acp.y + 2)].bg, element_bg);
+
+        // Pointer on the chain panel: it lightens, left column back to rest.
+        view.update_hover(chain.x + 2, chain.y + 5);
+        let lit = render_buffer_with_frame_bg(&mut view, area, &[], &theme);
+        assert_eq!(
+            lit[(chain.x + 2, chain.y + 5)].bg,
+            lightened(rgba_color(theme.background_panel))
+        );
+        assert_eq!(lit[(prompt_models.x + 2, prompt_models.y + 8)].bg, bg);
+    }
+
+    #[test]
+    fn leaving_the_router_clears_the_hover_state() {
+        let mut view = RouterView::new();
+        view.update_hover(1, 1);
+        view.clear_hover();
+        // Re-rendering after the clear must match the never-hovered frame.
+        let area = Rect::new(0, 0, 100, 40);
+        let models = vec![test_model("openrouter", "model-a")];
+        let mut fresh = RouterView::new();
+        assert_eq!(
+            render_view(&mut view, area, &models),
+            render_view(&mut fresh, area, &models)
+        );
     }
 
     #[test]
