@@ -886,15 +886,20 @@ impl RightPanelState {
     /// Resolve which subagent sessions are DISPLAYED this frame and store
     /// them in `visible_subagents` (display order: chronological).
     ///
-    /// Candidates ranked best-first:
+    /// Candidates ranked best-first. Focused/pinned windows keep their top
+    /// priority ONLY while their session is alive: a finished one ranks
+    /// below every RUNNING session, so live work never hides behind stale
+    /// focus/pin when display space is scarce (it still outranks finished
+    /// live entries, so navigation keeps its window whenever space allows):
     ///   0. The FOCUSED queue's current window (its selected entry while
-    ///      navigating, otherwise its newest) — switching focus must hand
-    ///      the display to that queue even when space is scarce.
-    ///   1. PINNED queues (user navigated there deliberately), most recently
-    ///      navigated first — that is where the user was last looking. When
-    ///      space must be reclaimed among pinned windows, the ones with the
-    ///      OLDEST navigation activity are hidden first.
-    ///   2. Live RUNNING sessions (not superseded), newest first.
+    ///      navigating, otherwise its newest) and PINNED queues' windows,
+    ///      while their sessions are RUNNING. Pinned queues come most
+    ///      recently navigated first; when space must be reclaimed among
+    ///      pinned windows of the SAME class, the ones with the OLDEST
+    ///      navigation activity are hidden first (a RUNNING pinned window
+    ///      always outranks a FINISHED one regardless of recency).
+    ///   1. Live RUNNING sessions (not superseded), newest first.
+    ///   2. FOCUSED/pinned windows whose session already FINISHED.
     ///   3. Live finished sessions (not superseded), newest first.
     ///
     /// A pin suppresses only its queue's FINISHED entries: a live RUNNING
@@ -935,10 +940,17 @@ impl RightPanelState {
                 .is_some_and(|i| i + 1 < queues.get(agent).map_or(0, Vec::len))
         };
 
-        // (rank class, tiebreak, session idx)
+        // (rank class, tiebreak, session idx). A focused/pinned window only
+        // outranks live work while its session is RUNNING; once finished it
+        // drops to class 2 (above finished live entries, below every
+        // running one) so it is displayed whenever space remains but never
+        // steals space from an in-flight subagent.
+        let focus_pin_class =
+            |idx: usize| if self.pty_sessions[idx].is_finished() { 2 } else { 0 };
         let mut ranked: Vec<(u8, u64, usize)> = Vec::new();
         if let Some(idx) = focused_window {
-            ranked.push((0, u64::MAX, idx));
+            let class = focus_pin_class(idx);
+            ranked.push((class, u64::MAX, idx));
         }
 
         // 1. Pinned queues — most recent manual navigation first. A pinned
@@ -966,7 +978,8 @@ impl RightPanelState {
         let mut pinned_windows: Vec<usize> = Vec::new();
         for (_, idx) in pinned {
             pinned_windows.push(idx);
-            ranked.push((0, 0, idx));
+            let class = focus_pin_class(idx);
+            ranked.push((class, 0, idx));
         }
 
         // 2 + 3. Live candidates, newest first (higher pty index = newer).
@@ -986,17 +999,18 @@ impl RightPanelState {
                 // queue's live RUNNING sessions still rank, so
                 // new work never hides behind the pin
             }
-            let class = if s.is_finished() { 2 } else { 1 };
+            let class = if s.is_finished() { 3 } else { 1 };
             ranked.push((class, idx as u64, idx));
         }
         ranked.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
 
-        // Pinned windows WILL be displayed — load them so their heights are
-        // accurate for the fit (spilled live candidates stay unloaded; they
-        // fit as header-only and scroll internally if chosen).
+        // Focused/pinned windows WILL be displayed (when space allows) —
+        // load them so their heights are accurate for the fit (spilled live
+        // candidates stay unloaded; they fit as header-only and scroll
+        // internally if chosen).
         let pinned_idx: Vec<usize> = ranked
             .iter()
-            .filter(|(class, _, _)| *class == 0)
+            .filter(|(class, _, _)| *class == 0 || *class == 2)
             .map(|&(_, _, i)| i)
             .collect();
         self.ensure_outputs_loaded(&pinned_idx);
@@ -2752,6 +2766,107 @@ mod tests {
             state.visible_subagents,
             vec![0, 2],
             "pinned window + new RUNNING session, nothing omitted"
+        );
+    }
+
+    /// REGRESSION: a FINISHED window held by FOCUS must never steal the
+    /// display space of a RUNNING subagent. The stale window is demoted
+    /// below every running session (but still above finished live entries,
+    /// so navigation keeps its window whenever space allows).
+    #[test]
+    fn finished_focused_window_yields_space_to_running() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: kilo".to_string(), None);
+        state.complete_last_pty("kilo report\n".to_string());
+        // The user clicked/navigated onto kilo's (now finished) window.
+        state.panel_focus = Some(PanelFocus::Agent("kilo".to_string()));
+
+        // A different CLI's subagent starts RUNNING while the finished
+        // kilo window keeps the focus.
+        state.start_pty("subagent: opencode".to_string(), None);
+        state.update_last_pty("opencode streaming\n".to_string());
+
+        state.subagent_rebuild_interval = Duration::ZERO;
+        state.text_regions_w = 38;
+        // Budget fits exactly ONE window (a second would need its 1-row
+        // separator margin on top of its content rows).
+        state.resolve_visible_subagents(38, 1);
+        assert_eq!(
+            state.visible_subagents,
+            vec![1],
+            "the RUNNING subagent must win the scarce space over the finished focused window"
+        );
+    }
+
+    /// Same regression through the PIN path: a pin on a finished entry
+    /// (user navigated back with ←) must not hide a live RUNNING session
+    /// of another queue when space is scarce.
+    #[test]
+    fn finished_pinned_window_yields_space_to_running() {
+        let mut state = RightPanelState::new();
+        for _ in 0..2 {
+            state.start_pty("subagent: kilo".to_string(), None);
+            state.complete_last_pty("kilo report\n".to_string());
+        }
+        // Pin kilo's queue on its OLDEST (finished) entry.
+        state.set_queue_index("kilo", 0);
+        assert!(state.queue_is_pinned("kilo"));
+
+        // A live RUNNING session of another queue arrives.
+        state.start_pty("subagent: opencode".to_string(), None);
+        state.update_last_pty("opencode streaming\n".to_string());
+
+        state.subagent_rebuild_interval = Duration::ZERO;
+        state.text_regions_w = 38;
+        state.resolve_visible_subagents(38, 1);
+        assert_eq!(
+            state.visible_subagents,
+            vec![2],
+            "the RUNNING subagent outranks the stale pin on a finished entry"
+        );
+    }
+
+    /// The stale window is only DEMOTED, never dropped: with enough space
+    /// both the finished focused window and the RUNNING session are
+    /// displayed (display order stays chronological).
+    #[test]
+    fn finished_focused_window_still_shows_when_space_allows() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: kilo".to_string(), None);
+        state.complete_last_pty("kilo report\n".to_string());
+        state.panel_focus = Some(PanelFocus::Agent("kilo".to_string()));
+        state.start_pty("subagent: opencode".to_string(), None);
+        state.update_last_pty("opencode streaming\n".to_string());
+
+        state.subagent_rebuild_interval = Duration::ZERO;
+        state.text_regions_w = 38;
+        state.resolve_visible_subagents(38, 100);
+        assert_eq!(
+            state.visible_subagents,
+            vec![0, 1],
+            "finished focused window survives whenever it fits"
+        );
+    }
+
+    /// NO-TRADEOFF guard: an ALIVE focused/pinned window keeps its top
+    /// priority — it wins the scarce space against another queue's RUNNING
+    /// session exactly as before. Focus/pin on live work is never demoted.
+    #[test]
+    fn running_focused_window_keeps_priority_over_other_running() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: kilo".to_string(), None);
+        state.update_last_pty("kilo streaming\n".to_string());
+        state.panel_focus = Some(PanelFocus::Agent("kilo".to_string()));
+        state.start_pty("subagent: opencode".to_string(), None);
+        state.update_last_pty("opencode streaming\n".to_string());
+
+        state.subagent_rebuild_interval = Duration::ZERO;
+        state.text_regions_w = 38;
+        state.resolve_visible_subagents(38, 1);
+        assert_eq!(
+            state.visible_subagents,
+            vec![0],
+            "the focused RUNNING window still outranks other live work"
         );
     }
 

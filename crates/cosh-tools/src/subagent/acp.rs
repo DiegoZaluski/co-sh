@@ -192,8 +192,16 @@ pub const ACP_AGENTS: &[Agent] = &[
 ];
 
 /// Build the [`AcpAgent`] launcher for a registered agent.
+///
+/// On Windows, npm-style launch commands (`.cmd`/`.bat` shims, e.g. `npx`)
+/// are routed through `cmd /d /s /c …` (see [`windows_script_launcher`]).
 pub(crate) fn agent_launcher(entry: &Agent) -> Result<AcpAgent, String> {
-    AcpAgent::from_args(iter::once(entry.command).chain(entry.args.iter().copied()))
+    let args: Vec<String> = iter::once(entry.command)
+        .chain(entry.args.iter().copied())
+        .map(String::from)
+        .collect();
+    let args = windows_script_launcher(&args).unwrap_or(args);
+    AcpAgent::from_args(args)
         .map_err(|e| format!("invalid ACP launch command for '{}': {e}", entry.name))
 }
 
@@ -209,10 +217,81 @@ fn binary_in_path(binary: &str) -> bool {
     std::env::var_os("PATH").is_some_and(|path| {
         std::env::split_paths(&path).any(|dir| {
             dir.join(binary).is_file()
-                // Windows PATHEXT resolution: only relevant on Windows.
-                || (cfg!(windows) && dir.join(binary).with_extension("exe").is_file())
+                // Windows PATHEXT resolution: only relevant on Windows. npm
+                // installs CLIs as `.cmd`/`.bat` batch shims (plus an
+                // extensionless sh script), all of which are launchable.
+                || (cfg!(windows)
+                    && ["exe", "cmd", "bat"]
+                        .into_iter()
+                        .any(|ext| dir.join(format!("{binary}.{ext}")).is_file()))
         })
     })
+}
+
+/// Whether `binary` resolves to a native `.exe` image in PATH (Windows only).
+///
+/// `CreateProcessW` (used by `AcpAgent::spawn_process`) can only launch
+/// `.exe` images directly; batch-file shims need the `cmd` detour below.
+#[cfg(windows)]
+fn exe_in_path(binary: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path).any(|dir| dir.join(format!("{binary}.exe")).is_file())
+    })
+}
+
+/// Whether `binary` resolves to a `.cmd`/`.bat` batch shim in PATH (Windows
+/// only) — the shape npm takes when installing global CLIs.
+#[cfg(windows)]
+fn script_shim_in_path(binary: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path)
+            .any(|dir| ["cmd", "bat"].into_iter().any(|ext| dir.join(format!("{binary}.{ext}")).is_file()))
+    })
+}
+
+/// Windows workaround for npm-style launch commands (`npx …`, or any CLI
+/// installed through `npm install -g`): those are `.cmd`/`.bat` batch shims,
+/// and the direct `CreateProcessW` spawn inside `AcpAgent::spawn_process`
+/// fails on them with `program not found`. When the launch command is a
+/// script shim, the whole invocation is routed through
+/// `cmd /d /s /c "<full command line>"` — `/s` makes `cmd` strip the outer
+/// quotes that the process-spawning layer adds around the joined line.
+///
+/// The joined line is interpreted by `cmd.exe`, so any argument containing
+/// cmd metacharacters (`& | ^ % < > "`) would be executed/expanded rather
+/// than passed through. Those cannot appear in the static [`ACP_AGENTS`]
+/// registry, and the guard below refuses to wrap if one ever does — the
+/// direct spawn then fails loudly with `program not found` instead of
+/// running something unintended.
+///
+/// Returns `Some(wrapped_args)` when a `cmd` detour is needed, `None`
+/// otherwise (native `.exe`, non-Windows, or unsafe-to-wrap argument).
+#[cfg(windows)]
+fn windows_script_launcher(args: &[String]) -> Option<Vec<String>> {
+    const CMD_METACHARACTERS: [char; 7] = ['&', '|', '^', '%', '<', '>', '"'];
+    if args
+        .iter()
+        .any(|arg| arg.chars().any(|c| CMD_METACHARACTERS.contains(&c)))
+    {
+        return None;
+    }
+    let command = args.first()?;
+    if exe_in_path(command) || !script_shim_in_path(command) {
+        return None;
+    }
+    Some(vec![
+        "cmd".to_string(),
+        "/d".to_string(),
+        "/s".to_string(),
+        "/c".to_string(),
+        args.join(" "),
+    ])
+}
+
+/// Non-Windows no-op: Unix spawn resolves scripts through the shebang line.
+#[cfg(not(windows))]
+fn windows_script_launcher(_args: &[String]) -> Option<Vec<String>> {
+    None
 }
 
 /// Return installation / configuration guidance for a given agent.

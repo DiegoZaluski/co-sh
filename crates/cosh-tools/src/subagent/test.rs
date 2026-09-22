@@ -664,6 +664,28 @@ fn launcher_builds_for_every_registered_agent() {
 }
 
 #[test]
+#[cfg(windows)]
+fn npx_launcher_routes_through_cmd_detour_on_windows() {
+    // The claude/codex launch commands are npm shims (npx.cmd), which
+    // `CreateProcessW` cannot spawn directly; agent_launcher must wrap them
+    // in `cmd /d /s /c …` when npx resolves to a batch shim. When no shim is
+    // present (e.g. a real npx.exe on PATH) the direct command is kept —
+    // either way the launcher must build and carry a valid command.
+    for name in ["claude", "codex"] {
+        let entry = ACP_AGENTS
+            .iter()
+            .find(|a| a.name == name)
+            .unwrap_or_else(|| panic!("agent '{name}' missing from registry"));
+        let launcher = agent_launcher(entry).expect("launcher must build");
+        let command = launcher.config().command().to_string_lossy().to_lowercase();
+        assert!(
+            command.ends_with("cmd.exe") || command.ends_with("\\cmd") || command == "cmd",
+            "agent '{name}' launcher should route through cmd (got '{command}')"
+        );
+    }
+}
+
+#[test]
 fn install_hint_resolves_only_registered_agents() {
     assert!(!install_hint("gemini").is_empty());
     assert_eq!(install_hint("nope"), "");

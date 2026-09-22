@@ -80,22 +80,14 @@ struct Stamp {
 }
 
 impl Stamp {
-    fn of(metadata: &Metadata) -> Self {
+    fn of(metadata: &Metadata, file: &File) -> Self {
         #[cfg(unix)]
         let identity = {
             use std::os::unix::fs::MetadataExt;
             Some((metadata.dev(), metadata.ino()))
         };
         #[cfg(windows)]
-        let identity = {
-            use std::os::windows::fs::MetadataExt;
-            // volume_serial_number + file_index, when the filesystem
-            // provides them (Some network drives report none).
-            match (metadata.volume_serial_number(), metadata.file_index()) {
-                (Some(volume), Some(index)) => Some((volume, index)),
-                _ => None,
-            }
-        };
+        let identity = windows_file_identity(file);
         #[cfg(not(any(unix, windows)))]
         let identity: Option<(u64, u64)> = None;
         Self {
@@ -114,6 +106,30 @@ impl Stamp {
                 _ => true,
             }
     }
+}
+
+#[cfg(windows)]
+fn windows_file_identity(file: &File) -> Option<(u64, u64)> {
+    use std::mem::MaybeUninit;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+
+    let mut information = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+    // SAFETY: `file` owns a valid Windows file handle for the duration of this
+    // call, and `information` points to writable storage of the required type.
+    let success =
+        unsafe { GetFileInformationByHandle(file.as_raw_handle(), information.as_mut_ptr()) };
+    if success == 0 {
+        return None;
+    }
+    // SAFETY: A successful call initializes the output structure.
+    let information = unsafe { information.assume_init() };
+    let volume = u64::from(information.dwVolumeSerialNumber);
+    let index =
+        (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
+    Some((volume, index))
 }
 
 struct Cached {
@@ -147,7 +163,7 @@ pub(crate) fn load(path: &Path) -> io::Result<(String, HistoryProjection)> {
 
 fn load_cached(path: &Path, previous: Option<Cached>) -> io::Result<Cached> {
     let mut file = File::open(path)?;
-    let stamp = Stamp::of(&file.metadata()?);
+    let stamp = Stamp::of(&file.metadata()?, &file);
     if let Some(mut previous) = previous {
         if stamp == previous.stamp {
             return Ok(previous);
@@ -259,7 +275,7 @@ fn checkpoint_impl(path: &Path, force: bool) -> io::Result<()> {
     bytes.push(b'\n');
     file.write_all(&bytes)?;
     file.sync_data()?;
-    state.stamp = Stamp::of(&file.metadata()?);
+    state.stamp = Stamp::of(&file.metadata()?, &file);
     state.checkpoint_end = state.stamp.length;
     state.checkpoint_weight = weight;
     state.tail = "\n".into();
@@ -615,7 +631,7 @@ mod tests {
             "unchanged transcript was copied into the new snapshot"
         );
         let mut file = File::open(&path).unwrap();
-        let stamp = Stamp::of(&file.metadata().unwrap());
+        let stamp = Stamp::of(&file.metadata().unwrap(), &file);
         let restored = restore_snapshot(&mut file, &stamp).unwrap().unwrap();
         assert_eq!(
             restored.projection.branches["root"].session.title,
