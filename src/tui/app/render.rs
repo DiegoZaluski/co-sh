@@ -265,7 +265,22 @@ impl App {
             let bug_right_x = main_area.right().saturating_sub(bug_w + 1);
             let bug_link_area = if matches!(self.mode(), AppMode::Home) && bug_right_x >= area.x + 9
             {
-                let bug_link_style = Style::default().fg(rgba_color(self.theme.accent));
+                // Hover feedback: at rest the link sits in the muted color;
+                // when the mouse cursor sits exactly on it, it lights up in
+                // the theme's default text color to signal it's clickable.
+                // (accent can't mark the hover state: in the default theme
+                // accent == text, so swapping between them is invisible.)
+                let bug_link_fg = if let Some(link_area) = self.bug_link_area
+                    && self.last_mouse_x >= link_area.x
+                    && self.last_mouse_x < link_area.right()
+                    && self.last_mouse_y >= link_area.y
+                    && self.last_mouse_y < link_area.bottom()
+                {
+                    rgba_color(self.theme.text)
+                } else {
+                    rgba_color(self.theme.text_muted)
+                };
+                let bug_link_style = Style::default().fg(bug_link_fg);
                 for (i, ch) in BUG_REPORT_TEXT.chars().enumerate() {
                     if let Some(cell) = buf.cell_mut((bug_right_x + i as u16, area.y)) {
                         cell.set_char(ch);

@@ -125,7 +125,7 @@ fn apply_background_preference(mut t: Theme, transparent_background: bool) -> Th
 
 /// Header link that opens the project's bug-report page.
 /// TODO: replace the URL with the real GitHub issues URL.
-const BUG_REPORT_TEXT: &str = "𓆦 bug";
+const BUG_REPORT_TEXT: &str = "𓆦 bug report";
 const BUG_REPORT_URL: &str = "https://github.com/PLACEHOLDER-OWNER/PLACEHOLDER-REPO/issues";
 const FOOTER_HEIGHT: u16 = 1;
 
