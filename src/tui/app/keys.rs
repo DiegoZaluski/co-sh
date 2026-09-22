@@ -481,6 +481,27 @@ impl App {
                         }
                         return Ok(false);
                     }
+                    // Backspace on the selected row = 🗑 click. Gated on the
+                    // sessions list being the active panel view: in Explorer
+                    // mode the hidden list's selection must not be deleted.
+                    // Falls through when it maps to no action so Backspace
+                    // still edits the prompt (empty list, etc.).
+                    KeyCode::Backspace if !matches!(self.left_panel, Mode::Explorer) => {
+                        if let SessionsAction::RequestDelete(session_id) = self
+                            .sidebar
+                            .handle_key(key.code, &self.state.session_summaries)
+                        {
+                            // Same confirm dialog the 🗑 click opens.
+                            self.pending_delete = Some(PendingSessionDelete::One(session_id));
+                            self.dialog.show(DialogType::Confirm {
+                                message: "Delete this session?".into(),
+                            });
+                            if let Some(d) = self.dialog.current_mut() {
+                                d.selected = 1;
+                            }
+                            return Ok(false);
+                        }
+                    }
                     KeyCode::Enter => match self
                         .sidebar
                         .handle_key(key.code, &self.state.session_summaries)

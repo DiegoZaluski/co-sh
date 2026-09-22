@@ -166,6 +166,16 @@ impl SessionsView {
                 };
                 SessionsAction::SwitchTo(summary.session_id.clone())
             }
+            // Backspace on the selected row mirrors the 🗑 glyph click: it
+            // requests deletion of that session (the caller opens the same
+            // confirmation dialog).
+            KeyCode::Backspace => {
+                let idx = self.selection.selected_index;
+                let Some(summary) = summaries.get(idx) else {
+                    return SessionsAction::None;
+                };
+                SessionsAction::RequestDelete(summary.session_id.clone())
+            }
             _ => SessionsAction::None,
         }
     }
@@ -310,3 +320,7 @@ impl SessionsView {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "test/sessions.rs"]
+mod tests;
