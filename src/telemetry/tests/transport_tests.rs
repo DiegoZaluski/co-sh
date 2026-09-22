@@ -9,14 +9,12 @@
 //! only; the throwaway certificate is explicitly trusted by the test client
 //! and never installed globally.
 
-use crate::telemetry::Telemetry;
 use crate::telemetry::events::synthetic;
 use crate::telemetry::queue::EventQueue;
 use crate::telemetry::schema::EventType;
 use crate::telemetry::sink::{Consent, FlushOutcome, SinkConfig, client, flush};
 use serde_json::{Value, json};
 use std::{
-    process::Command,
     sync::{Arc, Mutex},
     time::Duration,
 };
