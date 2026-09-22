@@ -34,26 +34,28 @@ pub enum PermissionCheck {
 /// Extract all paths from tool arguments for permission checking.
 ///
 /// Supports the following argument shapes:
-/// - `{ "targets": [{ "path": "..." }, ...] }` (fs_read, fs_write, fs_edit)
-/// - `{ "path": "..." }` (fs_edit flat single-file form, fs_rollback)
+/// - `{ "path": "...", "content": "..." }` (fs_write flat single-file form,
+///   fs_edit flat single-file form, fs_rollback)
+/// - `{ "targets": [{ "path": "..." }, ...] }` (fs_read, legacy fs_write/fs_edit batch)
 /// - `{ "path": "..." }` / `{ "paths": [...] }` (find_glob, find_grep)
+///
+/// The flat `path` is checked BEFORE `targets` (matching the dispatch
+/// precedence): a mixed-shape call is rejected later by the dispatch, but the
+/// approval dialog must name the same file the flat branch would act on.
 pub(crate) fn extract_paths_from_args(tool_name: &str, args: &Value) -> Vec<String> {
     match tool_name {
         "fs_read" | "fs_write" | "fs_edit" => {
+            if let Some(path) = args.get("path").and_then(|p| p.as_str()) {
+                return vec![path.to_string()];
+            }
             if let Some(targets) = args.get("targets").and_then(|v| v.as_array()) {
-                targets
+                return targets
                     .iter()
                     .filter_map(|t| t.get("path").and_then(|p| p.as_str()))
                     .map(String::from)
-                    .collect()
-            } else {
-                // fs_edit's advertised single-file form: a flat {path, ...}.
-                args.get("path")
-                    .and_then(|p| p.as_str())
-                    .map(String::from)
-                    .into_iter()
-                    .collect()
+                    .collect();
             }
+            Vec::new()
         }
         // find_glob / find_grep: the single `path` plus every entry of the
         // optional `paths` array — each target is a real path the tool opens,

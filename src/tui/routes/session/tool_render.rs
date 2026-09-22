@@ -484,11 +484,16 @@ pub(crate) fn input_value(input: &serde_json::Value, key: &str) -> Option<String
     })
 }
 
-/// Extract a filepath from tool input, supporting both opencode-style
-/// ({"filePath": "..."}) and cosh-style ({"targets": [{"path": "...", ...}]}).
+/// Extract a filepath from tool input, supporting opencode-style
+/// ({"filePath": "..."}), cosh flat style ({"path": "..."}, the advertised
+/// fs_write/fs_edit shape) and the legacy batch form
+/// ({"targets": [{"path": "...", ...}]}).
 pub(crate) fn input_filepath(input: &serde_json::Value) -> Option<String> {
     if let Some(fp) = input_value(input, "filePath") {
         return Some(fp);
+    }
+    if let Some(p) = input_value(input, "path") {
+        return Some(p);
     }
     input
         .get("targets")
@@ -497,8 +502,10 @@ pub(crate) fn input_filepath(input: &serde_json::Value) -> Option<String> {
         .and_then(|t| input_value(t, "path"))
 }
 
-/// Extract content from tool input, supporting both opencode-style
-/// ({"content": "..."}) and cosh-style ({"targets": [{"text": "...", ...}]}).
+/// Extract content from tool input, supporting opencode-style
+/// ({"content": "..."}), cosh flat style ({"content": "..."} at the top
+/// level, the advertised fs_write shape) and the legacy batch form
+/// ({"targets": [{"text": "...", ...}]}).
 pub(crate) fn input_content(input: &serde_json::Value) -> Option<String> {
     if let Some(c) = input_value(input, "content") {
         return Some(c);
