@@ -137,6 +137,73 @@ fn build_bash_needs_approval() {
 }
 
 #[test]
+fn build_position_dependent_tools_are_denied() {
+    // screenshot and pointer depend on the pointer staying where it was
+    // when the coordinates were measured — Build's approval dialog hands
+    // focus to the TUI and the user may move the pointer while answering,
+    // so both are hidden from the model AND denied outright here (asking
+    // would re-create the pointer-drift problem).
+    let shot = serde_json::json!({});
+    let result = check_tool_permission("computer_screenshot", &shot, Mode::Build, None);
+    assert!(
+        matches!(result, PermissionCheck::Denied(_)),
+        "computer_screenshot must be denied in Build, got {result:?}"
+    );
+
+    let pointer = serde_json::json!({ "x": 100, "y": 200 });
+    let result = check_tool_permission("computer_pointer", &pointer, Mode::Build, None);
+    assert!(
+        matches!(result, PermissionCheck::Denied(_)),
+        "computer_pointer must be denied in Build, got {result:?}"
+    );
+}
+
+#[test]
+fn yolo_mode_allows_position_dependent_tools() {
+    let shot = serde_json::json!({});
+    let result = check_tool_permission("computer_screenshot", &shot, Mode::Yolo, None);
+    assert!(matches!(result, PermissionCheck::Allowed));
+
+    let pointer = serde_json::json!({ "x": 100, "y": 200, "action": "click" });
+    let result = check_tool_permission("computer_pointer", &pointer, Mode::Yolo, None);
+    assert!(matches!(result, PermissionCheck::Allowed));
+}
+
+#[test]
+fn ask_mode_allows_screenshot_but_denies_pointer() {
+    // Ask has no approval dialog, so the read-only screenshot stays
+    // available; pointer is synthetic input and stays restricted.
+    let shot = serde_json::json!({});
+    let result = check_tool_permission("computer_screenshot", &shot, Mode::Ask, None);
+    assert!(matches!(result, PermissionCheck::Allowed));
+
+    let pointer = serde_json::json!({ "x": 100, "y": 200 });
+    let result = check_tool_permission("computer_pointer", &pointer, Mode::Ask, None);
+    assert!(matches!(result, PermissionCheck::Denied(_)));
+}
+
+#[test]
+fn build_accessibility_tree_tools_still_need_approval() {
+    // The tree tools keep their Build behavior: touch/keyboard ask, and
+    // the read-only observation tools pass straight through.
+    let touch = serde_json::json!({ "name": "Safari", "selector": "button[name='OK']" });
+    let result = check_tool_permission("computer_touch", &touch, Mode::Build, None);
+    assert!(matches!(result, PermissionCheck::NeedsApproval(_)));
+
+    let keyboard = serde_json::json!({ "key": "enter" });
+    let result = check_tool_permission("computer_keyboard", &keyboard, Mode::Build, None);
+    assert!(matches!(result, PermissionCheck::NeedsApproval(_)));
+
+    let apps = serde_json::json!({});
+    let result = check_tool_permission("computer_apps", &apps, Mode::Build, None);
+    assert!(matches!(result, PermissionCheck::Allowed));
+
+    let snapshot = serde_json::json!({ "name": "Safari" });
+    let result = check_tool_permission("computer_snapshot", &snapshot, Mode::Build, None);
+    assert!(matches!(result, PermissionCheck::Allowed));
+}
+
+#[test]
 fn build_fs_edit_always_needs_approval() {
     let args = serde_json::json!({
         "targets": [{ "path": "src/main.rs", "file_hash": "abcd", "ops": "replace 1..1:\n+fn main() {}" }]
