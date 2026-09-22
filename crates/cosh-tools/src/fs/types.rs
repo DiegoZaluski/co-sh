@@ -50,6 +50,13 @@ pub struct FsRead {
 }
 #[derive(Clone, Default, Debug, Deserialize, JsonSchema)]
 pub struct TargetFile {
+    /// Content to write. The advertised schema uses `content` (the field
+    /// name every mainstream write tool trains on); `text` is the legacy
+    /// batch-form name, kept as the primary field with `content` as a serde
+    /// alias. NOT `#[serde(default)]`: a missing `content` must fail at
+    /// parse time (surfacing the schema hint), not fall through to an
+    /// empty-write warning.
+    #[serde(alias = "content")]
     pub text: String,
     pub path: String,
     /// Optional file hash from a previous `read`. When the target file

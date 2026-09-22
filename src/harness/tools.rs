@@ -1135,8 +1135,37 @@ impl Tools for CoshTools {
             }
 
             "fs_write" => {
-                let targets: Vec<TargetFile> =
-                    serde_json::from_value(args["targets"].clone()).map_err(|e| e.to_string())?;
+                // Advertised single-file shape: a flat {path, content,
+                // file_hash?}. The multi-file `targets` batch form is kept
+                // (like `fs_edit`) but only for a single legacy target —
+                // batched writes raised schema-error rates in agent sessions.
+                let targets: Vec<TargetFile> = if args.get("path").is_some() {
+                    if args.get("targets").is_some() {
+                        // Mixed shapes are ambiguous: fs_edit's auto-dispatch
+                        // rejects them too. A silent "flat wins" choice would
+                        // write one file when the model asked for a batch.
+                        return Err(
+                            "fs_write accepts ONE file per call: provide either a flat \
+                             {path, content, file_hash?} or the legacy single-element \
+                             {targets: [...]}, never both."
+                                .to_string()
+                        );
+                    }
+                    vec![serde_json::from_value(args.clone()).map_err(|e| e.to_string())?]
+                } else {
+                    let parsed: Vec<TargetFile> = serde_json::from_value(
+                        args.get("targets").cloned().unwrap_or(serde_json::Value::Null),
+                    )
+                    .map_err(|e| e.to_string())?;
+                    if parsed.len() > 1 {
+                        return Err(
+                            "fs_write accepts ONE file per call: {path, content, file_hash?}. \
+                             Issue one call per file."
+                                .to_string()
+                        );
+                    }
+                    parsed
+                };
                 let results = self.fs.write(targets).await?;
                 self.emit_lsp_notes(
                     "fs_write",

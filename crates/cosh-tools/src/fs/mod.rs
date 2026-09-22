@@ -194,8 +194,8 @@ impl Fs {
             description_write: serde_json::json!({
                 "name": "fs_write",
                 "description": concat!(
-                    "Write content to one or more files. Creates new files or ",
-                    "overwrites existing ones entirely.\n\n",
+                    "Write content to one file. Creates new files or overwrites ",
+                    "existing ones entirely.\n\n",
                     "IMPORTANT: When overwriting an existing file, you MUST include the ",
                     "`file_hash` from a previous `fs_read` call. This proves you have ",
                     "read the file before overwriting it. If you omit `file_hash` on an ",
@@ -205,35 +205,25 @@ impl Fs {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "targets": {
-                            "type": "array",
-                            "description": "List of file write targets",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "path": {
-                                        "type": "string",
-                                        "description": "Path to the file to write, relative to the project root"
-                                    },
-                                    "text": {
-                                        "type": "string",
-                                        "description": "Full text content to write to the file"
-                                    },
-                                    "file_hash": {
-                                        "type": ["string", "null"],
-                                        "description": concat!(
-                                            "4-hex content hash tag from `fs_read` OR a previous ",
-                                            "fs_edit result (the \u{00B6}path#TAG header). REQUIRED when ",
-                                            "overwriting an existing file to prove you have read its ",
-                                            "current content. Omit or set to null for new files."
-                                        )
-                                    }
-                                },
-                                "required": ["path", "text"]
-                            }
+                        "path": {
+                            "type": "string",
+                            "description": "Path to the file to write, relative to the project root"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "Full text content to write to the file"
+                        },
+                        "file_hash": {
+                            "type": ["string", "null"],
+                            "description": concat!(
+                                "4-hex content hash tag from `fs_read` OR a previous ",
+                                "fs_edit result (the \u{00B6}path#TAG header). REQUIRED when ",
+                                "overwriting an existing file to prove you have read its ",
+                                "current content. Omit or set to null for new files."
+                            )
                         }
                     },
-                    "required": ["targets"]
+                    "required": ["path", "content"]
                 }
             }),
             description_edit: Self::description_edit_auto(),

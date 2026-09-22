@@ -627,9 +627,134 @@ async fn argument_rejection_echoes_the_expected_schema_shape() {
         err.contains("Expected `fs_write` arguments — minimal shape:"),
         "rejection must teach the shape: {err}"
     );
+    // The advertised shape is the flat single-file form (same shape the
+    // mainstream write tools train on), not the legacy batch array.
     assert!(
-        err.contains("<array of"),
-        "shape renders nested schemas: {err}"
+        err.contains("{ path: <string>, content: <string>, file_hash?: <string>|<null> }"),
+        "shape renders the flat single-file schema: {err}"
+    );
+}
+
+// ── fs_write flat single-file dispatch ────────────────────────────────────
+
+#[tokio::test]
+async fn fs_write_flat_shape_writes_one_file() {
+    use cosh_sdk::connector::Connector;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::new(
+        Connector::new("openai").unwrap(),
+        dir.path().to_str().unwrap(),
+        HashSet::new(),
+    );
+    h.push_tool_call(ToolCallData {
+        id: String::new(),
+        name: "fs_write".into(),
+        arguments: json!({ "path": "notes.md", "content": "hello\n" }),
+        thought_signature: String::new(),
+    });
+    let out = h.dispatch_next().await.expect("flat write should succeed");
+    assert!(
+        out.contains("\"path\":\"notes.md\""),
+        "result names the written file: {out}"
+    );
+    assert!(
+        !out.contains("\"warnings\":\""),
+        "no warnings on a plain create: {out}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("notes.md")).unwrap(),
+        "hello\n"
+    );
+}
+
+#[tokio::test]
+async fn fs_write_rejects_multi_file_batch() {
+    use cosh_sdk::connector::Connector;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::new(
+        Connector::new("openai").unwrap(),
+        dir.path().to_str().unwrap(),
+        HashSet::new(),
+    );
+    h.push_tool_call(ToolCallData {
+        id: String::new(),
+        name: "fs_write".into(),
+        arguments: json!({
+            "targets": [
+                { "path": "a.txt", "text": "one" },
+                { "path": "b.txt", "text": "two" }
+            ]
+        }),
+        thought_signature: String::new(),
+    });
+    let err = h.dispatch_next().await.unwrap_err();
+    assert!(
+        err.contains("ONE file per call") && err.contains("path"),
+        "batch rejection must teach the flat shape: {err}"
+    );
+    assert!(
+        !dir.path().join("a.txt").exists() && !dir.path().join("b.txt").exists(),
+        "a rejected batch must not write anything"
+    );
+}
+
+#[tokio::test]
+async fn fs_write_flat_without_content_is_a_parse_error_not_an_empty_write() {
+    use cosh_sdk::connector::Connector;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::new(
+        Connector::new("openai").unwrap(),
+        dir.path().to_str().unwrap(),
+        HashSet::new(),
+    );
+    h.push_tool_call(ToolCallData {
+        id: String::new(),
+        name: "fs_write".into(),
+        arguments: json!({ "path": "notes.md" }),
+        thought_signature: String::new(),
+    });
+    let err = h.dispatch_next().await.unwrap_err();
+    assert!(
+        err.contains("missing field") && err.contains("Expected `fs_write` arguments"),
+        "missing content must surface the schema hint: {err}"
+    );
+    assert!(
+        !dir.path().join("notes.md").exists(),
+        "no file may be created without content"
+    );
+}
+
+#[tokio::test]
+async fn fs_write_rejects_mixed_flat_and_batch_arguments() {
+    use cosh_sdk::connector::Connector;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::new(
+        Connector::new("openai").unwrap(),
+        dir.path().to_str().unwrap(),
+        HashSet::new(),
+    );
+    h.push_tool_call(ToolCallData {
+        id: String::new(),
+        name: "fs_write".into(),
+        arguments: json!({
+            "path": "flat.txt",
+            "content": "flat",
+            "targets": [{ "path": "batch.txt", "text": "batch" }]
+        }),
+        thought_signature: String::new(),
+    });
+    let err = h.dispatch_next().await.unwrap_err();
+    assert!(
+        err.contains("ONE file per call") && err.contains("never both"),
+        "mixed shapes must be rejected with a correction: {err}"
+    );
+    assert!(
+        !dir.path().join("flat.txt").exists() && !dir.path().join("batch.txt").exists(),
+        "an ambiguous call must not write anything"
     );
 }
 
