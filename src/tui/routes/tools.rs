@@ -66,13 +66,16 @@ fn internal_tools() -> &'static [(&'static str, &'static str)] {
         ("computer_snapshot", "Capture an app's accessibility tree"),
         (
             "computer_screenshot",
-            "Capture the screen, a region or an element as an image",
+            "Capture screen/region/element as an image (unavailable in Build mode)",
         ),
         (
             "computer_touch",
             "Perform actions on accessibility-tree elements by selector",
         ),
-        ("computer_pointer", "Click/scroll/move the pointer at coordinates"),
+        (
+            "computer_pointer",
+            "Click/scroll/move the pointer at coordinates (Yolo/Command modes only)",
+        ),
         ("computer_keyboard", "Send synthetic keystrokes or type text"),
         (
             "lsp",

@@ -2,7 +2,7 @@
 use super::context::error_catalog_window;
 use super::context::{ContextManager, MAX_CONTEXT_TOKENS, MapRequest, RunOutcome};
 use super::correction_memory::CorrectionMemory;
-use super::tools::{CoshTools, Tools, is_tool_disabled};
+use super::tools::{CoshTools, Tools, is_position_dependent_tool, is_tool_disabled};
 use crate::mcp::{McpConfig, McpManager};
 use cosh_sdk::connector::{
     ChatMessage, ChatStream, ClaudeThinkingBlock, Connector, ConnectorError, ToolCallMode,
@@ -1081,10 +1081,21 @@ impl Harness {
         if let Some(ref cosh) = self.cosh_tools {
             let _ = write!(out, "### System Tools\n\n");
             match self.mode {
-                Mode::Build | Mode::Yolo | Mode::Command => cosh.write_tool_descriptions_enabled(
+                // Yolo/Command dispatch without an interactive approval dialog,
+                // so coordinate-based tools stay accurate; Build hands focus to
+                // the TUI and the user may move the pointer while answering, so
+                // Build runs the full set MINUS the position-dependent tools.
+                Mode::Build => cosh.write_tool_descriptions_enabled(
                     &mut out,
                     &self.disabled_tools,
                     include_inline_schemas,
+                    false,
+                ),
+                Mode::Yolo | Mode::Command => cosh.write_tool_descriptions_enabled(
+                    &mut out,
+                    &self.disabled_tools,
+                    include_inline_schemas,
+                    true,
                 ),
                 Mode::Ask => cosh.write_tool_descriptions_filtered(
                     &mut out,
@@ -1173,9 +1184,8 @@ impl Harness {
         }
         if let Some(ref cosh) = self.cosh_tools {
             let schemas = match self.mode {
-                Mode::Build | Mode::Yolo | Mode::Command => {
-                    cosh.schemas_enabled(&self.disabled_tools)
-                }
+                Mode::Build => cosh.schemas_enabled(&self.disabled_tools, false),
+                Mode::Yolo | Mode::Command => cosh.schemas_enabled(&self.disabled_tools, true),
                 Mode::Ask => cosh.schemas_filtered(&self.disabled_tools),
             };
             log::debug!(
@@ -1218,9 +1228,8 @@ impl Harness {
         }
         if let Some(ref cosh) = self.cosh_tools {
             let schemas = match self.mode {
-                Mode::Build | Mode::Yolo | Mode::Command => {
-                    cosh.schemas_enabled(&self.disabled_tools)
-                }
+                Mode::Build => cosh.schemas_enabled(&self.disabled_tools, false),
+                Mode::Yolo | Mode::Command => cosh.schemas_enabled(&self.disabled_tools, true),
                 Mode::Ask => cosh.schemas_filtered(&self.disabled_tools),
             };
             for schema in schemas {
@@ -3184,7 +3193,20 @@ impl Harness {
         // tools the model is allowed to call in the current mode.
         if let Some(ref cosh) = self.cosh_tools {
             let descriptions: Vec<serde_json::Value> = match self.mode {
-                Mode::Build | Mode::Yolo | Mode::Command => {
+                Mode::Build => {
+                    // All tools minus disabled, minus position-dependent ones:
+                    // Build's approval dialog can move the pointer between the
+                    // coordinate measurement (screenshot) and its use (pointer).
+                    cosh.tool_descriptions()
+                        .into_iter()
+                        .filter(|desc| {
+                            let name = desc["name"].as_str().unwrap_or_default();
+                            !is_tool_disabled(name, &self.disabled_tools)
+                                && !is_position_dependent_tool(name)
+                        })
+                        .collect()
+                }
+                Mode::Yolo | Mode::Command => {
                     // All tools minus disabled
                     cosh.tool_descriptions()
                         .into_iter()
@@ -4963,9 +4985,8 @@ impl Harness {
     fn schema_input(&self, tool_name: &str) -> Option<serde_json::Value> {
         if let Some(cosh) = &self.cosh_tools {
             let schemas = match self.mode {
-                Mode::Build | Mode::Yolo | Mode::Command => {
-                    cosh.schemas_enabled(&self.disabled_tools)
-                }
+                Mode::Build => cosh.schemas_enabled(&self.disabled_tools, false),
+                Mode::Yolo | Mode::Command => cosh.schemas_enabled(&self.disabled_tools, true),
                 Mode::Ask => cosh.schemas_filtered(&self.disabled_tools),
             };
             for schema in schemas {

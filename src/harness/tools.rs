@@ -418,6 +418,10 @@ impl CoshTools {
         v.push(self.skills.description_read.clone());
         v.push(self.skills.description_read_asset.clone());
         v.push(self.skills.description_match_skills.clone());
+        // Ask mode keeps computer_screenshot: it is read-only observation and
+        // Ask mode has no approval dialog (nothing can move the pointer
+        // between capture and use). apps/snapshot are structural (accessibility
+        // tree), so they are position-independent by definition.
         v.push(self.computer.description_apps.clone());
         v.push(self.computer.description_snapshot.clone());
         v.push(self.computer.description_screenshot.clone());
@@ -452,11 +456,15 @@ impl CoshTools {
         out: &mut String,
         disabled_tools: &HashSet<String>,
         include_schema: bool,
+        allow_position_dependent: bool,
     ) {
         let all = self.tool_descriptions();
         for desc in all {
             let name = desc["name"].as_str().unwrap_or_default();
             if is_tool_disabled(name, disabled_tools) {
+                continue;
+            }
+            if !allow_position_dependent && is_position_dependent_tool(name) {
                 continue;
             }
             write_single_tool(out, &desc, include_schema);
@@ -572,12 +580,17 @@ impl CoshTools {
     /// # Panics
     ///
     /// Panics if the internal `plan` mutex is poisoned.
-    pub fn schemas_enabled(&self, disabled_tools: &HashSet<String>) -> Vec<ToolSchema> {
+    pub fn schemas_enabled(
+        &self,
+        disabled_tools: &HashSet<String>,
+        allow_position_dependent: bool,
+    ) -> Vec<ToolSchema> {
         let all = self.tool_descriptions();
         all.iter()
             .filter(|desc| {
                 let name = desc["name"].as_str().unwrap_or_default();
                 !is_tool_disabled(name, disabled_tools)
+                    && (allow_position_dependent || !is_position_dependent_tool(name))
             })
             .map(extract_schema)
             .collect()
@@ -783,6 +796,18 @@ pub(crate) fn is_tool_disabled(name: &str, disabled: &HashSet<String>) -> bool {
     false
 }
 
+/// True for computer tools whose arguments are desktop pixel coordinates.
+///
+/// Their usefulness depends on the pointer being where it was when the
+/// coordinates were measured. Build mode is excluded because its approval
+/// dialog hands focus to the TUI and the user may move the pointer while
+/// answering — the model's coordinate math then targets the wrong pixel.
+/// They are only exposed in Yolo (and Command) mode, where dispatches run
+/// without an interactive dialog.
+pub(crate) fn is_position_dependent_tool(name: &str) -> bool {
+    matches!(name, "computer_screenshot" | "computer_pointer")
+}
+
 #[cfg(test)]
 mod disabled_tests {
     use super::is_tool_disabled;
@@ -800,6 +825,17 @@ mod disabled_tests {
         assert!(!is_tool_disabled("fs_read", &disabled));
         assert!(!is_tool_disabled("lsp", &empty));
         assert!(!is_tool_disabled("subagent_call", &disabled));
+    }
+
+    #[test]
+    fn position_dependent_set_is_exactly_the_coordinate_tools() {
+        assert!(super::is_position_dependent_tool("computer_screenshot"));
+        assert!(super::is_position_dependent_tool("computer_pointer"));
+        // Accessibility-tree tools are structural — no coordinates involved.
+        assert!(!super::is_position_dependent_tool("computer_apps"));
+        assert!(!super::is_position_dependent_tool("computer_snapshot"));
+        assert!(!super::is_position_dependent_tool("computer_touch"));
+        assert!(!super::is_position_dependent_tool("computer_keyboard"));
     }
 }
 

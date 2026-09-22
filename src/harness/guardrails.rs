@@ -3,6 +3,7 @@ use std::path::Path;
 use serde_json::Value;
 
 use super::core::Mode;
+use super::tools::is_position_dependent_tool;
 
 /// Action the user can take in response to a permission request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,8 +131,16 @@ fn needs_path_approval(paths: &[String], project_root: Option<&Path>) -> Option<
 /// Tools that always need user approval (regardless of path):
 /// - `bash_run`, `subagent_call` (execute external commands/code)
 /// - `fs_edit`, `fs_rollback` (write/restore file operations)
-/// - `computer_touch`, `computer_pointer`, `computer_keyboard` (synthetic
-///   input acts on the whole desktop — outside any project-root sandbox)
+/// - `computer_touch`, `computer_keyboard` (synthetic input acts on the
+///   whole desktop — outside any project-root sandbox)
+///
+/// Position-dependent tools (`computer_screenshot`, `computer_pointer`):
+/// hidden from the model in Build mode (their schemas are not registered)
+/// and outright DENIED here if a call still arrives — the Build approval
+/// dialog hands focus to the TUI and the user may move the pointer while
+/// answering, so any coordinate measured before the dialog can be stale.
+/// They are only exposed in Yolo/Command mode, where dispatches run
+/// without an interactive dialog.
 ///
 /// Tools that need approval when targeting paths outside the project root:
 /// - `fs_read` (read outside cwd)
@@ -167,6 +176,19 @@ pub fn check_tool_permission(
     // Ask mode should only expose read-only tools.
     if mode == Mode::Ask && is_restricted_in_ask_mode(tool_name) {
         return PermissionCheck::Denied(format!("`{tool_name}` is not available in Ask mode"));
+    }
+
+    // Position-dependent tools are hidden from the model in Build mode
+    // (defense in depth): the Build approval dialog hands focus to the TUI
+    // and the user may move the pointer while answering, so any coordinate
+    // measured before the dialog can be stale by the time the action runs.
+    // Deny outright instead of asking — an approval would re-create the
+    // exact pointer-drift problem this guardrail exists to prevent.
+    if mode == Mode::Build && is_position_dependent_tool(tool_name) {
+        return PermissionCheck::Denied(format!(
+            "`{tool_name}` requires pixel coordinates that go stale when the Build approval \
+             dialog moves the pointer — it is only available in Yolo/Command mode"
+        ));
     }
 
     // ── Tools that always need user approval ──────────────────────
@@ -240,19 +262,6 @@ pub fn check_tool_permission(
                 tool: "computer_touch".to_string(),
                 description: format!("perform an action on a desktop UI element ({app})"),
                 args: target.to_string(),
-            });
-        }
-        "computer_pointer" => {
-            let x = args.get("x").and_then(|v| v.as_i64()).unwrap_or(0);
-            let y = args.get("y").and_then(|v| v.as_i64()).unwrap_or(0);
-            let action = args
-                .get("action")
-                .and_then(|v| v.as_str())
-                .unwrap_or("click");
-            return PermissionCheck::NeedsApproval(PermissionRequest {
-                tool: "computer_pointer".to_string(),
-                description: format!("{action} the mouse pointer on the desktop"),
-                args: format!("({x}, {y})"),
             });
         }
         "computer_keyboard" => {
