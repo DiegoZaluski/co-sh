@@ -67,12 +67,8 @@ fn main() {
     // real-desktop provider). The mock registers ONE application —
     // "TestApp" — at pid 1234; `MOCK_SHELL_PID` (4242) belongs to the
     // shell's taskbar surface, deliberately distinct:
-    let app = App::by_pid_with(
-        mock::build_provider(),
-        1234,
-        Duration::from_secs(3),
-    )
-    .expect("the mock provider registers TestApp at pid 1234");
+    let app = App::by_pid_with(mock::build_provider(), 1234, Duration::from_secs(3))
+        .expect("the mock provider registers TestApp at pid 1234");
 
     // A root locator scoped to the app resolves elements from the tree —
     // the scope is the app's element DATA (App exposes it publicly):

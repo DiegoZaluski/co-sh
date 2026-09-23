@@ -8,12 +8,16 @@ mod snapshot_surface_tests {
 
     use xa11y::{ShellSurface, ShellSurfaceKind, mock};
 
+    use crate::computer::snapshot::{DEFAULT_MAX_DEPTH, snapshot_surface};
     use crate::computer::types::{ComputerSnapshot, SnapshotFormat};
-    use crate::computer::snapshot::{snapshot_surface, DEFAULT_MAX_DEPTH};
 
     fn taskbar() -> xa11y::ShellSurface {
-        ShellSurface::by_kind_with(mock::build_provider(), ShellSurfaceKind::Taskbar, Duration::ZERO)
-            .expect("mock fixture carries a taskbar")
+        ShellSurface::by_kind_with(
+            mock::build_provider(),
+            ShellSurfaceKind::Taskbar,
+            Duration::ZERO,
+        )
+        .expect("mock fixture carries a taskbar")
     }
 
     /// A surface-rooted snapshot without a selector outlines the WHOLE
@@ -22,8 +26,13 @@ mod snapshot_surface_tests {
     #[test]
     fn surface_root_reports_surface_identity() {
         let input = ComputerSnapshot::default();
-        let out = snapshot_surface(&input, taskbar(), Some(DEFAULT_MAX_DEPTH as usize), SnapshotFormat::default())
-            .expect("mock taskbar must snapshot");
+        let out = snapshot_surface(
+            &input,
+            taskbar(),
+            Some(DEFAULT_MAX_DEPTH as usize),
+            SnapshotFormat::default(),
+        )
+        .expect("mock taskbar must snapshot");
         assert_eq!(out.app, "Taskbar");
         assert_eq!(out.pid, Some(mock::MOCK_SHELL_PID));
         assert!(out.elements >= 1);
@@ -39,8 +48,13 @@ mod snapshot_surface_tests {
             nth: Some(1),
             ..ComputerSnapshot::default()
         };
-        let out = snapshot_surface(&input, taskbar(), Some(DEFAULT_MAX_DEPTH as usize), SnapshotFormat::default())
-            .expect("mock taskbar carries buttons");
+        let out = snapshot_surface(
+            &input,
+            taskbar(),
+            Some(DEFAULT_MAX_DEPTH as usize),
+            SnapshotFormat::default(),
+        )
+        .expect("mock taskbar carries buttons");
         assert_eq!(out.app, "Taskbar");
         assert_eq!(out.elements, 1, "nth(1) picks exactly one match");
     }
@@ -53,17 +67,22 @@ mod snapshot_surface_tests {
             selector: Some("text_field[name='definitely-not-here']".into()),
             ..ComputerSnapshot::default()
         };
-        let err = snapshot_surface(&input, taskbar(), Some(DEFAULT_MAX_DEPTH as usize), SnapshotFormat::default())
-            .expect_err("missing selector must fail");
+        let err = snapshot_surface(
+            &input,
+            taskbar(),
+            Some(DEFAULT_MAX_DEPTH as usize),
+            SnapshotFormat::default(),
+        )
+        .expect_err("missing selector must fail");
         assert!(!err.is_empty());
     }
 }
 
 #[cfg(test)]
 mod snapshot_render_tests {
-    use crate::computer::types::{ElementStates, StateNode, ToggleState};
-    use crate::computer::types::SnapshotFormat;
     use crate::computer::snapshot::{render_tree, write_outline};
+    use crate::computer::types::SnapshotFormat;
+    use crate::computer::types::{ElementStates, StateNode, ToggleState};
 
     /// A node with only default states renders as bare `role name=value` —
     /// no state tokens, keeping the common case one short line.
@@ -169,11 +188,20 @@ mod snapshot_render_tests {
         // `.get()` (not indexing) so a MISSING key would fail: indexing an
         // absent key also yields Null, which would make this assertion pass
         // even if `checked` were dropped from the serialization entirely.
-        assert_eq!(value["states"].get("checked"), Some(&serde_json::Value::Null));
-        assert_eq!(value["states"].get("expanded"), Some(&serde_json::Value::Null));
+        assert_eq!(
+            value["states"].get("checked"),
+            Some(&serde_json::Value::Null)
+        );
+        assert_eq!(
+            value["states"].get("expanded"),
+            Some(&serde_json::Value::Null)
+        );
         let grandchild = &value["children"][0];
         assert_eq!(grandchild["states"]["editable"], true);
-        assert_eq!(grandchild["states"].get("checked"), Some(&serde_json::Value::Null));
+        assert_eq!(
+            grandchild["states"].get("checked"),
+            Some(&serde_json::Value::Null)
+        );
         // ToggleState serializes lowercase.
         let toggled = ElementStates {
             checked: Some(ToggleState::On),
@@ -218,11 +246,13 @@ mod surface_tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use xa11y::{Provider, ShellSurfaceKind};
-    use crate::computer::types::{ComputerAct, ComputerScreenshot, ComputerSnapshot};
+    use crate::computer::surface::{
+        kind, resolve_with, surface_label, validate_act, validate_screenshot, validate_snapshot,
+    };
     use crate::computer::types::SurfaceKind;
-    use crate::computer::surface::{kind, resolve_with, surface_label, validate_act, validate_snapshot, validate_screenshot};
+    use crate::computer::types::{ComputerAct, ComputerScreenshot, ComputerSnapshot};
     use xa11y::mock::build_provider;
+    use xa11y::{Provider, ShellSurfaceKind};
 
     fn mock() -> Arc<dyn Provider> {
         build_provider()
@@ -278,7 +308,10 @@ mod surface_tests {
         let ok = || validate_snapshot(&ComputerSnapshot::default());
         // Zero targets.
         let err = ok().unwrap_err();
-        assert!(err.contains("provide `name`, `pid` or `surface`"), "err: {err}");
+        assert!(
+            err.contains("provide `name`, `pid` or `surface`"),
+            "err: {err}"
+        );
         // Two app scopes.
         let err = validate_snapshot(&ComputerSnapshot {
             name: Some("Safari".into()),
@@ -299,11 +332,13 @@ mod surface_tests {
             "app+surface mix must be rejected: {err}"
         );
         // Exactly one: surface alone is fine (mock-free check).
-        assert!(validate_snapshot(&ComputerSnapshot {
-            surface: Some(SurfaceKind::MenuBar),
-            ..Default::default()
-        })
-        .is_ok());
+        assert!(
+            validate_snapshot(&ComputerSnapshot {
+                surface: Some(SurfaceKind::MenuBar),
+                ..Default::default()
+            })
+            .is_ok()
+        );
     }
 
     #[test]
@@ -341,4 +376,3 @@ mod surface_tests {
         assert!(err.contains("cannot share a call"), "err: {err}");
     }
 }
-

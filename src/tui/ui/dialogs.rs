@@ -53,7 +53,10 @@ const SHORTCUTS: &[ShortcutLine] = &[
     ShortcutLine::Key("Ctrl+K", "Show/hide keyboard shortcuts"),
     ShortcutLine::Key("Ctrl+B", "Toggle left panel"),
     ShortcutLine::Key("Ctrl+P", "Toggle right panel"),
-    ShortcutLine::Key("Ctrl+C", "Copy selection / clear prompt (focused) / Quit cosh?"),
+    ShortcutLine::Key(
+        "Ctrl+C",
+        "Copy selection / clear prompt (focused) / Quit cosh?",
+    ),
     ShortcutLine::Key("Ctrl+T", "Toggle thinking (show/hide reasoning)"),
     ShortcutLine::Key("Ctrl+D", "Toggle tool details (show/hide completed)"),
     ShortcutLine::Key("Ctrl+E", "Toggle diagnostics (show/hide LSP findings)"),
@@ -667,7 +670,9 @@ impl std::fmt::Debug for DialogType {
             Self::UndoList {
                 session_id,
                 versions,
-            } => f.debug_struct("UndoList").field("session_id", session_id)
+            } => f
+                .debug_struct("UndoList")
+                .field("session_id", session_id)
                 // The previews are user-typed prompt text — same redaction
                 // policy as every other user-content field.
                 .field(

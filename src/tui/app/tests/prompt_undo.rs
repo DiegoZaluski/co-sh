@@ -264,7 +264,10 @@ async fn ctrl_c_on_an_empty_or_whitespace_prompt_shows_the_quit_confirm() {
     let mut app = session_app();
     type_text(&mut app, "   ");
     app.process_key_event(ctrl(KeyCode::Char('c'))).unwrap();
-    assert_eq!(app.prompt_view.input, "   ", "whitespace draft is not cleared");
+    assert_eq!(
+        app.prompt_view.input, "   ",
+        "whitespace draft is not cleared"
+    );
     assert!(
         app.is_confirm_dialog_visible(),
         "focused Ctrl+C on a whitespace-only draft must show the quit-confirm"
@@ -289,7 +292,10 @@ async fn double_ctrl_c_wipes_the_draft_then_asks_to_quit() {
         app.is_confirm_dialog_visible(),
         "the second Ctrl+C (empty draft) must open the quit-confirm"
     );
-    assert!(!app.should_quit, "the dialog itself decides, not the keypress");
+    assert!(
+        !app.should_quit,
+        "the dialog itself decides, not the keypress"
+    );
 }
 
 /// Ctrl+C with the slash menu open and the prompt focused still clears the
@@ -302,11 +308,17 @@ async fn ctrl_c_clears_the_draft_even_with_the_slash_menu_open() {
     let mut app = session_app();
 
     type_text(&mut app, "/he");
-    assert!(app.slash_menu.visible, "typing a slash command opens the menu");
+    assert!(
+        app.slash_menu.visible,
+        "typing a slash command opens the menu"
+    );
 
     app.process_key_event(ctrl(KeyCode::Char('c'))).unwrap();
     assert_eq!(app.prompt_view.input, "");
-    assert!(!app.slash_menu.visible, "the menu closes on the empty draft");
+    assert!(
+        !app.slash_menu.visible,
+        "the menu closes on the empty draft"
+    );
     assert!(!app.is_confirm_dialog_visible());
 
     app.process_key_event(ctrl(KeyCode::Char('z'))).unwrap();

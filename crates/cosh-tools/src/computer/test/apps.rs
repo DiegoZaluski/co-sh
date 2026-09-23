@@ -6,8 +6,8 @@ mod apps_focus_tests {
     use xa11y::mock::build_provider;
     use xa11y::{Element, Provider, Role};
 
+    use crate::computer::apps::{FOCUSED_WALK_MAX_DEPTH, find_focused, find_focused_below};
     use crate::computer::types::{AppsTarget, ComputerApps};
-    use crate::computer::apps::{find_focused, find_focused_below, FOCUSED_WALK_MAX_DEPTH};
 
     /// The mock fixture's window reports `focused` — the walk below the app
     /// root must find it and report the role path from the root down to the

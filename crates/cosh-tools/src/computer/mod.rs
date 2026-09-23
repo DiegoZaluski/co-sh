@@ -46,10 +46,10 @@ pub use control::control;
 pub use screenshot::screenshot;
 pub use snapshot::snapshot;
 pub use types::{
-    ActAction, ActOutput, AppInfo, AppsOutput, AppsTarget, ControlOutput, ComputerAct,
-    ComputerControl, ComputerApps, ComputerWait, FocusedElement, FocusedOutput, PointerAction,
-    SnapshotFormat, SnapshotOutput, ScreenshotOutput, ComputerScreenshot, ComputerSnapshot,
-    ElementStates, StateNode, PointerAnchor, ToggleState, WaitObservation, WaitOutput, WaitState,
+    ActAction, ActOutput, AppInfo, AppsOutput, AppsTarget, ComputerAct, ComputerApps,
+    ComputerControl, ComputerScreenshot, ComputerSnapshot, ComputerWait, ControlOutput,
+    ElementStates, FocusedElement, FocusedOutput, PointerAction, PointerAnchor, ScreenshotOutput,
+    SnapshotFormat, SnapshotOutput, StateNode, ToggleState, WaitObservation, WaitOutput, WaitState,
 };
 pub use wait::wait;
 
@@ -64,8 +64,7 @@ use crate::ToolDescription;
 pub(crate) fn shared_input_sim() -> Result<xa11y::InputSim, String> {
     static SIM: std::sync::OnceLock<Result<xa11y::InputSim, String>> = std::sync::OnceLock::new();
     SIM.get_or_init(|| {
-        xa11y::input_sim()
-            .map_err(|e| errors::render("computer", "initialize input backend", &e))
+        xa11y::input_sim().map_err(|e| errors::render("computer", "initialize input backend", &e))
     })
     .clone()
 }
@@ -884,10 +883,7 @@ impl Computer {
     /// Returns `Err` for invalid input, an app/selector that never matches,
     /// a failed capture (e.g. missing screen-recording permission), or an
     /// encode failure.
-    pub async fn screenshot(
-        &self,
-        input: &ComputerScreenshot,
-    ) -> Result<ScreenshotOutput, String> {
+    pub async fn screenshot(&self, input: &ComputerScreenshot) -> Result<ScreenshotOutput, String> {
         screenshot::screenshot(input).await
     }
 

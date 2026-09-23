@@ -62,7 +62,10 @@ fn internal_tools() -> &'static [(&'static str, &'static str)] {
         ("skills_read_asset", "Read a skill asset"),
         ("skills_match_skills", "Match skills to task"),
         ("subagent_call", "Run a sub-agent for a delegated task"),
-        ("computer_apps", "List desktop apps with PIDs (accessibility tree)"),
+        (
+            "computer_apps",
+            "List desktop apps with PIDs (accessibility tree)",
+        ),
         ("computer_snapshot", "Capture an app's accessibility tree"),
         (
             "computer_wait",

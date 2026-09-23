@@ -10,14 +10,12 @@ use std::time::Duration;
 
 use cosh_sdk::connector::{ChatMessage, ImageBlock, tool_result_message_with_images};
 use xa11y::{
-    App, AppExt, Rect, screenshot as xa11y_screenshot, screenshot_element,
-    screenshot_region as xa11y_screenshot_region, screenshot_annotated, Annotated, Screenshot,
+    Annotated, App, AppExt, Rect, Screenshot, screenshot as xa11y_screenshot, screenshot_annotated,
+    screenshot_element, screenshot_region as xa11y_screenshot_region,
 };
 
 use super::snapshot::DEFAULT_TIMEOUT_MS;
-use super::types::{
-    ComputerScreenshot, LegendEntryOutput, OmissionOutput, ScreenshotOutput,
-};
+use super::types::{ComputerScreenshot, LegendEntryOutput, OmissionOutput, ScreenshotOutput};
 
 /// Default maximum width of the delivered image, in pixels.
 ///
@@ -185,7 +183,7 @@ fn annotated_blocking(input: &ComputerScreenshot) -> Result<ScreenshotOutput, St
     let shot: Screenshot = if annotated.screenshot.width > max_width {
         let target_height = ((f64::from(annotated.screenshot.height) * f64::from(max_width)
             / f64::from(annotated.screenshot.width))
-            .round() as u32)
+        .round() as u32)
             .max(1);
         annotated
             .screenshot
@@ -270,9 +268,9 @@ fn plain_blocking(input: &ComputerScreenshot) -> Result<ScreenshotOutput, String
         // the selector, shoot the element's current bounds.
         (None, Some(selector)) => {
             let locator = target_locator(input, selector, input.nth)?;
-            let element = locator
-                .element()
-                .map_err(|e| super::errors::render("computer_screenshot", "resolve selector", &e))?;
+            let element = locator.element().map_err(|e| {
+                super::errors::render("computer_screenshot", "resolve selector", &e)
+            })?;
             screenshot_element(&element)
         }
         // Full display.
@@ -287,7 +285,7 @@ fn plain_blocking(input: &ComputerScreenshot) -> Result<ScreenshotOutput, String
     let capture = if capture.width > max_width {
         let target_height = ((f64::from(capture.height) * f64::from(max_width)
             / f64::from(capture.width))
-            .round() as u32)
+        .round() as u32)
             .max(1);
         capture
             .resize(max_width, target_height)
@@ -374,12 +372,18 @@ pub fn screenshot_tool_result(tool_call_id: &str, output: &ScreenshotOutput) -> 
         output.desktop_scale.1,
     );
     if !output.legend.is_empty() {
-        text.push_str("\n\nAnnotated elements — act on a box by passing its \
-selector to computer_act:\n");
+        text.push_str(
+            "\n\nAnnotated elements — act on a box by passing its \
+selector to computer_act:\n",
+        );
         for entry in &output.legend {
             match &entry.name {
                 Some(name) => {
-                    let _ = writeln!(text, "{}  {}  {} '{}'", entry.tag, entry.selector, entry.role, name);
+                    let _ = writeln!(
+                        text,
+                        "{}  {}  {} '{}'",
+                        entry.tag, entry.selector, entry.role, name
+                    );
                 }
                 None => {
                     let _ = writeln!(text, "{}  {}  {}", entry.tag, entry.selector, entry.role);
@@ -436,7 +440,11 @@ pub(crate) fn without_quoted_spans(selector: &str) -> String {
 fn resolve_app(input: &ComputerScreenshot) -> Result<App, String> {
     use std::time::Duration;
     let timeout = Duration::from_millis(input.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
-    let name = input.app.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let name = input
+        .app
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     match (name, input.pid) {
         (Some(name), None) => App::by_name(name, timeout)
             .map_err(|e| super::errors::render("computer_screenshot", "resolve application", &e)),
@@ -445,8 +453,6 @@ fn resolve_app(input: &ComputerScreenshot) -> Result<App, String> {
         (None, None) => {
             Err("computer_screenshot: element capture requires `app`, `pid` or `surface`".into())
         }
-        (Some(_), Some(_)) => {
-            Err("computer_screenshot: provide `app` or `pid`, not both".into())
-        }
+        (Some(_), Some(_)) => Err("computer_screenshot: provide `app` or `pid`, not both".into()),
     }
 }

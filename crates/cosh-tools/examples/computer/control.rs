@@ -21,7 +21,7 @@
 //! ```
 
 use cosh_tools::computer::keyboard::parse_key;
-use cosh_tools::computer::mouse::{validate, MIN_DRAG_MS};
+use cosh_tools::computer::mouse::{MIN_DRAG_MS, validate};
 use cosh_tools::computer::types::{ComputerControl, PointerAction, PointerAnchor};
 
 fn main() {

@@ -1,7 +1,7 @@
 //! Tests for the pipeline engines: chain validation (act/control/touch), the wait state machine and their report fragments.
 #[cfg(test)]
 mod act_validation_tests {
-    use crate::computer::act::{validate_chain, ACT_CHAIN_MAX_DEPTH};
+    use crate::computer::act::{ACT_CHAIN_MAX_DEPTH, validate_chain};
     use crate::computer::types::ComputerAct;
 
     fn step() -> ComputerAct {
@@ -148,8 +148,7 @@ mod act_validation_tests {
             root
         }
         assert!(validate_chain(&chain(ACT_CHAIN_MAX_DEPTH), ACT_CHAIN_MAX_DEPTH).is_ok());
-        let err = validate_chain(&chain(ACT_CHAIN_MAX_DEPTH + 1), ACT_CHAIN_MAX_DEPTH)
-            .unwrap_err();
+        let err = validate_chain(&chain(ACT_CHAIN_MAX_DEPTH + 1), ACT_CHAIN_MAX_DEPTH).unwrap_err();
         assert!(err.contains("exceeds"), "err: {err}");
     }
 
@@ -167,7 +166,10 @@ mod act_validation_tests {
             })),
             ..step()
         };
-        assert!(chain_needs_sim(&wait_then_type), "wait → text needs the sim");
+        assert!(
+            chain_needs_sim(&wait_then_type),
+            "wait → text needs the sim"
+        );
 
         let type_then_wait = ComputerAct {
             text: Some("hi".into()),
@@ -177,7 +179,10 @@ mod act_validation_tests {
             })),
             ..step()
         };
-        assert!(chain_needs_sim(&type_then_wait), "text → wait needs the sim");
+        assert!(
+            chain_needs_sim(&type_then_wait),
+            "text → wait needs the sim"
+        );
 
         let wait_only = ComputerAct {
             wait: Some(600),
@@ -200,7 +205,7 @@ mod act_validation_tests {
 
 #[cfg(test)]
 mod control_validation_tests {
-    use crate::computer::control::{validate_chain, CONTROL_CHAIN_MAX_DEPTH};
+    use crate::computer::control::{CONTROL_CHAIN_MAX_DEPTH, validate_chain};
     use crate::computer::types::ComputerControl;
 
     fn step() -> ComputerControl {
@@ -321,11 +326,8 @@ mod control_validation_tests {
     #[test]
     fn chain_depth_cap() {
         assert!(validate_chain(&chain(CONTROL_CHAIN_MAX_DEPTH), CONTROL_CHAIN_MAX_DEPTH).is_ok());
-        let err = validate_chain(
-            &chain(CONTROL_CHAIN_MAX_DEPTH + 1),
-            CONTROL_CHAIN_MAX_DEPTH,
-        )
-        .unwrap_err();
+        let err = validate_chain(&chain(CONTROL_CHAIN_MAX_DEPTH + 1), CONTROL_CHAIN_MAX_DEPTH)
+            .unwrap_err();
         assert!(err.contains("exceeds"), "err: {err}");
     }
 
@@ -535,7 +537,10 @@ mod touch_validation_tests {
             ..step()
         };
         let err = validate(&s, TOOL).unwrap_err();
-        assert!(err.contains("`held` applies to keyboard and pointer"), "err: {err}");
+        assert!(
+            err.contains("`held` applies to keyboard and pointer"),
+            "err: {err}"
+        );
     }
 
     #[test]
@@ -584,8 +589,12 @@ mod touch_surface_tests {
     const TOOL: &str = "computer_act";
 
     fn taskbar() -> xa11y::ShellSurface {
-        ShellSurface::by_kind_with(mock::build_provider(), ShellSurfaceKind::Taskbar, Duration::ZERO)
-            .expect("mock fixture carries a taskbar")
+        ShellSurface::by_kind_with(
+            mock::build_provider(),
+            ShellSurfaceKind::Taskbar,
+            Duration::ZERO,
+        )
+        .expect("mock fixture carries a taskbar")
     }
 
     /// A press on a surface locator reports against the SURFACE's name —
@@ -613,9 +622,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use crate::computer::wait::{MAX_WAIT_MS, validate, wait_on_locator, wait_state};
-    use xa11y::{ElementState, Locator};
     use xa11y::Provider;
     use xa11y::mock::build_provider;
+    use xa11y::{ElementState, Locator};
 
     fn root_locator(selector: &str) -> Locator {
         let provider = build_provider();
@@ -729,10 +738,16 @@ mod tests {
         // message must carry the tool prefix, the NEXT-STEP guidance
         // (budget, wait step) and the platform's Diagnosis verbatim, so
         // the model sees exactly what the poll loop last saw.
-        assert!(err.starts_with("computer_wait: wait for element state: "), "err: {err}");
+        assert!(
+            err.starts_with("computer_wait: wait for element state: "),
+            "err: {err}"
+        );
         assert!(err.contains("timed out after"), "err: {err}");
         assert!(err.contains("timeout_ms"), "missing budget guidance: {err}");
-        assert!(err.contains("`wait` step"), "missing wait-step guidance: {err}");
+        assert!(
+            err.contains("`wait` step"),
+            "missing wait-step guidance: {err}"
+        );
         assert!(
             err.contains("Attached") || err.contains("attached"),
             "timeout error must name the condition: {err}"
@@ -777,4 +792,3 @@ mod tests {
         );
     }
 }
-

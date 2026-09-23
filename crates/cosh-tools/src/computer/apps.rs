@@ -9,9 +9,7 @@ use std::time::Duration;
 use serde::Serialize;
 use xa11y::{App, AppExt};
 
-use super::types::{
-    AppInfo, AppsOutput, AppsTarget, FocusedElement, FocusedOutput, ComputerApps,
-};
+use super::types::{AppInfo, AppsOutput, AppsTarget, ComputerApps, FocusedElement, FocusedOutput};
 
 /// Default auto-wait for a foreground application to exist.
 const DEFAULT_TIMEOUT_MS: u64 = 3000;
@@ -85,14 +83,16 @@ fn list_all() -> Result<AppsOutput, String> {
 /// answer is still correct and useful.
 fn focused_blocking(input: &ComputerApps) -> Result<FocusedOutput, String> {
     let timeout = Duration::from_millis(input.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
-    let app = App::foreground(timeout)
-        .map_err(|e| super::errors::render("computer_apps", "resolve foreground application", &e))?;
-    let focused_element = find_focused_below(&app.as_element()).map(|(path, leaf)| FocusedElement {
-        role: leaf.role.to_snake_case().to_string(),
-        name: leaf.name.clone(),
-        value: leaf.value.clone(),
-        path,
-    });
+    let app = App::foreground(timeout).map_err(|e| {
+        super::errors::render("computer_apps", "resolve foreground application", &e)
+    })?;
+    let focused_element =
+        find_focused_below(&app.as_element()).map(|(path, leaf)| FocusedElement {
+            role: leaf.role.to_snake_case().to_string(),
+            name: leaf.name.clone(),
+            value: leaf.value.clone(),
+            path,
+        });
     Ok(FocusedOutput {
         app: app.name.clone(),
         pid: app.pid,
@@ -118,7 +118,9 @@ pub(crate) const FOCUSED_WALK_MAX_DEPTH: usize = 15;
 ///
 /// Returns the leaf's data plus the role path from the root down to it,
 /// inclusive.
-pub(crate) fn find_focused_below(root: &xa11y::Element) -> Option<(Vec<String>, xa11y::ElementData)> {
+pub(crate) fn find_focused_below(
+    root: &xa11y::Element,
+) -> Option<(Vec<String>, xa11y::ElementData)> {
     let root_role = root.data().role.to_snake_case().to_string();
     for child in root.children().ok()? {
         if let Some((path, leaf)) = find_focused(&child, 1) {

@@ -11,6 +11,13 @@ use cosh_sdk::extract_action::ToolSchema;
 use cosh_sdk::find::{GlobMatch, GrepMatch};
 use cosh_tools::{
     bash::{Bash, BashRunInput},
+    computer::{
+        Computer,
+        types::{
+            ComputerAct, ComputerApps, ComputerControl, ComputerScreenshot, ComputerSnapshot,
+            ComputerWait,
+        },
+    },
     find::{Find, GlobCallOptions, GlobMatchCallback, GrepMatchCallback},
     fs::{Fs, FsRollbackInput, LspNotes, Target, TargetFile},
     lsp::Lsp,
@@ -23,13 +30,6 @@ use cosh_tools::{
     subagent::{
         SubAgent,
         types::{SubAgentCallInput, SubAgentCallOutput},
-    },
-    computer::{
-        Computer,
-        types::{
-            ComputerAct, ComputerApps, ComputerControl, ComputerScreenshot, ComputerSnapshot,
-            ComputerWait,
-        },
     },
     web::{Web, WebFetch, WebSearchInput},
 };
@@ -585,10 +585,7 @@ impl CoshTools {
     /// # Panics
     ///
     /// Panics if the internal `plan` mutex is poisoned.
-    pub fn schemas_enabled(
-        &self,
-        disabled_tools: &HashSet<String>,
-    ) -> Vec<ToolSchema> {
+    pub fn schemas_enabled(&self, disabled_tools: &HashSet<String>) -> Vec<ToolSchema> {
         let all = self.tool_descriptions();
         all.iter()
             .filter(|desc| {
@@ -1583,7 +1580,8 @@ impl Tools for CoshTools {
             }
 
             "computer_apps" => {
-                let input: ComputerApps = serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let input: ComputerApps =
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let output = self.computer.apps(&input).await?;
                 serde_json::to_string(&output).map_err(|e| e.to_string())
             }
@@ -1621,8 +1619,7 @@ impl Tools for CoshTools {
             }
 
             "computer_act" => {
-                let input: ComputerAct =
-                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let input: ComputerAct = serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let output = self.computer.act(&input).await?;
                 serde_json::to_string(&output).map_err(|e| e.to_string())
             }

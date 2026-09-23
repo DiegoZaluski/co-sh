@@ -4213,8 +4213,7 @@ impl Harness {
                                 info_sig.as_deref().unwrap_or_default(),
                                 &reason,
                             );
-                            tool_interactions
-                                .push(format!("{name}\u{0}{args}\u{0}{reason}"));
+                            tool_interactions.push(format!("{name}\u{0}{args}\u{0}{reason}"));
                         }
                         self.correction_memory.push(&reason);
                         let _ = tx.send(HarnessEvent::ToolError { error: reason });
@@ -4297,9 +4296,7 @@ impl Harness {
                                 // denials repeat identically, so this also lets
                                 // the loop detector fire its own (earlier,
                                 // louder) break instead of burning all lives.
-                                tool_interactions.push(format!(
-                                    "{name}\u{0}{args}\u{0}{reason}"
-                                ));
+                                tool_interactions.push(format!("{name}\u{0}{args}\u{0}{reason}"));
                             }
                             self.correction_memory.push(&reason);
                             let _ = tx.send(HarnessEvent::ToolError { error: reason });
@@ -4308,11 +4305,8 @@ impl Harness {
                             // the `continue` skips the end-of-iteration check:
                             // a stuck model re-issuing an identical denied call
                             // must hit the detector, not the retry budget.
-                            if self.check_loop_detection(
-                                &tool_interactions,
-                                &mut loop_window,
-                                &tx,
-                            ) {
+                            if self.check_loop_detection(&tool_interactions, &mut loop_window, &tx)
+                            {
                                 terminal_sent = true;
                                 break;
                             }

@@ -46,8 +46,7 @@ fn main() {
 
     // The input IS the wire payload the MCP tool receives — deserialize
     // this shape to show the schema advertises exactly these fields:
-    let annotated_wire =
-        r#"{"app": "Reports", "selector": "button", "annotate": true}"#;
+    let annotated_wire = r#"{"app": "Reports", "selector": "button", "annotate": true}"#;
     let parsed: ComputerScreenshot =
         serde_json::from_str(annotated_wire).expect("valid wire shape");
     println!("wire {annotated_wire} → {parsed:?}");

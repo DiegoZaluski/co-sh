@@ -772,7 +772,11 @@ impl HistoryProjection {
                 branch.deleted = false;
                 branch
             }
-            Delta::Revert { target, undo_label, prompt_preview } => {
+            Delta::Revert {
+                target,
+                undo_label,
+                prompt_preview,
+            } => {
                 if target.branch_id != event.branch_id {
                     return Err(ReplayError::CrossBranchReference {
                         branch: event.branch_id.clone(),

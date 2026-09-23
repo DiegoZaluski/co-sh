@@ -80,14 +80,14 @@ struct Stamp {
 }
 
 impl Stamp {
-    fn of(metadata: &Metadata, file: &File) -> Self {
+    fn of(metadata: &Metadata, _file: &File) -> Self {
         #[cfg(unix)]
         let identity = {
             use std::os::unix::fs::MetadataExt;
             Some((metadata.dev(), metadata.ino()))
         };
         #[cfg(windows)]
-        let identity = windows_file_identity(file);
+        let identity = windows_file_identity(_file);
         #[cfg(not(any(unix, windows)))]
         let identity: Option<(u64, u64)> = None;
         Self {

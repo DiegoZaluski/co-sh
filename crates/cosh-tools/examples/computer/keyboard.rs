@@ -47,11 +47,8 @@ fn main() {
     // ── Modifiers: aliases collapse onto four keys ──
     //
     // shift | ctrl|control | alt|option | meta|cmd|command|super|win.
-    let held = parse_keys(
-        &["ctrl".into(), "CONTROL".into(), "win".into()],
-        TOOL,
-    )
-    .expect("all aliases resolve");
+    let held = parse_keys(&["ctrl".into(), "CONTROL".into(), "win".into()], TOOL)
+        .expect("all aliases resolve");
     println!(
         "ctrl + CONTROL + win → {:?}",
         held.iter().map(key_name).collect::<Vec<_>>()
@@ -77,15 +74,13 @@ fn main() {
     //
     // key `a` + held `ctrl` = select-all, on the wire:
     let chord_wire = r#"{"key": "a", "held": ["ctrl"]}"#;
-    let select_all: ComputerControl =
-        serde_json::from_str(chord_wire).expect("valid wire shape");
+    let select_all: ComputerControl = serde_json::from_str(chord_wire).expect("valid wire shape");
     println!("chord wire: {chord_wire} → {select_all:?}");
 
     // Uppercase INTENT is spelled with an explicit shift hold — the only
     // way to type a capital `A` as a keystroke (or use `text` instead):
     let capital_wire = r#"{"key": "a", "held": ["shift"]}"#;
-    let capital: ComputerControl =
-        serde_json::from_str(capital_wire).expect("valid wire shape");
+    let capital: ComputerControl = serde_json::from_str(capital_wire).expect("valid wire shape");
     println!("shift+`a` wire: {capital_wire} → {capital:?}");
 
     // Dispatch (needs a desktop session; typing lands in the FOCUSED

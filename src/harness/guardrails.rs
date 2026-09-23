@@ -217,8 +217,7 @@ pub fn check_tool_permission(
             let mut index = 1usize;
             let mut element_seen = false;
             while let Some(s) = step {
-                let is_keyboard =
-                    s.get("key").is_some() || s.get("text").is_some();
+                let is_keyboard = s.get("key").is_some() || s.get("text").is_some();
                 if !is_keyboard
                     && (s.get("x").is_some()
                         || s.get("y").is_some()
@@ -304,8 +303,7 @@ pub fn check_tool_permission(
             let mut step = Some(args);
             let mut element_seen = false;
             while let Some(s) = step {
-                let is_keyboard =
-                    s.get("key").is_some() || s.get("text").is_some();
+                let is_keyboard = s.get("key").is_some() || s.get("text").is_some();
                 if is_keyboard && !element_seen {
                     return PermissionCheck::Denied(
                         "`computer_act` types into whatever element holds keyboard focus, \
@@ -358,7 +356,10 @@ pub fn check_tool_permission(
             });
         }
         if tool_name == "computer_screenshot"
-            && !args.get("annotate").and_then(Value::as_bool).unwrap_or(false)
+            && !args
+                .get("annotate")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
         {
             return PermissionCheck::Denied(
                 "`computer_screenshot` as a plain capture hands the model pixel \
@@ -427,10 +428,7 @@ pub fn check_tool_permission(
         // the chain-walk above has already returned; this arm serves
         // Yolo/Command mode.
         "computer_act" => {
-            let target = args
-                .get("selector")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
+            let target = args.get("selector").and_then(|v| v.as_str()).unwrap_or("?");
             let app = if let Some(name) = args.get("name").and_then(|v| v.as_str()) {
                 name.to_string()
             } else {
@@ -480,7 +478,13 @@ pub fn check_tool_permission(
 fn is_restricted_in_ask_mode(name: &str) -> bool {
     matches!(
         name,
-        "fs_write" | "fs_edit" | "fs_rollback" | "bash_run" | "plan_todo_write" | "subagent_call"
-            | "computer_act" | "computer_control"
+        "fs_write"
+            | "fs_edit"
+            | "fs_rollback"
+            | "bash_run"
+            | "plan_todo_write"
+            | "subagent_call"
+            | "computer_act"
+            | "computer_control"
     )
 }

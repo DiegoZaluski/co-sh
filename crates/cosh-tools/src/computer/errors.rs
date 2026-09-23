@@ -73,13 +73,19 @@ pub fn render(tool: &str, ctx: &str, err: &Error) -> String {
             out
         }
         Error::InvalidSelector { selector, message } => {
-            format!("{head}selector `{selector}` is invalid: {message} — fix the selector syntax and retry (no platform call was made)")
+            format!(
+                "{head}selector `{selector}` is invalid: {message} — fix the selector syntax and retry (no platform call was made)"
+            )
         }
         Error::InvalidActionData { message } => {
-            format!("{head}invalid action data: {message} — fix the call arguments and retry (no platform call was made)")
+            format!(
+                "{head}invalid action data: {message} — fix the call arguments and retry (no platform call was made)"
+            )
         }
         Error::InvalidConfig { message } => {
-            format!("{head}invalid configuration: {message} — fix the environment setting and restart the session")
+            format!(
+                "{head}invalid configuration: {message} — fix the environment setting and restart the session"
+            )
         }
         Error::NoElementBounds => format!(
             "{head}the element matched but has no on-screen bounds — it may \

@@ -38,7 +38,10 @@ fn main() {
                 .last_observed("matched button \"Export\" (visible=false, enabled=true)"),
         )),
     };
-    println!("── SelectorNotMatched ──\n{}\n", render(TOOL, "press", &stale_selector));
+    println!(
+        "── SelectorNotMatched ──\n{}\n",
+        render(TOOL, "press", &stale_selector)
+    );
 
     // ── Permission denied — the platform's own consent instructions ──
     //
@@ -47,7 +50,10 @@ fn main() {
     let denied = Error::PermissionDenied {
         instructions: "grant Accessibility access in System Settings".into(),
     };
-    println!("── PermissionDenied ──\n{}\n", render(TOOL, "click", &denied));
+    println!(
+        "── PermissionDenied ──\n{}\n",
+        render(TOOL, "click", &denied)
+    );
 
     // ── The bridge is off — Chromium/Electron without a11y rendering ──
     let bridge_off = Error::AccessibilityNotEnabled {
@@ -66,23 +72,32 @@ fn main() {
     // anything NEW from a future xa11y release hits the non_exhaustive
     // wildcard instead of breaking the build.
     let transient: Vec<(&str, Error)> = vec![
-        ("Timeout", Error::Timeout {
-            elapsed: std::time::Duration::from_secs(3),
-            diagnosis: Some(Box::new(
-                Diagnosis::new()
-                    .condition("visible")
-                    .selector("dialog[name='Export…']")
-                    .last_observed("2 matches; both visible=false"),
-            )),
-        }),
-        ("ActionNotSupported", Error::ActionNotSupported {
-            action: "expand".into(),
-            role: xa11y::Role::Button,
-        }),
-        ("Platform", Error::Platform {
-            code: -1,
-            message: "pixel format not supported".into(),
-        }),
+        (
+            "Timeout",
+            Error::Timeout {
+                elapsed: std::time::Duration::from_secs(3),
+                diagnosis: Some(Box::new(
+                    Diagnosis::new()
+                        .condition("visible")
+                        .selector("dialog[name='Export…']")
+                        .last_observed("2 matches; both visible=false"),
+                )),
+            },
+        ),
+        (
+            "ActionNotSupported",
+            Error::ActionNotSupported {
+                action: "expand".into(),
+                role: xa11y::Role::Button,
+            },
+        ),
+        (
+            "Platform",
+            Error::Platform {
+                code: -1,
+                message: "pixel format not supported".into(),
+            },
+        ),
     ];
     for (variant, err) in transient {
         let msg = render(TOOL, "act", &err);

@@ -59,10 +59,7 @@ fn main() {
 
     for (label, wire) in [
         // The inputs ARE the wire payloads the MCP tool receives:
-        (
-            "whole app (tree)",
-            r#"{"name": "Reports"}"#,
-        ),
+        ("whole app (tree)", r#"{"name": "Reports"}"#),
         (
             "dialog subtree",
             r#"{"pid": 4242, "selector": "window[name='Export…']", "nth": 1}"#,

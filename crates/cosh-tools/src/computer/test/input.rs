@@ -1,7 +1,7 @@
 //! Tests for the input engines: pointer validation and the keyboard parse/parse/classify tables.
 #[cfg(test)]
 mod pointer_validation_tests {
-    use crate::computer::mouse::{validate, MIN_DRAG_MS};
+    use crate::computer::mouse::{MIN_DRAG_MS, validate};
     use crate::computer::types::{ComputerControl, PointerAction, PointerAnchor};
 
     const TOOL: &str = "computer_control";
@@ -128,7 +128,9 @@ mod pointer_validation_tests {
 mod keyboard_tests {
     use xa11y::Key;
 
-    use crate::computer::keyboard::{is_keyboard_step, is_wait_step, key_name, parse_key, parse_keys};
+    use crate::computer::keyboard::{
+        is_keyboard_step, is_wait_step, key_name, parse_key, parse_keys,
+    };
 
     const TOOL: &str = "computer_control";
 
@@ -211,7 +213,11 @@ mod keyboard_tests {
             ("win", Key::Meta),
         ];
         for (name, expected) in pairs {
-            assert_eq!(parse_keys(&[name.into()], TOOL), Ok(vec![expected]), "{name}");
+            assert_eq!(
+                parse_keys(&[name.into()], TOOL),
+                Ok(vec![expected]),
+                "{name}"
+            );
         }
         let err = parse_keys(&["hyper".into()], TOOL).expect_err("unknown modifier");
         assert!(err.contains("shift, ctrl, alt or meta"), "{err}");
@@ -273,4 +279,3 @@ mod keyboard_tests {
         assert_eq!(parsed, vec![Key::Shift, Key::Ctrl]);
     }
 }
-

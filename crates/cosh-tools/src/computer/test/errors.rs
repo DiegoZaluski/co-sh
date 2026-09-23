@@ -26,7 +26,10 @@ mod render_tests {
             instructions: "grant in System Settings".into(),
         };
         let out = render(TOOL, CTX, &err);
-        assert!(out.starts_with("computer_snapshot: resolve application: "), "{out}");
+        assert!(
+            out.starts_with("computer_snapshot: resolve application: "),
+            "{out}"
+        );
         assert!(out.contains("permission denied"), "{out}");
         assert!(out.contains("System Settings"), "{out}");
         assert!(out.contains("retry the same call"), "{out}");
@@ -73,9 +76,7 @@ mod render_tests {
     fn timeout_advises_budget_and_keeps_diagnosis() {
         let err = Error::Timeout {
             elapsed: Duration::from_millis(3000),
-            diagnosis: Some(Box::new(
-                diagnosis().condition("wait for detached").clone(),
-            )),
+            diagnosis: Some(Box::new(diagnosis().condition("wait for detached").clone())),
         };
         let out = render(TOOL, CTX, &err);
         assert!(out.contains("timed out after 3"), "{out}");
@@ -144,19 +145,41 @@ mod render_tests {
     fn every_variant_renders_tool_prefix() {
         use xa11y::Error as E;
         let errors: Vec<Error> = vec![
-            E::PermissionDenied { instructions: "i".into() },
-            E::AccessibilityNotEnabled { app: "a".into(), instructions: "i".into() },
+            E::PermissionDenied {
+                instructions: "i".into(),
+            },
+            E::AccessibilityNotEnabled {
+                app: "a".into(),
+                instructions: "i".into(),
+            },
             E::selector_not_matched("s"),
-            E::ElementStale { selector: "s".into() },
-            E::ActionNotSupported { action: "press".into(), role: xa11y::Role::Button },
+            E::ElementStale {
+                selector: "s".into(),
+            },
+            E::ActionNotSupported {
+                action: "press".into(),
+                role: xa11y::Role::Button,
+            },
             E::TextValueNotSupported,
             E::timeout(Duration::from_secs(1)),
-            E::InvalidSelector { selector: "s".into(), message: "m".into() },
-            E::InvalidActionData { message: "m".into() },
-            E::InvalidConfig { message: "m".into() },
+            E::InvalidSelector {
+                selector: "s".into(),
+                message: "m".into(),
+            },
+            E::InvalidActionData {
+                message: "m".into(),
+            },
+            E::InvalidConfig {
+                message: "m".into(),
+            },
             E::NoElementBounds,
-            E::Unsupported { feature: "f".into() },
-            E::Platform { code: 0, message: "m".into() },
+            E::Unsupported {
+                feature: "f".into(),
+            },
+            E::Platform {
+                code: 0,
+                message: "m".into(),
+            },
         ];
         for err in errors {
             let out = render(TOOL, CTX, &err);

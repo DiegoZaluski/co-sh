@@ -81,8 +81,7 @@ fn main() {
     // The inputs ARE the wire payloads the MCP tools receive — deserialize
     // each to show the shape is what the schema advertises:
     let snapshot_wire = r#"{"surface": "taskbar"}"#;
-    let _: ComputerSnapshot =
-        serde_json::from_str(snapshot_wire).expect("valid wire shape");
+    let _: ComputerSnapshot = serde_json::from_str(snapshot_wire).expect("valid wire shape");
     println!("taskbar snapshot wire: {snapshot_wire}");
 
     for (label, wire) in [

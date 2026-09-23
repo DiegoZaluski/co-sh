@@ -3,9 +3,9 @@
 //! (mouse/keyboard), the shared error renderer, the annotated screenshot
 //! and the apps focus queries. Extracted verbatim from the bottom of each
 //! implementation file — logic and assertions unchanged.
-mod pipelines;
-mod snapshot_surface;
-mod input;
-mod errors;
-mod screenshot;
 mod apps;
+mod errors;
+mod input;
+mod pipelines;
+mod screenshot;
+mod snapshot_surface;

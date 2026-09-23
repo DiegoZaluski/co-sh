@@ -365,7 +365,11 @@ fn build_act_is_chain_aware_element_first_asks_keyboard_first_denied() {
     );
     if let PermissionCheck::NeedsApproval(req) = result {
         assert_eq!(req.tool, "computer_act");
-        assert!(req.args.contains("menu_item[name='Rename']"), "{}", req.args);
+        assert!(
+            req.args.contains("menu_item[name='Rename']"),
+            "{}",
+            req.args
+        );
     }
 
     // A chain that types but never touches an element sends the text into

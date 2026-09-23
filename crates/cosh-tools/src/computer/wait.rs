@@ -97,7 +97,11 @@ fn wait_blocking(input: &ComputerWait) -> Result<WaitOutput, String> {
     // must reflect the whole call, app resolution included.
     let started = Instant::now();
 
-    let name = input.name.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let name = input
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     // The app lookup SHARES the call's budget instead of getting a fresh
     // one (review finding): bounded to the same 3 s slice snapshot uses
     // for "app surfaces", it can never eat the budget the condition
@@ -115,9 +119,7 @@ fn wait_blocking(input: &ComputerWait) -> Result<WaitOutput, String> {
         .selector
         .as_deref()
         .expect("validated: computer_wait carries a selector");
-    let locator = app
-        .locator(selector.trim())
-        .nth(input.nth.unwrap_or(1));
+    let locator = app.locator(selector.trim()).nth(input.nth.unwrap_or(1));
     let state = wait_state(input.state.unwrap_or_default());
     // The element wait gets whatever budget the app lookup left — the
     // TOTAL stays within the caller's timeout_ms (xa11y's poll loop
@@ -185,10 +187,7 @@ pub(crate) fn wait_on_locator(
     }
 }
 
-fn observation(
-    states: &xa11y::StateSet,
-    attached: bool,
-) -> WaitObservation {
+fn observation(states: &xa11y::StateSet, attached: bool) -> WaitObservation {
     if attached {
         WaitObservation {
             attached: true,

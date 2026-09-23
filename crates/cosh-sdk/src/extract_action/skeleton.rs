@@ -152,12 +152,7 @@ fn object_or_array_skeleton(
     "{}".to_string()
 }
 
-fn object_skeleton(
-    schema: &JsonValue,
-    depth: usize,
-    ref_hops: usize,
-    root: &JsonValue,
-) -> String {
+fn object_skeleton(schema: &JsonValue, depth: usize, ref_hops: usize, root: &JsonValue) -> String {
     let Some(props) = schema.get("properties").and_then(JsonValue::as_object) else {
         return "{}".to_string();
     };
@@ -177,7 +172,11 @@ fn object_skeleton(
         } else {
             "?"
         };
-        fields.push((key.clone(), skeleton(prop, depth + 1, ref_hops, root), marker));
+        fields.push((
+            key.clone(),
+            skeleton(prop, depth + 1, ref_hops, root),
+            marker,
+        ));
     }
     fields.sort_by_key(|(_, _, marker)| if marker.is_empty() { 0 } else { 1 });
     let truncated = fields.len() > MAX_PROPS;
@@ -194,27 +193,14 @@ fn object_skeleton(
     }
 }
 
-fn array_skeleton(
-    schema: &JsonValue,
-    depth: usize,
-    ref_hops: usize,
-    root: &JsonValue,
-) -> String {
+fn array_skeleton(schema: &JsonValue, depth: usize, ref_hops: usize, root: &JsonValue) -> String {
     match schema.get("items") {
-        Some(items) => format!(
-            "<array of {}>",
-            skeleton(items, depth + 1, ref_hops, root)
-        ),
+        Some(items) => format!("<array of {}>", skeleton(items, depth + 1, ref_hops, root)),
         None => "<array>".to_string(),
     }
 }
 
-fn union_skeleton(
-    schema: &JsonValue,
-    depth: usize,
-    ref_hops: usize,
-    root: &JsonValue,
-) -> String {
+fn union_skeleton(schema: &JsonValue, depth: usize, ref_hops: usize, root: &JsonValue) -> String {
     let branches = schema
         .get("oneOf")
         .or_else(|| schema.get("anyOf"))
@@ -296,7 +282,10 @@ mod skeleton_tests {
         });
         let rendered = schema_skeleton(&schema);
         assert!(rendered.contains("key: <string>"), "{rendered}");
-        assert!(rendered.contains("held?: <array of <string>>"), "{rendered}");
+        assert!(
+            rendered.contains("held?: <array of <string>>"),
+            "{rendered}"
+        );
         assert!(rendered.contains("text?"), "{rendered}");
     }
 

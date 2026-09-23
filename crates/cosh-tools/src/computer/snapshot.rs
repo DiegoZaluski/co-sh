@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use xa11y::{App, AppExt};
 
-use super::types::{ElementStates, SnapshotFormat, SnapshotOutput, StateNode, ComputerSnapshot};
+use super::types::{ComputerSnapshot, ElementStates, SnapshotFormat, SnapshotOutput, StateNode};
 
 /// Default auto-wait for the application to appear.
 pub(crate) const DEFAULT_TIMEOUT_MS: u64 = 3000;
@@ -74,7 +74,11 @@ fn snapshot_blocking(input: &ComputerSnapshot) -> Result<SnapshotOutput, String>
         return snapshot_surface(input, surface, max_depth, format);
     }
 
-    let name = input.name.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let name = input
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
 
     let app = match (name, input.pid) {
         (Some(name), None) => App::by_name(name, timeout),
@@ -247,4 +251,3 @@ fn count_nodes(node: &StateNode) -> usize {
     }
     total
 }
-

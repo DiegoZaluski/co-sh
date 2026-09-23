@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use xa11y::{Provider, ShellSurface, ShellSurfaceKind};
 
-use super::types::{ComputerAct, ComputerSnapshot, ComputerScreenshot, SurfaceKind};
+use super::types::{ComputerAct, ComputerScreenshot, ComputerSnapshot, SurfaceKind};
 
 /// Map the wire enum onto xa11y's kind vocabulary — total, so a missed arm
 /// fails compilation rather than silently targeting the wrong surface.
@@ -184,7 +184,10 @@ pub fn resolve(surface: SurfaceKind, timeout: Duration) -> Result<ShellSurface, 
     let provider = xa11y::provider().map_err(|e| {
         super::errors::render(
             "computer",
-            &format!("initialize the accessibility provider (for surface `{}`)", surface_label(surface)),
+            &format!(
+                "initialize the accessibility provider (for surface `{}`)",
+                surface_label(surface)
+            ),
             &e,
         )
     })?;

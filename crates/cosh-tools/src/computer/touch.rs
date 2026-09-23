@@ -47,7 +47,9 @@ pub fn validate(step: &ComputerAct, tool: &str) -> Result<(), String> {
     }
     super::surface::validate_act(step)?;
     if step.nth == Some(0) {
-        return Err(format!("{tool}: `nth` is 1-based; use 1 for the first match"));
+        return Err(format!(
+            "{tool}: `nth` is 1-based; use 1 for the first match"
+        ));
     }
     if step.held.is_some() {
         return Err(format!(
@@ -115,7 +117,11 @@ pub fn run_step(step: &ComputerAct, tool: &str) -> Result<String, String> {
             super::surface::resolve(surface_kind, timeout).map_err(|e| format!("{tool}: {e}"))?;
         return run_step_on_surface(step, surface, timeout, tool);
     }
-    let name = step.name.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let name = step
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     let app = match (name, step.pid) {
         (Some(name), None) => App::by_name(name, timeout),
         (None, Some(pid)) => App::by_pid(pid, timeout),
@@ -189,9 +195,7 @@ fn dispatch_action(
             locator.perform_action(step.value.as_deref().unwrap_or_default())
         }
     };
-    result.map_err(|e| {
-        super::errors::render(tool, &action_name(action).to_lowercase(), &e)
-    })?;
+    result.map_err(|e| super::errors::render(tool, &action_name(action).to_lowercase(), &e))?;
 
     Ok(format!(
         "{} `{}` ({})",

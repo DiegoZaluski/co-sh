@@ -74,10 +74,7 @@ pub fn validate(step: &ComputerControl, tool: &str) -> Result<(), String> {
     // Element form needs a selector AND exactly one root (app scope or a
     // shell surface — phase-6 field test: a surface+selector step is the
     // same element form, not a scope leak).
-    if step.selector.is_some()
-        && step.app.is_none()
-        && step.pid.is_none()
-        && step.surface.is_none()
+    if step.selector.is_some() && step.app.is_none() && step.pid.is_none() && step.surface.is_none()
     {
         return Err(format!(
             "{tool}: the element form requires `app`, `pid` or `surface` together with `selector`"
@@ -102,7 +99,9 @@ pub fn validate(step: &ComputerControl, tool: &str) -> Result<(), String> {
         ));
     }
     if step.nth == Some(0) {
-        return Err(format!("{tool}: `nth` is 1-based; use 1 for the first match"));
+        return Err(format!(
+            "{tool}: `nth` is 1-based; use 1 for the first match"
+        ));
     }
     if step.nth.is_some() && step.selector.is_none() {
         return Err(format!("{tool}: `nth` requires `selector`"));
@@ -138,7 +137,9 @@ pub fn validate(step: &ComputerControl, tool: &str) -> Result<(), String> {
         }
     }
     if step.count == Some(0) {
-        return Err(format!("{tool}: `count` is 1-based; use 1 for a single click"));
+        return Err(format!(
+            "{tool}: `count` is 1-based; use 1 for a single click"
+        ));
     }
     if let Some(duration) = step.duration_ms {
         if action != PointerAction::Drag {
@@ -172,7 +173,9 @@ fn validate_drag(step: &ComputerControl, tool: &str) -> Result<(), String> {
     let start_is_element = step.selector.is_some();
 
     if coord_end && (step.x2.is_none() || step.y2.is_none()) {
-        return Err(format!("{tool}: `drag` by coordinates requires both `x2` and `y2`"));
+        return Err(format!(
+            "{tool}: `drag` by coordinates requires both `x2` and `y2`"
+        ));
     }
     if coord_end && step.to_selector.is_some() {
         return Err(format!(
@@ -225,10 +228,9 @@ pub fn run_step(
         // the failing selector in context — no extra wrapper here.
         let element = resolve_element(step, selector, step.nth.unwrap_or(1), tool)?;
         Some(
-            xa11y::point_for(&element, anchor(step.anchor.unwrap_or_default()))
-                .map_err(|e| {
-                    super::errors::render(tool, &format!("resolve point for `{selector}`"), &e)
-                })?,
+            xa11y::point_for(&element, anchor(step.anchor.unwrap_or_default())).map_err(|e| {
+                super::errors::render(tool, &format!("resolve point for `{selector}`"), &e)
+            })?,
         )
     } else {
         match (step.x, step.y) {
@@ -245,10 +247,7 @@ pub fn run_step(
     let result = match action {
         PointerAction::Click => sim.mouse().click_with(
             point_target(point),
-            ClickOptions::new()
-                .button(button)
-                .count(count)
-                .held(held),
+            ClickOptions::new().button(button).count(count).held(held),
         ),
         // `count` is honored on EVERY click action: double_click defaults to
         // 2, right_click defaults to 1 — passing an explicit `count` always
@@ -306,9 +305,7 @@ pub fn run_step(
             )
         }
     };
-    result.map_err(|e| {
-        super::errors::render(tool, &action_name(action).to_lowercase(), &e)
-    })?;
+    result.map_err(|e| super::errors::render(tool, &action_name(action).to_lowercase(), &e))?;
 
     // Human-facing report with the EFFECTIVE point — for the element form
     // this is what the bounds resolved to at dispatch time, which makes a
@@ -347,12 +344,7 @@ pub fn run_step(
             // review): re-resolving `to_selector` here could fail after the
             // drag already ran and report a success as an error.
             let to = drag_to.expect("drag arm resolved its end point before dispatch");
-            format!(
-                "dragged {} → ({},{})",
-                where_at(step, point),
-                to.x,
-                to.y
-            )
+            format!("dragged {} → ({},{})", where_at(step, point), to.x, to.y)
         }
     })
 }

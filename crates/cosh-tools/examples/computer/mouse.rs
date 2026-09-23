@@ -21,7 +21,7 @@
 //! cargo run --example computer-mouse
 //! ```
 
-use cosh_tools::computer::mouse::{validate, DEFAULT_DRAG_MS, MIN_DRAG_MS};
+use cosh_tools::computer::mouse::{DEFAULT_DRAG_MS, MIN_DRAG_MS, validate};
 use cosh_tools::computer::types::{ComputerControl, PointerAction, PointerAnchor};
 
 fn main() {

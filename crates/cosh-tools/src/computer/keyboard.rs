@@ -67,9 +67,7 @@ pub fn run_keyboard_step(
         let names: Vec<String> = held.iter().map(key_name).collect();
         sim.keyboard()
             .chord(parsed, &held)
-            .map_err(|e| {
-                super::errors::render(tool, &format!("chord {key} + {names:?}"), &e)
-            })?;
+            .map_err(|e| super::errors::render(tool, &format!("chord {key} + {names:?}"), &e))?;
         Ok(format!("pressed {key} with {} held", names.join(",")))
     }
 }
@@ -117,7 +115,9 @@ pub fn parse_key(name: &str, tool: &str) -> Result<Key, String> {
         }
         _ if lower.starts_with('f')
             && lower.len() <= 3
-            && lower[1..].parse::<u8>().is_ok_and(|n| (1..=12).contains(&n)) =>
+            && lower[1..]
+                .parse::<u8>()
+                .is_ok_and(|n| (1..=12).contains(&n)) =>
         {
             Key::F(lower[1..].parse::<u8>().unwrap_or(1))
         }
