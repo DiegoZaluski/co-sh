@@ -168,6 +168,19 @@ impl App {
                     self.copy_registration_form_field();
                     return Ok(false);
                 }
+                // While the bare prompt owns the keyboard, Ctrl+C clears
+                // the whole draft (readline-style kill) instead of asking
+                // to quit — leaving the app then takes an explicit blur
+                // (clicking outside the prompt area) first. The clear is
+                // recorded as ONE atomic Replace group, so a single Ctrl+Z
+                // brings the draft back exactly. Sits AFTER the selection
+                // gates on purpose: a live selection still copies
+                // (universal convention); the clear only fires with
+                // nothing selected.
+                if self.prompt_owns_keyboard() && !self.prompt_view.has_selection() {
+                    self.prompt_clear();
+                    return Ok(false);
+                }
                 self.pending_delete = None;
                 self.dialog.show(DialogType::Confirm {
                     message: "Quit cosh?".into(),
@@ -1680,6 +1693,15 @@ impl App {
     fn insert_newline_in_prompt(&mut self) {
         self.prompt_view.note_activity();
         self.prompt_view.insert_newline();
+    }
+
+    /// Ctrl+C on the chat prompt: wipe the whole draft. Mirrors `prompt_undo`
+    /// bookkeeping — activity note plus slash-menu re-sync — because the draft
+    /// text changed under the menu.
+    fn prompt_clear(&mut self) {
+        self.prompt_view.clear_all();
+        self.prompt_view.note_activity();
+        self.slash_menu.update(&self.prompt_view.input);
     }
 
     /// Ctrl+Z on the chat prompt: step back one edit-history group (last

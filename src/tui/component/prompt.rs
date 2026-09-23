@@ -438,6 +438,20 @@ impl PromptView {
         self.record_edit(EditKind::Replace);
     }
 
+    /// Ctrl+C while the prompt is focused: wipe the WHOLE draft — text,
+    /// cursor, paste placeholders — as ONE atomic Replace group, so a
+    /// single Ctrl+Z restores everything. Unlike `clear_draft` (the
+    /// slash-menu dismiss path) the edit history is KEPT: the clear is a
+    /// normal, reversible edit.
+    pub fn clear_all(&mut self) {
+        self.input.clear();
+        self.cursor_pos = 0;
+        self.history_index = -1;
+        self.pasted_parts.clear();
+        self.clear_selection();
+        self.record_edit(EditKind::Replace);
+    }
+
     /// Ctrl+Z: step back one edit group and apply the restored snapshot
     /// (text, cursor, paste mappings). A group boundary is always a whole
     /// state: mid-group intermediate states are never surfaced.

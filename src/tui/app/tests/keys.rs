@@ -358,6 +358,8 @@ async fn esc_with_confirm_dialog_visible_does_not_set_stop_signal() {
     });
     app.process_key_event(KeyEvent::new(K::Char('/'), KeyModifiers::NONE))
         .unwrap();
+    // Blur the prompt: focused, Ctrl+C clears the draft instead of quitting.
+    app.prompt_view.blur();
     app.process_key_event(KeyEvent::new(K::Char('c'), KeyModifiers::CONTROL))
         .unwrap();
     assert!(app.is_confirm_dialog_visible());

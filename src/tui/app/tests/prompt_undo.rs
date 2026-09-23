@@ -185,3 +185,81 @@ async fn typing_after_undo_discards_the_redo_branch() {
     // Noop redo must NOT have restored "abc".
     assert_eq!(app.prompt_view.input, "x");
 }
+
+/// Ctrl+C with the prompt focused clears the whole draft; a single Ctrl+Z
+/// (one atomic Replace group) brings it back exactly, Ctrl+Y re-clears.
+#[tokio::test]
+async fn ctrl_c_clears_the_focused_prompt_and_ctrl_z_restores_it() {
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = session_app();
+
+    type_text(&mut app, "rascunho inteiro");
+    assert_eq!(app.prompt_view.input, "rascunho inteiro");
+
+    app.process_key_event(ctrl(KeyCode::Char('c'))).unwrap();
+    assert_eq!(app.prompt_view.input, "");
+    assert_eq!(app.prompt_view.cursor_pos, 0);
+    assert!(
+        !app.is_confirm_dialog_visible(),
+        "focused Ctrl+C must clear the draft, not ask to quit"
+    );
+    assert!(!app.should_quit, "focused Ctrl+C must not quit");
+
+    app.process_key_event(ctrl(KeyCode::Char('z'))).unwrap();
+    assert_eq!(
+        app.prompt_view.input, "rascunho inteiro",
+        "one Ctrl+Z must restore the whole cleared draft"
+    );
+    assert_eq!(app.prompt_view.cursor_pos, app.prompt_view.input.len());
+
+    app.process_key_event(ctrl(KeyCode::Char('y'))).unwrap();
+    assert_eq!(app.prompt_view.input, "");
+}
+
+/// Ctrl+C with the prompt BLURRED keeps the old meaning: the quit-confirm
+/// dialog. The clear only fires while the prompt owns the keyboard.
+#[tokio::test]
+async fn ctrl_c_with_the_prompt_blurred_still_shows_the_quit_confirm() {
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = session_app();
+
+    type_text(&mut app, "conteúdo");
+    app.prompt_view.blur();
+
+    app.process_key_event(ctrl(KeyCode::Char('c'))).unwrap();
+    assert!(
+        app.is_confirm_dialog_visible(),
+        "blurred Ctrl+C must keep the quit-confirm meaning"
+    );
+    assert!(
+        !app.should_quit,
+        "the confirm dialog itself decides, not the keypress"
+    );
+    assert_eq!(
+        app.prompt_view.input, "conteúdo",
+        "the draft must be untouched by the blurred Ctrl+C"
+    );
+}
+
+/// Ctrl+C with the slash menu open and the prompt focused still clears the
+/// draft (the prompt owns the keyboard while filtering) and the menu
+/// re-syncs shut on the empty input — same as a Ctrl+Z to empty.
+#[tokio::test]
+async fn ctrl_c_clears_the_draft_even_with_the_slash_menu_open() {
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = session_app();
+
+    type_text(&mut app, "/he");
+    assert!(app.slash_menu.visible, "typing a slash command opens the menu");
+
+    app.process_key_event(ctrl(KeyCode::Char('c'))).unwrap();
+    assert_eq!(app.prompt_view.input, "");
+    assert!(!app.slash_menu.visible, "the menu closes on the empty draft");
+    assert!(!app.is_confirm_dialog_visible());
+
+    app.process_key_event(ctrl(KeyCode::Char('z'))).unwrap();
+    assert_eq!(app.prompt_view.input, "/he");
+}

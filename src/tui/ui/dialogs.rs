@@ -53,7 +53,7 @@ const SHORTCUTS: &[ShortcutLine] = &[
     ShortcutLine::Key("Ctrl+K", "Show/hide keyboard shortcuts"),
     ShortcutLine::Key("Ctrl+B", "Toggle left panel"),
     ShortcutLine::Key("Ctrl+P", "Toggle right panel"),
-    ShortcutLine::Key("Ctrl+C", "Copy selection / Quit cosh?"),
+    ShortcutLine::Key("Ctrl+C", "Copy selection / clear prompt (focused) / Quit cosh?"),
     ShortcutLine::Key("Ctrl+T", "Toggle thinking (show/hide reasoning)"),
     ShortcutLine::Key("Ctrl+D", "Toggle tool details (show/hide completed)"),
     ShortcutLine::Key("Ctrl+E", "Toggle diagnostics (show/hide LSP findings)"),

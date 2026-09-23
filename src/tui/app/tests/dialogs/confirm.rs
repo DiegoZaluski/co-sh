@@ -123,7 +123,10 @@ async fn confirm_quit_full_real_input_flow_with_slash_menu() {
         .unwrap();
     assert!(app.slash_menu.visible, "slash menu open after typing '/'");
 
-    // Ctrl+C opens the quit confirm (default selection = "No").
+    // Ctrl+C opens the quit confirm (default selection = "No"). The prompt
+    // is blurred first: with the prompt focused, Ctrl+C clears the draft
+    // instead of asking to quit.
+    app.prompt_view.blur();
     app.process_key_event(key(K::Char('c'), KeyModifiers::CONTROL))
         .unwrap();
     assert!(
@@ -158,6 +161,8 @@ async fn confirm_quit_sovereign_enter_beats_slash_menu() {
         .unwrap();
     assert!(app.slash_menu.visible);
 
+    // Blur the prompt: focused, Ctrl+C clears the draft instead of quitting.
+    app.prompt_view.blur();
     app.process_key_event(KeyEvent::new(K::Char('c'), KeyModifiers::CONTROL))
         .unwrap();
     assert!(app.is_confirm_dialog_visible());
@@ -194,6 +199,8 @@ async fn confirm_quit_sovereign_esc_cancels_without_menu_reaction() {
     });
     app.process_key_event(KeyEvent::new(K::Char('/'), KeyModifiers::NONE))
         .unwrap();
+    // Blur the prompt: focused, Ctrl+C clears the draft instead of quitting.
+    app.prompt_view.blur();
     app.process_key_event(KeyEvent::new(K::Char('c'), KeyModifiers::CONTROL))
         .unwrap();
     assert!(app.is_confirm_dialog_visible());
@@ -221,6 +228,8 @@ async fn confirm_quit_swallows_other_keys() {
     });
     app.process_key_event(KeyEvent::new(K::Char('/'), KeyModifiers::NONE))
         .unwrap();
+    // Blur the prompt: focused, Ctrl+C clears the draft instead of quitting.
+    app.prompt_view.blur();
     app.process_key_event(KeyEvent::new(K::Char('c'), KeyModifiers::CONTROL))
         .unwrap();
     let input_before = app.prompt_view.input.clone();
