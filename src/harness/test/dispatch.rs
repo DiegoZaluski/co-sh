@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use super::super::core::{Harness, annotate_summary_tool_set};
 use cosh_sdk::extract_action::ToolCallData;
+use cosh_tools::fs::Fs;
 use rmcp::ErrorData as McpError;
 use rmcp::ServiceExt;
 use rmcp::handler::server::ServerHandler;
@@ -755,6 +756,227 @@ async fn fs_write_rejects_mixed_flat_and_batch_arguments() {
     assert!(
         !dir.path().join("flat.txt").exists() && !dir.path().join("batch.txt").exists(),
         "an ambiguous call must not write anything"
+    );
+}
+
+// ── fs_read flat single-file dispatch ─────────────────────────────────────
+
+#[tokio::test]
+async fn fs_read_flat_shape_reads_one_file() {
+    use cosh_sdk::connector::Connector;
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("notes.md"), "hello\n").unwrap();
+    let mut h = Harness::new(
+        Connector::new("openai").unwrap(),
+        dir.path().to_str().unwrap(),
+        HashSet::new(),
+    );
+    h.push_tool_call(ToolCallData {
+        id: String::new(),
+        name: "fs_read".into(),
+        arguments: json!({ "path": "notes.md" }),
+        thought_signature: String::new(),
+    });
+    let out = h.dispatch_next().await.expect("flat read should succeed");
+    assert!(
+        out.contains("notes.md") && out.contains("1| hello"),
+        "result names the read file and carries its content: {out}"
+    );
+}
+
+#[tokio::test]
+async fn fs_read_flat_shape_supports_offset_limit() {
+    use cosh_sdk::connector::Connector;
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("lines.txt"), "a\nb\nc\n").unwrap();
+    let mut h = Harness::new(
+        Connector::new("openai").unwrap(),
+        dir.path().to_str().unwrap(),
+        HashSet::new(),
+    );
+    h.push_tool_call(ToolCallData {
+        id: String::new(),
+        name: "fs_read".into(),
+        arguments: json!({ "path": "lines.txt", "offset": 2, "limit": 2 }),
+        thought_signature: String::new(),
+    });
+    let out = h
+        .dispatch_next()
+        .await
+        .expect("flat read with offset/limit should succeed");
+    assert!(
+        out.contains("b") && out.contains("c") && !out.contains("1| a"),
+        "only the requested range is returned: {out}"
+    );
+}
+
+#[tokio::test]
+async fn fs_read_legacy_line_range_still_works_but_is_not_advertised() {
+    use cosh_sdk::connector::Connector;
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("lines.txt"), "a\nb\nc\n").unwrap();
+    let mut h = Harness::new(
+        Connector::new("openai").unwrap(),
+        dir.path().to_str().unwrap(),
+        HashSet::new(),
+    );
+    h.push_tool_call(ToolCallData {
+        id: String::new(),
+        name: "fs_read".into(),
+        arguments: json!({ "path": "lines.txt", "line_range": "2-3" }),
+        thought_signature: String::new(),
+    });
+    let out = h
+        .dispatch_next()
+        .await
+        .expect("legacy line_range read should still succeed");
+    assert!(
+        out.contains("b") && out.contains("c") && !out.contains("1| a"),
+        "only the requested range is returned: {out}"
+    );
+    let schema = &Fs::new().description_read["inputSchema"]["properties"];
+    assert!(
+        schema.get("line_range").is_none() && schema.get("offset").is_some(),
+        "schema advertises offset/limit, not line_range"
+    );
+}
+
+#[tokio::test]
+async fn fs_read_offset_without_limit_reads_syntactic_block() {
+    use cosh_sdk::connector::Connector;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut src = String::new();
+    src.push_str("// padding line to push fn main past the head\n");
+    src.push_str("fn main() {\n    println!(\"hi\");\n}\n");
+    std::fs::write(dir.path().join("main.rs"), &src).unwrap();
+    let mut h = Harness::new(
+        Connector::new("openai").unwrap(),
+        dir.path().to_str().unwrap(),
+        HashSet::new(),
+    );
+    h.push_tool_call(ToolCallData {
+        id: String::new(),
+        name: "fs_read".into(),
+        arguments: json!({ "path": "main.rs", "offset": 2 }),
+        thought_signature: String::new(),
+    });
+    let out = h
+        .dispatch_next()
+        .await
+        .expect("offset without limit should succeed");
+    assert!(
+        out.contains("fn main"),
+        "offset without limit reads the syntactic block containing the line: {out}"
+    );
+}
+
+#[tokio::test]
+async fn fs_read_offset_wins_over_legacy_line_range() {
+    use cosh_sdk::connector::Connector;
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("lines.txt"), "a\nb\nc\nd\ne\n").unwrap();
+    let mut h = Harness::new(
+        Connector::new("openai").unwrap(),
+        dir.path().to_str().unwrap(),
+        HashSet::new(),
+    );
+    h.push_tool_call(ToolCallData {
+        id: String::new(),
+        name: "fs_read".into(),
+        arguments: json!({
+            "path": "lines.txt",
+            "offset": 2,
+            "limit": 1,
+            "line_range": "4-5"
+        }),
+        thought_signature: String::new(),
+    });
+    let out = h
+        .dispatch_next()
+        .await
+        .expect("offset/limit should win over legacy line_range");
+    assert!(
+        out.contains("2| b") && !out.contains("4| d"),
+        "offset+limit range takes precedence over legacy line_range: {out}"
+    );
+}
+
+#[tokio::test]
+async fn fs_read_rejects_multi_target_batch() {
+    use cosh_sdk::connector::Connector;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::new(
+        Connector::new("openai").unwrap(),
+        dir.path().to_str().unwrap(),
+        HashSet::new(),
+    );
+    h.push_tool_call(ToolCallData {
+        id: String::new(),
+        name: "fs_read".into(),
+        arguments: json!({
+            "targets": [
+                { "path": "a.txt" },
+                { "path": "b.txt" }
+            ]
+        }),
+        thought_signature: String::new(),
+    });
+    let err = h.dispatch_next().await.unwrap_err();
+    assert!(
+        err.contains("ONE file per call") && err.contains("path"),
+        "batch rejection must teach the flat shape: {err}"
+    );
+}
+
+#[tokio::test]
+async fn fs_read_rejects_mixed_flat_and_batch_arguments() {
+    use cosh_sdk::connector::Connector;
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("flat.txt"), "flat\n").unwrap();
+    std::fs::write(dir.path().join("batch.txt"), "batch\n").unwrap();
+    let mut h = Harness::new(
+        Connector::new("openai").unwrap(),
+        dir.path().to_str().unwrap(),
+        HashSet::new(),
+    );
+    h.push_tool_call(ToolCallData {
+        id: String::new(),
+        name: "fs_read".into(),
+        arguments: json!({
+            "path": "flat.txt",
+            "targets": [{ "path": "batch.txt" }]
+        }),
+        thought_signature: String::new(),
+    });
+    let err = h.dispatch_next().await.unwrap_err();
+    assert!(
+        err.contains("ONE file per call") && err.contains("never both"),
+        "mixed shapes must be rejected with a correction: {err}"
+    );
+}
+
+#[tokio::test]
+async fn fs_read_empty_arguments_fail_instead_of_reading_nothing() {
+    use cosh_sdk::connector::Connector;
+
+    let mut h = Harness::new(Connector::new("openai").unwrap(), ".", HashSet::new());
+    h.push_tool_call(ToolCallData {
+        id: String::new(),
+        name: "fs_read".into(),
+        arguments: json!({}),
+        thought_signature: String::new(),
+    });
+    let err = h.dispatch_next().await.unwrap_err();
+    assert!(
+        err.contains("invalid") || err.contains("expected") || err.contains("missing"),
+        "empty args must surface a parse error, not empty results: {err}"
     );
 }
 

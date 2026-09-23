@@ -10,7 +10,7 @@
 //!   verbatim to a scratch log at `<OS temp>/cosh/<content-hash>.log` and
 //!   replaced in the model-facing text with a structured notice pointing at
 //!   the file. The model can then read the omitted section back gradually
-//!   with `fs_read` (using `line_range`) or `find_grep` — no re-execution,
+//!   with `fs_read` (using `offset`/`limit`) or `find_grep` — no re-execution,
 //!   no information loss.
 //!
 //! Used by `bash_run` ([`MAX_TOOL_OUTPUT_TOKENS`]) and `web_fetch`
@@ -185,7 +185,7 @@ fn truncation_notice(
          The middle of this output was removed to conserve context.\n\
          omitted: {omitted_lines} lines, {omitted_bytes} bytes (~{omitted_tokens} tokens)\n\
          The FULL output is saved at: {path}\n\
-         Read it in parts with fs_read (targets: [{{\"path\": \"{path}\", \"line_range\": \"50-100\"}}])\n\
+         Read it in parts with fs_read ({{\"path\": \"{path}\", \"offset\": 50, \"limit\": 100}})\n\
          or search it with find_grep (path: \"{path}\", line_range: \"1-100\").\n\
          ════════════════════════════════════════════\n"
     )

@@ -42,6 +42,9 @@ fn main() {
             line: None,
             symbol: None,
             line_range: None,
+
+            offset: None,
+            limit: None,
         }])
         .await;
     let header = &results[0].header;
@@ -102,6 +105,9 @@ fn main() {
             line: None,
             symbol: None,
             line_range: None,
+
+            offset: None,
+            limit: None,
         }])
         .await;
     let read_c = fs
@@ -110,6 +116,9 @@ fn main() {
             line: None,
             symbol: None,
             line_range: None,
+
+            offset: None,
+            limit: None,
         }])
         .await;
 

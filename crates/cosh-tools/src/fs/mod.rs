@@ -131,14 +131,15 @@ impl Fs {
             description_read: serde_json::json!({
                 "name": "fs_read",
                 "description": concat!(
-                    "Read one or more files, named symbols, or exact line ranges from ",
-                    "the project. Each target can specify: a path with an optional ",
-                    "`line` number (reads the syntactic block containing that line), ",
-                    "an optional `symbol` name (function, class, variable) to look up, ",
-                    "or an optional `line_range` (\"start-end\", 1-based inclusive, ",
-                    "comma-separated for multiple disjoint ranges) to read exact ",
-                    "lines without AST resolution. `line_range` takes precedence ",
-                    "over `line`/`symbol`. Every result carries a \u{00b6}path#TAG ",
+                    "Read one file, named symbols, or a range of lines from ",
+                    "the project. The call can specify: a path with an optional ",
+                    "`offset` (1-based line number to start reading from — reads ",
+                    "the syntactic block containing that line when used without ",
+                    "`limit`), an optional `limit` (number of lines to read; only ",
+                    "provide together with `offset`, if the file is too large to ",
+                    "read at once), or an optional `symbol` name (function, class, ",
+                    "variable) to look up. `symbol` takes precedence over ",
+                    "`offset`/`limit`. Every result carries a \u{00b6}path#TAG ",
                     "header; lines are numbered `N| text` so edits can anchor ",
                     "directly. After an fs_edit the response also carries the ",
                     "updated header — you only need to re-read when you want ",
@@ -150,45 +151,37 @@ impl Fs {
                 ),
                 "inputSchema": {
                     "type": "object",
+                    "additionalProperties": false,
                     "properties": {
-                        "targets": {
-                            "type": "array",
-                            "description": "List of read targets",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "path": {
-                                        "type": "string",
-                                        "description": "Path to the file to read, relative to the project root"
-                                    },
-                                    "line": {
-                                        "type": "integer",
-                                        "description": concat!(
-                                            "Optional specific 1-based line number to read ",
-                                            "(reads the syntactic block containing that line)"
-                                        )
-                                    },
-                                    "symbol": {
-                                        "type": "string",
-                                        "description": concat!(
-                                            "Optional symbol name to look up ",
-                                            "(function, class, variable) within the file"
-                                        )
-                                    },
-                                    "line_range": {
-                                        "type": "string",
-                                        "description": concat!(
-                                            "Optional 1-based inclusive line range(s) to read exactly, ",
-                                            "e.g. \"50-100\" or \"10-20,200-220\"; takes precedence ",
-                                            "over line/symbol and does not use AST block resolution"
-                                        )
-                                    }
-                                },
-                                "required": ["path"]
-                            }
+                        "path": {
+                            "type": "string",
+                            "description": "Path to the file to read, relative to the project root"
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "description": concat!(
+                                "Optional 1-based line number to start reading from. Only ",
+                                "provide if the file is too large to read at once. Without ",
+                                "`limit`, reads the syntactic block containing that line; ",
+                                "with `limit`, reads exactly offset..offset+limit-1"
+                            )
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": concat!(
+                                "Optional number of lines to read. Only provide together ",
+                                "with `offset`, if the file is too large to read at once"
+                            )
+                        },
+                        "symbol": {
+                            "type": "string",
+                            "description": concat!(
+                                "Optional symbol name to look up ",
+                                "(function, class, variable) within the file"
+                            )
                         }
                     },
-                    "required": ["targets"]
+                    "required": ["path"]
                 }
             }),
             description_write: serde_json::json!({

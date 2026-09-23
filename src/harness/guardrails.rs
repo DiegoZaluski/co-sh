@@ -34,8 +34,10 @@ pub enum PermissionCheck {
 /// Extract all paths from tool arguments for permission checking.
 ///
 /// Supports the following argument shapes:
-/// - `{ "targets": [{ "path": "..." }, ...] }` (fs_read, fs_write, fs_edit)
-/// - `{ "path": "..." }` (fs_edit flat single-file form, fs_rollback)
+/// - `{ "path": "..." }` — the advertised flat single-file form (fs_read,
+///   fs_write, fs_edit, fs_rollback)
+/// - `{ "targets": [{ "path": "..." }, ...] }` — the legacy batch form, kept
+///   for single-element compatibility (fs_read, fs_write, fs_edit)
 /// - `{ "path": "..." }` / `{ "paths": [...] }` (find_glob, find_grep)
 pub(crate) fn extract_paths_from_args(tool_name: &str, args: &Value) -> Vec<String> {
     match tool_name {
@@ -47,7 +49,7 @@ pub(crate) fn extract_paths_from_args(tool_name: &str, args: &Value) -> Vec<Stri
                     .map(String::from)
                     .collect()
             } else {
-                // fs_edit's advertised single-file form: a flat {path, ...}.
+                // The advertised flat single-file form: a flat {path, ...}.
                 args.get("path")
                     .and_then(|p| p.as_str())
                     .map(String::from)

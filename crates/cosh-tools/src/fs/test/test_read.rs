@@ -41,12 +41,18 @@ async fn test_function_search() {
                     line: None,
                     symbol: Some("fixture_symbol".to_string()),
                     line_range: None,
+
+                    offset: None,
+                    limit: None,
                 },
                 Target {
                     path: plain_file.to_string_lossy().to_string(),
                     line: None,
                     symbol: None,
                     line_range: None,
+
+                    offset: None,
+                    limit: None,
                 },
             ],
         },
@@ -76,6 +82,9 @@ async fn test_line_block() {
                 line: Some(5),
                 symbol: None,
                 line_range: None,
+
+                offset: None,
+                limit: None,
             }],
         },
     )
@@ -97,6 +106,244 @@ async fn test_line_block() {
 // ── line_range exact reads ─────────────────────────────────────────────
 
 #[tokio::test]
+async fn test_offset_limit_reads_exact_lines() {
+    let dir = temp_dir("offset_limit");
+    let file = dir.join("a.txt");
+    std::fs::write(&file, "l1\nl2\nl3\nl4\nl5\nl6\n").unwrap();
+
+    let results = read(
+        meta_with_root(&dir),
+        FsRead {
+            targets: vec![Target {
+                path: file.to_string_lossy().to_string(),
+                line: None,
+                symbol: None,
+                line_range: None,
+                offset: Some(2),
+                limit: Some(3),
+            }],
+        },
+    )
+    .await;
+
+    assert_eq!(results.len(), 1);
+    let r = &results[0];
+    assert!(r.warnings.is_none(), "unexpected warning: {:?}", r.warnings);
+    assert!(r.content.contains("2| l2"), "line 2 shown: {}", r.content);
+    assert!(r.content.contains("3| l3"), "line 3 shown: {}", r.content);
+    assert!(r.content.contains("4| l4"), "line 4 shown: {}", r.content);
+    assert!(
+        !r.content.contains("5| l5") && !r.content.contains("1| l1"),
+        "lines outside offset..offset+limit-1 must not appear: {}",
+        r.content
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn test_offset_limit_clamps_beyond_eof() {
+    let dir = temp_dir("offset_limit_eof");
+    let file = dir.join("a.txt");
+    std::fs::write(&file, "l1\nl2\nl3\n").unwrap();
+
+    let results = read(
+        meta_with_root(&dir),
+        FsRead {
+            targets: vec![Target {
+                path: file.to_string_lossy().to_string(),
+                line: None,
+                symbol: None,
+                line_range: None,
+                offset: Some(2),
+                limit: Some(100),
+            }],
+        },
+    )
+    .await;
+
+    assert_eq!(results.len(), 1);
+    let r = &results[0];
+    assert!(
+        r.warnings.is_none(),
+        "clamped range is not an error: {:?}",
+        r.warnings
+    );
+    assert!(
+        r.content.contains("2| l2") && r.content.contains("3| l3"),
+        "lines to EOF shown: {}",
+        r.content
+    );
+    assert!(
+        !r.content.contains("4| "),
+        "nothing beyond EOF may appear: {}",
+        r.content
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn test_limit_without_offset_is_ignored_and_reads_whole_file() {
+    let dir = temp_dir("limit_only");
+    let file = dir.join("a.txt");
+    std::fs::write(&file, "l1\nl2\nl3\n").unwrap();
+
+    let results = read(
+        meta_with_root(&dir),
+        FsRead {
+            targets: vec![Target {
+                path: file.to_string_lossy().to_string(),
+                line: None,
+                symbol: None,
+                line_range: None,
+                offset: None,
+                limit: Some(1),
+            }],
+        },
+    )
+    .await;
+
+    assert_eq!(results.len(), 1);
+    let r = &results[0];
+    assert!(
+        r.content.contains("1| l1") && r.content.contains("3| l3"),
+        "limit without offset must not silently slice: {}",
+        r.content
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn test_offset_wins_over_legacy_line_range() {
+    let dir = temp_dir("offset_wins");
+    let file = dir.join("a.txt");
+    std::fs::write(&file, "l1\nl2\nl3\nl4\nl5\n").unwrap();
+
+    let results = read(
+        meta_with_root(&dir),
+        FsRead {
+            targets: vec![Target {
+                path: file.to_string_lossy().to_string(),
+                line: None,
+                symbol: None,
+                line_range: Some("4-5".to_string()),
+                offset: Some(2),
+                limit: Some(1),
+            }],
+        },
+    )
+    .await;
+
+    assert_eq!(results.len(), 1);
+    let r = &results[0];
+    assert!(
+        r.content.contains("2| l2") && !r.content.contains("4| l4"),
+        "offset+limit range takes precedence over legacy line_range: {}",
+        r.content
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn test_offset_without_limit_reads_syntactic_block() {
+    let dir = temp_dir("offset_block");
+    let file = dir.join("a.rs");
+    std::fs::write(&file, "// padding\nfn main() {\n    println!(\"hi\");\n}\n").unwrap();
+
+    let results = read(
+        meta_with_root(&dir),
+        FsRead {
+            targets: vec![Target {
+                path: file.to_string_lossy().to_string(),
+                line: None,
+                symbol: None,
+                line_range: None,
+                offset: Some(2),
+                limit: None,
+            }],
+        },
+    )
+    .await;
+
+    assert_eq!(results.len(), 1);
+    let r = &results[0];
+    assert!(
+        r.content.contains("fn main"),
+        "offset without limit reads the syntactic block containing the line: {}",
+        r.content
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn test_huge_offset_limit_saturates_without_overflow() {
+    let dir = temp_dir("offset_overflow");
+    let file = dir.join("a.txt");
+    std::fs::write(&file, "l1\nl2\nl3\n").unwrap();
+
+    // usize::MAX-scale values must clamp, never panic (debug overflow) or
+    // leak past the u32 legacy range parser as a parse error.
+    let results = read(
+        meta_with_root(&dir),
+        FsRead {
+            targets: vec![Target {
+                path: file.to_string_lossy().to_string(),
+                line: None,
+                symbol: None,
+                line_range: None,
+                offset: Some(usize::MAX - 1),
+                limit: Some(usize::MAX),
+            }],
+        },
+    )
+    .await;
+
+    assert_eq!(results.len(), 1);
+    let r = &results[0];
+    // A start beyond EOF is the parser's clean "beyond end of file" warning,
+    // not a panic and not a silent whole-file fallback.
+    assert!(
+        r.warnings
+            .as_deref()
+            .is_some_and(|w| w.contains("beyond end of file")),
+        "huge offset must surface the beyond-EOF warning: {:?}",
+        r.warnings
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn test_offset_zero_is_clamped_to_first_line() {
+    let dir = temp_dir("offset_zero");
+    let file = dir.join("a.txt");
+    std::fs::write(&file, "l1\nl2\nl3\n").unwrap();
+
+    let results = read(
+        meta_with_root(&dir),
+        FsRead {
+            targets: vec![Target {
+                path: file.to_string_lossy().to_string(),
+                line: None,
+                symbol: None,
+                line_range: None,
+                offset: Some(0),
+                limit: Some(2),
+            }],
+        },
+    )
+    .await;
+
+    assert_eq!(results.len(), 1);
+    let r = &results[0];
+    assert!(r.warnings.is_none(), "unexpected warning: {:?}", r.warnings);
+    assert!(
+        r.content.contains("1| l1") && r.content.contains("2| l2"),
+        "offset 0 clamps to line 1: {}",
+        r.content
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn test_line_range_reads_exact_lines() {
     let dir = temp_dir("range");
     let file = dir.join("a.txt");
@@ -110,6 +357,9 @@ async fn test_line_range_reads_exact_lines() {
                 line: None,
                 symbol: None,
                 line_range: Some("2-4".to_string()),
+
+                offset: None,
+                limit: None,
             }],
         },
     )
@@ -145,6 +395,9 @@ async fn test_line_range_multi_with_gap_marker() {
                 line: None,
                 symbol: None,
                 line_range: Some("1-2,5-5".to_string()),
+
+                offset: None,
+                limit: None,
             }],
         },
     )
@@ -178,6 +431,9 @@ async fn test_line_range_beyond_eof_is_skipped_with_notice() {
                 line: None,
                 symbol: None,
                 line_range: Some("10-12".to_string()),
+
+                offset: None,
+                limit: None,
             }],
         },
     )
@@ -214,6 +470,9 @@ async fn test_line_range_malformed_returns_warning_with_full_body() {
                 line: None,
                 symbol: None,
                 line_range: Some("5-1".to_string()),
+
+                offset: None,
+                limit: None,
             }],
         },
     )
@@ -257,6 +516,9 @@ async fn test_large_block_is_elided_with_rereread_footer() {
                 line: Some(1),
                 symbol: None,
                 line_range: None,
+
+                offset: None,
+                limit: None,
             }],
         },
     )
@@ -275,7 +537,7 @@ async fn test_large_block_is_elided_with_rereread_footer() {
         r.content
     );
     assert!(
-        r.content.contains("lines elided; re-read with line_range"),
+        r.content.contains("lines elided; re-read with offset"),
         "re-read footer expected: {}",
         r.content
     );
@@ -302,6 +564,9 @@ async fn test_small_block_is_returned_whole() {
                 line: Some(1),
                 symbol: None,
                 line_range: None,
+
+                offset: None,
+                limit: None,
             }],
         },
     )
@@ -341,6 +606,9 @@ async fn test_block_starting_after_line_one_renders_its_body() {
                 line: Some(5),
                 symbol: None,
                 line_range: None,
+
+                offset: None,
+                limit: None,
             }],
         },
     )
@@ -388,6 +656,9 @@ async fn test_symbol_starting_after_line_one_renders_its_body() {
                 line: None,
                 symbol: Some("main".to_string()),
                 line_range: None,
+
+                offset: None,
+                limit: None,
             }],
         },
     )
@@ -421,6 +692,9 @@ async fn test_whole_file_records_seen_lines() {
                 line: None,
                 symbol: None,
                 line_range: None,
+
+                offset: None,
+                limit: None,
             }],
         },
     )
@@ -464,6 +738,9 @@ async fn test_large_block_starting_after_line_one_elides_with_correct_numbers() 
                 line: Some(2),
                 symbol: None,
                 line_range: None,
+
+                offset: None,
+                limit: None,
             }],
         },
     )
@@ -513,6 +790,9 @@ async fn test_elided_block_records_only_surfaced_lines() {
                 line: Some(1),
                 symbol: None,
                 line_range: None,
+
+                offset: None,
+                limit: None,
             }],
         },
     )
@@ -551,6 +831,9 @@ async fn test_long_lines_are_column_truncated() {
                 line: None,
                 symbol: None,
                 line_range: Some("1-2".to_string()),
+
+                offset: None,
+                limit: None,
             }],
         },
     )

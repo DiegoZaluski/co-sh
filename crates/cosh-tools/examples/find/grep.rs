@@ -168,6 +168,9 @@ fn main() {
             line: None,
             symbol: None,
             line_range: None,
+
+            offset: None,
+            limit: None,
         }])
         .await;
     println!("  after edit, disk content:");

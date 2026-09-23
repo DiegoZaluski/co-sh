@@ -33,14 +33,25 @@ pub struct LspNotes {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct Target {
     pub path: String,
+    /// Legacy form of `offset` (reads the syntactic block containing that
+    /// line). Kept as an alias; the advertised schema uses `offset`.
     pub line: Option<usize>,
     pub symbol: Option<String>,
-    /// Optional 1-based inclusive line range(s) to read exactly, e.g.
+    /// Legacy 1-based inclusive line range(s) to read exactly, e.g.
     /// `"50-100"` or `"10-20,200-220"` (comma-separated for multiple
     /// disjoint ranges). Performs a plain line slice — no AST block
-    /// resolution — so the agent reads only what it asked for. Checked
-    /// before `line`, but after `symbol`: if `symbol` is set it wins.
+    /// resolution. Accepted but NOT advertised: the schema uses
+    /// `offset`/`limit` (the CC-trained shape). `offset`+`limit` is
+    /// normalized into a single range before this is consulted, and wins
+    /// when both are provided.
     pub line_range: Option<String>,
+    /// 1-based line number to start reading from (the CC `Read` shape).
+    /// With `limit`, reads exactly `offset..offset+limit-1` (plain slice);
+    /// without `limit`, reads the syntactic block containing that line
+    /// (same behavior as the legacy `line`).
+    pub offset: Option<usize>,
+    /// Number of lines to read; only meaningful together with `offset`.
+    pub limit: Option<usize>,
 }
 
 /// Configuration for file read operations.

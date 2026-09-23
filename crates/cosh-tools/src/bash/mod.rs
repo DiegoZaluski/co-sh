@@ -108,7 +108,7 @@ impl Bash {
              Outputs above the token budget are head/tail-truncated: the \
              middle is saved to a log file (path given in the truncation \
              notice) that you can read back in parts with fs_read \
-             (line_range) or find_grep. \
+             (offset/limit) or find_grep. \
              Environment variables and PTY mode are wrapper configuration, \
              not call arguments. \
              The configured default timeout is {configured_ms} \

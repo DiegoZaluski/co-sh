@@ -3,18 +3,20 @@
 //! Each call to [`read`] carries one or more [`Target`] entries.  A target can
 //! request the whole file, a syntactic block at a given line, a definition
 //! block matching a name (symbol, struct, class, …), or one or more exact line
-//! ranges via `line_range` (a plain slice — no AST involved).  When the name
-//! search targets a directory the entire tree is walked recursively.
+//! ranges (a plain slice — no AST involved) via the advertised
+//! `offset`/`limit` shape, or via the legacy `line_range` string.  When the
+//! name search targets a directory the entire tree is walked recursively.
 //!
 //! Output is hashline-numbered (`N| text`) so the model can anchor edits
 //! directly.  Token-saving behaviors:
 //!
-//! - **Exact range reads** — `line_range: "50-100"` (or comma-separated
-//!   `"10-20,200-220"`) returns only the requested lines, with a footer
-//!   reporting how many lines remain and how to continue.
+//! - **Exact range reads** — `offset: 50, limit: 51` (or the legacy
+//!   `line_range: "50-100"` string, which also supports comma-separated
+//!   disjoint ranges like `"10-20,200-220"`) returns only the requested
+//!   lines, with a footer reporting how many lines remain and how to continue.
 //! - **Elided blocks** — blocks larger than [`ELIDE_MIN_BLOCK_LINES`] are
 //!   shown as their head/tail with a `…` marker and a footer telling the model
-//!   which `line_range` to re-read when it needs the elided body.
+//!   which `offset`/`limit` to re-read when it needs the elided body.
 //! - **Column truncation** — lines longer than [`MAX_COLUMN`] characters are
 //!   cut with a `...` suffix and a notice.
 //! - **Seen lines** — every surfaced line is recorded against the snapshot
@@ -76,6 +78,8 @@ async fn read_target(fs: DiskFilesystem, target: Target, metadata: &FsMetadata) 
                 line: target.line,
                 symbol: target.symbol,
                 line_range: target.line_range,
+                offset: target.offset,
+                limit: target.limit,
             };
             read_target_impl(fs, target).await
         }
@@ -232,17 +236,17 @@ fn read_range_body(lines: &[String], ranges: &[(u32, u32)]) -> RangeBody {
 
     if truncated_any {
         notices.push(format!(
-            "[Some lines were truncated to {MAX_COLUMN} columns; use line_range to re-read specific lines for the full content]"
+            "[Some lines were truncated to {MAX_COLUMN} columns; use offset/limit to re-read specific lines for the full content]"
         ));
     }
     if let Some(last_shown) = seen.iter().map(|(n, _)| *n).max()
         && last_shown < total
     {
         notices.push(format!(
-            "[{} more lines in file; continue with line_range \"{}-{}\"]",
+            "[{} more lines in file; continue with offset {}, limit {}]",
             total - last_shown,
             last_shown + 1,
-            total
+            total - last_shown
         ));
     }
     (parts.join("\n"), seen, notices, warnings)
@@ -309,6 +313,46 @@ async fn read_target_impl(fs: DiskFilesystem, target: Target) -> Vec<ReadResult>
         return search_symbol(&fs, &target.path, &name).await;
     }
 
+    // Normalize the advertised `offset`/`limit` shape (the CC-trained
+    // form) into a single contiguous range before the legacy `line_range`
+    // handling: `offset` alone degrades to the legacy `line` behavior
+    // (syntactic block), `offset`+`limit` becomes one plain slice.
+    // Explicit `offset`+`limit` wins over a legacy `line_range` string.
+    let target = if target.limit.is_some() && target.offset.is_none() {
+        let mut t = target;
+        t.limit = None; // `limit` without `offset` is meaningless — drop it.
+        t
+    } else if let Some(offset) = target.offset {
+        let mut t = target;
+        match t.limit {
+            Some(limit) => {
+                if limit < 1 {
+                    return vec![ReadResult {
+                        path: t.path.clone(),
+                        file_hash: String::new(),
+                        header: String::new(),
+                        content: String::new(),
+                        warnings: Some(format!("`limit` must be >= 1, got: {limit}")),
+                    }];
+                }
+                let start = offset.max(1).min(u32::MAX as usize);
+                // Saturate at u32::MAX (the legacy range parser's domain):
+                // huge `limit` values must clamp, never overflow — the
+                // slice is clamped to EOF later anyway.
+                let end = start.saturating_add(limit - 1).min(u32::MAX as usize);
+                t.line_range = Some(format!("{start}-{end}"));
+            }
+            // `offset` without `limit` reads the syntactic block containing
+            // that line — the legacy `line` behavior.
+            None => t.line = Some(offset),
+        }
+        t.offset = None;
+        t.limit = None;
+        t
+    } else {
+        target
+    };
+
     if Path::new(&target.path).is_dir() {
         return vec![ReadResult {
             path: target.path.clone(),
@@ -320,8 +364,7 @@ async fn read_target_impl(fs: DiskFilesystem, target: Target) -> Vec<ReadResult>
                  When `path` is a directory, a `symbol` (e.g., a function or struct name) must be \
                  provided so the tool searches for matching definitions across all supported source \
                  files in that tree. \
-                 To read entire files, list each file path explicitly in the `read` array with no \
-                 `line` or `symbol` fields.",
+                 To read entire files, pass the file path with no `offset`, `limit`, or `symbol` fields.",
                 path = target.path
             )),
         }];
@@ -400,13 +443,15 @@ async fn read_target_impl(fs: DiskFilesystem, target: Target) -> Vec<ReadResult>
                 let mut notices: Vec<String> = Vec::new();
                 if let Some((s, e)) = elided {
                     notices.push(format!(
-                        "[…{} lines elided; re-read with line_range \"{s}-{e}\"]",
+                        "[…{} lines elided; re-read with offset {}, limit {}]",
+                        e - s + 1,
+                        s,
                         e - s + 1
                     ));
                 }
                 if truncated_any {
                     notices.push(format!(
-                        "[Some lines were truncated to {MAX_COLUMN} columns; use line_range to re-read specific lines for the full content]"
+                        "[Some lines were truncated to {MAX_COLUMN} columns; use offset/limit to re-read specific lines for the full content]"
                     ));
                 }
                 let mut content = format!("{header}\n{}", body_lines.join("\n"));
@@ -431,7 +476,7 @@ async fn read_target_impl(fs: DiskFilesystem, target: Target) -> Vec<ReadResult>
                          Possible causes: the line does not begin a valid block (e.g. fn, struct, \
                          impl, enum, trait, mod), the line number exceeds the file length, or the \
                          line falls inside a string or comment. \
-                         Try a different line number, a `line_range`, or read the whole file instead.",
+                         Try a different line number, an `offset`/`limit` range, or read the whole file instead.",
                         path = target.path
                     )),
                 }]
@@ -462,7 +507,7 @@ async fn search_symbol(fs: &DiskFilesystem, path: &str, name: &str) -> Vec<ReadR
         Ok(vec![path.to_string()])
     } else {
         Err(format!(
-            "no tree-sitter grammar available for `{path}`; use `line` targeting or read the whole file instead"
+            "no tree-sitter grammar available for `{path}`; use `offset` targeting or read the whole file instead"
         ))
     } {
         Ok(p) => p,
@@ -509,13 +554,15 @@ async fn search_symbol(fs: &DiskFilesystem, path: &str, name: &str) -> Vec<ReadR
             let mut notices: Vec<String> = Vec::new();
             if let Some((s, e)) = elided {
                 notices.push(format!(
-                    "[…{} lines elided; re-read with line_range \"{s}-{e}\"]",
+                    "[…{} lines elided; re-read with offset {}, limit {}]",
+                    e - s + 1,
+                    s,
                     e - s + 1
                 ));
             }
             if truncated_any {
                 notices.push(format!(
-                    "[Some lines were truncated to {MAX_COLUMN} columns; use line_range to re-read specific lines for the full content]"
+                    "[Some lines were truncated to {MAX_COLUMN} columns; use offset/limit to re-read specific lines for the full content]"
                 ));
             }
             let mut content = format!("{header}\n{}", body_lines.join("\n"));
@@ -541,7 +588,7 @@ async fn search_symbol(fs: &DiskFilesystem, path: &str, name: &str) -> Vec<ReadR
                  Verify the symbol name is spelled exactly as defined in source code. \
                  If `{path}` is a directory, it may contain no files with a supported \
                  tree-sitter grammar. \
-                 Try using `line` targeting to read specific sections, or read the whole \
+                 Try using `offset` targeting to read specific sections, or read the whole \
                  file to inspect its contents.",
             )),
         }];

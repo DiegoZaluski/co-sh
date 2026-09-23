@@ -84,6 +84,9 @@ async fn read_gap_absolute_path_no_guard() {
                 line: None,
                 symbol: None,
                 line_range: None,
+
+                offset: None,
+                limit: None,
             }],
         },
     )
@@ -120,6 +123,9 @@ async fn read_gap_dotdot_traversal_no_guard() {
                 line: None,
                 symbol: None,
                 line_range: None,
+
+                offset: None,
+                limit: None,
             }],
         },
     )
@@ -148,6 +154,9 @@ async fn read_absolute_path_outside_root_is_denied() {
                 line: None,
                 symbol: None,
                 line_range: None,
+
+                offset: None,
+                limit: None,
             }],
         },
     )
@@ -178,6 +187,9 @@ async fn read_traversal_relative_path_escapes_denied() {
                 line: None,
                 symbol: None,
                 line_range: None,
+
+                offset: None,
+                limit: None,
             }],
         },
     )

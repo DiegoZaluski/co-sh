@@ -41,6 +41,9 @@ fn main() {
             line: None,
             symbol: None,
             line_range: None,
+
+            offset: None,
+            limit: None,
         }])
         .await;
 
@@ -58,6 +61,9 @@ fn main() {
             line: Some(6),
             symbol: None,
             line_range: None,
+
+            offset: None,
+            limit: None,
         }])
         .await;
 
@@ -71,6 +77,9 @@ fn main() {
             line: None,
             symbol: Some("greet".to_string()),
             line_range: None,
+
+            offset: None,
+            limit: None,
         }])
         .await;
 
@@ -84,6 +93,9 @@ fn main() {
             line: None,
             symbol: None,
             line_range: Some("5-7".to_string()),
+
+            offset: None,
+            limit: None,
         }])
         .await;
 
@@ -98,6 +110,9 @@ fn main() {
             line: None,
             symbol: None,
             line_range: None,
+
+            offset: None,
+            limit: None,
         }])
         .await;
 
