@@ -45,7 +45,7 @@ pub fn validate(input: &ComputerWait) -> Result<(), String> {
     {
         return Err(
             "computer_wait: `selector` is required — the element to watch, \
-             e.g. progress_indicator[name='Exporting…']"
+             e.g. progress_bar[name='Exporting…']"
                 .to_string(),
         );
     }
@@ -128,7 +128,7 @@ fn wait_blocking(input: &ComputerWait) -> Result<WaitOutput, String> {
 }
 
 /// Map the wire enum onto xa11y's state vocabulary.
-fn wait_state(state: WaitState) -> ElementState {
+pub(crate) fn wait_state(state: WaitState) -> ElementState {
     match state {
         WaitState::Attached => ElementState::Attached,
         WaitState::Detached => ElementState::Detached,
@@ -152,7 +152,7 @@ fn wait_state(state: WaitState) -> ElementState {
 /// On timeout the xa11y error's `Display` already embeds the `Diagnosis`
 /// (condition + last observed state); it is passed through verbatim so
 /// the model sees exactly what the poll loop last saw.
-fn wait_on_locator(
+pub(crate) fn wait_on_locator(
     locator: &Locator,
     state: ElementState,
     timeout: Duration,
@@ -203,172 +203,5 @@ fn observation(
             enabled: None,
             focused: None,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use xa11y::Provider;
-    use xa11y::mock::build_provider;
-
-    fn root_locator(selector: &str) -> Locator {
-        let provider = build_provider();
-        let provider_dyn: std::sync::Arc<dyn Provider> = provider;
-        Locator::new(provider_dyn, None, selector)
-    }
-
-    #[test]
-    fn validation_requires_selector_and_one_app_scope() {
-        let input = ComputerWait::default();
-        let err = validate(&input).unwrap_err();
-        assert!(err.contains("`selector` is required"), "err: {err}");
-
-        let input = ComputerWait {
-            selector: Some("button".into()),
-            ..Default::default()
-        };
-        let err = validate(&input).unwrap_err();
-        assert!(err.contains("`name` or `pid`"), "err: {err}");
-
-        let input = ComputerWait {
-            name: Some("Safari".into()),
-            pid: Some(42),
-            selector: Some("button".into()),
-            ..Default::default()
-        };
-        let err = validate(&input).unwrap_err();
-        assert!(err.contains("not both"), "err: {err}");
-    }
-
-    #[test]
-    fn validation_rejects_zero_nth_and_overcap_timeout() {
-        let input = ComputerWait {
-            name: Some("Safari".into()),
-            selector: Some("button".into()),
-            nth: Some(0),
-            ..Default::default()
-        };
-        let err = validate(&input).unwrap_err();
-        assert!(err.contains("1-based"), "err: {err}");
-
-        let input = ComputerWait {
-            name: Some("Safari".into()),
-            selector: Some("button".into()),
-            timeout_ms: Some(MAX_WAIT_MS + 1),
-            ..Default::default()
-        };
-        let err = validate(&input).unwrap_err();
-        assert!(err.contains("capped at"), "err: {err}");
-
-        // Exactly at the cap is fine.
-        let input = ComputerWait {
-            name: Some("Safari".into()),
-            selector: Some("button".into()),
-            timeout_ms: Some(MAX_WAIT_MS),
-            ..Default::default()
-        };
-        assert!(validate(&input).is_ok());
-    }
-
-    #[test]
-    fn wait_met_immediately_reports_observed_state() {
-        // The mock fixture carries a visible, enabled check_box; the
-        // default state (`visible`) is met on the first poll.
-        let locator = root_locator("check_box");
-        let out = wait_on_locator(
-            &locator,
-            ElementState::Visible,
-            Duration::from_secs(2),
-            Instant::now(),
-        )
-        .expect("visible check_box must meet the condition");
-        assert!(out.met);
-        assert!(out.elapsed_ms < 2_000);
-        assert!(out.observed.attached);
-        assert_eq!(out.observed.visible, Some(true));
-        assert_eq!(out.observed.enabled, Some(true));
-    }
-
-    #[test]
-    fn wait_detached_met_without_element() {
-        // A selector nothing matches: the ABSENCE condition is met on the
-        // first poll — the common "spinner went away" shape.
-        let locator = root_locator("button[name='Definitely Not There']");
-        let out = wait_on_locator(
-            &locator,
-            ElementState::Detached,
-            Duration::from_secs(2),
-            Instant::now(),
-        )
-        .expect("detached is met when nothing matches");
-        assert!(out.met);
-        assert!(!out.observed.attached);
-        assert_eq!(out.observed.visible, None);
-    }
-
-    #[test]
-    fn wait_timeout_error_carries_diagnosis() {
-        // Attached on a selector that never matches: runs out the (tiny)
-        // timeout; the error must name the condition and the last
-        // observation, not a bare "timeout".
-        let locator = root_locator("button[name='Definitely Not There']");
-        let err = wait_on_locator(
-            &locator,
-            ElementState::Attached,
-            Duration::from_millis(150),
-            Instant::now(),
-        )
-        .expect_err("attached on a missing element must time out");
-        // Phase 7: the wait path routes through the error renderer — the
-        // message must carry the tool prefix, the NEXT-STEP guidance
-        // (budget, wait step) and the platform's Diagnosis verbatim, so
-        // the model sees exactly what the poll loop last saw.
-        assert!(err.starts_with("computer_wait: wait for element state: "), "err: {err}");
-        assert!(err.contains("timed out after"), "err: {err}");
-        assert!(err.contains("timeout_ms"), "missing budget guidance: {err}");
-        assert!(err.contains("`wait` step"), "missing wait-step guidance: {err}");
-        assert!(
-            err.contains("Attached") || err.contains("attached"),
-            "timeout error must name the condition: {err}"
-        );
-        assert!(
-            err.contains("last observed"),
-            "diagnosis (last observed) must survive verbatim: {err}"
-        );
-    }
-
-    #[test]
-    fn state_mapping_is_total() {
-        // Every wire variant maps onto a distinct xa11y state — a missed
-        // arm here would silently wait for the wrong condition.
-        let pairs = [
-            (WaitState::Attached, ElementState::Attached),
-            (WaitState::Detached, ElementState::Detached),
-            (WaitState::Visible, ElementState::Visible),
-            (WaitState::Hidden, ElementState::Hidden),
-            (WaitState::Enabled, ElementState::Enabled),
-            (WaitState::Disabled, ElementState::Disabled),
-            (WaitState::Focused, ElementState::Focused),
-            (WaitState::Unfocused, ElementState::Unfocused),
-        ];
-        for (wire, native) in pairs {
-            assert_eq!(wait_state(wire), native);
-        }
-    }
-
-    #[test]
-    fn mock_provider_type_is_usable_via_selector() {
-        // Guards the test seam itself: `build_provider` must yield a
-        // provider whose locators resolve. If the fixture topology changes
-        // (check_box disappearing), the wait tests above fail HERE with a
-        // clearer message.
-        let provider = build_provider();
-        let provider_dyn: std::sync::Arc<dyn Provider> = provider;
-        let locator = Locator::new(provider_dyn, None, "check_box");
-        assert!(
-            locator.count().map(|n| n >= 1).unwrap_or(false),
-            "mock fixture lost its check_box — update the wait tests' fixture assumptions"
-        );
     }
 }

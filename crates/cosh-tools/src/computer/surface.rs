@@ -22,7 +22,7 @@ use super::types::{ComputerAct, ComputerSnapshot, ComputerScreenshot, SurfaceKin
 
 /// Map the wire enum onto xa11y's kind vocabulary — total, so a missed arm
 /// fails compilation rather than silently targeting the wrong surface.
-fn kind(kind: SurfaceKind) -> ShellSurfaceKind {
+pub(crate) fn kind(kind: SurfaceKind) -> ShellSurfaceKind {
     match kind {
         SurfaceKind::MenuBar => ShellSurfaceKind::MenuBar,
         SurfaceKind::StatusItems => ShellSurfaceKind::StatusItems,
@@ -203,128 +203,5 @@ pub fn surface_label(surface: SurfaceKind) -> &'static str {
         SurfaceKind::Desktop => "desktop",
         SurfaceKind::Flyout => "flyout",
         SurfaceKind::Unknown => "unknown",
-    }
-}
-
-#[cfg(test)]
-mod surface_tests {
-    use super::*;
-    use xa11y::mock::build_provider;
-
-    fn mock() -> Arc<dyn Provider> {
-        build_provider()
-    }
-
-    #[test]
-    fn kind_mapping_is_total() {
-        // Every wire variant maps onto a distinct xa11y kind — a missed arm
-        // here would silently target the wrong surface.
-        let pairs = [
-            (SurfaceKind::MenuBar, ShellSurfaceKind::MenuBar),
-            (SurfaceKind::StatusItems, ShellSurfaceKind::StatusItems),
-            (SurfaceKind::Taskbar, ShellSurfaceKind::Taskbar),
-            (SurfaceKind::Panel, ShellSurfaceKind::Panel),
-            (SurfaceKind::Dock, ShellSurfaceKind::Dock),
-            (SurfaceKind::Desktop, ShellSurfaceKind::Desktop),
-            (SurfaceKind::Flyout, ShellSurfaceKind::Flyout),
-            (SurfaceKind::Unknown, ShellSurfaceKind::Unknown),
-        ];
-        for (wire, native) in pairs {
-            assert_eq!(kind(wire), native);
-            // Wire spelling must match xa11y's snake_case spelling — the
-            // schema's enum values and error messages rely on it.
-            assert_eq!(surface_label(wire), native.to_snake_case());
-        }
-    }
-
-    #[test]
-    fn resolve_taskbar_through_mock() {
-        // The mock fixture ships a taskbar surface; resolution must yield
-        // a handle whose kind and name round-trip.
-        let surface = resolve_with(mock(), SurfaceKind::Taskbar, Duration::ZERO)
-            .expect("mock fixture carries a taskbar");
-        assert_eq!(surface.kind, ShellSurfaceKind::Taskbar);
-        assert_eq!(surface.name, "Taskbar");
-        // The handle must be usable as a selector root (the flow every
-        // consumer relies on).
-        let locator = surface.locator("button");
-        assert!(locator.count().map(|n| n >= 1).unwrap_or(false));
-    }
-
-    #[test]
-    fn resolve_missing_kind_is_honest_scope() {
-        // The mock ships no dock; a missing kind is an error (scope), not
-        // a panic or an empty success.
-        let err = resolve_with(mock(), SurfaceKind::Dock, Duration::ZERO)
-            .expect_err("mock has no dock surface");
-        assert!(err.contains("dock"), "err: {err}");
-    }
-
-    #[test]
-    fn targeting_exactly_one_of_three() {
-        let ok = || validate_snapshot(&ComputerSnapshot::default());
-        // Zero targets.
-        let err = ok().unwrap_err();
-        assert!(err.contains("provide `name`, `pid` or `surface`"), "err: {err}");
-        // Two app scopes.
-        let err = validate_snapshot(&ComputerSnapshot {
-            name: Some("Safari".into()),
-            pid: Some(1),
-            ..Default::default()
-        })
-        .unwrap_err();
-        assert!(err.contains("not both"), "err: {err}");
-        // App + surface mix.
-        let err = validate_snapshot(&ComputerSnapshot {
-            name: Some("Safari".into()),
-            surface: Some(SurfaceKind::MenuBar),
-            ..Default::default()
-        })
-        .unwrap_err();
-        assert!(
-            err.contains("cannot share a call"),
-            "app+surface mix must be rejected: {err}"
-        );
-        // Exactly one: surface alone is fine (mock-free check).
-        assert!(validate_snapshot(&ComputerSnapshot {
-            surface: Some(SurfaceKind::MenuBar),
-            ..Default::default()
-        })
-        .is_ok());
-    }
-
-    #[test]
-    fn targeting_act_and_screenshot_match_their_wire_shapes() {
-        // act uses `name`; screenshot uses `app` — the error text must
-        // mirror each tool's wire spelling.
-        let err = validate_act(&ComputerAct::default()).unwrap_err();
-        assert!(err.contains("`name`"), "err: {err}");
-        let err = validate_act(&ComputerAct {
-            name: Some("Safari".into()),
-            surface: Some(SurfaceKind::Dock),
-            ..Default::default()
-        })
-        .unwrap_err();
-        assert!(err.contains("cannot share a call"), "err: {err}");
-
-        // Rootless screenshot is LEGAL (full display / region captures) —
-        // the tool's own clauses police those forms; this check only
-        // rejects MIXED roots (review round 1, CRITICAL 1).
-        assert!(validate_screenshot(&ComputerScreenshot::default()).is_ok());
-        let err = validate_screenshot(&ComputerScreenshot {
-            app: Some("Safari".into()),
-            surface: Some(SurfaceKind::Dock),
-            ..Default::default()
-        })
-        .unwrap_err();
-        assert!(err.contains("cannot share a call"), "err: {err}");
-        // pid + surface mix also rejected.
-        let err = validate_screenshot(&ComputerScreenshot {
-            pid: Some(1),
-            surface: Some(SurfaceKind::Dock),
-            ..Default::default()
-        })
-        .unwrap_err();
-        assert!(err.contains("cannot share a call"), "err: {err}");
     }
 }
