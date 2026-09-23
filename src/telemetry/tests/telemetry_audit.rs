@@ -21,7 +21,7 @@ use crate::telemetry::queue::EventQueue;
 use crate::telemetry::sanitize::sanitize_string;
 use crate::telemetry::schema::{ErrorCategory, EventType};
 use crate::telemetry::session::SessionTelemetry;
-use crate::telemetry::sink::SinkConfig;
+use crate::telemetry::sink::{FlushOutcome, SinkConfig};
 use std::collections::BTreeMap;
 
 #[test]
