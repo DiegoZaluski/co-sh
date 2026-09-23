@@ -1053,7 +1053,17 @@ impl App {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
-        let session_id = self.state.current_session_id.clone().unwrap_or_default();
+        // Scope the record to the loop's OWNING session, exactly like every
+        // other asynchronous event handler (ContextItemRecorded, Done, …):
+        // a Usage event arrives while the user may have switched sessions (or
+        // returned Home), and attributing it to the merely-VIEWED session puts
+        // that loop's spend on the wrong session's dashboard — and `""` (the
+        // old `unwrap_or_default`) made it vanish from every session block.
+        let session_id = self
+            .active_loop_session_id
+            .clone()
+            .or_else(|| self.state.current_session_id.clone())
+            .unwrap_or_default();
         let id = self.usage_next_id;
         self.usage_next_id = self.usage_next_id.wrapping_add(1);
 

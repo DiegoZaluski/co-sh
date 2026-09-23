@@ -11,7 +11,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 
 use crate::theme::{Theme, rgba_color};
-use crate::usage::SpendSummary;
+use crate::usage::{SpendSummary, format_usd};
 
 /// A fully-computed snapshot the dashboard renders. Assembled by the App so
 /// this module stays a pure view (easy to test).
@@ -27,11 +27,6 @@ pub struct DashboardData {
     pub period: SpendSummary,
     /// The period currently selected.
     pub period_enum: crate::usage::UsagePeriod,
-}
-
-/// Format a USD figure with two decimal places: `$0.00`, `$1.50`.
-fn format_usd(v: f64) -> String {
-    format!("${v:.2}")
 }
 
 /// Pick a highlight (background) color for a period so the active range is

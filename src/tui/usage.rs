@@ -154,6 +154,18 @@ pub enum UsagePeriod {
     All,
 }
 
+/// Format a USD figure for the dashboard/header: two decimals normally, but
+/// four below one cent so real sub-cent costs (e.g. Charm Hyper's per-request
+/// $0.001–$0.03) do not render as a misleading `$0.00`. A true zero stays
+/// `$0.00` (there is nothing sub-cent about it).
+pub fn format_usd(v: f64) -> String {
+    if v != 0.0 && v.abs() < 0.01 {
+        format!("${v:.4}")
+    } else {
+        format!("${v:.2}")
+    }
+}
+
 impl UsagePeriod {
     /// Short, label-safe name for the period selector.
     pub fn label(self) -> &'static str {
@@ -285,6 +297,24 @@ pub fn summarize(records: &[UsageRecord], period: UsagePeriod, now_ms: u64) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn format_usd_keeps_two_decimals_above_one_cent() {
+        assert_eq!(format_usd(0.0), "$0.00");
+        assert_eq!(format_usd(0.01), "$0.01");
+        assert_eq!(format_usd(1.5), "$1.50");
+        assert_eq!(format_usd(42.0), "$42.00");
+    }
+
+    #[test]
+    fn format_usd_show_sub_cent_costs_instead_of_zero() {
+        // Regression: Charm-scale per-request costs used to render as `$0.00`
+        // even though the provider reported real spend.
+        assert_eq!(format_usd(0.0025), "$0.0025");
+        assert_eq!(format_usd(0.000012), "$0.0000");
+        assert_eq!(format_usd(0.0099), "$0.0099");
+        assert_eq!(format_usd(-0.005), "$-0.0050");
+    }
 
     pub fn rec(
         ts: u64,

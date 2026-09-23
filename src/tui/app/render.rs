@@ -191,7 +191,7 @@ impl App {
                 let cost_str = if credits_mode {
                     self.hypercredit_balance.map(|b| format!("\u{25c6} {b:.0}"))
                 } else {
-                    self.session_cost().map(|c| format!("${c:.2}"))
+                    self.session_cost().map(crate::usage::format_usd)
                 };
                 let cost_w = cost_str.as_ref().map_or(0, |s| s.chars().count()) as u16;
                 let cost_gap = if cost_str.is_some() { gap } else { 0 };
