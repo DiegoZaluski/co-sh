@@ -45,7 +45,7 @@ pub fn validate(input: &ComputerWait) -> Result<(), String> {
     {
         return Err(
             "computer_wait: `selector` is required — the element to watch, \
-             e.g. progress_indicator[name='Exporting…']"
+             e.g. progress_bar[name='Exporting…']"
                 .to_string(),
         );
     }

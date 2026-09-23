@@ -136,6 +136,46 @@ name = "recall"
 path = "examples/recall/recall.rs"
 required-features = ["embed"]
 
+[[example]]
+name = "computer-control"
+path = "examples/computer/control.rs"
+
+[[example]]
+name = "computer-act"
+path = "examples/computer/act.rs"
+
+[[example]]
+name = "computer-wait"
+path = "examples/computer/wait.rs"
+
+[[example]]
+name = "computer-apps"
+path = "examples/computer/apps.rs"
+
+[[example]]
+name = "computer-snapshot"
+path = "examples/computer/snapshot.rs"
+
+[[example]]
+name = "computer-screenshot"
+path = "examples/computer/screenshot.rs"
+
+[[example]]
+name = "computer-surface"
+path = "examples/computer/surface.rs"
+
+[[example]]
+name = "computer-errors"
+path = "examples/computer/errors.rs"
+
+[[example]]
+name = "computer-mouse"
+path = "examples/computer/mouse.rs"
+
+[[example]]
+name = "computer-keyboard"
+path = "examples/computer/keyboard.rs"
+
 [dev-dependencies.criterion]
 version = "0.7"
 

@@ -553,7 +553,7 @@ pub struct ComputerWait {
     /// Application process ID. Provide `name` or `pid` — exactly one.
     pub pid: Option<u32>,
     /// CSS-like selector for the element to watch, e.g.
-    /// `progress_indicator[name='Exporting…']`.
+    /// `progress_bar[name='Exporting…']`.
     pub selector: Option<String>,
     /// 1-based match index when `selector` matches multiple elements
     /// (default 1).

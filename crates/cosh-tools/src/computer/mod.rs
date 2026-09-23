@@ -249,7 +249,7 @@ impl Computer {
                         },
                         "selector": {
                             "type": "string",
-                            "description": "CSS-like selector for the element to watch, e.g. \"progress_indicator[name='Exporting…']\"."
+                            "description": "CSS-like selector for the element to watch, e.g. \"progress_bar[name='Exporting…']\"."
                         },
                         "nth": {
                             "type": "integer",
