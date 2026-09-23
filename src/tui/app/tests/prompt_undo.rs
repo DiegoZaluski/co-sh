@@ -243,6 +243,55 @@ async fn ctrl_c_with_the_prompt_blurred_still_shows_the_quit_confirm() {
     );
 }
 
+/// Ctrl+C with the prompt focused but the draft EMPTY has nothing to kill:
+/// the key falls through to the quit-confirm instead. Whitespace-only
+/// drafts count as empty (trim), and a double Ctrl+C leaves the app
+/// naturally — the first press wipes the draft, the second quits.
+#[tokio::test]
+async fn ctrl_c_on_an_empty_or_whitespace_prompt_shows_the_quit_confirm() {
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = session_app();
+
+    // Empty draft: straight to the quit-confirm.
+    app.process_key_event(ctrl(KeyCode::Char('c'))).unwrap();
+    assert!(
+        app.is_confirm_dialog_visible(),
+        "focused Ctrl+C on an empty draft must fall through to the quit-confirm"
+    );
+
+    // Whitespace-only draft: still nothing to kill.
+    let mut app = session_app();
+    type_text(&mut app, "   ");
+    app.process_key_event(ctrl(KeyCode::Char('c'))).unwrap();
+    assert_eq!(app.prompt_view.input, "   ", "whitespace draft is not cleared");
+    assert!(
+        app.is_confirm_dialog_visible(),
+        "focused Ctrl+C on a whitespace-only draft must show the quit-confirm"
+    );
+}
+
+/// The full double-Ctrl+C escape flow: first press wipes the draft, second
+/// press (draft now empty) opens the quit-confirm. No blur needed in between.
+#[tokio::test]
+async fn double_ctrl_c_wipes_the_draft_then_asks_to_quit() {
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = session_app();
+
+    type_text(&mut app, "rascunho");
+    app.process_key_event(ctrl(KeyCode::Char('c'))).unwrap();
+    assert_eq!(app.prompt_view.input, "");
+    assert!(!app.is_confirm_dialog_visible());
+
+    app.process_key_event(ctrl(KeyCode::Char('c'))).unwrap();
+    assert!(
+        app.is_confirm_dialog_visible(),
+        "the second Ctrl+C (empty draft) must open the quit-confirm"
+    );
+    assert!(!app.should_quit, "the dialog itself decides, not the keypress");
+}
+
 /// Ctrl+C with the slash menu open and the prompt focused still clears the
 /// draft (the prompt owns the keyboard while filtering) and the menu
 /// re-syncs shut on the empty input — same as a Ctrl+Z to empty.

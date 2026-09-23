@@ -168,16 +168,22 @@ impl App {
                     self.copy_registration_form_field();
                     return Ok(false);
                 }
-                // While the bare prompt owns the keyboard, Ctrl+C clears
-                // the whole draft (readline-style kill) instead of asking
-                // to quit — leaving the app then takes an explicit blur
-                // (clicking outside the prompt area) first. The clear is
+                // While the bare prompt owns the keyboard AND holds actual
+                // content, Ctrl+C clears the whole draft (readline-style
+                // kill) instead of asking to quit. An empty (or
+                // whitespace-only) draft has nothing to kill, so the key
+                // falls through to the quit-confirm below — that way a
+                // double Ctrl+C still leaves the app naturally: the first
+                // press wipes the draft, the second quits. The clear is
                 // recorded as ONE atomic Replace group, so a single Ctrl+Z
                 // brings the draft back exactly. Sits AFTER the selection
                 // gates on purpose: a live selection still copies
                 // (universal convention); the clear only fires with
                 // nothing selected.
-                if self.prompt_owns_keyboard() && !self.prompt_view.has_selection() {
+                if self.prompt_owns_keyboard()
+                    && !self.prompt_view.has_selection()
+                    && !self.prompt_view.input.trim().is_empty()
+                {
                     self.prompt_clear();
                     return Ok(false);
                 }
