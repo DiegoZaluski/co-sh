@@ -2,7 +2,7 @@
 use super::context::error_catalog_window;
 use super::context::{ContextManager, MAX_CONTEXT_TOKENS, MapRequest, RunOutcome};
 use super::correction_memory::CorrectionMemory;
-use super::tools::{CoshTools, Tools, is_position_dependent_tool, is_tool_disabled};
+use super::tools::{CoshTools, Tools, is_tool_disabled};
 use crate::mcp::{McpConfig, McpManager};
 use cosh_sdk::connector::{
     ChatMessage, ChatStream, ClaudeThinkingBlock, Connector, ConnectorError, ToolCallMode,
@@ -1082,20 +1082,18 @@ impl Harness {
             let _ = write!(out, "### System Tools\n\n");
             match self.mode {
                 // Yolo/Command dispatch without an interactive approval dialog,
-                // so coordinate-based tools stay accurate; Build hands focus to
-                // the TUI and the user may move the pointer while answering, so
-                // Build runs the full set MINUS the position-dependent tools.
+                // and Build asks per-call (the guardrail denies coordinate
+                // forms and approves the tree-grounded ones), so every mode
+                // sees the full toolset.
                 Mode::Build => cosh.write_tool_descriptions_enabled(
                     &mut out,
                     &self.disabled_tools,
                     include_inline_schemas,
-                    false,
                 ),
                 Mode::Yolo | Mode::Command => cosh.write_tool_descriptions_enabled(
                     &mut out,
                     &self.disabled_tools,
                     include_inline_schemas,
-                    true,
                 ),
                 Mode::Ask => cosh.write_tool_descriptions_filtered(
                     &mut out,
@@ -1184,8 +1182,9 @@ impl Harness {
         }
         if let Some(ref cosh) = self.cosh_tools {
             let schemas = match self.mode {
-                Mode::Build => cosh.schemas_enabled(&self.disabled_tools, false),
-                Mode::Yolo | Mode::Command => cosh.schemas_enabled(&self.disabled_tools, true),
+                Mode::Build | Mode::Yolo | Mode::Command => {
+                    cosh.schemas_enabled(&self.disabled_tools)
+                }
                 Mode::Ask => cosh.schemas_filtered(&self.disabled_tools),
             };
             log::debug!(
@@ -1228,8 +1227,9 @@ impl Harness {
         }
         if let Some(ref cosh) = self.cosh_tools {
             let schemas = match self.mode {
-                Mode::Build => cosh.schemas_enabled(&self.disabled_tools, false),
-                Mode::Yolo | Mode::Command => cosh.schemas_enabled(&self.disabled_tools, true),
+                Mode::Build | Mode::Yolo | Mode::Command => {
+                    cosh.schemas_enabled(&self.disabled_tools)
+                }
                 Mode::Ask => cosh.schemas_filtered(&self.disabled_tools),
             };
             for schema in schemas {
@@ -3194,15 +3194,16 @@ impl Harness {
         if let Some(ref cosh) = self.cosh_tools {
             let descriptions: Vec<serde_json::Value> = match self.mode {
                 Mode::Build => {
-                    // All tools minus disabled, minus position-dependent ones:
-                    // Build's approval dialog can move the pointer between the
-                    // coordinate measurement (screenshot) and its use (pointer).
+                    // All tools minus disabled: every mode sees the full
+                    // toolset now. The coordinate forms of computer_pointer /
+                    // computer_screenshot are gated per-call by the guardrail
+                    // (denied in Build with guidance toward the tree-grounded
+                    // forms), not by hiding the tool.
                     cosh.tool_descriptions()
                         .into_iter()
                         .filter(|desc| {
                             let name = desc["name"].as_str().unwrap_or_default();
                             !is_tool_disabled(name, &self.disabled_tools)
-                                && !is_position_dependent_tool(name)
                         })
                         .collect()
                 }
@@ -3281,6 +3282,53 @@ impl Harness {
             hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
         }
         format!("{hash:016x}")
+    }
+
+    /// Crush-style loop detection over the current tool interactions.
+    ///
+    /// Pushes the current interaction signature into `loop_window` and stops
+    /// the loop (Toast + `Done`, returns `true`) when the same signature
+    /// shows up more than [`LOOP_DETECTION_MAX_REPEATS`] times within a full
+    /// [`LOOP_DETECTION_WINDOW_SIZE`] window.
+    ///
+    /// Called BOTH mid-iteration (the guardrail/hook denial arms, whose
+    /// `continue` skips the end-of-iteration checks — without this a stuck
+    /// model re-issuing an identical denied call burned the whole
+    /// [`MAX_TOOL_RETRIES`] budget on one mistake, observed in the field)
+    /// and once at the end of each iteration. A denied call pushes twice
+    /// per iteration (deny arm + end-of-iteration), so repeated denials
+    /// fill the window in half the iterations — detection still lands
+    /// safely inside the retry budget.
+    fn check_loop_detection(
+        &mut self,
+        tool_interactions: &[String],
+        loop_window: &mut VecDeque<String>,
+        tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
+    ) -> bool {
+        if tool_interactions.is_empty() {
+            return false;
+        }
+        let sig = Self::tool_interaction_signature(tool_interactions);
+        loop_window.push_back(sig.clone());
+        if loop_window.len() > LOOP_DETECTION_WINDOW_SIZE {
+            loop_window.pop_front();
+        }
+        let repeats = loop_window.iter().filter(|s| **s == sig).count();
+        if loop_window.len() == LOOP_DETECTION_WINDOW_SIZE && repeats > LOOP_DETECTION_MAX_REPEATS {
+            self.context_manager.close_loop();
+            let _ = tx.send(super::events::HarnessEvent::Toast {
+                message: "Agent stopped: repeated identical tool calls \
+                          detected (the model appears stuck in a loop)."
+                    .to_string(),
+                variant: super::events::ToastVariant::Info,
+            });
+            let _ = tx.send(self.lsp_snapshot_event());
+            let _ = tx.send(super::events::HarnessEvent::Done {
+                context: self.context_manager.save_state(),
+            });
+            return true;
+        }
+        false
     }
 
     /// Add a tool call + its result to the context manager (structural
@@ -4148,12 +4196,39 @@ impl Harness {
                         );
                         self.tool_issuer.pop_front();
                         self.tool_failure_count += 1;
+                        // Record the denial as the call's conversation turn —
+                        // same rationale as the guardrail-deny path below: a
+                        // call that never gets a visible answer gets re-issued,
+                        // burning MAX_TOOL_RETRIES lives on the same mistake.
+                        if let Some((ref call_id, ref name, ref args)) = info {
+                            let tool_id = if call_id.is_empty() {
+                                format!("call_{:016x}", iteration)
+                            } else {
+                                call_id.clone()
+                            };
+                            self.push_tool_history(
+                                &tool_id,
+                                name,
+                                args,
+                                info_sig.as_deref().unwrap_or_default(),
+                                &reason,
+                            );
+                            tool_interactions
+                                .push(format!("{name}\u{0}{args}\u{0}{reason}"));
+                        }
                         self.correction_memory.push(&reason);
                         let _ = tx.send(HarnessEvent::ToolError { error: reason });
                         // Halt stops the entire turn
                         if hr.halt {
                             let msg = "Turn halted by hook".to_string();
                             self.emit_terminal_error(&tx, msg);
+                            terminal_sent = true;
+                            break;
+                        }
+                        // Run the loop detector before the `continue` skips
+                        // the end-of-iteration check (same rationale as the
+                        // guardrail-deny path below).
+                        if self.check_loop_detection(&tool_interactions, &mut loop_window, &tx) {
                             terminal_sent = true;
                             break;
                         }
@@ -4191,15 +4266,56 @@ impl Harness {
 
                     match perm_check {
                         PermissionCheck::Denied(reason) => {
-                            // Blocked by mode restrictions (Ask mode) — skip dispatch entirely
+                            // Blocked by mode restrictions (Ask mode, or the Build
+                            // guardrail denying a coordinate form) — skip dispatch
+                            // entirely. The denial MUST be recorded as the call's
+                            // conversation turn (like the user-deny path below):
+                            // the schema was registered, so a denied call is part
+                            // of normal operation — if the model never sees its
+                            // call answered, it re-issues it and each re-issue
+                            // burns one of the MAX_TOOL_RETRIES lives.
                             log::debug!(
                                 "run_agent_loop PERM_DENIED tool={:?} reason={reason}",
                                 info.as_ref().map(|(_, n, _)| n)
                             );
                             self.tool_issuer.pop_front();
                             self.tool_failure_count += 1;
+                            if let Some((ref call_id, ref name, ref args)) = info {
+                                let tool_id = if call_id.is_empty() {
+                                    format!("call_{:016x}", iteration)
+                                } else {
+                                    call_id.clone()
+                                };
+                                self.push_tool_history(
+                                    &tool_id,
+                                    name,
+                                    args,
+                                    info_sig.as_deref().unwrap_or_default(),
+                                    &reason,
+                                );
+                                // Loop-detection signature part: identical
+                                // denials repeat identically, so this also lets
+                                // the loop detector fire its own (earlier,
+                                // louder) break instead of burning all lives.
+                                tool_interactions.push(format!(
+                                    "{name}\u{0}{args}\u{0}{reason}"
+                                ));
+                            }
                             self.correction_memory.push(&reason);
                             let _ = tx.send(HarnessEvent::ToolError { error: reason });
+                            // The denial just became this iteration's tool
+                            // interaction — run the loop detector HERE, before
+                            // the `continue` skips the end-of-iteration check:
+                            // a stuck model re-issuing an identical denied call
+                            // must hit the detector, not the retry budget.
+                            if self.check_loop_detection(
+                                &tool_interactions,
+                                &mut loop_window,
+                                &tx,
+                            ) {
+                                terminal_sent = true;
+                                break;
+                            }
                             if self.tool_failure_count >= MAX_TOOL_RETRIES {
                                 let msg = format!(
                                     "{MAX_TOOL_RETRIES} consecutive tool call failures. Agent loop interrupted."
@@ -4601,30 +4717,10 @@ impl Harness {
             // the exact same action (e.g. re-running a failing command).
             // Stop the loop here instead of burning tokens up to
             // MAX_ITERATIONS — same safety intent, caught far earlier.
-            if !tool_interactions.is_empty() {
-                let sig = Self::tool_interaction_signature(&tool_interactions);
-                loop_window.push_back(sig.clone());
-                if loop_window.len() > LOOP_DETECTION_WINDOW_SIZE {
-                    loop_window.pop_front();
-                }
-                let repeats = loop_window.iter().filter(|s| **s == sig).count();
-                if loop_window.len() == LOOP_DETECTION_WINDOW_SIZE
-                    && repeats > LOOP_DETECTION_MAX_REPEATS
-                {
-                    // log::debug!("run_agent_loop LOOP_DETECTED repeats={repeats}");
-                    self.context_manager.close_loop();
-                    let _ = tx.send(HarnessEvent::Toast {
-                        message: "Agent stopped: repeated identical tool calls \
-                                  detected (the model appears stuck in a loop)."
-                            .to_string(),
-                        variant: ToastVariant::Info,
-                    });
-                    let _ = tx.send(self.lsp_snapshot_event());
-                    let _ = tx.send(HarnessEvent::Done {
-                        context: self.context_manager.save_state(),
-                    });
-                    break;
-                }
+            // (The `break` exits the outer iteration loop directly, so no
+            // terminal_sent bookkeeping is needed at this call site.)
+            if self.check_loop_detection(&tool_interactions, &mut loop_window, &tx) {
+                break;
             }
 
             if !had_tools {
@@ -4985,8 +5081,9 @@ impl Harness {
     fn schema_input(&self, tool_name: &str) -> Option<serde_json::Value> {
         if let Some(cosh) = &self.cosh_tools {
             let schemas = match self.mode {
-                Mode::Build => cosh.schemas_enabled(&self.disabled_tools, false),
-                Mode::Yolo | Mode::Command => cosh.schemas_enabled(&self.disabled_tools, true),
+                Mode::Build | Mode::Yolo | Mode::Command => {
+                    cosh.schemas_enabled(&self.disabled_tools)
+                }
                 Mode::Ask => cosh.schemas_filtered(&self.disabled_tools),
             };
             for schema in schemas {

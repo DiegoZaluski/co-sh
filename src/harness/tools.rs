@@ -11,13 +11,6 @@ use cosh_sdk::extract_action::ToolSchema;
 use cosh_sdk::find::{GlobMatch, GrepMatch};
 use cosh_tools::{
     bash::{Bash, BashRunInput},
-    computer::{
-        Computer,
-        types::{
-            ComputerApps, ComputerKeyboard, ComputerPointer, ComputerScreenshot, ComputerSnapshot,
-            ComputerTouch,
-        },
-    },
     find::{Find, GlobCallOptions, GlobMatchCallback, GrepMatchCallback},
     fs::{Fs, FsRollbackInput, LspNotes, Target, TargetFile},
     lsp::Lsp,
@@ -30,6 +23,13 @@ use cosh_tools::{
     subagent::{
         SubAgent,
         types::{SubAgentCallInput, SubAgentCallOutput},
+    },
+    computer::{
+        Computer,
+        types::{
+            ComputerAct, ComputerApps, ComputerControl, ComputerScreenshot, ComputerSnapshot,
+            ComputerWait,
+        },
     },
     web::{Web, WebFetch, WebSearchInput},
 };
@@ -421,9 +421,12 @@ impl CoshTools {
         // Ask mode keeps computer_screenshot: it is read-only observation and
         // Ask mode has no approval dialog (nothing can move the pointer
         // between capture and use). apps/snapshot are structural (accessibility
-        // tree), so they are position-independent by definition.
+        // tree), so they are position-independent by definition. computer_wait
+        // is likewise read-only: it sends no input and blocks on a state
+        // check, so it stays exposed here too.
         v.push(self.computer.description_apps.clone());
         v.push(self.computer.description_snapshot.clone());
+        v.push(self.computer.description_wait.clone());
         v.push(self.computer.description_screenshot.clone());
         if let Some(lsp) = &self.lsp {
             v.push(lsp.description_definitions.clone());
@@ -456,15 +459,11 @@ impl CoshTools {
         out: &mut String,
         disabled_tools: &HashSet<String>,
         include_schema: bool,
-        allow_position_dependent: bool,
     ) {
         let all = self.tool_descriptions();
         for desc in all {
             let name = desc["name"].as_str().unwrap_or_default();
             if is_tool_disabled(name, disabled_tools) {
-                continue;
-            }
-            if !allow_position_dependent && is_position_dependent_tool(name) {
                 continue;
             }
             write_single_tool(out, &desc, include_schema);
@@ -552,9 +551,9 @@ impl CoshTools {
             include_schema,
         );
         // Ask mode exposes the READ-ONLY observation tools of the computer
-        // set (apps/snapshot/screenshot) — no synthetic input, so they are
-        // as safe as a web search. touch/pointer/keyboard stay out (they
-        // need approval even in Build mode).
+        // set (apps/snapshot/screenshot/wait) — no synthetic input, so they
+        // are as safe as a web search. act/control stay out (they need
+        // approval even in Build mode).
         write_tool_if_enabled(
             out,
             disabled_tools,
@@ -565,6 +564,12 @@ impl CoshTools {
             out,
             disabled_tools,
             &self.computer.description_snapshot,
+            include_schema,
+        );
+        write_tool_if_enabled(
+            out,
+            disabled_tools,
+            &self.computer.description_wait,
             include_schema,
         );
         write_tool_if_enabled(
@@ -583,14 +588,12 @@ impl CoshTools {
     pub fn schemas_enabled(
         &self,
         disabled_tools: &HashSet<String>,
-        allow_position_dependent: bool,
     ) -> Vec<ToolSchema> {
         let all = self.tool_descriptions();
         all.iter()
             .filter(|desc| {
                 let name = desc["name"].as_str().unwrap_or_default();
                 !is_tool_disabled(name, disabled_tools)
-                    && (allow_position_dependent || !is_position_dependent_tool(name))
             })
             .map(extract_schema)
             .collect()
@@ -621,6 +624,7 @@ impl CoshTools {
         // `tool_descriptions_filtered`/`write_tool_descriptions_filtered`.
         v.push(extract_schema(&self.computer.description_apps));
         v.push(extract_schema(&self.computer.description_snapshot));
+        v.push(extract_schema(&self.computer.description_wait));
         v.push(extract_schema(&self.computer.description_screenshot));
         if let Some(lsp) = &self.lsp {
             v.push(extract_schema(&lsp.description_definitions));
@@ -796,18 +800,6 @@ pub(crate) fn is_tool_disabled(name: &str, disabled: &HashSet<String>) -> bool {
     false
 }
 
-/// True for computer tools whose arguments are desktop pixel coordinates.
-///
-/// Their usefulness depends on the pointer being where it was when the
-/// coordinates were measured. Build mode is excluded because its approval
-/// dialog hands focus to the TUI and the user may move the pointer while
-/// answering — the model's coordinate math then targets the wrong pixel.
-/// They are only exposed in Yolo (and Command) mode, where dispatches run
-/// without an interactive dialog.
-pub(crate) fn is_position_dependent_tool(name: &str) -> bool {
-    matches!(name, "computer_screenshot" | "computer_pointer")
-}
-
 #[cfg(test)]
 mod disabled_tests {
     use super::is_tool_disabled;
@@ -825,17 +817,6 @@ mod disabled_tests {
         assert!(!is_tool_disabled("fs_read", &disabled));
         assert!(!is_tool_disabled("lsp", &empty));
         assert!(!is_tool_disabled("subagent_call", &disabled));
-    }
-
-    #[test]
-    fn position_dependent_set_is_exactly_the_coordinate_tools() {
-        assert!(super::is_position_dependent_tool("computer_screenshot"));
-        assert!(super::is_position_dependent_tool("computer_pointer"));
-        // Accessibility-tree tools are structural — no coordinates involved.
-        assert!(!super::is_position_dependent_tool("computer_apps"));
-        assert!(!super::is_position_dependent_tool("computer_snapshot"));
-        assert!(!super::is_position_dependent_tool("computer_touch"));
-        assert!(!super::is_position_dependent_tool("computer_keyboard"));
     }
 }
 
@@ -904,10 +885,10 @@ impl Tools for CoshTools {
         write_single_tool(out, &self.skills.description_match_skills, true);
         write_single_tool(out, &self.computer.description_apps, true);
         write_single_tool(out, &self.computer.description_snapshot, true);
+        write_single_tool(out, &self.computer.description_wait, true);
         write_single_tool(out, &self.computer.description_screenshot, true);
-        write_single_tool(out, &self.computer.description_touch, true);
-        write_single_tool(out, &self.computer.description_pointer, true);
-        write_single_tool(out, &self.computer.description_keyboard, true);
+        write_single_tool(out, &self.computer.description_act, true);
+        write_single_tool(out, &self.computer.description_control, true);
         if let Some(lsp) = &self.lsp {
             write_single_tool(out, &lsp.description_definitions, true);
             write_single_tool(out, &lsp.description_references, true);
@@ -947,10 +928,10 @@ impl Tools for CoshTools {
         v.push(self.skills.description_match_skills.clone());
         v.push(self.computer.description_apps.clone());
         v.push(self.computer.description_snapshot.clone());
+        v.push(self.computer.description_wait.clone());
         v.push(self.computer.description_screenshot.clone());
-        v.push(self.computer.description_touch.clone());
-        v.push(self.computer.description_pointer.clone());
-        v.push(self.computer.description_keyboard.clone());
+        v.push(self.computer.description_act.clone());
+        v.push(self.computer.description_control.clone());
         if let Some(lsp) = &self.lsp {
             v.push(lsp.description_definitions.clone());
             v.push(lsp.description_references.clone());
@@ -991,10 +972,10 @@ impl Tools for CoshTools {
         v.push(extract_schema(&self.skills.description_match_skills));
         v.push(extract_schema(&self.computer.description_apps));
         v.push(extract_schema(&self.computer.description_snapshot));
+        v.push(extract_schema(&self.computer.description_wait));
         v.push(extract_schema(&self.computer.description_screenshot));
-        v.push(extract_schema(&self.computer.description_touch));
-        v.push(extract_schema(&self.computer.description_pointer));
-        v.push(extract_schema(&self.computer.description_keyboard));
+        v.push(extract_schema(&self.computer.description_act));
+        v.push(extract_schema(&self.computer.description_control));
         if let Some(lsp) = &self.lsp {
             v.push(extract_schema(&lsp.description_definitions));
             v.push(extract_schema(&lsp.description_references));
@@ -1573,9 +1554,8 @@ impl Tools for CoshTools {
             }
 
             "computer_apps" => {
-                let _input: ComputerApps =
-                    serde_json::from_value(args).map_err(|e| e.to_string())?;
-                let output = self.computer.apps().await?;
+                let input: ComputerApps = serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let output = self.computer.apps(&input).await?;
                 serde_json::to_string(&output).map_err(|e| e.to_string())
             }
 
@@ -1583,6 +1563,13 @@ impl Tools for CoshTools {
                 let input: ComputerSnapshot =
                     serde_json::from_value(args).map_err(|e| e.to_string())?;
                 let output = self.computer.snapshot(&input).await?;
+                serde_json::to_string(&output).map_err(|e| e.to_string())
+            }
+
+            "computer_wait" => {
+                let input: ComputerWait =
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let output = self.computer.wait(&input).await?;
                 serde_json::to_string(&output).map_err(|e| e.to_string())
             }
 
@@ -1604,24 +1591,17 @@ impl Tools for CoshTools {
                 serde_json::to_string(&output).map_err(|e| e.to_string())
             }
 
-            "computer_touch" => {
-                let input: ComputerTouch =
+            "computer_act" => {
+                let input: ComputerAct =
                     serde_json::from_value(args).map_err(|e| e.to_string())?;
-                let output = self.computer.touch(&input).await?;
+                let output = self.computer.act(&input).await?;
                 serde_json::to_string(&output).map_err(|e| e.to_string())
             }
 
-            "computer_pointer" => {
-                let input: ComputerPointer =
+            "computer_control" => {
+                let input: ComputerControl =
                     serde_json::from_value(args).map_err(|e| e.to_string())?;
-                let output = self.computer.pointer(&input).await?;
-                serde_json::to_string(&output).map_err(|e| e.to_string())
-            }
-
-            "computer_keyboard" => {
-                let input: ComputerKeyboard =
-                    serde_json::from_value(args).map_err(|e| e.to_string())?;
-                let output = self.computer.keyboard(&input).await?;
+                let output = self.computer.control(&input).await?;
                 serde_json::to_string(&output).map_err(|e| e.to_string())
             }
 

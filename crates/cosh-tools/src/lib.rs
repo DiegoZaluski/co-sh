@@ -2,6 +2,10 @@
 // bitflags 1.x/2.x, thiserror 1.x/2.x, phf 0.11/0.13, rand 0.8/0.9, etc.
 // These cannot be unified without breaking upstream crates.
 #![allow(clippy::multiple_crate_versions)]
+// The tool-description schemas are single `serde_json::json!` macros with
+// deep `allOf`/`anyOf` nesting (computer_control carries the deepest) —
+// the default 128 recursion limit overflows while expanding them.
+#![recursion_limit = "512"]
 
 // TOOL DESCRIPTION CONVENTION (applies to every tool in this crate)
 //

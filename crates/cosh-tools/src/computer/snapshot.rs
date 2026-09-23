@@ -1,9 +1,10 @@
 //! `computer_snapshot` — capture an application's accessibility tree.
 //!
 //! Two renderings share one resolution path: the compact indented outline
-//! ([`xa11y::App::dump`], the format the xa11y docs recommend for figuring
-//! out roles/names before writing selectors) and structured JSON
-//! ([`xa11y::TreeNode`] serialized directly).
+//! (role, name, value and non-default state flags per line) and structured
+//! JSON ([`StateNode`] serialized directly, states included). The tool
+//! builds its own tree from `Element::children()` + `ElementData.states`
+//! because xa11y's `TreeNode` carries no states.
 //!
 //! Resolution is fail-fast: only the application lookup auto-waits (up to
 //! `timeout_ms`). Selector matching resolves once — a selector on an
@@ -11,9 +12,9 @@
 //! the interface settles instead of expecting the tool to poll.
 use std::time::Duration;
 
-use xa11y::{App, AppExt, TreeNode};
+use xa11y::{App, AppExt};
 
-use super::types::{ComputerSnapshot, SnapshotFormat, SnapshotOutput};
+use super::types::{ElementStates, SnapshotFormat, SnapshotOutput, StateNode, ComputerSnapshot};
 
 /// Default auto-wait for the application to appear.
 pub(crate) const DEFAULT_TIMEOUT_MS: u64 = 3000;
@@ -41,18 +42,7 @@ const MAX_NODES: usize = 4000;
 /// snapshot exceeds [`MAX_NODES`], or when the platform accessibility API
 /// is unreachable.
 pub async fn snapshot(input: &ComputerSnapshot) -> Result<SnapshotOutput, String> {
-    let has_name = input
-        .name
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .is_some();
-    if has_name && input.pid.is_some() {
-        return Err("computer_snapshot: provide `name` or `pid`, not both".into());
-    }
-    if !has_name && input.pid.is_none() {
-        return Err("computer_snapshot: provide `name` or `pid`".into());
-    }
+    super::surface::validate_snapshot(input)?;
     if input.nth == Some(0) {
         return Err("computer_snapshot: `nth` is 1-based; use 1 for the first match".into());
     }
@@ -68,19 +58,6 @@ pub async fn snapshot(input: &ComputerSnapshot) -> Result<SnapshotOutput, String
 
 fn snapshot_blocking(input: &ComputerSnapshot) -> Result<SnapshotOutput, String> {
     let timeout = Duration::from_millis(input.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
-    let name = input
-        .name
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-
-    let app = match (name, input.pid) {
-        (Some(name), None) => App::by_name(name, timeout),
-        (None, Some(pid)) => App::by_pid(pid, timeout),
-        _ => unreachable!("validated in snapshot"),
-    }
-    .map_err(|e| format!("computer_snapshot: resolve application: {e}"))?;
-
     let max_depth = Some(
         input
             .max_depth
@@ -89,18 +66,60 @@ fn snapshot_blocking(input: &ComputerSnapshot) -> Result<SnapshotOutput, String>
     );
     let format = input.format.unwrap_or_default();
 
+    // Shell-surface targeting: the SAME selector flow, rooted at the
+    // surface instead of an app (validated: exactly one of name/pid/surface).
+    if let Some(surface_kind) = input.surface {
+        let surface = super::surface::resolve(surface_kind, timeout)
+            .map_err(|e| format!("computer_snapshot: {e}"))?;
+        return snapshot_surface(input, surface, max_depth, format);
+    }
+
+    let name = input.name.as_deref().map(str::trim).filter(|s| !s.is_empty());
+
+    let app = match (name, input.pid) {
+        (Some(name), None) => App::by_name(name, timeout),
+        (None, Some(pid)) => App::by_pid(pid, timeout),
+        _ => unreachable!("validated in snapshot"),
+    }
+    .map_err(|e| super::errors::render("computer_snapshot", "resolve application", &e))?;
+
     let (snapshot, elements) = match &input.selector {
         Some(selector) => {
             let nth = input.nth.unwrap_or(1);
             let locator = app.locator(selector).nth(nth);
             render(&format, &locator, max_depth)?
         }
-        None => render_app(&format, &app, max_depth)?,
+        None => render_root(&format, &app.as_element(), max_depth)?,
     };
 
     Ok(SnapshotOutput {
         app: app.name.clone(),
         pid: app.pid,
+        snapshot,
+        elements,
+    })
+}
+
+/// Render a surface-rooted snapshot — shared by the production path
+/// (resolved against the singleton provider) and the tests (mock provider,
+/// via the `ShellSurface` handle they build directly).
+fn snapshot_surface(
+    input: &ComputerSnapshot,
+    surface: xa11y::ShellSurface,
+    max_depth: Option<usize>,
+    format: SnapshotFormat,
+) -> Result<SnapshotOutput, String> {
+    let (snapshot, elements) = match &input.selector {
+        Some(selector) => {
+            let nth = input.nth.unwrap_or(1);
+            let locator = surface.locator(selector).nth(nth);
+            render(&format, &locator, max_depth)?
+        }
+        None => render_root(&format, &surface.as_element(), max_depth)?,
+    };
+    Ok(SnapshotOutput {
+        app: surface.name.clone(),
+        pid: surface.pid,
         snapshot,
         elements,
     })
@@ -112,31 +131,64 @@ fn render(
     locator: &xa11y::Locator,
     max_depth: Option<usize>,
 ) -> Result<(String, usize), String> {
-    let tree = locator
-        .tree(max_depth)
-        .map_err(|e| format!("computer_snapshot: {e}"))?;
+    let root = locator
+        .element()
+        .map_err(|e| super::errors::render("computer_snapshot", "resolve selector", &e))?;
+    let tree = build_state_tree(&root, max_depth, 0)?;
     let count = checked_node_count(&tree)?;
     Ok((render_tree(format, &tree), count))
 }
 
-/// Render an application-rooted snapshot in the requested format.
-fn render_app(
+/// Render a snapshot rooted at ANY element handle — an application root or
+/// a shell-surface root take the same path (both wrap a real platform
+/// element).
+fn render_root(
     format: &SnapshotFormat,
-    app: &App,
+    root: &xa11y::Element,
     max_depth: Option<usize>,
 ) -> Result<(String, usize), String> {
-    let tree = app
-        .tree(max_depth)
-        .map_err(|e| format!("computer_snapshot: {e}"))?;
+    let tree = build_state_tree(root, max_depth, 0)?;
     let count = checked_node_count(&tree)?;
     Ok((render_tree(format, &tree), count))
 }
 
-/// Serialize a [`TreeNode`] in the requested format.
+/// Build the tool's own tree with states, mirroring xa11y's
+/// `build_tree_node` depth semantics: `Some(d)` stops at depth `d`,
+/// `None` traverses the full subtree.
+///
+/// States come from the same `ElementData` fetch that identifies the node —
+/// one provider round trip per element, same as xa11y's stateless tree.
+fn build_state_tree(
+    element: &xa11y::Element,
+    max_depth: Option<usize>,
+    depth: usize,
+) -> Result<StateNode, String> {
+    let data = element.data();
+    let states = ElementStates::from_state_set(&data.states);
+    let children = if max_depth.is_none_or(|d| depth < d) {
+        element
+            .children()
+            .map_err(|e| super::errors::render("computer_snapshot", "read tree", &e))?
+            .into_iter()
+            .map(|child| build_state_tree(&child, max_depth, depth + 1))
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        Vec::new()
+    };
+    Ok(StateNode {
+        role: data.role.to_snake_case().to_string(),
+        name: data.name.clone(),
+        value: data.value.clone(),
+        states,
+        children,
+    })
+}
+
+/// Serialize a [`StateNode`] in the requested format.
 ///
 /// Both formats come from the same resolved tree, so the element count is
 /// exact regardless of newlines inside names/values.
-fn render_tree(format: &SnapshotFormat, tree: &TreeNode) -> String {
+fn render_tree(format: &SnapshotFormat, tree: &StateNode) -> String {
     match format {
         SnapshotFormat::Json => serde_json::to_string_pretty(tree).unwrap_or_default(),
         SnapshotFormat::Tree => {
@@ -147,8 +199,9 @@ fn render_tree(format: &SnapshotFormat, tree: &TreeNode) -> String {
     }
 }
 
-/// Indented one-line-per-element outline (role, name, value).
-fn write_outline(node: &TreeNode, depth: usize, out: &mut String) {
+/// Indented one-line-per-element outline (role, name, value, non-default
+/// states).
+fn write_outline(node: &StateNode, depth: usize, out: &mut String) {
     let indent = "  ".repeat(depth);
     out.push_str(&indent);
     out.push_str(&node.role);
@@ -157,6 +210,10 @@ fn write_outline(node: &TreeNode, depth: usize, out: &mut String) {
     }
     if let Some(value) = node.value.as_deref().filter(|v| !v.is_empty()) {
         out.push_str(&format!(" value={}", escape_text(value)));
+    }
+    for token in node.states.outline_tokens() {
+        out.push(' ');
+        out.push_str(token);
     }
     out.push('\n');
     for child in &node.children {
@@ -172,7 +229,7 @@ fn escape_text(text: &str) -> String {
 
 /// Count nodes and reject snapshots beyond the [`MAX_NODES`] budget so a
 /// runaway tree fails cleanly instead of flooding the model's context.
-fn checked_node_count(node: &TreeNode) -> Result<usize, String> {
+fn checked_node_count(node: &StateNode) -> Result<usize, String> {
     let count = count_nodes(node);
     if count > MAX_NODES {
         return Err(format!(
@@ -183,10 +240,223 @@ fn checked_node_count(node: &TreeNode) -> Result<usize, String> {
     Ok(count)
 }
 
-fn count_nodes(node: &TreeNode) -> usize {
+fn count_nodes(node: &StateNode) -> usize {
     let mut total = 1;
     for child in &node.children {
         total += count_nodes(child);
     }
     total
+}
+
+/// Shell-surface dispatch tests — same mock fixture as the wait tests
+/// (Taskbar surface at `MOCK_SHELL_PID`), driving `snapshot_surface`
+/// directly through its provider seam.
+#[cfg(test)]
+mod snapshot_surface_tests {
+    use std::time::Duration;
+
+    use xa11y::{ShellSurface, ShellSurfaceKind, mock};
+
+    use super::super::types::{ComputerSnapshot, SnapshotFormat};
+    use super::{snapshot_surface, DEFAULT_MAX_DEPTH};
+
+    fn taskbar() -> xa11y::ShellSurface {
+        ShellSurface::by_kind_with(mock::build_provider(), ShellSurfaceKind::Taskbar, Duration::ZERO)
+            .expect("mock fixture carries a taskbar")
+    }
+
+    /// A surface-rooted snapshot without a selector outlines the WHOLE
+    /// surface and reports the surface's own identity (name + shell pid),
+    /// not an app's.
+    #[test]
+    fn surface_root_reports_surface_identity() {
+        let input = ComputerSnapshot::default();
+        let out = snapshot_surface(&input, taskbar(), Some(DEFAULT_MAX_DEPTH as usize), SnapshotFormat::default())
+            .expect("mock taskbar must snapshot");
+        assert_eq!(out.app, "Taskbar");
+        assert_eq!(out.pid, Some(mock::MOCK_SHELL_PID));
+        assert!(out.elements >= 1);
+        assert!(out.snapshot.contains("Taskbar"), "{}", out.snapshot);
+    }
+
+    /// With a selector the SAME locator flow narrows into the surface's
+    /// subtree — `nth` (1-based) applies exactly like the app path.
+    #[test]
+    fn surface_selector_narrows_like_app_path() {
+        let input = ComputerSnapshot {
+            selector: Some("button".into()),
+            nth: Some(1),
+            ..ComputerSnapshot::default()
+        };
+        let out = snapshot_surface(&input, taskbar(), Some(DEFAULT_MAX_DEPTH as usize), SnapshotFormat::default())
+            .expect("mock taskbar carries buttons");
+        assert_eq!(out.app, "Taskbar");
+        assert_eq!(out.elements, 1, "nth(1) picks exactly one match");
+    }
+
+    /// A selector that matches nothing under the surface is an honest
+    /// error naming the surface — same contract as the app path.
+    #[test]
+    fn surface_selector_miss_is_honest_error() {
+        let input = ComputerSnapshot {
+            selector: Some("text_field[name='definitely-not-here']".into()),
+            ..ComputerSnapshot::default()
+        };
+        let err = snapshot_surface(&input, taskbar(), Some(DEFAULT_MAX_DEPTH as usize), SnapshotFormat::default())
+            .expect_err("missing selector must fail");
+        assert!(!err.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod snapshot_render_tests {
+    use super::super::types::{ElementStates, StateNode, ToggleState};
+    use super::{render_tree, write_outline, SnapshotFormat};
+
+    /// A node with only default states renders as bare `role name=value` —
+    /// no state tokens, keeping the common case one short line.
+    #[test]
+    fn default_states_render_nothing() {
+        let node = StateNode {
+            role: "button".into(),
+            name: Some("OK".into()),
+            value: None,
+            states: ElementStates::default(),
+            children: vec![],
+        };
+        assert_eq!(write_outline_str(&node), "button name=\"OK\"\n");
+    }
+
+    /// Non-default flags render as aria-vocabulary tokens, in fixed order:
+    /// disabled, hidden, focused, checked, selected, expanded, editable, busy.
+    #[test]
+    fn non_default_states_render_as_tokens_in_fixed_order() {
+        let states = ElementStates {
+            enabled: false,
+            visible: false,
+            focused: true,
+            checked: Some(ToggleState::On),
+            selected: true,
+            expanded: Some(false),
+            editable: true,
+            busy: true,
+        };
+        let node = StateNode {
+            role: "checkbox".into(),
+            name: None,
+            value: None,
+            states,
+            children: vec![],
+        };
+        assert_eq!(
+            write_outline_str(&node),
+            "checkbox disabled hidden focused checked selected collapsed editable busy\n"
+        );
+    }
+
+    /// An unchecked checkbox is meaningful (the user wants to know it is
+    /// checkable and off), so `Some(Off)` renders `unchecked` — unlike the
+    /// absence of checkability (`None`), which renders nothing.
+    #[test]
+    fn unchecked_is_reported_but_non_checkable_is_silent() {
+        let unchecked = ElementStates {
+            checked: Some(ToggleState::Off),
+            ..ElementStates::default()
+        };
+        let unchecked_node = StateNode {
+            role: "checkbox".into(),
+            name: None,
+            value: None,
+            states: unchecked,
+            children: vec![],
+        };
+        assert_eq!(write_outline_str(&unchecked_node), "checkbox unchecked\n");
+
+        let mixed = ElementStates {
+            checked: Some(ToggleState::Mixed),
+            ..ElementStates::default()
+        };
+        let mixed_node = StateNode {
+            role: "checkbox".into(),
+            name: None,
+            value: None,
+            states: mixed,
+            children: vec![],
+        };
+        assert_eq!(write_outline_str(&mixed_node), "checkbox mixed\n");
+    }
+
+    /// `json` format serializes the node directly: the flat `states` object
+    /// is present with the normalized subset, `checked` is "off" (lowercase
+    /// enum) and children nest recursively.
+    #[test]
+    fn json_format_embeds_states_object() {
+        let child = StateNode {
+            role: "text_field".into(),
+            name: Some("Search".into()),
+            value: Some("hi".into()),
+            states: ElementStates {
+                editable: true,
+                ..ElementStates::default()
+            },
+            children: vec![],
+        };
+        let root = StateNode {
+            role: "window".into(),
+            name: Some("Main".into()),
+            value: None,
+            states: ElementStates::default(),
+            children: vec![child],
+        };
+        let json = render_tree(&SnapshotFormat::Json, &root);
+        let value: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        assert_eq!(value["role"], "window");
+        assert_eq!(value["states"]["enabled"], true);
+        assert_eq!(value["states"]["visible"], true);
+        assert_eq!(value["states"]["focused"], false);
+        // `.get()` (not indexing) so a MISSING key would fail: indexing an
+        // absent key also yields Null, which would make this assertion pass
+        // even if `checked` were dropped from the serialization entirely.
+        assert_eq!(value["states"].get("checked"), Some(&serde_json::Value::Null));
+        assert_eq!(value["states"].get("expanded"), Some(&serde_json::Value::Null));
+        let grandchild = &value["children"][0];
+        assert_eq!(grandchild["states"]["editable"], true);
+        assert_eq!(grandchild["states"].get("checked"), Some(&serde_json::Value::Null));
+        // ToggleState serializes lowercase.
+        let toggled = ElementStates {
+            checked: Some(ToggleState::On),
+            ..ElementStates::default()
+        };
+        let toggled_node = StateNode {
+            role: "checkbox".into(),
+            name: None,
+            value: None,
+            states: toggled,
+            children: vec![],
+        };
+        let toggled_json = render_tree(&SnapshotFormat::Json, &toggled_node);
+        let toggled_value: serde_json::Value =
+            serde_json::from_str(&toggled_json).expect("valid json");
+        assert_eq!(toggled_value["states"]["checked"], "on");
+        let mixed_json_value = ElementStates {
+            checked: Some(ToggleState::Mixed),
+            ..ElementStates::default()
+        };
+        let mixed_node = StateNode {
+            role: "checkbox".into(),
+            name: None,
+            value: None,
+            states: mixed_json_value,
+            children: vec![],
+        };
+        let mixed_json = render_tree(&SnapshotFormat::Json, &mixed_node);
+        let mixed_value: serde_json::Value = serde_json::from_str(&mixed_json).expect("valid json");
+        assert_eq!(mixed_value["states"]["checked"], "mixed");
+    }
+
+    fn write_outline_str(node: &StateNode) -> String {
+        let mut out = String::new();
+        write_outline(node, 0, &mut out);
+        out
+    }
 }

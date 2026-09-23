@@ -33,6 +33,10 @@ version = "0.15"
 cosh-sdk = { path = "../cosh-sdk" }
 tempfile = "3"
 
+[dev-dependencies.xa11y]
+version = "0.15"
+features = ["test-support"]
+
 [dev-dependencies.tokio]
 version = "1.52.3"
 features = ["rt", "macros"]

@@ -137,61 +137,107 @@ fn build_bash_needs_approval() {
 }
 
 #[test]
-fn build_position_dependent_tools_are_denied() {
-    // screenshot and pointer depend on the pointer staying where it was
-    // when the coordinates were measured — Build's approval dialog hands
-    // focus to the TUI and the user may move the pointer while answering,
-    // so both are hidden from the model AND denied outright here (asking
-    // would re-create the pointer-drift problem).
-    let shot = serde_json::json!({});
-    let result = check_tool_permission("computer_screenshot", &shot, Mode::Build, None);
-    assert!(
-        matches!(result, PermissionCheck::Denied(_)),
-        "computer_screenshot must be denied in Build, got {result:?}"
-    );
-
+fn build_denies_coordinates_anywhere_in_the_chain_but_asks_for_element_chains() {
+    // Coordinates depend on the pointer staying where it was when they
+    // were measured — Build's approval dialog hands focus to the TUI and
+    // the user may move the pointer while answering. Denied outright
+    // (asking would re-create the pointer-drift problem), with guidance
+    // toward the tree-grounded element form.
     let pointer = serde_json::json!({ "x": 100, "y": 200 });
-    let result = check_tool_permission("computer_pointer", &pointer, Mode::Build, None);
+    let result = check_tool_permission("computer_control", &pointer, Mode::Build, None);
+    let denied = match result {
+        PermissionCheck::Denied(msg) => msg,
+        other => panic!("coordinate step must be denied in Build, got {other:?}"),
+    };
+    assert!(
+        denied.contains("`app`/`pid`/`surface` + `selector`"),
+        "the denial must point at the element form: {denied}"
+    );
+
+    // A coordinate drag is the same staleness problem (its start resolves
+    // to pixels) — denied like any coordinate step.
+    let drag = serde_json::json!({ "x": 10, "y": 10, "x2": 90, "y2": 90, "action": "drag" });
+    let result = check_tool_permission("computer_control", &drag, Mode::Build, None);
     assert!(
         matches!(result, PermissionCheck::Denied(_)),
-        "computer_pointer must be denied in Build, got {result:?}"
+        "coordinate drag must be denied in Build, got {result:?}"
+    );
+
+    // A coordinate step hidden DEEPER in a `then` chain is the same
+    // position dependence — the guardrail walks the whole chain.
+    let deeper = serde_json::json!({
+        "app": "Firefox",
+        "selector": "button[name='OK']",
+        "then": { "x": 100, "y": 200 }
+    });
+    let result = check_tool_permission("computer_control", &deeper, Mode::Build, None);
+    match result {
+        PermissionCheck::Denied(reason) => {
+            assert!(
+                reason.contains("step 2"),
+                "the denial must name the failing step: {reason}"
+            );
+        }
+        other => panic!("deeper coordinate step must be denied in Build, got {other:?}"),
+    }
+
+    // The element form resolves the point from the a11y tree at dispatch
+    // time — no coordinate can go stale — so it ASKS like computer_act.
+    let element = serde_json::json!({
+        "app": "Firefox",
+        "selector": "button[name='OK']",
+        "action": "click"
+    });
+    let result = check_tool_permission("computer_control", &element, Mode::Build, None);
+    assert!(
+        matches!(result, PermissionCheck::NeedsApproval(_)),
+        "element-form step must ask in Build, got {result:?}"
+    );
+    if let PermissionCheck::NeedsApproval(req) = result {
+        assert_eq!(req.tool, "computer_control");
+        assert!(req.args.contains("button[name='OK']"), "{}", req.args);
+    }
+
+    // Element-to-element drag: tree-grounded on both ends — asks too.
+    let drag = serde_json::json!({
+        "app": "Files",
+        "selector": "list_item[name='report.pdf']",
+        "to_selector": "group[name='Drop here']",
+        "action": "drag"
+    });
+    let result = check_tool_permission("computer_control", &drag, Mode::Build, None);
+    assert!(
+        matches!(result, PermissionCheck::NeedsApproval(_)),
+        "element drag must ask in Build, got {result:?}"
     );
 }
 
 #[test]
-fn yolo_mode_allows_position_dependent_tools() {
-    let shot = serde_json::json!({});
-    let result = check_tool_permission("computer_screenshot", &shot, Mode::Yolo, None);
-    assert!(matches!(result, PermissionCheck::Allowed));
-
+fn yolo_mode_allows_coordinate_control() {
     let pointer = serde_json::json!({ "x": 100, "y": 200, "action": "click" });
-    let result = check_tool_permission("computer_pointer", &pointer, Mode::Yolo, None);
+    let result = check_tool_permission("computer_control", &pointer, Mode::Yolo, None);
     assert!(matches!(result, PermissionCheck::Allowed));
 }
 
 #[test]
-fn ask_mode_allows_screenshot_but_denies_pointer() {
+fn ask_mode_allows_screenshot_but_denies_control() {
     // Ask has no approval dialog, so the read-only screenshot stays
-    // available; pointer is synthetic input and stays restricted.
+    // available; computer_control is synthetic input and stays restricted.
     let shot = serde_json::json!({});
     let result = check_tool_permission("computer_screenshot", &shot, Mode::Ask, None);
     assert!(matches!(result, PermissionCheck::Allowed));
 
     let pointer = serde_json::json!({ "x": 100, "y": 200 });
-    let result = check_tool_permission("computer_pointer", &pointer, Mode::Ask, None);
+    let result = check_tool_permission("computer_control", &pointer, Mode::Ask, None);
     assert!(matches!(result, PermissionCheck::Denied(_)));
 }
 
 #[test]
 fn build_accessibility_tree_tools_still_need_approval() {
-    // The tree tools keep their Build behavior: touch/keyboard ask, and
-    // the read-only observation tools pass straight through.
-    let touch = serde_json::json!({ "name": "Safari", "selector": "button[name='OK']" });
-    let result = check_tool_permission("computer_touch", &touch, Mode::Build, None);
-    assert!(matches!(result, PermissionCheck::NeedsApproval(_)));
-
-    let keyboard = serde_json::json!({ "key": "enter" });
-    let result = check_tool_permission("computer_keyboard", &keyboard, Mode::Build, None);
+    // The tree tools keep their Build behavior: act asks, and the
+    // read-only observation tools pass straight through.
+    let act = serde_json::json!({ "name": "Safari", "selector": "button[name='OK']" });
+    let result = check_tool_permission("computer_act", &act, Mode::Build, None);
     assert!(matches!(result, PermissionCheck::NeedsApproval(_)));
 
     let apps = serde_json::json!({});
@@ -201,6 +247,244 @@ fn build_accessibility_tree_tools_still_need_approval() {
     let snapshot = serde_json::json!({ "name": "Safari" });
     let result = check_tool_permission("computer_snapshot", &snapshot, Mode::Build, None);
     assert!(matches!(result, PermissionCheck::Allowed));
+}
+
+#[test]
+fn computer_wait_is_allowed_in_every_mode() {
+    // `computer_wait` is pure observation: it sends no input, moves no
+    // pointer and opens no dialog, so a blocking wait is safe in every
+    // mode — including Ask (the plan's allow-matrix decision for phase 5).
+    // It must NOT appear in `is_restricted_in_ask_mode`.
+    let wait = serde_json::json!({
+        "name": "Safari",
+        "selector": "progress_indicator",
+        "state": "detached",
+        "timeout_ms": 1000
+    });
+    for mode in [Mode::Ask, Mode::Build, Mode::Yolo] {
+        let result = check_tool_permission("computer_wait", &wait, mode, None);
+        assert!(
+            matches!(result, PermissionCheck::Allowed),
+            "computer_wait must be allowed in {mode:?}, got {result:?}"
+        );
+    }
+}
+
+#[test]
+fn build_control_is_chain_aware_click_first_asks_keyboard_first_denied() {
+    // The canonical click-first pipeline: a real click on the element
+    // moves OS keyboard focus AFTER the user answers the dialog — exactly
+    // what makes the chained typing land on the target — so the whole
+    // chain asks once, like any synthetic-input tool.
+    let click_first = serde_json::json!({
+        "app": "Obsidian",
+        "selector": "text_field[name='Untitled']",
+        "action": "click",
+        "then": { "text": "hello" }
+    });
+    let result = check_tool_permission("computer_control", &click_first, Mode::Build, None);
+    assert!(
+        matches!(result, PermissionCheck::NeedsApproval(_)),
+        "click-first pipeline must ask in Build, got {result:?}"
+    );
+
+    // A chain that STARTS with a keyboard step types into whatever holds
+    // keyboard focus — and the approval dialog hands focus to the TUI, so
+    // the text would land in the cosh input box (observed in the field).
+    // Deny with guidance toward the click-first pattern.
+    let keyboard_first = serde_json::json!({ "key": "enter" });
+    let result = check_tool_permission("computer_control", &keyboard_first, Mode::Build, None);
+    match result {
+        PermissionCheck::Denied(reason) => {
+            assert!(
+                reason.contains("click on the target element"),
+                "denial must guide toward the click-first pattern: {reason}"
+            );
+        }
+        other => panic!("keyboard-first chain must be denied in Build, got {other:?}"),
+    }
+
+    // The same keyboard step is allowed outright in Yolo (no approval
+    // dialog exists there to steal focus — dispatch runs without an
+    // interactive prompt, matching the coordinate form's Yolo behavior).
+    let result = check_tool_permission("computer_control", &keyboard_first, Mode::Yolo, None);
+    assert!(
+        matches!(result, PermissionCheck::Allowed),
+        "keyboard step must be allowed in Yolo, got {result:?}"
+    );
+
+    // ORDER-SENSITIVE (review finding, same fix as computer_act): a
+    // keyboard step BEFORE the element step is denied — the keystroke
+    // would run before any click could set focus; a later element step
+    // does not sanitize an earlier keystroke. The element-first mirror
+    // passes the order check and asks.
+    let type_then_click = serde_json::json!({
+        "key": "enter",
+        "then": { "app": "Obsidian", "selector": "text_field[name='Untitled']" }
+    });
+    let result = check_tool_permission("computer_control", &type_then_click, Mode::Build, None);
+    match result {
+        PermissionCheck::Denied(reason) => {
+            assert!(
+                reason.contains("no earlier step"),
+                "keyboard-before-element control chain must be denied: {reason}"
+            );
+        }
+        other => panic!("keyboard-before-element control chain must be denied, got {other:?}"),
+    }
+
+    let click_then_type = serde_json::json!({
+        "app": "Obsidian",
+        "selector": "text_field[name='Untitled']",
+        "then": { "key": "enter" }
+    });
+    let result = check_tool_permission("computer_control", &click_then_type, Mode::Build, None);
+    assert!(
+        matches!(result, PermissionCheck::NeedsApproval(_)),
+        "click-first control chain must ask in Build, got {result:?}"
+    );
+}
+
+#[test]
+fn build_act_is_chain_aware_element_first_asks_keyboard_first_denied() {
+    // The canonical act pipeline (field-test pattern): a semantic action
+    // on an element, then a wait, then typing into the field it created —
+    // the whole chain asks once, like any synthetic-input tool.
+    let element_first = serde_json::json!({
+        "name": "Obsidian",
+        "selector": "menu_item[name='Rename']",
+        "then": {
+            "wait": 600,
+            "then": { "text": "cosh-test", "then": { "key": "enter" } }
+        }
+    });
+    let result = check_tool_permission("computer_act", &element_first, Mode::Build, None);
+    assert!(
+        matches!(result, PermissionCheck::NeedsApproval(_)),
+        "element-first act pipeline must ask in Build, got {result:?}"
+    );
+    if let PermissionCheck::NeedsApproval(req) = result {
+        assert_eq!(req.tool, "computer_act");
+        assert!(req.args.contains("menu_item[name='Rename']"), "{}", req.args);
+    }
+
+    // A chain that types but never touches an element sends the text into
+    // whatever holds keyboard focus after the approval dialog — the cosh
+    // input box (observed in the field). Deny with guidance toward the
+    // element-first pattern (and the click fallback via computer_control).
+    let keyboard_first = serde_json::json!({ "key": "enter" });
+    let result = check_tool_permission("computer_act", &keyboard_first, Mode::Build, None);
+    match result {
+        PermissionCheck::Denied(reason) => {
+            assert!(
+                reason.contains("element step"),
+                "denial must guide toward the element-first pattern: {reason}"
+            );
+        }
+        other => panic!("keyboard-first act chain must be denied in Build, got {other:?}"),
+    }
+
+    // ORDER-SENSITIVE (review finding): a keyboard step BEFORE the element
+    // step is just as unsafe as a keyboard-only chain — the keystroke runs
+    // before any element action could set focus. A later element step does
+    // not sanitize an earlier keystroke.
+    let type_then_element = serde_json::json!({
+        "key": "enter",
+        "then": { "name": "Obsidian", "selector": "text_field[name='Untitled']" }
+    });
+    let result = check_tool_permission("computer_act", &type_then_element, Mode::Build, None);
+    match result {
+        PermissionCheck::Denied(reason) => {
+            assert!(
+                reason.contains("no earlier step"),
+                "keyboard-before-element chain must be denied: {reason}"
+            );
+        }
+        other => panic!("keyboard-before-element chain must be denied, got {other:?}"),
+    }
+
+    // The element-first mirror passes the order check and asks.
+    let element_then_type = serde_json::json!({
+        "name": "Obsidian",
+        "selector": "text_field[name='Untitled']",
+        "then": { "key": "enter" }
+    });
+    let result = check_tool_permission("computer_act", &element_then_type, Mode::Build, None);
+    assert!(
+        matches!(result, PermissionCheck::NeedsApproval(_)),
+        "element-first chain must ask in Build, got {result:?}"
+    );
+
+    // The same keyboard step is allowed outright in Yolo (no approval
+    // dialog exists there to steal focus).
+    let result = check_tool_permission("computer_act", &keyboard_first, Mode::Yolo, None);
+    assert!(
+        matches!(result, PermissionCheck::Allowed),
+        "keyboard step must be allowed in Yolo, got {result:?}"
+    );
+
+    // A wait-only chain carries no element to re-ground focus either; it
+    // still asks like any synthetic-input tool (and is unrestricted in
+    // Yolo).
+    let wait_only = serde_json::json!({ "wait": 600, "then": { "wait": 400 } });
+    let result = check_tool_permission("computer_act", &wait_only, Mode::Build, None);
+    assert!(
+        matches!(result, PermissionCheck::NeedsApproval(_)),
+        "wait-only act chain must ask in Build, got {result:?}"
+    );
+}
+
+#[test]
+fn build_act_surface_step_keeps_unchanged_approval_rules() {
+    // Phase 6: `surface` is a THIRD targeting root on computer_act, not a
+    // new tool — the guardrail matrix must be UNCHANGED. A surface step is
+    // a semantic step (it carries `selector`), so it satisfies the
+    // order-sensitive check exactly like a `name`/`pid` step: surface-first
+    // chains ask in Build; a keyboard step BEFORE any selector step is
+    // denied wherever a surface appears.
+    let surface_first = serde_json::json!({
+        "surface": "menu_bar",
+        "selector": "menu_item[name='About']",
+        "then": { "key": "escape" }
+    });
+    let result = check_tool_permission("computer_act", &surface_first, Mode::Build, None);
+    assert!(
+        matches!(result, PermissionCheck::NeedsApproval(_)),
+        "surface-first act chain must ask in Build like any element chain, got {result:?}"
+    );
+    if let PermissionCheck::NeedsApproval(req) = result {
+        assert_eq!(req.tool, "computer_act");
+        assert!(
+            req.args.contains("menu_item[name='About']"),
+            "approval args must carry the surface step's selector: {}",
+            req.args
+        );
+    }
+
+    // A surface step LATER in the chain does not sanitize an earlier
+    // keyboard step — same order-sensitive rule as the app path.
+    let keyboard_then_surface = serde_json::json!({
+        "key": "escape",
+        "then": { "surface": "menu_bar", "selector": "menu_item[name='About']" }
+    });
+    let result = check_tool_permission("computer_act", &keyboard_then_surface, Mode::Build, None);
+    match result {
+        PermissionCheck::Denied(reason) => {
+            assert!(
+                reason.contains("no earlier step"),
+                "keyboard-before-surface chain must be denied: {reason}"
+            );
+        }
+        other => panic!("keyboard-before-surface chain must be denied, got {other:?}"),
+    }
+
+    // And the whole chain is allowed outright in Yolo (synthetic input,
+    // unrestricted there like every other act chain).
+    let result = check_tool_permission("computer_act", &surface_first, Mode::Yolo, None);
+    assert!(
+        matches!(result, PermissionCheck::Allowed),
+        "surface-first act chain must be allowed in Yolo, got {result:?}"
+    );
 }
 
 #[test]

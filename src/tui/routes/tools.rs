@@ -62,26 +62,23 @@ fn internal_tools() -> &'static [(&'static str, &'static str)] {
         ("skills_read_asset", "Read a skill asset"),
         ("skills_match_skills", "Match skills to task"),
         ("subagent_call", "Run a sub-agent for a delegated task"),
-        (
-            "computer_apps",
-            "List desktop apps with PIDs (accessibility tree)",
-        ),
+        ("computer_apps", "List desktop apps with PIDs (accessibility tree)"),
         ("computer_snapshot", "Capture an app's accessibility tree"),
         (
+            "computer_wait",
+            "Block until an element reaches a state (visible/enabled/detached/...); read-only",
+        ),
+        (
             "computer_screenshot",
-            "Capture screen/region/element as an image (unavailable in Build mode)",
+            "Capture screen as an image; annotate=true for boxes + selector legend (Build-safe)",
         ),
         (
-            "computer_touch",
-            "Perform actions on accessibility-tree elements by selector",
+            "computer_act",
+            "Act AND type as one pipeline: semantic action on an element, then keyboard/wait via `then`",
         ),
         (
-            "computer_pointer",
-            "Click/scroll/move the pointer at coordinates (Yolo/Command modes only)",
-        ),
-        (
-            "computer_keyboard",
-            "Send synthetic keystrokes or type text",
+            "computer_control",
+            "Pointer AND keyboard as one pipeline: click an element, then type/press via `then`",
         ),
         (
             "lsp",

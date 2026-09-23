@@ -218,6 +218,125 @@ async fn loop_detection_stops_repeated_identical_tool_calls() {
     );
 }
 
+// ── Guardrail denials are VISIBLE conversation turns ──────────────────────
+//
+// A Build-mode denial (e.g. computer_control with pixel coordinates) skips
+// dispatch — but the schema was registered, so the model legitimately emits
+// such calls and MUST see each one answered. Before the fix the denial path
+// popped the call and only emitted a ToolError event: the call never became
+// a conversation turn, never entered the loop-detection signature, and the
+// model re-issued the identical call until MAX_TOOL_RETRIES (10) killed the
+// loop with "10 consecutive tool call failures" (observed in the field: the
+// model retried a denied coordinate pointer 10x and the agent loop died).
+//
+// Now each denial is recorded as the call's tool result, so the IDENTICAL
+// denial repeats identically → the loop detector (MAX_REPEATS = 5, window
+// 10) fires on the 6th repeat: the loop ends with Done + Toast long before
+// the retry budget is burned.
+#[tokio::test]
+async fn repeated_guardrail_denials_become_visible_turns_and_trip_loop_detection() {
+    // 12 identical denied calls — more than MAX_TOOL_RETRIES (10), so the
+    // OLD behavior (invisible denials, failure counter only) would end with
+    // the fatal "10 consecutive tool call failures" Error.
+    let streams: Vec<Result<Vec<&str>, &str>> = (0..12)
+        .map(|_| {
+            Ok(vec![
+                r#"{"name": "computer_control", "arguments": {"x": 100, "y": 200}}"#,
+            ])
+        })
+        .collect();
+    let mut h = Harness::new_test()
+        // Register the schema so inline extraction accepts the call; the
+        // guardrail (Build mode) denies the coordinate form BEFORE dispatch,
+        // exactly like the production flow.
+        .with_test_tool(
+            "computer_control",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "x": { "type": "integer" },
+                    "y": { "type": "integer" },
+                    "app": { "type": "string" },
+                    "selector": { "type": "string" }
+                }
+            }),
+        )
+        .with_mock_streams(streams);
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stop_signal = Arc::new(AtomicBool::new(false));
+
+    let handle = tokio::spawn(async move {
+        h.run_agent_loop("click at 100,200", tx, answer_rx, perm_rx, stop_signal)
+            .await;
+    });
+
+    let mut events = Vec::new();
+    let timeout = tokio::time::Duration::from_secs(8);
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        match tokio::time::timeout(tokio::time::Duration::from_millis(100), rx.recv()).await {
+            Ok(Some(event)) => {
+                let is_done = matches!(
+                    event,
+                    HarnessEvent::Done { .. }
+                        | HarnessEvent::Stopped { .. }
+                        | HarnessEvent::Error { .. }
+                );
+                events.push(event);
+                if is_done {
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(_) => continue,
+        }
+    }
+    handle.abort();
+
+    // Every denial must have been answered to the model as a ToolError
+    // carrying the guardrail's guidance (this is what the model learns from).
+    let denial_errors = events
+        .iter()
+        .filter_map(|e| match e {
+            HarnessEvent::ToolError { error } => Some(error.as_str()),
+            _ => None,
+        })
+        .filter(|msg| msg.contains("`app`/`pid`/`surface` + `selector`"))
+        .count();
+    assert!(
+        denial_errors >= 5, // LOOP_DETECTION_MAX_REPEATS
+        "each denied call must surface its guidance to the model, got {denial_errors}; \
+         events={events:?}"
+    );
+
+    // The loop must stop via LOOP DETECTION (identical denials repeat
+    // identically now that they are recorded) — Done + Toast — NOT by
+    // exhausting the retry budget (which ends with Error).
+    assert!(
+        matches!(events.last(), Some(HarnessEvent::Done { .. })),
+        "repeated denials must trip loop detection (Done), not burn the retry \
+         budget; got {:?}",
+        events.last()
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, HarnessEvent::Toast { .. })),
+        "loop detection must surface a Toast explaining the stop"
+    );
+    let fatal = events.iter().any(|e| {
+        matches!(e, HarnessEvent::Error { .. })
+            && format!("{e:?}").contains("consecutive tool call failures")
+    });
+    assert!(
+        !fatal,
+        "the denial path must never burn all 10 retries on an identical denial" // MAX_TOOL_RETRIES
+    );
+}
+
 // ── Proof: a full multi-iteration tool loop owns the whole conversation ──
 //
 // Runs run_agent_loop end-to-end (iteration 1: text + tool call; iteration 2:

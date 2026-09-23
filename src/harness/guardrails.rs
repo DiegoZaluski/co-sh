@@ -3,7 +3,6 @@ use std::path::Path;
 use serde_json::Value;
 
 use super::core::Mode;
-use super::tools::is_position_dependent_tool;
 
 /// Action the user can take in response to a permission request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,28 +34,26 @@ pub enum PermissionCheck {
 /// Extract all paths from tool arguments for permission checking.
 ///
 /// Supports the following argument shapes:
-/// - `{ "path": "...", "content": "..." }` (fs_write flat single-file form,
-///   fs_edit flat single-file form, fs_rollback)
-/// - `{ "targets": [{ "path": "..." }, ...] }` (fs_read, legacy fs_write/fs_edit batch)
+/// - `{ "targets": [{ "path": "..." }, ...] }` (fs_read, fs_write, fs_edit)
+/// - `{ "path": "..." }` (fs_edit flat single-file form, fs_rollback)
 /// - `{ "path": "..." }` / `{ "paths": [...] }` (find_glob, find_grep)
-///
-/// The flat `path` is checked BEFORE `targets` (matching the dispatch
-/// precedence): a mixed-shape call is rejected later by the dispatch, but the
-/// approval dialog must name the same file the flat branch would act on.
 pub(crate) fn extract_paths_from_args(tool_name: &str, args: &Value) -> Vec<String> {
     match tool_name {
         "fs_read" | "fs_write" | "fs_edit" => {
-            if let Some(path) = args.get("path").and_then(|p| p.as_str()) {
-                return vec![path.to_string()];
-            }
             if let Some(targets) = args.get("targets").and_then(|v| v.as_array()) {
-                return targets
+                targets
                     .iter()
                     .filter_map(|t| t.get("path").and_then(|p| p.as_str()))
                     .map(String::from)
-                    .collect();
+                    .collect()
+            } else {
+                // fs_edit's advertised single-file form: a flat {path, ...}.
+                args.get("path")
+                    .and_then(|p| p.as_str())
+                    .map(String::from)
+                    .into_iter()
+                    .collect()
             }
-            Vec::new()
         }
         // find_glob / find_grep: the single `path` plus every entry of the
         // optional `paths` array — each target is a real path the tool opens,
@@ -133,16 +130,18 @@ fn needs_path_approval(paths: &[String], project_root: Option<&Path>) -> Option<
 /// Tools that always need user approval (regardless of path):
 /// - `bash_run`, `subagent_call` (execute external commands/code)
 /// - `fs_edit`, `fs_rollback` (write/restore file operations)
-/// - `computer_touch`, `computer_keyboard` (synthetic input acts on the
+/// - `computer_act`, `computer_control` (synthetic input acts on the
 ///   whole desktop — outside any project-root sandbox)
 ///
-/// Position-dependent tools (`computer_screenshot`, `computer_pointer`):
-/// hidden from the model in Build mode (their schemas are not registered)
-/// and outright DENIED here if a call still arrives — the Build approval
+/// Tree-grounded computer tools with a coordinate form (`computer_screenshot`,
+/// `computer_control`):
+/// the COORDINATE form is outright DENIED in Build mode — the Build approval
 /// dialog hands focus to the TUI and the user may move the pointer while
 /// answering, so any coordinate measured before the dialog can be stale.
-/// They are only exposed in Yolo/Command mode, where dispatches run
-/// without an interactive dialog.
+/// The tree-grounded form of each (annotate=true capture; app/pid + selector
+/// pointer targets) is allowed — it resolves from the a11y tree at dispatch
+/// time, so no coordinate can go stale. Coordinate forms are fully available
+/// in Yolo/Command mode, where dispatches run without an interactive dialog.
 ///
 /// Tools that need approval when targeting paths outside the project root:
 /// - `fs_read` (read outside cwd)
@@ -186,11 +185,187 @@ pub fn check_tool_permission(
     // measured before the dialog can be stale by the time the action runs.
     // Deny outright instead of asking — an approval would re-create the
     // exact pointer-drift problem this guardrail exists to prevent.
-    if mode == Mode::Build && is_position_dependent_tool(tool_name) {
-        return PermissionCheck::Denied(format!(
-            "`{tool_name}` requires pixel coordinates that go stale when the Build approval \
-             dialog moves the pointer — it is only available in Yolo/Command mode"
-        ));
+    //
+    // computer_screenshot is the exception: with `annotate: true` it is
+    // selector-grounded (the model acts via computer_act with the legend's
+    // selectors, never via pixels), so no coordinate can go stale — Build
+    // allows exactly that form and denies the plain capture, which hands
+    // the model pixel coordinates.
+    if mode == Mode::Build {
+        // Pointer: the element form (`app`/`pid` + `selector`) resolves the
+        // point from the a11y tree at dispatch time — no coordinate can go
+        // stale while the approval dialog is open, so it may ASK like any
+        // other synthetic-input tool. The coordinate form (`x`/`y`, incl.
+        // coordinate drag endpoints) is position-dependent: deny outright —
+        // an approval would re-create the exact pointer-drift problem this
+        // guardrail exists to prevent.
+        // computer_control: the chain is checked AS A WHOLE before any
+        // decision. A coordinate step ANYWHERE in it is position-dependent:
+        // deny outright — an approval would re-create the exact
+        // pointer-drift problem this guardrail exists to prevent. A chain
+        // containing an element step may ask like any synthetic-input tool:
+        // its real click moves OS keyboard focus AFTER the user answers the
+        // dialog, which is exactly what makes the chained typing land on
+        // the target. A chain that types (key/text) but never clicks an
+        // element would send the text into whatever holds focus after the
+        // dialog — the TUI input box (observed in the field) — so it is
+        // denied with guidance toward the click-first pattern.
+        if tool_name == "computer_control" {
+            let mut step = Some(args);
+            let mut index = 1usize;
+            let mut element_seen = false;
+            while let Some(s) = step {
+                let is_keyboard =
+                    s.get("key").is_some() || s.get("text").is_some();
+                if !is_keyboard
+                    && (s.get("x").is_some()
+                        || s.get("y").is_some()
+                        || s.get("x2").is_some()
+                        || s.get("y2").is_some())
+                {
+                    return PermissionCheck::Denied(format!(
+                        "`computer_control` step {index} uses pixel coordinates: coordinates go \
+                         stale when the Build approval dialog moves the pointer — target the \
+                         element instead (`app`/`pid`/`surface` + `selector`), or switch to \
+                         Yolo/Command mode"
+                    ));
+                }
+                // ORDER-SENSITIVE (review finding): a keyboard step only
+                // lands on the target when an EARLIER step's element click
+                // has already moved OS keyboard focus. Typing before any
+                // element step would reach whatever holds focus when
+                // dispatch starts — the TUI input box after the approval
+                // dialog (observed in the field) — so it is denied wherever
+                // in the chain it appears.
+                if is_keyboard && !element_seen {
+                    return PermissionCheck::Denied(
+                        "`computer_control` types into whatever element holds keyboard focus, \
+                         and no earlier step in the chain clicks an element to set focus — \
+                         the text would land in the cosh input box. Start with a click on \
+                         the target element (`app`/`pid`/`surface` + `selector`) and chain \
+                         the typing via `then`, or switch to Yolo/Command mode"
+                            .to_string(),
+                    );
+                }
+                element_seen |= s.get("selector").is_some();
+                step = s.get("then");
+                index += 1;
+            }
+            if element_seen {
+                let app = args
+                    .get("app")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or_else(|| {
+                        args.get("pid")
+                            .and_then(Value::as_u64)
+                            .map(|p| p.to_string())
+                    })
+                    .or_else(|| {
+                        args.get("surface")
+                            .and_then(Value::as_str)
+                            .map(|s| format!("surface {s}"))
+                    })
+                    .unwrap_or_else(|| "?".to_string());
+                return PermissionCheck::NeedsApproval(PermissionRequest {
+                    tool: "computer_control".to_string(),
+                    description: format!(
+                        "pointer/keyboard pipeline on a desktop UI element ({app})"
+                    ),
+                    args: args
+                        .get("selector")
+                        .and_then(Value::as_str)
+                        .unwrap_or("?")
+                        .to_string(),
+                });
+            }
+            // Targetless pointer steps only (e.g. a lone `up`): still
+            // synthetic desktop input — ask like any other.
+            return PermissionCheck::NeedsApproval(PermissionRequest {
+                tool: "computer_control".to_string(),
+                description: "synthetic pointer/keyboard input on the desktop".to_string(),
+                args: String::new(),
+            });
+        }
+        // computer_act: the chain is checked AS A WHOLE, same policy shape
+        // as computer_control. A chain whose keyboard steps all come AFTER
+        // an element (semantic) step may ask like any synthetic-input tool
+        // — the element action moves OS keyboard focus BEFORE the typing
+        // runs, which is what makes the chained typing land on the target.
+        // A keyboard step with NO earlier element step (regardless of what
+        // comes later) would send the text into whatever holds focus after
+        // the dialog — the TUI input box (observed in the field) — so it
+        // is denied with guidance toward the element-first pattern (a
+        // semantic press is NOT a reliable focus mover on every toolkit;
+        // only a real click is).
+        if tool_name == "computer_act" {
+            let mut step = Some(args);
+            let mut element_seen = false;
+            while let Some(s) = step {
+                let is_keyboard =
+                    s.get("key").is_some() || s.get("text").is_some();
+                if is_keyboard && !element_seen {
+                    return PermissionCheck::Denied(
+                        "`computer_act` types into whatever element holds keyboard focus, \
+                         and no earlier step in the chain acts on an element to set focus — \
+                         the text would land in the cosh input box. Start with an element \
+                         step (`name`/`pid`/`surface` + `selector`) and chain the typing \
+                         via `then`; if the typing still misses the field, click it with \
+                         computer_control first (a real click is the one reliable focus \
+                         mover), or switch to Yolo/Command mode"
+                            .to_string(),
+                    );
+                }
+                element_seen |= s.get("selector").is_some();
+                step = s.get("then");
+            }
+            if element_seen {
+                let app = args
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or_else(|| {
+                        args.get("pid")
+                            .and_then(Value::as_u64)
+                            .map(|p| p.to_string())
+                    })
+                    .or_else(|| {
+                        args.get("surface")
+                            .and_then(Value::as_str)
+                            .map(|s| format!("surface {s}"))
+                    })
+                    .unwrap_or_else(|| "?".to_string());
+                return PermissionCheck::NeedsApproval(PermissionRequest {
+                    tool: "computer_act".to_string(),
+                    description: format!(
+                        "semantic/keyboard pipeline on a desktop UI element ({app})"
+                    ),
+                    args: args
+                        .get("selector")
+                        .and_then(Value::as_str)
+                        .unwrap_or("?")
+                        .to_string(),
+                });
+            }
+            // Wait-only (or otherwise targetless) chain: still synthetic
+            // desktop input — ask like any other.
+            return PermissionCheck::NeedsApproval(PermissionRequest {
+                tool: "computer_act".to_string(),
+                description: "synthetic input on the desktop (wait-only chain)".to_string(),
+                args: String::new(),
+            });
+        }
+        if tool_name == "computer_screenshot"
+            && !args.get("annotate").and_then(Value::as_bool).unwrap_or(false)
+        {
+            return PermissionCheck::Denied(
+                "`computer_screenshot` as a plain capture hands the model pixel \
+                 coordinates that go stale when the Build approval dialog moves the \
+                 pointer — use annotate=true for a selector-grounded capture (boxes + \
+                 legend of selectors), or switch to Yolo/Command mode"
+                    .to_string(),
+            );
+        }
     }
 
     // ── Tools that always need user approval ──────────────────────
@@ -246,9 +421,14 @@ pub fn check_tool_permission(
         }
         // Synthetic desktop input: acts on whatever the OS currently has
         // focused/under the cursor — there is no project-root sandbox to
-        // fall back on, so every call asks (like bash_run).
-        "computer_touch" => {
-            let target = args.get("selector").and_then(|v| v.as_str()).unwrap_or("?");
+        // fall back on, so every call asks (like bash_run). In Build mode
+        // the chain-walk above has already returned; this arm serves
+        // Yolo/Command mode.
+        "computer_act" => {
+            let target = args
+                .get("selector")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
             let app = if let Some(name) = args.get("name").and_then(|v| v.as_str()) {
                 name.to_string()
             } else {
@@ -258,21 +438,9 @@ pub fn check_tool_permission(
                     .unwrap_or_else(|| "?".to_string())
             };
             return PermissionCheck::NeedsApproval(PermissionRequest {
-                tool: "computer_touch".to_string(),
+                tool: "computer_act".to_string(),
                 description: format!("perform an action on a desktop UI element ({app})"),
                 args: target.to_string(),
-            });
-        }
-        "computer_keyboard" => {
-            let what = args
-                .get("text")
-                .and_then(|v| v.as_str())
-                .or_else(|| args.get("key").and_then(|v| v.as_str()))
-                .unwrap_or("?");
-            return PermissionCheck::NeedsApproval(PermissionRequest {
-                tool: "computer_keyboard".to_string(),
-                description: "send synthetic keystrokes to the desktop".to_string(),
-                args: what.to_string(),
             });
         }
         _ => {}
@@ -310,14 +478,7 @@ pub fn check_tool_permission(
 fn is_restricted_in_ask_mode(name: &str) -> bool {
     matches!(
         name,
-        "fs_write"
-            | "fs_edit"
-            | "fs_rollback"
-            | "bash_run"
-            | "plan_todo_write"
-            | "subagent_call"
-            | "computer_touch"
-            | "computer_pointer"
-            | "computer_keyboard"
+        "fs_write" | "fs_edit" | "fs_rollback" | "bash_run" | "plan_todo_write" | "subagent_call"
+            | "computer_act" | "computer_control"
     )
 }
