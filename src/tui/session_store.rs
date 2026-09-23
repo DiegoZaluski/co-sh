@@ -50,9 +50,32 @@ use crate::session_history::{
     BranchMetadata, BranchProjection, ContextBoundary, ContextDelta, Delta, HistoryEvent,
     HistoryProjection, MessageDelta, MetadataDelta, Reference, context_groups,
 };
-use crate::types::{MessageRole, Session};
+use crate::types::{MessageRole, Part, Session};
 
 const UNDO_VERSIONS_CAP: usize = 10;
+
+/// One-line, control-character-free preview of the user prompt that a revert
+/// removed. Same sanitization contract as `dialog_preview_text`: the value
+/// flows into `draw_text_line`, which panics on control characters.
+fn revert_prompt_preview(message: &crate::types::Message) -> String {
+    if !matches!(message.role, MessageRole::User) {
+        return String::new();
+    }
+    message
+        .parts
+        .iter()
+        .find_map(|part| match part {
+            Part::Text(text) if !text.synthetic => {
+                Some(text.text.lines().next().unwrap_or_default())
+            }
+            _ => None,
+        })
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(36)
+        .collect()
+}
 
 /// A queued transport projection for the append writer. `context: None`
 /// means no context delta is generated, so a display-only save cannot alter
@@ -631,6 +654,16 @@ impl SessionStore {
                 return false;
             }
         };
+        // Display-only aid: the start of the prompt being reverted, stored so
+        // the `/undo` box can label each branch with something meaningful
+        // instead of a bare `v1`/`v2`.
+        let prompt_preview = branch
+            .session
+            .messages
+            .iter()
+            .find(|message| message.id == message_id)
+            .map(revert_prompt_preview)
+            .unwrap_or_default();
         let next_version = projection
             .reverts
             .iter()
@@ -650,6 +683,7 @@ impl SessionStore {
                     selection,
                 },
                 undo_label: format!("v{next_version}"),
+                prompt_preview,
             },
         );
         append_events(&path, &contents, &[event]).is_ok()
@@ -908,16 +942,19 @@ impl SessionStore {
         )
     }
 
-    /// Persistent undo labels derived from revert events, oldest first.
-    pub fn undo_versions(&self, session_id: &str) -> Vec<String> {
+    /// Persistent undo references derived from revert events, oldest first.
+    /// Each entry pairs the undo label with a one-line preview of the prompt
+    /// that was reverted, so the `/undo` box can show where each branch
+    /// returns to instead of a bare `v1`/`v2`/`v3`.
+    pub fn undo_versions(&self, session_id: &str) -> Vec<(String, String)> {
         let Some((_, _, projection)) = self.load_history_for_branch(session_id) else {
             return Vec::new();
         };
-        let versions: Vec<String> = projection
+        let versions: Vec<(String, String)> = projection
             .reverts
             .iter()
             .filter(|revert| revert.branch_id == session_id)
-            .map(|revert| revert.undo_label.clone())
+            .map(|revert| (revert.undo_label.clone(), revert.prompt_preview.clone()))
             .collect();
         versions
             .into_iter()
@@ -3901,7 +3938,10 @@ mod tests {
         assert!(store.revert_session(&session.id, "msg-2"));
         let after_revert = std::fs::read(&path).unwrap();
         assert!(after_revert.starts_with(&before_revert));
-        assert_eq!(store.undo_versions(&session.id), vec!["v1"]);
+        assert_eq!(
+            store.undo_versions(&session.id),
+            vec![("v1".to_string(), "three".to_string())]
+        );
         let reverted = store.load_session(&session.id).unwrap();
         assert_eq!(
             reverted
