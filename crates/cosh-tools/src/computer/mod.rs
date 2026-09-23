@@ -36,6 +36,9 @@ pub mod touch;
 pub mod types;
 pub mod wait;
 
+#[cfg(test)]
+mod test;
+
 pub use act::act;
 pub use apps::AppsResult;
 pub use apps::apps;

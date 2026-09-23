@@ -20,7 +20,7 @@ use super::types::{ElementStates, SnapshotFormat, SnapshotOutput, StateNode, Com
 pub(crate) const DEFAULT_TIMEOUT_MS: u64 = 3000;
 /// Default snapshot depth — deep enough for real dialogs, shallow enough
 /// to keep the output inside a tool-result budget.
-const DEFAULT_MAX_DEPTH: u32 = 12;
+pub(crate) const DEFAULT_MAX_DEPTH: u32 = 12;
 /// Hard depth cap: runaway web-embedded trees can be enormous.
 const MAX_MAX_DEPTH: u32 = 40;
 /// Hard node budget for a snapshot. Depth alone does not bound size: a
@@ -103,7 +103,7 @@ fn snapshot_blocking(input: &ComputerSnapshot) -> Result<SnapshotOutput, String>
 /// Render a surface-rooted snapshot — shared by the production path
 /// (resolved against the singleton provider) and the tests (mock provider,
 /// via the `ShellSurface` handle they build directly).
-fn snapshot_surface(
+pub(crate) fn snapshot_surface(
     input: &ComputerSnapshot,
     surface: xa11y::ShellSurface,
     max_depth: Option<usize>,
@@ -188,7 +188,7 @@ fn build_state_tree(
 ///
 /// Both formats come from the same resolved tree, so the element count is
 /// exact regardless of newlines inside names/values.
-fn render_tree(format: &SnapshotFormat, tree: &StateNode) -> String {
+pub(crate) fn render_tree(format: &SnapshotFormat, tree: &StateNode) -> String {
     match format {
         SnapshotFormat::Json => serde_json::to_string_pretty(tree).unwrap_or_default(),
         SnapshotFormat::Tree => {
@@ -201,7 +201,7 @@ fn render_tree(format: &SnapshotFormat, tree: &StateNode) -> String {
 
 /// Indented one-line-per-element outline (role, name, value, non-default
 /// states).
-fn write_outline(node: &StateNode, depth: usize, out: &mut String) {
+pub(crate) fn write_outline(node: &StateNode, depth: usize, out: &mut String) {
     let indent = "  ".repeat(depth);
     out.push_str(&indent);
     out.push_str(&node.role);
@@ -248,215 +248,3 @@ fn count_nodes(node: &StateNode) -> usize {
     total
 }
 
-/// Shell-surface dispatch tests — same mock fixture as the wait tests
-/// (Taskbar surface at `MOCK_SHELL_PID`), driving `snapshot_surface`
-/// directly through its provider seam.
-#[cfg(test)]
-mod snapshot_surface_tests {
-    use std::time::Duration;
-
-    use xa11y::{ShellSurface, ShellSurfaceKind, mock};
-
-    use super::super::types::{ComputerSnapshot, SnapshotFormat};
-    use super::{snapshot_surface, DEFAULT_MAX_DEPTH};
-
-    fn taskbar() -> xa11y::ShellSurface {
-        ShellSurface::by_kind_with(mock::build_provider(), ShellSurfaceKind::Taskbar, Duration::ZERO)
-            .expect("mock fixture carries a taskbar")
-    }
-
-    /// A surface-rooted snapshot without a selector outlines the WHOLE
-    /// surface and reports the surface's own identity (name + shell pid),
-    /// not an app's.
-    #[test]
-    fn surface_root_reports_surface_identity() {
-        let input = ComputerSnapshot::default();
-        let out = snapshot_surface(&input, taskbar(), Some(DEFAULT_MAX_DEPTH as usize), SnapshotFormat::default())
-            .expect("mock taskbar must snapshot");
-        assert_eq!(out.app, "Taskbar");
-        assert_eq!(out.pid, Some(mock::MOCK_SHELL_PID));
-        assert!(out.elements >= 1);
-        assert!(out.snapshot.contains("Taskbar"), "{}", out.snapshot);
-    }
-
-    /// With a selector the SAME locator flow narrows into the surface's
-    /// subtree — `nth` (1-based) applies exactly like the app path.
-    #[test]
-    fn surface_selector_narrows_like_app_path() {
-        let input = ComputerSnapshot {
-            selector: Some("button".into()),
-            nth: Some(1),
-            ..ComputerSnapshot::default()
-        };
-        let out = snapshot_surface(&input, taskbar(), Some(DEFAULT_MAX_DEPTH as usize), SnapshotFormat::default())
-            .expect("mock taskbar carries buttons");
-        assert_eq!(out.app, "Taskbar");
-        assert_eq!(out.elements, 1, "nth(1) picks exactly one match");
-    }
-
-    /// A selector that matches nothing under the surface is an honest
-    /// error naming the surface — same contract as the app path.
-    #[test]
-    fn surface_selector_miss_is_honest_error() {
-        let input = ComputerSnapshot {
-            selector: Some("text_field[name='definitely-not-here']".into()),
-            ..ComputerSnapshot::default()
-        };
-        let err = snapshot_surface(&input, taskbar(), Some(DEFAULT_MAX_DEPTH as usize), SnapshotFormat::default())
-            .expect_err("missing selector must fail");
-        assert!(!err.is_empty());
-    }
-}
-
-#[cfg(test)]
-mod snapshot_render_tests {
-    use super::super::types::{ElementStates, StateNode, ToggleState};
-    use super::{render_tree, write_outline, SnapshotFormat};
-
-    /// A node with only default states renders as bare `role name=value` —
-    /// no state tokens, keeping the common case one short line.
-    #[test]
-    fn default_states_render_nothing() {
-        let node = StateNode {
-            role: "button".into(),
-            name: Some("OK".into()),
-            value: None,
-            states: ElementStates::default(),
-            children: vec![],
-        };
-        assert_eq!(write_outline_str(&node), "button name=\"OK\"\n");
-    }
-
-    /// Non-default flags render as aria-vocabulary tokens, in fixed order:
-    /// disabled, hidden, focused, checked, selected, expanded, editable, busy.
-    #[test]
-    fn non_default_states_render_as_tokens_in_fixed_order() {
-        let states = ElementStates {
-            enabled: false,
-            visible: false,
-            focused: true,
-            checked: Some(ToggleState::On),
-            selected: true,
-            expanded: Some(false),
-            editable: true,
-            busy: true,
-        };
-        let node = StateNode {
-            role: "checkbox".into(),
-            name: None,
-            value: None,
-            states,
-            children: vec![],
-        };
-        assert_eq!(
-            write_outline_str(&node),
-            "checkbox disabled hidden focused checked selected collapsed editable busy\n"
-        );
-    }
-
-    /// An unchecked checkbox is meaningful (the user wants to know it is
-    /// checkable and off), so `Some(Off)` renders `unchecked` — unlike the
-    /// absence of checkability (`None`), which renders nothing.
-    #[test]
-    fn unchecked_is_reported_but_non_checkable_is_silent() {
-        let unchecked = ElementStates {
-            checked: Some(ToggleState::Off),
-            ..ElementStates::default()
-        };
-        let unchecked_node = StateNode {
-            role: "checkbox".into(),
-            name: None,
-            value: None,
-            states: unchecked,
-            children: vec![],
-        };
-        assert_eq!(write_outline_str(&unchecked_node), "checkbox unchecked\n");
-
-        let mixed = ElementStates {
-            checked: Some(ToggleState::Mixed),
-            ..ElementStates::default()
-        };
-        let mixed_node = StateNode {
-            role: "checkbox".into(),
-            name: None,
-            value: None,
-            states: mixed,
-            children: vec![],
-        };
-        assert_eq!(write_outline_str(&mixed_node), "checkbox mixed\n");
-    }
-
-    /// `json` format serializes the node directly: the flat `states` object
-    /// is present with the normalized subset, `checked` is "off" (lowercase
-    /// enum) and children nest recursively.
-    #[test]
-    fn json_format_embeds_states_object() {
-        let child = StateNode {
-            role: "text_field".into(),
-            name: Some("Search".into()),
-            value: Some("hi".into()),
-            states: ElementStates {
-                editable: true,
-                ..ElementStates::default()
-            },
-            children: vec![],
-        };
-        let root = StateNode {
-            role: "window".into(),
-            name: Some("Main".into()),
-            value: None,
-            states: ElementStates::default(),
-            children: vec![child],
-        };
-        let json = render_tree(&SnapshotFormat::Json, &root);
-        let value: serde_json::Value = serde_json::from_str(&json).expect("valid json");
-        assert_eq!(value["role"], "window");
-        assert_eq!(value["states"]["enabled"], true);
-        assert_eq!(value["states"]["visible"], true);
-        assert_eq!(value["states"]["focused"], false);
-        // `.get()` (not indexing) so a MISSING key would fail: indexing an
-        // absent key also yields Null, which would make this assertion pass
-        // even if `checked` were dropped from the serialization entirely.
-        assert_eq!(value["states"].get("checked"), Some(&serde_json::Value::Null));
-        assert_eq!(value["states"].get("expanded"), Some(&serde_json::Value::Null));
-        let grandchild = &value["children"][0];
-        assert_eq!(grandchild["states"]["editable"], true);
-        assert_eq!(grandchild["states"].get("checked"), Some(&serde_json::Value::Null));
-        // ToggleState serializes lowercase.
-        let toggled = ElementStates {
-            checked: Some(ToggleState::On),
-            ..ElementStates::default()
-        };
-        let toggled_node = StateNode {
-            role: "checkbox".into(),
-            name: None,
-            value: None,
-            states: toggled,
-            children: vec![],
-        };
-        let toggled_json = render_tree(&SnapshotFormat::Json, &toggled_node);
-        let toggled_value: serde_json::Value =
-            serde_json::from_str(&toggled_json).expect("valid json");
-        assert_eq!(toggled_value["states"]["checked"], "on");
-        let mixed_json_value = ElementStates {
-            checked: Some(ToggleState::Mixed),
-            ..ElementStates::default()
-        };
-        let mixed_node = StateNode {
-            role: "checkbox".into(),
-            name: None,
-            value: None,
-            states: mixed_json_value,
-            children: vec![],
-        };
-        let mixed_json = render_tree(&SnapshotFormat::Json, &mixed_node);
-        let mixed_value: serde_json::Value = serde_json::from_str(&mixed_json).expect("valid json");
-        assert_eq!(mixed_value["states"]["checked"], "mixed");
-    }
-
-    fn write_outline_str(node: &StateNode) -> String {
-        let mut out = String::new();
-        write_outline(node, 0, &mut out);
-        out
-    }
-}
