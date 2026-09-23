@@ -486,11 +486,14 @@ pub enum DialogType {
     },
 
     /// `/undo`: versioned `/tmp` snapshots taken before each revert. A bare
-    /// borderless list (`v1`, `v2`, …) — Enter or click rolls the session
-    /// files back to the picked version.
+    /// borderless list — Enter or click rolls the session files back to the
+    /// picked version. Each row is labeled with the start of the prompt that
+    /// was reverted (plus the version number) so the user can tell the
+    /// branches apart without trial and error.
     UndoList {
         session_id: String,
-        versions: Vec<String>,
+        /// `(undo_label, prompt_preview)` per revert, oldest first.
+        versions: Vec<(String, String)>,
     },
 
     /// Action picker for a PENDING queued message (the rows above the
@@ -664,10 +667,16 @@ impl std::fmt::Debug for DialogType {
             Self::UndoList {
                 session_id,
                 versions,
-            } => f
-                .debug_struct("UndoList")
-                .field("session_id", session_id)
-                .field("versions", versions)
+            } => f.debug_struct("UndoList").field("session_id", session_id)
+                // The previews are user-typed prompt text — same redaction
+                // policy as every other user-content field.
+                .field(
+                    "versions",
+                    &versions
+                        .iter()
+                        .map(|(label, _)| (label.as_str(), secret(label)))
+                        .collect::<Vec<_>>(),
+                )
                 .finish(),
             Self::QueueActions {
                 queue,
@@ -2810,14 +2819,16 @@ impl DialogState {
                     Style::default().fg(rgba_color(theme.text_muted)),
                 );
 
-                // Lines 4+: bare version rows — nothing but the list.
+                // Lines 4+: one row per revert — the start of the reverted
+                // prompt as the return indicator, with the version number
+                // right-aligned so ordering stays visible.
                 let list_top = dialog_y + 4;
                 let list_pad = 1;
                 let list_x = dialog_x + list_pad;
                 let list_w = dialog_w.saturating_sub(list_pad * 2);
                 let selection = instance.selected.min(versions.len().saturating_sub(1));
 
-                for (idx, version) in versions.iter().enumerate() {
+                for (idx, (version, prompt_preview)) in versions.iter().enumerate() {
                     let y = list_top + idx as u16;
                     let is_selected = idx == selection;
 
@@ -2839,14 +2850,32 @@ impl DialogState {
 
                     let indicator = if is_selected { "🞴 " } else { "   " };
                     draw_text_line(buf, indicator, list_x, y, 3, name_style);
-                    draw_text_line(
-                        buf,
-                        version,
-                        list_x + 3,
-                        y,
-                        list_w.saturating_sub(3),
-                        name_style,
-                    );
+                    let text_x = list_x + 3;
+                    let text_w = list_w.saturating_sub(3);
+                    let label = prompt_preview.trim();
+                    if label.is_empty() {
+                        // Reverts recorded before the preview existed (or
+                        // non-user targets) fall back to the bare version.
+                        draw_text_line(buf, version, text_x, y, text_w, name_style);
+                    } else {
+                        draw_text_line(buf, label, text_x, y, text_w, name_style);
+                        // Right-aligned version label keeps the ordering
+                        // glanceable without competing with the preview.
+                        let version_w = version.chars().count() as u16;
+                        let version_x = text_x + text_w.saturating_sub(version_w);
+                        if version_x >= text_x.saturating_add(label.chars().count() as u16) {
+                            draw_text_line(
+                                buf,
+                                version,
+                                version_x,
+                                y,
+                                version_w,
+                                Style::default()
+                                    .fg(rgba_color(theme.text_muted))
+                                    .bg(bg_color),
+                            );
+                        }
+                    }
                 }
             }
             DialogType::MessageActions {

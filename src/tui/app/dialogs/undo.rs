@@ -89,7 +89,8 @@ impl App {
                     None => return false,
                 };
                 self.dialog.pop();
-                self.restore_undo_version(&session_id, &versions[selected]);
+                let (label, _) = &versions[selected];
+                self.restore_undo_version(&session_id, label);
                 true
             }
             KeyCode::Esc => {

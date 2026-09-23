@@ -124,6 +124,10 @@ pub(crate) enum Delta {
     Revert {
         target: Reference,
         undo_label: String,
+        /// One-line preview of the prompt that triggered the revert. Purely a
+        /// display aid for the `/undo` box; older files deserialize without it.
+        #[serde(default)]
+        prompt_preview: String,
     },
     Rollback {
         target: Reference,
@@ -566,6 +570,12 @@ pub(crate) struct HistoryProjection {
 pub(crate) struct RevertRecord {
     pub branch_id: String,
     pub undo_label: String,
+    /// One-line preview of the prompt that triggered the revert, shown in the
+    /// `/undo` box so the user can tell the branches apart at a glance.
+    /// Defaulted so cached view-commit projections written before the field
+    /// existed still deserialize.
+    #[serde(default)]
+    pub prompt_preview: String,
     pub previous: Reference,
 }
 
@@ -762,7 +772,7 @@ impl HistoryProjection {
                 branch.deleted = false;
                 branch
             }
-            Delta::Revert { target, undo_label } => {
+            Delta::Revert { target, undo_label, prompt_preview } => {
                 if target.branch_id != event.branch_id {
                     return Err(ReplayError::CrossBranchReference {
                         branch: event.branch_id.clone(),
@@ -782,6 +792,7 @@ impl HistoryProjection {
                 self.reverts.push(RevertRecord {
                     branch_id: event.branch_id.clone(),
                     undo_label: undo_label.clone(),
+                    prompt_preview: prompt_preview.clone(),
                     previous,
                 });
                 self.resolve(target)?
@@ -1460,6 +1471,7 @@ mod tests {
                         selection: Selection::BeforeMessage("m3".into()),
                     },
                     undo_label: "v1".into(),
+                    prompt_preview: "three".into(),
                 },
             ),
             HistoryEvent::new(
@@ -1536,6 +1548,7 @@ mod tests {
                         selection: Selection::BeforeMessage("m2".into()),
                     },
                     undo_label: "v1".into(),
+                    prompt_preview: "two".into(),
                 },
             )],
         )
@@ -1583,6 +1596,7 @@ mod tests {
                         selection: Selection::BeforeMessage("m2".into()),
                     },
                     undo_label: "v1".into(),
+                    prompt_preview: "two".into(),
                 },
             ),
             HistoryEvent::new(

@@ -841,7 +841,8 @@ impl App {
                                 let (session_id, versions) = (session_id.clone(), versions.clone());
                                 let selected = d.selected.min(versions.len().saturating_sub(1));
                                 self.dialog.pop();
-                                self.restore_undo_version(&session_id, &versions[selected]);
+                                let (label, _) = &versions[selected];
+                                self.restore_undo_version(&session_id, label);
                                 return Ok(true);
                             }
                             DialogType::QueueActions { queue, index, .. } => {
