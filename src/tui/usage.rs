@@ -243,8 +243,17 @@ pub struct SpendSummary {
 
 /// Sum the real token counters of a slice of records.
 pub fn total_tokens(records: &[UsageRecord]) -> u64 {
+    total_tokens_iter(records)
+}
+
+/// Sum the real token counters of an iterator of records (by reference, no
+/// clone needed). Kept beside [`total_tokens`] so both share the field list.
+pub fn total_tokens_iter<'a, I>(records: I) -> u64
+where
+    I: IntoIterator<Item = &'a UsageRecord>,
+{
     records
-        .iter()
+        .into_iter()
         .map(|r| {
             let u = &r.usage;
             u64::from(u.input_tokens)

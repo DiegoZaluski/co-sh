@@ -463,6 +463,22 @@ impl App {
     pub(super) fn paste_burst_flush_if_due(&mut self) {
         self.paste_burst_flush_if_due_at(Instant::now());
     }
+
+    /// Whether a run is pending whose flush is governed by [`BURST_WINDOW`]:
+    /// the replay-worthy shadow is still waiting and the burst window has not
+    /// expired since the last absorbed key. The idle loop uses this to keep
+    /// its poll timeout short so the run lands atomically on time instead of
+    /// up to a full idle-wait late.
+    pub(super) fn paste_burst_pending_flush_deadline(&self) -> bool {
+        let now = Instant::now();
+        !self.paste_burst.shadow_is_empty()
+            && self.paste_burst.run_replayable()
+            && (self.paste_burst.last_text_key_at.is_some_and(|t| is_recent(t, now))
+                || self
+                    .paste_burst
+                    .last_absorbed_enter_at
+                    .is_some_and(|t| is_recent(t, now)))
+    }
 }
 
 #[cfg(test)]
