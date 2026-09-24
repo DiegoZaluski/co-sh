@@ -525,11 +525,14 @@ fn bounded_tail(text: &str, max: usize) -> String {
 }
 
 /// Maximum bytes kept of one tool call's output tail.
-const SUBAGENT_TOOL_TAIL_CHARS: usize = 4_000;
+const SUBAGENT_TOOL_TAIL_BYTES: usize = 4_000;
 /// Maximum bytes kept of one transcript text entry (message or thought).
 /// Chunks coalesce into one growing entry; the tail survives so the box
 /// shows the most recent text while the final report keeps everything.
-const SUBAGENT_TEXT_ENTRY_CHARS: usize = 8_000;
+/// The bound applies to the coalesced entry AND to a freshly started one
+/// (a single chunk may itself exceed the cap — ACP does not bound
+/// `ContentBlock::Text`).
+const SUBAGENT_TEXT_ENTRY_BYTES: usize = 8_000;
 /// Maximum transcript entries kept live. A very long turn drops its OLDEST
 /// entries — the box is a live mini-chat window, not a full archive.
 const SUBAGENT_TIMELINE_MAX_ENTRIES: usize = 200;
@@ -587,25 +590,39 @@ impl SubagentActivity {
     /// chunks is one growing transcript row, not one row per chunk), tool
     /// calls patch their announcement-position entry by id, and the plan
     /// replaces its existing entry in place — arrival order never changes.
-    pub(crate) fn apply(&mut self, event: &SubagentEvent) {
+    /// Apply one typed sub-agent event to the timeline. Returns whether the
+    /// event changed any VISIBLE state: the caller auto-follows the scroll
+    /// only then (a no-op event such as `Mode` must not yank the viewport).
+    pub(crate) fn apply(&mut self, event: &SubagentEvent) -> bool {
         match event {
             SubagentEvent::Message { text } => {
                 if let Some(SubagentTimelineEntry::Message { text: acc }) = self.timeline.last_mut()
                 {
                     acc.push_str(text);
-                    *acc = bounded_tail(acc, SUBAGENT_TEXT_ENTRY_CHARS);
+                    *acc = bounded_tail(acc, SUBAGENT_TEXT_ENTRY_BYTES);
                 } else {
-                    self.push_entry(SubagentTimelineEntry::Message { text: text.clone() });
+                    // A freshly started entry is bounded too: a single chunk
+                    // may itself exceed the cap (ACP does not bound
+                    // `ContentBlock::Text`).
+                    self.push_entry(SubagentTimelineEntry::Message {
+                        text: bounded_tail(text, SUBAGENT_TEXT_ENTRY_BYTES),
+                    });
                 }
+                true
             }
             SubagentEvent::Thought { text } => {
                 if let Some(SubagentTimelineEntry::Thought { text: acc }) = self.timeline.last_mut()
                 {
                     acc.push_str(text);
-                    *acc = bounded_tail(acc, SUBAGENT_TEXT_ENTRY_CHARS);
+                    *acc = bounded_tail(acc, SUBAGENT_TEXT_ENTRY_BYTES);
                 } else {
-                    self.push_entry(SubagentTimelineEntry::Thought { text: text.clone() });
+                    // Same bound as Message: a single chunk may exceed the
+                    // cap, so the fresh entry is clamped immediately.
+                    self.push_entry(SubagentTimelineEntry::Thought {
+                        text: bounded_tail(text, SUBAGENT_TEXT_ENTRY_BYTES),
+                    });
                 }
+                true
             }
             SubagentEvent::ToolCall {
                 id,
@@ -624,21 +641,35 @@ impl SubagentActivity {
                     // plain string renders as-is).
                     output_tail: raw_input
                         .as_ref()
-                        .map(|v| bounded_tail(&v.to_string(), SUBAGENT_TOOL_TAIL_CHARS)),
+                        .map(|v| bounded_tail(&v.to_string(), SUBAGENT_TOOL_TAIL_BYTES)),
                     diff: None,
                     detail: raw_input.as_ref().and_then(tool_input_detail),
                 };
                 // A re-announcement of a known id patches in place; a new id
-                // appends at the current position.
+                // appends at the current position. The patch must NOT
+                // discard progress accumulated by earlier ToolCallUpdates —
+                // the output tail and the diff are the UPDATES' data.
                 if let Some(existing) = self.timeline.iter_mut().rev().find_map(|entry| match entry
                 {
                     SubagentTimelineEntry::Tool(c) if c.id == *id => Some(c),
                     _ => None,
                 }) {
-                    *existing = call;
+                    existing.title = call.title;
+                    existing.kind = call.kind;
+                    existing.status = call.status;
+                    // Seed the tail from the re-announced input only when
+                    // nothing accumulated yet (the first announcement may
+                    // have carried no raw input at all).
+                    if existing.output_tail.is_none() {
+                        existing.output_tail = call.output_tail;
+                    }
+                    if existing.detail.is_none() {
+                        existing.detail = call.detail;
+                    }
                 } else {
                     self.push_entry(SubagentTimelineEntry::Tool(call));
                 }
+                true
             }
             SubagentEvent::ToolCallUpdate {
                 id,
@@ -647,6 +678,9 @@ impl SubagentActivity {
                 raw_output,
                 content,
             } => {
+                // Only a patch that actually changed the visible call counts
+                // as an update (a no-op update must not yank the viewport).
+                let mut changed = false;
                 if let Some(call) = self
                     .timeline
                     .iter_mut()
@@ -656,29 +690,45 @@ impl SubagentActivity {
                         _ => None,
                     })
                 {
-                    if let Some(status) = status {
+                    if let Some(status) = status
+                        && call.status != *status
+                    {
                         call.status = *status;
+                        changed = true;
                     }
-                    if let Some(title) = title {
+                    if let Some(title) = title
+                        && call.title != *title
+                    {
                         call.title = title.clone();
+                        changed = true;
                     }
                     // Content text replaces the tail (the ACP rule:
                     // collections are overwritten, not extended). When the
                     // update carries no text but a JSON raw output, keep a
                     // compact rendering of it.
                     if !content.text.is_empty() {
-                        call.output_tail =
-                            Some(bounded_tail(&content.text, SUBAGENT_TOOL_TAIL_CHARS));
+                        let tail = bounded_tail(&content.text, SUBAGENT_TOOL_TAIL_BYTES);
+                        if call.output_tail.as_deref() != Some(tail.as_str()) {
+                            call.output_tail = Some(tail);
+                            changed = true;
+                        }
                     } else if let Some(out) = raw_output {
-                        call.output_tail =
-                            Some(bounded_tail(&out.to_string(), SUBAGENT_TOOL_TAIL_CHARS));
+                        let tail = bounded_tail(&out.to_string(), SUBAGENT_TOOL_TAIL_BYTES);
+                        if call.output_tail.as_deref() != Some(tail.as_str()) {
+                            call.output_tail = Some(tail);
+                            changed = true;
+                        }
                     }
                     // A diff block (file edit) replaces any previous summary:
                     // the LAST diff wins, same rule as the content text.
-                    if let Some(diff) = &content.diff {
+                    if let Some(diff) = &content.diff
+                        && call.diff.as_ref() != Some(diff)
+                    {
                         call.diff = Some(diff.clone());
+                        changed = true;
                     }
                 }
+                changed
             }
             SubagentEvent::Plan { entries } => {
                 // The ACP spec replaces the plan wholesale; the entry keeps
@@ -692,23 +742,32 @@ impl SubagentActivity {
                         _ => None,
                     })
                 {
+                    let changed = *plan != *entries;
                     *plan = entries.clone();
+                    changed
                 } else {
                     self.push_entry(SubagentTimelineEntry::Plan {
                         entries: entries.clone(),
                     });
+                    true
                 }
             }
             SubagentEvent::Usage {
                 context_window,
                 tokens_in_context,
             } => {
-                self.usage = Some((*context_window, *tokens_in_context));
+                let next = Some((*context_window, *tokens_in_context));
+                if self.usage != next {
+                    self.usage = next;
+                    true
+                } else {
+                    false
+                }
             }
             // No live-state impact; Phase 3b may render these in the header.
-            SubagentEvent::Mode { .. } | SubagentEvent::SessionInfo { .. } => {}
+            SubagentEvent::Mode { .. } | SubagentEvent::SessionInfo { .. } => false,
             // `#[non_exhaustive]`: future variants are ignored safely.
-            _ => {}
+            _ => false,
         }
     }
 
@@ -2212,24 +2271,24 @@ impl RightPanelState {
     /// (Phase 3a plumbing). Only RUNNING subagent sessions accumulate live
     /// activity: bash sessions and finished/rehydrated windows ignore it.
     ///
-    /// Returns whether the event was applied — the caller auto-follows the
-    /// scroll only when it was (a dropped event must not yank the viewport).
+    /// Returns whether the event was applied AND changed visible state —
+    /// the caller auto-follows the scroll only then (a dropped event or a
+    /// no-op event such as a duplicate `Usage` must not yank the viewport).
     pub(crate) fn update_subagent_activity(&mut self, event: &SubagentEvent) -> bool {
-        let mut found_kind = None;
+        let mut changed = false;
         if let Some(session) = self
             .pty_sessions
             .iter_mut()
             .rev()
             .find(|s| matches!(s.status, PtyStatus::Running) && s.is_subagent())
         {
-            session.subagent_activity.apply(event);
-            found_kind = Some(SectionKind::Subagent);
+            changed = session.subagent_activity.apply(event);
             self.pty_gen = self.pty_gen.wrapping_add(1);
         }
-        if let Some(kind) = found_kind {
-            self.mark_activity(kind);
+        if changed {
+            self.mark_activity(SectionKind::Subagent);
         }
-        found_kind.is_some()
+        changed
     }
 
     /// Trim a PTY output string to `MAX_PTY_OUTPUT_CHARS`, keeping the TAIL
@@ -2825,10 +2884,44 @@ mod tests {
             SubagentTimelineEntry::Thought { text } => text.clone(),
             other => panic!("expected a thought entry, got {other:?}"),
         };
-        assert!(thought.len() <= SUBAGENT_TEXT_ENTRY_CHARS);
+        assert!(thought.len() <= SUBAGENT_TEXT_ENTRY_BYTES);
         // The TAIL survives — the newest chunk is present.
         assert!(thought.contains("thought-000499"));
         assert!(!thought.contains("thought-000000"));
+    }
+
+    #[test]
+    fn subagent_single_oversized_chunk_is_bounded_when_it_starts_a_new_entry() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: opencode".to_string(), None);
+        // A single chunk LARGER than the cap must be clamped on arrival,
+        // even when it opens a NEW entry (the previous last entry is a tool
+        // call, so coalescing does not apply) — ACP does not bound
+        // `ContentBlock::Text`.
+        state.update_subagent_activity(&tool_call_event("c1", "Reading a"));
+        state.update_subagent_activity(&SubagentEvent::Message {
+            text: "x".repeat(SUBAGENT_TEXT_ENTRY_BYTES + 5_000),
+        });
+        let activity = &state.pty_sessions[0].subagent_activity;
+        assert_eq!(activity.timeline.len(), 2);
+        let message = match &activity.timeline[1] {
+            SubagentTimelineEntry::Message { text } => text.clone(),
+            other => panic!("expected a message entry, got {other:?}"),
+        };
+        assert!(message.len() <= SUBAGENT_TEXT_ENTRY_BYTES);
+        // Same guarantee for a Thought chunk that opens a new entry.
+        state.update_subagent_activity(&SubagentEvent::Message {
+            text: "again".to_string(),
+        });
+        state.update_subagent_activity(&SubagentEvent::Thought {
+            text: "y".repeat(SUBAGENT_TEXT_ENTRY_BYTES + 5_000),
+        });
+        let activity = &state.pty_sessions[0].subagent_activity;
+        let thought = match activity.timeline.last() {
+            Some(SubagentTimelineEntry::Thought { text }) => text.clone(),
+            other => panic!("expected a thought entry, got {other:?}"),
+        };
+        assert!(thought.len() <= SUBAGENT_TEXT_ENTRY_BYTES);
     }
 
     #[test]
