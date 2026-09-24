@@ -176,7 +176,7 @@ pub(crate) fn activity_visual_rows(activity: &SubagentActivity, wrap_w: u16) -> 
 }
 
 /// Split a subagent PTY output into the optional main-agent input line
-/// (`→ cosh: ...`, prepended by `app.rs` when the tool call carries an
+/// (`→ cosh: ...`, prepended by `app/events.rs` when the tool call carries an
 /// `input`) and the remaining subagent body. When the output was truncated
 /// (tail-only retention) the prefix may be gone — then everything is body.
 pub(crate) fn split_subagent_output(output: &str) -> (Option<&str>, &str) {
@@ -187,6 +187,30 @@ pub(crate) fn split_subagent_output(output: &str) -> (Option<&str>, &str) {
         Some(i) => (Some(&output[..i]), &output[i + 1..]),
         None => (Some(output), ""),
     }
+}
+
+/// The ONE-LINE input echo shown under a subagent window's header
+/// (`→ cosh: …`). A multi-line prompt is collapsed to its first line and
+/// capped: the window is a live mini-chat whose stream must not be buried
+/// under a static multi-row echo of the prompt (the FULL prompt stays
+/// visible in the chat's tool part — the echo is a pointer, not a copy).
+/// `None` when there is nothing to show (no input, or empty after trim).
+///
+/// Both the live path (`ToolCall` in `app/events.rs`) and the rehydration
+/// path (`rehydrate_from_session`) must build the echo through THIS helper,
+/// so a restored window renders exactly like the original live run.
+pub(crate) fn subagent_input_line(input: &str) -> Option<String> {
+    const MAX_ECHO_CHARS: usize = 120;
+    let first = input.lines().next()?.trim();
+    if first.is_empty() {
+        return None;
+    }
+    let mut line = first.to_string();
+    if line.chars().count() > MAX_ECHO_CHARS {
+        line = line.chars().take(MAX_ECHO_CHARS).collect();
+        line.push('…');
+    }
+    Some(format!("→ cosh: {line}\n"))
 }
 
 /// Filter control characters (keeping `\n`) so raw bytes can never reach
@@ -905,13 +929,20 @@ pub struct RightPanelState {
     pub subagent_scroll_y: i32,
 
     // ── Subagent markdown layout cache ────────────────────────────
-    /// Cached per-session content rows (command header + optional input
-    /// line + markdown body rows) for the subagent section, keyed to
-    /// `subagent_layout_gen` and the wrap width. Rebuilt only when output or
-    /// width changes — `estimate_height` (a pulldown_cmark parse) is too
-    /// expensive to run on every frame.
+    /// Cached per-session STATIC content rows (command header + optional
+    /// one-line input echo + markdown body rows) for the subagent section,
+    /// keyed to `subagent_layout_gen` and the wrap width. Rebuilt only when
+    /// output or width changes — `estimate_height` (a pulldown_cmark parse)
+    /// is too expensive to run on every frame. The LIVE activity rows are
+    /// deliberately NOT part of this cache (see `subagent_rows_combined`).
     subagent_rows_cache: Vec<u16>,
     subagent_rows_cache_w: u16,
+    /// The rows CALLERS see: the static cache plus the live activity rows,
+    /// which are recounted fresh on every call (outside the throttle) so the
+    /// section height — and the scroll clamp derived from it — always
+    /// matches the timeline the renderer paints this frame. Aligned with
+    /// `subagent_rows_cache` (one entry per subagent session).
+    subagent_rows_combined: Vec<u16>,
     /// The `pty_gen` the subagent layout caches (rows + rendered body cells)
     /// were last rebuilt for. When `pty_gen` moves ahead but the rebuild is
     /// throttled, BOTH caches keep serving their previous values, so heights
@@ -1055,6 +1086,7 @@ impl RightPanelState {
             subagent_scroll_y: 0,
             subagent_rows_cache: Vec::new(),
             subagent_rows_cache_w: 0,
+            subagent_rows_combined: Vec::new(),
             subagent_layout_gen: 0,
             last_subagent_rebuild: Instant::now()
                 .checked_sub(SUBAGENT_REBUILD_INTERVAL)
@@ -1548,7 +1580,7 @@ impl RightPanelState {
         self.ensure_outputs_loaded(&visible);
         self.subagent_section_rows(wrap_w);
         let mut out = vec![0u16; self.pty_sessions.len()];
-        let mut it = self.subagent_rows_cache.iter();
+        let mut it = self.subagent_rows_combined.iter();
         for (i, s) in self.pty_sessions.iter().enumerate() {
             if s.is_subagent()
                 && let Some(&r) = it.next()
@@ -2398,11 +2430,9 @@ impl RightPanelState {
         }
         for (agent, input, output, failed) in kept_subs {
             let command = format!("subagent: {agent}");
-            // Same contract as the live path (events): an EMPTY input
-            // message never draws a "→ cosh:" line.
-            let input_line = input
-                .filter(|msg| !msg.is_empty())
-                .map(|msg| format!("→ cosh: {msg}\n"));
+            // Same contract as the live path (events): the echo is the ONE-LINE
+            // collapsed input (empty/absent input → no line at all).
+            let input_line = input.as_deref().and_then(subagent_input_line);
             self.replay_pty(command, input_line, output, failed);
         }
     }
@@ -2507,14 +2537,23 @@ impl RightPanelState {
     }
 
     /// Total content rows (command header + optional input line + markdown
-    /// body) per subagent session, cached against `subagent_layout_gen` and
-    /// `wrap_w` so the markdown parse only runs when needed. During
-    /// streaming, rebuilds are coalesced to at most one per
-    /// [`SUBAGENT_REBUILD_INTERVAL`] — when throttled, the previous rows are
-    /// served (and `subagent_layout_gen` stays behind `pty_gen`, so the
-    /// body cache keeps agreeing with them). A wrap-width change always
-    /// rebuilds immediately. Mirrors the render exactly: the body width here
-    /// is the same `wrap_w` the section renderer passes to
+    /// body + live activity) per subagent session. The STATIC part is cached
+    /// against `subagent_layout_gen` and `wrap_w` so the markdown parse only
+    /// runs when needed; during streaming, rebuilds are coalesced to at most
+    /// one per [`SUBAGENT_REBUILD_INTERVAL`] — when throttled, the previous
+    /// static rows are served (and `subagent_layout_gen` stays behind
+    /// `pty_gen`, so the body cache keeps agreeing with them). A wrap-width
+    /// change always rebuilds immediately.
+    ///
+    /// The LIVE activity rows (tool calls, plan, thought — only RUNNING
+    /// sessions have any) are added FRESH on every call, outside the
+    /// throttle: the timeline grows on every event while the static cache
+    /// can lag up to one interval, and a height that lags the painted
+    /// content makes the scroll clamp (and the auto-follow) oscillate
+    /// between the stale bottom and the real one. `activity_visual_rows` is
+    /// a cheap Vec build, not a markdown parse — recounting per frame is
+    /// fine. Mirrors the render exactly: the body width here is the same
+    /// `wrap_w` the section renderer passes to
     /// [`MarkdownRenderable`](cosh_tui::core::renderables::markdown::MarkdownRenderable).
     pub(crate) fn subagent_section_rows(&mut self, wrap_w: u16) -> &[u16] {
         let width_changed = wrap_w != self.subagent_rows_cache_w;
@@ -2540,13 +2579,6 @@ impl RightPanelState {
                 if let Some(input) = input {
                     rows = rows.saturating_add(wrap_count(input, wrap_w));
                 }
-                // Live activity rows (tool calls, plan, thought) sit between
-                // the input line and the report body — only the RUNNING
-                // session has any (activity is cleared on completion).
-                if pty.status == PtyStatus::Running {
-                    rows =
-                        rows.saturating_add(activity_visual_rows(&pty.subagent_activity, wrap_w));
-                }
                 // The severity header is consumed (tints the box, never
                 // shown): the height math counts the DISPLAYED body.
                 let clean = sanitize_subagent_text(subagent_visible_body(body));
@@ -2557,7 +2589,22 @@ impl RightPanelState {
             }
             self.subagent_rows_cache_w = wrap_w;
         }
-        &self.subagent_rows_cache
+        // Fresh overlay: static rows + THIS frame's live activity rows. The
+        // combined vec is what every caller (layout fitting, scroll clamp,
+        // renderer) consumes.
+        self.subagent_rows_combined.clear();
+        let mut it = self.subagent_rows_cache.iter().copied();
+        for pty in &self.pty_sessions {
+            if !pty.command.starts_with("subagent:") {
+                continue;
+            }
+            let mut rows = it.next().unwrap_or(0);
+            if pty.status == PtyStatus::Running {
+                rows = rows.saturating_add(activity_visual_rows(&pty.subagent_activity, wrap_w));
+            }
+            self.subagent_rows_combined.push(rows);
+        }
+        &self.subagent_rows_combined
     }
 
     /// Check if there's any content to show in the panel.
@@ -4213,6 +4260,65 @@ mod tests {
         assert_eq!(
             split_subagent_output("→ cosh: hi"),
             (Some("→ cosh: hi"), "")
+        );
+    }
+
+    /// REGRESSION (buried stream): a multi-line subagent prompt used to be
+    /// echoed in full into the PTY output; only its FIRST line counted as
+    /// the input line, and the remaining lines leaked into the markdown
+    /// BODY — a static block BELOW the live timeline that the auto-follow
+    /// kept pinned on screen, hiding the stream until the user scrolled
+    /// up. The echo must be exactly ONE line (collapsed + capped); the full
+    /// prompt lives in the chat's tool part.
+    #[test]
+    fn subagent_input_line_echo_is_one_line() {
+        let multiline = "review the last commit\nbe thorough\ncheck tests too";
+        let echo = subagent_input_line(multiline).unwrap();
+        assert!(echo.starts_with("→ cosh: review the last commit\n"));
+        assert_eq!(echo.lines().count(), 1, "echo must be a single line");
+        assert!(!echo.contains("be thorough"), "extra lines must be dropped");
+        // Absent or blank input → no echo line at all (same as before).
+        assert!(subagent_input_line("").is_none());
+        assert!(subagent_input_line("\n  \n").is_none());
+        // A long single-line prompt is capped (no unbounded wrap row).
+        let long = "x".repeat(300);
+        let capped = subagent_input_line(&long).unwrap();
+        // All counts in CHARS: 120 cap + "→ cosh: " prefix + '…' + '\n'.
+        assert!(capped.chars().count() <= 120 + "→ cosh: ".chars().count() + 2);
+        assert!(capped.ends_with("…\n"));
+    }
+
+    /// REGRESSION (oscillating viewport): the live activity rows used to be
+    /// counted INSIDE the throttled static cache, so while the cache lagged
+    /// a rebuild interval behind the timeline the section height — and the
+    /// scroll clamp derived from it — alternated between the stale bottom
+    /// and the real one. The rows must be recounted FRESH on every call,
+    /// even when the static cache is served stale.
+    #[test]
+    fn subagent_activity_rows_are_fresh_inside_the_throttle_interval() {
+        let mut state = RightPanelState::new();
+        state.subagent_rebuild_interval = Duration::from_secs(60); // frozen throttle
+        state.start_pty("subagent: opencode".to_string(), None);
+        let rows_before = state.subagent_section_rows(30).to_vec();
+
+        // An activity event grows the timeline; the static cache may NOT
+        // rebuild within the interval, but the combined rows must reflect
+        // the new timeline row immediately.
+        state.update_subagent_activity(&tool_call_event("c1", "Reading a"));
+        let rows_after = state.subagent_section_rows(30).to_vec();
+        assert_eq!(
+            rows_after[0],
+            rows_before[0] + 1,
+            "one new tool-call row must show up without a cache rebuild"
+        );
+
+        // And shrink back the moment the activity is cleared (completion):
+        // height and renderer must agree with no stale residue.
+        state.complete_last_pty("report\n".to_string());
+        let rows_done = state.subagent_section_rows(30).to_vec();
+        assert_eq!(
+            rows_done[0], rows_before[0],
+            "cleared activity must not keep phantom rows"
         );
     }
 

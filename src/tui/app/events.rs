@@ -318,10 +318,14 @@ impl App {
                         self.state.right_panel.start_pty(cmd, None);
                         // Show the input message as the first line of the dialogue,
                         // visually prefixed to indicate it came from the main agent.
-                        if !msg.is_empty() {
-                            self.state
-                                .right_panel
-                                .update_last_pty(format!("→ cosh: {msg}\n"));
+                        // The echo is ALWAYS one line (multi-line prompts are
+                        // collapsed — the full text lives in the chat's tool
+                        // part); otherwise a long prompt would bury the live
+                        // mini-chat stream under a static multi-row block.
+                        if let Some(line) =
+                            crate::routes::session::right_panel::types::subagent_input_line(msg)
+                        {
+                            self.state.right_panel.update_last_pty(line);
                         }
                         self.state.right_panel.scroll_to_bottom();
                     }
