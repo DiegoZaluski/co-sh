@@ -37,6 +37,11 @@
 //! | `codex` | `npx -y @agentclientprotocol/codex-acp@latest` (official adapter) |
 
 pub mod acp;
+/// The turn's final-message accumulator: which streamed text is the report
+/// the caller receives (the ACP analogue of the internal harness's
+/// `ContextItem::Closure`). Market-standard contract: only the LAST message
+/// returns to the parent; earlier narration stays in the live timeline.
+pub mod closure;
 /// Typed event stream mapped from the ACP `session/update` notifications:
 /// the backend foundation for the TUI sub-agent box (Phase 3).
 pub mod events;

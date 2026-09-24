@@ -134,21 +134,30 @@ spawned.
    selection](#model-selection-model) above).
 5. **Prompt.** `session/prompt` sends the task as a single text content
    block. While the turn runs:
-   - `session/update` notifications carrying `AgentMessageChunk` are
-     appended to the accumulator and streamed through `chunk_tx`;
+   - `session/update` notifications carrying `AgentMessageChunk` feed the
+     turn's closure (see below) and stream through `chunk_tx`;
    - `session/request_permission` requests are **auto-approved** (first
      option, YOLO style) so a headless call never blocks; with no options
      the request is answered `Cancelled` per the spec;
    - `fs/read_text_file` / `fs/write_text_file` requests operate on the real
      workspace files (1-based lines, absolute paths per the protocol).
 6. **Complete.** The prompt response's stop reason is returned with the
-   accumulated output. There is NO time limit: a sub-agent may work for
-   hours, and the turn ends when the agent ends it — or earlier only when
-   the user stops it, which sends `session/cancel` and yields the
-   spec-mandated `"cancelled"` stop reason with the partial output
-   preserved. A harness that ignores `session/cancel` and never ends the
-   turn is abandoned with the call (its task and process stay alive until
-   the app exits) — the stop signal is the only early-end mechanism.
+   turn's REPORT — the sub-agent's LAST message (the text written after its
+   final tool call), not the concatenation of every message it produced.
+   Earlier narration between tool calls lives only in the TUI's live
+   timeline; the market-standard contract (Claude Code's Task tool, Gemini
+   CLI's `generalist`, `codex exec --output-last-message`) returns the
+   final message alone, keeping the caller's context clean. A defensive
+   fallback applies when the turn ends right after a tool call with no
+   post-call text: the last completed message is returned instead of an
+   empty report (the mechanism is `subagent::closure::TurnClosure`). There
+   is NO time limit: a sub-agent may work for hours, and the turn ends
+   when the agent ends it — or earlier only when the user stops it, which
+   sends `session/cancel` and yields the spec-mandated `"cancelled"` stop
+   reason with the partial output preserved. A harness that ignores
+   `session/cancel` and never ends the turn is abandoned with the call
+   (its task and process stay alive until the app exits) — the stop signal
+   is the only early-end mechanism.
 
 ---
 

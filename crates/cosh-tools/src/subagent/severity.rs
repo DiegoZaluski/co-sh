@@ -2,10 +2,19 @@
 //!
 //! A code-review sub-agent task (`code_review: true` on
 //! [`SubAgentCallInput`](crate::subagent::types::SubAgentCallInput)) carries
-//! a prompt contract: the FINAL REPORT must START with an HTML comment
-//! header declaring the outcome — `<!-- severity: green -->`,
+//! a prompt contract: the FINAL REPORT — the sub-agent's last message, the
+//! one written after its final tool call and the only text returned to the
+//! caller (see [`crate::subagent::closure`]) — must START with an HTML
+//! comment header declaring the outcome: `<!-- severity: green -->`,
 //! `<!-- severity: yellow -->` (minor issues / bad practice at most) or
 //! `<!-- severity: red -->` (something critical was found).
+//!
+//! The marker lives on the final report — not on the turn's first message —
+//! for a logical reason: the agent can only declare the review outcome once
+//! it has DONE the analysis. Earlier narration (progress notes between tool
+//! calls) belongs to the live TUI timeline and is never shown to the caller,
+//! so coloring the turn by the first line would tint the box from a message
+//! written before any work happened.
 //!
 //! An HTML comment was chosen deliberately: it is a shape every model
 //! already knows how to produce, it is inert in markdown rendering, and it
@@ -44,8 +53,12 @@ impl Severity {
     }
 }
 
-/// The prompt contract appended to the input when `code_review` is set.
-pub(crate) const SEVERITY_CONTRACT: &str = "\n\n---\nREPORT FORMAT CONTRACT (mandatory): your FINAL REPORT must START with an HTML comment header declaring the review outcome, on its own first line, exactly one of:\n<!-- severity: green -->   (all good — at most cosmetic details)\n<!-- severity: yellow --> (minor issues or bad practice found, nothing critical)\n<!-- severity: red -->    (something critical was found)\nThe header is consumed by the client tooling and never shown; everything after it is the report itself. Do not put anything before the header.";
+/// The prompt contract appended to the input when `code_review` is set. The
+/// marker must open the FINAL REPORT — the sub-agent's last message, written
+/// after its final tool call, which is the only text returned to the caller
+/// ([`crate::subagent::closure`]). Earlier narration is not the report and
+/// carries no marker.
+pub(crate) const SEVERITY_CONTRACT: &str = "\n\n---\nREPORT FORMAT CONTRACT (mandatory): your final report — your LAST message, the one you write AFTER your final tool calls, which is the only text returned to the caller — must START with an HTML comment header declaring the review outcome, on its own first line, exactly one of:\n<!-- severity: green -->   (all good — at most cosmetic details)\n<!-- severity: yellow --> (minor issues or bad practice found, nothing critical)\n<!-- severity: red -->    (something critical was found)\nDo NOT put the header on earlier progress messages: intermediate narration between tool calls is shown live but is not your report. The header is consumed by the client tooling and never shown; everything after it is the report itself. Do not put anything before the header.";
 
 /// Extract the severity from the first line of a report and return
 /// `(severity, report_without_the_header)`.

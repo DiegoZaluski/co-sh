@@ -14,8 +14,10 @@
 //! 3. `authenticate` — when the agent advertises auth methods.
 //! 4. `session/new` — opens a session rooted at the workspace directory.
 //! 5. `session/prompt` — sends the task as the user prompt.
-//! 6. `session/update` notifications — agent message chunks are streamed
-//!    live (to the TUI) and accumulated.
+//! 6. `session/update` notifications — mapped events stream live to the
+//!    TUI's sub-agent box, and message chunks feed the turn's closure
+//!    ([`TurnClosure`](crate::subagent::closure)): only the message written
+//!    after the LAST tool call is the report returned to the caller.
 //! 7. The turn ends when the `session/prompt` response arrives with a
 //!    [`StopReason`](agent_client_protocol::schema::v1::StopReason).
 //!
@@ -592,7 +594,8 @@ pub async fn call(
             }
         });
 
-    let accumulated: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    let accumulated: Arc<Mutex<super::closure::TurnClosure>> =
+        Arc::new(Mutex::new(super::closure::TurnClosure::default()));
     let input = input.to_string();
 
     // The turn runs to completion with NO time limit: a sub-agent may work
@@ -621,10 +624,11 @@ pub async fn call(
         .map_err(|e| format!("sub-agent task failed: {e}"))?
     };
 
-    let final_output = accumulated.lock().unwrap().clone();
+    let final_output = accumulated.lock().unwrap().output();
 
     match turn {
-        // Turn completed: the session already wrote every chunk into the buffer.
+        // Turn completed: the closure already retained the final message
+        // (post-tool-calls) — see the `TurnClosure` contract on `output`.
         Ok((stop_reason, session_id)) => Ok((final_output, stop_reason, Some(session_id))),
         // Turn errored: partial output (if any) is still worth returning.
         // The turn's own session id is NOT propagated — an errored turn's
@@ -826,9 +830,13 @@ async fn select_session_model(
 /// the prompt's stop reason on success. `select_session_model` runs before
 /// the prompt, and the shared stop flag is raced against the prompt await
 /// (Phase 5 cancellation: a trigger sends `session/cancel` and the turn
-/// still ends with the agent's own answer). Message text is appended to
-/// `accumulated`; every mapped session update is streamed through
-/// `chunk_tx` as a typed [`SubagentEvent`].
+/// still ends with the agent's own answer). Message text feeds the
+/// [`TurnClosure`](super::closure::TurnClosure) — only the message written
+/// after the LAST tool call is the returned report (the market-standard
+/// "final message" contract), with a defensive fallback to the last
+/// completed message when the turn ends right after a tool call; every
+/// mapped session update is streamed through `chunk_tx` as a typed
+/// [`SubagentEvent`].
 ///
 /// # Errors
 ///
@@ -842,7 +850,7 @@ pub(crate) async fn run_session<T>(
     resume: Option<String>,
     cwd: PathBuf,
     preferred_model: &'static str,
-    accumulated: Arc<Mutex<String>>,
+    accumulated: Arc<Mutex<super::closure::TurnClosure>>,
     stop_signal: Arc<AtomicBool>,
     chunk_tx: tokio::sync::mpsc::UnboundedSender<SubagentEvent>,
 ) -> Result<(String, String), String>
@@ -877,13 +885,12 @@ where
         .on_receive_notification(
             async move |notification: SessionNotification, _cx| {
                 // Map every session update with a TUI representation into a
-                // typed event; message chunks additionally keep flowing into
-                // the accumulated text buffer (the persisted final output).
+                // typed event; message chunks additionally feed the turn's
+                // closure (the last-message accumulator that produces the
+                // returned report).
                 match SubagentEvent::from_session_update(notification.update) {
                     Some(event) => {
-                        if let SubagentEvent::Message { text } = &event {
-                            accumulated.lock().unwrap().push_str(text);
-                        }
+                        accumulated.lock().unwrap().observe(&event);
                         let _ = chunk_tx.send(event);
                     }
                     // Updates with no display representation (user chunks,

@@ -50,7 +50,9 @@ rejected by [`validate_agent`](acp.md#validate_agent) with a
 
 ```rust
 pub struct SubAgentCallOutput {
-    /// Accumulated output from the sub-agent.
+    /// The sub-agent's report: its FINAL message — the text written after
+    /// its last tool call (see `subagent::closure::TurnClosure`), not the
+    /// concatenation of every message of the turn.
     pub output: String,
     /// Why the prompt turn ended: a snake_case ACP stop reason (e.g.
     /// `end_turn`, `cancelled` — the spec-mandated answer to a
@@ -64,8 +66,9 @@ pub struct SubAgentCallOutput {
 The harness returns this as JSON after the sub-agent finishes. The two fields
 tell the caller everything needed to judge the outcome:
 
-- `output` — the full accumulated agent message chunks of the external ACP
-  harness, or the internal agent's final report.
+- `output` — the external ACP harness's FINAL message (the last message of
+  the turn, with a fallback to the last completed message when the turn
+  ends right after a tool call), or the internal agent's final report.
 - `stop_reason` — the snake_case ACP stop reason of the completed turn (e.g.
   `end_turn`, `cancelled` when the user stopped it via `session/cancel`,
   `refusal`); or `"error"` when the ACP turn failed mid-flight with partial

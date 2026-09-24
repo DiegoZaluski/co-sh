@@ -255,7 +255,7 @@ async fn run_session_drives_a_full_acp_turn_end_to_end() {
     });
 
     let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel();
-    let accumulated = Arc::new(Mutex::new(String::new()));
+    let accumulated = Arc::new(Mutex::new(super::closure::TurnClosure::default()));
 
     let (turn, _, streamed) = tokio::join!(
         run_session(
@@ -274,7 +274,7 @@ async fn run_session_drives_a_full_acp_turn_end_to_end() {
 
     let (stop_reason, _session_id) = turn.unwrap();
     assert_eq!(stop_reason, "end_turn");
-    assert_eq!(accumulated.lock().unwrap().as_str(), "hello from acp");
+    assert_eq!(accumulated.lock().unwrap().output(), "hello from acp");
     assert!(matches!(
         streamed.unwrap(),
         SubagentEvent::Message { text } if text == "hello from acp"
@@ -436,7 +436,7 @@ async fn run_session_serves_fs_requests_and_auto_approves_permissions() {
     });
 
     let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel();
-    let accumulated = Arc::new(Mutex::new(String::new()));
+    let accumulated = Arc::new(Mutex::new(super::closure::TurnClosure::default()));
 
     let (turn, _, streamed) = tokio::join!(
         run_session(
@@ -456,12 +456,12 @@ async fn run_session_serves_fs_requests_and_auto_approves_permissions() {
     let (stop_reason, _session_id) = turn.unwrap();
     assert_eq!(stop_reason, "end_turn");
     assert_eq!(
-        accumulated.lock().unwrap().as_str(),
+        accumulated.lock().unwrap().output(),
         "read: l2\nperm: allow-yes\nperm-empty: Cancelled\nwrite: written-by-client"
     );
     assert!(matches!(
         streamed.unwrap(),
-        SubagentEvent::Message { text } if text == accumulated.lock().unwrap().as_str()
+        SubagentEvent::Message { text } if text == accumulated.lock().unwrap().output()
     ));
 }
 
@@ -566,7 +566,7 @@ async fn run_session_selects_the_preferred_session_model() {
     });
 
     let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel();
-    let accumulated = Arc::new(Mutex::new(String::new()));
+    let accumulated = Arc::new(Mutex::new(super::closure::TurnClosure::default()));
 
     let (turn, _, streamed) = tokio::join!(
         run_session(
@@ -585,7 +585,7 @@ async fn run_session_selects_the_preferred_session_model() {
 
     let (stop_reason, _session_id) = turn.unwrap();
     assert_eq!(stop_reason, "end_turn");
-    assert_eq!(accumulated.lock().unwrap().as_str(), "model-ok");
+    assert_eq!(accumulated.lock().unwrap().output(), "model-ok");
     assert!(matches!(
         streamed.unwrap(),
         SubagentEvent::Message { text } if text == "model-ok"
@@ -708,7 +708,7 @@ async fn run_session_maps_session_updates_into_typed_events() {
     });
 
     let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel();
-    let accumulated = Arc::new(Mutex::new(String::new()));
+    let accumulated = Arc::new(Mutex::new(super::closure::TurnClosure::default()));
 
     // Drain events until the turn ends (the sender drops with the session).
     let collector = async {
@@ -738,7 +738,7 @@ async fn run_session_maps_session_updates_into_typed_events() {
     assert_eq!(stop_reason, "end_turn");
     // Only message text enters the accumulator — no thoughts, no tool
     // titles, no plan entries.
-    assert_eq!(accumulated.lock().unwrap().as_str(), "all done");
+    assert_eq!(accumulated.lock().unwrap().output(), "all done");
 
     use super::events::{PlanEntry, PlanEntryPriority, PlanEntryStatus, ToolCallStatus, ToolKind};
     assert_eq!(
@@ -1626,7 +1626,7 @@ async fn drive_turn(
     resume: Option<String>,
 ) -> (String, String) {
     let (chunk_tx, _chunk_rx) = tokio::sync::mpsc::unbounded_channel();
-    let accumulated = Arc::new(Mutex::new(String::new()));
+    let accumulated = Arc::new(Mutex::new(super::closure::TurnClosure::default()));
     let (turn, _, _) = tokio::join!(
         run_session(
             client_side,
@@ -1903,7 +1903,7 @@ async fn resumed_session_selects_the_preferred_session_model() {
     });
 
     let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel();
-    let accumulated = Arc::new(Mutex::new(String::new()));
+    let accumulated = Arc::new(Mutex::new(super::closure::TurnClosure::default()));
     let (turn, _, streamed) = tokio::join!(
         run_session(
             client_side,
@@ -1931,7 +1931,7 @@ async fn resumed_session_selects_the_preferred_session_model() {
         ["resume:stored-9", "set-config:model"],
         "the turn must resume AND switch the model before prompting"
     );
-    assert_eq!(accumulated.lock().unwrap().as_str(), "model-resumed-ok");
+    assert_eq!(accumulated.lock().unwrap().output(), "model-resumed-ok");
     assert!(matches!(
         streamed.unwrap(),
         SubagentEvent::Message { text } if text == "model-resumed-ok"
@@ -2027,7 +2027,7 @@ async fn run_session_cancels_the_remote_turn_on_the_stop_signal() {
     });
 
     let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel();
-    let accumulated = Arc::new(Mutex::new(String::new()));
+    let accumulated = Arc::new(Mutex::new(super::closure::TurnClosure::default()));
 
     // Simulate the user hitting ESC as soon as the first chunk arrives.
     let stop_signal = Arc::new(AtomicBool::new(false));
@@ -2058,7 +2058,7 @@ async fn run_session_cancels_the_remote_turn_on_the_stop_signal() {
     let (stop_reason, session_id) = turn.unwrap();
     assert_eq!(stop_reason, "cancelled");
     // Partial output streamed before the stop survives.
-    assert_eq!(accumulated.lock().unwrap().as_str(), PARTIAL);
+    assert_eq!(accumulated.lock().unwrap().output(), PARTIAL);
     // The turn ended protocol-clean, so the session id IS propagated.
     assert_eq!(session_id, "cancel-fixture");
     // The fixture actually received the ACP cancel notification.

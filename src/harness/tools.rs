@@ -1521,10 +1521,12 @@ impl Tools for CoshTools {
                 // when the harness lost it. Safe by the sequential-dispatch
                 // invariant documented on `SubAgent::last_session`.
                 let resume = self.subagent.resume_id(&agent, input.continue_session);
-                // Review tasks carry the severity contract: the FINAL REPORT
-                // must start with `<!-- severity: green|yellow|red -->`. The
-                // contract is appended AFTER the stored-input resolution so a
-                // retry (reused raw input) never double-appends it.
+                // Review tasks carry the severity contract: the sub-agent's
+                // FINAL REPORT (its last message, post-tool-calls — see
+                // `subagent::closure`) must start with
+                // `<!-- severity: green|yellow|red -->`. The contract is
+                // appended AFTER the stored-input resolution so a retry
+                // (reused raw input) never double-appends it.
                 let call_input = cosh_tools::subagent::severity::with_severity_contract(
                     &call_input,
                     input.code_review,
