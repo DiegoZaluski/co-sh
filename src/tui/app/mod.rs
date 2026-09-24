@@ -124,6 +124,9 @@ fn apply_background_preference(mut t: Theme, transparent_background: bool) -> Th
     t
 }
 
+/// Header back button label.
+const BACK_LINK_TEXT: &str = "← esc";
+
 /// Header link that opens the project's bug-report page.
 /// TODO: replace the URL with the real GitHub issues URL.
 const BUG_REPORT_TEXT: &str = "𓆦 bug report";
@@ -477,6 +480,8 @@ pub struct App {
     sidebar_focused: bool,
     /// Clickable area of the "bug report" header link (None when not drawn).
     bug_link_area: Option<Rect>,
+    /// Clickable area of the header's back/escape button (None when not drawn).
+    back_link_area: Option<Rect>,
     /// Astra-style starfield flourish in the session header (see
     /// `component/sparkle.rs`). Session-router-only: armed per session id,
     /// drawn exclusively on blank cells of the header row.
@@ -729,6 +734,7 @@ impl App {
             needs_full_redraw: false,
             sidebar_focused: false,
             bug_link_area: None,
+            back_link_area: None,
             update_event_rx,
             update_event_tx,
             update_changelog_url: None,

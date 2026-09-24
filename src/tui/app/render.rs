@@ -7,8 +7,8 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 
 use super::{
-    App, AppMode, BUG_REPORT_TEXT, EMPTY_SESSION_PROMPT_MIN_WIDTH, EMPTY_SESSION_PROMPT_RATIO,
-    MIN_PROMPT_RESERVE_ROWS, SessionArea,
+    App, AppMode, BACK_LINK_TEXT, BUG_REPORT_TEXT, EMPTY_SESSION_PROMPT_MIN_WIDTH,
+    EMPTY_SESSION_PROMPT_RATIO, MIN_PROMPT_RESERVE_ROWS, SessionArea,
 };
 use crate::left_panel::{MIN_WIDTH_FOR_LEFT_PANEL, Mode};
 use crate::logo::LOGO_CHAT;
@@ -156,14 +156,34 @@ impl App {
                 );
             }
 
-            let header_style = Style::default().fg(rgba_color(self.theme.text_muted));
-            let title_chars: Vec<char> = "← esc".chars().collect();
+            let title_chars: Vec<char> = BACK_LINK_TEXT.chars().collect();
+            let title_w = title_chars.len() as u16;
+            let back_link_area = (area.width > 1).then(|| {
+                Rect::new(
+                    area.x + 1,
+                    area.y,
+                    title_w.min(area.width.saturating_sub(1)),
+                    1,
+                )
+            });
+            let back_link_fg = if let Some(link_area) = back_link_area
+                && self.last_mouse_x >= link_area.x
+                && self.last_mouse_x < link_area.right()
+                && self.last_mouse_y >= link_area.y
+                && self.last_mouse_y < link_area.bottom()
+            {
+                rgba_color(self.theme.text)
+            } else {
+                rgba_color(self.theme.text_muted)
+            };
+            let header_style = Style::default().fg(back_link_fg);
             for (i, ch) in title_chars.iter().enumerate() {
                 if let Some(cell) = buf.cell_mut((area.x + 1 + i as u16, area.y)) {
                     cell.set_char(*ch);
                     cell.set_style(header_style);
                 }
             }
+            self.back_link_area = back_link_area;
 
             let bug_w = BUG_REPORT_TEXT.chars().count() as u16;
 
@@ -329,7 +349,7 @@ impl App {
             let is_session_mode = matches!(self.mode(), AppMode::Session);
             if is_session_mode {
                 let header_strip = Rect::new(main_area.x, area.y, main_area.width, 1);
-                let hint_w = "← esc".chars().count() as u16;
+                let hint_w = BACK_LINK_TEXT.chars().count() as u16;
                 let protected_hint = Rect::new(area.x + 1, area.y, hint_w, 1);
                 let (fg_r, fg_g, fg_b, _) = self.theme.text.to_ints();
                 // Night-window gate (see component/sparkle.rs): local
