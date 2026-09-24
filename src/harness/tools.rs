@@ -877,6 +877,8 @@ impl Tools for CoshTools {
         write_single_tool(out, &self.fs.description_read, true);
         write_single_tool(out, &self.fs.description_write, true);
         write_single_tool(out, &self.fs.description_edit, true);
+        write_single_tool(out, &self.fs.description_edit_lines, true);
+        write_single_tool(out, &self.fs.description_ast_edit, true);
         write_single_tool(out, &self.fs.description_rollback, true);
         write_single_tool(out, &self.find.description_glob, true);
         write_single_tool(out, &self.find.description_grep, true);
@@ -919,6 +921,8 @@ impl Tools for CoshTools {
             self.fs.description_read.clone(),
             self.fs.description_write.clone(),
             self.fs.description_edit.clone(),
+            self.fs.description_edit_lines.clone(),
+            self.fs.description_ast_edit.clone(),
             self.fs.description_rollback.clone(),
             self.find.description_glob.clone(),
             self.find.description_grep.clone(),
@@ -1162,8 +1166,9 @@ impl Tools for CoshTools {
                 // batched writes raised schema-error rates in agent sessions.
                 let targets: Vec<TargetFile> = if args.get("path").is_some() {
                     if args.get("targets").is_some() {
-                        // Mixed shapes are ambiguous: fs_edit's auto-dispatch
-                        // rejects them too. A silent "flat wins" choice would
+                        // Mixed shapes are ambiguous: the edit tools reject
+                        // them the same way (one shape per call). A silent
+                        // "flat wins" choice would
                         // write one file when the model asked for a batch.
                         return Err("fs_write accepts ONE file per call: provide either a flat \
                              {path, content, file_hash?} or the legacy single-element \
@@ -1195,10 +1200,14 @@ impl Tools for CoshTools {
                 serde_json::to_string(&results).map_err(|e| e.to_string())
             }
 
-            "fs_edit" => {
-                let results = self.fs.edit(args).await?;
+            "fs_edit" | "fs_edit_lines" | "fs_ast_edit" => {
+                let results = match name {
+                    "fs_edit" => self.fs.edit(args).await?,
+                    "fs_edit_lines" => self.fs.edit_lines(args).await?,
+                    _ => self.fs.edit_ast(args).await?,
+                };
                 self.emit_lsp_notes(
-                    "fs_edit",
+                    name,
                     results.iter().filter_map(|r| r.lsp_notes.as_ref()),
                 );
                 serde_json::to_string(&results).map_err(|e| e.to_string())

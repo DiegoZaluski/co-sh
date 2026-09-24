@@ -35,13 +35,14 @@ pub enum PermissionCheck {
 ///
 /// Supports the following argument shapes:
 /// - `{ "path": "..." }` — the advertised flat single-file form (fs_read,
-///   fs_write, fs_edit, fs_rollback)
+///   fs_write, fs_edit, fs_edit_lines, fs_ast_edit, fs_rollback)
 /// - `{ "targets": [{ "path": "..." }, ...] }` — the legacy batch form, kept
-///   for single-element compatibility (fs_read, fs_write, fs_edit)
+///   for single-element compatibility (fs_read, fs_write, fs_edit,
+///   fs_edit_lines, fs_ast_edit)
 /// - `{ "path": "..." }` / `{ "paths": [...] }` (find_glob, find_grep)
 pub(crate) fn extract_paths_from_args(tool_name: &str, args: &Value) -> Vec<String> {
     match tool_name {
-        "fs_read" | "fs_write" | "fs_edit" => {
+        "fs_read" | "fs_write" | "fs_edit" | "fs_edit_lines" | "fs_ast_edit" => {
             if let Some(targets) = args.get("targets").and_then(|v| v.as_array()) {
                 targets
                     .iter()
@@ -131,7 +132,8 @@ fn needs_path_approval(paths: &[String], project_root: Option<&Path>) -> Option<
 ///
 /// Tools that always need user approval (regardless of path):
 /// - `bash_run`, `subagent_call` (execute external commands/code)
-/// - `fs_edit`, `fs_rollback` (write/restore file operations)
+/// - `fs_edit`, `fs_edit_lines`, `fs_ast_edit`, `fs_rollback` (write/restore file
+///   operations)
 /// - `computer_act`, `computer_control` (synthetic input acts on the
 ///   whole desktop — outside any project-root sandbox)
 ///
@@ -383,7 +385,7 @@ pub fn check_tool_permission(
                 args: command.to_string(),
             });
         }
-        "fs_edit" | "fs_write" => {
+        "fs_edit" | "fs_edit_lines" | "fs_ast_edit" | "fs_write" => {
             let paths = extract_paths_from_args(tool_name, args);
             let args_str = if paths.is_empty() {
                 String::new()
@@ -480,6 +482,8 @@ fn is_restricted_in_ask_mode(name: &str) -> bool {
         name,
         "fs_write"
             | "fs_edit"
+            | "fs_edit_lines"
+            | "fs_ast_edit"
             | "fs_rollback"
             | "bash_run"
             | "plan_todo_write"

@@ -95,8 +95,9 @@ pub const INSTRUCTIONS_BUILD: &str = concat!(
     "- When the current user request has been fully completed and no further action is required, invoke `stop_agent_loop`.\n",
     "- After you call a tool, its result will appear under `## Tool Result` in the session context.\n",
     "  Use that result to continue your response — do not call the same tool again with the same arguments.\n",
-    "  After fs_edit, the result carries the updated \u{00B6}path#TAG header — use it directly\n",
-    "  for subsequent edits on the same file. Do NOT re-read a file just to get a new tag.\n",
+    "  After an edit tool (fs_edit, fs_edit_lines, fs_ast_edit), the result carries the\n",
+    "  updated \u{00B6}path#TAG header — use it directly for subsequent edits on the\n",
+    "  same file. Do NOT re-read a file just to get a new tag.\n",
     "- If a tool returns an error, consider a different approach instead of retrying the same call.\n\n",
     "## Self-Review Loop\n",
     "- After code changes, decide yourself whether a subagent review is needed: the test is whether the change affects runtime behavior.\n",
@@ -4554,7 +4555,7 @@ impl Harness {
                     {
                         for p in &allow_once_paths {
                             match allow_once_tool.as_str() {
-                                "fs_read" | "fs_write" | "fs_edit" | "fs_rollback" => {
+                                "fs_read" | "fs_write" | "fs_edit" | "fs_edit_lines" | "fs_ast_edit" | "fs_rollback" => {
                                     cosh.remove_fs_allowlist_path(p);
                                 }
                                 "find_glob" | "find_grep" => {
@@ -4878,7 +4879,7 @@ impl Harness {
         if let Some(cosh) = cosh_tools.as_mut() {
             for p in &paths {
                 match tool_name {
-                    "fs_read" | "fs_write" | "fs_edit" | "fs_rollback" => {
+                    "fs_read" | "fs_write" | "fs_edit" | "fs_edit_lines" | "fs_ast_edit" | "fs_rollback" => {
                         log::debug!("add_paths_to_allowlist fs allowed: {:?}", p);
                         cosh.add_fs_allowlist_path(p.clone());
                     }
