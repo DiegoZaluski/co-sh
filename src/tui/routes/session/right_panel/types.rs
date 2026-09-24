@@ -91,7 +91,10 @@ pub(crate) enum SubagentActivityLine {
         status: PlanEntryStatus,
         text: String,
     },
-    /// One wrapped visual row of the latest thought.
+    /// One wrapped visual row of the sub-agent's message text (normal
+    /// text style, not dimmed — it is the agent speaking).
+    Message(String),
+    /// One wrapped visual row of the sub-agent's thinking.
     Thought(String),
 }
 
@@ -112,45 +115,54 @@ fn tool_kind_name(kind: ToolKind) -> &'static str {
     }
 }
 
-/// The drawable activity lines of one running sub-agent session, in display
-/// order: tool calls (with their detail/diff lines), then the plan, then the
-/// wrapped tail of the latest thought. Called ONLY for running sessions —
-/// activity is cleared on completion, so finished windows render nothing.
+/// The drawable activity lines of one running sub-agent session, in
+/// CHRONOLOGICAL order (mini-chat): transcript entries render in arrival
+/// order, so tool calls, thoughts and message text climb upward as new
+/// content arrives — the same flow as the main chat. Called ONLY for
+/// running sessions — activity is cleared on completion, so finished
+/// windows render nothing.
 pub(crate) fn activity_lines(
     activity: &SubagentActivity,
     wrap_w: u16,
 ) -> Vec<SubagentActivityLine> {
-    const THOUGHT_ROWS: usize = 2;
-
     let mut out = Vec::new();
-    for call in &activity.tool_calls {
-        let name = tool_kind_name(call.kind);
-        let detail = call.detail.clone().unwrap_or_else(|| call.title.clone());
-        out.push(SubagentActivityLine::Tool {
-            id: call.id.clone(),
-            text: format!("{name} {detail}"),
-            status: call.status,
-        });
-        if let Some(diff) = &call.diff {
-            out.push(SubagentActivityLine::Diff(format!(
-                "{} +{} −{}",
-                diff.path, diff.added, diff.removed
-            )));
-        }
-    }
-    for entry in &activity.plan {
-        out.push(SubagentActivityLine::Plan {
-            status: entry.status,
-            text: entry.content.clone(),
-        });
-    }
-    if let Some(thought) = &activity.last_thought {
-        let clean = sanitize_subagent_text(thought);
-        let rows = wrap_chars(clean.trim(), wrap_w);
-        // The TAIL of the thought is what is currently being thought — show
-        // its last visual rows.
-        for row in rows.iter().rev().take(THOUGHT_ROWS).rev() {
-            out.push(SubagentActivityLine::Thought(row.clone()));
+    for entry in &activity.timeline {
+        match entry {
+            SubagentTimelineEntry::Message { text } => {
+                let clean = sanitize_subagent_text(text);
+                for row in wrap_chars(clean.trim(), wrap_w) {
+                    out.push(SubagentActivityLine::Message(row));
+                }
+            }
+            SubagentTimelineEntry::Thought { text } => {
+                let clean = sanitize_subagent_text(text);
+                for row in wrap_chars(clean.trim(), wrap_w) {
+                    out.push(SubagentActivityLine::Thought(row));
+                }
+            }
+            SubagentTimelineEntry::Tool(call) => {
+                let name = tool_kind_name(call.kind);
+                let detail = call.detail.clone().unwrap_or_else(|| call.title.clone());
+                out.push(SubagentActivityLine::Tool {
+                    id: call.id.clone(),
+                    text: format!("{name} {detail}"),
+                    status: call.status,
+                });
+                if let Some(diff) = &call.diff {
+                    out.push(SubagentActivityLine::Diff(format!(
+                        "{} +{} −{}",
+                        diff.path, diff.added, diff.removed
+                    )));
+                }
+            }
+            SubagentTimelineEntry::Plan { entries } => {
+                for entry in entries {
+                    out.push(SubagentActivityLine::Plan {
+                        status: entry.status,
+                        text: entry.content.clone(),
+                    });
+                }
+            }
         }
     }
     out
@@ -443,19 +455,33 @@ impl PtySession {
     }
 }
 
-/// Live structured activity of one running sub-agent session — tool calls,
-/// plan, last thought, usage. Display-only plumbing (Phase 3a): Phase 3b
-/// draws it inside the sub-agent box. Reset when the session completes;
-/// persisted sessions keep rendering from the final JSON envelope (3a.3).
+/// One chronological entry of a running sub-agent's transcript (mini-chat):
+/// entries are stored in ARRIVAL order and new ones push the older content
+/// up, exactly like the main chat. Tool calls and the plan are updated in
+/// place by later events without moving their position.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum SubagentTimelineEntry {
+    /// A chunk (or run) of the sub-agent's message text.
+    Message { text: String },
+    /// The sub-agent's thinking (rendered dimmed).
+    Thought { text: String },
+    /// A tool call: announced at its arrival position, patched in place by
+    /// `ToolCallUpdate` events with the same id.
+    Tool(SubagentToolCall),
+    /// The sub-agent's plan: the ACP spec replaces it wholesale; the entry
+    /// keeps the position where the plan was first announced.
+    Plan { entries: Vec<PlanEntry> },
+}
+
+/// Live structured activity of one running sub-agent session — the
+/// chronological transcript the sub-agent box renders as a mini chat.
+/// Display-only plumbing (Phase 3a): Phase 3b draws it inside the sub-agent
+/// box. Reset when the session completes; persisted sessions keep rendering
+/// from the final JSON envelope (3a.3).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct SubagentActivity {
-    /// Tool calls in announcement order; updates patch the entry with the
-    /// matching id in place.
-    pub(crate) tool_calls: Vec<SubagentToolCall>,
-    /// The latest plan (full replacement, per the ACP spec).
-    pub(crate) plan: Vec<PlanEntry>,
-    /// The most recent thought chunk (tail only).
-    pub(crate) last_thought: Option<String>,
+    /// Transcript entries in arrival order; the newest is the LAST entry.
+    pub(crate) timeline: Vec<SubagentTimelineEntry>,
     /// Latest usage snapshot: `(context_window, tokens_in_context)`.
     pub(crate) usage: Option<(u64, u64)>,
 }
@@ -500,8 +526,13 @@ fn bounded_tail(text: &str, max: usize) -> String {
 
 /// Maximum bytes kept of one tool call's output tail.
 const SUBAGENT_TOOL_TAIL_CHARS: usize = 4_000;
-/// Maximum bytes kept of the last thought.
-const SUBAGENT_THOUGHT_CHARS: usize = 2_000;
+/// Maximum bytes kept of one transcript text entry (message or thought).
+/// Chunks coalesce into one growing entry; the tail survives so the box
+/// shows the most recent text while the final report keeps everything.
+const SUBAGENT_TEXT_ENTRY_CHARS: usize = 8_000;
+/// Maximum transcript entries kept live. A very long turn drops its OLDEST
+/// entries — the box is a live mini-chat window, not a full archive.
+const SUBAGENT_TIMELINE_MAX_ENTRIES: usize = 200;
 
 /// Extract the one input detail worth showing under a tool line from a
 /// sub-agent tool call's raw input JSON (the announcement's `raw_input`).
@@ -550,18 +581,31 @@ fn tool_input_detail(raw_input: &serde_json::Value) -> Option<String> {
 impl SubagentActivity {
     /// Apply one typed sub-agent event, mutating the live state in place
     /// (Phase 3a plumbing; Phase 3b renders the result).
+    ///
+    /// The timeline is chronological (mini-chat): message and thought
+    /// chunks COALESCE into the timeline's last matching entry (a stream of
+    /// chunks is one growing transcript row, not one row per chunk), tool
+    /// calls patch their announcement-position entry by id, and the plan
+    /// replaces its existing entry in place — arrival order never changes.
     pub(crate) fn apply(&mut self, event: &SubagentEvent) {
         match event {
-            SubagentEvent::Message { .. } => {
-                // Message text flows through the legacy ToolOutput path;
-                // the box never accumulates it here (see the Phase 3 note
-                // on the harness double-send).
+            SubagentEvent::Message { text } => {
+                if let Some(SubagentTimelineEntry::Message { text: acc }) = self.timeline.last_mut()
+                {
+                    acc.push_str(text);
+                    *acc = bounded_tail(acc, SUBAGENT_TEXT_ENTRY_CHARS);
+                } else {
+                    self.push_entry(SubagentTimelineEntry::Message { text: text.clone() });
+                }
             }
             SubagentEvent::Thought { text } => {
-                // Chunks append; the tail is what survives.
-                let mut combined = self.last_thought.take().unwrap_or_default();
-                combined.push_str(text);
-                self.last_thought = Some(bounded_tail(&combined, SUBAGENT_THOUGHT_CHARS));
+                if let Some(SubagentTimelineEntry::Thought { text: acc }) = self.timeline.last_mut()
+                {
+                    acc.push_str(text);
+                    *acc = bounded_tail(acc, SUBAGENT_TEXT_ENTRY_CHARS);
+                } else {
+                    self.push_entry(SubagentTimelineEntry::Thought { text: text.clone() });
+                }
             }
             SubagentEvent::ToolCall {
                 id,
@@ -584,7 +628,17 @@ impl SubagentActivity {
                     diff: None,
                     detail: raw_input.as_ref().and_then(tool_input_detail),
                 };
-                self.tool_calls.push(call);
+                // A re-announcement of a known id patches in place; a new id
+                // appends at the current position.
+                if let Some(existing) = self.timeline.iter_mut().rev().find_map(|entry| match entry
+                {
+                    SubagentTimelineEntry::Tool(c) if c.id == *id => Some(c),
+                    _ => None,
+                }) {
+                    *existing = call;
+                } else {
+                    self.push_entry(SubagentTimelineEntry::Tool(call));
+                }
             }
             SubagentEvent::ToolCallUpdate {
                 id,
@@ -593,7 +647,15 @@ impl SubagentActivity {
                 raw_output,
                 content,
             } => {
-                if let Some(call) = self.tool_calls.iter_mut().rev().find(|c| &c.id == id) {
+                if let Some(call) = self
+                    .timeline
+                    .iter_mut()
+                    .rev()
+                    .find_map(|entry| match entry {
+                        SubagentTimelineEntry::Tool(c) if c.id == *id => Some(c),
+                        _ => None,
+                    })
+                {
                     if let Some(status) = status {
                         call.status = *status;
                     }
@@ -619,7 +681,23 @@ impl SubagentActivity {
                 }
             }
             SubagentEvent::Plan { entries } => {
-                self.plan = entries.clone();
+                // The ACP spec replaces the plan wholesale; the entry keeps
+                // the position where the plan was first announced.
+                if let Some(plan) = self
+                    .timeline
+                    .iter_mut()
+                    .rev()
+                    .find_map(|entry| match entry {
+                        SubagentTimelineEntry::Plan { entries } => Some(entries),
+                        _ => None,
+                    })
+                {
+                    *plan = entries.clone();
+                } else {
+                    self.push_entry(SubagentTimelineEntry::Plan {
+                        entries: entries.clone(),
+                    });
+                }
             }
             SubagentEvent::Usage {
                 context_window,
@@ -631,6 +709,17 @@ impl SubagentActivity {
             SubagentEvent::Mode { .. } | SubagentEvent::SessionInfo { .. } => {}
             // `#[non_exhaustive]`: future variants are ignored safely.
             _ => {}
+        }
+    }
+
+    /// Append one transcript entry, bounding the timeline: a very long turn
+    /// could otherwise grow it without limit, so the OLDEST entries are
+    /// dropped (the box shows the live mini-chat; the final report still
+    /// carries the complete content once the turn ends).
+    fn push_entry(&mut self, entry: SubagentTimelineEntry) {
+        self.timeline.push(entry);
+        while self.timeline.len() > SUBAGENT_TIMELINE_MAX_ENTRIES {
+            self.timeline.remove(0);
         }
     }
 }
@@ -2122,7 +2211,10 @@ impl RightPanelState {
     /// Apply one typed sub-agent event to the last running PTY session
     /// (Phase 3a plumbing). Only RUNNING subagent sessions accumulate live
     /// activity: bash sessions and finished/rehydrated windows ignore it.
-    pub(crate) fn update_subagent_activity(&mut self, event: &SubagentEvent) {
+    ///
+    /// Returns whether the event was applied — the caller auto-follows the
+    /// scroll only when it was (a dropped event must not yank the viewport).
+    pub(crate) fn update_subagent_activity(&mut self, event: &SubagentEvent) -> bool {
         let mut found_kind = None;
         if let Some(session) = self
             .pty_sessions
@@ -2137,6 +2229,7 @@ impl RightPanelState {
         if let Some(kind) = found_kind {
             self.mark_activity(kind);
         }
+        found_kind.is_some()
     }
 
     /// Trim a PTY output string to `MAX_PTY_OUTPUT_CHARS`, keeping the TAIL
@@ -2602,24 +2695,36 @@ mod tests {
         });
 
         let activity = &state.pty_sessions[0].subagent_activity;
-        assert_eq!(activity.tool_calls.len(), 2);
-        assert_eq!(activity.tool_calls[0].id, "c1");
-        assert_eq!(activity.tool_calls[0].status, ToolCallStatus::Completed);
-        assert_eq!(
-            activity.tool_calls[0].output_tail.as_deref(),
-            Some("file contents")
-        );
+        let tools: Vec<&SubagentToolCall> = activity
+            .timeline
+            .iter()
+            .filter_map(|entry| match entry {
+                SubagentTimelineEntry::Tool(call) => Some(call),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0].id, "c1");
+        assert_eq!(tools[0].status, ToolCallStatus::Completed);
+        assert_eq!(tools[0].output_tail.as_deref(), Some("file contents"));
         // The untouched call keeps its announcement state; its tail is the
         // compact JSON of the raw input.
-        assert_eq!(activity.tool_calls[1].status, ToolCallStatus::InProgress);
-        assert_eq!(
-            activity.tool_calls[1].output_tail.as_deref(),
-            Some(r#"{"path":"a.txt"}"#)
-        );
+        assert_eq!(tools[1].status, ToolCallStatus::InProgress);
+        assert_eq!(tools[1].output_tail.as_deref(), Some(r#"{"path":"a.txt"}"#));
+        // Chronological mini-chat: the calls are timeline entries in
+        // arrival order, not grouped by category.
+        assert!(matches!(
+            activity.timeline[0],
+            SubagentTimelineEntry::Tool(_)
+        ));
+        assert!(matches!(
+            activity.timeline[1],
+            SubagentTimelineEntry::Tool(_)
+        ));
     }
 
     #[test]
-    fn subagent_activity_accumulates_thought_plan_and_usage() {
+    fn subagent_activity_accumulates_thought_plan_and_message_in_order() {
         let mut state = RightPanelState::new();
         state.start_pty("subagent: opencode".to_string(), None);
 
@@ -2640,15 +2745,26 @@ mod tests {
             context_window: 8192,
             tokens_in_context: 2048,
         });
-        // Message text does NOT accumulate here (it flows through
-        // `ToolOutput`); the box's structured state stays clean.
+        // Message text is part of the timeline now (the mini-chat shows the
+        // agent speaking); a chunk after the plan opens a NEW entry.
         state.update_subagent_activity(&SubagentEvent::Message {
-            text: "visible via ToolOutput".to_string(),
+            text: "visible in the timeline".to_string(),
         });
 
         let activity = &state.pty_sessions[0].subagent_activity;
-        assert_eq!(activity.last_thought.as_deref(), Some("thinking hard"));
-        assert_eq!(activity.plan.len(), 1);
+        assert_eq!(activity.timeline.len(), 3);
+        assert!(matches!(
+            &activity.timeline[0],
+            SubagentTimelineEntry::Thought { text } if text == "thinking hard"
+        ));
+        assert!(matches!(
+            &activity.timeline[1],
+            SubagentTimelineEntry::Plan { entries } if entries.len() == 1
+        ));
+        assert!(matches!(
+            &activity.timeline[2],
+            SubagentTimelineEntry::Message { text } if text == "visible in the timeline"
+        ));
         assert_eq!(activity.usage, Some((8192, 2048)));
     }
 
@@ -2660,24 +2776,14 @@ mod tests {
 
         state.complete_last_pty("final report".to_string());
 
-        assert!(
-            state.pty_sessions[0]
-                .subagent_activity
-                .tool_calls
-                .is_empty()
-        );
+        assert!(state.pty_sessions[0].subagent_activity.timeline.is_empty());
         assert_eq!(state.pty_sessions[0].status, PtyStatus::Completed);
         // The report text is still the session's rendered output.
         assert_eq!(state.pty_sessions[0].output, "final report");
 
         // A NEW subagent session starts with empty activity again.
         state.start_pty("subagent: opencode".to_string(), None);
-        assert!(
-            state.pty_sessions[1]
-                .subagent_activity
-                .tool_calls
-                .is_empty()
-        );
+        assert!(state.pty_sessions[1].subagent_activity.timeline.is_empty());
     }
 
     #[test]
@@ -2685,50 +2791,86 @@ mod tests {
         let mut state = RightPanelState::new();
         // A running BASH session must not absorb sub-agent events.
         state.start_pty("cargo test".to_string(), None);
-        state.update_subagent_activity(&tool_call_event("c1", "Reading a"));
-        assert!(
-            state.pty_sessions[0]
-                .subagent_activity
-                .tool_calls
-                .is_empty()
-        );
+        assert!(!state.update_subagent_activity(&tool_call_event("c1", "Reading a")));
+        assert!(state.pty_sessions[0].subagent_activity.timeline.is_empty());
 
         // A finished subagent window (history entry) must not either.
         state.complete_last_pty(String::new());
         state.start_pty("subagent: opencode".to_string(), None);
         state.complete_last_pty("done".to_string());
-        state.update_subagent_activity(&tool_call_event("c2", "Reading b"));
-        assert!(
-            state.pty_sessions[1]
-                .subagent_activity
-                .tool_calls
-                .is_empty()
-        );
+        assert!(!state.update_subagent_activity(&tool_call_event("c2", "Reading b")));
+        assert!(state.pty_sessions[1].subagent_activity.timeline.is_empty());
 
-        // Events with no running subagent target are simply dropped.
-        state.update_subagent_activity(&tool_call_event("c3", "Reading c"));
+        // Events with no running subagent target are simply dropped (and
+        // report `false`, so the caller must not auto-follow them).
+        assert!(!state.update_subagent_activity(&tool_call_event("c3", "Reading c")));
     }
 
     #[test]
-    fn subagent_thought_tail_is_bounded() {
+    fn subagent_text_entries_are_bounded() {
         let mut state = RightPanelState::new();
         state.start_pty("subagent: opencode".to_string(), None);
-        // Many chunks (each 15 bytes): 500 × 15 = 7500 bytes — well past
-        // the cap, so only the bounded tail survives.
-        for i in 0..500 {
+        // Many chunks (each 15 bytes): 600 × 15 = 9000 bytes — past the
+        // 8000-byte cap, so only the bounded tail survives (chunks coalesce
+        // into one growing transcript entry).
+        for i in 0..600 {
             state.update_subagent_activity(&SubagentEvent::Thought {
                 text: format!("thought-{i:06} "),
             });
         }
-        let thought = state.pty_sessions[0]
-            .subagent_activity
-            .last_thought
-            .clone()
-            .unwrap();
-        assert!(thought.len() <= SUBAGENT_THOUGHT_CHARS);
+        let activity = &state.pty_sessions[0].subagent_activity;
+        // ONE coalesced entry, not 500 of them.
+        assert_eq!(activity.timeline.len(), 1);
+        let thought = match &activity.timeline[0] {
+            SubagentTimelineEntry::Thought { text } => text.clone(),
+            other => panic!("expected a thought entry, got {other:?}"),
+        };
+        assert!(thought.len() <= SUBAGENT_TEXT_ENTRY_CHARS);
         // The TAIL survives — the newest chunk is present.
         assert!(thought.contains("thought-000499"));
         assert!(!thought.contains("thought-000000"));
+    }
+
+    #[test]
+    fn subagent_timeline_drops_its_oldest_entries_when_bounded() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: opencode".to_string(), None);
+        // Alternate entries so every chunk opens a NEW timeline entry
+        // (chunks only coalesce into a matching last entry).
+        for i in 0..(SUBAGENT_TIMELINE_MAX_ENTRIES + 10) {
+            state.update_subagent_activity(&SubagentEvent::Message {
+                text: format!("msg-{i:04}"),
+            });
+            state.update_subagent_activity(&SubagentEvent::ToolCall {
+                id: format!("c{i}"),
+                title: "call".to_string(),
+                kind: ToolKind::Read,
+                status: ToolCallStatus::InProgress,
+                raw_input: None,
+            });
+        }
+        let activity = &state.pty_sessions[0].subagent_activity;
+        assert_eq!(activity.timeline.len(), SUBAGENT_TIMELINE_MAX_ENTRIES);
+        // Exact first survivor: 210 iterations × 2 entries = 420 pushes;
+        // keeping the last 200 drops the first 220 (= 110 full iterations),
+        // so the timeline opens with iteration 110's message.
+        assert_eq!(
+            &activity.timeline[0],
+            &SubagentTimelineEntry::Message {
+                text: "msg-0110".to_string()
+            }
+        );
+        // ... immediately followed by that iteration's tool call (ids are
+        // NOT zero-padded: `c110`, unlike the messages' `{i:04}`).
+        assert!(matches!(
+            &activity.timeline[1],
+            SubagentTimelineEntry::Tool(call) if call.id == "c110"
+        ));
+        // The newest pair is intact at the tail (mini-chat: newest last).
+        assert!(matches!(
+            activity.timeline.last(),
+            Some(SubagentTimelineEntry::Tool(call)) if call.id == format!("c{}", SUBAGENT_TIMELINE_MAX_ENTRIES + 9)
+        ));
     }
 
     // ── Severity consumption (Phase 3b.1) ─────────────────────────────

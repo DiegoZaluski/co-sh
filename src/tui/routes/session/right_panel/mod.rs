@@ -1113,6 +1113,13 @@ fn draw_activity_lines(
                     ));
                 }
             }
+            SubagentActivityLine::Message(text) => {
+                // Normal text style — the agent speaking, not thinking.
+                draw_text(buf, text, x, line_y, wrap_w, text_style);
+                if rebuild_regions {
+                    regions.push(TextRegion::one_row(row, x, x + wrap_w, text.clone()));
+                }
+            }
             SubagentActivityLine::Thought(text) => {
                 // Always visible, dimmed — the sub-agent's "opaque thinking"
                 // treatment (no hidden toggle here).

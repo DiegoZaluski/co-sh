@@ -556,16 +556,22 @@ impl App {
                     }
                 }
 
-                // Typed sub-agent activity (thoughts, tool calls, plans,
-                // usage) feeds the structured state of the running subagent
-                // window (Phase 3a); Phase 3b renders it inside the box —
-                // message text keeps flowing through `ToolOutput` above.
-                // NOTE: the `tool` field is always "subagent_call" today and
-                // is intentionally ignored; typed events carry no session id,
-                // so concurrent subagents of the SAME agent CLI interleave
-                // into one window (a pre-existing harness limitation).
+                // Typed sub-agent activity (message text, thoughts, tool
+                // calls, plans, usage) feeds the chronological mini-chat
+                // timeline of the running subagent window (Phase 3a/3b) and
+                // auto-follows the scroll like any other streamed output —
+                // the box behaves as a small chat that climbs as content
+                // arrives, unless the user scrolled away. NOTE: the `tool`
+                // field is always "subagent_call" today and is intentionally
+                // ignored; typed events carry no session id, so concurrent
+                // subagents of the SAME agent CLI interleave into one window
+                // (a pre-existing harness limitation).
                 HarnessEvent::SubagentEvent { event, .. } => {
-                    self.state.right_panel.update_subagent_activity(&event);
+                    if self.state.right_panel.update_subagent_activity(&event)
+                        && !self.state.right_panel.is_scrolled_up()
+                    {
+                        self.state.right_panel.scroll_to_bottom();
+                    }
                 }
 
                 HarnessEvent::ToolDiagnostics { tool, notes } => {
