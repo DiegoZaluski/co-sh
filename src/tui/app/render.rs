@@ -684,6 +684,11 @@ impl App {
                     self.session_view
                         .tool_state
                         .advance_tool_spinners(delta_time);
+                    // Subagent tool-call spinners live in the right panel
+                    // state and share the same per-frame tick.
+                    for spinner in self.state.right_panel.subagent_tool_spinners.values_mut() {
+                        spinner.advance(delta_time);
+                    }
 
                     // The correction spinner occupies this row only while the
                     // agent-loop spinner is absent.

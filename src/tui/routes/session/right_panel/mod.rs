@@ -15,9 +15,15 @@ pub mod types;
 
 use todo::{render_todo_section, todo_section_height};
 use types::{
-    PtySession, RightPanelState, SubagentBodyCache, sanitize_subagent_text, split_subagent_output,
-    wrap_chars,
+    PtySession, RightPanelState, SubagentActivityLine, SubagentBodyCache, activity_lines,
+    sanitize_subagent_text, split_subagent_output, subagent_visible_body, wrap_chars,
 };
+
+use std::collections::HashMap;
+
+use cosh_tools::subagent::events::{PlanEntryStatus, ToolCallStatus};
+
+use crate::component::spinner_highlight::HighlightSpinner;
 
 /// Black-or-white text color with readable contrast on `bg`.
 fn contrast_fg(bg: RGBA) -> RGBA {
@@ -38,6 +44,16 @@ fn blend(base: RGBA, accent: RGBA, t: f32) -> RGBA {
     let (ar, ag, ab, _) = base.to_ints();
     let (br, bg_, bb, _) = accent.to_ints();
     RGBA::from_ints(mix(ar, br), mix(ag, bg_), mix(ab, bb), 255)
+}
+
+/// Box-tint accent for a review severity (Phase 3b.1): the theme's
+/// success/warning/error colors stand in for green/yellow/red.
+fn severity_rgba(sev: cosh_tools::subagent::severity::Severity, theme: &Theme) -> RGBA {
+    match sev {
+        cosh_tools::subagent::severity::Severity::Green => theme.success,
+        cosh_tools::subagent::severity::Severity::Yellow => theme.warning,
+        cosh_tools::subagent::severity::Severity::Red => theme.error,
+    }
 }
 
 /// Draw a highlighted label ("highlighter pen" chip): a colored background
@@ -588,14 +604,21 @@ fn render_subagent_section(
     // the internal subagent content).
     if let (Some(first), Some(last)) = (sessions.first(), sessions.last()) {
         for (pad_y, sess_idx) in [(box_y, first.0), (box_y + box_h.saturating_sub(1), last.0)] {
-            if pad_y < box_y + box_h
-                && let Some(agent) = state.pty_sessions[sess_idx].subagent_agent()
-            {
-                let tint = blend(
-                    theme.background_element,
-                    state.agent_area_color(agent),
-                    0.18,
-                );
+            if pad_y < box_y + box_h {
+                // A review window's severity color wins over the agent
+                // color (same rule as the window tints below); a padding
+                // row must never read as belonging to a different verdict.
+                let tint = if let Some(sev) = state.pty_sessions[sess_idx].severity {
+                    blend(theme.background_element, severity_rgba(sev, theme), 0.18)
+                } else if let Some(agent) = state.pty_sessions[sess_idx].subagent_agent() {
+                    blend(
+                        theme.background_element,
+                        state.agent_area_color(agent),
+                        0.18,
+                    )
+                } else {
+                    continue;
+                };
                 let mut fill = BoxRenderable::new();
                 fill.set_background_color(Some(tint.into()));
                 fill.render_self(buf, Rect::new(x, pad_y, max_w, 1));
@@ -604,18 +627,24 @@ fn render_subagent_section(
     }
     // ONE read-only pass builds each window's area tint — method calls
     // borrow all of `state`, so nothing of this shape may run inside the
-    // render loop.
-    let tints: Vec<RGBA> = sessions
+    // render loop. A review window with a consumed severity header tints
+    // green/yellow/red (Phase 3b.1) instead of its agent color. The accent
+    // (the unblended color) doubles as the running tool-call spinner's
+    // highlight color, so a red verdict window also sweeps red.
+    let (tints, accents): (Vec<RGBA>, Vec<RGBA>) = sessions
         .iter()
-        .map(|(_, s)| {
-            let agent = s.subagent_agent().unwrap_or("");
-            blend(
-                theme.background_element,
-                state.agent_area_color(agent),
-                0.18,
-            )
+        .map(|(_, s)| match s.severity {
+            Some(sev) => {
+                let accent = severity_rgba(sev, theme);
+                (blend(theme.background_element, accent, 0.18), accent)
+            }
+            None => {
+                let agent = s.subagent_agent().unwrap_or("");
+                let accent = state.agent_area_color(agent);
+                (blend(theme.background_element, accent, 0.18), accent)
+            }
         })
-        .collect();
+        .unzip();
 
     // Screen bands of each rendered window (for click-to-focus mapping).
     state.subagent_window_layouts.clear();
@@ -625,6 +654,7 @@ fn render_subagent_section(
     // and the scroll offset (mutable) at once.
     let subagent_scratch = &mut state.subagent_scratch;
     let subagent_scroll_y = &mut state.subagent_scroll_y;
+    let subagent_spinners = &mut state.subagent_tool_spinners;
     // Normalize the stored offset every render (same rationale as the bash
     // section): the `i32::MAX` scroll-to-bottom sentinel must not survive a
     // render that fits the content, or it leaks into selection math.
@@ -641,6 +671,9 @@ fn render_subagent_section(
     let theme_key = subagent_theme_key(theme);
     let content_bottom = scroll_y + i32::from(inner_h);
     let mut content_row: i32 = 0;
+    // Spinner keys that are InProgress THIS frame — the map is pruned to
+    // this set after the loop so finished calls stop animating.
+    let mut live_spinner_keys: Vec<String> = Vec::new();
 
     for (window, (sess_idx, session)) in sessions.iter().enumerate() {
         let sess_rows = i32::from(rows_all.get(*sess_idx).copied().unwrap_or(1));
@@ -653,7 +686,6 @@ fn render_subagent_section(
             .unwrap_or_default();
         let head_h = header_rows.len() as i32;
         let input_h = input_rows.len() as i32;
-        let body_start = content_row + head_h + input_h;
         let sess_end = content_row + sess_rows;
         // The 1-row separator margin exists only BELOW non-last windows —
         // the last window leans on the box's own bottom padding instead.
@@ -722,6 +754,32 @@ fn render_subagent_section(
                 );
             }
         }
+        // Live activity (Phase 3b.2): tool calls, plan, thought — the same
+        // lines the height math counted for RUNNING sessions. Finished
+        // windows have none (activity is cleared on completion), so this
+        // contributes nothing for history entries.
+        let activity = activity_lines(&session.subagent_activity, wrap_w);
+        let activity_h = activity.len() as i32;
+        let body_start = content_row + head_h + input_h + activity_h;
+        draw_activity_lines(
+            buf,
+            x + LEFT_PAD,
+            inner_y,
+            &activity,
+            content_row + head_h + input_h,
+            scroll_y,
+            content_bottom,
+            wrap_w,
+            tint,
+            accents[window],
+            theme,
+            text_style,
+            session.id.as_str(),
+            subagent_spinners,
+            &mut live_spinner_keys,
+            rebuild_regions,
+            &mut state.subagent_text_regions,
+        );
         // Markdown body: blit the visible slice of the previously rendered
         // cells (cache hit), or re-render the full body into the scratch and
         // store the cells when the content, wrap width or theme changed. The
@@ -729,9 +787,19 @@ fn render_subagent_section(
         // rendered on a miss — but that happens once per streamed chunk, not
         // every frame (re-rendering the whole body per frame was the
         // right-panel frame bottleneck).
-        let body_h = sess_rows - head_h - input_h;
+        // body_h derives from the (throttled, ~100 ms coalesced) row cache
+        // minus the LIVE activity count: a new tool row arriving between
+        // rebuilds can push body_h ≤ 0 for a frame — the guard skips the
+        // body blit until the cache catches up. Self-healing by design;
+        // do NOT clamp the body into the window here, the row math owns it.
+        let body_h = sess_rows - head_h - input_h - activity_h;
         if body_h > 0 && body_start < content_bottom && sess_end > scroll_y {
-            let clean = sanitize_subagent_text(body);
+            // The severity header is consumed (it tinted the window above)
+            // and is never shown as report text. Failed windows keep the
+            // neutral color (no severity was extracted) but still lose a
+            // leading header line here — accepted: a header on a FAILED
+            // run is a malformed report.
+            let clean = sanitize_subagent_text(subagent_visible_body(body));
             if !clean.trim().is_empty() {
                 let body_h_u = body_h as u16;
                 let hit = state
@@ -829,6 +897,13 @@ fn render_subagent_section(
         content_row = sess_end + i32::from(has_next_window);
     }
 
+    // Prune spinner entries that left the InProgress state this frame (the
+    // call finished or its window completed): finished calls must not keep
+    // animating state alive across turns.
+    let live: std::collections::HashSet<&str> =
+        live_spinner_keys.iter().map(String::as_str).collect();
+    subagent_spinners.retain(|key, _| live.contains(key.as_str()));
+
     highlight_section_selection(
         buf,
         state,
@@ -841,6 +916,206 @@ fn render_subagent_section(
             scroll_y,
         },
     );
+}
+
+/// Draw the live activity lines of one running sub-agent window (Phase
+/// 3b.2), starting at content row `start_row`, clipped to the visible band.
+///
+/// Rendering per variant (design decisions from the user):
+/// - Tool: NO icons — the lowercase tool name (`read`, `edit`, `search`,
+///   …) followed by the extracted detail (path/query/URL). InProgress calls
+///   render through the luminous-sweep [`HighlightSpinner`] (highlight =
+///   window accent, so a red-verdict window sweeps red); the other
+///   statuses draw a plain ✓/✗/· marker colored success/error/text.
+/// - Diff: one dimmed `path +N −M` line under the call.
+/// - Plan: compact checkbox glyphs (☐ pending/in-progress, ☑ completed —
+///   the outer TODO panel's row style is deliberately NOT reused: it takes
+///   too much width inside the box).
+/// - Thought: dimmed (text_muted) wrapped rows of the latest thought, the
+///   same "opaque thinking" treatment as the main agent's reasoning but
+///   always visible (no hidden state).
+///
+/// Selection text regions are appended for drawn rows when
+/// `rebuild_regions`. Spinner map entries are created/updated keyed by
+/// `{session_id}:{call_id}`; `live_keys` collects the InProgress keys so
+/// the caller can prune finished entries after the window loop.
+#[allow(clippy::too_many_arguments)]
+fn draw_activity_lines(
+    buf: &mut Buffer,
+    x: u16,
+    inner_y: u16,
+    lines: &[SubagentActivityLine],
+    start_row: i32,
+    scroll_y: i32,
+    content_bottom: i32,
+    wrap_w: u16,
+    _tint: RGBA,
+    accent: RGBA,
+    theme: &Theme,
+    text_style: Style,
+    session_id: &str,
+    spinners: &mut HashMap<String, HighlightSpinner>,
+    live_keys: &mut Vec<String>,
+    rebuild_regions: bool,
+    regions: &mut Vec<TextRegion>,
+) {
+    let marker_style_ok = Style::default().fg(rgba_color(theme.success));
+    let marker_style_err = Style::default().fg(rgba_color(theme.error));
+    let dimmed_style = Style::default().fg(rgba_color(theme.text_muted));
+
+    for (offset, line) in lines.iter().enumerate() {
+        let row = start_row + offset as i32;
+        // Spinner liveness is tracked BEFORE the clip check: an off-screen
+        // running call keeps its animation entry, so scrolling it back in
+        // does not restart the sweep from phase 0.
+        if let SubagentActivityLine::Tool {
+            id,
+            status: ToolCallStatus::InProgress,
+            ..
+        } = line
+        {
+            live_keys.push(format!("{session_id}:{id}"));
+        }
+        if row < scroll_y || row >= content_bottom {
+            continue;
+        }
+        let line_y = inner_y + (row - scroll_y) as u16;
+        match line {
+            SubagentActivityLine::Tool { id, text, status } => {
+                let key = format!("{session_id}:{id}");
+                match status {
+                    ToolCallStatus::InProgress => {
+                        // Create the spinner on first sight of this call;
+                        // afterwards only keep its text in sync (titles do
+                        // not change while running, but stay defensive).
+                        let spinner = spinners.entry(key).or_insert_with(|| {
+                            HighlightSpinner::new(text, accent, theme.text_muted)
+                        });
+                        if spinner.text() != text {
+                            spinner.set_text(text);
+                        }
+                        spinner.set_colors(accent, theme.text_muted);
+                        spinner.render(buf, x, line_y);
+                        let shown = text.chars().count().min(wrap_w as usize);
+                        if rebuild_regions {
+                            regions.push(TextRegion::one_row(
+                                row,
+                                x,
+                                x + shown as u16,
+                                text.clone(),
+                            ));
+                        }
+                    }
+                    ToolCallStatus::Completed => {
+                        draw_text(buf, "✓", x, line_y, wrap_w, marker_style_ok);
+                        draw_text(
+                            buf,
+                            text,
+                            x + 2,
+                            line_y,
+                            wrap_w.saturating_sub(2),
+                            text_style,
+                        );
+                        if rebuild_regions {
+                            regions.push(TextRegion::one_row(
+                                row,
+                                x,
+                                x + wrap_w,
+                                format!("✓ {text}"),
+                            ));
+                        }
+                    }
+                    ToolCallStatus::Failed => {
+                        draw_text(buf, "✗", x, line_y, wrap_w, marker_style_err);
+                        draw_text(
+                            buf,
+                            text,
+                            x + 2,
+                            line_y,
+                            wrap_w.saturating_sub(2),
+                            text_style,
+                        );
+                        if rebuild_regions {
+                            regions.push(TextRegion::one_row(
+                                row,
+                                x,
+                                x + wrap_w,
+                                format!("✗ {text}"),
+                            ));
+                        }
+                    }
+                    // Pending / Unknown: dimmed dot, not yet running.
+                    _ => {
+                        draw_text(buf, "·", x, line_y, wrap_w, dimmed_style);
+                        draw_text(
+                            buf,
+                            text,
+                            x + 2,
+                            line_y,
+                            wrap_w.saturating_sub(2),
+                            dimmed_style,
+                        );
+                        if rebuild_regions {
+                            regions.push(TextRegion::one_row(
+                                row,
+                                x,
+                                x + wrap_w,
+                                format!("· {text}"),
+                            ));
+                        }
+                    }
+                }
+            }
+            SubagentActivityLine::Diff(summary) => {
+                // Indent under its tool line; counts stay dimmed so the
+                // path dominates.
+                draw_text(
+                    buf,
+                    summary,
+                    x + 2,
+                    line_y,
+                    wrap_w.saturating_sub(2),
+                    dimmed_style,
+                );
+                if rebuild_regions {
+                    regions.push(TextRegion::one_row(row, x, x + wrap_w, summary.clone()));
+                }
+            }
+            SubagentActivityLine::Plan { status, text } => {
+                let (glyph, style) = match status {
+                    PlanEntryStatus::Completed => ("☑", marker_style_ok),
+                    PlanEntryStatus::InProgress => ("☐", text_style),
+                    PlanEntryStatus::Pending => ("☐", dimmed_style),
+                    _ => ("☐", dimmed_style),
+                };
+                draw_text(buf, glyph, x, line_y, wrap_w, style);
+                draw_text(
+                    buf,
+                    text,
+                    x + 2,
+                    line_y,
+                    wrap_w.saturating_sub(2),
+                    text_style,
+                );
+                if rebuild_regions {
+                    regions.push(TextRegion::one_row(
+                        row,
+                        x,
+                        x + wrap_w,
+                        format!("{glyph} {text}"),
+                    ));
+                }
+            }
+            SubagentActivityLine::Thought(text) => {
+                // Always visible, dimmed — the sub-agent's "opaque thinking"
+                // treatment (no hidden toggle here).
+                draw_text(buf, text, x, line_y, wrap_w, dimmed_style);
+                if rebuild_regions {
+                    regions.push(TextRegion::one_row(row, x, x + wrap_w, text.clone()));
+                }
+            }
+        }
+    }
 }
 
 /// Draw a wrapped logical line as visual rows starting at content row
