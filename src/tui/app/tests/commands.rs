@@ -77,6 +77,163 @@ async fn slash_toolcall_command_opens_tool_call_dialog() {
     assert!(!app.slash_menu.visible, "slash menu closes after Enter");
 }
 
+/// The TODO completion strike-through animation: a todo that flips to
+/// `completed` arms a fresh frame counter (hold 2 frames, sweep 12), repeated
+/// `set_todos` calls with the same list keep it ticking, the already-struck
+/// items never replay it, and `/new`'s panel reset drops everything.
+#[tokio::test]
+async fn todo_completion_strike_animation_frames() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    use crate::routes::session::right_panel::types::{
+        TodoItem, TODO_STRIKE_TOTAL_FRAMES,
+    };
+
+    let mut app = App::new("/tmp".to_string());
+    let todo = |status: &str, content: &str| TodoItem {
+        status: status.to_string(),
+        content: content.to_string(),
+    };
+
+    // Rehydration: the first update already carries the item as completed —
+    // it must strike immediately (permanent marker), never animate.
+    app.state
+        .right_panel
+        .set_todos(vec![todo("completed", "done before we saw it")]);
+    let panel = &mut app.state.right_panel;
+    assert!(
+        !panel.todo_strike_animating(),
+        "rehydrated completed todo must not replay the animation"
+    );
+    assert_eq!(panel.todo_strike_frame(0), None, "permanent strike");
+
+    // The primary flow: an item the panel saw PENDING flips to completed —
+    // it must arm a fresh counter (hold phase first), not snap to permanent.
+    app.state
+        .right_panel
+        .set_todos(vec![todo("in_progress", "flip me")]);
+    let panel = &mut app.state.right_panel;
+    assert!(
+        panel.todo_strike_frame(0).is_none(),
+        "pending item has no counter"
+    );
+    app.state
+        .right_panel
+        .set_todos(vec![todo("completed", "flip me")]);
+    let panel = &mut app.state.right_panel;
+    assert_eq!(
+        panel.todo_strike_frame(0),
+        Some(0),
+        "pending→completed arms a fresh hold-phase counter"
+    );
+    assert!(panel.todo_strike_animating());
+
+    // Duplicate contents are independent: two identical items completing in
+    // the same update must each get their own counter, not share one.
+    app.state.right_panel.set_todos(vec![
+        todo("in_progress", "Same"),
+        todo("in_progress", "Same"),
+    ]);
+    let panel = &mut app.state.right_panel;
+    assert!(panel.todo_strike_frame(0).is_none());
+    assert!(panel.todo_strike_frame(1).is_none());
+    app.state
+        .right_panel
+        .set_todos(vec![todo("completed", "Same"), todo("completed", "Same")]);
+    let panel = &mut app.state.right_panel;
+    assert_eq!(
+        panel.todo_strike_frame(0),
+        Some(0),
+        "first duplicate animates"
+    );
+    assert_eq!(
+        panel.todo_strike_frame(1),
+        Some(0),
+        "second duplicate animates independently"
+    );
+
+    // A completed item's counter must not leak onto a different item that
+    // slides into its slot after a removal.
+    app.state
+        .right_panel
+        .set_todos(vec![todo("in_progress", "a"), todo("completed", "b")]);
+    let panel = &mut app.state.right_panel;
+    assert_eq!(panel.todo_strike_frame(1), Some(0));
+    app.state
+        .right_panel
+        .set_todos(vec![todo("completed", "b"), todo("completed", "a")]);
+    let panel = &mut app.state.right_panel;
+    // "b" carried its fresh counter through the shift; "a" completed in this
+    // update also arms fresh — no stale/aliased counters either way.
+    assert_eq!(panel.todo_strike_frame(0), Some(0));
+    assert_eq!(panel.todo_strike_frame(1), Some(0));
+
+    // Live completion: a pending todo flips to completed → animation arms.
+    // "old" is a NEW item arriving already completed in this same update —
+    // from the tool's point of view it was just completed too, so it animates
+    // as well (only the panel's very first snapshot strikes instantly).
+    app.state
+        .right_panel
+        .set_todos(vec![todo("in_progress", "sweep me"), todo("completed", "old")]);
+    let panel = &mut app.state.right_panel;
+    let first = panel.todo_strike_frame(1).expect("strike just armed");
+    assert_eq!(
+        first, 0,
+        "fresh counter starts at 0: hold phase, sweep not started yet"
+    );
+    assert!(
+        panel.todo_strike_frame(1).is_some(),
+        "newly-completed item in a later update animates too"
+    );
+    assert!(panel.todo_strike_animating());
+
+    // The every-update repetition with the same list must keep the same
+    // running counter alive, not re-arm (which would restart the sweep).
+    app.state
+        .right_panel
+        .set_todos(vec![todo("in_progress", "sweep me"), todo("completed", "old")]);
+    let panel = &mut app.state.right_panel;
+    assert_eq!(
+        panel.todo_strike_frame(1),
+        Some(first),
+        "unchanged list keeps its counter"
+    );
+
+    // Advancing past the total finishes the animation: the counter is
+    // dropped and the strike becomes permanent.
+    panel.advance_todo_strikes(TODO_STRIKE_TOTAL_FRAMES + 1);
+    assert!(
+        !panel.todo_strike_animating(),
+        "finished animation is dropped"
+    );
+    assert_eq!(panel.todo_strike_frame(0), None, "permanent strike");
+
+    // An item removed from every update forgets its seen-content key, so a
+    // much later re-completion of the same text animates again.
+    app.state
+        .right_panel
+        .set_todos(vec![todo("in_progress", "sweep me")]);
+    app.state
+        .right_panel
+        .set_todos(vec![todo("completed", "old")]);
+    let panel = &mut app.state.right_panel;
+    assert!(
+        panel.todo_strike_frame(0).is_some(),
+        "re-completion of a forgotten key animates again"
+    );
+
+    // `/new` resets the panel wholesale: no strike state may survive.
+    app.run_slash_command(&crate::ui::slash_menu::SlashCommand {
+        name: "new".into(),
+        desc: String::new(),
+    });
+    let panel = &app.state.right_panel;
+    assert!(
+        !panel.todo_strike_animating(),
+        "/new drops the strike animation state"
+    );
+}
+
 /// Generic slash commands still fill the prompt instead of opening a
 /// dialog (the fallback branch of `run_slash_command`).
 #[tokio::test]

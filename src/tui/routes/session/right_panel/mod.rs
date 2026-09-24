@@ -348,6 +348,12 @@ pub fn render_right_panel(
 
         match kind {
             types::SectionKind::Todo => {
+                // Snapshot the strike frames before the scroll borrow: the
+                // counters live on `state`, which is already borrowed mutably
+                // for `todo_scroll_y` below.
+                let strike_frames: Vec<Option<u64>> = (0..state.todos.len())
+                    .map(|i| state.todo_strike_frame(i))
+                    .collect();
                 let scroll = if natural_h > allocated as i32 {
                     state.todo_scroll_y = state.todo_scroll_y.min(natural_h - allocated as i32);
                     Some(&mut state.todo_scroll_y)
@@ -361,6 +367,7 @@ pub fn render_right_panel(
                     inner_w,
                     allocated,
                     &state.todos,
+                    &strike_frames,
                     theme,
                     scroll,
                 );
