@@ -17,8 +17,8 @@ pub async fn call(
 
 The `chunk_tx` channel receives every agent message chunk as it is produced
 (for live TUI display); the returned tuple is the accumulated output plus
-the ACP stop reason (e.g. `"EndTurn"`, or the client-side terminal markers
-`"timeout"` / `"error"`). The ACP session runs on a dedicated current-thread
+the ACP stop reason (e.g. `"EndTurn"`, or the client-side terminal marker
+`"error"`). The ACP session runs on a dedicated current-thread
 runtime inside `tokio::task::spawn_blocking`, so the ambient async runtime is
 not blocked and the caller's future stays `Send`.
 
@@ -142,13 +142,13 @@ spawned.
    - `fs/read_text_file` / `fs/write_text_file` requests operate on the real
      workspace files (1-based lines, absolute paths per the protocol).
 6. **Complete.** The prompt response's stop reason is returned with the
-   accumulated output.
-7. **On timeout** (`COSH_SUBAGENT_TIMEOUT_SECS`, 2 minutes by default): the
-   session future is dropped, which tears down the harness process group. If
-   partial output exists it is returned with stop reason `"timeout"` and a
-   warning is logged — the partial result is real data, not an error. With
-   no output the call fails with a message naming the timeout and the
-   agent's install/auth hint.
+   accumulated output. There is NO time limit: a sub-agent may work for
+   hours, and the turn ends when the agent ends it — or earlier only when
+   the user stops it, which sends `session/cancel` and yields the
+   spec-mandated `"cancelled"` stop reason with the partial output
+   preserved. A harness that ignores `session/cancel` and never ends the
+   turn is abandoned with the call (its task and process stay alive until
+   the app exits) — the stop signal is the only early-end mechanism.
 
 ---
 
@@ -159,6 +159,4 @@ spawned.
 | Unknown agent name | `Err("Unsupported agent …")` — before any spawn |
 | ACP handshake/prompt failure, no output | `Err` naming the failing step |
 | ACP turn failed, partial output | `Ok((partial_output, "error"))` — with a warning log |
-| Timeout, no output | `Err` naming the timeout + install/auth hint |
-| Timeout, partial output | `Ok((partial_output, "timeout"))` — with a warning log |
 | Turn completed | `Ok((output, stop_reason))` |

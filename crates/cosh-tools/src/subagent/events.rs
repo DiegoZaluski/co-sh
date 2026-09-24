@@ -258,17 +258,6 @@ pub enum SubagentEvent {
 }
 
 impl SubagentEvent {
-    /// The message text, when this event is a [`SubagentEvent::Message`].
-    ///
-    /// The harness bridge keeps forwarding message text through the legacy
-    /// `ToolOutput` path so the existing rendering does not regress.
-    pub fn as_message_text(&self) -> Option<&str> {
-        match self {
-            Self::Message { text } => Some(text),
-            _ => None,
-        }
-    }
-
     /// Map one ACP `session/update` into a display event.
     ///
     /// Returns `None` for updates with no TUI representation (user chunks,

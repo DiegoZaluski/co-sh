@@ -52,9 +52,11 @@ rejected by [`validate_agent`](acp.md#validate_agent) with a
 pub struct SubAgentCallOutput {
     /// Accumulated output from the sub-agent.
     pub output: String,
-    /// Why the prompt turn ended (the ACP stop reason, e.g. `EndTurn`), or
-    /// one of the client-side terminal markers `timeout` / `error` when the
-    /// harness was torn down or failed mid-turn.
+    /// Why the prompt turn ended: a snake_case ACP stop reason (e.g.
+    /// `end_turn`, `cancelled` — the spec-mandated answer to a
+    /// `session/cancel`), or the client-side terminal marker `error` when
+    /// the harness failed mid-turn. There is no timeout: the turn runs
+    /// until the agent ends it or the user stops it.
     pub stop_reason: String,
 }
 ```
@@ -64,12 +66,11 @@ tell the caller everything needed to judge the outcome:
 
 - `output` — the full accumulated agent message chunks of the external ACP
   harness, or the internal agent's final report.
-- `stop_reason` — the ACP stop reason of the completed turn (e.g. `EndTurn`,
-  `Cancelled`, `Refusal`); or `"timeout"` when the harness was torn down
-  after exceeding `COSH_SUBAGENT_TIMEOUT_SECS` (partial output may still be
-  present, and the harness logs a warning in that case); or `"error"` when
-  the ACP turn failed mid-flight with partial output already produced.
+- `stop_reason` — the snake_case ACP stop reason of the completed turn (e.g.
+  `end_turn`, `cancelled` when the user stopped it via `session/cancel`,
+  `refusal`); or `"error"` when the ACP turn failed mid-flight with partial
+  output already produced.
 
-For the external path, a **hard failure** (validation error, or a timeout /
-turn failure with no output at all) is returned as an `Err` string instead
+For the external path, a **hard failure** (validation error, or a turn
+failure with no output at all) is returned as an `Err` string instead
 of an output struct — see the [acp page](acp.md#errors) for the exact cases.

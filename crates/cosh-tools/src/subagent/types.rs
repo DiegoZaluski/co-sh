@@ -70,8 +70,8 @@ pub struct SubAgentCallOutput {
     pub output: String,
     /// Why the prompt turn ended: a snake_case ACP stop reason (e.g.
     /// `end_turn`, `cancelled` — the spec-mandated answer to a
-    /// `session/cancel`), or one of the client-side terminal markers
-    /// `timeout` / `error` when the harness was torn down or failed
-    /// mid-turn.
+    /// `session/cancel`), or the client-side terminal marker `error` when
+    /// the harness failed mid-turn. There is no timeout: the turn runs
+    /// until the agent ends it or the user stops it.
     pub stop_reason: String,
 }

@@ -85,7 +85,7 @@ pub struct SubAgent {
     /// Last ACP session id per agent name (Phase 4): the session each
     /// harness returned from `session/new`, resumed by the next call with
     /// `continue_session` (the default) so the sub-agent keeps its context
-    /// across calls. Failed/timeout turns store nothing — a session whose
+    /// across calls. Failed turns store nothing — a session whose
     /// turn errored is not trusted.
     ///
     /// Concurrency invariant: the read-then-store-after-await pattern in

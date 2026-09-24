@@ -330,31 +330,6 @@ pub fn detect_installed() -> &'static Vec<&'static str> {
     })
 }
 
-/// Default max time to wait for the prompt turn to complete.
-pub(crate) const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(2 * 60);
-
-/// Resolve the effective call timeout. Honors the `COSH_SUBAGENT_TIMEOUT_SECS`
-/// environment variable (in seconds); falls back to [`DEFAULT_CALL_TIMEOUT`].
-///
-/// Values that are missing, non-numeric, or less than one second are ignored
-/// (they fall back to [`DEFAULT_CALL_TIMEOUT`]) so a `0`/garbage value cannot
-/// make calls time out instantly.
-fn call_timeout() -> Duration {
-    timeout_from_secs(std::env::var("COSH_SUBAGENT_TIMEOUT_SECS").ok().as_deref())
-}
-
-/// Pure resolver for the call timeout, parameterized over the raw env value
-/// so the parsing contract is testable without mutating process-global env.
-pub(crate) fn timeout_from_secs(raw: Option<&str>) -> Duration {
-    match raw {
-        Some(s) => match s.trim().parse::<u64>() {
-            Ok(secs) if secs >= 1 => Duration::from_secs(secs),
-            _ => DEFAULT_CALL_TIMEOUT,
-        },
-        None => DEFAULT_CALL_TIMEOUT,
-    }
-}
-
 /// Validate-then-serve path sandbox (non-Unix fallback, and the unit-test
 /// subject for sandbox semantics).
 ///
@@ -563,9 +538,6 @@ pub fn validate_agent(agent: &str) -> Result<(), String> {
     }
 }
 
-/// Sentinel error distinguishing a timeout teardown from other failures.
-const TIMEOUT_ERROR: &str = "cosh:subagent:timeout";
-
 /// Call a sub-agent harness over ACP and return its final output.
 ///
 /// 1. Looks up `agent` in [`ACP_AGENTS`] to get the ACP launch command.
@@ -580,12 +552,8 @@ const TIMEOUT_ERROR: &str = "cosh:subagent:timeout";
 ///    while accumulating the message text into the full output.
 /// 4. Returns `(accumulated_output, stop_reason, Option<session_id>)` when
 ///    the turn ends — the session id only when it ended protocol-clean
-///    (`Some` is withheld on error and timeout arms) — or an error when
+///    (`Some` is withheld on error arms) — or an error when
 ///    the harness fails before producing any output.
-///
-/// A timeout (`COSH_SUBAGENT_TIMEOUT_SECS`, default 2 minutes) tears down the
-/// harness; partial output is returned with stop reason `"timeout"` when any
-/// was produced.
 ///
 /// The ACP session runs on a dedicated current-thread runtime inside a
 /// blocking task, isolating the SDK's connection machinery from the ambient
@@ -594,8 +562,8 @@ const TIMEOUT_ERROR: &str = "cosh:subagent:timeout";
 /// # Errors
 ///
 /// Returns an error if the agent is unsupported, the harness cannot be
-/// launched, the ACP turn fails before any output, or the timeout fires with
-/// no output.
+/// launched, or the ACP turn fails before any output. There is NO time
+/// limit: the turn runs until the agent ends it or the user stops it.
 ///
 /// # Panics
 ///
@@ -625,9 +593,12 @@ pub async fn call(
         });
 
     let accumulated: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
-    let timeout = call_timeout();
     let input = input.to_string();
 
+    // The turn runs to completion with NO time limit: a sub-agent may work
+    // for hours and the only legitimate way to end it is the user's stop
+    // signal (raced against the prompt await inside `run_session`), which
+    // makes the agent end the turn itself with `StopReason::Cancelled`.
     let turn = {
         let accumulated = accumulated.clone();
         tokio::task::spawn_blocking(move || {
@@ -635,22 +606,16 @@ pub async fn call(
                 .enable_all()
                 .build()
                 .map_err(|e| format!("failed to build ACP runtime: {e}"))?
-                .block_on(tokio::time::timeout(
-                    timeout,
-                    run_session(
-                        launcher,
-                        input,
-                        resume,
-                        cwd,
-                        entry.model,
-                        accumulated,
-                        stop_signal,
-                        chunk_tx,
-                    ),
+                .block_on(run_session(
+                    launcher,
+                    input,
+                    resume,
+                    cwd,
+                    entry.model,
+                    accumulated,
+                    stop_signal,
+                    chunk_tx,
                 ))
-                // Map the `Elapsed` error to the sentinel so the whole
-                // closure shares one error type (String).
-                .map_err(|_| TIMEOUT_ERROR.to_string())
         })
         .await
         .map_err(|e| format!("sub-agent task failed: {e}"))?
@@ -660,39 +625,19 @@ pub async fn call(
 
     match turn {
         // Turn completed: the session already wrote every chunk into the buffer.
-        Ok(Ok((stop_reason, session_id))) => Ok((final_output, stop_reason, Some(session_id))),
+        Ok((stop_reason, session_id)) => Ok((final_output, stop_reason, Some(session_id))),
         // Turn errored: partial output (if any) is still worth returning.
         // The turn's own session id is NOT propagated — an errored turn's
         // session state is unreliable, so its id is not (re)stored here.
         // An OLDER stored id for this agent stays in place and is resumed
         // again by the next default call; a stale one self-heals via the
         // `session/new` fallback in `open_or_resume_session`.
-        Ok(Err(session_error)) => {
+        Err(session_error) => {
             if final_output.is_empty() {
                 Err(session_error)
             } else {
                 log::warn!("sub-agent '{agent}' ACP turn failed: {session_error}");
                 Ok((final_output, "error".to_string(), None))
-            }
-        }
-        // Timeout: the dropped session future tears down the harness process.
-        Err(_elapsed) => {
-            if final_output.is_empty() {
-                Err(format!(
-                    "sub-agent '{agent}' did not respond within {} seconds. \
-                     The ACP harness started but produced no output; verify it \
-                     is authenticated and speaks ACP. Install/setup: {}",
-                    timeout.as_secs(),
-                    entry.install_hint,
-                ))
-            } else {
-                log::warn!(
-                    "sub-agent '{agent}' timed out after {}s, returning partial output",
-                    timeout.as_secs(),
-                );
-                // The session id is NOT propagated — a torn-down harness's
-                // session state is unreliable, so the next call starts fresh.
-                Ok((final_output, "timeout".to_string(), None))
             }
         }
     }
@@ -1104,8 +1049,8 @@ where
             // the prompt await. On trigger, `session/cancel` is sent as a
             // fire-and-forget notification and the prompt is STILL awaited —
             // the ACP spec requires the agent to end the turn itself,
-            // answering with `StopReason::Cancelled`. The outer timeout in
-            // `call` is the backstop for a harness that never answers.
+            // answering with `StopReason::Cancelled`. This is the ONLY way
+            // the turn ends early: there is no time limit.
             tokio::pin!(prompt_request);
             let stop_wait = async {
                 while !stop_signal.load(Ordering::Relaxed) {

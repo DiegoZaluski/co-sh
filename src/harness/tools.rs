@@ -158,8 +158,9 @@ pub struct CoshTools {
     event_tx: Option<tokio::sync::mpsc::UnboundedSender<HarnessEvent>>,
     /// Shared stop flag for interruptible tools (Phase 5): the agent loop's
     /// `stop_signal` reaches a running `subagent_call` through this, turning
-    /// an ESC into a spec-conformant ACP `session/cancel` instead of waiting
-    /// out the turn's timeout. `None` → turns run to completion.
+    /// an ESC into a spec-conformant ACP `session/cancel` — the only way a
+    /// turn ends early (there is no time limit). `None` → turns run to
+    /// completion.
     stop_signal: Option<Arc<AtomicBool>>,
     /// Configured base URLs for local providers (used by the cloud embedder).
     #[cfg(feature = "embed")]
@@ -1206,10 +1207,7 @@ impl Tools for CoshTools {
                     "fs_edit_lines" => self.fs.edit_lines(args).await?,
                     _ => self.fs.edit_ast(args).await?,
                 };
-                self.emit_lsp_notes(
-                    name,
-                    results.iter().filter_map(|r| r.lsp_notes.as_ref()),
-                );
+                self.emit_lsp_notes(name, results.iter().filter_map(|r| r.lsp_notes.as_ref()));
                 serde_json::to_string(&results).map_err(|e| e.to_string())
             }
 
@@ -1565,10 +1563,12 @@ impl Tools for CoshTools {
                 });
 
                 // Stream typed sub-agent events while waiting for the ACP
-                // turn to complete. Message-text chunks keep the legacy
-                // `ToolOutput` path (the existing chat rendering); every
-                // other event goes to the typed variant for the TUI's
-                // sub-agent box (Phase 3).
+                // turn to complete. ALL events go to the typed variant for
+                // the TUI's sub-agent box — message text is part of the
+                // box's chronological mini-chat timeline (Phase 3b.4), so
+                // there is no per-chunk `ToolOutput` mirror (it would
+                // render the text twice). One final `ToolOutput { finished:
+                // true }` below still seeds the persisted report.
                 let call_result = loop {
                     tokio::select! {
                         result = &mut call_handle => {
@@ -1577,19 +1577,12 @@ impl Tools for CoshTools {
                         event = chunk_rx.recv() => {
                             if let Some(event) = event
                                 && let Some(ref tx) = event_tx_during {
-                                    // Phase 3 note: once the TUI renders
-                                    // `SubagentEvent::Message` inside the
-                                    // sub-agent box, this mirrored
-                                    // `ToolOutput` send must stop (or the
-                                    // box must ignore `Message` events) —
-                                    // otherwise message text renders twice.
-                                    if let Some(text) = event.as_message_text() {
-                                        let _ = tx.send(HarnessEvent::ToolOutput {
-                                            tool: "subagent_call".to_string(),
-                                            output: text.to_string(),
-                                            finished: false,
-                                        });
-                                    }
+                                    // Message text renders INSIDE the sub-agent
+                                    // box (the chronological mini-chat timeline,
+                                    // Phase 3b.4) — the legacy `ToolOutput`
+                                    // mirror that used to stream it into the
+                                    // markdown body is gone, or the text would
+                                    // appear twice.
                                     let _ = tx.send(HarnessEvent::SubagentEvent {
                                         tool: "subagent_call".to_string(),
                                         event,
@@ -1602,9 +1595,8 @@ impl Tools for CoshTools {
                 let (accumulated, stop_reason, session_id) =
                     call_result.map_err(|e| e.to_string())??;
                 // A successful turn's session is the one the next
-                // `continue_session` call resumes (Phase 4). A failed or
-                // timed-out turn returns `None` here, so nothing stale is
-                // stored.
+                // `continue_session` call resumes (Phase 4). A failed turn
+                // returns `None` here, so nothing stale is stored.
                 if let Some(session_id) = session_id {
                     self.subagent.store_session(&stored_agent, session_id);
                 }

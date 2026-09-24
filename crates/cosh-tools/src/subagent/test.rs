@@ -1,14 +1,14 @@
 //! Tests for the `subagent` module: the [`SubAgent`] wrapper (schema,
 //! input reuse, note interpolation) and the ACP engine (agent registry,
-//! name validation, launcher building, timeout parsing, and the full
+//! name validation, launcher building, and the full
 //! in-memory ACP client turn driven through `Channel::duplex()`).
 
 // Items from the sibling engine module: some are `pub(crate)` precisely
 // because they are exercised here.
 use super::SubAgent;
 use super::acp::{
-    ACP_AGENTS, Agent, DEFAULT_CALL_TIMEOUT, acp_error, agent_launcher, ensure_path_within,
-    install_hint, run_session, stop_reason_str, timeout_from_secs, validate_agent,
+    ACP_AGENTS, Agent, acp_error, agent_launcher, ensure_path_within, install_hint, run_session,
+    stop_reason_str, validate_agent,
 };
 use super::events::SubagentEvent;
 
@@ -18,7 +18,6 @@ use agent_client_protocol::schema::v1::{
 };
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 #[test]
 fn fresh_instance_without_input_errors() {
@@ -276,7 +275,10 @@ async fn run_session_drives_a_full_acp_turn_end_to_end() {
     let (stop_reason, _session_id) = turn.unwrap();
     assert_eq!(stop_reason, "end_turn");
     assert_eq!(accumulated.lock().unwrap().as_str(), "hello from acp");
-    assert_eq!(streamed.unwrap().as_message_text(), Some("hello from acp"));
+    assert!(matches!(
+        streamed.unwrap(),
+        SubagentEvent::Message { text } if text == "hello from acp"
+    ));
 }
 
 /// The fixture agent drives the client's inbound-request handlers over
@@ -457,10 +459,10 @@ async fn run_session_serves_fs_requests_and_auto_approves_permissions() {
         accumulated.lock().unwrap().as_str(),
         "read: l2\nperm: allow-yes\nperm-empty: Cancelled\nwrite: written-by-client"
     );
-    assert_eq!(
-        streamed.unwrap().as_message_text(),
-        Some(accumulated.lock().unwrap().as_str())
-    );
+    assert!(matches!(
+        streamed.unwrap(),
+        SubagentEvent::Message { text } if text == accumulated.lock().unwrap().as_str()
+    ));
 }
 
 /// The fixture harness advertises a `model` config option whose default
@@ -584,7 +586,10 @@ async fn run_session_selects_the_preferred_session_model() {
     let (stop_reason, _session_id) = turn.unwrap();
     assert_eq!(stop_reason, "end_turn");
     assert_eq!(accumulated.lock().unwrap().as_str(), "model-ok");
-    assert_eq!(streamed.unwrap().as_message_text(), Some("model-ok"));
+    assert!(matches!(
+        streamed.unwrap(),
+        SubagentEvent::Message { text } if text == "model-ok"
+    ));
 }
 
 /// The typed event stream (Phase 2): the fixture harness streams a thought,
@@ -1037,19 +1042,6 @@ fn npx_launcher_routes_through_cmd_detour_on_windows() {
 fn install_hint_resolves_only_registered_agents() {
     assert!(!install_hint("gemini").is_empty());
     assert_eq!(install_hint("nope"), "");
-}
-
-#[test]
-fn timeout_parsing_falls_back_on_garbage_zero_and_missing() {
-    // Pure resolver: no process-global env mutation (set_var/remove_var
-    // in a parallel test suite is a data race on getenv/setenv).
-    assert_eq!(timeout_from_secs(Some("5")), Duration::from_secs(5));
-    assert_eq!(timeout_from_secs(Some(" 30 ")), Duration::from_secs(30));
-    assert_eq!(timeout_from_secs(Some("0")), DEFAULT_CALL_TIMEOUT);
-    assert_eq!(timeout_from_secs(Some("garbage")), DEFAULT_CALL_TIMEOUT);
-    assert_eq!(timeout_from_secs(Some("-3")), DEFAULT_CALL_TIMEOUT);
-    assert_eq!(timeout_from_secs(Some("")), DEFAULT_CALL_TIMEOUT);
-    assert_eq!(timeout_from_secs(None), DEFAULT_CALL_TIMEOUT);
 }
 
 // -------------------------------------------------------------------------
@@ -1940,10 +1932,10 @@ async fn resumed_session_selects_the_preferred_session_model() {
         "the turn must resume AND switch the model before prompting"
     );
     assert_eq!(accumulated.lock().unwrap().as_str(), "model-resumed-ok");
-    assert_eq!(
-        streamed.unwrap().as_message_text(),
-        Some("model-resumed-ok")
-    );
+    assert!(matches!(
+        streamed.unwrap(),
+        SubagentEvent::Message { text } if text == "model-resumed-ok"
+    ));
 }
 
 /// Phase 5.4: a user stop during a running sub-agent turn sends ACP
