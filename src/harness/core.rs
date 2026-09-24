@@ -15,6 +15,7 @@ use cosh_sdk::extract_action::{
 };
 use cosh_tools::TOOL_FORMAT;
 use cosh_tools::lsp::Lsp;
+use cosh_tools::subagent::types::SubAgentCallInput;
 #[cfg(not(test))]
 use std::collections::HashMap;
 use std::collections::{HashSet, VecDeque};
@@ -3591,6 +3592,9 @@ impl Harness {
         // Pass the event tx to CoshTools for streaming tool output (e.g. bash)
         if let Some(ref mut cosh) = self.cosh_tools {
             cosh.set_event_tx(tx.clone());
+            // Phase 5: share the stop flag so a running `subagent_call`
+            // honours ESC via an ACP `session/cancel` notification.
+            cosh.set_stop_signal(stop_signal.clone());
         }
 
         log::debug!(
@@ -4943,7 +4947,10 @@ impl Harness {
                 // item on both success and error, so the caller never
                 // re-dispatches a failed internal call.
                 self.tool_issuer.pop_front();
-                let input = args_map
+                let input: SubAgentCallInput =
+                    serde_json::from_value(serde_json::Value::Object(args_map.clone()))
+                        .map_err(|e| e.to_string())?;
+                let raw_input = args_map
                     .get("input")
                     .and_then(|v| v.as_str())
                     .map(String::from);
@@ -4951,7 +4958,14 @@ impl Harness {
                     .cosh_tools
                     .as_ref()
                     .ok_or_else(|| "internal sub-agent unavailable".to_string())?
-                    .resolve_subagent_input(input)?;
+                    .resolve_subagent_input(raw_input)?;
+                // Review tasks carry the severity contract (same as the
+                // external path): appended AFTER the stored-input resolution
+                // so a retry never double-appends it.
+                let call_input = cosh_tools::subagent::severity::with_severity_contract(
+                    &call_input,
+                    input.code_review,
+                );
                 return self.run_internal_subagent(call_input).await;
             }
         }

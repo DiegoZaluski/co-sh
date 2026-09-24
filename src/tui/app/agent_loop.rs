@@ -693,6 +693,7 @@ impl App {
 
             let mut tools = cosh::harness::CoshTools::new(&cwd);
             tools.set_event_tx(event_tx.clone());
+            tools.set_stop_signal(stop_signal.clone());
 
             // ESC/Interrupt sets the stop signal; racing it against the
             // dispatch makes the command cancellable (the losing branch is

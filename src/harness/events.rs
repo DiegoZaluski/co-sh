@@ -89,6 +89,18 @@ pub enum HarnessEvent {
         /// Whether this is the final chunk for this tool call.
         finished: bool,
     },
+    /// A typed progress event from a running ACP sub-agent
+    /// ([`cosh_tools::subagent::events::SubagentEvent`]). Message-text
+    /// events are ALSO mirrored through [`HarnessEvent::ToolOutput`] so the
+    /// existing chat rendering does not regress; this variant carries the
+    /// rest (thoughts, tool calls, plans, usage) for the TUI's sub-agent
+    /// box (Phase 3).
+    SubagentEvent {
+        /// The tool call the event belongs to (always `subagent_call`).
+        tool: String,
+        /// The typed event.
+        event: cosh_tools::subagent::events::SubagentEvent,
+    },
     /// Passive LSP findings collected by an fs operation after it touched a
     /// file. The model sees the same findings inline in the tool result; this
     /// event carries the user-facing rendering signal: the TUI shows errors

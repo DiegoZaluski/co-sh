@@ -3,6 +3,7 @@
 //! This intentionally lives outside the agent loop: correcting a draft must
 //! neither create a transcript message nor alter the running agent's context.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::App;
@@ -109,7 +110,7 @@ async fn run_prompt_corrector_fallbacks(
     session_route: Option<&(String, String)>,
     cwd: &str,
     local_base_urls: &std::collections::HashMap<String, String>,
-    cancelled: &AtomicBool,
+    cancelled: &Arc<AtomicBool>,
 ) -> Result<String, String> {
     if fallbacks.is_empty() {
         let Some((provider, model)) = session_route else {
@@ -149,7 +150,13 @@ async fn run_prompt_corrector_fallbacks(
             }
             PromptCorrectorFallback::Acp { agent } => {
                 let label = format!("ACP:{agent}");
-                let result = correct_with_acp(agent, request, std::path::PathBuf::from(cwd)).await;
+                let result = correct_with_acp(
+                    agent,
+                    request,
+                    std::path::PathBuf::from(cwd),
+                    cancelled.clone(),
+                )
+                .await;
                 (label, result)
             }
         };
@@ -187,20 +194,29 @@ async fn correct_with_acp(
     agent: &str,
     request: &str,
     cwd: std::path::PathBuf,
+    cancelled: Arc<AtomicBool>,
 ) -> Result<String, String> {
     let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel();
-    let call = cosh_tools::subagent::acp::call(agent, request, cwd, chunk_tx);
+    // Prompt correction is a standalone one-shot call (an unrelated task
+    // that needs clean context) — never resume a sub-agent session here
+    // (Phase 4's `continue_session` default applies to subagent_call).
+    // The correction cancel flag is passed through as the ACP stop signal
+    // (Phase 5): Esc interrupts the remote turn via `session/cancel`
+    // instead of abandoning the blocking runtime to the turn timeout.
+    let call = cosh_tools::subagent::acp::call(agent, request, None, cwd, cancelled, chunk_tx);
     tokio::pin!(call);
     let mut chunks_open = true;
 
     loop {
         if chunks_open {
             tokio::select! {
-                result = &mut call => return result.map(|(output, _stop_reason)| output),
+                result = &mut call => {
+                    return result.map(|(output, _stop_reason, _session)| output)
+                }
                 chunk = chunk_rx.recv() => chunks_open = chunk.is_some(),
             }
         } else {
-            return call.await.map(|(output, _stop_reason)| output);
+            return call.await.map(|(output, _stop_reason, _session)| output);
         }
     }
 }
@@ -302,7 +318,7 @@ mod tests {
             provider: "openrouter".into(),
             model: "test/model".into(),
         }];
-        let cancelled = AtomicBool::new(true);
+        let cancelled = Arc::new(AtomicBool::new(true));
         let err = run_prompt_corrector_fallbacks(
             "correct this",
             &fallbacks,
@@ -325,7 +341,7 @@ mod tests {
             provider: "openrouter".into(),
             model: "test/model".into(),
         }];
-        let cancelled = AtomicBool::new(true);
+        let cancelled = Arc::new(AtomicBool::new(true));
         let err = run_prompt_corrector_fallbacks(
             "correct this",
             &fallbacks,

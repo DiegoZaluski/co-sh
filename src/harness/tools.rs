@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::fmt::Write;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -155,6 +156,11 @@ pub struct CoshTools {
     pending_images: Mutex<Option<Vec<cosh_sdk::connector::ImageBlock>>>,
     /// Optional event sender for streaming tool output.
     event_tx: Option<tokio::sync::mpsc::UnboundedSender<HarnessEvent>>,
+    /// Shared stop flag for interruptible tools (Phase 5): the agent loop's
+    /// `stop_signal` reaches a running `subagent_call` through this, turning
+    /// an ESC into a spec-conformant ACP `session/cancel` instead of waiting
+    /// out the turn's timeout. `None` → turns run to completion.
+    stop_signal: Option<Arc<AtomicBool>>,
     /// Configured base URLs for local providers (used by the cloud embedder).
     #[cfg(feature = "embed")]
     local_base_urls: std::collections::HashMap<String, String>,
@@ -226,6 +232,7 @@ impl CoshTools {
             computer: Computer::new(),
             pending_images: Mutex::new(None),
             event_tx: None,
+            stop_signal: None,
             #[cfg(feature = "embed")]
             local_base_urls: std::collections::HashMap::new(),
         }
@@ -302,6 +309,13 @@ impl CoshTools {
     /// Set the event sender for streaming tool output.
     pub fn set_event_tx(&mut self, tx: tokio::sync::mpsc::UnboundedSender<HarnessEvent>) {
         self.event_tx = Some(tx);
+    }
+
+    /// Share the agent loop's stop flag with interruptible tools (Phase 5).
+    /// Called wherever `set_event_tx` is called, so a running
+    /// `subagent_call` honours ESC via an ACP `session/cancel` notification.
+    pub fn set_stop_signal(&mut self, stop_signal: Arc<AtomicBool>) {
+        self.stop_signal = Some(stop_signal);
     }
 
     /// Forward passive LSP findings from an fs operation to the TUI as a
@@ -1492,36 +1506,99 @@ impl Tools for CoshTools {
                 // when `input` is omitted, reuse the last message sent to a
                 // sub-agent in this session (stored on `self.subagent`).
                 let call_input = self.subagent.resolve_input(input.input)?;
+                // Session resume (Phase 4): consecutive calls to the same
+                // agent share the ACP session by default (the sub-agent
+                // keeps its context); `continue_session: false` opts out.
+                // `resume_id` maps the flag to the stored id (or `None`),
+                // and the acp layer still falls back to a fresh session
+                // when the harness lost it. Safe by the sequential-dispatch
+                // invariant documented on `SubAgent::last_session`.
+                let resume = self.subagent.resume_id(&agent, input.continue_session);
+                // Review tasks carry the severity contract: the FINAL REPORT
+                // must start with `<!-- severity: green|yellow|red -->`. The
+                // contract is appended AFTER the stored-input resolution so a
+                // retry (reused raw input) never double-appends it.
+                let call_input = cosh_tools::subagent::severity::with_severity_contract(
+                    &call_input,
+                    input.code_review,
+                );
                 let event_tx_during = self.event_tx.clone();
                 // The ACP session is rooted at the workspace directory.
                 let cwd = self.project_root().clone();
+                // Cancellation (Phase 5): share the agent loop's stop flag so
+                // ESC interrupts the remote turn via `session/cancel`. Tools
+                // dispatched outside an agent loop (or before the flag is
+                // wired) run to completion — a fresh flag can never fire.
+                let stop_signal = self
+                    .stop_signal
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
 
-                let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+                let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel::<
+                    cosh_tools::subagent::events::SubagentEvent,
+                >();
+
+                // `agent` is moved into the spawned turn below; the clone
+                // records the successful session id under the same name
+                // afterwards.
+                let stored_agent = agent.clone();
 
                 let mut call_handle = tokio::task::spawn(async move {
-                    cosh_tools::subagent::acp::call(&agent, &call_input, cwd, chunk_tx).await
+                    cosh_tools::subagent::acp::call(
+                        &agent,
+                        &call_input,
+                        resume,
+                        cwd,
+                        stop_signal,
+                        chunk_tx,
+                    )
+                    .await
                 });
 
-                // Stream chunks while waiting for the ACP turn to complete.
+                // Stream typed sub-agent events while waiting for the ACP
+                // turn to complete. Message-text chunks keep the legacy
+                // `ToolOutput` path (the existing chat rendering); every
+                // other event goes to the typed variant for the TUI's
+                // sub-agent box (Phase 3).
                 let call_result = loop {
                     tokio::select! {
                         result = &mut call_handle => {
                             break result;
                         }
-                        chunk = chunk_rx.recv() => {
-                            if let Some(c) = chunk
+                        event = chunk_rx.recv() => {
+                            if let Some(event) = event
                                 && let Some(ref tx) = event_tx_during {
-                                    let _ = tx.send(HarnessEvent::ToolOutput {
+                                    // Phase 3 note: once the TUI renders
+                                    // `SubagentEvent::Message` inside the
+                                    // sub-agent box, this mirrored
+                                    // `ToolOutput` send must stop (or the
+                                    // box must ignore `Message` events) —
+                                    // otherwise message text renders twice.
+                                    if let Some(text) = event.as_message_text() {
+                                        let _ = tx.send(HarnessEvent::ToolOutput {
+                                            tool: "subagent_call".to_string(),
+                                            output: text.to_string(),
+                                            finished: false,
+                                        });
+                                    }
+                                    let _ = tx.send(HarnessEvent::SubagentEvent {
                                         tool: "subagent_call".to_string(),
-                                        output: c,
-                                        finished: false,
+                                        event,
                                     });
                                 }
                         }
                     }
                 };
 
-                let (accumulated, stop_reason) = call_result.map_err(|e| e.to_string())??;
+                let (accumulated, stop_reason, session_id) =
+                    call_result.map_err(|e| e.to_string())??;
+                // A successful turn's session is the one the next
+                // `continue_session` call resumes (Phase 4). A failed or
+                // timed-out turn returns `None` here, so nothing stale is
+                // stored.
+                if let Some(session_id) = session_id {
+                    self.subagent.store_session(&stored_agent, session_id);
+                }
 
                 if let Some(ref tx) = self.event_tx {
                     let _ = tx.send(HarnessEvent::ToolOutput {

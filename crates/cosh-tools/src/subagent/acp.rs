@@ -38,6 +38,8 @@
 //! | `goose` | `goose acp` |
 //! | `opencode` | `opencode acp` |
 //! | `kilo` | `kilo acp` |
+//! | `cline` | `cline --acp` |
+//! | `devin` | `devin acp` |
 //! | `claude` | `npx -y @agentclientprotocol/claude-agent-acp@latest` (official adapter) |
 //! | `codex` | `npx -y @agentclientprotocol/codex-acp@latest` (official adapter) |
 //!
@@ -49,23 +51,29 @@
 //! beyond the table entry.
 
 use std::iter;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    AuthenticateRequest, ClientCapabilities, ContentBlock, FileSystemCapabilities,
-    InitializeRequest, NewSessionRequest, NewSessionResponse, PromptRequest, ReadTextFileRequest,
+    AgentCapabilities, AuthenticateRequest, CancelNotification, ClientCapabilities, ContentBlock,
+    FileSystemCapabilities, InitializeRequest, LoadSessionRequest, LoadSessionResponse,
+    NewSessionRequest, PermissionOptionKind, PromptRequest, ReadTextFileRequest,
     ReadTextFileResponse, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigId, SessionConfigKind,
-    SessionConfigSelectOptions, SessionConfigValueId, SessionNotification, SessionUpdate,
-    SetSessionConfigOptionRequest, TextContent, WriteTextFileRequest, WriteTextFileResponse,
+    RequestPermissionResponse, ResumeSessionRequest, ResumeSessionResponse,
+    SelectedPermissionOutcome, SessionConfigId, SessionConfigKind, SessionConfigOption,
+    SessionConfigSelectOptions, SessionConfigValueId, SessionId, SessionNotification,
+    SetSessionConfigOptionRequest, StopReason, TextContent, WriteTextFileRequest,
+    WriteTextFileResponse,
 };
 use agent_client_protocol::{
     AcpAgent, Agent as AcpRole, Client, ConnectionTo, Error as AcpError, LineDirection,
     on_receive_notification, on_receive_request,
 };
+
+use super::events::SubagentEvent;
 
 /// A single registered ACP agent harness.
 ///
@@ -347,6 +355,197 @@ pub(crate) fn timeout_from_secs(raw: Option<&str>) -> Duration {
     }
 }
 
+/// Validate-then-serve path sandbox (non-Unix fallback, and the unit-test
+/// subject for sandbox semantics).
+///
+/// On Unix the fs handlers use the kernel-pinned component walk in
+/// [`super::sandbox`] instead — the read/write descriptor is obtained during
+/// the walk, so there is no validate-then-use window — while this helper
+/// remains the non-Unix fallback and the direct unit-test subject.
+///
+/// ACP agents send absolute paths; a request that resolves OUTSIDE the
+/// workspace — a different absolute prefix, or the same prefix escaping it
+/// through `..` segments or symlinks — is rejected instead of served.
+///
+/// Three gates run in sequence:
+///
+/// 1. **Canonical root** — the workspace root is canonicalized first, so
+///    containment runs in fully-resolved space (on macOS `/tmp` is a symlink
+///    to `/private/tmp`).
+/// 2. **Lexical** — the request must be rooted at the workspace (either its
+///    given or canonical spelling) and must not climb out through `..`
+///    components.
+/// 3. **Component walk** — each relative component is appended to the
+///    resolved base and checked with `symlink_metadata` (which does NOT
+///    follow the final entry): an encountered symlink is canonicalized
+///    immediately and its target must stay inside the workspace; a DANGLING
+///    symlink therefore fails closed (its target cannot be verified), while
+///    a plain MISSING component is appended as-is — a write legitimately
+///    creates new files and directories. Because the walk never descends
+///    into a non-existent component, no later component can hide a symlink.
+///
+/// NOTE: on Unix this check alone is NOT sufficient for serving (a TOCTOU
+/// window opens between this validation and the subsequent `std::fs`
+/// operation); it is the non-Unix fallback where that window is accepted,
+/// and a fast lexical pre-filter in tests.
+///
+/// The returned path is the resolved one the handlers operate on (symlinks
+/// encountered on the way are already resolved).
+///
+/// # Errors
+///
+/// Returns an ACP error when the path escapes the workspace root, a symlink
+/// inside it dangles or points outside, or the workspace itself is not
+/// accessible.
+#[cfg(any(not(unix), test))]
+pub(crate) fn ensure_path_within(root: &Path, requested: &Path) -> Result<PathBuf, AcpError> {
+    let canonical_root = root.canonicalize().map_err(|e| {
+        acp_error(format!(
+            "session workspace '{}' is not accessible: {e}",
+            root.display()
+        ))
+    })?;
+
+    // Lexical gate (see above).
+    let inside = requested
+        .strip_prefix(root)
+        .ok()
+        .or_else(|| requested.strip_prefix(&canonical_root).ok());
+    let Some(relative) = inside else {
+        return Err(outside_workspace_error(requested));
+    };
+    if relative
+        .components()
+        .any(|c| c == std::path::Component::ParentDir)
+    {
+        return Err(outside_workspace_error(requested));
+    }
+
+    // Component walk (see above).
+    let mut resolved = canonical_root.clone();
+    for component in relative.components() {
+        let candidate = resolved.join(component);
+        match candidate.symlink_metadata() {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                // The entry itself exists and is a symlink: resolve it NOW.
+                // A dangling symlink (unresolvable target) fails closed.
+                let target = candidate
+                    .canonicalize()
+                    .map_err(|_| outside_workspace_error(requested))?;
+                if !target.starts_with(&canonical_root) {
+                    return Err(outside_workspace_error(requested));
+                }
+                resolved = target;
+            }
+            Ok(_) => resolved = candidate,
+            // Missing entry: plain append. Everything below a missing
+            // component is necessarily missing too (no hidden symlinks),
+            // and the fs handlers create the intermediate directories.
+            Err(_) => resolved = candidate,
+        }
+    }
+    if !resolved.starts_with(&canonical_root) {
+        return Err(outside_workspace_error(requested));
+    }
+    Ok(resolved)
+}
+
+/// The rejection error for a path that escapes the session workspace.
+pub(crate) fn outside_workspace_error(requested: &Path) -> AcpError {
+    acp_error(format!(
+        "path '{}' resolves outside the session workspace; refusing to serve it",
+        requested.display()
+    ))
+}
+
+/// Apply the protocol's 1-based `line`/`limit` window to file content
+/// (shared by the sandboxed and fallback read paths).
+#[must_use]
+pub(crate) fn slice_lines(content: &str, line: Option<u32>, limit: Option<u32>) -> String {
+    let start = line.map_or(0, |line| line.saturating_sub(1) as usize);
+    match limit {
+        None if start == 0 => content.to_string(),
+        limit => content
+            .lines()
+            .skip(start)
+            .take(limit.map_or(usize::MAX, |l| l as usize))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
+
+/// Serve `fs/read_text_file`, sandboxed to the workspace root.
+///
+/// Unix: kernel-pinned component walk (see [`sandbox`](super::sandbox)) —
+/// the read descriptor is obtained DURING the walk, so a concurrent swap of
+/// a validated directory for an outside symlink is caught at open time and
+/// there is no validate-then-use window. Other platforms fall back to
+/// validate-then-serve via [`ensure_path_within`].
+#[cfg(unix)]
+fn serve_read(
+    root: &super::sandbox::PinnedRoot,
+    requested: &Path,
+    line: Option<u32>,
+    limit: Option<u32>,
+) -> Result<String, AcpError> {
+    super::sandbox::read(root, requested, line, limit)
+}
+
+/// See [`serve_read`]; non-Unix platforms use validate-then-serve.
+#[cfg(not(unix))]
+fn serve_read(
+    root: &Path,
+    requested: &Path,
+    line: Option<u32>,
+    limit: Option<u32>,
+) -> Result<String, AcpError> {
+    let path = ensure_path_within(root, requested)?;
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| acp_error(format!("failed to read {}: {e}", requested.display())))?;
+    Ok(slice_lines(&content, line, limit))
+}
+
+/// Serve `fs/write_text_file`, sandboxed to the workspace root (see
+/// [`serve_read`] for the platform split). Missing intermediate directories
+/// are created inside the workspace.
+#[cfg(unix)]
+fn serve_write(
+    root: &super::sandbox::PinnedRoot,
+    requested: &Path,
+    content: &str,
+) -> Result<(), AcpError> {
+    super::sandbox::write(root, requested, content)
+}
+
+/// See [`serve_write`]; non-Unix platforms use validate-then-serve.
+#[cfg(not(unix))]
+fn serve_write(root: &Path, requested: &Path, content: &str) -> Result<(), AcpError> {
+    let path = ensure_path_within(root, requested)?;
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(&path, content)
+        .map_err(|e| acp_error(format!("failed to write {}: {e}", requested.display())))
+}
+
+/// Stable, serde-shaped string for an ACP [`StopReason`].
+///
+/// The persisted `SubAgentCallOutput.stop_reason` must not depend on `Debug`
+/// formatting (which can change with crate versions); these snake_case names
+/// mirror the protocol's wire spelling. Unknown variants (the enum is
+/// `#[non_exhaustive]`) degrade to their debug form instead of panicking.
+#[must_use]
+pub(crate) fn stop_reason_str(reason: StopReason) -> String {
+    match reason {
+        StopReason::EndTurn => "end_turn".to_string(),
+        StopReason::MaxTokens => "max_tokens".to_string(),
+        StopReason::MaxTurnRequests => "max_turn_requests".to_string(),
+        StopReason::Refusal => "refusal".to_string(),
+        StopReason::Cancelled => "cancelled".to_string(),
+        other => format!("{other:?}"),
+    }
+}
+
 /// Validate that `agent` is registered in [`ACP_AGENTS`].
 ///
 /// # Errors
@@ -371,13 +570,18 @@ const TIMEOUT_ERROR: &str = "cosh:subagent:timeout";
 ///
 /// 1. Looks up `agent` in [`ACP_AGENTS`] to get the ACP launch command.
 /// 2. Runs a full ACP client turn (see the [module docs](self)):
-///    `initialize` → `authenticate` (when advertised) → `session/new` on
-///    `cwd` → `session/prompt`, auto-approving permission requests and
-///    serving `fs/*` requests.
-/// 3. Streams agent message chunks through `chunk_tx` (for the TUI) while
-///    accumulating the full output.
-/// 4. Returns `(accumulated_output, stop_reason)` when the turn ends, or an
-///    error when the harness fails before producing any output.
+///    `initialize` → `authenticate` (when advertised) → `session/new` or,
+///    when resuming, `session/resume`/`session/load` (falling back to
+///    `session/new` on any resume failure) → `session/prompt`,
+///    auto-approving permission requests and serving `fs/*` requests.
+///    The shared stop flag is raced against the prompt await; a trigger
+///    sends `session/cancel` and the agent ends the turn itself.
+/// 3. Streams typed [`SubagentEvent`]s through `chunk_tx` (for the TUI)
+///    while accumulating the message text into the full output.
+/// 4. Returns `(accumulated_output, stop_reason, Option<session_id>)` when
+///    the turn ends — the session id only when it ended protocol-clean
+///    (`Some` is withheld on error and timeout arms) — or an error when
+///    the harness fails before producing any output.
 ///
 /// A timeout (`COSH_SUBAGENT_TIMEOUT_SECS`, default 2 minutes) tears down the
 /// harness; partial output is returned with stop reason `"timeout"` when any
@@ -401,9 +605,11 @@ const TIMEOUT_ERROR: &str = "cosh:subagent:timeout";
 pub async fn call(
     agent: &str,
     input: &str,
+    resume: Option<String>,
     cwd: PathBuf,
-    chunk_tx: tokio::sync::mpsc::UnboundedSender<String>,
-) -> Result<(String, String), String> {
+    stop_signal: Arc<AtomicBool>,
+    chunk_tx: tokio::sync::mpsc::UnboundedSender<SubagentEvent>,
+) -> Result<(String, String, Option<String>), String> {
     validate_agent(agent)?;
     let entry = ACP_AGENTS
         .iter()
@@ -431,7 +637,16 @@ pub async fn call(
                 .map_err(|e| format!("failed to build ACP runtime: {e}"))?
                 .block_on(tokio::time::timeout(
                     timeout,
-                    run_session(launcher, input, cwd, entry.model, accumulated, chunk_tx),
+                    run_session(
+                        launcher,
+                        input,
+                        resume,
+                        cwd,
+                        entry.model,
+                        accumulated,
+                        stop_signal,
+                        chunk_tx,
+                    ),
                 ))
                 // Map the `Elapsed` error to the sentinel so the whole
                 // closure shares one error type (String).
@@ -445,14 +660,19 @@ pub async fn call(
 
     match turn {
         // Turn completed: the session already wrote every chunk into the buffer.
-        Ok(Ok(stop_reason)) => Ok((final_output, stop_reason)),
+        Ok(Ok((stop_reason, session_id))) => Ok((final_output, stop_reason, Some(session_id))),
         // Turn errored: partial output (if any) is still worth returning.
+        // The turn's own session id is NOT propagated — an errored turn's
+        // session state is unreliable, so its id is not (re)stored here.
+        // An OLDER stored id for this agent stays in place and is resumed
+        // again by the next default call; a stale one self-heals via the
+        // `session/new` fallback in `open_or_resume_session`.
         Ok(Err(session_error)) => {
             if final_output.is_empty() {
                 Err(session_error)
             } else {
                 log::warn!("sub-agent '{agent}' ACP turn failed: {session_error}");
-                Ok((final_output, "error".to_string()))
+                Ok((final_output, "error".to_string(), None))
             }
         }
         // Timeout: the dropped session future tears down the harness process.
@@ -470,10 +690,124 @@ pub async fn call(
                     "sub-agent '{agent}' timed out after {}s, returning partial output",
                     timeout.as_secs(),
                 );
-                Ok((final_output, "timeout".to_string()))
+                // The session id is NOT propagated — a torn-down harness's
+                // session state is unreliable, so the next call starts fresh.
+                Ok((final_output, "timeout".to_string(), None))
             }
         }
     }
+}
+
+/// Whether the agent harness supports resuming sessions, read from the
+/// capabilities advertised at `initialize`. Both ACP mechanisms count:
+/// `sessionCapabilities.resume` (`session/resume`) and the older top-level
+/// `session/load` capability (`session/load`).
+fn session_resume_support(capabilities: &AgentCapabilities) -> SessionResumeSupport {
+    if capabilities.session_capabilities.resume.is_some() {
+        SessionResumeSupport::Resume
+    } else if capabilities.load_session {
+        SessionResumeSupport::Load
+    } else {
+        SessionResumeSupport::None
+    }
+}
+
+/// The ACP resume mechanism a harness advertises (Phase 4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionResumeSupport {
+    /// `session/resume` (`sessionCapabilities.resume`).
+    Resume,
+    /// The older top-level `session/load` capability.
+    Load,
+    /// No resume support — every call opens a fresh session.
+    None,
+}
+
+/// Open (or resume) the session for one ACP prompt turn.
+///
+/// With `resume: Some(id)` and advertised support, the stored session id is
+/// resumed (`session/resume`, falling back to the older `session/load`).
+/// ANY failure on the resume path — no advertised capability, a stale id
+/// after a harness restart, a transport error — silently falls back to a
+/// fresh `session/new`: resume is a default, never a hard dependency.
+///
+/// Returns the session id to prompt against plus the config options the
+/// session came back with (used by [`select_session_model`]; `None` for a
+/// plain `session/new` response is carried through as-is).
+///
+/// # Errors
+///
+/// Only a failed `session/new` is fatal — the turn cannot proceed without
+/// a session.
+async fn open_or_resume_session(
+    connection: &ConnectionTo<AcpRole>,
+    resume: Option<String>,
+    cwd: &Path,
+    support: SessionResumeSupport,
+) -> Result<(SessionId, Option<Vec<SessionConfigOption>>), AcpError> {
+    // Exhaustive over (resume, support): no `unreachable!()` arm — the
+    // `None`-support and no-id cases fall through to `session/new` below.
+    match (resume, support) {
+        (Some(id), SessionResumeSupport::Resume) => {
+            let response = connection
+                .send_request(ResumeSessionRequest::new(
+                    SessionId::new(id.as_str()),
+                    cwd.to_path_buf(),
+                ))
+                .block_task()
+                .await;
+            match response.map(|r: ResumeSessionResponse| (r.config_options,)) {
+                Ok((config_options,)) => {
+                    log::debug!("sub-agent ACP session resumed: {id}");
+                    return Ok((SessionId::new(id), config_options));
+                }
+                Err(e) => {
+                    // Stale id (harness restart) or a resume quirk: fall
+                    // through to a fresh session instead of failing the
+                    // turn — the sub-agent just loses its previous context.
+                    log::warn!(
+                        "sub-agent ACP resume of session '{id}' failed ({e}); \
+                         falling back to session/new"
+                    );
+                }
+            }
+        }
+        (Some(id), SessionResumeSupport::Load) => {
+            let response = connection
+                .send_request(LoadSessionRequest::new(
+                    SessionId::new(id.as_str()),
+                    cwd.to_path_buf(),
+                ))
+                .block_task()
+                .await;
+            match response.map(|r: LoadSessionResponse| (r.config_options,)) {
+                Ok((config_options,)) => {
+                    log::debug!("sub-agent ACP session loaded: {id}");
+                    return Ok((SessionId::new(id), config_options));
+                }
+                Err(e) => {
+                    log::warn!(
+                        "sub-agent ACP load of session '{id}' failed ({e}); \
+                         falling back to session/new"
+                    );
+                }
+            }
+        }
+        (Some(_), SessionResumeSupport::None) => {
+            log::debug!(
+                "sub-agent harness advertises no session resume support; \
+                 starting a fresh session"
+            );
+        }
+        (None, _) => {}
+    }
+
+    let session = connection
+        .send_request(NewSessionRequest::new(cwd.to_path_buf()))
+        .block_task()
+        .await
+        .map_err(|e| acp_error(format!("ACP session/new failed: {e}")))?;
+    Ok((session.session_id, session.config_options))
 }
 
 /// Select the agent's preferred session model, when one is registered and
@@ -491,15 +825,14 @@ pub async fn call(
 /// values, or when the `session/set_config_option` request fails.
 async fn select_session_model(
     connection: &ConnectionTo<AcpRole>,
-    session: &NewSessionResponse,
+    session_id: &SessionId,
+    config_options: Option<&[SessionConfigOption]>,
     preferred_model: &str,
 ) -> Result<(), String> {
     if preferred_model.is_empty() {
         return Ok(());
     }
-    let Some(option) = session
-        .config_options
-        .as_deref()
+    let Some(option) = config_options
         .unwrap_or_default()
         .iter()
         .find(|option| option.id.0.as_ref() == "model")
@@ -530,7 +863,7 @@ async fn select_session_model(
     }
     connection
         .send_request(SetSessionConfigOptionRequest::new(
-            session.session_id.clone(),
+            session_id.clone(),
             SessionConfigId::new("model"),
             SessionConfigValueId::new(preferred_model),
         ))
@@ -545,25 +878,51 @@ async fn select_session_model(
 /// `transport` is anything implementing [`ConnectTo`] for the agent role: in
 /// production it is the [`AcpAgent`] subprocess launcher; tests use an
 /// in-memory [`Channel`](agent_client_protocol::Channel) instead. Returns
-/// the prompt's stop reason on success. Agent message chunks are appended
-/// to `accumulated` and streamed through `chunk_tx` as they arrive.
+/// the prompt's stop reason on success. `select_session_model` runs before
+/// the prompt, and the shared stop flag is raced against the prompt await
+/// (Phase 5 cancellation: a trigger sends `session/cancel` and the turn
+/// still ends with the agent's own answer). Message text is appended to
+/// `accumulated`; every mapped session update is streamed through
+/// `chunk_tx` as a typed [`SubagentEvent`].
 ///
 /// # Errors
 ///
 /// Returns an error if any step of the ACP handshake or the prompt turn
 /// fails.
 #[allow(clippy::unwrap_used)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_session<T>(
     transport: T,
     input: String,
+    resume: Option<String>,
     cwd: PathBuf,
     preferred_model: &'static str,
     accumulated: Arc<Mutex<String>>,
-    chunk_tx: tokio::sync::mpsc::UnboundedSender<String>,
-) -> Result<String, String>
+    stop_signal: Arc<AtomicBool>,
+    chunk_tx: tokio::sync::mpsc::UnboundedSender<SubagentEvent>,
+) -> Result<(String, String), String>
 where
     T: agent_client_protocol::ConnectTo<agent_client_protocol::Client> + 'static,
 {
+    // `fs/*` requests are served against the real filesystem, sandboxed to
+    // the session workspace root. The root is pinned to a VERIFIED directory
+    // descriptor once per turn (see `sandbox::PinnedRoot`): the handlers
+    // below clone that descriptor's handle and every `fs/*` resolution
+    // walks `openat`-relative from it — no path is ever re-resolved after
+    // verification, closing the validate-then-use window (including at the
+    // root itself).
+    // Non-Unix has no descriptor pinning; the handlers fall back to the
+    // lexical validate-then-serve path (`ensure_path_within`), so hand them
+    // the plain root path there.
+    #[cfg(unix)]
+    let read_root = super::sandbox::PinnedRoot::acquire(&cwd).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    let write_root = super::sandbox::PinnedRoot::acquire(&cwd).map_err(|e| e.to_string())?;
+    #[cfg(not(unix))]
+    let read_root = cwd.clone();
+    #[cfg(not(unix))]
+    let write_root = cwd.clone();
+
     // Route the transport through the generic connection machinery. The
     // subprocess launcher gets stderr line logging; in-memory test channels
     // pass through untouched.
@@ -572,67 +931,93 @@ where
         .name("cosh")
         .on_receive_notification(
             async move |notification: SessionNotification, _cx| {
-                let SessionUpdate::AgentMessageChunk(chunk) = notification.update else {
-                    return Ok(());
-                };
-                if let ContentBlock::Text(text) = chunk.content {
-                    accumulated.lock().unwrap().push_str(&text.text);
-                    let _ = chunk_tx.send(text.text);
+                // Map every session update with a TUI representation into a
+                // typed event; message chunks additionally keep flowing into
+                // the accumulated text buffer (the persisted final output).
+                match SubagentEvent::from_session_update(notification.update) {
+                    Some(event) => {
+                        if let SubagentEvent::Message { text } = &event {
+                            accumulated.lock().unwrap().push_str(text);
+                        }
+                        let _ = chunk_tx.send(event);
+                    }
+                    // Updates with no display representation (user chunks,
+                    // available-commands refreshes, unstable variants):
+                    // log instead of silently dropping.
+                    None => {
+                        log::debug!("sub-agent session update without a display mapping");
+                    }
                 }
                 Ok(())
             },
             on_receive_notification!(),
         )
-        // Headless automation: auto-approve by selecting the first option
-        // (YOLO style), so the sub-agent never blocks on a dialog nobody
-        // can answer. With no options, cancel the request per the spec.
+        // Headless automation: auto-approve (YOLO style), so the sub-agent
+        // never blocks on a dialog nobody can answer. Option ORDER is
+        // harness-defined — some harnesses list reject-like choices first —
+        // so an explicit allow-kind option is preferred over "first option"
+        // whenever one exists. With no options, cancel the request per the
+        // spec.
         .on_receive_request(
-            async move |request: RequestPermissionRequest, responder, _connection| match request
-                .options
-                .first()
-            {
-                Some(option) => responder.respond(RequestPermissionResponse::new(
-                    RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
-                        option.option_id.clone(),
+            async move |request: RequestPermissionRequest, responder, _connection| {
+                // Explicit preference order: AllowAlways first, then
+                // AllowOnce — both auto-approve, but Always avoids the same
+                // prompt coming back for every later call. Without any
+                // allow-kind option, the first listed option is picked as a
+                // last resort; its kind is logged so a reject-like auto-
+                // approval is visible in debug output.
+                let selected = request
+                    .options
+                    .iter()
+                    .find(|option| option.kind == PermissionOptionKind::AllowAlways)
+                    .or_else(|| {
+                        request
+                            .options
+                            .iter()
+                            .find(|option| option.kind == PermissionOptionKind::AllowOnce)
+                    })
+                    .or_else(|| request.options.first());
+                match selected {
+                    Some(option) => {
+                        log::debug!(
+                            "sub-agent permission auto-approved: option '{}' (kind {:?}) for tool call {}",
+                            option.option_id.0,
+                            option.kind,
+                            request.tool_call.tool_call_id.0
+                        );
+                        responder.respond(RequestPermissionResponse::new(
+                            RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
+                                option.option_id.clone(),
+                            )),
+                        ))
+                    }
+                    None => responder.respond(RequestPermissionResponse::new(
+                        RequestPermissionOutcome::Cancelled,
                     )),
-                )),
-                None => responder.respond(RequestPermissionResponse::new(
-                    RequestPermissionOutcome::Cancelled,
-                )),
+                }
             },
             on_receive_request!(),
         )
         // Serve the agent's filesystem capability against the real workspace
-        // (absolute paths, 1-based lines per the protocol contract).
+        // (absolute paths, 1-based lines per the protocol contract), SANDBOXED
+        // to the session workspace root: a path that escapes `cwd` (through
+        // `..` segments or symlinks) is rejected with an ACP error instead of
+        // being served.
         .on_receive_request(
             async move |request: ReadTextFileRequest, responder, _connection| {
-                let content = std::fs::read_to_string(&request.path).map_err(|e| {
-                    acp_error(format!("failed to read {}: {e}", request.path.display()))
-                })?;
-                let start = request
-                    .line
-                    .map_or(0, |line| line.saturating_sub(1) as usize);
-                let selected = match request.limit {
-                    None if start == 0 => content,
-                    limit => content
-                        .lines()
-                        .skip(start)
-                        .take(limit.map_or(usize::MAX, |l| l as usize))
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                };
-                responder.respond(ReadTextFileResponse::new(selected))
+                let content = serve_read(
+                    &read_root,
+                    &request.path,
+                    request.line,
+                    request.limit,
+                )?;
+                responder.respond(ReadTextFileResponse::new(content))
             },
             on_receive_request!(),
         )
         .on_receive_request(
             async move |request: WriteTextFileRequest, responder, _connection| {
-                if let Some(parent) = request.path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                std::fs::write(&request.path, &request.content).map_err(|e| {
-                    acp_error(format!("failed to write {}: {e}", request.path.display()))
-                })?;
+                serve_write(&write_root, &request.path, &request.content)?;
                 responder.respond(WriteTextFileResponse::new())
             },
             on_receive_request!(),
@@ -683,31 +1068,71 @@ where
                 return Err(acp_error(e));
             }
 
-            let session = connection
-                .send_request(NewSessionRequest::new(cwd))
-                .block_task()
-                .await
-                .map_err(|e| acp_error(format!("ACP session/new failed: {e}")))?;
+            let (session_id, config_options) =
+                open_or_resume_session(
+                    &connection,
+                    resume,
+                    &cwd,
+                    session_resume_support(&init.agent_capabilities),
+                )
+                .await?;
 
             // Select the preferred session model when the agent registered
             // one and the harness advertises a `model` config option. A
             // mismatch here is fatal on some harnesses (e.g. kilo's ACP
             // default is a paid-tier model that fails the prompt with "You
             // need to sign in"), so a failed selection aborts the turn.
-            select_session_model(&connection, &session, preferred_model)
-                .await
-                .map_err(acp_error)?;
+            // Resumed sessions carry their config options in the resume
+            // response, so the selection applies to them too.
+            select_session_model(
+                &connection,
+                &session_id,
+                config_options.as_deref(),
+                preferred_model,
+            )
+            .await
+            .map_err(acp_error)?;
 
-            let prompt = connection
+            let prompt_request = connection
                 .send_request(PromptRequest::new(
-                    session.session_id,
+                    session_id.clone(),
                     vec![ContentBlock::Text(TextContent::new(input))],
                 ))
-                .block_task()
-                .await
+                .block_task();
+
+            // Cancellation (Phase 5): the shared stop flag is raced against
+            // the prompt await. On trigger, `session/cancel` is sent as a
+            // fire-and-forget notification and the prompt is STILL awaited —
+            // the ACP spec requires the agent to end the turn itself,
+            // answering with `StopReason::Cancelled`. The outer timeout in
+            // `call` is the backstop for a harness that never answers.
+            tokio::pin!(prompt_request);
+            let stop_wait = async {
+                while !stop_signal.load(Ordering::Relaxed) {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            };
+            let prompt = tokio::select! {
+                prompt = &mut prompt_request => prompt,
+                () = stop_wait => {
+                    log::debug!("sub-agent ACP turn cancelled by stop signal");
+                    if let Err(e) =
+                        connection.send_notification(CancelNotification::new(session_id.clone()))
+                    {
+                        log::warn!("sub-agent ACP cancel notification failed: {e}");
+                    }
+                    (&mut prompt_request).await
+                }
+            };
+            let prompt = prompt
                 .map_err(|e| acp_error(format!("ACP session/prompt failed: {e}")))?;
 
-            Ok(format!("{:?}", prompt.stop_reason))
+            // The session id flows back to the caller: it is stored per
+            // agent name and reused by the next `continue_session` call.
+            Ok((
+                stop_reason_str(prompt.stop_reason),
+                session_id.0.to_string(),
+            ))
         })
         .await
         .map_err(|e| format!("ACP connection failed: {e}"))

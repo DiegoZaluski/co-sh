@@ -556,6 +556,18 @@ impl App {
                     }
                 }
 
+                // Typed sub-agent activity (thoughts, tool calls, plans,
+                // usage) feeds the structured state of the running subagent
+                // window (Phase 3a); Phase 3b renders it inside the box —
+                // message text keeps flowing through `ToolOutput` above.
+                // NOTE: the `tool` field is always "subagent_call" today and
+                // is intentionally ignored; typed events carry no session id,
+                // so concurrent subagents of the SAME agent CLI interleave
+                // into one window (a pre-existing harness limitation).
+                HarnessEvent::SubagentEvent { event, .. } => {
+                    self.state.right_panel.update_subagent_activity(&event);
+                }
+
                 HarnessEvent::ToolDiagnostics { tool, notes } => {
                     // Emitted right before the matching ToolResult, while the
                     // fs tool part is still Running: attach the findings so

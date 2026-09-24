@@ -7,14 +7,16 @@
 // because they are exercised here.
 use super::SubAgent;
 use super::acp::{
-    ACP_AGENTS, Agent, DEFAULT_CALL_TIMEOUT, acp_error, agent_launcher, install_hint, run_session,
-    timeout_from_secs, validate_agent,
+    ACP_AGENTS, Agent, DEFAULT_CALL_TIMEOUT, acp_error, agent_launcher, ensure_path_within,
+    install_hint, run_session, stop_reason_str, timeout_from_secs, validate_agent,
 };
+use super::events::SubagentEvent;
 
 use agent_client_protocol::schema::v1::{
     ContentBlock, InitializeRequest, NewSessionRequest, PromptRequest, ReadTextFileRequest,
     SessionNotification, SessionUpdate, TextContent, WriteTextFileRequest,
 };
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -256,22 +258,25 @@ async fn run_session_drives_a_full_acp_turn_end_to_end() {
     let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel();
     let accumulated = Arc::new(Mutex::new(String::new()));
 
-    let (stop_reason, _, streamed) = tokio::join!(
+    let (turn, _, streamed) = tokio::join!(
         run_session(
             client_side,
             "hello from acp".to_string(),
+            None,
             std::env::temp_dir(),
             "",
             accumulated.clone(),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             chunk_tx,
         ),
         agent_task,
         async { chunk_rx.recv().await },
     );
 
-    assert_eq!(stop_reason.unwrap(), "EndTurn");
+    let (stop_reason, _session_id) = turn.unwrap();
+    assert_eq!(stop_reason, "end_turn");
     assert_eq!(accumulated.lock().unwrap().as_str(), "hello from acp");
-    assert_eq!(streamed.unwrap(), "hello from acp");
+    assert_eq!(streamed.unwrap().as_message_text(), Some("hello from acp"));
 }
 
 /// The fixture agent drives the client's inbound-request handlers over
@@ -431,25 +436,31 @@ async fn run_session_serves_fs_requests_and_auto_approves_permissions() {
     let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel();
     let accumulated = Arc::new(Mutex::new(String::new()));
 
-    let (stop_reason, _, streamed) = tokio::join!(
+    let (turn, _, streamed) = tokio::join!(
         run_session(
             client_side,
             "exercise handlers".to_string(),
+            None,
             scratch.path().to_path_buf(),
             "",
             accumulated.clone(),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             chunk_tx,
         ),
         agent_task,
         async { chunk_rx.recv().await },
     );
 
-    assert_eq!(stop_reason.unwrap(), "EndTurn");
+    let (stop_reason, _session_id) = turn.unwrap();
+    assert_eq!(stop_reason, "end_turn");
     assert_eq!(
         accumulated.lock().unwrap().as_str(),
         "read: l2\nperm: allow-yes\nperm-empty: Cancelled\nwrite: written-by-client"
     );
-    assert_eq!(streamed.unwrap(), accumulated.lock().unwrap().as_str());
+    assert_eq!(
+        streamed.unwrap().as_message_text(),
+        Some(accumulated.lock().unwrap().as_str())
+    );
 }
 
 /// The fixture harness advertises a `model` config option whose default
@@ -555,22 +566,359 @@ async fn run_session_selects_the_preferred_session_model() {
     let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel();
     let accumulated = Arc::new(Mutex::new(String::new()));
 
-    let (stop_reason, _, streamed) = tokio::join!(
+    let (turn, _, streamed) = tokio::join!(
         run_session(
             client_side,
             "check model".to_string(),
+            None,
             std::env::temp_dir(),
             PREFERRED,
             accumulated.clone(),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             chunk_tx,
         ),
         agent_task,
         async { chunk_rx.recv().await },
     );
 
-    assert_eq!(stop_reason.unwrap(), "EndTurn");
+    let (stop_reason, _session_id) = turn.unwrap();
+    assert_eq!(stop_reason, "end_turn");
     assert_eq!(accumulated.lock().unwrap().as_str(), "model-ok");
-    assert_eq!(streamed.unwrap(), "model-ok");
+    assert_eq!(streamed.unwrap().as_message_text(), Some("model-ok"));
+}
+
+/// The typed event stream (Phase 2): the fixture harness streams a thought,
+/// a tool call, its update, a plan, a usage snapshot, and a mode change —
+/// plus one update with no display mapping (`UserMessageChunk`). All mapped
+/// variants must arrive as typed events, only message text accumulates, and
+/// the unmapped update must be ignored (logged, not emitted).
+#[tokio::test(flavor = "current_thread")]
+async fn run_session_maps_session_updates_into_typed_events() {
+    use agent_client_protocol::schema::v1 as acp1;
+    use agent_client_protocol::schema::v1::{
+        AgentCapabilities, InitializeResponse, PromptResponse, ToolCallUpdateFields,
+    };
+    use agent_client_protocol::{Agent as AgentRole, Channel, Responder};
+
+    let (client_side, agent_side) = Channel::duplex();
+
+    let agent_task = tokio::spawn(async move {
+        AgentRole
+            .builder()
+            .name("event-fixture")
+            .on_receive_request(
+                async move |request: InitializeRequest,
+                            responder: Responder<InitializeResponse>,
+                            _cx| {
+                    responder.respond(
+                        InitializeResponse::new(request.protocol_version)
+                            .agent_capabilities(AgentCapabilities::new()),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_request: NewSessionRequest,
+                            responder: Responder<
+                    agent_client_protocol::schema::v1::NewSessionResponse,
+                >,
+                            _cx| {
+                    responder.respond(agent_client_protocol::schema::v1::NewSessionResponse::new(
+                        agent_client_protocol::schema::v1::SessionId::new("event-fixture"),
+                    ))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |request: PromptRequest, responder: Responder<PromptResponse>, _cx| {
+                    let notify = |update| {
+                        _cx.send_notification(SessionNotification::new(
+                            request.session_id.clone(),
+                            update,
+                        ))
+                    };
+
+                    // Unmapped: user chunks have no TUI representation.
+                    let _ = notify(SessionUpdate::UserMessageChunk(acp1::ContentChunk::new(
+                        ContentBlock::Text(TextContent::new("user-never-shown")),
+                    )));
+                    // Thought chunk → SubagentEvent::Thought.
+                    let _ = notify(SessionUpdate::AgentThoughtChunk(acp1::ContentChunk::new(
+                        ContentBlock::Text(TextContent::new("thinking hard")),
+                    )));
+                    // Tool call announcement → SubagentEvent::ToolCall.
+                    let _ = notify(SessionUpdate::ToolCall(
+                        acp1::ToolCall::new("call-1", "Reading config")
+                            .kind(acp1::ToolKind::Read)
+                            .status(acp1::ToolCallStatus::InProgress)
+                            .raw_input(serde_json::json!({"path": "config.toml"})),
+                    ));
+                    // Tool call update → SubagentEvent::ToolCallUpdate
+                    // (status + text content). The fields struct is
+                    // `#[non_exhaustive]`, so build it through the builder.
+                    let _ = notify(SessionUpdate::ToolCallUpdate(acp1::ToolCallUpdate::new(
+                        "call-1",
+                        ToolCallUpdateFields::new()
+                            .status(acp1::ToolCallStatus::Completed)
+                            .content(Some(vec![acp1::ToolCallContent::Content(
+                                acp1::Content::new(ContentBlock::Text(TextContent::new(
+                                    "port=8080",
+                                ))),
+                            )])),
+                    )));
+                    // Plan → SubagentEvent::Plan (full replacement list).
+                    let _ = notify(SessionUpdate::Plan(acp1::Plan::new(vec![
+                        acp1::PlanEntry::new(
+                            "read config",
+                            acp1::PlanEntryPriority::High,
+                            acp1::PlanEntryStatus::Completed,
+                        ),
+                        acp1::PlanEntry::new(
+                            "write tests",
+                            acp1::PlanEntryPriority::Medium,
+                            acp1::PlanEntryStatus::InProgress,
+                        ),
+                    ])));
+                    // Usage → SubagentEvent::Usage.
+                    let _ = notify(SessionUpdate::UsageUpdate(acp1::UsageUpdate::new(
+                        2048, 8192,
+                    )));
+                    // Mode change → SubagentEvent::Mode.
+                    let _ = notify(SessionUpdate::CurrentModeUpdate(
+                        acp1::CurrentModeUpdate::new("code-mode"),
+                    ));
+                    // The agent's actual answer → SubagentEvent::Message (and
+                    // the accumulated buffer).
+                    let _ = notify(SessionUpdate::AgentMessageChunk(acp1::ContentChunk::new(
+                        ContentBlock::Text(TextContent::new("all done")),
+                    )));
+                    responder.respond(PromptResponse::new(
+                        agent_client_protocol::schema::v1::StopReason::EndTurn,
+                    ))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_to(agent_side)
+            .await
+    });
+
+    let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel();
+    let accumulated = Arc::new(Mutex::new(String::new()));
+
+    // Drain events until the turn ends (the sender drops with the session).
+    let collector = async {
+        let mut events = Vec::new();
+        while let Some(event) = chunk_rx.recv().await {
+            events.push(event);
+        }
+        events
+    };
+
+    let (turn, _, events) = tokio::join!(
+        run_session(
+            client_side,
+            "do the thing".to_string(),
+            None,
+            std::env::temp_dir(),
+            "",
+            accumulated.clone(),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            chunk_tx,
+        ),
+        agent_task,
+        collector,
+    );
+
+    let (stop_reason, _session_id) = turn.unwrap();
+    assert_eq!(stop_reason, "end_turn");
+    // Only message text enters the accumulator — no thoughts, no tool
+    // titles, no plan entries.
+    assert_eq!(accumulated.lock().unwrap().as_str(), "all done");
+
+    use super::events::{PlanEntry, PlanEntryPriority, PlanEntryStatus, ToolCallStatus, ToolKind};
+    assert_eq!(
+        events,
+        vec![
+            SubagentEvent::Thought {
+                text: "thinking hard".to_string(),
+            },
+            SubagentEvent::ToolCall {
+                id: "call-1".to_string(),
+                title: "Reading config".to_string(),
+                kind: ToolKind::Read,
+                status: ToolCallStatus::InProgress,
+                raw_input: Some(serde_json::json!({"path": "config.toml"})),
+            },
+            SubagentEvent::ToolCallUpdate {
+                id: "call-1".to_string(),
+                status: Some(ToolCallStatus::Completed),
+                title: None,
+                raw_output: None,
+                content: super::events::ToolOutputBlock {
+                    text: "port=8080".to_string(),
+                    skipped: 0,
+                    diff: None,
+                },
+            },
+            SubagentEvent::Plan {
+                entries: vec![
+                    PlanEntry {
+                        content: "read config".to_string(),
+                        priority: PlanEntryPriority::High,
+                        status: PlanEntryStatus::Completed,
+                    },
+                    PlanEntry {
+                        content: "write tests".to_string(),
+                        priority: PlanEntryPriority::Medium,
+                        status: PlanEntryStatus::InProgress,
+                    },
+                ],
+            },
+            SubagentEvent::Usage {
+                context_window: 8192,
+                tokens_in_context: 2048,
+            },
+            SubagentEvent::Mode {
+                id: "code-mode".to_string(),
+            },
+            SubagentEvent::Message {
+                text: "all done".to_string(),
+            },
+        ]
+    );
+}
+
+/// The typed events serialize to stable snake_case tagged JSON and
+/// deserialize back losslessly — the persistence/rehydration contract for
+/// Phase 6. Unknown protocol enum values round-trip through the `Unknown`
+/// fallbacks instead of failing.
+#[test]
+fn subagent_events_round_trip_through_json() {
+    use super::events::{PlanEntry, PlanEntryPriority, PlanEntryStatus, ToolCallStatus, ToolKind};
+
+    let event = SubagentEvent::ToolCall {
+        id: "call-7".to_string(),
+        title: "Running tests".to_string(),
+        kind: ToolKind::Execute,
+        status: ToolCallStatus::InProgress,
+        raw_input: Some(serde_json::json!({"cmd": "cargo test"})),
+    };
+    let json = serde_json::to_value(&event).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "type": "tool_call",
+            "id": "call-7",
+            "title": "Running tests",
+            "kind": "execute",
+            "status": "in_progress",
+            "raw_input": {"cmd": "cargo test"}
+        })
+    );
+    assert_eq!(
+        serde_json::from_value::<SubagentEvent>(json).unwrap(),
+        event
+    );
+
+    // Unknown enum values (future spec kinds) deserialize to the `Unknown`
+    // fallback instead of erroring.
+    let unknown = serde_json::json!({
+        "type": "tool_call",
+        "id": "call-8",
+        "title": "t",
+        "kind": "brand_new_kind",
+        "status": "frobnicating",
+        "raw_input": null
+    });
+    let parsed = serde_json::from_value::<SubagentEvent>(unknown).unwrap();
+    assert_eq!(
+        parsed,
+        SubagentEvent::ToolCall {
+            id: "call-8".to_string(),
+            title: "t".to_string(),
+            kind: ToolKind::Unknown,
+            status: ToolCallStatus::Unknown,
+            raw_input: None,
+        }
+    );
+
+    // Plan entries and usage round-trip too.
+    let plan = SubagentEvent::Plan {
+        entries: vec![PlanEntry {
+            content: "step".to_string(),
+            priority: PlanEntryPriority::Low,
+            status: PlanEntryStatus::Pending,
+        }],
+    };
+    assert_eq!(
+        serde_json::from_value::<SubagentEvent>(serde_json::to_value(&plan).unwrap()).unwrap(),
+        plan
+    );
+    let usage = SubagentEvent::Usage {
+        context_window: 100,
+        tokens_in_context: 25,
+    };
+    assert_eq!(
+        serde_json::from_value::<SubagentEvent>(serde_json::to_value(&usage).unwrap()).unwrap(),
+        usage
+    );
+
+    // The remaining variants pin their serialized tag/field names too — the
+    // Phase 6 persistence contract depends on all of them staying stable.
+    let thought = SubagentEvent::Thought {
+        text: "pondering".to_string(),
+    };
+    assert_eq!(
+        serde_json::to_value(&thought).unwrap(),
+        serde_json::json!({"type": "thought", "text": "pondering"})
+    );
+    let update = SubagentEvent::ToolCallUpdate {
+        id: "call-9".to_string(),
+        status: Some(ToolCallStatus::Completed),
+        title: Some("Renamed".to_string()),
+        raw_output: Some(serde_json::json!({"exit": 0})),
+        content: super::events::ToolOutputBlock {
+            text: "done".to_string(),
+            skipped: 2,
+            diff: None,
+        },
+    };
+    assert_eq!(
+        serde_json::to_value(&update).unwrap(),
+        serde_json::json!({
+            "type": "tool_call_update",
+            "id": "call-9",
+            "status": "completed",
+            "title": "Renamed",
+            "raw_output": {"exit": 0},
+            "content": {"text": "done", "skipped": 2, "diff": null}
+        })
+    );
+    assert_eq!(
+        serde_json::from_value::<SubagentEvent>(serde_json::to_value(&update).unwrap()).unwrap(),
+        update
+    );
+    let mode = SubagentEvent::Mode {
+        id: "code".to_string(),
+    };
+    assert_eq!(
+        serde_json::to_value(&mode).unwrap(),
+        serde_json::json!({"type": "mode", "id": "code"})
+    );
+    let info = SubagentEvent::SessionInfo {
+        title: Some("Fixing the bug".to_string()),
+    };
+    assert_eq!(
+        serde_json::to_value(&info).unwrap(),
+        serde_json::json!({"type": "session_info", "title": "Fixing the bug"})
+    );
+    let message = SubagentEvent::Message {
+        text: "hi".to_string(),
+    };
+    assert_eq!(
+        serde_json::to_value(&message).unwrap(),
+        serde_json::json!({"type": "message", "text": "hi"})
+    );
 }
 
 #[test]
@@ -702,4 +1050,1025 @@ fn timeout_parsing_falls_back_on_garbage_zero_and_missing() {
     assert_eq!(timeout_from_secs(Some("-3")), DEFAULT_CALL_TIMEOUT);
     assert_eq!(timeout_from_secs(Some("")), DEFAULT_CALL_TIMEOUT);
     assert_eq!(timeout_from_secs(None), DEFAULT_CALL_TIMEOUT);
+}
+
+// -------------------------------------------------------------------------
+// Phase 1: fs path sandbox + stable stop reasons
+// -------------------------------------------------------------------------
+
+#[test]
+fn stop_reasons_are_stable_snake_case_strings() {
+    // The persisted `SubAgentCallOutput.stop_reason` must not depend on
+    // `Debug` formatting: the wire snake_case names are stable across
+    // crate versions.
+    use agent_client_protocol::schema::v1::StopReason;
+    assert_eq!(stop_reason_str(StopReason::EndTurn), "end_turn");
+    assert_eq!(stop_reason_str(StopReason::MaxTokens), "max_tokens");
+    assert_eq!(
+        stop_reason_str(StopReason::MaxTurnRequests),
+        "max_turn_requests"
+    );
+    assert_eq!(stop_reason_str(StopReason::Refusal), "refusal");
+    assert_eq!(stop_reason_str(StopReason::Cancelled), "cancelled");
+}
+
+#[test]
+fn ensure_path_within_accepts_paths_inside_the_workspace() {
+    let root = tempfile::tempdir().unwrap();
+    let inside = root.path().join("sub").join("file.txt");
+    let resolved = ensure_path_within(root.path(), &inside).unwrap();
+    // Existing or not, an in-workspace path resolves under the root.
+    // Compare against the CANONICAL root: `/tmp` is a symlink on macOS
+    // (`/private/tmp`), so the raw tempdir path is not the resolved prefix.
+    assert!(resolved.starts_with(root.path().canonicalize().unwrap()));
+}
+
+#[test]
+fn ensure_path_within_rejects_paths_outside_the_workspace() {
+    let root = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let outside = scratch.path().join("secret.txt");
+    let err = ensure_path_within(root.path(), &outside)
+        .unwrap_err()
+        .message;
+    assert!(
+        err.contains("resolves outside the session workspace"),
+        "{err}"
+    );
+}
+
+#[test]
+fn ensure_path_within_rejects_parent_dir_escapes() {
+    let root = tempfile::tempdir().unwrap();
+    // Same absolute prefix, but climbing out through `..`.
+    let escaping = root.path().join("..").join("elsewhere.txt");
+    let err = ensure_path_within(root.path(), &escaping)
+        .unwrap_err()
+        .message;
+    assert!(
+        err.contains("resolves outside the session workspace"),
+        "{err}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_path_within_rejects_escapes_through_a_symlinked_directory() {
+    // A symlink INSIDE the workspace pointing OUTSIDE it must be rejected,
+    // even when the target file does not exist yet (a write that would
+    // create it): canonicalizing the deepest existing ancestor (the
+    // symlinked directory itself) catches what a plain prefix check cannot
+    // see.
+    let root = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let link = root.path().join("link");
+    std::os::unix::fs::symlink(scratch.path(), &link).unwrap();
+    let through_link = link.join("new-file.txt");
+
+    let err = ensure_path_within(root.path(), &through_link)
+        .unwrap_err()
+        .message;
+    assert!(
+        err.contains("resolves outside the session workspace"),
+        "{err}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_path_within_rejects_dangling_symlinks() {
+    // A symlink whose target does not exist cannot be verified to stay
+    // inside the workspace: it must fail CLOSED (a `canonicalize`-based
+    // check would silently miss it, since `canonicalize` errors on
+    // dangling links too).
+    let root = tempfile::tempdir().unwrap();
+    let link = root.path().join("dangling");
+    std::os::unix::fs::symlink("/nonexistent/target/dir", &link).unwrap();
+    let through = link.join("file.txt");
+
+    let err = ensure_path_within(root.path(), &through)
+        .unwrap_err()
+        .message;
+    assert!(
+        err.contains("resolves outside the session workspace"),
+        "{err}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_path_within_rejects_symlink_escapes() {
+    // A symlink INSIDE the workspace pointing OUTSIDE it must be rejected:
+    // the on-disk canonicalize pass catches what the lexical prefix check
+    // cannot see.
+    let root = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let secret = scratch.path().join("secret.txt");
+    std::fs::write(&secret, "top secret").unwrap();
+    let link = root.path().join("link.txt");
+    std::os::unix::fs::symlink(&secret, &link).unwrap();
+
+    let err = ensure_path_within(root.path(), &link).unwrap_err().message;
+    assert!(
+        err.contains("resolves outside the session workspace"),
+        "{err}"
+    );
+}
+
+#[test]
+fn ensure_path_within_resolves_an_existing_file_to_its_real_path() {
+    let root = tempfile::tempdir().unwrap();
+    let inside = root.path().join("real.txt");
+    std::fs::write(&inside, "content").unwrap();
+    let resolved = ensure_path_within(root.path(), &inside).unwrap();
+    assert_eq!(resolved, inside.canonicalize().unwrap());
+}
+
+// -------------------------------------------------------------------------
+// Phase 1 (fix rounds 2-3): kernel-pinned fs sandbox (`sandbox::read/write`)
+// — the path the production Unix handlers actually take.
+// -------------------------------------------------------------------------
+
+#[cfg(unix)]
+fn pinned_root(root: &Path) -> super::sandbox::PinnedRoot {
+    super::sandbox::PinnedRoot::acquire(root).unwrap()
+}
+
+#[cfg(unix)]
+#[test]
+fn pinned_sandbox_round_trips_reads_and_writes() {
+    use super::sandbox;
+    let root = tempfile::tempdir().unwrap();
+    let pinned = pinned_root(root.path());
+    // Write through the pinned walk, including a NOT-YET-EXISTING
+    // intermediate directory (the write must create it).
+    sandbox::write(
+        &pinned,
+        &root.path().join("nested/dir/file.txt"),
+        "one\ntwo\nthree\n",
+    )
+    .unwrap();
+    // Full read.
+    assert_eq!(
+        sandbox::read(
+            &pinned,
+            &root.path().join("nested/dir/file.txt"),
+            None,
+            None
+        )
+        .unwrap(),
+        "one\ntwo\nthree\n"
+    );
+    // 1-based line window: line 2, limit 1 → "two" (protocol contract).
+    assert_eq!(
+        sandbox::read(
+            &pinned,
+            &root.path().join("nested/dir/file.txt"),
+            Some(2),
+            Some(1)
+        )
+        .unwrap(),
+        "two"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn pinned_sandbox_rejects_paths_outside_the_workspace() {
+    use super::sandbox;
+    let root = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let outside = scratch.path().join("secret.txt");
+    std::fs::write(&outside, "top secret").unwrap();
+    let pinned = pinned_root(root.path());
+
+    let err = sandbox::read(&pinned, &outside, None, None)
+        .unwrap_err()
+        .message;
+    assert!(
+        err.contains("resolves outside the session workspace"),
+        "{err}"
+    );
+    let err = sandbox::write(&pinned, &outside, "x").unwrap_err().message;
+    assert!(
+        err.contains("resolves outside the session workspace"),
+        "{err}"
+    );
+    // The outside file was NOT touched by the attempted write.
+    assert_eq!(std::fs::read_to_string(&outside).unwrap(), "top secret");
+}
+
+#[cfg(unix)]
+#[test]
+fn pinned_sandbox_rejects_relative_paths() {
+    use super::sandbox;
+    let root = tempfile::tempdir().unwrap();
+    let pinned = pinned_root(root.path());
+    // The ACP spec requires absolute paths: a relative request is refused
+    // (it would resolve against the process CWD, not the workspace).
+    let err = sandbox::read(&pinned, Path::new("file.txt"), None, None)
+        .unwrap_err()
+        .message;
+    assert!(
+        err.contains("resolves outside the session workspace"),
+        "{err}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn pinned_sandbox_rejects_symlink_escapes_at_open_time() {
+    use super::sandbox;
+    let root = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let pinned = pinned_root(root.path());
+    // 1. Symlink FILE inside → outside: fails closed.
+    let secret = scratch.path().join("secret.txt");
+    std::fs::write(&secret, "top secret").unwrap();
+    let file_link = root.path().join("link.txt");
+    std::os::unix::fs::symlink(&secret, &file_link).unwrap();
+    let err = sandbox::read(&pinned, &file_link, None, None)
+        .unwrap_err()
+        .message;
+    assert!(
+        err.contains("resolves outside the session workspace"),
+        "{err}"
+    );
+    // 2. Symlinked DIRECTORY inside → outside: fails closed on write (the
+    //    target cannot be proven to stay inside).
+    let dir_link = root.path().join("link");
+    std::os::unix::fs::symlink(scratch.path(), &dir_link).unwrap();
+    let err = sandbox::write(&pinned, &dir_link.join("new.txt"), "x")
+        .unwrap_err()
+        .message;
+    assert!(
+        err.contains("resolves outside the session workspace"),
+        "{err}"
+    );
+    assert!(!scratch.path().join("new.txt").exists(), "no outside write");
+    // 3. Dangling symlink: fails closed.
+    let dangling = root.path().join("dangling");
+    std::os::unix::fs::symlink("/nonexistent/target/dir", &dangling).unwrap();
+    let err = sandbox::read(&pinned, &dangling.join("f.txt"), None, None)
+        .unwrap_err()
+        .message;
+    assert!(
+        err.contains("resolves outside the session workspace"),
+        "{err}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn pinned_sandbox_write_never_follows_a_final_symlink() {
+    use super::sandbox;
+    let root = tempfile::tempdir().unwrap();
+    let pinned = pinned_root(root.path());
+    // A write THROUGH a final-entry symlink fails closed — it must not
+    // truncate an existing target nor materialize one through a dangling
+    // link (classic no-follow semantics).
+    std::fs::write(root.path().join("real.txt"), "precious").unwrap();
+    let alias = root.path().join("alias.txt");
+    std::os::unix::fs::symlink(root.path().join("real.txt"), &alias).unwrap();
+    let err = sandbox::write(&pinned, &alias, "overwritten")
+        .unwrap_err()
+        .message;
+    assert!(
+        err.contains("resolves outside the session workspace"),
+        "{err}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("real.txt")).unwrap(),
+        "precious"
+    );
+
+    let missing = root.path().join("missing.txt");
+    let link = root.path().join("to-missing.txt");
+    std::os::unix::fs::symlink(&missing, &link).unwrap();
+    let err = sandbox::write(&pinned, &link, "created?")
+        .unwrap_err()
+        .message;
+    assert!(
+        err.contains("resolves outside the session workspace"),
+        "{err}"
+    );
+    assert!(!missing.exists(), "no file materialized through the link");
+}
+
+#[cfg(unix)]
+#[test]
+fn pinned_sandbox_allows_symlinks_that_stay_inside() {
+    use super::sandbox;
+    let root = tempfile::tempdir().unwrap();
+    let pinned = pinned_root(root.path());
+    std::fs::write(root.path().join("real.txt"), "inside").unwrap();
+    let link = root.path().join("alias.txt");
+    std::os::unix::fs::symlink(root.path().join("real.txt"), &link).unwrap();
+    // A symlink pointing INSIDE the workspace is legitimate and served.
+    assert_eq!(sandbox::read(&pinned, &link, None, None).unwrap(), "inside");
+    // An ABSOLUTE target resets the walk base to the pinned root: it must
+    // resolve from the workspace root, not from the symlink's directory.
+    let subdir = root.path().join("sub");
+    std::fs::create_dir_all(&subdir).unwrap();
+    let absolute_link = subdir.join("abs.txt");
+    std::os::unix::fs::symlink(
+        root.path().canonicalize().unwrap().join("real.txt"),
+        &absolute_link,
+    )
+    .unwrap();
+    assert_eq!(
+        sandbox::read(&pinned, &absolute_link, None, None).unwrap(),
+        "inside"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn pinned_sandbox_rejects_symlink_targets_climbing_out_with_parent_dirs() {
+    use super::sandbox;
+    let root = tempfile::tempdir().unwrap();
+    let pinned = pinned_root(root.path());
+    // A relative target climbing out of the workspace via `..` is rejected
+    // regardless of where it actually points.
+    let link = root.path().join("up.txt");
+    std::os::unix::fs::symlink("../elsewhere/secret.txt", &link).unwrap();
+    let err = sandbox::read(&pinned, &link, None, None)
+        .unwrap_err()
+        .message;
+    assert!(
+        err.contains("resolves outside the session workspace"),
+        "{err}"
+    );
+
+    // Same for an ABSOLUTE target inside the workspace prefix whose stripped
+    // remainder carries `..`: without the check it would reach
+    // `openat(root_fd, "..")` and open the workspace's parent.
+    let abs_link = root.path().join("abs-up.txt");
+    std::os::unix::fs::symlink(
+        root.path().join("sub/../../../elsewhere/secret.txt"),
+        &abs_link,
+    )
+    .unwrap();
+    let err = sandbox::read(&pinned, &abs_link, None, None)
+        .unwrap_err()
+        .message;
+    assert!(
+        err.contains("resolves outside the session workspace"),
+        "{err}"
+    );
+}
+
+// ── Diff summaries (Phase 3b.2) ───────────────────────────────────────
+
+use super::events::diff_summary;
+
+#[test]
+fn diff_summary_new_file_counts_everything_as_added() {
+    let s = diff_summary("src/new.rs", None, "a\nb\nc\n");
+    assert_eq!(s.added, 3);
+    assert_eq!(s.removed, 0);
+    assert_eq!(s.path, "src/new.rs");
+}
+
+#[test]
+fn diff_summary_set_difference_counts_changed_lines() {
+    let old = "keep\nchange-me\nremove\n";
+    let new = "keep\nchanged\nadd\n";
+    let s = diff_summary("f.rs", Some(old), new);
+    // added: changed, add (2) — removed: change-me, remove (2).
+    assert_eq!(s.added, 2);
+    assert_eq!(s.removed, 2);
+}
+
+#[test]
+fn diff_summary_identical_content_is_zero_on_both_sides() {
+    let s = diff_summary("f.rs", Some("same\nlines\n"), "same\nlines\n");
+    assert_eq!(s.added, 0);
+    assert_eq!(s.removed, 0);
+}
+
+#[test]
+fn diff_summary_degrades_to_length_delta_past_the_cap() {
+    let big_old: String =
+        std::iter::repeat_n("x\n", super::events::DIFF_SUMMARY_LINE_CAP + 10).collect();
+    let big_new = format!("{big_old}extra\n");
+    // Either side past the cap → raw line-count delta, no O(n) set scan.
+    let s = diff_summary("huge.rs", Some(&big_old), &big_new);
+    assert_eq!(s.added, 1);
+    assert_eq!(s.removed, 0);
+}
+
+#[test]
+fn extract_content_text_joins_texts_and_keeps_the_last_diff() {
+    use super::events::extract_content_text;
+    use agent_client_protocol::schema::v1::{
+        Content, ContentBlock, Diff as AcpDiff, ImageContent, TextContent, ToolCallContent,
+    };
+
+    let blocks = vec![
+        ToolCallContent::Content(Content::new(ContentBlock::Text(TextContent::new("first")))),
+        // A non-text content block is SKIPPED, not rendered.
+        ToolCallContent::Content(Content::new(ContentBlock::Image(ImageContent::new(
+            "data:img",
+            "image/png",
+        )))),
+        ToolCallContent::Diff(AcpDiff::new("a.rs", "one\ntwo\n").old_text("one\n")),
+        // The LAST diff block wins — a follow-up edit supersedes the
+        // previous summary (documented contract).
+        ToolCallContent::Diff(AcpDiff::new("b.rs", "new file, all added\nlines\n")),
+        ToolCallContent::Content(Content::new(ContentBlock::Text(TextContent::new("second")))),
+    ];
+
+    let block = extract_content_text(blocks);
+    // Text chunks are newline-joined in order.
+    assert_eq!(block.text, "first\nsecond");
+    // Exactly one skipped block (the image); terminals also count here.
+    assert_eq!(block.skipped, 1);
+    // The second diff replaced the first, and its new-file semantics
+    // (old_text = None) count every line as added.
+    let diff = block.diff.expect("last diff survives");
+    assert_eq!(diff.path, "b.rs");
+    assert_eq!(diff.added, 2);
+    assert_eq!(diff.removed, 0);
+}
+
+// ── Session resume (Phase 4) ──────────────────────────────────────────
+
+#[test]
+fn input_defaults_continue_session_to_true() {
+    use super::SubAgentCallInput;
+    // Omitted → resume (the token-efficient default).
+    let input: SubAgentCallInput = serde_json::from_value(serde_json::json!({})).unwrap();
+    assert!(input.continue_session);
+    // Explicit opt-out → fresh session.
+    let input: SubAgentCallInput =
+        serde_json::from_value(serde_json::json!({"continue_session": false})).unwrap();
+    assert!(!input.continue_session);
+}
+
+#[test]
+fn subagent_stores_sessions_per_agent() {
+    let sub = super::SubAgent::new();
+    assert_eq!(sub.stored_session("gemini"), None);
+    // Per-agent keys do not interfere.
+    sub.store_session("gemini", "s-1".to_string());
+    sub.store_session("opencode", "s-2".to_string());
+    assert_eq!(sub.stored_session("gemini").as_deref(), Some("s-1"));
+    assert_eq!(sub.stored_session("opencode").as_deref(), Some("s-2"));
+    // A later successful turn REPLACES the stored id.
+    sub.store_session("gemini", "s-3".to_string());
+    assert_eq!(sub.stored_session("gemini").as_deref(), Some("s-3"));
+}
+
+/// The dispatch-level flag→id mapping (`continue_session` → the `resume`
+/// argument): resume-by-default hands over the stored id, the opt-out and
+/// the nothing-stored case produce `None` (→ `session/new`).
+#[test]
+fn resume_id_maps_continue_session_to_the_stored_id() {
+    let sub = super::SubAgent::new();
+    // Nothing stored: both the default and the opt-out open a fresh session.
+    assert_eq!(sub.resume_id("gemini", true), None);
+    assert_eq!(sub.resume_id("gemini", false), None);
+    // With an id stored: the default resumes it, the opt-out ignores it.
+    sub.store_session("gemini", "s-1".to_string());
+    assert_eq!(sub.resume_id("gemini", true).as_deref(), Some("s-1"));
+    assert_eq!(sub.resume_id("gemini", false), None);
+    // The mapping is per agent: another agent's id is not leaked.
+    sub.store_session("opencode", "s-2".to_string());
+    assert_eq!(sub.resume_id("opencode", true).as_deref(), Some("s-2"));
+    assert_eq!(sub.resume_id("gemini", true).as_deref(), Some("s-1"));
+}
+
+/// Which session-lifecycle request the fixture received, in order.
+type RequestLog = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
+/// Spawn an ACP fixture harness for the resume tests: it advertises the
+/// given agent capabilities, logs every session-lifecycle request it
+/// receives (order preserved), and ends the prompt turn immediately.
+/// Returns the CLIENT side of the duplex channel (to hand to
+/// [`drive_turn`]) plus the agent task handle (abort it when done).
+fn spawn_resume_fixture(
+    capabilities: agent_client_protocol::schema::v1::AgentCapabilities,
+    log: RequestLog,
+) -> (agent_client_protocol::Channel, tokio::task::JoinHandle<()>) {
+    use agent_client_protocol::schema::v1::{
+        InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse,
+        NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, ResumeSessionRequest,
+        ResumeSessionResponse, SessionId,
+    };
+    use agent_client_protocol::{Agent as AgentRole, Responder};
+
+    let (client_side, agent_side) = agent_client_protocol::Channel::duplex();
+    let new_log = log.clone();
+    let resume_log = log.clone();
+    let load_log = log.clone();
+    let agent_task = tokio::spawn(async move {
+        let _ = AgentRole
+            .builder()
+            .name("resume-fixture")
+            .on_receive_request(
+                async move |request: InitializeRequest,
+                            responder: Responder<InitializeResponse>,
+                            _cx| {
+                    // The handler closure may fire more than once: clone
+                    // the capabilities instead of moving them out.
+                    responder.respond(
+                        InitializeResponse::new(request.protocol_version)
+                            .agent_capabilities(capabilities.clone()),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_request: NewSessionRequest,
+                            responder: Responder<NewSessionResponse>,
+                            _cx| {
+                    new_log.lock().unwrap().push("new".to_string());
+                    responder.respond(NewSessionResponse::new(SessionId::new("fresh-1")))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |request: ResumeSessionRequest,
+                            responder: Responder<ResumeSessionResponse>,
+                            _cx| {
+                    resume_log
+                        .lock()
+                        .unwrap()
+                        .push(format!("resume:{}", request.session_id.0));
+                    responder.respond(ResumeSessionResponse::new())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |request: LoadSessionRequest,
+                            responder: Responder<LoadSessionResponse>,
+                            _cx| {
+                    load_log
+                        .lock()
+                        .unwrap()
+                        .push(format!("load:{}", request.session_id.0));
+                    responder.respond(LoadSessionResponse::new())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_request: PromptRequest, responder: Responder<PromptResponse>, _cx| {
+                    responder.respond(PromptResponse::new(
+                        agent_client_protocol::schema::v1::StopReason::EndTurn,
+                    ))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_to(agent_side)
+            .await;
+    });
+    (client_side, agent_task)
+}
+
+/// Drive one `run_session` turn against a fixture channel, returning
+/// `(stop_reason, session_id)`.
+async fn drive_turn(
+    client_side: agent_client_protocol::Channel,
+    input: &str,
+    resume: Option<String>,
+) -> (String, String) {
+    let (chunk_tx, _chunk_rx) = tokio::sync::mpsc::unbounded_channel();
+    let accumulated = Arc::new(Mutex::new(String::new()));
+    let (turn, _, _) = tokio::join!(
+        run_session(
+            client_side,
+            input.to_string(),
+            resume,
+            std::env::temp_dir(),
+            "",
+            accumulated,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            chunk_tx,
+        ),
+        std::future::ready(()),
+        std::future::ready(()),
+    );
+    turn.unwrap()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn run_session_resumes_the_stored_session_when_advertised() {
+    use agent_client_protocol::schema::v1::{
+        AgentCapabilities, SessionCapabilities, SessionResumeCapabilities,
+    };
+    let resume_caps = || {
+        AgentCapabilities::new().session_capabilities(
+            SessionCapabilities::new().resume(SessionResumeCapabilities::new()),
+        )
+    };
+
+    let log: RequestLog = Arc::default();
+    // First turn: no stored session → plain `session/new`, and the id the
+    // harness handed out is returned to the caller for storage.
+    let (client_side, agent_task) = spawn_resume_fixture(resume_caps(), log.clone());
+    let (reason, session_id) = drive_turn(client_side, "first", None).await;
+    agent_task.abort();
+    assert_eq!(reason, "end_turn");
+    assert_eq!(session_id, "fresh-1");
+    assert_eq!(log.lock().unwrap().as_slice(), ["new"]);
+
+    // Second turn (fresh fixture, shared log): the stored id + an
+    // advertised resume capability → `session/resume` carrying that id;
+    // the resumed session id is what the next call would store again.
+    let (client_side, agent_task) = spawn_resume_fixture(resume_caps(), log.clone());
+    let (reason, session_id) = drive_turn(client_side, "second", Some(session_id)).await;
+    agent_task.abort();
+    assert_eq!(reason, "end_turn");
+    assert_eq!(session_id, "fresh-1");
+    assert_eq!(log.lock().unwrap().as_slice(), ["new", "resume:fresh-1"]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn fresh_session_opt_out_opens_a_new_session_even_when_resume_works() {
+    use agent_client_protocol::schema::v1::{
+        AgentCapabilities, SessionCapabilities, SessionResumeCapabilities,
+    };
+
+    // The dispatch layer maps `continue_session: false` to `resume: None`
+    // at this boundary: even with resume support and a stored id, a fresh
+    // session must be opened.
+    let log: RequestLog = Arc::default();
+    let (client_side, agent_task) = spawn_resume_fixture(
+        AgentCapabilities::new().session_capabilities(
+            SessionCapabilities::new().resume(SessionResumeCapabilities::new()),
+        ),
+        log.clone(),
+    );
+    let (reason, session_id) = drive_turn(client_side, "fresh please", None).await;
+    agent_task.abort();
+    assert_eq!(reason, "end_turn");
+    assert_eq!(session_id, "fresh-1");
+    assert_eq!(log.lock().unwrap().as_slice(), ["new"]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn resume_without_advertised_capability_falls_back_to_new() {
+    use agent_client_protocol::schema::v1::AgentCapabilities;
+
+    // A stored id handed to a harness WITHOUT resume support must not
+    // abort the turn: it silently falls back to `session/new`.
+    let log: RequestLog = Arc::default();
+    let (client_side, agent_task) = spawn_resume_fixture(AgentCapabilities::new(), log.clone());
+    let (reason, session_id) =
+        drive_turn(client_side, "no resume", Some("stored-9".to_string())).await;
+    agent_task.abort();
+    assert_eq!(reason, "end_turn");
+    assert_eq!(session_id, "fresh-1");
+    assert_eq!(log.lock().unwrap().as_slice(), ["new"]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn failed_resume_falls_back_to_a_fresh_session() {
+    use agent_client_protocol::schema::v1::{
+        AgentCapabilities, InitializeRequest, InitializeResponse, NewSessionRequest,
+        NewSessionResponse, PromptRequest, PromptResponse, ResumeSessionRequest,
+        ResumeSessionResponse, SessionCapabilities, SessionId, SessionResumeCapabilities,
+    };
+    use agent_client_protocol::{Agent as AgentRole, Responder};
+
+    // A fixture whose `session/resume` handler ERRORS (e.g. the harness
+    // restarted and lost the session): the turn must still succeed via
+    // `session/new`.
+    let log: RequestLog = Arc::default();
+    let (client_side, agent_side) = agent_client_protocol::Channel::duplex();
+    let resume_log = log.clone();
+    let new_log = log.clone();
+    let agent_task = tokio::spawn(async move {
+        let _ = AgentRole
+            .builder()
+            .name("resume-error-fixture")
+            .on_receive_request(
+                async move |request: InitializeRequest,
+                            responder: Responder<InitializeResponse>,
+                            _cx| {
+                    responder.respond(
+                        InitializeResponse::new(request.protocol_version).agent_capabilities(
+                            AgentCapabilities::new().session_capabilities(
+                                SessionCapabilities::new().resume(SessionResumeCapabilities::new()),
+                            ),
+                        ),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_request: ResumeSessionRequest,
+                            responder: Responder<ResumeSessionResponse>,
+                            _cx| {
+                    resume_log.lock().unwrap().push("resume-error".to_string());
+                    let _ = responder.respond_with_internal_error("session gone");
+                    Ok(())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_request: NewSessionRequest,
+                            responder: Responder<NewSessionResponse>,
+                            _cx| {
+                    new_log.lock().unwrap().push("new".to_string());
+                    responder.respond(NewSessionResponse::new(SessionId::new("fresh-1")))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_request: PromptRequest, responder: Responder<PromptResponse>, _cx| {
+                    responder.respond(PromptResponse::new(
+                        agent_client_protocol::schema::v1::StopReason::EndTurn,
+                    ))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_to(agent_side)
+            .await;
+    });
+
+    let (reason, session_id) = drive_turn(client_side, "retry", Some("stored-9".to_string())).await;
+    agent_task.abort();
+    assert_eq!(reason, "end_turn");
+    assert_eq!(session_id, "fresh-1");
+    assert_eq!(log.lock().unwrap().as_slice(), ["resume-error", "new"]);
+}
+
+/// 4.4 on a RESUMED session: the `session/resume` response may carry
+/// `config_options` whose `model` default differs from the preferred
+/// model — the same set-before-prompt contract as `session/new` must
+/// apply (the kilo paid-tier default would fail the prompt otherwise).
+#[tokio::test(flavor = "current_thread")]
+async fn resumed_session_selects_the_preferred_session_model() {
+    use agent_client_protocol::schema::v1::{
+        AgentCapabilities, ContentBlock, ContentChunk, InitializeRequest, InitializeResponse,
+        PromptRequest, PromptResponse, ResumeSessionRequest, ResumeSessionResponse,
+        SessionCapabilities, SessionConfigId, SessionConfigOption, SessionConfigOptionValue,
+        SessionConfigSelectOption, SessionConfigValueId, SessionNotification,
+        SessionResumeCapabilities, SessionUpdate, SetSessionConfigOptionRequest,
+        SetSessionConfigOptionResponse, TextContent,
+    };
+    use agent_client_protocol::{Agent as AgentRole, Channel, Responder};
+
+    const PREFERRED: &str = "kilo/nvidia/nemotron-3-ultra-550b-a55b:free";
+
+    let log: RequestLog = Arc::default();
+    let (client_side, agent_side) = Channel::duplex();
+    let resume_log = log.clone();
+    let set_log = log.clone();
+    let agent_task = tokio::spawn(async move {
+        let _ = AgentRole
+            .builder()
+            .name("resume-model-fixture")
+            .on_receive_request(
+                async move |request: InitializeRequest,
+                            responder: Responder<InitializeResponse>,
+                            _cx| {
+                    responder.respond(
+                        InitializeResponse::new(request.protocol_version).agent_capabilities(
+                            AgentCapabilities::new().session_capabilities(
+                                SessionCapabilities::new().resume(SessionResumeCapabilities::new()),
+                            ),
+                        ),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |request: ResumeSessionRequest,
+                            responder: Responder<ResumeSessionResponse>,
+                            _cx| {
+                    resume_log
+                        .lock()
+                        .unwrap()
+                        .push(format!("resume:{}", request.session_id.0));
+                    responder.respond(ResumeSessionResponse::new().config_options(vec![
+                        SessionConfigOption::select(
+                            SessionConfigId::new("model"),
+                            "Model",
+                            // Default differs from PREFERRED: must be switched.
+                            SessionConfigValueId::new("kilo/google/gemini-3-pro-image"),
+                            vec![SessionConfigSelectOption::new(
+                                SessionConfigValueId::new(PREFERRED),
+                                "Nemotron free",
+                            )],
+                        ),
+                    ]))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |request: SetSessionConfigOptionRequest,
+                            responder: Responder<SetSessionConfigOptionResponse>,
+                            _cx| {
+                    // Client-side proof the request was actually SENT: the
+                    // assertions below only run when the client issues the
+                    // switch, so this log entry makes the test falsifiable
+                    // if model selection were skipped for resumed sessions.
+                    set_log
+                        .lock()
+                        .unwrap()
+                        .push(format!("set-config:{}", request.config_id.0));
+                    // The switch must carry the preferred model value.
+                    assert_eq!(request.config_id.0.as_ref(), "model");
+                    match &request.value {
+                        SessionConfigOptionValue::ValueId { value } => {
+                            assert_eq!(value.0.as_ref(), PREFERRED);
+                        }
+                        other => panic!("unexpected config value: {other:?}"),
+                    }
+                    responder.respond(SetSessionConfigOptionResponse::new(vec![
+                        SessionConfigOption::select(
+                            SessionConfigId::new("model"),
+                            "Model",
+                            SessionConfigValueId::new(PREFERRED),
+                            vec![SessionConfigSelectOption::new(
+                                SessionConfigValueId::new(PREFERRED),
+                                "Nemotron free",
+                            )],
+                        ),
+                    ]))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |request: PromptRequest, responder: Responder<PromptResponse>, _cx| {
+                    let _ = _cx.send_notification(SessionNotification::new(
+                        request.session_id.clone(),
+                        SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                            TextContent::new("model-resumed-ok"),
+                        ))),
+                    ));
+                    responder.respond(PromptResponse::new(
+                        agent_client_protocol::schema::v1::StopReason::EndTurn,
+                    ))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_to(agent_side)
+            .await;
+    });
+
+    let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel();
+    let accumulated = Arc::new(Mutex::new(String::new()));
+    let (turn, _, streamed) = tokio::join!(
+        run_session(
+            client_side,
+            "check resumed model".to_string(),
+            Some("stored-9".to_string()),
+            std::env::temp_dir(),
+            PREFERRED,
+            accumulated.clone(),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            chunk_tx,
+        ),
+        agent_task,
+        async { chunk_rx.recv().await },
+    );
+
+    let (stop_reason, session_id) = turn.unwrap();
+    assert_eq!(stop_reason, "end_turn");
+    // The RESUMED id (the requested one) is preserved — not a fresh id.
+    assert_eq!(session_id, "stored-9");
+    assert_eq!(
+        log.lock().unwrap().as_slice(),
+        // The set-config entry proves model selection ran on the RESUMED
+        // session: skipping `select_session_model` for resumes would leave
+        // the log at just ["resume:stored-9"] and fail this assertion.
+        ["resume:stored-9", "set-config:model"],
+        "the turn must resume AND switch the model before prompting"
+    );
+    assert_eq!(accumulated.lock().unwrap().as_str(), "model-resumed-ok");
+    assert_eq!(
+        streamed.unwrap().as_message_text(),
+        Some("model-resumed-ok")
+    );
+}
+
+/// Phase 5.4: a user stop during a running sub-agent turn sends ACP
+/// `session/cancel` and the turn ends with the spec-mandated
+/// `StopReason::Cancelled` — with the output streamed so far preserved
+/// and the (still valid) session id propagated.
+///
+/// The fixture's prompt handler spawns its answering task via `cx.spawn`
+/// (a handler that awaited inline would block the dispatch loop and the
+/// `CancelNotification` could never be processed — deadlock). The spawned
+/// task streams one message chunk, waits for the cancel notification, and
+/// only then answers.
+#[tokio::test(flavor = "current_thread")]
+async fn run_session_cancels_the_remote_turn_on_the_stop_signal() {
+    use agent_client_protocol::schema::v1::{
+        AgentCapabilities, CancelNotification, ContentBlock, ContentChunk, InitializeRequest,
+        InitializeResponse, NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse,
+        SessionId, SessionNotification, SessionUpdate, StopReason, TextContent,
+    };
+    use agent_client_protocol::{Agent as AgentRole, Channel, Responder};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    const PARTIAL: &str = "partial output so far";
+
+    let (client_side, agent_side) = Channel::duplex();
+    // Shared between the prompt task and the cancel-notification handler.
+    let cancel_received = Arc::new(tokio::sync::Notify::new());
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    let notify = cancel_received.clone();
+    let flag = cancel_flag.clone();
+    let agent_task = tokio::spawn(async move {
+        let _ = AgentRole
+            .builder()
+            .name("cancel-fixture")
+            .on_receive_request(
+                async move |request: InitializeRequest,
+                            responder: Responder<InitializeResponse>,
+                            _cx| {
+                    responder.respond(
+                        InitializeResponse::new(request.protocol_version)
+                            .agent_capabilities(AgentCapabilities::new()),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_request: NewSessionRequest,
+                            responder: Responder<NewSessionResponse>,
+                            _cx| {
+                    responder.respond(NewSessionResponse::new(SessionId::new("cancel-fixture")))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_notification(
+                async move |_notification: CancelNotification, _cx| {
+                    flag.store(true, Ordering::Relaxed);
+                    // `notify_one` (not `notify_waiters`): it stores a permit
+                    // when no waiter is registered yet, so a cancel that
+                    // arrives before the spawned responder task's first poll
+                    // cannot be lost (which would hang the test instead of
+                    // failing it).
+                    notify.notify_one();
+                    Ok(())
+                },
+                agent_client_protocol::on_receive_notification!(),
+            )
+            .on_receive_request(
+                async move |request: PromptRequest, responder: Responder<PromptResponse>, cx| {
+                    // Stream one chunk immediately, then park the answer on
+                    // the cancel signal: the client must see the partial
+                    // output BEFORE the stop, mirroring a real long turn.
+                    let _ = cx.send_notification(SessionNotification::new(
+                        request.session_id.clone(),
+                        SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                            TextContent::new(PARTIAL),
+                        ))),
+                    ));
+                    let notify = cancel_received.clone();
+                    cx.spawn(async move {
+                        notify.notified().await;
+                        responder.respond(PromptResponse::new(StopReason::Cancelled))
+                    })?;
+                    Ok(())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_to(agent_side)
+            .await;
+    });
+
+    let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel();
+    let accumulated = Arc::new(Mutex::new(String::new()));
+
+    // Simulate the user hitting ESC as soon as the first chunk arrives.
+    let stop_signal = Arc::new(AtomicBool::new(false));
+    let stop_driver = {
+        let stop_signal = stop_signal.clone();
+        async move {
+            if chunk_rx.recv().await.is_some() {
+                stop_signal.store(true, Ordering::Relaxed);
+            }
+        }
+    };
+
+    let (turn, _, _) = tokio::join!(
+        run_session(
+            client_side,
+            "long running task".to_string(),
+            None,
+            std::env::temp_dir(),
+            "",
+            accumulated.clone(),
+            stop_signal.clone(),
+            chunk_tx,
+        ),
+        agent_task,
+        stop_driver,
+    );
+
+    let (stop_reason, session_id) = turn.unwrap();
+    assert_eq!(stop_reason, "cancelled");
+    // Partial output streamed before the stop survives.
+    assert_eq!(accumulated.lock().unwrap().as_str(), PARTIAL);
+    // The turn ended protocol-clean, so the session id IS propagated.
+    assert_eq!(session_id, "cancel-fixture");
+    // The fixture actually received the ACP cancel notification.
+    assert!(cancel_flag.load(Ordering::Relaxed));
 }

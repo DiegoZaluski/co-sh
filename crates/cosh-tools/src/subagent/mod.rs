@@ -3,10 +3,21 @@
 //! The model sees a single `subagent_call` tool, but the harness dispatches
 //! it to two implementations (see [`SubAgent`]): an external agent harness —
 //! driven through the [Agent Client Protocol (ACP)](https://agentclientprotocol.com/)
-//! as a full client turn (initialize → session/new → session/prompt), with
-//! agent message chunks streamed in real time and accumulated until the turn
-//! ends — or, when `agent` is omitted/empty, an internal agent (a nested
-//! harness that reports only its final answer).
+//! as a full client turn (initialize → `session/new` or `session/resume` →
+//! `session/prompt`), with agent message chunks streamed in real time and
+//! accumulated until the turn ends — or, when `agent` is omitted/empty, an
+//! internal agent (a nested harness that reports only its final answer).
+//!
+//! Two turn behaviors apply to the external path:
+//!
+//! - **Session resume by default** (Phase 4): the agent's most recent ACP
+//!   session is reused on the next call (`continue_session`, omitted =
+//!   resume), keeping the sub-agent's context across calls; `false` starts
+//!   a brand-new session. A failed or timed-out turn stores nothing.
+//! - **Cancellation** (Phase 5): the agent loop's shared stop flag is raced
+//!   against the prompt await — a trigger sends `session/cancel` and the
+//!   turn ends with the agent's own `StopReason::Cancelled`, preserving the
+//!   output streamed so far.
 //!
 //! # Supported agents
 //!
@@ -26,8 +37,20 @@
 //! | `codex` | `npx -y @agentclientprotocol/codex-acp@latest` (official adapter) |
 
 pub mod acp;
+/// Typed event stream mapped from the ACP `session/update` notifications:
+/// the backend foundation for the TUI sub-agent box (Phase 3).
+pub mod events;
+/// Kernel-pinned filesystem sandbox for the ACP `fs/*` handlers (Unix only;
+/// other platforms use the validate-then-serve fallback in [`acp`]).
+#[cfg(unix)]
+pub mod sandbox;
+/// Severity DSL for code-review reports: the `code_review` prompt contract
+/// (`<!-- severity: ... -->` header) and its extraction. The header tints
+/// the sub-agent box green/yellow/red and is never rendered.
+pub mod severity;
 pub mod types;
 
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 use crate::ToolDescription;
@@ -40,13 +63,16 @@ pub use types::{SubAgentCallInput, SubAgentCallOutput};
 /// or an internal agent (a nested harness: fresh empty context,
 /// auto-approve, no persistence, final report only) when `agent` is omitted
 /// or empty. The harness routes the call; this struct owns the visible
-/// schema, the optional description `note` (see [`set_note`](Self::set_note))
-/// and the last-input storage.
+/// schema, the optional description `note` (see [`set_note`](Self::set_note)),
+/// and the cross-call memory: the last input message (retry support) and
+/// the last ACP session id per agent (Phase 4 session resume).
 ///
 /// Each instance keeps the last input message sent to a sub-agent, so a
-/// retry after a failed call does not require re-writing the whole prompt.
-/// The harness creates one instance per agent loop, so the stored message
-/// never leaks across sessions and no explicit `clean()` is needed.
+/// retry after a failed call does not require re-writing the whole prompt,
+/// plus the last ACP session id per agent name, so the next call with
+/// `continue_session` (the default) resumes that session. The harness
+/// creates one instance per agent loop, so neither ever leaks across
+/// sessions and no explicit `clean()` is needed.
 pub struct SubAgent {
     /// MCP Tool description for `call`.
     pub description_call: ToolDescription,
@@ -56,6 +82,17 @@ pub struct SubAgent {
     /// Last input message sent to a sub-agent in this session, reused when
     /// a call omits `input`.
     last_input: Mutex<Option<String>>,
+    /// Last ACP session id per agent name (Phase 4): the session each
+    /// harness returned from `session/new`, resumed by the next call with
+    /// `continue_session` (the default) so the sub-agent keeps its context
+    /// across calls. Failed/timeout turns store nothing — a session whose
+    /// turn errored is not trusted.
+    ///
+    /// Concurrency invariant: the read-then-store-after-await pattern in
+    /// the dispatch layer is safe because tool dispatch is sequential per
+    /// agent loop and each harness owns its own `SubAgent` — a parallel
+    /// dispatch change would need its own synchronization here.
+    last_session: Mutex<HashMap<String, String>>,
 }
 
 impl Default for SubAgent {
@@ -74,6 +111,7 @@ impl SubAgent {
             description_call: Self::build_tool_description(""),
             note: String::new(),
             last_input: Mutex::new(None),
+            last_session: Mutex::new(HashMap::new()),
         }
     }
 
@@ -124,6 +162,10 @@ impl SubAgent {
                      - Use `subagent_call` with `agent` (and optionally `input`) \
                      to delegate a task to another agent ACP harness.\n\
                      - Omit `input` to reuse the last message sent to a sub-agent.\n\
+                     - Consecutive calls to the same agent resume that agent's \
+                     most recent session by default, keeping its context (ideal \
+                     for review/iteration follow-ups). Pass `continue_session: \
+                     false` when the new task is unrelated and needs clean context.\n\
                      - Omit `agent` (or pass an empty string) to call the internal \
                      agent instead of an external ACP harness.\n\
                      - Use `bash_run` for regular shell commands. \
@@ -191,6 +233,14 @@ impl SubAgent {
                         "type": "string",
                         "description": "The message to send to the sub-agent as input. Optional: if omitted (or empty), the last message sent to a sub-agent in this session is reused automatically, so a failed call can be retried without re-writing the prompt. If no sub-agent has been called yet, an error is returned.",
                     },
+                    "code_review": {
+                        "type": "boolean",
+                        "description": "Set to true when the task is a CODE REVIEW. The sub-agent's final report then starts with a `<!-- severity: green|yellow|red -->` header consumed by the client: it tints the sub-agent box (green = at most cosmetic details, yellow = minor issues / bad practice, red = something critical found). Ignored for non-review tasks. Optional, defaults to false.",
+                    },
+                    "continue_session": {
+                        "type": "boolean",
+                        "description": "Resume the agent's most recent session, keeping its context (default). Set false to start a brand-new session when the new task is unrelated and needs clean context.",
+                    },
                 },
                 "required": [],
             },
@@ -238,6 +288,46 @@ impl SubAgent {
                  argument to send the first message."
                 .to_string()
         })
+    }
+
+    /// Store the ACP session id a harness returned for `agent` (Phase 4).
+    ///
+    /// Only successful turns are stored: a failed or timed-out turn leaves
+    /// the previous id untouched (so `None` from [`stored_session`] makes
+    /// the next call open a fresh session, and an older id that a failed
+    /// turn ran on is retried on the next default call — a stale one
+    /// self-heals via the `session/new` fallback in
+    /// [`open_or_resume_session`]).
+    #[allow(clippy::unwrap_used)]
+    pub fn store_session(&self, agent: &str, session_id: String) {
+        self.last_session
+            .lock()
+            .unwrap()
+            .insert(agent.to_string(), session_id);
+    }
+
+    /// The session id to resume for `agent`, when `continue_session` is
+    /// requested and one is stored. `None` → the caller opens a fresh
+    /// session (first call for this agent, or no id has ever been stored —
+    /// failed turns do not clear a previously stored id).
+    #[allow(clippy::unwrap_used)]
+    pub fn stored_session(&self, agent: &str) -> Option<String> {
+        self.last_session.lock().unwrap().get(agent).cloned()
+    }
+
+    /// The `resume` argument for [`acp::call`](crate::subagent::acp::call):
+    /// the stored session id when `continue_session` is requested
+    /// (resume-by-default), `None` for the opt-out (`continue_session:
+    /// false`) or when nothing is stored yet. Keeping the flag→id decision
+    /// here makes the opt-out mapping unit-testable; the dispatch layer
+    /// just forwards the result.
+    #[allow(clippy::unwrap_used)]
+    pub fn resume_id(&self, agent: &str, continue_session: bool) -> Option<String> {
+        if continue_session {
+            self.stored_session(agent)
+        } else {
+            None
+        }
     }
 }
 

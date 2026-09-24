@@ -23,6 +23,10 @@ use ratatui::buffer::{Buffer, Cell};
 use crate::types::{Part, Session, ToolStatus};
 use crate::util::text_region::{TextRegion, extract_text_in_region};
 
+use cosh_tools::subagent::events::{
+    PlanEntry, PlanEntryStatus, SubagentEvent, ToolCallStatus, ToolKind,
+};
+
 /// Rehydration limits when the panel is rebuilt from a persisted session
 /// (app restart, session switch): only the most recent bash command and the
 /// newest few subagent windows PER agent CLI are restored, so opening an
@@ -66,6 +70,99 @@ const AGENT_PALETTE: [(u8, u8, u8); 12] = [
     (233, 168, 253), // orchid
 ];
 
+/// One drawable line of a running sub-agent's live activity (Phase 3b.2).
+/// Each variant renders as exactly ONE visual row inside the sub-agent box
+/// (the renderer truncates to the wrap width; the thought variant is
+/// pre-wrapped by [`activity_lines`]).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum SubagentActivityLine {
+    /// A tool call line: `✓ read src/main.rs`-style. `InProgress` selects
+    /// the spinner rendering (luminous sweep); the other statuses draw the
+    /// ✓/✗/· marker.
+    Tool {
+        id: String,
+        text: String,
+        status: ToolCallStatus,
+    },
+    /// A file-edit diff summary: `path +N −M`.
+    Diff(String),
+    /// A plan entry with its checkbox glyph (☐/☑/☒).
+    Plan {
+        status: PlanEntryStatus,
+        text: String,
+    },
+    /// One wrapped visual row of the latest thought.
+    Thought(String),
+}
+
+/// The short, lowercase tool marker shown before the title (user decision:
+/// no icons — just the tool name, small and direct).
+fn tool_kind_name(kind: ToolKind) -> &'static str {
+    match kind {
+        ToolKind::Read => "read",
+        ToolKind::Edit => "edit",
+        ToolKind::Delete => "delete",
+        ToolKind::Move => "move",
+        ToolKind::Search => "search",
+        ToolKind::Execute => "exec",
+        ToolKind::Think => "think",
+        ToolKind::Fetch => "fetch",
+        ToolKind::SwitchMode => "mode",
+        ToolKind::Unknown => "tool",
+    }
+}
+
+/// The drawable activity lines of one running sub-agent session, in display
+/// order: tool calls (with their detail/diff lines), then the plan, then the
+/// wrapped tail of the latest thought. Called ONLY for running sessions —
+/// activity is cleared on completion, so finished windows render nothing.
+pub(crate) fn activity_lines(
+    activity: &SubagentActivity,
+    wrap_w: u16,
+) -> Vec<SubagentActivityLine> {
+    const THOUGHT_ROWS: usize = 2;
+
+    let mut out = Vec::new();
+    for call in &activity.tool_calls {
+        let name = tool_kind_name(call.kind);
+        let detail = call.detail.clone().unwrap_or_else(|| call.title.clone());
+        out.push(SubagentActivityLine::Tool {
+            id: call.id.clone(),
+            text: format!("{name} {detail}"),
+            status: call.status,
+        });
+        if let Some(diff) = &call.diff {
+            out.push(SubagentActivityLine::Diff(format!(
+                "{} +{} −{}",
+                diff.path, diff.added, diff.removed
+            )));
+        }
+    }
+    for entry in &activity.plan {
+        out.push(SubagentActivityLine::Plan {
+            status: entry.status,
+            text: entry.content.clone(),
+        });
+    }
+    if let Some(thought) = &activity.last_thought {
+        let clean = sanitize_subagent_text(thought);
+        let rows = wrap_chars(clean.trim(), wrap_w);
+        // The TAIL of the thought is what is currently being thought — show
+        // its last visual rows.
+        for row in rows.iter().rev().take(THOUGHT_ROWS).rev() {
+            out.push(SubagentActivityLine::Thought(row.clone()));
+        }
+    }
+    out
+}
+
+/// Total visual rows the activity block occupies at `wrap_w` (the height
+/// math in [`RightPanelState::subagent_section_rows`] and the renderer must
+/// agree — both go through [`activity_lines`]).
+pub(crate) fn activity_visual_rows(activity: &SubagentActivity, wrap_w: u16) -> u16 {
+    u16::try_from(activity_lines(activity, wrap_w).len()).unwrap_or(u16::MAX)
+}
+
 /// Split a subagent PTY output into the optional main-agent input line
 /// (`→ cosh: ...`, prepended by `app.rs` when the tool call carries an
 /// `input`) and the remaining subagent body. When the output was truncated
@@ -88,6 +185,15 @@ pub(crate) fn sanitize_subagent_text(text: &str) -> String {
     text.chars()
         .filter(|ch| !ch.is_control() || *ch == '\n')
         .collect()
+}
+
+/// The subagent body as it is DISPLAYED: the leading `<!-- severity: ... -->`
+/// header is consumed (it only tints the box, Phase 3b.1) and never shown.
+/// A body without a header passes through unchanged. Both the height math
+/// ([`RightPanelState::subagent_section_rows`]) and the renderer call this
+/// before sanitizing, so heights and display stay in lockstep.
+pub(crate) fn subagent_visible_body(body: &str) -> &str {
+    cosh_tools::subagent::severity::extract_severity(body).1
 }
 
 /// Convert the persisted ACP tool result into the text the live panel
@@ -283,6 +389,18 @@ pub struct PtySession {
     /// `spilled_path`. Reloaded lazily by [`RightPanelState::session_output`].
     pub spilled: bool,
     pub spilled_path: Option<PathBuf>,
+    /// Live structured sub-agent activity (Phase 3a). Empty for bash
+    /// sessions and for finished/rehydrated subagent windows — only the
+    /// currently RUNNING subagent accumulates events, and the state is
+    /// cleared when the session completes (the final report renders from
+    /// the JSON envelope as before).
+    pub(crate) subagent_activity: SubagentActivity,
+    /// Review outcome declared by the report's `<!-- severity: ... -->`
+    /// header (Phase 3b.1). `None` for bash sessions, non-review tasks and
+    /// reports without a header — the box keeps its neutral per-agent color.
+    /// Consumed at completion (live) or rehydration (persisted); the header
+    /// itself is stripped at render time, never shown.
+    pub(crate) severity: Option<cosh_tools::subagent::severity::Severity>,
 }
 
 impl PtySession {
@@ -296,6 +414,8 @@ impl PtySession {
             superseded: false,
             spilled: false,
             spilled_path: None,
+            subagent_activity: SubagentActivity::default(),
+            severity: None,
         }
     }
 
@@ -311,6 +431,198 @@ impl PtySession {
     /// Finished sessions are never updated again and can be spilled/hidden.
     pub(crate) fn is_finished(&self) -> bool {
         !matches!(self.status, PtyStatus::Running)
+    }
+}
+
+/// Live structured activity of one running sub-agent session — tool calls,
+/// plan, last thought, usage. Display-only plumbing (Phase 3a): Phase 3b
+/// draws it inside the sub-agent box. Reset when the session completes;
+/// persisted sessions keep rendering from the final JSON envelope (3a.3).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct SubagentActivity {
+    /// Tool calls in announcement order; updates patch the entry with the
+    /// matching id in place.
+    pub(crate) tool_calls: Vec<SubagentToolCall>,
+    /// The latest plan (full replacement, per the ACP spec).
+    pub(crate) plan: Vec<PlanEntry>,
+    /// The most recent thought chunk (tail only).
+    pub(crate) last_thought: Option<String>,
+    /// Latest usage snapshot: `(context_window, tokens_in_context)`.
+    pub(crate) usage: Option<(u64, u64)>,
+}
+
+/// One tool call announced by the sub-agent, kept up to date by
+/// `ToolCallUpdate` events with the same id.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SubagentToolCall {
+    /// Unique id of the call within the session.
+    pub(crate) id: String,
+    /// Human-readable title (replaced by updates carrying one).
+    pub(crate) title: String,
+    /// Category of the tool (drives the short name marker in Phase 3b).
+    pub(crate) kind: ToolKind,
+    /// Lifecycle status (drives the spinner/✓/✗ marker in Phase 3b).
+    pub(crate) status: ToolCallStatus,
+    /// Tail of the latest output text (content text, or a compact rendering
+    /// of `raw_output` when no text block was sent).
+    pub(crate) output_tail: Option<String>,
+    /// Compact diff summary when the update carried a `ToolCallContent::Diff`
+    /// (file edits): rendered as one `path +N −M` line under the call.
+    pub(crate) diff: Option<cosh_tools::subagent::events::ToolDiffSummary>,
+    /// The one input detail worth showing under the tool line (path, query,
+    /// URL, command) — extracted from the announcement's raw input and NOT
+    /// replaced by updates. Generic over CLIs; `None` when no common key
+    /// matched.
+    pub(crate) detail: Option<String>,
+}
+
+/// Keep a text tail bounded, cutting at a char boundary (`max` bytes of the
+/// TAIL survive — the panel shows the most recent activity).
+fn bounded_tail(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_string();
+    }
+    let mut start = text.len() - max;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    text[start..].to_string()
+}
+
+/// Maximum bytes kept of one tool call's output tail.
+const SUBAGENT_TOOL_TAIL_CHARS: usize = 4_000;
+/// Maximum bytes kept of the last thought.
+const SUBAGENT_THOUGHT_CHARS: usize = 2_000;
+
+/// Extract the one input detail worth showing under a tool line from a
+/// sub-agent tool call's raw input JSON (the announcement's `raw_input`).
+///
+/// Generic over CLIs (no per-agent coupling): tool inputs across the ACP
+/// agents consistently carry the interesting value under one of a small set
+/// of common keys — a path (`path`/`file_path`/`file`), a search query
+/// (`query`/`pattern`), a URL (`url`), or a command (`command`). Values are
+/// single-line-trimmed and capped; nested values render compact. `None`
+/// when the input is not a JSON object or none of the keys matched — the
+/// compact JSON tail already shows in that case.
+fn tool_input_detail(raw_input: &serde_json::Value) -> Option<String> {
+    const DETAIL_KEYS: [&str; 7] = [
+        "path",
+        "file_path",
+        "file",
+        "query",
+        "pattern",
+        "url",
+        "command",
+    ];
+    const MAX_DETAIL_CHARS: usize = 120;
+
+    let object = raw_input.as_object()?;
+    for key in DETAIL_KEYS {
+        if let Some(found) = object.get(key) {
+            let rendered = match found {
+                serde_json::Value::String(s) => s.trim().to_string(),
+                other => other.to_string(),
+            };
+            if rendered.is_empty() {
+                continue;
+            }
+            // One line only: newlines would break the single-row layout.
+            let mut line = rendered.lines().next().unwrap_or("").to_string();
+            if line.chars().count() > MAX_DETAIL_CHARS {
+                line = line.chars().take(MAX_DETAIL_CHARS).collect();
+                line.push('…');
+            }
+            return Some(line);
+        }
+    }
+    None
+}
+
+impl SubagentActivity {
+    /// Apply one typed sub-agent event, mutating the live state in place
+    /// (Phase 3a plumbing; Phase 3b renders the result).
+    pub(crate) fn apply(&mut self, event: &SubagentEvent) {
+        match event {
+            SubagentEvent::Message { .. } => {
+                // Message text flows through the legacy ToolOutput path;
+                // the box never accumulates it here (see the Phase 3 note
+                // on the harness double-send).
+            }
+            SubagentEvent::Thought { text } => {
+                // Chunks append; the tail is what survives.
+                let mut combined = self.last_thought.take().unwrap_or_default();
+                combined.push_str(text);
+                self.last_thought = Some(bounded_tail(&combined, SUBAGENT_THOUGHT_CHARS));
+            }
+            SubagentEvent::ToolCall {
+                id,
+                title,
+                kind,
+                status,
+                raw_input,
+            } => {
+                let call = SubagentToolCall {
+                    id: id.clone(),
+                    title: title.clone(),
+                    kind: *kind,
+                    status: *status,
+                    // The raw input is usually a JSON object of parameters;
+                    // keep its compact JSON form as the initial tail (a
+                    // plain string renders as-is).
+                    output_tail: raw_input
+                        .as_ref()
+                        .map(|v| bounded_tail(&v.to_string(), SUBAGENT_TOOL_TAIL_CHARS)),
+                    diff: None,
+                    detail: raw_input.as_ref().and_then(tool_input_detail),
+                };
+                self.tool_calls.push(call);
+            }
+            SubagentEvent::ToolCallUpdate {
+                id,
+                status,
+                title,
+                raw_output,
+                content,
+            } => {
+                if let Some(call) = self.tool_calls.iter_mut().rev().find(|c| &c.id == id) {
+                    if let Some(status) = status {
+                        call.status = *status;
+                    }
+                    if let Some(title) = title {
+                        call.title = title.clone();
+                    }
+                    // Content text replaces the tail (the ACP rule:
+                    // collections are overwritten, not extended). When the
+                    // update carries no text but a JSON raw output, keep a
+                    // compact rendering of it.
+                    if !content.text.is_empty() {
+                        call.output_tail =
+                            Some(bounded_tail(&content.text, SUBAGENT_TOOL_TAIL_CHARS));
+                    } else if let Some(out) = raw_output {
+                        call.output_tail =
+                            Some(bounded_tail(&out.to_string(), SUBAGENT_TOOL_TAIL_CHARS));
+                    }
+                    // A diff block (file edit) replaces any previous summary:
+                    // the LAST diff wins, same rule as the content text.
+                    if let Some(diff) = &content.diff {
+                        call.diff = Some(diff.clone());
+                    }
+                }
+            }
+            SubagentEvent::Plan { entries } => {
+                self.plan = entries.clone();
+            }
+            SubagentEvent::Usage {
+                context_window,
+                tokens_in_context,
+            } => {
+                self.usage = Some((*context_window, *tokens_in_context));
+            }
+            // No live-state impact; Phase 3b may render these in the header.
+            SubagentEvent::Mode { .. } | SubagentEvent::SessionInfo { .. } => {}
+            // `#[non_exhaustive]`: future variants are ignored safely.
+            _ => {}
+        }
     }
 }
 
@@ -458,6 +770,12 @@ pub struct RightPanelState {
     /// `Buffer::resize` retains the allocation, so streaming never allocates
     /// a large buffer per frame.
     pub(crate) subagent_scratch: Option<Buffer>,
+    /// Luminous-sweep spinners for the RUNNING tool-call lines of live
+    /// subagent windows (Phase 3b.2), keyed by `{session_id}:{call_id}`.
+    /// Pruned to InProgress entries after each subagent render so finished
+    /// calls never keep animating state alive.
+    pub(crate) subagent_tool_spinners:
+        HashMap<String, crate::component::spinner_highlight::HighlightSpinner>,
 
     // ── History navigation (bash toggle + per-agent queues) ────────
     /// Keyboard focus inside the panel (set by clicking a section). Plain
@@ -572,6 +890,7 @@ impl RightPanelState {
                 .unwrap_or_else(Instant::now),
             subagent_rebuild_interval: SUBAGENT_REBUILD_INTERVAL,
             subagent_scratch: None,
+            subagent_tool_spinners: HashMap::new(),
             user_scrolled_away: false,
             section_layouts: Vec::new(),
             drag_selection: None,
@@ -1649,6 +1968,10 @@ impl RightPanelState {
 
     /// Mark the last running PTY session as completed.
     pub fn complete_last_pty(&mut self, final_output: String) {
+        // The severity header sits at the START of the report, but
+        // `truncate_output` keeps only the TAIL — extract BEFORE trimming,
+        // otherwise a large report loses its header.
+        let (severity, _) = cosh_tools::subagent::severity::extract_severity(&final_output);
         let mut final_output = final_output;
         Self::truncate_output(&mut final_output);
         if let Some(session) = self
@@ -1657,8 +1980,17 @@ impl RightPanelState {
             .rev()
             .find(|s| matches!(s.status, PtyStatus::Running))
         {
+            // Review reports declare their outcome in a leading
+            // `<!-- severity: ... -->` header; consume it here (the render
+            // strips the header itself in 3b.2) so the box can tint green/
+            // yellow/red. Bash sessions never carry one — the parse returns
+            // None and the box color is untouched.
+            if session.is_subagent() {
+                session.severity = severity;
+            }
             session.output = final_output;
             session.status = PtyStatus::Completed;
+            session.subagent_activity = SubagentActivity::default();
             self.pty_gen = self.pty_gen.wrapping_add(1);
         }
     }
@@ -1675,7 +2007,28 @@ impl RightPanelState {
         {
             session.output = error;
             session.status = PtyStatus::Failed;
+            session.subagent_activity = SubagentActivity::default();
             self.pty_gen = self.pty_gen.wrapping_add(1);
+        }
+    }
+
+    /// Apply one typed sub-agent event to the last running PTY session
+    /// (Phase 3a plumbing). Only RUNNING subagent sessions accumulate live
+    /// activity: bash sessions and finished/rehydrated windows ignore it.
+    pub(crate) fn update_subagent_activity(&mut self, event: &SubagentEvent) {
+        let mut found_kind = None;
+        if let Some(session) = self
+            .pty_sessions
+            .iter_mut()
+            .rev()
+            .find(|s| matches!(s.status, PtyStatus::Running) && s.is_subagent())
+        {
+            session.subagent_activity.apply(event);
+            found_kind = Some(SectionKind::Subagent);
+            self.pty_gen = self.pty_gen.wrapping_add(1);
+        }
+        if let Some(kind) = found_kind {
+            self.mark_activity(kind);
         }
     }
 
@@ -1809,6 +2162,14 @@ impl RightPanelState {
         let Some(session) = self.pty_sessions.last_mut() else {
             return;
         };
+        // Rehydrated review reports declare their outcome in a leading
+        // `<!-- severity: ... -->` header, exactly like the live path's
+        // `complete_last_pty`; consume it so a restored window keeps its
+        // box tint. Extracted BEFORE truncation (which keeps only the tail).
+        if session.is_subagent() && !failed {
+            let (severity, _) = cosh_tools::subagent::severity::extract_severity(&output);
+            session.severity = severity;
+        }
         if let Some(line) = input_line {
             session.output.push_str(&line);
         }
@@ -1920,7 +2281,16 @@ impl RightPanelState {
                 if let Some(input) = input {
                     rows = rows.saturating_add(wrap_count(input, wrap_w));
                 }
-                let clean = sanitize_subagent_text(body);
+                // Live activity rows (tool calls, plan, thought) sit between
+                // the input line and the report body — only the RUNNING
+                // session has any (activity is cleared on completion).
+                if pty.status == PtyStatus::Running {
+                    rows =
+                        rows.saturating_add(activity_visual_rows(&pty.subagent_activity, wrap_w));
+                }
+                // The severity header is consumed (tints the box, never
+                // shown): the height math counts the DISPLAYED body.
+                let clean = sanitize_subagent_text(subagent_visible_body(body));
                 if !clean.trim().is_empty() {
                     rows = rows.saturating_add(estimate_height(&clean, wrap_w));
                 }
@@ -2087,6 +2457,435 @@ mod tests {
 
         assert_eq!(state.pty_sessions[0].output, "done");
         assert_eq!(state.pty_sessions[1].output, "output2");
+    }
+
+    // ── Sub-agent live activity (Phase 3a) ────────────────────────────
+
+    use cosh_tools::subagent::events::{PlanEntryPriority, PlanEntryStatus, ToolOutputBlock};
+
+    fn tool_call_event(id: &str, title: &str) -> SubagentEvent {
+        SubagentEvent::ToolCall {
+            id: id.to_string(),
+            title: title.to_string(),
+            kind: ToolKind::Read,
+            status: ToolCallStatus::InProgress,
+            raw_input: Some(serde_json::json!({"path": "a.txt"})),
+        }
+    }
+
+    #[test]
+    fn subagent_activity_accumulates_and_patches_tool_calls() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: opencode".to_string(), None);
+
+        state.update_subagent_activity(&tool_call_event("c1", "Reading a"));
+        state.update_subagent_activity(&tool_call_event("c2", "Reading b"));
+        // An update patches the matching call in place (matched from the
+        // most recent announcement).
+        state.update_subagent_activity(&SubagentEvent::ToolCallUpdate {
+            id: "c1".to_string(),
+            status: Some(ToolCallStatus::Completed),
+            title: None,
+            raw_output: None,
+            content: ToolOutputBlock {
+                text: "file contents".to_string(),
+                skipped: 0,
+                diff: None,
+            },
+        });
+
+        let activity = &state.pty_sessions[0].subagent_activity;
+        assert_eq!(activity.tool_calls.len(), 2);
+        assert_eq!(activity.tool_calls[0].id, "c1");
+        assert_eq!(activity.tool_calls[0].status, ToolCallStatus::Completed);
+        assert_eq!(
+            activity.tool_calls[0].output_tail.as_deref(),
+            Some("file contents")
+        );
+        // The untouched call keeps its announcement state; its tail is the
+        // compact JSON of the raw input.
+        assert_eq!(activity.tool_calls[1].status, ToolCallStatus::InProgress);
+        assert_eq!(
+            activity.tool_calls[1].output_tail.as_deref(),
+            Some(r#"{"path":"a.txt"}"#)
+        );
+    }
+
+    #[test]
+    fn subagent_activity_accumulates_thought_plan_and_usage() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: opencode".to_string(), None);
+
+        state.update_subagent_activity(&SubagentEvent::Thought {
+            text: "thinking ".to_string(),
+        });
+        state.update_subagent_activity(&SubagentEvent::Thought {
+            text: "hard".to_string(),
+        });
+        state.update_subagent_activity(&SubagentEvent::Plan {
+            entries: vec![PlanEntry {
+                content: "step".to_string(),
+                priority: PlanEntryPriority::High,
+                status: PlanEntryStatus::InProgress,
+            }],
+        });
+        state.update_subagent_activity(&SubagentEvent::Usage {
+            context_window: 8192,
+            tokens_in_context: 2048,
+        });
+        // Message text does NOT accumulate here (it flows through
+        // `ToolOutput`); the box's structured state stays clean.
+        state.update_subagent_activity(&SubagentEvent::Message {
+            text: "visible via ToolOutput".to_string(),
+        });
+
+        let activity = &state.pty_sessions[0].subagent_activity;
+        assert_eq!(activity.last_thought.as_deref(), Some("thinking hard"));
+        assert_eq!(activity.plan.len(), 1);
+        assert_eq!(activity.usage, Some((8192, 2048)));
+    }
+
+    #[test]
+    fn subagent_activity_resets_when_the_session_completes() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: opencode".to_string(), None);
+        state.update_subagent_activity(&tool_call_event("c1", "Reading a"));
+
+        state.complete_last_pty("final report".to_string());
+
+        assert!(
+            state.pty_sessions[0]
+                .subagent_activity
+                .tool_calls
+                .is_empty()
+        );
+        assert_eq!(state.pty_sessions[0].status, PtyStatus::Completed);
+        // The report text is still the session's rendered output.
+        assert_eq!(state.pty_sessions[0].output, "final report");
+
+        // A NEW subagent session starts with empty activity again.
+        state.start_pty("subagent: opencode".to_string(), None);
+        assert!(
+            state.pty_sessions[1]
+                .subagent_activity
+                .tool_calls
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn subagent_activity_ignores_bash_sessions_and_finished_windows() {
+        let mut state = RightPanelState::new();
+        // A running BASH session must not absorb sub-agent events.
+        state.start_pty("cargo test".to_string(), None);
+        state.update_subagent_activity(&tool_call_event("c1", "Reading a"));
+        assert!(
+            state.pty_sessions[0]
+                .subagent_activity
+                .tool_calls
+                .is_empty()
+        );
+
+        // A finished subagent window (history entry) must not either.
+        state.complete_last_pty(String::new());
+        state.start_pty("subagent: opencode".to_string(), None);
+        state.complete_last_pty("done".to_string());
+        state.update_subagent_activity(&tool_call_event("c2", "Reading b"));
+        assert!(
+            state.pty_sessions[1]
+                .subagent_activity
+                .tool_calls
+                .is_empty()
+        );
+
+        // Events with no running subagent target are simply dropped.
+        state.update_subagent_activity(&tool_call_event("c3", "Reading c"));
+    }
+
+    #[test]
+    fn subagent_thought_tail_is_bounded() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: opencode".to_string(), None);
+        // Many chunks (each 15 bytes): 500 × 15 = 7500 bytes — well past
+        // the cap, so only the bounded tail survives.
+        for i in 0..500 {
+            state.update_subagent_activity(&SubagentEvent::Thought {
+                text: format!("thought-{i:06} "),
+            });
+        }
+        let thought = state.pty_sessions[0]
+            .subagent_activity
+            .last_thought
+            .clone()
+            .unwrap();
+        assert!(thought.len() <= SUBAGENT_THOUGHT_CHARS);
+        // The TAIL survives — the newest chunk is present.
+        assert!(thought.contains("thought-000499"));
+        assert!(!thought.contains("thought-000000"));
+    }
+
+    // ── Severity consumption (Phase 3b.1) ─────────────────────────────
+
+    #[test]
+    fn complete_last_pty_consumes_severity_header() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: opencode".to_string(), None);
+        state.complete_last_pty("<!-- severity: red -->\n\n## Critical\n\nBug found.".to_string());
+        assert_eq!(
+            state.pty_sessions[0].severity,
+            Some(cosh_tools::subagent::severity::Severity::Red)
+        );
+
+        // A non-review report without a header stays neutral.
+        state.start_pty("subagent: gemini".to_string(), None);
+        state.complete_last_pty("plain report".to_string());
+        assert_eq!(state.pty_sessions[1].severity, None);
+
+        // A bash session never carries severity even with a header.
+        state.start_pty("cargo test".to_string(), None);
+        state.complete_last_pty("<!-- severity: green -->\nok".to_string());
+        assert_eq!(state.pty_sessions[2].severity, None);
+    }
+
+    #[test]
+    fn replay_pty_consumes_severity_header_on_rehydration() {
+        let mut state = RightPanelState::new();
+        state.replay_pty(
+            "subagent: opencode".to_string(),
+            Some("→ cosh: review\n".to_string()),
+            "<!-- severity: yellow -->\nminor issues".to_string(),
+            false,
+        );
+        assert_eq!(
+            state.pty_sessions[0].severity,
+            Some(cosh_tools::subagent::severity::Severity::Yellow)
+        );
+
+        // Failed (crashed) windows stay neutral — no report was delivered.
+        state.replay_pty(
+            "subagent: opencode".to_string(),
+            None,
+            "<!-- severity: green -->\nok".to_string(),
+            true,
+        );
+        assert_eq!(state.pty_sessions[1].severity, None);
+    }
+
+    #[test]
+    fn severity_survives_truncation_because_extraction_precedes_it() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: opencode".to_string(), None);
+        // A report larger than MAX_PTY_OUTPUT_CHARS: truncation keeps only
+        // the tail, so the leading header would be lost if extraction did
+        // not happen first.
+        let big_report = format!(
+            "<!-- severity: green -->\n{}",
+            "x".repeat(MAX_PTY_OUTPUT_CHARS * 2)
+        );
+        state.complete_last_pty(big_report);
+        assert_eq!(
+            state.pty_sessions[0].severity,
+            Some(cosh_tools::subagent::severity::Severity::Green)
+        );
+        assert!(state.pty_sessions[0].output.len() <= MAX_PTY_OUTPUT_CHARS);
+        assert!(!state.pty_sessions[0].output.contains("severity"));
+    }
+
+    // ── In-box rendering (Phase 3b.2) ─────────────────────────────────
+
+    #[test]
+    fn tool_input_detail_extracts_common_keys() {
+        assert_eq!(
+            tool_input_detail(&serde_json::json!({"path": "src/main.rs"})),
+            Some("src/main.rs".to_string())
+        );
+        assert_eq!(
+            tool_input_detail(&serde_json::json!({"query": "find the bug"})),
+            Some("find the bug".to_string())
+        );
+        assert_eq!(
+            tool_input_detail(&serde_json::json!({"url": "https://example.com"})),
+            Some("https://example.com".to_string())
+        );
+        // Key priority: path before file.
+        assert_eq!(
+            tool_input_detail(&serde_json::json!({"path": "a", "file": "b"})),
+            Some("a".to_string())
+        );
+        // Non-object / no match / empty value → None.
+        assert_eq!(tool_input_detail(&serde_json::json!("plain")), None);
+        assert_eq!(tool_input_detail(&serde_json::json!({"other": 1})), None);
+        assert_eq!(tool_input_detail(&serde_json::json!({"path": ""})), None);
+    }
+
+    #[test]
+    fn tool_input_detail_is_single_line_and_capped() {
+        let multiline = serde_json::json!({"command": "one\ntwo\nthree"});
+        assert_eq!(tool_input_detail(&multiline), Some("one".to_string()));
+        let long = "x".repeat(300);
+        let detail = tool_input_detail(&serde_json::json!({"path": long})).unwrap();
+        assert!(detail.chars().count() <= 121); // 120 + the ellipsis
+        assert!(detail.ends_with('…'));
+    }
+
+    #[test]
+    fn activity_lines_render_tool_names_details_and_diffs() {
+        let mut activity = SubagentActivity::default();
+        activity.apply(&SubagentEvent::ToolCall {
+            id: "c1".to_string(),
+            title: "Reading src/main.rs".to_string(),
+            kind: ToolKind::Read,
+            status: ToolCallStatus::InProgress,
+            raw_input: Some(serde_json::json!({"path": "src/main.rs"})),
+        });
+        activity.apply(&SubagentEvent::ToolCallUpdate {
+            id: "c1".to_string(),
+            status: Some(ToolCallStatus::Completed),
+            title: None,
+            raw_output: None,
+            content: cosh_tools::subagent::events::ToolOutputBlock {
+                text: "contents".to_string(),
+                skipped: 0,
+                diff: Some(cosh_tools::subagent::events::ToolDiffSummary {
+                    path: "src/main.rs".to_string(),
+                    added: 12,
+                    removed: 3,
+                }),
+            },
+        });
+
+        let lines = activity_lines(&activity, 60);
+        assert_eq!(lines.len(), 2);
+        // Tool line: NO icon, just the lowercase tool name + the extracted
+        // detail (user decision) — status drives the marker, not the text.
+        assert_eq!(
+            lines[0],
+            SubagentActivityLine::Tool {
+                id: "c1".to_string(),
+                text: "read src/main.rs".to_string(),
+                status: ToolCallStatus::Completed,
+            }
+        );
+        // Diff summary under the call.
+        assert_eq!(
+            lines[1],
+            SubagentActivityLine::Diff("src/main.rs +12 −3".to_string())
+        );
+    }
+
+    #[test]
+    fn activity_lines_fall_back_to_the_title_without_a_detail() {
+        let mut activity = SubagentActivity::default();
+        activity.apply(&SubagentEvent::ToolCall {
+            id: "c1".to_string(),
+            title: "Doing something".to_string(),
+            kind: ToolKind::Execute,
+            status: ToolCallStatus::InProgress,
+            raw_input: Some(serde_json::json!({"unknown_key": 42})),
+        });
+        let lines = activity_lines(&activity, 60);
+        assert_eq!(
+            lines[0],
+            SubagentActivityLine::Tool {
+                id: "c1".to_string(),
+                text: "exec Doing something".to_string(),
+                status: ToolCallStatus::InProgress,
+            }
+        );
+    }
+
+    #[test]
+    fn activity_lines_render_plan_glyphs_and_thought_tail() {
+        use cosh_tools::subagent::events::{PlanEntryPriority, PlanEntryStatus};
+        let mut activity = SubagentActivity::default();
+        activity.apply(&SubagentEvent::Plan {
+            entries: vec![
+                PlanEntry {
+                    content: "done task".to_string(),
+                    priority: PlanEntryPriority::High,
+                    status: PlanEntryStatus::Completed,
+                },
+                PlanEntry {
+                    content: "pending task".to_string(),
+                    priority: PlanEntryPriority::Low,
+                    status: PlanEntryStatus::Pending,
+                },
+            ],
+        });
+        activity.apply(&SubagentEvent::Thought {
+            text: "thinking hard about the problem at hand".to_string(),
+        });
+
+        let lines = activity_lines(&activity, 20);
+        // 2 plan rows + the wrapped thought rows.
+        assert!(lines.len() >= 3);
+        assert_eq!(
+            lines[0],
+            SubagentActivityLine::Plan {
+                status: PlanEntryStatus::Completed,
+                text: "done task".to_string(),
+            }
+        );
+        assert_eq!(
+            lines[1],
+            SubagentActivityLine::Plan {
+                status: PlanEntryStatus::Pending,
+                text: "pending task".to_string(),
+            }
+        );
+        // The thought occupies the LAST rows (its tail is what is shown).
+        assert!(matches!(
+            lines.last(),
+            Some(SubagentActivityLine::Thought(_))
+        ));
+    }
+
+    #[test]
+    fn activity_visual_rows_match_activity_lines_len() {
+        let mut activity = SubagentActivity::default();
+        activity.apply(&SubagentEvent::ToolCall {
+            id: "c1".to_string(),
+            title: "t".to_string(),
+            kind: ToolKind::Read,
+            status: ToolCallStatus::InProgress,
+            raw_input: Some(serde_json::json!({"path": "f.rs"})),
+        });
+        assert_eq!(activity_visual_rows(&activity, 60), 1);
+    }
+
+    #[test]
+    fn subagent_visible_body_strips_only_the_header() {
+        // Header consumed; body kept (leading blanks trimmed — the 3b.0
+        // `extract_severity` contract).
+        assert_eq!(
+            subagent_visible_body("<!-- severity: red -->\n\n## Findings\n"),
+            "## Findings\n"
+        );
+        // No header → untouched (bit-identical).
+        assert_eq!(subagent_visible_body("plain report"), "plain report");
+        // Header NOT on the first line is report text, not a header.
+        assert_eq!(
+            subagent_visible_body("# Report\n<!-- severity: red -->"),
+            "# Report\n<!-- severity: red -->"
+        );
+    }
+
+    #[test]
+    fn running_session_height_includes_activity_rows() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: opencode".to_string(), None);
+        state.update_subagent_activity(&tool_call_event("c1", "Reading a"));
+        state.update_last_pty("streaming report".to_string());
+
+        let wrap_w = state.subagent_wrap_w.max(40);
+        let rows_running = state.subagent_section_rows_for_display(wrap_w)[0];
+        // One activity row (the tool call) on top of header + body.
+        assert!(rows_running >= 2);
+
+        // Completing the session clears the activity: height shrinks back.
+        state.complete_last_pty("final".to_string());
+        let rows_done = state.subagent_section_rows_for_display(wrap_w)[0];
+        assert!(rows_done < rows_running);
     }
 
     // ── Rehydration from a persisted session ─────────────────────────

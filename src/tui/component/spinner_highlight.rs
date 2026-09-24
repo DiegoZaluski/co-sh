@@ -95,6 +95,7 @@ pub enum SpinnerPhase {
 /// | Constructor               | Highlight colour          | Base colour               |
 /// |---------------------------|---------------------------|---------------------------|
 /// | `HighlightSpinner::new`   | Explicit `RGBA`           | Explicit `RGBA`           |
+#[derive(Debug)]
 pub struct HighlightSpinner {
     text: String,
     chars: Vec<char>,
