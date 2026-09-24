@@ -417,10 +417,12 @@ fn resolve_app(step: &ComputerControl, tool: &str) -> Result<App, String> {
     let timeout = Duration::from_millis(DEFAULT_TIMEOUT_MS);
     let name = step.app.as_deref().map(str::trim).filter(|s| !s.is_empty());
     match (name, step.pid) {
-        (Some(name), None) => App::by_name(name, timeout)
-            .map_err(|e| super::errors::render(tool, "resolve application", &e)),
-        (None, Some(pid)) => App::by_pid(pid, timeout)
-            .map_err(|e| super::errors::render(tool, "resolve application", &e)),
+        (Some(name), None) => {
+            App::by_name(name, timeout).map_err(|e| super::errors::render_app_miss(tool, &e))
+        }
+        (None, Some(pid)) => {
+            App::by_pid(pid, timeout).map_err(|e| super::errors::render_app_miss(tool, &e))
+        }
         (None, None) => Err(format!("{tool}: the element form requires `app` or `pid`")),
         (Some(_), Some(_)) => Err(format!("{tool}: provide `app` or `pid`, not both")),
     }

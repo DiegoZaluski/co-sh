@@ -59,8 +59,9 @@ pub fn render(tool: &str, ctx: &str, err: &Error) -> String {
         ),
         Error::TextValueNotSupported => format!(
             "{head}this element does not accept text input through the \
-             accessibility bridge — click it first (computer_control, the \
-             real click is the one reliable focus mover) and type with a \
+             accessibility bridge — for a slider/spinner use `set_numeric_value` \
+             with `numeric_value`, otherwise click it first (computer_control, \
+             the real click is the one reliable focus mover) and type with a \
              keyboard step instead"
         ),
         Error::Timeout { elapsed, diagnosis } => {
@@ -116,6 +117,25 @@ pub fn render(tool: &str, ctx: &str, err: &Error) -> String {
              current state before retrying",
             other
         ),
+    }
+}
+
+/// Render an APPLICATION-resolution miss (`App::by_name`/`by_pid`), the
+/// same rendering [`render`] produces plus the transient-shell hint: a
+/// flyout (Quick Settings, Notification Center, a shell context menu) is
+/// never an application — it does not appear in `computer_apps` and no app
+/// name can reach it, so the fix is surface targeting, not another lookup.
+pub fn render_app_miss(tool: &str, err: &Error) -> String {
+    let out = render(tool, "resolve application", err);
+    match err {
+        Error::SelectorNotMatched { .. } => format!(
+            "{out} — a name that matches no APPLICATION may belong to a \
+             transient shell surface (Quick Settings, Notification Center, \
+             a shell menu): those never appear as applications. Target them \
+             with `surface` instead (e.g. `\"flyout\"` for an open flyout, \
+             `\"menu_bar\"` for menus)"
+        ),
+        _ => out,
     }
 }
 

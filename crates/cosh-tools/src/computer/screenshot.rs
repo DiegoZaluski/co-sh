@@ -447,9 +447,9 @@ fn resolve_app(input: &ComputerScreenshot) -> Result<App, String> {
         .filter(|s| !s.is_empty());
     match (name, input.pid) {
         (Some(name), None) => App::by_name(name, timeout)
-            .map_err(|e| super::errors::render("computer_screenshot", "resolve application", &e)),
+            .map_err(|e| super::errors::render_app_miss("computer_screenshot", &e)),
         (None, Some(pid)) => App::by_pid(pid, timeout)
-            .map_err(|e| super::errors::render("computer_screenshot", "resolve application", &e)),
+            .map_err(|e| super::errors::render_app_miss("computer_screenshot", &e)),
         (None, None) => {
             Err("computer_screenshot: element capture requires `app`, `pid` or `surface`".into())
         }

@@ -153,10 +153,12 @@ fn validate_step(step: &ComputerAct) -> Result<(), String> {
                 return Err(format!(
                     "{TOOL}: {name} belongs to a semantic-action step — a keyboard step \
                      types into the focused element; act on the target element in an \
-                     earlier step, then chain the typing via `then`. If the typed text \
-                     keeps missing the field, click the field element with \
-                     computer_control instead — a real click is the one mechanism that \
-                     reliably moves keyboard focus"
+                     earlier step, then chain the typing via `then`. On a SHELL SURFACE \
+                     the pattern is: a semantic `press` with `surface` first (that is \
+                     what moves keyboard focus to the flyout), then this keyboard step \
+                     with no `surface`. If the typed text keeps missing the field, click \
+                     the field element with computer_control instead — a real click is \
+                     the one mechanism that reliably moves keyboard focus"
                 ));
             }
         }
