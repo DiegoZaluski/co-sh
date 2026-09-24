@@ -9,7 +9,7 @@ const MEMORY_KEEP_SESSIONS: usize = 8;
 /// Only the TAIL is kept, since the panel renders the most recent output.
 const MAX_PTY_OUTPUT_CHARS: usize = 60_000;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -138,6 +138,15 @@ pub(crate) fn parse_todo_output(output: &str) -> Option<Vec<TodoItem>> {
             .collect(),
     )
 }
+
+/// Frames a freshly completed TODO's strike animation holds before the
+/// strikethrough starts sweeping in (mirrors oh-my-pi's TODO_STRIKE_HOLD_FRAMES).
+pub const TODO_STRIKE_HOLD_FRAMES: u32 = 2;
+/// Frames the strikethrough sweep takes to cross the whole label, after the
+/// hold (mirrors oh-my-pi's TODO_STRIKE_REVEAL_FRAMES).
+pub const TODO_STRIKE_REVEAL_FRAMES: u32 = 12;
+/// Total frames of the strike animation (hold + reveal).
+pub const TODO_STRIKE_TOTAL_FRAMES: u32 = TODO_STRIKE_HOLD_FRAMES + TODO_STRIKE_REVEAL_FRAMES;
 
 /// Wrap one logical line into visual rows of at most `wrap_w` columns,
 /// breaking at SPACES with whole-word moves — the same word semantics as
@@ -387,6 +396,18 @@ const AUTO_SCROLL_SPEED_FAST: f64 = 72.0;
 pub struct RightPanelState {
     /// Current list of TODOs.
     pub todos: Vec<TodoItem>,
+    /// Frame counters for the TODO completion strike-through animation,
+    /// keyed by item position in `todos`. Frames advance on the app's 30 fps
+    /// animation tick (see `App::render`); the animation runs for
+    /// `TODO_STRIKE_TOTAL_FRAMES` and is then dropped (the strike stays).
+    /// Keys without a matching `completed` item are stale and pruned.
+    /// Completed items with NO counter render fully struck-through.
+    todo_strike_frames: HashMap<u64, u64>,
+    /// Contents of every TODO ever seen by `set_todos` in this panel. A
+    /// `completed` item whose content is NOT here arrived already done
+    /// (rehydration, restored session): it renders struck-through
+    /// immediately, without replaying the animation.
+    todo_seen_contents: HashSet<String>,
     /// Active/completed PTY sessions.
     pub pty_sessions: Vec<PtySession>,
     /// Counter for generating unique PTY IDs.
@@ -549,6 +570,8 @@ impl RightPanelState {
     pub fn new() -> Self {
         let mut state = Self {
             todos: Vec::new(),
+            todo_strike_frames: HashMap::new(),
+            todo_seen_contents: HashSet::new(),
             pty_sessions: Vec::new(),
             next_pty_id: 0,
             next_activity_id: 1,
@@ -1453,8 +1476,92 @@ impl RightPanelState {
 
     /// Set the current todos, replacing any existing ones.
     pub fn set_todos(&mut self, todos: Vec<TodoItem>) {
+        // ── Completion strike-through bookkeeping (see the struct fields) ──
+        let fresh: HashSet<String> = todos.iter().map(|t| t.content.clone()).collect();
+        // Occurrences of each content in the PREVIOUS list, consumed FIFO:
+        // pairing new `completed` items with their matching previous
+        // occurrence one-to-one keeps duplicate texts independent (no
+        // shared or aliased counters between equal contents).
+        let mut prev_occ: HashMap<&str, VecDeque<(usize, &str)>> = HashMap::new();
+        for (i, t) in self.todos.iter().enumerate() {
+            prev_occ
+                .entry(t.content.as_str())
+                .or_default()
+                .push_back((i, t.status.as_str()));
+        }
+        let first_snapshot = self.todos.is_empty() && self.todo_seen_contents.is_empty();
+        // The counter map is rebuilt from scratch every update: each
+        // completed item either carries its previous counter forward (it
+        // was already completed, unchanged items keep ticking through an
+        // insert/remove), arms a fresh hold-then-sweep counter (it just
+        // flipped to `completed`, in place or re-entering the list), or
+        // strikes permanently (arrived done in the very first snapshot).
+        // Rebuilding also drops stale counters for free — no orphaned
+        // position key can outlive its item or leak onto a neighbor that
+        // slides into its slot.
+        let mut frames: HashMap<u64, u64> = HashMap::new();
+        for (i, t) in todos.iter().enumerate() {
+            if t.status != "completed" {
+                continue;
+            }
+            self.todo_seen_contents.insert(t.content.clone());
+            let carry = match prev_occ
+                .get_mut(t.content.as_str())
+                .and_then(VecDeque::pop_front)
+            {
+                // Same item, already completed last update: keep ticking.
+                Some((p, "completed")) => self.todo_strike_frames.get(&(p as u64)).copied(),
+                // Same item just flipped to `completed`, or it re-entered
+                // the list already done: start a fresh counter.
+                _ if !first_snapshot => Some(0),
+                // Very first update this panel sees: a snapshot arriving
+                // already done (restored session / first result carries
+                // completions) strikes instantly — nothing to animate
+                // from, matching oh-my-pi's first-snapshot behavior. No
+                // counter is stored, so the item renders fully crossed.
+                _ => None,
+            };
+            if let Some(carry) = carry {
+                frames.insert(i as u64, carry);
+            }
+        }
+        self.todo_strike_frames = frames;
+        // Contents gone from every update are forgotten, so a much later
+        // re-completion of the same text animates again.
+        self.todo_seen_contents.retain(|c| fresh.contains(c));
+
         self.todos = todos;
         self.mark_activity(SectionKind::Todo);
+    }
+
+    /// Current strike frame for the todo item at `index`, if its animation is
+    /// still running (`None` = permanent strike, render fully crossed out).
+    pub fn todo_strike_frame(&self, index: usize) -> Option<u64> {
+        let frame = *self.todo_strike_frames.get(&(index as u64))?;
+        (frame <= u64::from(TODO_STRIKE_TOTAL_FRAMES)).then_some(frame)
+    }
+
+    /// Advance the strike animation by `ticks` 30 fps frames, called once per
+    /// rendered frame from `App::render`. Counters past the animation's total
+    /// are dropped (the strike is permanent; a `None` frame then renders).
+    /// Returns whether any counter is still live — the caller keeps the
+    /// render loop in live mode while it is.
+    pub fn advance_todo_strikes(&mut self, ticks: u32) -> bool {
+        if self.todo_strike_frames.is_empty() {
+            return false;
+        }
+        for frame in self.todo_strike_frames.values_mut() {
+            *frame = frame.saturating_add(u64::from(ticks));
+        }
+        self.todo_strike_frames
+            .retain(|_, f| *f <= u64::from(TODO_STRIKE_TOTAL_FRAMES));
+        !self.todo_strike_frames.is_empty()
+    }
+
+    /// Whether any todo strike animation is currently running (drives the
+    /// live render loop without waiting for the next event).
+    pub fn todo_strike_animating(&self) -> bool {
+        !self.todo_strike_frames.is_empty()
     }
 
     /// Manual show/hide override (Ctrl+P).

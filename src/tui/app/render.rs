@@ -54,6 +54,14 @@ impl App {
             (self.animation_tick_remainder + delta_time.max(0.0)).min(4.0 / 30.0);
         let animation_ticks = (self.animation_tick_remainder * 30.0) as u32;
         self.animation_tick_remainder -= f64::from(animation_ticks) / 30.0;
+        // TODO completion strike-through: advance the per-item frame counters
+        // (holds 2 frames, sweeps left-to-right over 12). Trailing frames are
+        // consumed too — while a sweep runs the panel redraws every tick; when
+        // the last counter passes its total the counter is dropped and the
+        // strike becomes permanent. Not needed to drive the visuals when the
+        // tick count is 0 (nothing changed), but kept unconditional so the
+        // counters can never get behind the loop's own clock.
+        self.state.right_panel.advance_todo_strikes(animation_ticks);
         // Sync live_requested — keeps the render loop running smoothly.
         // Session: during streaming, sticky scroll needs continuous re-rendering.
         // RAG: when the spinner is active (fetching/embedding), enable live mode
@@ -79,6 +87,10 @@ impl App {
                     && self.agent_spinner_bass.is_some()));
         live = live || self.rag_spinner_active();
         live = live || has_active_spinner;
+        // TODO completion strikes: while any strike animation is running the
+        // panel must redraw every frame, even in an idle session — otherwise
+        // the sweep would freeze mid-label until the next unrelated event.
+        live = live || self.state.right_panel.todo_strike_animating();
         // A running compaction stopwatch must tick every frame.
         live = live || self.has_running_compaction();
         // The scroll-to-bottom pill's slide/fade must finish even with no
