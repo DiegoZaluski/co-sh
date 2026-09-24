@@ -186,6 +186,8 @@ pub const TOOL_ALLOWLIST: &[&str] = &[
     "fs_read",
     "fs_write",
     "fs_edit",
+    "fs_edit_lines",
+    "fs_ast_edit",
     "find_glob",
     "find_grep",
     "plan",

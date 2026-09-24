@@ -371,7 +371,7 @@ pub fn tool_display(tool: &str) -> &str {
         "bash_run" => "bash",
         "fs_read" => "read",
         "fs_write" => "write",
-        "fs_edit" => "edit",
+        "fs_edit" | "fs_edit_lines" | "fs_ast_edit" => "edit",
         "find_glob" => "glob",
         "find_grep" => "grep",
         "web_fetch" => "webfetch",

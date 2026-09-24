@@ -1,4 +1,4 @@
-use super::super::{EditEngine, Fs};
+use super::super::Fs;
 use cosh_sdk::hashline::format::compute_file_hash;
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Unique scratch root: each dispatch test edits fixture files inside its own
+/// Unique scratch root: each edit-tool test edits fixture files inside its own
 /// directory, so tests never touch a developer's real project tree.
 struct TempRoot(PathBuf);
 
@@ -18,7 +18,7 @@ impl TempRoot {
             .duration_since(UNIX_EPOCH)
             .expect("system time is after UNIX_EPOCH")
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("cosh_fs_dispatch_{label}_{id}_{nanos}"));
+        let dir = std::env::temp_dir().join(format!("cosh_fs_edit_tools_{label}_{id}_{nanos}"));
         std::fs::create_dir_all(&dir).expect("create temp root");
         Self(dir)
     }
@@ -42,42 +42,125 @@ impl Drop for TempRoot {
 fn fs_root(root: &Path) -> Fs {
     Fs::new().cwd(root)
 }
-fn fs_replace(root: &Path) -> Fs {
-    fs_root(root).only_replace()
-}
-fn fs_ast(root: &Path) -> Fs {
-    fs_root(root).only_ast()
-}
+
+// ── fs_edit (content replace engine) ─────────────────────────────────────
 
 #[tokio::test]
-async fn auto_dispatches_to_replace_via_targets() {
-    let root = TempRoot::new("replace");
-    let path = root.file("cosh_test_dispatch_replace.txt");
-    std::fs::write(&path, "line1\nline2\n").unwrap();
-    let hash = compute_file_hash(&std::fs::read_to_string(&path).unwrap());
+async fn fs_edit_replaces_exact_string() {
+    let root = TempRoot::new("content");
+    let path = root.file("cosh_test_edit_content.txt");
+    let text = "alpha\nbeta\n";
+    std::fs::write(&path, text).unwrap();
+    let hash = cosh_sdk::rollback::record(&path, text).unwrap();
     let args = json!({
-        "targets": [{ "path": path, "file_hash": hash, "ops": "replace 1..1:\n+REPL" }]
+        "path": path,
+        "file_hash": hash,
+        "old_string": "beta",
+        "new_string": "BETA"
     });
     let out = fs_root(root.path())
         .edit(args)
         .await
-        .expect("replace should succeed");
+        .expect("content edit should succeed");
+    assert_eq!(out.len(), 1);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "alpha\nBETA\n");
+}
+
+#[tokio::test]
+async fn fs_edit_without_file_hash_is_rejected_with_anchor_hint() {
+    let root = TempRoot::new("content_notag");
+    let path = root.file("cosh_test_edit_notag.txt");
+    std::fs::write(&path, "alpha\n").unwrap();
+    let args = json!({
+        "path": path,
+        "old_string": "alpha",
+        "new_string": "BETA"
+    });
+    let err = fs_root(root.path())
+        .edit(args)
+        .await
+        .expect_err("missing file_hash must be rejected with a correction");
+    assert!(
+        err.contains(&path) && err.contains("¶"),
+        "the error should carry the file's live anchor, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn fs_edit_requires_old_string() {
+    let args = json!({ "path": "x", "new_string": "b" });
+    let err = fs_root(Path::new("."))
+        .edit(args)
+        .await
+        .expect_err("should be rejected");
+    assert!(
+        err.contains("content replace engine") && err.contains("old_string"),
+        "got: {err}"
+    );
+}
+
+// ── fs_edit_lines (hashline replace engine) ──────────────────────────────
+
+#[tokio::test]
+async fn fs_edit_lines_applies_flat_ops_shape() {
+    let root = TempRoot::new("lines");
+    let path = root.file("cosh_test_edit_lines.txt");
+    std::fs::write(&path, "line1\nline2\n").unwrap();
+    let hash = compute_file_hash(&std::fs::read_to_string(&path).unwrap());
+    let args = json!({
+        "path": path,
+        "file_hash": hash,
+        "ops": "replace 1..1:\n+REPL"
+    });
+    let out = fs_root(root.path())
+        .edit_lines(args)
+        .await
+        .expect("line edit should succeed");
     assert_eq!(out.len(), 1);
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "REPL\nline2\n");
 }
 
 #[tokio::test]
-async fn auto_dispatches_to_ast_via_ast() {
-    let root = TempRoot::new("ast");
-    let path = root.file("cosh_test_dispatch_ast.rs");
-    std::fs::write(&path, "fn main() { oldApi(1); }\n").unwrap();
+async fn fs_edit_lines_keeps_legacy_targets_batch_form() {
+    let root = TempRoot::new("lines_legacy");
+    let path = root.file("cosh_test_edit_lines_legacy.txt");
+    std::fs::write(&path, "a\n").unwrap();
+    let hash = compute_file_hash(&std::fs::read_to_string(&path).unwrap());
     let args = json!({
-        "ast": { "ops": [{"pat": "oldApi($$$ARGS)", "out": "newApi($$$ARGS)"}], "paths": [path] }
+        "targets": [{ "path": path, "file_hash": hash, "ops": "replace 1..1:\n+b" }]
     });
     let out = fs_root(root.path())
-        .edit(args)
+        .edit_lines(args)
         .await
-        .expect("ast should succeed");
+        .expect("legacy batch form is kept for benchmarks");
+    assert_eq!(out.len(), 1);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "b\n");
+}
+
+#[tokio::test]
+async fn fs_edit_lines_requires_path_and_ops() {
+    let err = fs_root(Path::new("."))
+        .edit_lines(json!({ "path": "x" }))
+        .await
+        .expect_err("should be rejected");
+    assert!(err.contains("replace engine requires"), "got: {err}");
+}
+
+// ── fs_ast_edit (AST structural engine) ─────────────────────────────────────
+
+#[tokio::test]
+async fn ast_edit_applies_flat_ops_shape() {
+    let root = TempRoot::new("ast");
+    let path = root.file("cosh_test_edit_ast.rs");
+    std::fs::write(&path, "fn main() { oldApi(1); }\n").unwrap();
+    let args = json!({
+        "path": path,
+        "ops": [{ "pat": "oldApi($$$ARGS)", "out": "newApi($$$ARGS)" }]
+    });
+    let out = fs_root(root.path())
+        .edit_ast(args)
+        .await
+        .expect("AST edit should succeed");
     assert_eq!(out.len(), 1);
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
@@ -86,34 +169,17 @@ async fn auto_dispatches_to_ast_via_ast() {
 }
 
 #[tokio::test]
-async fn only_replace_forces_replace_engine() {
-    let root = TempRoot::new("onlyreplace");
-    let path = root.file("cosh_test_only_replace.txt");
-    std::fs::write(&path, "a\n").unwrap();
-    let hash = compute_file_hash(&std::fs::read_to_string(&path).unwrap());
-    let args = json!({
-        "targets": [{ "path": path, "file_hash": hash, "ops": "replace 1..1:\n+b" }]
-    });
-    let out = fs_replace(root.path())
-        .edit(args)
-        .await
-        .expect("replace should succeed");
-    assert_eq!(out.len(), 1);
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), "b\n");
-}
-
-#[tokio::test]
-async fn only_ast_forces_ast_engine() {
-    let root = TempRoot::new("onlyast");
-    let path = root.file("cosh_test_only_ast.rs");
+async fn ast_edit_keeps_legacy_ast_batch_form() {
+    let root = TempRoot::new("ast_legacy");
+    let path = root.file("cosh_test_edit_ast_legacy.rs");
     std::fs::write(&path, "fn main() { foo(1); }\n").unwrap();
     let args = json!({
         "ast": { "ops": [{"pat": "foo($$$ARGS)", "out": "bar($$$ARGS)"}], "paths": [path] }
     });
-    let out = fs_ast(root.path())
-        .edit(args)
+    let out = fs_root(root.path())
+        .edit_ast(args)
         .await
-        .expect("ast should succeed");
+        .expect("legacy batch form is kept for codemods");
     assert_eq!(out.len(), 1);
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
@@ -122,217 +188,79 @@ async fn only_ast_forces_ast_engine() {
 }
 
 #[tokio::test]
-async fn only_ast_rejects_targets_argument() {
-    let args = json!({ "targets": [{"path": "x", "file_hash": "H", "ops": "y"}] });
-    let err = fs_ast(Path::new("."))
-        .edit(args)
-        .await
-        .expect_err("should be rejected");
-    assert!(err.contains("the AST engine requires"), "got: {err}");
-}
-
-#[tokio::test]
-async fn only_replace_rejects_ast_argument() {
-    let args = json!({ "ast": { "ops": [], "paths": [] } });
-    let err = fs_replace(Path::new("."))
-        .edit(args)
-        .await
-        .expect_err("should be rejected");
-    assert!(err.contains("the replace engine requires"), "got: {err}");
-}
-
-#[tokio::test]
-async fn auto_with_no_arguments_returns_usage_prompt() {
+async fn ast_edit_requires_path_and_ops() {
     let err = fs_root(Path::new("."))
-        .edit(json!({}))
+        .edit_ast(json!({ "path": "x" }))
         .await
         .expect_err("should be rejected");
+    assert!(err.contains("AST engine requires"), "got: {err}");
+}
+
+// ── tool descriptions teach exactly one engine each ──────────────────────
+
+#[test]
+fn description_edit_teaches_the_content_replace_shape() {
+    let desc = &Fs::new().description_edit;
+    assert_eq!(desc["name"], "fs_edit");
+    let props = &desc["inputSchema"]["properties"];
     assert!(
-        err.contains("hashline replace") && err.contains("content replace"),
-        "got: {err}"
+        props.get("old_string").is_some() && props.get("new_string").is_some(),
+        "fs_edit teaches the CC-trained old_string/new_string shape"
     );
-}
-
-#[tokio::test]
-async fn auto_with_both_arguments_returns_error() {
-    let root = TempRoot::new("both");
-    let path = root.file("cosh_test_dispatch_both.txt");
-    std::fs::write(&path, "a\n").unwrap();
-    let hash = compute_file_hash(&std::fs::read_to_string(&path).unwrap());
-    let args = json!({
-        "targets": [{ "path": path, "file_hash": hash, "ops": "replace 1..1:\n+b" }],
-        "ast": { "ops": [{"pat": "x($A)", "out": "y($A)"}], "paths": [path] }
-    });
-    let err = fs_root(root.path())
-        .edit(args)
-        .await
-        .expect_err("should be rejected");
-    assert!(err.contains("multiple edit engine arguments"), "got: {err}");
-}
-
-#[tokio::test]
-async fn auto_corrects_ast_schema_placed_in_targets() {
-    let args = json!({
-        "targets": [{ "pat": "oldApi($A)", "out": "newApi($A)" }]
-    });
-    let err = fs_root(Path::new("."))
-        .edit(args)
-        .await
-        .expect_err("should be corrected");
-    assert!(err.contains("`ast` argument"), "got: {err}");
-}
-
-#[tokio::test]
-async fn auto_corrects_replace_schema_placed_in_ast() {
-    let args = json!({
-        "ast": { "targets": [{"path": "x", "file_hash": "H", "ops": "y"}] }
-    });
-    let err = fs_root(Path::new("."))
-        .edit(args)
-        .await
-        .expect_err("should be corrected");
-    assert!(err.contains("`targets` argument"), "got: {err}");
-}
-
-#[tokio::test]
-async fn auto_engine_accessor_reflects_setters() {
-    assert_eq!(fs_root(Path::new(".")).edit_engine(), EditEngine::Auto);
+    assert!(
+        props.get("ops").is_none() && props.get("targets").is_none(),
+        "fs_edit must not advertise other engines' arguments"
+    );
+    assert!(
+        desc["description"]
+            .as_str()
+            .is_some_and(|t| t.contains("old_string") && t.contains("Example")),
+        "the content engine is taught by example"
+    );
     assert_eq!(
-        fs_replace(Path::new(".")).edit_engine(),
-        EditEngine::Replace
+        desc["inputSchema"]["required"],
+        json!(["path", "old_string", "new_string"])
     );
-    assert_eq!(fs_ast(Path::new(".")).edit_engine(), EditEngine::Ast);
-    assert_eq!(
-        fs_ast(Path::new(".")).auto().edit_engine(),
-        EditEngine::Auto
-    );
-}
-
-// ── content replace engine (`edits`) dispatch ─────────────────────────────
-
-#[tokio::test]
-async fn auto_dispatches_to_content_via_edits() {
-    let root = TempRoot::new("edits");
-    let path = root.file("cosh_test_dispatch_edits.txt");
-    let text = "alpha\nbeta\n";
-    std::fs::write(&path, text).unwrap();
-    let hash = cosh_sdk::rollback::record(&path, text).unwrap();
-    let args = json!({
-        "edits": [{ "path": path, "file_hash": hash, "old_string": "beta", "new_string": "BETA" }]
-    });
-    let out = fs_root(root.path())
-        .edit(args)
-        .await
-        .expect("edits should succeed");
-    assert_eq!(out.len(), 1);
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), "alpha\nBETA\n");
-}
-
-#[tokio::test]
-async fn auto_rejects_targets_and_edits_together() {
-    let args = json!({
-        "targets": [{ "path": "x", "file_hash": "H", "ops": "y" }],
-        "edits": [{ "path": "x", "old_string": "a", "new_string": "b" }]
-    });
-    let err = fs_root(Path::new("."))
-        .edit(args)
-        .await
-        .expect_err("should be rejected");
-    assert!(
-        err.contains("multiple edit engine arguments") && err.contains("`edits`"),
-        "got: {err}"
-    );
-}
-
-#[tokio::test]
-async fn auto_rejects_ast_and_edits_together() {
-    let args = json!({
-        "ast": { "ops": [{"pat": "x($A)", "out": "y($A)"}], "paths": ["x"] },
-        "edits": [{ "path": "x", "old_string": "a", "new_string": "b" }]
-    });
-    let err = fs_root(Path::new("."))
-        .edit(args)
-        .await
-        .expect_err("should be rejected");
-    assert!(err.contains("multiple edit engine arguments"), "got: {err}");
-}
-
-#[tokio::test]
-async fn auto_rejects_all_three_engines_together() {
-    let args = json!({
-        "targets": [{ "path": "x", "file_hash": "H", "ops": "y" }],
-        "ast": { "ops": [{"pat": "x($A)", "out": "y($A)"}], "paths": ["x"] },
-        "edits": [{ "path": "x", "old_string": "a", "new_string": "b" }]
-    });
-    let err = fs_root(Path::new("."))
-        .edit(args)
-        .await
-        .expect_err("should be rejected");
-    assert!(err.contains("multiple edit engine arguments"), "got: {err}");
-}
-
-#[tokio::test]
-async fn usage_prompt_lists_the_content_engine() {
-    let err = fs_root(Path::new("."))
-        .edit(json!({}))
-        .await
-        .expect_err("should be rejected");
-    assert!(
-        err.contains("content replace") && err.contains("old_string"),
-        "got: {err}"
-    );
-}
-
-#[tokio::test]
-async fn auto_corrects_content_schema_placed_in_targets() {
-    let args = json!({
-        "targets": [{ "path": "x", "file_hash": "H", "old_string": "a", "new_string": "b" }]
-    });
-    let err = fs_root(Path::new("."))
-        .edit(args)
-        .await
-        .expect_err("should be corrected");
-    assert!(err.contains("`edits` argument"), "got: {err}");
-}
-
-#[tokio::test]
-async fn auto_corrects_hashline_schema_placed_in_edits() {
-    let args = json!({
-        "edits": [{ "path": "x", "file_hash": "H", "ops": "replace 1..1:\n+y" }]
-    });
-    let err = fs_root(Path::new("."))
-        .edit(args)
-        .await
-        .expect_err("should be corrected");
-    assert!(err.contains("`targets` argument"), "got: {err}");
-}
-
-#[tokio::test]
-async fn only_replace_rejects_edits_argument() {
-    let args = json!({
-        "edits": [{ "path": "x", "old_string": "a", "new_string": "b" }]
-    });
-    let err = fs_replace(Path::new("."))
-        .edit(args)
-        .await
-        .expect_err("forced replace engine must reject `edits`");
-    assert!(err.contains("the replace engine requires"), "got: {err}");
 }
 
 #[test]
-fn edit_auto_description_examples_teach_both_engines_argument_shapes() {
-    let schema = &Fs::new().description_edit["inputSchema"]["properties"];
-    let ops_text = &schema["ops"]["description"];
+fn description_edit_lines_teaches_the_hashline_shape() {
+    let desc = &Fs::new().description_edit_lines;
+    assert_eq!(desc["name"], "fs_edit_lines");
+    let props = &desc["inputSchema"]["properties"];
     assert!(
-        ops_text
-            .as_str()
-            .is_some_and(|t| t.contains("Example") && t.contains("pat")),
-        "the ops description teaches both the hashline DSL and the AST engine by example"
+        props.get("ops").is_some() && props.get("file_hash").is_some(),
+        "fs_edit_lines teaches the path/file_hash/ops shape"
     );
-    let desc = &Fs::new().description_edit["description"];
     assert!(
-        desc.as_str()
-            .is_some_and(|t| t.contains("old_string") && t.contains("Example")),
-        "the content engine is taught by example"
+        props.get("old_string").is_none() && props.get("ast").is_none(),
+        "fs_edit_lines must not advertise other engines' arguments"
+    );
+    assert!(
+        props["ops"]
+            ["description"]
+            .as_str()
+            .is_some_and(|t| t.contains("Example") && t.contains("replace")),
+        "the ops DSL is taught by example"
+    );
+}
+
+#[test]
+fn description_ast_edit_teaches_the_pattern_shape() {
+    let desc = &Fs::new().description_ast_edit;
+    assert_eq!(desc["name"], "fs_ast_edit");
+    let props = &desc["inputSchema"]["properties"];
+    assert!(
+        props["ops"].get("items").is_some(),
+        "fs_ast_edit teaches the pattern/out array shape"
+    );
+    assert!(
+        props.get("old_string").is_none() && props.get("file_hash").is_none(),
+        "fs_ast_edit must not advertise other engines' arguments"
+    );
+    assert!(
+        props["ops"]["items"]["required"]
+            == json!(["pat", "out"]),
+        "each AST op requires pat and out"
     );
 }
