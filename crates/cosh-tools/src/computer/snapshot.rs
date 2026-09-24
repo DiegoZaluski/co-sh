@@ -85,7 +85,7 @@ fn snapshot_blocking(input: &ComputerSnapshot) -> Result<SnapshotOutput, String>
         (None, Some(pid)) => App::by_pid(pid, timeout),
         _ => unreachable!("validated in snapshot"),
     }
-    .map_err(|e| super::errors::render("computer_snapshot", "resolve application", &e))?;
+    .map_err(|e| super::errors::render_app_miss("computer_snapshot", &e))?;
 
     let (snapshot, elements) = match &input.selector {
         Some(selector) => {

@@ -1034,6 +1034,138 @@ fn native_call_string_encoded_field_is_repaired() {
     }
 }
 
+// Scalar + $ref repair (computer pipelines) — observed in the field with
+// computer_act: numeric_value/pid/nth delivered as strings and the chained
+// `then` step as a JSON-encoded string, all failing the tool's deserializer.
+// The step shape lives in `$defs.step` behind `allOf: [{$ref}]`, so repair
+// and validation must dispatch through the ref.
+fn pipeline_act_schema() -> ToolSchema {
+    ToolSchema {
+        name: "computer_act".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "$defs": {
+                "step": {
+                    "type": "object",
+                    "properties": {
+                        "pid": { "type": "integer", "minimum": 1 },
+                        "nth": { "type": "integer", "minimum": 1 },
+                        "numeric_value": { "type": "number" },
+                        "timeout_ms": { "type": "integer" },
+                        "key": { "type": "string" },
+                        "then": { "$ref": "#/$defs/step" }
+                    }
+                }
+            },
+            "allOf": [ { "$ref": "#/$defs/step" } ]
+        }),
+        example_args: None,
+    }
+}
+
+#[test]
+fn pipeline_stringified_scalars_and_then_are_repaired() {
+    let mut ex = ExtractAction::new().with_tool(pipeline_act_schema());
+    let text = concat!(
+        r#"{"name": "computer_act", "arguments": {"pid": "8016", "#,
+        r#""numeric_value": "70", "timeout_ms": "3000", "#,
+        r#""then": "{\"wait\": 1200}"}}"#
+    );
+    let result = ex.extract_batch(text);
+
+    let tool_items: Vec<_> = result
+        .items
+        .iter()
+        .filter_map(|i| {
+            if let Item::ToolCall(tc) = i {
+                Some(tc)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    assert!(
+        !tool_items.is_empty(),
+        "stringified scalars must be repaired, got: {result:?}"
+    );
+    assert_eq!(ex.take_tool_failures(), 0, "repair, not rejection");
+    let args = &tool_items[0].arguments;
+    assert_eq!(args["pid"], 8016, "{args:?}");
+    assert_eq!(args["numeric_value"], 70.0, "{args:?}");
+    assert_eq!(args["timeout_ms"], 3000, "{args:?}");
+    assert!(
+        args["then"].is_object() && args["then"]["wait"] == 1200,
+        "`then` must be a repaired step object: {args:?}"
+    );
+}
+
+#[test]
+fn pipeline_stringified_scalar_that_is_not_a_number_reaches_the_hint() {
+    // Repair is value-driven, not blind: a string that cannot take the
+    // schema's type stays a string and the call is rejected WITH the schema
+    // hint, instead of shipping a wrong-typed argument downstream.
+    let mut ex = ExtractAction::new().with_tool(pipeline_act_schema());
+    let text = r#"{"name": "computer_act", "arguments": {"pid": "8016 and a half"}}"#;
+    let result = ex.extract_batch(text);
+
+    assert!(
+        result
+            .items
+            .iter()
+            .all(|i| matches!(i, Item::ToolCall(_)) == false),
+        "a non-numeric string for an integer field must be rejected: {result:?}"
+    );
+    assert_eq!(ex.take_tool_failures(), 1, "rejection, not silent pass");
+}
+
+#[test]
+fn pipeline_integers_stay_integers_not_floats() {
+    // `"70"` for an `integer` field must repair to 70 (i64/u64), not 70.0 —
+    // serde deserializes `Option<u32>` from 70.0 only with lossy settings.
+    let mut ex = ExtractAction::new().with_tool(pipeline_act_schema());
+    let call = NativeToolCall {
+        id: "call_1".into(),
+        name: "computer_act".into(),
+        arguments: r#"{"pid": "8016", "nth": "1"}"#.into(),
+        thought_signature: String::new(),
+    };
+    match ex.register_native_call(&call) {
+        StreamAction::ToolCall(tc) => {
+            assert!(
+                tc.arguments["pid"].is_i64() && tc.arguments["nth"].is_i64(),
+                "integer fields must repair as integers: {:?}",
+                tc.arguments
+            );
+            assert_eq!(ex.take_tool_failures(), 0);
+        }
+        other => panic!("expected ToolCall, got {other:?}"),
+    }
+}
+
+#[test]
+fn pipeline_cyclic_ref_terminates_instead_of_overflowing() {
+    // A third-party MCP schema may declare a cyclic `$ref` — the dispatch
+    // must hit the hop cap and terminate, not recurse until the stack
+    // overflows (the process would abort on model-visible input).
+    let schema = ToolSchema {
+        name: "cyclic".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "$defs": {
+                "a": { "allOf": [ { "$ref": "#/$defs/b" } ] },
+                "b": { "allOf": [ { "$ref": "#/$defs/a" } ] }
+            },
+            "allOf": [ { "$ref": "#/$defs/a" } ]
+        }),
+        example_args: None,
+    };
+    let mut ex = ExtractAction::new().with_tool(schema);
+    // Must terminate with SOME outcome (accept or rejection) — the test
+    // fails on a stack overflow, not on the assertion.
+    let _ = ex.extract_batch(r#"{"name": "cyclic", "arguments": {}}"#);
+}
+
 #[test]
 fn schema_failure_hint_prefers_curated_example() {
     // With a curated example registered, the rejection hint shows the full

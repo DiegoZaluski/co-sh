@@ -813,9 +813,9 @@ fn validate_tool_call(
         // string-encoded array/object back into its structured form before
         // validating — and return the coerced value so downstream consumers
         // deserialize the repaired payload, not the raw string.
-        let args = repair_string_encoded(&args, &tool.input_schema);
+        let args = repair_string_encoded(&args, &tool.input_schema, &tool.input_schema);
 
-        if !validate_against_schema(&args, &tool.input_schema) {
+        if !validate_against_schema(&args, &tool.input_schema, &tool.input_schema) {
             return Err(ToolCallRejection::SchemaMismatch {
                 name: name.to_string(),
             });
@@ -839,14 +839,16 @@ fn validate_tool_call(
         // string-encoded field must recover identically to the enveloped
         // form, instead of failing schema validation here.
         if validate_against_schema(
-            &repair_string_encoded(value, &tool.input_schema),
+            &repair_string_encoded(value, &tool.input_schema, &tool.input_schema),
+            &tool.input_schema,
             &tool.input_schema,
         ) {
             matches.push(tool);
         }
     }
     if matches.len() == 1 {
-        let repaired = repair_string_encoded(value, &matches[0].input_schema);
+        let repaired =
+            repair_string_encoded(value, &matches[0].input_schema, &matches[0].input_schema);
         return Ok(ToolCallData {
             id,
             name: matches[0].name.clone(),
@@ -858,20 +860,102 @@ fn validate_tool_call(
     Err(ToolCallRejection::NoToolMatch)
 }
 
+/// Resolve a local `$ref` (`#/$defs/name`) against the document root — the
+/// pointer form the pipeline tool schemas use (`allOf: [{$ref: '#/$defs/step'}]`).
+///
+/// Fail-open by design: an unresolvable pointer yields the raw `{$ref}`
+/// schema, which repairs nothing and validates as anything — the tool's own
+/// deserializer still type-checks downstream, and a rejection hint beats a
+/// dropped valid call.
+fn resolve_ref<'a>(schema: &'a JsonValue, root: &'a JsonValue) -> Option<&'a JsonValue> {
+    let path = schema.get("$ref")?.as_str()?.strip_prefix("#/")?;
+    let mut current = root;
+    for segment in path.split('/') {
+        current = current.get(segment)?;
+    }
+    Some(current)
+}
+
+/// Cap on `$ref` hops followed per dispatch, mirroring the same cap in
+/// `skeleton.rs`: a `serde_json::Value` is a finite tree, but a third-party
+/// MCP schema may declare a cyclic `$ref` (`$defs/a → $defs/b → $defs/a`),
+/// which must hit the cap instead of recursing forever.
+const MAX_REF_HOPS: usize = 4;
+
+/// The schema that actually describes THIS level: a `$ref` followed, and —
+/// when the level carries no properties of its own — the first `allOf`
+/// branch (the `allOf: [{$ref: '#/$defs/step'}]` idiom the pipeline tool
+/// schemas use, same convention [`schema_skeleton`] renders). Without this
+/// dispatch, `repair_string_encoded` sees a properties-less top level and
+/// repairs nothing, so every nested field defect reaches the tool's
+/// deserializer raw.
+///
+/// The dispatch never takes an `allOf` branch away from a level that ALSO
+/// carries `oneOf`/`anyOf`/`properties`: those keywords belong to THIS
+/// level, and replacing it with a branch would drop their semantics.
+fn effective_schema<'a>(schema: &'a JsonValue, root: &'a JsonValue) -> &'a JsonValue {
+    effective_schema_bounded(schema, root, 0)
+}
+
+fn effective_schema_bounded<'a>(
+    schema: &'a JsonValue,
+    root: &'a JsonValue,
+    ref_hops: usize,
+) -> &'a JsonValue {
+    let resolved = if ref_hops >= MAX_REF_HOPS {
+        // Cap reached: hand back the level as-is rather than follow another
+        // hop — the schema's own `type`/`properties` (if any) still apply.
+        schema
+    } else {
+        resolve_ref(schema, root).unwrap_or(schema)
+    };
+    if resolved.get("properties").is_none()
+        && resolved.get("oneOf").is_none()
+        && resolved.get("anyOf").is_none()
+        && let Some(first) = resolved
+            .get("allOf")
+            .and_then(JsonValue::as_array)
+            .and_then(|branches| branches.first())
+    {
+        return effective_schema_bounded(first, root, ref_hops + 1);
+    }
+    resolved
+}
+
 /// Coerce string-encoded fields back into their structured form, guided by
 /// `schema`. Recurses into object properties and array items; a string value
 /// in a position whose schema says `array`/`object` is parsed as JSON and
-/// kept only when it parses to the expected kind. This repairs the common
-/// model mistake of double-encoding a single field
-/// (`{"questions": "[{...}]"}`) without burning a round-trip on the model.
-fn repair_string_encoded(value: &JsonValue, schema: &JsonValue) -> JsonValue {
+/// kept only when it parses to the expected kind, and a stringified scalar
+/// (`"numeric_value": "70"`) is parsed into the schema's number/boolean
+/// type. This repairs the common model mistakes of double-encoding a single
+/// field (`{"questions": "[{...}]"}`) or quoting a scalar — without burning
+/// a round-trip on the model. A string that cannot take the schema's type
+/// stays a string and fails validation with the schema hint.
+fn repair_string_encoded(value: &JsonValue, schema: &JsonValue, root: &JsonValue) -> JsonValue {
+    let schema = effective_schema(schema, root);
     if let JsonValue::String(s) = value
         && let Some(kind) = schema.get("type").and_then(JsonValue::as_str)
-        && matches!(kind, "array" | "object")
-        && let Ok(parsed) = serde_json::from_str::<JsonValue>(s)
-        && value_type_matches(&parsed, kind)
     {
-        return repair_string_encoded(&parsed, schema);
+        match kind {
+            "array" | "object" => {
+                if let Ok(parsed) = serde_json::from_str::<JsonValue>(s)
+                    && value_type_matches(&parsed, kind)
+                {
+                    return repair_string_encoded(&parsed, schema, root);
+                }
+            }
+            "number" | "integer" => {
+                if let Ok(n) = s.parse::<serde_json::Number>()
+                    && value_type_matches(&JsonValue::Number(n.clone()), kind)
+                {
+                    return JsonValue::Number(n);
+                }
+            }
+            "boolean" if s == "true" || s == "false" => {
+                return JsonValue::Bool(s == "true");
+            }
+            _ => {}
+        }
     }
 
     match value {
@@ -880,7 +964,7 @@ fn repair_string_encoded(value: &JsonValue, schema: &JsonValue) -> JsonValue {
             let mut out = serde_json::Map::new();
             for (key, val) in map {
                 let repaired = match properties.and_then(|p| p.get(key)) {
-                    Some(prop_schema) => repair_string_encoded(val, prop_schema),
+                    Some(prop_schema) => repair_string_encoded(val, prop_schema, root),
                     None => val.clone(),
                 };
                 out.insert(key.clone(), repaired);
@@ -893,7 +977,7 @@ fn repair_string_encoded(value: &JsonValue, schema: &JsonValue) -> JsonValue {
                 items
                     .iter()
                     .map(|item| match item_schema {
-                        Some(item_schema) => repair_string_encoded(item, item_schema),
+                        Some(item_schema) => repair_string_encoded(item, item_schema, root),
                         None => item.clone(),
                     })
                     .collect(),
@@ -903,10 +987,12 @@ fn repair_string_encoded(value: &JsonValue, schema: &JsonValue) -> JsonValue {
     }
 }
 
-fn validate_against_schema(value: &JsonValue, schema: &JsonValue) -> bool {
+fn validate_against_schema(value: &JsonValue, schema: &JsonValue, root: &JsonValue) -> bool {
     // Handle oneOf: value must match at least one sub-schema
     if let Some(one_of) = schema.get("oneOf").and_then(|o| o.as_array()) {
-        return one_of.iter().any(|sub| validate_against_schema(value, sub));
+        return one_of
+            .iter()
+            .any(|sub| validate_against_schema(value, sub, root));
     }
 
     let JsonValue::Object(obj) = value else {
@@ -930,14 +1016,24 @@ fn validate_against_schema(value: &JsonValue, schema: &JsonValue) -> bool {
         }
     }
 
+    // The `allOf: [{$ref: '#/$defs/step'}]` idiom the pipeline tools use:
+    // this level may carry no properties of its own while the real shape
+    // (typed fields) lives behind the ref — follow it, so nested field
+    // types are validated instead of passing through unchecked.
+    let schema = effective_schema(schema, root);
+
     if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
         for (field_name, field_schema) in properties {
             if let Some(field_value) = obj.get(field_name) {
                 if field_schema.get("oneOf").is_some() {
-                    if !validate_against_schema(field_value, field_schema) {
+                    if !validate_against_schema(field_value, field_schema, root) {
                         return false;
                     }
                 } else {
+                    // A `$ref` field (`then: {$ref: '#/$defs/step'}`) has
+                    // neither `const` nor `type` of its own — resolve it
+                    // before the checks, or the value validates as anything.
+                    let field_schema = effective_schema(field_schema, root);
                     if let Some(const_val) = field_schema.get("const")
                         && field_value != const_val
                     {

@@ -113,7 +113,7 @@ fn wait_blocking(input: &ComputerWait) -> Result<WaitOutput, String> {
         (None, Some(pid)) => App::by_pid(pid, app_timeout),
         _ => unreachable!("validated: computer_wait carries exactly one app scope"),
     }
-    .map_err(|e| super::errors::render("computer_wait", "resolve application", &e))?;
+    .map_err(|e| super::errors::render_app_miss("computer_wait", &e))?;
 
     let selector = input
         .selector

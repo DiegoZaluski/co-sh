@@ -127,7 +127,7 @@ pub fn run_step(step: &ComputerAct, tool: &str) -> Result<String, String> {
         (None, Some(pid)) => App::by_pid(pid, timeout),
         _ => unreachable!("validated: semantic step carries exactly one app scope"),
     }
-    .map_err(|e| super::errors::render(tool, "resolve application", &e))?;
+    .map_err(|e| super::errors::render_app_miss(tool, &e))?;
     let locator = app.locator(selector.trim()).nth(nth).with_timeout(timeout);
     dispatch_action(&locator, action, step, app.name.clone(), tool)
 }
@@ -179,7 +179,20 @@ fn dispatch_action(
         ActAction::Increment => locator.increment(),
         ActAction::Decrement => locator.decrement(),
         ActAction::ScrollIntoView => locator.scroll_into_view(),
-        ActAction::SetValue => locator.set_value(step.value.as_deref().unwrap_or_default()),
+        ActAction::SetValue => {
+            let value = step.value.as_deref().unwrap_or_default();
+            // A slider/spinner rejects text input (no ValuePattern), but the
+            // model's value may still be numeric — retry through the
+            // RangeValue path `set_numeric_value` uses before giving up.
+            match locator.set_value(value) {
+                Err(xa11y::Error::TextValueNotSupported) => match value.trim().parse::<f64>() {
+                    Ok(numeric) => locator.set_numeric_value(numeric),
+                    // Not numeric: keep the original text-input rejection.
+                    Err(_) => Err(xa11y::Error::TextValueNotSupported),
+                },
+                result => result,
+            }
+        }
         ActAction::SetNumericValue => {
             locator.set_numeric_value(step.numeric_value.unwrap_or_default())
         }
