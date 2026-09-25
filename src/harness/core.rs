@@ -5207,36 +5207,77 @@ impl Harness {
                     // prompt and its own (blocklisted) tool set.
                     nested.format_header_context();
 
-                    // Bridge: forward the sub-agent's text as ToolOutput,
-                    // usage, and explicit summarization routing notices.
-                    // Tool calls/results, snapshots, compaction and Done are
-                    // dropped; the loop's fatal Error (if any) is captured
-                    // so a failure is surfaced instead of masked.
+                    // Bridge: translate the nested loop's plain event stream
+                    // into the SAME typed SubagentEvent stream the external
+                    // ACP path emits — message and thought chunks, tool
+                    // calls with their results/errors (FIFO-paired: the
+                    // harness guarantees the Nth result matches the Nth
+                    // call), the plan_todo_write TODO as the plan, and the
+                    // context budget as the usage footer. The TUI sub-agent
+                    // box renders both sub-agent flavors identically. Nested
+                    // usage and explicit summarization routing notices still
+                    // pass through unchanged (nested accounting); snapshots,
+                    // compaction and Done are dropped; the loop's fatal
+                    // Error (if any) is captured so a failure is surfaced
+                    // instead of masked. No per-chunk ToolOutput mirror: the
+                    // report reaches the chat through the ONE final
+                    // `ToolOutput { finished: true }` below, exactly like
+                    // the ACP path.
                     let (nested_tx, mut nested_rx) =
                         tokio::sync::mpsc::unbounded_channel::<super::events::HarnessEvent>();
                     let bridge_tx = parent_tx.clone();
                     let last_error = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
                     let err_capture = last_error.clone();
                     let bridge = tokio::spawn(async move {
+                        use cosh_tools::subagent::internal::InternalEventBridge;
+                        let mut internal = InternalEventBridge::new();
                         while let Some(event) = nested_rx.recv().await {
                             if Harness::forward_nested_accounting(&event, bridge_tx.as_ref()) {
                                 continue;
                             }
-                            match event {
-                                super::events::HarnessEvent::Token { text }
-                                | super::events::HarnessEvent::Reasoning { text } => {
-                                    if let Some(tx) = &bridge_tx {
-                                        let _ = tx.send(super::events::HarnessEvent::ToolOutput {
-                                            tool: "subagent_call".to_string(),
-                                            output: text,
-                                            finished: false,
-                                        });
+                            let subagent_events: Vec<cosh_tools::subagent::events::SubagentEvent> =
+                                match event {
+                                    super::events::HarnessEvent::Token { text } => {
+                                        vec![InternalEventBridge::message(text)]
                                     }
+                                    super::events::HarnessEvent::Reasoning { text } => {
+                                        vec![InternalEventBridge::thought(text)]
+                                    }
+                                    super::events::HarnessEvent::ToolCall { tool, input } => {
+                                        let mut events = vec![internal.tool_call(&tool, &input)];
+                                        if tool == "plan_todo_write"
+                                            && let Some(plan) =
+                                                InternalEventBridge::plan_from_todo_write(&input)
+                                        {
+                                            events.push(plan);
+                                        }
+                                        events
+                                    }
+                                    super::events::HarnessEvent::ToolResult { output } => {
+                                        internal.tool_result(&output).into_iter().collect()
+                                    }
+                                    super::events::HarnessEvent::ToolError { error } => {
+                                        internal.tool_error(&error).into_iter().collect()
+                                    }
+                                    super::events::HarnessEvent::ContextInfo { info } => {
+                                        vec![InternalEventBridge::usage(
+                                            info.total_tokens,
+                                            info.max_tokens,
+                                        )]
+                                    }
+                                    super::events::HarnessEvent::Error { message, .. } => {
+                                        *err_capture.lock().unwrap() = Some(message);
+                                        Vec::new()
+                                    }
+                                    _ => Vec::new(),
+                                };
+                            if let Some(tx) = &bridge_tx {
+                                for event in subagent_events {
+                                    let _ = tx.send(super::events::HarnessEvent::SubagentEvent {
+                                        tool: "subagent_call".to_string(),
+                                        event,
+                                    });
                                 }
-                                super::events::HarnessEvent::Error { message, .. } => {
-                                    *err_capture.lock().unwrap() = Some(message);
-                                }
-                                _ => {}
                             }
                         }
                     });

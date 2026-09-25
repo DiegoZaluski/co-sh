@@ -46,6 +46,11 @@ pub mod closure;
 /// Typed event stream mapped from the ACP `session/update` notifications:
 /// the backend foundation for the TUI sub-agent box (Phase 3).
 pub mod events;
+/// Synthesis of typed events for the INTERNAL sub-agent (a nested harness):
+/// maps the nested loop's plain event stream to the same
+/// [`events::SubagentEvent`] stream the external ACP path emits, so both
+/// sub-agent flavors render identically in the TUI box.
+pub mod internal;
 /// Kernel-pinned filesystem sandbox for the ACP `fs/*` handlers (Unix only;
 /// other platforms use the validate-then-serve fallback in [`acp`]).
 #[cfg(unix)]
