@@ -66,7 +66,9 @@ fn default_true() -> bool {
 /// Output from calling a sub-agent over ACP.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubAgentCallOutput {
-    /// Accumulated output from the sub-agent.
+    /// The sub-agent's report: its FINAL message — the text written after
+    /// its last tool call (see `subagent::closure::TurnClosure`), not the
+    /// concatenation of every message of the turn.
     pub output: String,
     /// Why the prompt turn ended: a snake_case ACP stop reason (e.g.
     /// `end_turn`, `cancelled` — the spec-mandated answer to a

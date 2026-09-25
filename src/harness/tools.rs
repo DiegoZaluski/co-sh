@@ -1526,7 +1526,11 @@ impl Tools for CoshTools {
                 // `subagent::closure`) must start with
                 // `<!-- severity: green|yellow|red -->`. The contract is
                 // appended AFTER the stored-input resolution so a retry
-                // (reused raw input) never double-appends it.
+                // (reused raw input) never double-appends it. The same
+                // review decision is kept for the report side: a finished
+                // review turn's report gets the header ENFORCED below.
+                let is_review =
+                    cosh_tools::subagent::severity::is_review_task(&call_input, input.code_review);
                 let call_input = cosh_tools::subagent::severity::with_severity_contract(
                     &call_input,
                     input.code_review,
@@ -1602,6 +1606,29 @@ impl Tools for CoshTools {
                 if let Some(session_id) = session_id {
                     self.subagent.store_session(&stored_agent, session_id);
                 }
+
+                // The severity header is MANDATORY on a completed review
+                // turn: prompt-only contracts are not enforcement, so a
+                // report that arrived without one gets the header injected
+                // (inferred from its own findings). The guard is
+                // deliberately narrow: `end_turn` only. Cancelled/errored
+                // turns keep their partial output, and so do the remaining
+                // stop reasons (`max_tokens`, `max_turn_requests`,
+                // `refusal` in acp.rs) — tinting a truncated or refused
+                // turn would misreport it. A headerless TRUNCATED review
+                // stays untinted; that is the accepted trade (a report that
+                // already carries a header still tints, via extraction).
+                // The same enforced text goes to the ToolOutput mirror and
+                // the returned envelope, so the live box and the persisted
+                // transcript agree. NOTE: if a new stop reason is ever added
+                // to `stop_reason_str`, decide here whether it counts as
+                // completed — this match will silently exclude it.
+                let completed = matches!(stop_reason.as_str(), "end_turn");
+                let accumulated = if is_review && completed && !accumulated.trim().is_empty() {
+                    cosh_tools::subagent::severity::enforce_severity_header(&accumulated, true)
+                } else {
+                    accumulated
+                };
 
                 if let Some(ref tx) = self.event_tx {
                     let _ = tx.send(HarnessEvent::ToolOutput {

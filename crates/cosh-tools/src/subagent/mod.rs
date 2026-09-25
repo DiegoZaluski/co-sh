@@ -4,8 +4,9 @@
 //! it to two implementations (see [`SubAgent`]): an external agent harness —
 //! driven through the [Agent Client Protocol (ACP)](https://agentclientprotocol.com/)
 //! as a full client turn (initialize → `session/new` or `session/resume` →
-//! `session/prompt`), with agent message chunks streamed in real time and
-//! accumulated until the turn ends — or, when `agent` is omitted/empty, an
+//! `session/prompt`), with agent message chunks streamed in real time —
+//! only the LAST message (post-tool-calls) becomes the returned report (see
+//! [`closure`]) — or, when `agent` is omitted/empty, an
 //! internal agent (a nested harness that reports only its final answer).
 //!
 //! Two turn behaviors apply to the external path:

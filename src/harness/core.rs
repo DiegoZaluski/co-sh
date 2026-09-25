@@ -4962,12 +4962,19 @@ impl Harness {
                     .resolve_subagent_input(raw_input)?;
                 // Review tasks carry the severity contract (same as the
                 // external path): appended AFTER the stored-input resolution
-                // so a retry never double-appends it.
+                // so a retry never double-appends it. The same review
+                // decision is kept for the report side: the internal turn's
+                // final report gets the header ENFORCED in
+                // `run_internal_subagent`.
+                let is_review = cosh_tools::subagent::severity::is_review_task(
+                    &call_input,
+                    input.code_review,
+                );
                 let call_input = cosh_tools::subagent::severity::with_severity_contract(
                     &call_input,
                     input.code_review,
                 );
-                return self.run_internal_subagent(call_input).await;
+                return self.run_internal_subagent(call_input, is_review).await;
             }
         }
 
@@ -5134,7 +5141,11 @@ impl Harness {
     /// thread panicked, or when the channel closed — the real reason is
     /// surfaced instead of a silent empty result.
     #[allow(clippy::unwrap_used)]
-    async fn run_internal_subagent(&mut self, input: String) -> Result<String, String> {
+    async fn run_internal_subagent(
+        &mut self,
+        input: String,
+        is_review: bool,
+    ) -> Result<String, String> {
         // The sub-agent cannot ask the user questions, capture the live
         // terminal, or stop the loop on its own (it must end with a written
         // report — see SUBAGENT_BLOCKED_TOOLS); those tools are disabled so
@@ -5247,6 +5258,32 @@ impl Harness {
 
                     match final_answer {
                         Some(report) => {
+                            // The severity header is MANDATORY on a
+                            // completed internal review turn: a report that
+                            // arrived without the first-line header gets it
+                            // injected (inferred from its own findings), so
+                            // the box tint works even when the sub-agent
+                            // ignored the DSL. ASYMMETRY vs the external
+                            // arm: the internal loop has no stop-reason
+                            // signal here, so ANY `Some(final_answer)` is
+                            // treated as completed — the external arm
+                            // additionally requires `end_turn`. In practice
+                            // a stopped internal turn closes without a
+                            // final answer (final_answer is `None`), so the
+                            // risk is thin; if the internal loop ever
+                            // learns to emit partial answers on stop, gate
+                            // this on the stop reason like tools.rs does.
+                            // Failed turns (the `None` arm below) are never
+                            // touched — tinting a partial or errored turn
+                            // would misreport it.
+                            let report = if is_review && !report.trim().is_empty() {
+                                cosh_tools::subagent::severity::enforce_severity_header(
+                                    &report,
+                                    true,
+                                )
+                            } else {
+                                report
+                            };
                             if let Some(tx) = &parent_tx {
                                 let _ = tx.send(super::events::HarnessEvent::ToolOutput {
                                     tool: "subagent_call".to_string(),

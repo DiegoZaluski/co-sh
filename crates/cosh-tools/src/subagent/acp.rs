@@ -551,9 +551,12 @@ pub fn validate_agent(agent: &str) -> Result<(), String> {
 ///    The shared stop flag is raced against the prompt await; a trigger
 ///    sends `session/cancel` and the agent ends the turn itself.
 /// 3. Streams typed [`SubagentEvent`]s through `chunk_tx` (for the TUI)
-///    while accumulating the message text into the full output.
-/// 4. Returns `(accumulated_output, stop_reason, Option<session_id>)` when
-///    the turn ends — the session id only when it ended protocol-clean
+///    while feeding the message text to the turn's closure
+///    ([`TurnClosure`](crate::subagent::closure::TurnClosure)).
+/// 4. Returns `(final_report, stop_reason, Option<session_id>)` when
+///    the turn ends — the report is the message written after the LAST
+///    tool call, with a fallback to the last completed message — and the
+///    session id only when it ended protocol-clean
 ///    (`Some` is withheld on error arms) — or an error when
 ///    the harness fails before producing any output.
 ///

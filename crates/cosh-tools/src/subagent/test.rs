@@ -595,8 +595,8 @@ async fn run_session_selects_the_preferred_session_model() {
 /// The typed event stream (Phase 2): the fixture harness streams a thought,
 /// a tool call, its update, a plan, a usage snapshot, and a mode change —
 /// plus one update with no display mapping (`UserMessageChunk`). All mapped
-/// variants must arrive as typed events, only message text accumulates, and
-/// the unmapped update must be ignored (logged, not emitted).
+/// variants must arrive as typed events, only message text feeds the turn's
+/// closure, and the unmapped update must be ignored (logged, not emitted).
 #[tokio::test(flavor = "current_thread")]
 async fn run_session_maps_session_updates_into_typed_events() {
     use agent_client_protocol::schema::v1 as acp1;
@@ -693,7 +693,7 @@ async fn run_session_maps_session_updates_into_typed_events() {
                         acp1::CurrentModeUpdate::new("code-mode"),
                     ));
                     // The agent's actual answer → SubagentEvent::Message (and
-                    // the accumulated buffer).
+                    // the turn's closure).
                     let _ = notify(SessionUpdate::AgentMessageChunk(acp1::ContentChunk::new(
                         ContentBlock::Text(TextContent::new("all done")),
                     )));
@@ -2063,4 +2063,239 @@ async fn run_session_cancels_the_remote_turn_on_the_stop_signal() {
     assert_eq!(session_id, "cancel-fixture");
     // The fixture actually received the ACP cancel notification.
     assert!(cancel_flag.load(Ordering::Relaxed));
+}
+
+/// CAPTURE (`#[ignore]`d): run a REAL opencode turn through
+/// [`acp::call`] and dump every typed event with its millisecond timestamp
+/// to the TUI's regression testdata
+/// (`src/tui/routes/session/right_panel/testdata/
+/// subagent_stream_capture2.json`), which the TUI replay tests embed via
+/// `include_str!`. This variant drives a MULTI-TOOL turn with narration
+/// between calls (the user-reported overlap scenario).
+///
+/// Run with: `cargo test -p cosh-tools --test-threads=1
+/// capture_real_opencode_stream_multi_tool -- --ignored --nocapture`, then
+/// commit the refreshed JSON together with any code change that needs it.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "live harness capture: needs an installed, authenticated opencode"]
+async fn capture_real_opencode_stream_multi_tool() {
+    let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel();
+    let start = std::time::Instant::now();
+    let handle = tokio::task::spawn_blocking(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("capture runtime");
+        rt.block_on(crate::subagent::acp::call(
+            "opencode",
+            "In three separate steps, each with its own tool call and a \
+             one-sentence narration BEFORE and AFTER every call: (1) read \
+             crates/cosh-tools/src/subagent/closure.rs and report its first \
+             line; (2) grep the workspace for 'TurnClosure' and report how \
+             many files mention it; (3) list the files in \
+             crates/cosh-tools/src/subagent/ and count them. Think step by \
+             step; narrate between the steps.",
+            None,
+            std::path::PathBuf::from("/home/inky/co-sh"),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            chunk_tx,
+        ))
+    });
+    let mut captured: Vec<serde_json::Value> = Vec::new();
+    while let Some(event) = chunk_rx.recv().await {
+        let shape = match &event {
+            SubagentEvent::Message { text } => serde_json::json!({
+                "kind": "Message", "text": text,
+            }),
+            SubagentEvent::Thought { text } => serde_json::json!({
+                "kind": "Thought", "text": text,
+            }),
+            SubagentEvent::ToolCall {
+                id,
+                title,
+                kind,
+                status,
+                raw_input,
+            } => serde_json::json!({
+                "kind": "ToolCall", "id": id, "title": title,
+                "tool_kind": format!("{kind:?}"), "status": format!("{status:?}"),
+                "raw_input": raw_input,
+            }),
+            SubagentEvent::ToolCallUpdate {
+                id,
+                status,
+                title,
+                raw_output,
+                content,
+            } => serde_json::json!({
+                "kind": "ToolCallUpdate", "id": id, "status": status.map(|s| format!("{s:?}")),
+                "title": title, "raw_output": raw_output, "content": content,
+            }),
+            SubagentEvent::Plan { entries } => serde_json::json!({
+                "kind": "Plan",
+                "entries": entries.iter().map(|e| serde_json::json!({
+                    "content": e.content,
+                    "status": format!("{:?}", e.status),
+                    "priority": format!("{:?}", e.priority),
+                })).collect::<Vec<_>>(),
+            }),
+            SubagentEvent::Usage {
+                context_window,
+                tokens_in_context,
+            } => serde_json::json!({
+                "kind": "Usage", "context_window": context_window,
+                "tokens_in_context": tokens_in_context,
+            }),
+            SubagentEvent::Mode { id } => serde_json::json!({
+                "kind": "Mode", "id": id,
+            }),
+            SubagentEvent::SessionInfo { title } => serde_json::json!({
+                "kind": "SessionInfo", "title": title,
+            }),
+            // No catch-all: a new SubagentEvent variant must be added here
+            // explicitly so captures never silently drop it.
+        };
+        captured.push(serde_json::json!({
+            "ms": start.elapsed().as_millis() as u64,
+            "event": shape,
+        }));
+    }
+    let (result,) = tokio::join!(handle);
+    let Ok((report, stop_reason, session_id)) = result.expect("capture join failed") else {
+        panic!("capture call failed");
+    };
+    eprintln!(
+        "CAPTURE done: {} events, stop_reason={stop_reason}, session_id={session_id:?}",
+        captured.len()
+    );
+    eprintln!(
+        "CAPTURE report tail: {}",
+        &report[report.len().saturating_sub(200)..]
+    );
+    let out = serde_json::json!({ "events": captured, "report": report });
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let out_path = format!(
+        "{manifest}/../../src/tui/routes/session/right_panel/testdata/subagent_stream_capture2.json"
+    );
+    std::fs::write(
+        &out_path,
+        serde_json::to_string_pretty(&out).expect("serialize capture"),
+    )
+    .unwrap_or_else(|e| panic!("write capture to {out_path}: {e}"));
+}
+/// CAPTURE (`#[ignore]`d): run a REAL opencode turn through
+/// [`acp::call`] and dump every typed event with its millisecond timestamp
+/// to the TUI's regression testdata
+/// (`src/tui/routes/session/right_panel/testdata/
+/// subagent_stream_capture.json`), which the TUI replay tests embed via
+/// `include_str!`. Requires the opencode harness to be installed and
+/// authenticated.
+///
+/// Run with: `cargo test -p cosh-tools --test-threads=1
+/// capture_real_opencode_stream -- --ignored --nocapture`, then commit the
+/// refreshed JSON together with any code change that needs it.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "live harness capture: needs an installed, authenticated opencode"]
+async fn capture_real_opencode_stream() {
+    let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel();
+    let start = std::time::Instant::now();
+    let handle = tokio::task::spawn_blocking(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("capture runtime");
+        rt.block_on(crate::subagent::acp::call(
+            "opencode",
+            "Read the file crates/cosh-tools/src/subagent/events.rs and, \
+             in one short sentence each: (1) say what module it defines, \
+             (2) list the first three event variants you saw, \
+             (3) state how many lines the file has. Think step by step \
+             before answering, then answer.",
+            None,
+            std::path::PathBuf::from("/home/inky/co-sh"),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            chunk_tx,
+        ))
+    });
+    let mut captured: Vec<serde_json::Value> = Vec::new();
+    while let Some(event) = chunk_rx.recv().await {
+        let shape = match &event {
+            SubagentEvent::Message { text } => serde_json::json!({
+                "kind": "Message", "text": text,
+            }),
+            SubagentEvent::Thought { text } => serde_json::json!({
+                "kind": "Thought", "text": text,
+            }),
+            SubagentEvent::ToolCall {
+                id,
+                title,
+                kind,
+                status,
+                raw_input,
+            } => serde_json::json!({
+                "kind": "ToolCall", "id": id, "title": title,
+                "tool_kind": format!("{kind:?}"), "status": format!("{status:?}"),
+                "raw_input": raw_input,
+            }),
+            SubagentEvent::ToolCallUpdate {
+                id,
+                status,
+                title,
+                raw_output,
+                content,
+            } => serde_json::json!({
+                "kind": "ToolCallUpdate", "id": id, "status": status.map(|s| format!("{s:?}")),
+                "title": title, "raw_output": raw_output, "content": content,
+            }),
+            SubagentEvent::Plan { entries } => serde_json::json!({
+                "kind": "Plan",
+                "entries": entries.iter().map(|e| serde_json::json!({
+                    "content": e.content,
+                    "status": format!("{:?}", e.status),
+                    "priority": format!("{:?}", e.priority),
+                })).collect::<Vec<_>>(),
+            }),
+            SubagentEvent::Usage {
+                context_window,
+                tokens_in_context,
+            } => serde_json::json!({
+                "kind": "Usage", "context_window": context_window,
+                "tokens_in_context": tokens_in_context,
+            }),
+            SubagentEvent::Mode { id } => serde_json::json!({
+                "kind": "Mode", "id": id,
+            }),
+            SubagentEvent::SessionInfo { title } => serde_json::json!({
+                "kind": "SessionInfo", "title": title,
+            }),
+            // No catch-all: a new SubagentEvent variant must be added here
+            // explicitly so captures never silently drop it.
+        };
+        captured.push(serde_json::json!({
+            "ms": start.elapsed().as_millis() as u64,
+            "event": shape,
+        }));
+    }
+    let (result,) = tokio::join!(handle);
+    let Ok((report, stop_reason, session_id)) = result.expect("capture join failed") else {
+        panic!("capture call failed");
+    };
+    eprintln!(
+        "CAPTURE done: {} events, stop_reason={stop_reason}, session_id={session_id:?}",
+        captured.len()
+    );
+    eprintln!(
+        "CAPTURE report tail: {}",
+        &report[report.len().saturating_sub(200)..]
+    );
+    let out = serde_json::json!({ "events": captured, "report": report });
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let out_path = format!(
+        "{manifest}/../../src/tui/routes/session/right_panel/testdata/subagent_stream_capture.json"
+    );
+    std::fs::write(
+        &out_path,
+        serde_json::to_string_pretty(&out).expect("serialize capture"),
+    )
+    .unwrap_or_else(|e| panic!("write capture to {out_path}: {e}"));
 }
