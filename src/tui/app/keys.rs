@@ -536,11 +536,9 @@ impl App {
                                 });
                                 return Ok(false);
                             }
-                            self.state.right_panel =
-                                crate::routes::session::right_panel::types::RightPanelState::new();
-                            self.finalize_stale_compaction_lines();
-                            self.state
-                                .switch_to_session(session_id, &self.session_store);
+                            if !self.switch_session_locked(&session_id) {
+                                return Ok(false);
+                            }
                             // Returning to a session restores the last model
                             // used there.
                             self.restore_current_session_model();

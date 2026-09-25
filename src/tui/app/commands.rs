@@ -107,6 +107,42 @@ impl App {
         }
     }
 
+    /// Switch to a session, refusing the switch when it is already open in
+    /// another cosh process (toast warning). The shared tail of every
+    /// sidebar keyboard/mouse switch: the guarded [`AppState::
+    /// switch_to_session`] plus the panel reset/rehydrate pair.
+    ///
+    /// Returns `false` (with the toast shown) when the target session is
+    /// locked by another process; `true` on a completed switch.
+    pub(super) fn switch_session_locked(&mut self, session_id: &str) -> bool {
+        // Finalize stale compaction lines on the OLD session BEFORE the
+        // switch: `switch_to_session` persists it, and a persisted session
+        // must not carry a still-running compaction stopwatch (it would
+        // inflate the elapsed time shown on a later return).
+        self.finalize_stale_compaction_lines();
+        if !self
+            .state
+            .switch_to_session(session_id.to_string(), &self.session_store)
+        {
+            use crate::ui::toast::{ToastOptions, ToastVariant};
+            self.toast_state.show(ToastOptions {
+                title: Some("Switch session".into()),
+                message: "This session is already open in another cosh process.".into(),
+                variant: ToastVariant::Warning,
+                duration_ms: 4000,
+            });
+            return false;
+        }
+        self.state.right_panel =
+            crate::routes::session::right_panel::types::RightPanelState::new();
+        self.rehydrate_right_panel();
+        self.session_view.hovered_msg_idx = None;
+        self.title_generated = true;
+        // Same cleanup, now against the NEWLY selected session.
+        self.finalize_stale_compaction_lines();
+        true
+    }
+
     /// Open the rename dialog for the current session, prefilled with its
     /// title (opencode-style prompt: edit in place, Enter applies, Esc
     /// cancels). No-op without a session.

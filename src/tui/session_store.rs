@@ -37,6 +37,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chrono::Datelike;
@@ -127,6 +128,11 @@ pub struct SessionStore {
     notify: Option<tokio::sync::mpsc::UnboundedSender<HarnessEvent>>,
     /// How long a write waits for a foreign process's lock before giving up.
     lock_wait: Duration,
+    /// Advisory locks held by this process for sessions it has open, keyed by
+    /// session id. Shared through the `Arc` so every clone of the store
+    /// (including the background writer thread) sees the same claims; the
+    /// mutex serializes the check-and-insert of the claim step.
+    session_locks: Arc<Mutex<HashMap<String, std::fs::File>>>,
 }
 
 impl SessionStore {
@@ -147,6 +153,7 @@ impl SessionStore {
             cwd_hash: compute_cwd_hash(),
             notify: None,
             lock_wait: LOCK_WAIT_TIMEOUT,
+            session_locks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -168,6 +175,7 @@ impl SessionStore {
             cwd_hash,
             notify: None,
             lock_wait: LOCK_WAIT_TIMEOUT,
+            session_locks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -1002,6 +1010,56 @@ impl SessionStore {
         );
     }
 
+    // ── Session open-locks ────────────────────────────────────────────────
+
+    /// Try to claim exclusive UI ownership of a session for this process.
+    ///
+    /// Backed by a per-session kernel lock file (`session-{id}.lock`, same
+    /// `flock` mechanism as the store lock): releasing happens on drop AND
+    /// automatically when the holder dies, so a crashed process can never
+    /// orphan the lock. Returns `false` when ANOTHER cosh process already
+    /// holds the session open; re-claims by this process are idempotent.
+    pub fn try_lock_session(&self, session_id: &str) -> bool {
+        let mut guards = self
+            .session_locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if guards.contains_key(session_id) {
+            return true;
+        }
+        match try_lock_session_file(&self.sessions_dir, session_id) {
+            Ok(file) => {
+                guards.insert(session_id.to_string(), file);
+                true
+            }
+            Err(error) => {
+                // Contention is the expected refusal path (info); an I/O
+                // failure is unexpected and gets a louder log — both refuse
+                // the claim, but they need different diagnosability.
+                if error.kind() == std::io::ErrorKind::WouldBlock {
+                    log::info!("session {session_id} is open in another process: {error}");
+                } else {
+                    log::warn!("failed to lock session {session_id}: {error}");
+                }
+                false
+            }
+        }
+    }
+
+    /// Release this process's claim on a session (no-op when not held).
+    ///
+    /// The lock FILE is left on disk on purpose: removing it would race with
+    /// another process that has just acquired the lock (it would keep
+    /// holding a lock on an unlinked file while a third process creates a
+    /// fresh file and wins its own lock). Orphan files are harmless — they
+    /// are not `.jsonl`, so the listing ignores them.
+    pub fn release_session_lock(&self, session_id: &str) {
+        self.session_locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(session_id);
+    }
+
     /// Check whether a session with the given ID exists on disk.
     pub fn has_session(&self, session_id: &str) -> bool {
         self.load_history_for_branch(session_id)
@@ -1282,6 +1340,22 @@ fn send_toast(
             variant,
         });
     }
+}
+
+/// Try to acquire the per-session open lock without waiting.
+///
+/// Kernel-managed (`flock` via the standard library), like the store lock:
+/// the OS releases it when the holder drops the file OR dies, so a crashed
+/// process can never lock a session forever.
+fn try_lock_session_file(sessions_dir: &Path, session_id: &str) -> std::io::Result<std::fs::File> {
+    let path = sessions_dir.join(format!("session-{session_id}.lock"));
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)?;
+    file.try_lock()?;
+    Ok(file)
 }
 
 /// Acquire the store's exclusive advisory lock. Kernel-managed (`flock` via
@@ -1727,6 +1801,7 @@ mod tests {
             cwd_hash: "testhash".to_string(),
             notify: None,
             lock_wait: LOCK_WAIT_TIMEOUT,
+            session_locks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -2738,6 +2813,60 @@ mod tests {
         assert!(saw_busy && saw_skipped);
     }
 
+    /// A session already open in another process is refused by
+    /// `try_lock_session`, and becomes claimable again after this process
+    /// releases it (the release must not unlink the lock file, which would
+    /// race with the foreign holder).
+    #[test]
+    fn session_open_lock_blocks_foreign_claim_until_released() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("testhash");
+        std::fs::create_dir_all(&sessions_dir).ok();
+        let session = make_test_session("open-lock", "Locked", vec![make_user_msg("m1", "hi")]);
+
+        // Simulate a foreign cosh process holding the session open.
+        let foreign = try_lock_session_file(&sessions_dir, &session.id).unwrap();
+
+        let store = test_store(&dir);
+        assert!(
+            !store.try_lock_session(&session.id),
+            "a session locked by another process must be refused"
+        );
+        // Refusal is repeatable and does not register a local claim.
+        assert!(!store.try_lock_session(&session.id));
+
+        // The foreign holder releases; now the claim must succeed, re-claims
+        // stay idempotent, and release frees it for the next process.
+        drop(foreign);
+        assert!(store.try_lock_session(&session.id));
+        assert!(store.try_lock_session(&session.id), "re-claim is idempotent");
+        store.release_session_lock(&session.id);
+        let next_process = try_lock_session_file(&sessions_dir, &session.id).unwrap();
+        drop(next_process);
+    }
+
+    /// The open-lock survives clone boundaries: a clone of the store (the
+    /// writer thread and UI share clones) sees the same claim, so re-claiming
+    /// through a clone does not fight the kernel lock.
+    #[test]
+    fn session_open_lock_is_shared_across_store_clones() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+        let session = make_test_session("open-clone", "Cloned", vec![make_user_msg("m1", "hi")]);
+        assert!(store.try_lock_session(&session.id));
+
+        let clone = store.clone();
+        assert!(
+            clone.try_lock_session(&session.id),
+            "a clone of the claiming store must see its own claim"
+        );
+        clone.release_session_lock(&session.id);
+        assert!(
+            store.try_lock_session(&session.id),
+            "a clone's release must free the original's claim too"
+        );
+    }
+
     /// Multi-event collision: two stale writers each append a multi-delta
     /// block with the same starting id. Replay keeps the first block whole
     /// and skips every duplicate that follows it.
@@ -3523,6 +3652,7 @@ mod tests {
             cwd_hash: "proja".to_string(),
             notify: None,
             lock_wait: LOCK_WAIT_TIMEOUT,
+            session_locks: Arc::new(Mutex::new(HashMap::new())),
         };
         std::fs::create_dir_all(base.join("proja")).ok();
 
@@ -3532,6 +3662,7 @@ mod tests {
             cwd_hash: "projb".to_string(),
             notify: None,
             lock_wait: LOCK_WAIT_TIMEOUT,
+            session_locks: Arc::new(Mutex::new(HashMap::new())),
         };
         std::fs::create_dir_all(base.join("projb")).ok();
 

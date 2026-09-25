@@ -1573,19 +1573,11 @@ impl App {
                     });
                     return true;
                 }
-                self.state.right_panel =
-                    crate::routes::session::right_panel::types::RightPanelState::new();
-                self.finalize_stale_compaction_lines();
-                self.state
-                    .switch_to_session(session_id, &self.session_store);
+                if !self.switch_session_locked(&session_id) {
+                    return true;
+                }
                 // Returning to a session restores the last model used there.
                 self.restore_current_session_model();
-                // The panel content belongs to the session: rebuild it from
-                // the newly selected session's history.
-                self.rehydrate_right_panel();
-                self.session_view.hovered_msg_idx = None;
-                self.title_generated = true;
-                self.finalize_stale_compaction_lines();
                 true
             }
             SessionsAction::RequestDelete(session_id) => {

@@ -117,6 +117,10 @@ impl App {
             }
         }
         self.state.remove_session(session_id);
+        // A deleted session can no longer be open anywhere in this process:
+        // free its open-lock so another cosh instance may open the id (a
+        // no-op when this process never held the lock).
+        self.session_store.release_session_lock(session_id);
         self.session_store.delete_session(session_id);
     }
 

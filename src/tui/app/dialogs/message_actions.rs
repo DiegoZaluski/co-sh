@@ -199,6 +199,18 @@ impl App {
                     return;
                 }
                 let new_id = forked.id.clone();
+                // Claim the fork's open-lock BEFORE it becomes selectable:
+                // the path stays all-or-nothing even in the (practically
+                // unreachable) case of an id collision with another process.
+                if !self.session_store.try_lock_session(&new_id) {
+                    self.toast_state.show(ToastOptions {
+                        title: Some("Fork".into()),
+                        message: "This session is already open in another cosh process.".into(),
+                        variant: ToastVariant::Warning,
+                        duration_ms: 4000,
+                    });
+                    return;
+                }
                 self.state.add_session(forked);
                 self.finalize_stale_compaction_lines();
                 // The fork branches the conversation: the panel starts clean
@@ -207,6 +219,8 @@ impl App {
                 // fork point, which is what the fork persisted).
                 self.state.right_panel =
                     crate::routes::session::right_panel::types::RightPanelState::new();
+                // The claim above makes this switch's own lock check succeed
+                // (claims are idempotent per process).
                 self.state.switch_to_session(new_id, &self.session_store);
                 self.rehydrate_right_panel();
                 self.session_view.hovered_msg_idx = None;
