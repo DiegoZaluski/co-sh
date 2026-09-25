@@ -3092,9 +3092,14 @@ fn bench_user_message(idx: usize) -> Message {
 fn bench_text_message(idx: usize, big: bool) -> Message {
     let text = if big {
         let mut s = String::with_capacity(64 * 1024);
+        // `{idx}` in every block makes each big message's content UNIQUE —
+        // real transcripts never repeat a full answer verbatim, and identical
+        // content would collapse every message after the first into the
+        // markdown estimator's global ESTIMATE_CACHE, undercounting the cold
+        // rebuild a real 10-hour session pays.
         for i in 0..400 {
             s.push_str(&format!(
-                "### Section {i}\n\nSome **markdown** with `inline code` and a list:\n- item one\n- item two\n- item three\n\n```rust\nfn f{i}() {{ Ok(()) }}\n```\n\n"
+                "### Section {idx}.{i}\n\nSome **markdown** with `inline code` and a list:\n- item one\n- item two\n- item three\n\n```rust\nfn f{idx}_{i}() {{ Ok(()) }}\n```\n\n"
             ));
         }
         s
@@ -6436,4 +6441,283 @@ fn pill_renders_on_the_caller_provided_anchor_row() {
     let buf = render_pill_anchored(&mut view, area, area.y);
     let (_, gy) = pill_cell(&buf, area).expect("glyph must paint");
     assert!(gy >= area.y, "slide must clamp inside the viewport");
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Left-panel toggle reflow benchmark
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Build a session that mirrors a real 10-hour working session: the transcript
+/// is dominated by LONG assistant markdown answers (code blocks, headers,
+/// lists — the content that makes the markdown estimator expensive) plus tool
+/// outputs, not by one-line "Step N" texts.
+fn bench_long_session(n_pairs: usize) -> Session {
+    let mut messages = Vec::with_capacity(n_pairs * 2);
+    for i in 0..n_pairs {
+        messages.push(bench_user_message(i));
+        // Alternate: big markdown answer / tool output / short answer —
+        // matching the realistic mix of agent work.
+        if i % 3 == 0 {
+            messages.push(bench_text_message(i, true));
+        } else if i % 3 == 1 {
+            messages.push(bench_tool_message(i, 8 * 1024));
+        } else {
+            messages.push(bench_text_message(i, false));
+        }
+    }
+    Session {
+        id: format!("bench-long-{n_pairs}"),
+        title: "Bench long".into(),
+        created_at: 0,
+        title_generated: false,
+        provider: None,
+        model: None,
+        reasoning: None,
+        ctx_ids: Default::default(),
+        messages,
+    }
+}
+
+/// Toggle the left panel on and off around a long session and time the reflow
+/// frame. Opening/closing the panel changes the main area width (22 columns),
+/// which changes `max_w` — and the height cache treats a width change as a
+/// FULL rebuild: every message's height is re-estimated (word-wrap + markdown
+/// parse) synchronously in the toggle frame, and the per-message cell cache is
+/// dropped entirely. On a 10-hour session that single frame pays for the whole
+/// transcript.
+///
+/// The numbers printed here are the direct user-visible symptom: the toggle
+/// frame duration. A fix must keep this frame within a few viewport renders
+/// worth of work, not scale with the transcript.
+#[test]
+#[ignore = "long-running toggle-reflow benchmark; run explicitly in release"]
+fn bench_left_panel_toggle_reflow_time() {
+    let theme = test_theme();
+    let config = test_config();
+
+    // Wide terminal so the session area comfortably fits both panel states.
+    let area = Rect::new(0, 0, 140, 50);
+    let session = bench_long_session(400);
+    let n_msgs = session.messages.len();
+
+    let mut state = AppState::new();
+    state.add_session(session);
+    state.current_session_id = Some("bench-long-400".into());
+    state.status = SessionStatus::Idle;
+
+    let mut view = SessionView::new();
+    let mut buf = Buffer::empty(area);
+
+    // Warm the caches at the panel-closed width first (the steady state the
+    // user sits in before toggling).
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+    // The toggle shrinks the session area by the panel width.
+    let panel_w = crate::left_panel::LEFT_PANEL_WIDTH;
+    let closed_area = Rect::new(0, 0, area.width, area.height);
+    let open_area = Rect::new(panel_w, 0, area.width - panel_w, area.height);
+
+    // Toggle open → closed → open, timing each reflow frame. The first frame
+    // at each width is the expensive one (cold at that width).
+    let mut times = Vec::new();
+    for round in 0..4 {
+        let (target, label) = if round % 2 == 0 {
+            (open_area, "open")
+        } else {
+            (closed_area, "closed")
+        };
+        // Keep the buffer geometry honest: each frame renders into a buffer
+        // sized like the real app's terminal (fixed), with the session area
+        // shifted/clipped by the panel — exactly what `session_main_area`
+        // does.
+        let _ = label;
+        let start = std::time::Instant::now();
+        view.render(&mut buf, target, &state, &theme, &config, 0.016);
+        times.push((label, start.elapsed()));
+    }
+
+    eprintln!("--- toggle reflow ({n_msgs} messages) ---");
+    for (label, t) in &times {
+        eprintln!("reflow to {label}: {t:?}");
+    }
+
+    // The FIRST reflow (round 0, open) is the cold one at that width: the
+    // steady-state closed-width caches were warm, but open-width caches did not
+    // exist yet, so it legitimately pays the full transcript rebuild once —
+    // that single frame is what the left-panel toggle has always cost. The
+    // point of the width-snapshot cache is that reflow doesn't SCALE with the
+    // transcript: each later toggle re-encounters a width whose caches were
+    // parked as a snapshot, so frames 2..=4 are O(1) swaps + cache-hit renders
+    // and must be a tiny handful of milliseconds. Asserting that (instead of a
+    // 30ms ceiling on the worst frame) keeps this a regression tripwire for the
+    // snapshot path; the printed numbers are the real evidence.
+    let first = times[0].1;
+    let subsequent = &times[1..];
+    eprintln!("[TOGGLE-REFLOW] first reflow frame: {first:?}");
+    for (label, t) in subsequent {
+        eprintln!("[TOGGLE-REFLOW] subsequent reflow to {label}: {t:?}");
+        assert!(
+            t.as_millis() < 5,
+            "reflow frame #{label} after the first took {t:?} — a later toggle \
+             re-paid the transcript rebuild instead of restoring the cached width"
+        );
+    }
+}
+
+/// Diagnostic probe: break the toggle-reflow cost into its parts.
+/// 1. cold `ensure_height_caches_fresh` at a NEW width (the suspected cost)
+/// 2. a second identical cold build (ESTIMATE_CACHE warm — same width again)
+/// 3. back to the ORIGINAL width after two intervening builds (thrash check)
+#[test]
+#[ignore = "diagnostic probe; run explicitly in release"]
+fn bench_height_cache_width_switch_probe() {
+    let theme = test_theme();
+    let config = test_config();
+    let session = bench_long_session(400);
+
+    let mut state = AppState::new();
+    state.add_session(session);
+    state.current_session_id = Some("bench-long-400".into());
+    state.status = SessionStatus::Idle;
+    let session = state.current_session().unwrap();
+
+    let mut view = SessionView::new();
+    let wa = 100u16; // panel closed max_w ≈ inner 140-2-6
+    let wb = 74u16; // panel open
+
+    let t = std::time::Instant::now();
+    view.ensure_height_caches_fresh(session, wa, &config, None);
+    eprintln!("probe 1 (cold A): {:?}", t.elapsed());
+
+    let t = std::time::Instant::now();
+    view.ensure_height_caches_fresh(session, wb, &config, None);
+    eprintln!("probe 2 (cold B): {:?}", t.elapsed());
+
+    let t = std::time::Instant::now();
+    view.ensure_height_caches_fresh(session, wb, &config, None);
+    eprintln!("probe 3 (warm B): {:?}", t.elapsed());
+
+    let t = std::time::Instant::now();
+    view.ensure_height_caches_fresh(session, wa, &config, None);
+    eprintln!("probe 4 (back to A, thrash check): {:?}", t.elapsed());
+
+    let t = std::time::Instant::now();
+    view.ensure_height_caches_fresh(session, wb, &config, None);
+    eprintln!("probe 5 (back to B, thrash check): {:?}", t.elapsed());
+
+    // Hash-only cost: msg_change_token over the whole transcript.
+    let t = std::time::Instant::now();
+    let mut sink: u64 = 0;
+    for m in state.current_session().unwrap().messages.iter() {
+        sink = sink.wrapping_add(super::msg_change_token(m));
+    }
+    eprintln!("probe 6 (hash all): {:?} sink={sink}", t.elapsed());
+}
+
+/// Decomposition probe 2: where do the ~80ms of the toggle frame go?
+/// Warm at width A, then measure the full frame at width B, the second frame
+/// at B (cell cache now warm at B), and the raw cost of rendering one big
+/// markdown message at each width.
+#[test]
+#[ignore = "diagnostic probe; run explicitly in release"]
+fn bench_toggle_frame_decomposition() {
+    let theme = test_theme();
+    let config = test_config();
+    let session = bench_long_session(400);
+
+    let mut state = AppState::new();
+    state.add_session(session);
+    state.current_session_id = Some("bench-long-400".into());
+    state.status = SessionStatus::Idle;
+
+    let area = Rect::new(0, 0, 140, 50);
+    let wa = 124u16; // closed: 140-2*2-... approx inner max_w
+    let wb = 102u16; // open: minus 22
+    let mut view = SessionView::new();
+    let mut buf = Buffer::empty(area);
+
+    let t = std::time::Instant::now();
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+    eprintln!("warm render at closed width: {:?}", t.elapsed());
+
+    // Toggle: render with a narrower session area (as app does).
+    let open_area = Rect::new(crate::left_panel::LEFT_PANEL_WIDTH, 0, area.width - crate::left_panel::LEFT_PANEL_WIDTH, area.height);
+    let t = std::time::Instant::now();
+    view.render(&mut buf, open_area, &state, &theme, &config, 0.016);
+    eprintln!("toggle frame (open): {:?}", t.elapsed());
+
+    let t = std::time::Instant::now();
+    view.render(&mut buf, open_area, &state, &theme, &config, 0.016);
+    eprintln!("second frame (open, warm): {:?}", t.elapsed());
+
+    let t = std::time::Instant::now();
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+    eprintln!("toggle back (closed): {:?}", t.elapsed());
+
+    // Raw cost: render one big markdown message at each width.
+    let mut tool_state = super::tool_render::ToolRenderState::new();
+    for w in [wa, wb] {
+        let full = Rect::new(0, 0, w + 6, 5000);
+        let mut temp = Buffer::empty(full);
+        let msg = bench_text_message(1, true);
+        // Generous part heights (the estimator already ran at this width), so
+        // the render isn't clipped mid-markdown.
+        let heights: Vec<u16> = msg.parts.iter().map(|_| 5000u16).collect();
+        let t = std::time::Instant::now();
+        SessionView::render_assistant_message(
+            &mut temp,
+            full,
+            &msg,
+            &theme,
+            &mut tool_state,
+            &config,
+            false,
+            false,
+            &heights,
+            false,
+        );
+        eprintln!("one big markdown render at w={w}: {:?}", t.elapsed());
+    }
+}
+
+/// Per-frame cost with the panel OPEN: is the dashboard's `dashboard_data()`
+/// aggregation (O(records) over the full usage log, every frame) responsible
+/// for the reported header-animation lag while the panel is open?
+/// Measures `summarize` at several record counts to find the per-record cost.
+#[test]
+#[ignore = "diagnostic probe; run explicitly in release"]
+fn bench_dashboard_summarize_per_frame() {
+    use crate::usage::{UsagePeriod, summarize};
+    use cosh_sdk::connector::TokenUsage;
+    let now_ms = 1_800_000_000_000u64;
+
+    for &n in &[1_000usize, 10_000, 100_000, 500_000] {
+        let records: Vec<crate::usage::UsageRecord> = (0..n)
+            .map(|i| crate::usage::UsageRecord {
+                id: i as u64,
+                ts: now_ms - (i as u64) * 1_000,
+                session_id: format!("s{}", i % 50),
+                provider: format!("p{}", i % 6),
+                model: "m".into(),
+                usage: TokenUsage {
+                    input_tokens: 1000,
+                    output_tokens: 500,
+                    ..TokenUsage::default()
+                },
+                cost_usd: Some(0.01),
+                cost_credits: None,
+            })
+            .collect();
+
+        // Warm + median of 20 runs (steady-state per-frame cost).
+        let _ = summarize(&records, UsagePeriod::Day, now_ms);
+        let mut times = Vec::with_capacity(20);
+        for _ in 0..20 {
+            let t = std::time::Instant::now();
+            let _ = summarize(&records, UsagePeriod::Day, now_ms);
+            times.push(t.elapsed());
+        }
+        times.sort();
+        eprintln!("summarize n={n:>7}: median {:?}", times[10]);
+    }
 }

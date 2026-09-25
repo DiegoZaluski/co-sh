@@ -16,6 +16,8 @@ use ratatui::buffer::{Buffer, Cell, CellDiffOption};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
+use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
+
 use cosh_tui::core::lib::border::{BorderCharacters, BorderSidesConfig};
 use cosh_tui::core::lib::rgba::{ColorInput, RGBA, ansi256_index_to_rgb};
 use cosh_tui::core::renderable::Renderable;
@@ -274,6 +276,12 @@ const SUMMARIZING_PAD_V: u16 = 1;
 /// guard around the viewport are evicted LRU-style — the transcript on disk
 /// keeps the full session, so scroll-back simply re-renders the evicted
 /// message. Bounding this cache keeps the TUI fluid on very long sessions.
+///
+/// This bounds the ACTIVE cache set only. The parked width snapshot (see
+/// [`WidthCacheSnapshot`], kept so a left-panel toggle restores the other
+/// width's caches in O(1)) holds its own copy — gated at capture/swap time to
+/// the low-water mark below, so while a snapshot is parked the peak is at
+/// most `RENDER_CACHE_BUDGET + RENDER_CACHE_LOW_WATER`.
 const RENDER_CACHE_BUDGET: usize = 64 * 1024 * 1024; // 64 MB
 
 /// Eviction stops once the cache is back under this water mark, so a small
@@ -522,12 +530,155 @@ pub struct SessionView {
     /// rendered once, the streaming text part patched incrementally (see
     /// `streaming` module). Freed when nothing is streaming.
     streaming_msg: Option<streaming::StreamingMessageCache>,
+    /// Caches for the width we are NOT currently rendering at (see
+    /// [`WidthCacheSnapshot`]): parked when a full rebuild leaves one width and
+    /// swapped back O(1) when the toggle returns — never cloned.
+    width_cache_snapshot: Option<Box<WidthCacheSnapshot>>,
 }
 
 #[derive(Clone, Copy, Default)]
 struct HeightCacheUpdate {
     full_rebuild: bool,
     tool_state_changed: bool,
+}
+
+/// A standby copy of the width-dependent render caches, kept so a left-panel
+/// toggle back to a previously-used width restores that width's exact caches
+/// instead of re-estimating every message height and re-rendering every
+/// visible message from scratch. On a 10-hour transcript that full rebuild was
+/// the ~1s toggle frame that froze the header animation.
+///
+/// Only the caches that actually depend on line width are captured — the
+/// scroll position, stream cache, hover/pill state, and the reusable scratch
+/// buffers stay on the view. Restoring the set is a battery of O(1) `Vec`
+/// moves (the heavy cells are never cloned), which is what makes the return
+/// toggle a cache-hit frame rather than a reflow.
+///
+/// A snapshot is only valid for the exact (session, config, tool-expansion,
+/// message-count, width) it was captured under; [`WidthCacheSnapshot::swap_with_view`]
+/// re-validates those keys in O(1) and the caller discards the snapshot if any
+/// of them drifted.
+struct WidthCacheSnapshot {
+    /// Validity keys — compared O(1) at swap time so a stale snapshot is
+    /// dropped instead of ever being trusted.
+    session_id: String,
+    /// Number of messages this snapshot's vectors cover.
+    msg_len: usize,
+    /// Config token this snapshot's caches were built under — tracks the
+    /// view's `cache_config_token`, not the current one, so a config change
+    /// only invalidates the snapshot if the config is still different when we
+    /// try to swap it back in.
+    config_tok: u64,
+    tool_state_version: u64,
+    /// Width this snapshot's heights were estimated for.
+    cache_max_w: u16,
+
+    // ── Width-dependent height caches ────────────────────────────────────────
+    msg_height_cache: Vec<i32>,
+    prefix_y: Vec<i32>,
+    part_heights_cache: Vec<Vec<u16>>,
+    last_msg_change_token: u64,
+    msg_change_tokens: Vec<u64>,
+    prev_mutable_msgs: Vec<usize>,
+    cached_total_height: i32,
+    actual_total_height: i32,
+    last_content_height: i32,
+
+    // ── Width-dependent per-message render caches ────────────────────────────
+    msg_cache_tokens: Vec<u64>,
+    msg_cache_cells: Vec<Option<Vec<ratatui::buffer::Cell>>>,
+    msg_cache_w: Vec<u16>,
+    msg_cache_h: Vec<u16>,
+    msg_cache_text_regions: Vec<Option<Vec<TextRegion>>>,
+    msg_cache_last_used: Vec<u64>,
+    msg_cache_bytes: usize,
+    /// Generation stamp matching `text_regions` — the region build is skipped
+    /// when the restored generation equals the freshly-computed one.
+    text_regions_gen: u64,
+    /// Selection regions for the captured width — swapped alongside `text_regions_gen`
+    /// because leaving the view's current-width regions while restoring the
+    /// old width's stamp would suppress a needed rebuild and break selection.
+    text_regions: Vec<TextRegion>,
+}
+
+impl WidthCacheSnapshot {
+    /// Lift the view's currently-active width-dependent caches out of it, in
+    /// place of a full rebuild's `clear()`. The view keeps every field the
+    /// rebuild path rewrites immediately after (`cache_max_w`,
+    /// `cached_total_height`, `actual_total_height`, `last_content_height`),
+    /// so the caller continues exactly as it would without the snapshot.
+    fn capture(view: &mut SessionView) -> Self {
+        Self {
+            session_id: view.last_session_id.clone().unwrap_or_default(),
+            msg_len: view.msg_height_cache.len(),
+            config_tok: view.cache_config_token,
+            tool_state_version: view.last_tool_state_version,
+            cache_max_w: view.cache_max_w,
+            msg_height_cache: std::mem::take(&mut view.msg_height_cache),
+            prefix_y: std::mem::take(&mut view.prefix_y),
+            part_heights_cache: std::mem::take(&mut view.part_heights_cache),
+            last_msg_change_token: view.last_msg_change_token,
+            msg_change_tokens: std::mem::take(&mut view.msg_change_tokens),
+            prev_mutable_msgs: std::mem::take(&mut view.prev_mutable_msgs),
+            cached_total_height: view.cached_total_height,
+            actual_total_height: view.actual_total_height,
+            last_content_height: view.last_content_height,
+            msg_cache_tokens: std::mem::take(&mut view.msg_cache_tokens),
+            msg_cache_cells: std::mem::take(&mut view.msg_cache_cells),
+            msg_cache_w: std::mem::take(&mut view.msg_cache_w),
+            msg_cache_h: std::mem::take(&mut view.msg_cache_h),
+            msg_cache_text_regions: std::mem::take(&mut view.msg_cache_text_regions),
+            msg_cache_last_used: std::mem::take(&mut view.msg_cache_last_used),
+            msg_cache_bytes: std::mem::take(&mut view.msg_cache_bytes),
+            text_regions_gen: view.text_regions_gen,
+            text_regions: std::mem::take(&mut view.text_regions),
+        }
+    }
+
+    /// O(1) swap: the snapshot's caches become the view's active set, and the
+    /// view's outgoing set is parked back in the snapshot — so the next toggle
+    /// is a swap in the other direction. The caller MUST validate the keys
+    /// first; invariants like "active `msg_height_cache.len()` equals every
+    /// render-cache vector's length and `prefix_y` is length+1" survive the
+    /// swap exactly because both sets were internally consistent on their own.
+    fn swap_with_view(&mut self, view: &mut SessionView) {
+        std::mem::swap(&mut self.msg_height_cache, &mut view.msg_height_cache);
+        std::mem::swap(&mut self.prefix_y, &mut view.prefix_y);
+        std::mem::swap(&mut self.part_heights_cache, &mut view.part_heights_cache);
+        std::mem::swap(&mut self.msg_change_tokens, &mut view.msg_change_tokens);
+        std::mem::swap(&mut self.prev_mutable_msgs, &mut view.prev_mutable_msgs);
+        std::mem::swap(&mut self.msg_cache_tokens, &mut view.msg_cache_tokens);
+        std::mem::swap(&mut self.msg_cache_cells, &mut view.msg_cache_cells);
+        std::mem::swap(&mut self.msg_cache_w, &mut view.msg_cache_w);
+        std::mem::swap(&mut self.msg_cache_h, &mut view.msg_cache_h);
+        std::mem::swap(
+            &mut self.msg_cache_text_regions,
+            &mut view.msg_cache_text_regions,
+        );
+        std::mem::swap(&mut self.msg_cache_last_used, &mut view.msg_cache_last_used);
+        std::mem::swap(&mut self.text_regions, &mut view.text_regions);
+        // Scalars that travel with the set. `config_tok ↔ cache_config_token`
+        // keeps each set keyed by the config it was built under; the session /
+        // tool-expansion keys were validated equal to the current ones, so the
+        // snapshot is re-keyed to them after the swap below.
+        std::mem::swap(&mut self.cache_max_w, &mut view.cache_max_w);
+        std::mem::swap(&mut self.config_tok, &mut view.cache_config_token);
+        std::mem::swap(&mut self.cached_total_height, &mut view.cached_total_height);
+        std::mem::swap(&mut self.actual_total_height, &mut view.actual_total_height);
+        std::mem::swap(&mut self.last_content_height, &mut view.last_content_height);
+        std::mem::swap(&mut self.text_regions_gen, &mut view.text_regions_gen);
+        std::mem::swap(
+            &mut self.last_msg_change_token,
+            &mut view.last_msg_change_token,
+        );
+        std::mem::swap(&mut self.msg_cache_bytes, &mut view.msg_cache_bytes);
+        // Re-key what the snapshot now holds (the view's erstwhile active set)
+        // to describe IT: same session and tool-expansion version (validated),
+        // with its own width/config/msg-count coming from the swapped fields.
+        self.session_id = view.last_session_id.clone().unwrap_or_default();
+        self.msg_len = self.msg_height_cache.len();
+        self.tool_state_version = view.last_tool_state_version;
+    }
 }
 
 fn text_regions_generation(
@@ -643,6 +794,7 @@ impl SessionView {
             msg_cache_last_used: Vec::new(),
             msg_cache_bytes: 0,
             streaming_msg: None,
+            width_cache_snapshot: None,
             hovered_msg_idx: None,
             pending_message_action: None,
             last_session_id: None,
@@ -2586,6 +2738,56 @@ impl SessionView {
             || self.cache_config_token != config_tok;
 
         if cache_stale {
+            // ── Width-snapshot swap: restore a previously-rendered width ─────
+            // A left-panel toggle changes ONLY `cache_max_w`; the caches for
+            // the width being re-entered were parked as a snapshot when the
+            // rebuild for the opposite width happened. If that snapshot still
+            // describes this exact session/config/expansion/message-count/
+            // width, swap it in O(1) instead of re-estimating every message and
+            // re-rendering the visible viewport from scratch — the ~60-80ms
+            // toggle frame (→ a second on a real 10h transcript) that froze the
+            // header animation. The outgoing active set was in steady state
+            // this frame, so it is healthy and gets parked back in the snapshot
+            // slot for the next toggle. Streaming does not disturb this: the
+            // streaming message cache re-validates by width every frame, and a
+            // message whose content changed re-renders itself because its
+            // per-message cell token no longer matches the restored cache.
+            if let Some(mut snap) = self.width_cache_snapshot.take()
+                && !session_changed
+                && !tool_state_changed
+                && snap.session_id == session.id
+                && snap.msg_len == session.messages.len()
+                && snap.config_tok == config_tok
+                && snap.tool_state_version == self.tool_state.version
+                && snap.cache_max_w == max_w
+            {
+                snap.swap_with_view(self);
+                // The reversed snapshot slot now holds the outgoing set;
+                // keep it only if its cached cells are small enough that
+                // snapshot + active stay within the render-cache budget
+                // (48MB low-water per set, mirroring `prune_render_cache`).
+                self.width_cache_snapshot =
+                    (snap.msg_cache_bytes <= RENDER_CACHE_LOW_WATER).then_some(snap);
+                log::debug!("[PERF] msg_height_cache: width-snapshot swap to max_w={max_w}");
+                // Sticky-bottom parity with the old full-rebuild path: the
+                // restored set's `last_content_height` matches its restored
+                // total, so the render-time `total_height !=
+                // last_content_height` guard would NOT fire and a sticky user
+                // would be left a wrap-delta above the bottom on every swap
+                // frame. Bumping the stamp forces that same recalc this frame
+                // (with the fresh viewport height), exactly like a full
+                // rebuild used to.
+                self.last_content_height = self.last_content_height.wrapping_sub(1);
+                return HeightCacheUpdate {
+                    full_rebuild: false,
+                    tool_state_changed: false,
+                };
+            }
+            // An invalid snapshot was `take`n and dropped (its validation keys
+            // no longer describe this session/config/expansion/messages/width)
+            // or no snapshot existed — either way, continue to the ordinary
+            // rebuild/extend path below.
+
             let config_or_width_changed =
                 self.cache_max_w != max_w || self.cache_config_token != config_tok;
             let count_grew =
@@ -2594,25 +2796,95 @@ impl SessionView {
             if config_or_width_changed || tool_state_changed || !count_grew || session_changed {
                 // Full rebuild: config/width changed, or count decreased
                 let _start = Instant::now();
+                // Park the outgoing set as a snapshot so a toggle back to this
+                // width is an O(1) swap instead of a second full rebuild. Only
+                // worth keeping when the set is healthy for the CURRENT
+                // session: non-empty, covers the whole transcript (a stale
+                // length would never re-validate), was built under the same
+                // session and tool-expansion version (the version counter is
+                // monotonic, so an older version can never match again), and is
+                // small enough that the snapshot never doubles the
+                // render-cache memory.
+                if !session_changed
+                    && !tool_state_changed
+                    && !self.msg_height_cache.is_empty()
+                    && self.msg_height_cache.len() == session.messages.len()
+                    && self.msg_cache_bytes <= RENDER_CACHE_LOW_WATER
+                {
+                    self.width_cache_snapshot = Some(Box::new(WidthCacheSnapshot::capture(self)));
+                }
                 self.msg_height_cache.clear();
                 self.part_heights_cache.clear();
-                for m in session.messages.iter() {
-                    let part_hs: Vec<u16> = m
-                        .parts
-                        .iter()
-                        .map(|p| {
-                            Self::estimate_part_height(p, max_w, config, &m.role, &self.tool_state)
+                // Parallel cold build (rayon): every message's height
+                // estimation is pure and independent — `estimate_part_height`
+                // reads only `tool_state` (immutable here) plus message data,
+                // and the markdown estimator memoizes its work in global
+                // `Mutex`-guarded LRU caches. On a unique-content transcript
+                // (the real 10-hour case) this is the single dominant cost of
+                // the first reflow at a new width — ~645ms sequential for 800
+                // messages, ~145ms across 12 cores — so splitting it across
+                // cores is the one change that moves the user-visible "first
+                // open" wall. The per-frame incremental paths below stay
+                // sequential: they touch a handful of messages, where thread
+                // dispatch would cost more than it saves. Small transcripts
+                // stay sequential too: below ~32 messages the per-message work
+                // (often a single line) is cheaper than the rayon task
+                // dispatch it would pay for.
+                if session.messages.len() >= 32 {
+                    let (part_hs_vec, msg_h_vec): (Vec<Vec<u16>>, Vec<i32>) = session
+                        .messages
+                        .par_iter()
+                        .map(|m| {
+                            let part_hs: Vec<u16> = m
+                                .parts
+                                .iter()
+                                .map(|p| {
+                                    Self::estimate_part_height(
+                                        p,
+                                        max_w,
+                                        config,
+                                        &m.role,
+                                        &self.tool_state,
+                                    )
+                                })
+                                .collect();
+                            let msg_h = Self::render_message_height(
+                                m,
+                                max_w,
+                                config,
+                                Some(&part_hs),
+                                &self.tool_state,
+                            );
+                            (part_hs, msg_h)
                         })
-                        .collect();
-                    let msg_h = Self::render_message_height(
-                        m,
-                        max_w,
-                        config,
-                        Some(&part_hs),
-                        &self.tool_state,
-                    );
-                    self.part_heights_cache.push(part_hs);
-                    self.msg_height_cache.push(msg_h);
+                        .unzip();
+                    self.part_heights_cache = part_hs_vec;
+                    self.msg_height_cache = msg_h_vec;
+                } else {
+                    for m in session.messages.iter() {
+                        let part_hs: Vec<u16> = m
+                            .parts
+                            .iter()
+                            .map(|p| {
+                                Self::estimate_part_height(
+                                    p,
+                                    max_w,
+                                    config,
+                                    &m.role,
+                                    &self.tool_state,
+                                )
+                            })
+                            .collect();
+                        let msg_h = Self::render_message_height(
+                            m,
+                            max_w,
+                            config,
+                            Some(&part_hs),
+                            &self.tool_state,
+                        );
+                        self.part_heights_cache.push(part_hs);
+                        self.msg_height_cache.push(msg_h);
+                    }
                 }
                 self.cache_max_w = max_w;
                 self.cache_config_token = config_tok;
