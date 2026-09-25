@@ -685,8 +685,9 @@ impl SubagentActivity {
     /// (Phase 3a plumbing; Phase 3b renders the result).
     ///
     /// The timeline is chronological (mini-chat): message and thought
-    /// chunks COALESCE into the timeline's last matching entry (a stream of
-    /// chunks is one growing transcript row, not one row per chunk), tool
+    /// chunks COALESCE into the NEAREST matching entry (a stream of
+    /// chunks is one growing transcript row, not one row per chunk —
+    /// see [`Self::coalesce_stream_chunk`]), tool
     /// calls patch their announcement-position entry by id, and the plan
     /// replaces its existing entry in place — arrival order never changes.
     /// Apply one typed sub-agent event to the timeline. Returns whether the
@@ -694,35 +695,8 @@ impl SubagentActivity {
     /// only then (a no-op event such as `Mode` must not yank the viewport).
     pub(crate) fn apply(&mut self, event: &SubagentEvent) -> bool {
         match event {
-            SubagentEvent::Message { text } => {
-                if let Some(SubagentTimelineEntry::Message { text: acc }) = self.timeline.last_mut()
-                {
-                    acc.push_str(text);
-                    *acc = bounded_tail(acc, SUBAGENT_TEXT_ENTRY_BYTES);
-                } else {
-                    // A freshly started entry is bounded too: a single chunk
-                    // may itself exceed the cap (ACP does not bound
-                    // `ContentBlock::Text`).
-                    self.push_entry(SubagentTimelineEntry::Message {
-                        text: bounded_tail(text, SUBAGENT_TEXT_ENTRY_BYTES),
-                    });
-                }
-                true
-            }
-            SubagentEvent::Thought { text } => {
-                if let Some(SubagentTimelineEntry::Thought { text: acc }) = self.timeline.last_mut()
-                {
-                    acc.push_str(text);
-                    *acc = bounded_tail(acc, SUBAGENT_TEXT_ENTRY_BYTES);
-                } else {
-                    // Same bound as Message: a single chunk may exceed the
-                    // cap, so the fresh entry is clamped immediately.
-                    self.push_entry(SubagentTimelineEntry::Thought {
-                        text: bounded_tail(text, SUBAGENT_TEXT_ENTRY_BYTES),
-                    });
-                }
-                true
-            }
+            SubagentEvent::Message { text } => self.coalesce_stream_chunk(text, false),
+            SubagentEvent::Thought { text } => self.coalesce_stream_chunk(text, true),
             SubagentEvent::ToolCall {
                 id,
                 title,
@@ -868,6 +842,54 @@ impl SubagentActivity {
             // `#[non_exhaustive]`: future variants are ignored safely.
             _ => false,
         }
+    }
+
+    /// Merge one streamed message/thought chunk into the timeline.
+    ///
+    /// The mini-chat contract (see [`Self::apply`]) says stream chunks
+    /// coalesce into one growing transcript row — the NEAREST matching
+    /// entry, not strictly the last one. Models interleave reasoning and
+    /// text deltas inside a single response; requiring the matching entry
+    /// to be the timeline's tail opened a NEW sub-block per alternation,
+    /// and the box rendered dozens of tiny rows that used a fraction of
+    /// the row width (the "reasoning in columns" report). The scan walks
+    /// back through chunks of the OPPOSITE stream kind and stops at tool
+    /// and plan entries: those are turn boundaries, and stream content
+    /// after them belongs to a later turn, where a fresh entry is the
+    /// correct layout for both sub-agent flavors.
+    ///
+    /// Returns `true` (the chunk always changes visible text).
+    fn coalesce_stream_chunk(&mut self, text: &str, thought: bool) -> bool {
+        for entry in self.timeline.iter_mut().rev() {
+            match entry {
+                SubagentTimelineEntry::Message { text: acc } if !thought => {
+                    acc.push_str(text);
+                    *acc = bounded_tail(acc, SUBAGENT_TEXT_ENTRY_BYTES);
+                    return true;
+                }
+                SubagentTimelineEntry::Thought { text: acc } if thought => {
+                    acc.push_str(text);
+                    *acc = bounded_tail(acc, SUBAGENT_TEXT_ENTRY_BYTES);
+                    return true;
+                }
+                // Turn boundary: nothing older may absorb this chunk.
+                SubagentTimelineEntry::Tool(_) | SubagentTimelineEntry::Plan { .. } => break,
+                // The opposite stream kind: keep scanning back.
+                _ => {}
+            }
+        }
+        // A freshly started entry is bounded too: a single chunk may itself
+        // exceed the cap (ACP does not bound `ContentBlock::Text`).
+        self.push_entry(if thought {
+            SubagentTimelineEntry::Thought {
+                text: bounded_tail(text, SUBAGENT_TEXT_ENTRY_BYTES),
+            }
+        } else {
+            SubagentTimelineEntry::Message {
+                text: bounded_tail(text, SUBAGENT_TEXT_ENTRY_BYTES),
+            }
+        });
+        true
     }
 
     /// Append one transcript entry, bounding the timeline: a very long turn

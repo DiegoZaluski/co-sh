@@ -597,6 +597,14 @@ fn render_subagent_section(
     // borders and the scrollbar stay clear of the box's right edge.
     let wrap_w = max_w.saturating_sub(LEFT_PAD + RIGHT_PAD);
     state.subagent_wrap_w = wrap_w;
+    // Selection regions are rebuilt from scratch on every content/width
+    // change — the bash section's contract. Without this clear the regions
+    // ACCUMULATED one generation per streamed chunk, and extraction read
+    // stale rows from old layouts: a selection pasted text entirely
+    // different from what was on screen.
+    if rebuild_regions {
+        state.subagent_text_regions.clear();
+    }
     if inner_h == 0 || wrap_w == 0 {
         return;
     }
@@ -1494,6 +1502,122 @@ fn highlight_section_selection(
 mod tests {
     use super::*;
     use crate::theme::ThemeRegistry;
+
+    /// REGRESSION (user-visible "reasoning in columns"): the timeline's
+    /// stream coalescing used to require the matching entry to be the
+    /// timeline's LAST one, so a model that interleaves reasoning and text
+    /// deltas opened a new tiny sub-block per alternation and the box
+    /// painted rows that used a fraction of the width. With nearest-entry
+    /// coalescing (the documented mini-chat contract), interleaved chunks
+    /// merge into one entry per kind and every painted row fills the box.
+    #[test]
+    fn interleaved_reasoning_and_text_coalesce_into_full_width_blocks() {
+        use cosh_tools::subagent::events::SubagentEvent;
+
+        let theme = test_theme();
+        let mut state = RightPanelState::new();
+        state.subagent_rebuild_interval = std::time::Duration::ZERO;
+        state.start_pty("subagent: ".to_string(), None);
+        // The internal bridge's stream shape: reasoning and message deltas
+        // alternate within one response.
+        for i in 0..10 {
+            state.update_subagent_activity(&SubagentEvent::Thought {
+                text: format!("pensando no passo {i} "),
+            });
+            state.update_subagent_activity(&SubagentEvent::Message {
+                text: format!("ponto {i}; "),
+            });
+        }
+        let activity = state.pty_sessions[0].subagent_activity.clone();
+        // Two entries total: one Thought run, one Message run.
+        assert_eq!(activity.timeline.len(), 2);
+
+        let wrap_w = 40u16;
+        let rows = state.subagent_section_rows_for_display(wrap_w);
+        let natural = (BOX_OVERHEAD + i32::from(rows.iter().sum::<u16>())).max(4) as u16;
+        // max_w = wrap_w + LEFT_PAD + RIGHT_PAD: the renderer derives its
+        // own wrap width from max_w, so the height math and the paint must
+        // agree on the same 40 columns.
+        let mut buf = Buffer::empty(Rect::new(0, 0, wrap_w + 2, natural));
+        render_subagent_section(
+            &mut buf,
+            0,
+            0,
+            wrap_w + 2,
+            natural,
+            &mut state,
+            &theme,
+            false,
+        );
+        // The old bug's signature is the RATIO of short rows: one tiny
+        // sub-block per alternation painted nearly every row narrow. The
+        // coalesced layout paints full rows with at most ONE short final
+        // line per block (two blocks: one Thought run, one Message run).
+        let content_rows = (0..natural)
+            .map(|y| row_text(&buf, y).trim_end().to_string())
+            .filter(|t| !t.trim().is_empty() && !t.contains("subagent:"))
+            .collect::<Vec<_>>();
+        assert!(
+            !content_rows.is_empty(),
+            "the coalesced blocks must be visible"
+        );
+        let short_rows = content_rows
+            .iter()
+            .filter(|t| t.trim_start().chars().count() as u16 <= wrap_w / 2)
+            .count();
+        assert!(
+            short_rows <= 2,
+            "stream blocks must coalesce into wide rows; {short_rows} narrow rows betray \
+             per-alternation fragments: {content_rows:?}"
+        );
+    }
+
+    /// REGRESSION (user-visible misleading copy): the subagent box's
+    /// selection regions were only ever PUSHED, never cleared, so every
+    /// rebuild (one per streamed chunk — `pty_gen` bumps constantly) added
+    /// another overlapping generation of regions and `extract_selected_text`
+    /// returned stale text from old layouts: pasting produced text entirely
+    /// different from the selection. The bash section's clear-on-rebuild
+    /// contract applies here too: consecutive rebuilds must leave the SAME
+    /// region set, and its text must match what is on screen.
+    #[test]
+    fn subagent_copy_regions_rebuild_from_scratch_not_accumulate() {
+        use cosh_tools::subagent::events::SubagentEvent;
+
+        let theme = test_theme();
+        let mut state = RightPanelState::new();
+        state.subagent_rebuild_interval = std::time::Duration::ZERO;
+        state.start_pty("subagent: ".to_string(), None);
+        state.update_subagent_activity(&SubagentEvent::Message {
+            text: "linha unica".to_string(),
+        });
+
+        let wrap_w = 40u16;
+        let rows = state.subagent_section_rows_for_display(wrap_w);
+        let natural = (BOX_OVERHEAD + i32::from(rows.iter().sum::<u16>())).max(4) as u16;
+
+        // Two consecutive rebuilds (e.g. a streamed chunk bumped pty_gen).
+        let mut buf = Buffer::empty(Rect::new(0, 0, 60, natural));
+        render_subagent_section(&mut buf, 0, 0, 60, natural, &mut state, &theme, true);
+        let first = state.subagent_text_regions.clone();
+        render_subagent_section(&mut buf, 0, 0, 60, natural, &mut state, &theme, true);
+        let second = state.subagent_text_regions.clone();
+
+        assert_eq!(
+            first, second,
+            "rebuilds must replace the regions, not append another generation"
+        );
+        assert!(
+            !first.is_empty(),
+            "the visible message must produce copy regions"
+        );
+        // The copied text must be exactly what the box displays.
+        let on_screen: Vec<String> = first.iter().map(|r| r.text.clone()).collect();
+        assert!(
+            on_screen.iter().any(|t| t.contains("linha unica")),
+            "a selection over the message must copy its own text, got {on_screen:?}"
+        );
+    }
 
     fn test_theme() -> Theme {
         ThemeRegistry::new().default_theme().clone()
