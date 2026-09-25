@@ -24,6 +24,9 @@ pub struct Setup {
     pub hooks: Hooks,
     pub providers: Providers,
     pub model: Model,
+    /// The last agent mode the user selected, restored for NEW sessions
+    /// (global mode persistence).
+    pub mode: Mode,
     pub cache: Cache,
     /// Skill-discovery configuration (Settings screen).
     pub skills: SkillsConfig,
@@ -52,6 +55,7 @@ impl Default for Setup {
             hooks: Hooks::default(),
             providers: Providers::default(),
             model: Model::default(),
+            mode: Mode::default(),
             cache: Cache::default(),
             skills: SkillsConfig::default(),
             lsp: true,
@@ -175,6 +179,18 @@ pub struct Model {
     pub model: String,
     /// Reasoning effort for the last selected model (`None` = model default).
     pub reasoning: Option<String>,
+}
+
+/// The last agent mode the user selected (Build/Ask/Yolo/Command),
+/// restored for NEW sessions (global mode persistence) — the app starts in
+/// the mode the user most likely wants to use again. Empty: fall back to
+/// the `Build` default.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Mode {
+    /// Lowercase name of the last selected agent mode ("build", "ask",
+    /// "yolo", "command"). Empty → no global selection yet.
+    pub mode: String,
 }
 
 // Cache
@@ -554,6 +570,38 @@ impl Setup {
         self.save();
     }
 
+    /// The globally persisted agent mode (`cosh::harness::Mode`), if the
+    /// user ever cycled away from the default. Unrecognized stored names
+    /// (e.g. from a newer version) fall back to `None`.
+    #[must_use]
+    pub fn persisted_mode(&self) -> Option<cosh::harness::Mode> {
+        match self.mode.mode.as_str() {
+            "build" => Some(cosh::harness::Mode::Build),
+            "ask" => Some(cosh::harness::Mode::Ask),
+            "yolo" => Some(cosh::harness::Mode::Yolo),
+            "command" => Some(cosh::harness::Mode::Command),
+            _ => None,
+        }
+    }
+
+    /// Record the last agent mode the user selected and persist it globally.
+    ///
+    /// An unchanged selection skips the disk write (cycling through the
+    /// modes with Tab must not rewrite the file four times per decision).
+    pub fn set_mode_selection(&mut self, mode: cosh::harness::Mode) {
+        let name = match mode {
+            cosh::harness::Mode::Build => "build",
+            cosh::harness::Mode::Ask => "ask",
+            cosh::harness::Mode::Yolo => "yolo",
+            cosh::harness::Mode::Command => "command",
+        };
+        if self.mode.mode == name {
+            return;
+        }
+        self.mode.mode = name.to_string();
+        self.save();
+    }
+
     /// Whether the user chose an extended Anthropic prompt-cache TTL (any
     /// wish above the 5-minute default maps onto the 1h TTL — the only
     /// extended value the API supports).
@@ -689,6 +737,35 @@ mod tests {
         setup.cache.openai_retention_min = 1440;
         assert!(setup.anthropic_cache_ttl_1h());
         assert_eq!(setup.openai_cache_retention(), Some("24h"));
+    }
+
+    /// The last agent mode is a single overwritten slot that round-trips
+    /// through setup.json, and an absent/unknown `mode` category in an old
+    /// config loads as "no selection yet" (the Build default applies).
+    #[test]
+    fn mode_selection_is_overwritten_and_roundtrips() {
+        let mut setup = Setup::default();
+        assert_eq!(setup.persisted_mode(), None);
+
+        setup.set_mode_selection(cosh::harness::Mode::Ask);
+        assert_eq!(setup.persisted_mode(), Some(cosh::harness::Mode::Ask));
+
+        // A later selection OVERWRITES the slot — no history is kept.
+        setup.set_mode_selection(cosh::harness::Mode::Command);
+        assert_eq!(setup.persisted_mode(), Some(cosh::harness::Mode::Command));
+
+        let restored: Setup =
+            serde_json::from_str(&serde_json::to_string(&setup).unwrap()).unwrap();
+        assert_eq!(restored.persisted_mode(), Some(cosh::harness::Mode::Command));
+
+        // An old config without the `mode` category loads with no selection.
+        let legacy: Setup = serde_json::from_str(r#"{"appearance": {}}"#).unwrap();
+        assert_eq!(legacy.persisted_mode(), None);
+
+        // An unrecognized stored name (future version) is ignored, not a
+        // crash or a wrong mode.
+        let unknown: Setup = serde_json::from_str(r#"{"mode": {"mode": "warp"}}"#).unwrap();
+        assert_eq!(unknown.persisted_mode(), None);
     }
 
     #[test]

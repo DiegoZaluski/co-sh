@@ -557,6 +557,13 @@ impl App {
         let saved_bell = setup.appearance.bell_enabled;
         let saved_anim = setup.appearance.anim_enabled;
 
+        // Restore the globally persisted agent mode (the last one the user
+        // cycled to) so new sessions start in the mode they most likely
+        // want again. Absent selection keeps the Build default.
+        if let Some(mode) = setup.persisted_mode() {
+            state.mode = mode;
+        }
+
         // Restore the globally persisted model selection (the last one the
         // user picked) so new sessions start with it — a stored selection
         // wins over the env-var defaults.
