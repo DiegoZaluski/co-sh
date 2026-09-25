@@ -456,6 +456,62 @@ async fn click_inside_the_title_text_switches_not_deletes() {
 }
 
 #[tokio::test]
+async fn click_on_a_session_locked_elsewhere_shows_a_toast_that_survives_the_title_tooltip() {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = build_small();
+    let guard = app.state.current_session_id.clone();
+
+    // The title tooltip only fires for LLM-generated titles: make the
+    // target's row eligible so the per-frame tooltip would normally
+    // overwrite any toast shown by the click itself (the reported bug).
+    app.state.session_summaries[0].title_generated = true;
+    app.state.session_summaries[0].title = "LLM generated title".into();
+
+    // A foreign cosh process holds the session open: an independent store
+    // claiming the same session id takes the kernel lock on the same
+    // session-{id}.lock file, so the app's own claim must fail.
+    let foreign = crate::session_store::SessionStore::new();
+    assert!(foreign.try_lock_session("history-0"));
+
+    // Click the title (row 2, x=6 — inside "session 0"'s span).
+    let _ = app
+        .handle_mouse_event(mouse(CKind::Down(CBtn::Left), 6, 2))
+        .unwrap();
+    let _ = app
+        .handle_mouse_event(mouse(CKind::Up(CBtn::Left), 6, 2))
+        .unwrap();
+
+    assert_eq!(
+        app.state.current_session_id, guard,
+        "a session open in another process must not open here"
+    );
+    assert!(
+        app.toast_state
+            .current
+            .as_ref()
+            .is_some_and(|t| t.message.contains("already open in another cosh process")),
+        "the refusal must surface as a toast, got {:?}",
+        app.toast_state.current
+    );
+
+    // The next frame with the pointer still resting on the same row: the
+    // per-frame title tooltip must NOT take the toast slot over.
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|f| app.render(f, 0.016)).unwrap();
+    assert!(
+        app.toast_state
+            .current
+            .as_ref()
+            .is_some_and(|t| t.message.contains("already open in another cosh process")),
+        "the block toast must survive the hover tooltip, got {:?}",
+        app.toast_state.current
+    );
+}
+
+#[tokio::test]
 async fn chat_message_click_still_opens_message_actions() {
     let _guard = HOME_LOCK.lock();
     isolate_home();
