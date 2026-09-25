@@ -246,11 +246,21 @@ impl AppState {
 
     /// Swap the current session: save one, load another. The old session is
     /// upserted into the cache (so subsequent switches are fast).
+    ///
+    /// Returns `false` when the target session is already open in another
+    /// cosh process — the switch is refused and the caller is expected to
+    /// surface that to the user. Otherwise releases the previous session's
+    /// open-lock, claims the target's and performs the switch.
     pub fn switch_to_session(
         &mut self,
         session_id: String,
         store: &crate::session_store::SessionStore,
-    ) {
+    ) -> bool {
+        // Refuse a session another process already holds open, BEFORE any
+        // state mutation: the switch must be all-or-nothing.
+        if !store.try_lock_session(&session_id) {
+            return false;
+        }
         // Save current session to disk only if it has real content
         let old_id = self.current_session_id.clone();
         if let Some(ref oid) = old_id {
@@ -265,11 +275,19 @@ impl AppState {
                 }
                 self.ensure_session_summary(oid);
             }
+            // The old session is no longer open in this process: free its
+            // open-lock so another cosh instance can take it over. Re-selecting
+            // the session already being viewed must NOT release — the claim
+            // just re-verified above is the one this process keeps holding.
+            if oid != &session_id {
+                store.release_session_lock(oid);
+            }
         }
 
         // Ensure target is cached
         self.ensure_session_cached(&session_id, store);
         self.current_session_id = Some(session_id);
+        true
     }
 
     pub fn max_scroll(&self) -> i32 {
