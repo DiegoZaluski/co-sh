@@ -16,6 +16,7 @@ use cosh_tui::core::renderables::diff::{DiffRenderable, DiffViewMode};
 use cosh_tui::core::renderables::markdown::{MarkdownRenderable, estimate_height};
 
 use crate::component::spinner_highlight::HighlightSpinner;
+use crate::routes::session::right_panel::types::{subagent_display_output, subagent_visible_body};
 use crate::theme::{Theme, rgba_color};
 use crate::types::{ToolPart, ToolStatus};
 
@@ -192,7 +193,7 @@ fn render_inline_tool(
     spinner: Option<&HighlightSpinner>,
 ) {
     if let Some(spinner) = spinner {
-        spinner.render(buf, x, y);
+        spinner.render(buf, x, y, max_w);
     } else {
         draw_text_line(buf, text, x, y, max_w, Style::default().fg(rgba_color(fg)));
     }
@@ -600,6 +601,63 @@ pub(crate) fn extract_diff_from_json(output: &str) -> Option<String> {
     }
 }
 
+/// Spinner-map key for ONE tool part. Keyed by the part's unique
+/// `tool_call_id` when present: `part_idx` alone is unique only WITHIN a
+/// message, so two same-tool calls in different messages shared one key and
+/// the older row's finished spinner re-animated when its twin call started
+/// (the map entry flipped back to Active and both rows rendered the beam).
+/// The positional fallback is legacy only — production parts always carry a
+/// `call-N` id (live ones from the ToolCall handler, loaded ones from
+/// `ensure_tool_call_ids`).
+pub fn spinner_key(display: &str, tool_call_id: Option<&str>, part_idx: u16) -> String {
+    match tool_call_id {
+        Some(id) => format!("{display}:{id}"),
+        None => format!("{display}_{part_idx}"),
+    }
+}
+
+/// Whether the ToolCall event handler should PRE-create a spinner for this
+/// display. Only the renderers that manage a spinner under the tool's OWN
+/// display key benefit from pre-creation (the beam must be visible even if
+/// the tool finishes before the next render). The remaining renderers either
+/// draw no spinner at all (`write`/`edit`/`question`/`todo`) or manage a
+/// `generic`-keyed one themselves in [`render_generic`] — for those a
+/// pre-created entry under the tool's own display would never be consumed
+/// and, with call-id keys, would leak one forever-Active spinner per call
+/// for the whole app run (invisible, but scanned by
+/// `advance_tool_spinners` every frame).
+pub fn tool_pre_creates_spinner(display: &str) -> bool {
+    matches!(
+        display,
+        "bash" | "glob" | "read" | "grep" | "webfetch" | "websearch" | "task"
+    )
+}
+
+/// The spinner-map key a tool part's RENDERER will actually use, or `None`
+/// when its renderer draws no spinner at all. Mirrors `dispatch_tool`'s
+/// mapping: the seven inline renderers manage their own display's key,
+/// `write`/`edit`/`question`/`todo` draw none, and everything else falls
+/// through to [`render_generic`], which manages a `generic`-keyed spinner.
+/// Both the ToolCall handler (pre-creation) and the cache-bypass check in
+/// the session renderer must ask THIS — asking for the display directly
+/// would miss generic-managed spinners, and pre-creating under a key no
+/// renderer reads leaks one forever-Active entry per call.
+pub fn renderer_spinner_key(
+    display: &str,
+    tool_call_id: Option<&str>,
+    part_idx: u16,
+) -> Option<String> {
+    if matches!(display, "write" | "edit" | "question" | "todo") {
+        return None;
+    }
+    let key_display = if tool_pre_creates_spinner(display) {
+        display
+    } else {
+        "generic"
+    };
+    Some(spinner_key(key_display, tool_call_id, part_idx))
+}
+
 pub fn render_shell(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
     let command = input_value(&part.input, "command").unwrap_or_default();
     let output = part.output.as_deref().unwrap_or("").trim().to_string();
@@ -607,7 +665,7 @@ pub fn render_shell(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
     let is_running = matches!(part.status, ToolStatus::Running);
     let is_completed = matches!(part.status, ToolStatus::Completed);
 
-    let tool_id = format!("bash_{}", part_idx);
+    let tool_id = spinner_key("bash", part.tool_call_id.as_deref(), part_idx);
     ctx.state
         .manage_tool_spinner(&tool_id, part, ctx.theme, is_running);
     let spinner = ctx
@@ -1207,7 +1265,7 @@ pub fn render_glob(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
         let _ = write!(label, " {glyph}", glyph = status.glyph);
     }
 
-    let tool_id = format!("glob_{}", part_idx);
+    let tool_id = spinner_key("glob", part.tool_call_id.as_deref(), part_idx);
     ctx.state
         .manage_tool_spinner(&tool_id, part, ctx.theme, is_running);
     let spinner = ctx
@@ -1335,7 +1393,7 @@ pub fn render_read(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
     let is_running = matches!(part.status, ToolStatus::Running);
     let is_completed = matches!(part.status, ToolStatus::Completed);
 
-    let tool_id = format!("read_{}", part_idx);
+    let tool_id = spinner_key("read", part.tool_call_id.as_deref(), part_idx);
     ctx.state
         .manage_tool_spinner(&tool_id, part, ctx.theme, is_running);
     let spinner = ctx
@@ -1474,7 +1532,7 @@ pub fn render_grep(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
     } else {
         ctx.theme.text
     };
-    let tool_id = format!("grep_{}", part_idx);
+    let tool_id = spinner_key("grep", part.tool_call_id.as_deref(), part_idx);
     ctx.state
         .manage_tool_spinner(&tool_id, part, ctx.theme, is_running);
     let spinner = ctx
@@ -1493,7 +1551,7 @@ pub fn render_webfetch(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) 
 
     let label = format!("WebFetch {url}");
     let fg = tool_label_fg(&part.status, ctx.theme);
-    let tool_id = format!("webfetch_{}", part_idx);
+    let tool_id = spinner_key("webfetch", part.tool_call_id.as_deref(), part_idx);
     ctx.state
         .manage_tool_spinner(&tool_id, part, ctx.theme, is_running);
     let spinner = ctx
@@ -1514,7 +1572,7 @@ pub fn render_websearch(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16)
     let provider_label = web_search_provider_label(provider.as_deref());
     let label = format!("{provider_label} \"{query}\"");
     let fg = tool_label_fg(&part.status, ctx.theme);
-    let tool_id = format!("websearch_{}", part_idx);
+    let tool_id = spinner_key("websearch", part.tool_call_id.as_deref(), part_idx);
     ctx.state
         .manage_tool_spinner(&tool_id, part, ctx.theme, is_running);
     let spinner = ctx
@@ -1538,7 +1596,7 @@ pub fn render_task(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
     };
 
     let fg = tool_label_fg(&part.status, ctx.theme);
-    let tool_id = format!("task_{}", part_idx);
+    let tool_id = spinner_key("task", part.tool_call_id.as_deref(), part_idx);
     ctx.state
         .manage_tool_spinner(&tool_id, part, ctx.theme, is_running);
     let spinner = ctx
@@ -1647,6 +1705,22 @@ pub fn tool_copy_text(part: &ToolPart) -> Option<String> {
             write_box_lines(part)?;
             let content = input_content(&part.input).unwrap_or_default();
             (!content.is_empty()).then(|| content.lines().take(20).collect::<Vec<_>>().join("\n"))
+        }
+        // NOTE: keyed on the RAW tool name — tool_display("subagent_call")
+        // falls through to "generic", so a display-keyed arm never matches.
+        _ if part.tool == "subagent_call" => {
+            // The chat never DRAWS the subagent body (render_generic keeps
+            // to a one-line label), but drag-selection over the part still
+            // copies this text. `part.output` is the persisted
+            // SubAgentCallOutput envelope (or a plain report on the
+            // internal path) whose first line is the CONSUMED severity
+            // header — copying it would leak `<!-- severity: ... -->` into
+            // the user's clipboard. Unwrap the envelope and strip the
+            // header, mirroring exactly what the box displays
+            // (subagent_display_output → subagent_visible_body).
+            let report = subagent_display_output(output.to_string());
+            let visible = subagent_visible_body(&report).trim().to_string();
+            (!visible.is_empty()).then_some(visible)
         }
         _ => (!output.is_empty()).then(|| output.to_string()),
     }
@@ -1790,7 +1864,7 @@ pub fn render_generic(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
         format!("Writing {tool_name}")
     };
     let fg = tool_label_fg(&part.status, ctx.theme);
-    let tool_id = format!("generic_{}", part_idx);
+    let tool_id = spinner_key("generic", part.tool_call_id.as_deref(), part_idx);
     ctx.state
         .manage_tool_spinner(&tool_id, part, ctx.theme, is_running);
     let spinner = ctx

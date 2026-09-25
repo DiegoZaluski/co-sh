@@ -10,7 +10,7 @@
 //! | Soft glow    | 0.22      | 0.25×       | Wide, atmospheric halo          |
 //! | Asymmetric   | trailing  | 1.8× wider  | Directional motion feel         |
 //!
-//! The beam also shimmers very subtly (peak intensity oscillates ±6 %) so the
+//! The beam also shimmers very subtly (peak intensity oscillates ±6 %) so the
 //! light doesn't feel static or mechanical.
 //!
 //! # Integration
@@ -27,7 +27,7 @@
 //!
 //! // Each frame:
 //! spinner.advance();
-//! spinner.render(buf, x, y);
+//! spinner.render(buf, x, y, max_w);
 //! ```
 
 use crate::theme::rgba_color;
@@ -52,7 +52,7 @@ fn lerp_color(a: RGBA, b: RGBA, t: f32) -> RGBA {
 }
 
 /// Gaussian function centred at zero with standard deviation `sigma`.
-/// Returns `1.0` at `x = 0` and decays to ≈ 0 beyond `3·sigma`.
+/// Returns `1.0` at `x = 0` and decays to ≈ 0 beyond `3·sigma`.
 fn gaussian(x: f32, sigma: f32) -> f32 {
     if sigma <= 0.0 {
         return 0.0;
@@ -80,14 +80,14 @@ pub enum SpinnerPhase {
 ///
 /// # Visual layers
 ///
-/// 1. **Primary beam** — a tight gaussian (σ ≈ 0.08 of text width) that
+/// 1. **Primary beam** — a tight gaussian (σ ≈ 0.08 of text width) that
 ///    provides the intense bright core.
-/// 2. **Soft glow** — a wide gaussian (σ ≈ 0.22) rendered at 25 % opacity,
+/// 2. **Soft glow** — a wide gaussian (σ ≈ 0.22) rendered at 25 % opacity,
 ///    creating an atmospheric halo around the beam.
 /// 3. **Asymmetric falloff** — the trailing edge of the beam is 1.8× wider
 ///    than the leading edge, giving the sweep a directional, "sweeping"
 ///    feel rather than a static blob sliding sideways.
-/// 4. **Shimmer** — the combined intensity gently oscillates (±6 %) every
+/// 4. **Shimmer** — the combined intensity gently oscillates (±6 %) every
 ///    few frames so the light looks organic.
 ///
 /// # Construction
@@ -102,7 +102,7 @@ pub struct HighlightSpinner {
     char_count: usize,
 
     // Animation state
-    /// Normalised beam position (`-0.3 … 1.3`). Values < 0 or > 1 mean the
+    /// Normalised beam position (`-0.3 … 1.3`). Values < 0 or > 1 mean the
     /// beam is partly off-screen, creating a natural entry/exit.
     beam_pos: f32,
     frame: u32,
@@ -217,7 +217,7 @@ impl HighlightSpinner {
 
     /// Set the shimmer amplitude (0.0 disables shimmer).
     ///
-    /// Default: `0.06` (±6 % oscillation).
+    /// Default: `0.06` (±6 % oscillation).
     pub fn with_shimmer_amp(&mut self, amp: f32) -> &mut Self {
         self.shimmer_amp = amp.max(0.0);
         self
@@ -233,7 +233,7 @@ impl HighlightSpinner {
     ///
     /// * `texts` — the messages to cycle through (must not be empty).
     /// * `durations` — optional per-message display durations in **frames**.
-    ///   If `None`, every message gets 400 frames (≈ 6.6 s at 60 fps).
+    ///   If `None`, every message gets 400 frames (≈ 6.6 s at 60 fps).
     ///   Pass an array shorter than `texts` and the remaining messages
     ///   use the last given value.
     pub fn with_messages(&mut self, texts: &[&str], durations: Option<&[u32]>) -> &mut Self {
@@ -331,7 +331,7 @@ impl HighlightSpinner {
     ///
     /// The beam moves at `speed * delta_secs * 30.0` so its visual
     /// speed stays consistent regardless of the actual frame rate.
-    /// At the default 30 fps (`delta_secs ≈ 0.033`) the factor is ~1.0×.
+    /// At the default 30 fps (`delta_secs ≈ 0.033`) the factor is ~1.0×.
     ///
     /// * `Active` — beam moves and wraps around.
     /// * `Finishing` — beam continues until it exits past `1.3`,
@@ -427,21 +427,46 @@ impl HighlightSpinner {
 
     // Rendering
 
-    /// Render the spinner into the buffer at position `(x, y)`.
+    /// Render the spinner into the buffer at position `(x, y)`, clamped to
+    /// `max_w` columns: no character is written at `x + max_w` or beyond, so
+    /// a long tool label can never bleed across the box edge into a
+    /// neighbouring panel (the caller wraps the text; the clamp is the last
+    /// line of defense).
     ///
     /// * `Active` / `Finishing` — draws each character with a colour
     ///   interpolated between `base_color` and `highlight_color` based
     ///   on the beam position.
     /// * `Idle` — draws all characters with `base_color` only (no beam).
-    pub fn render(&self, buf: &mut Buffer, x: u16, y: u16) {
-        if self.char_count == 0 {
+    pub fn render(&self, buf: &mut Buffer, x: u16, y: u16, max_w: u16) {
+        self.render_row(buf, x, y, max_w, 0);
+    }
+
+    /// Render ONE visual row of the spinner's text — the slice of characters
+    /// starting at `start_char` — onto buffer row `y`. The beam position is
+    /// normalised over the WHOLE text, so a label the caller wrapped onto
+    /// several rows (a broken path like `src/tui/routes/…`) is swept as one
+    /// continuous string: the beam leaves the first row and lights up the
+    /// continuation rows in order, instead of dying at the first wrap.
+    /// Callers render every visible row of the wrapped label with the
+    /// cumulative character offset of that row (`start_char`). The `max_w`
+    /// clamp is the last line of defense against painting beyond the caller's
+    /// box — but a caller passing a `max_w` WIDER than the row's own text
+    /// would paint the first characters of the NEXT row's slice over the
+    /// short row's tail: `max_w` must match the row's text width (or the
+    /// caller's drawing width when the row fills it).
+    pub fn render_row(&self, buf: &mut Buffer, x: u16, y: u16, max_w: u16, start_char: usize) {
+        if self.char_count == 0 || start_char >= self.char_count {
             return;
         }
+        let right = x.saturating_add(max_w);
 
         // Idle: all characters at base colour, no beam calculation.
         if self.phase == SpinnerPhase::Idle {
-            for (i, &ch) in self.chars.iter().enumerate() {
-                let cell_x = x + i as u16;
+            for (i, &ch) in self.chars.iter().enumerate().skip(start_char) {
+                let cell_x = x + (i - start_char) as u16;
+                if cell_x >= right {
+                    break;
+                }
                 if let Some(cell) = buf.cell_mut((cell_x, y)) {
                     cell.set_char(ch);
                     cell.set_style(Style::default().fg(rgba_color(self.base_color)));
@@ -450,11 +475,17 @@ impl HighlightSpinner {
             return;
         }
 
-        // Active / Finishing: beam rendering.
+        // Active / Finishing: beam rendering. The beam position is
+        // normalised over the FULL text (not the row), so the sweep flows
+        // across wrapped rows.
         let char_count_f = self.char_count as f32;
         let shimmer = 1.0 + self.shimmer_amp * ((self.frame as f32) * self.shimmer_freq).sin();
 
-        for (i, &ch) in self.chars.iter().enumerate() {
+        for (i, &ch) in self.chars.iter().enumerate().skip(start_char) {
+            let cell_x = x + (i - start_char) as u16;
+            if cell_x >= right {
+                break;
+            }
             let char_norm = if self.char_count > 1 {
                 i as f32 / (char_count_f - 1.0)
             } else {
@@ -475,11 +506,134 @@ impl HighlightSpinner {
             let intensity = (primary + glow).clamp(0.0, 1.0) * shimmer;
             let color = lerp_color(self.base_color, self.highlight_color, intensity);
 
-            let cell_x = x + i as u16;
             if let Some(cell) = buf.cell_mut((cell_x, y)) {
                 cell.set_char(ch);
                 cell.set_style(Style::default().fg(rgba_color(color)));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::layout::Rect;
+    use ratatui::style::Color;
+
+    fn fg_rgb(buf: &Buffer, x: u16, y: u16) -> Option<(u8, u8, u8)> {
+        match buf.cell((x, y))?.style().fg {
+            Some(Color::Rgb(r, g, b)) => Some((r, g, b)),
+            _ => None,
+        }
+    }
+
+    fn dist(a: (u8, u8, u8), b: (u8, u8, u8)) -> u32 {
+        a.0.abs_diff(b.0) as u32 + a.1.abs_diff(b.1) as u32 + a.2.abs_diff(b.2) as u32
+    }
+
+    fn spinner() -> HighlightSpinner {
+        HighlightSpinner::new(
+            "AAAABBBB",
+            RGBA::from_ints(255, 107, 48, 255),
+            RGBA::from_ints(128, 128, 128, 255),
+        )
+    }
+
+    /// The beam must sweep the WHOLE string across wrapped rows: with the
+    /// beam over the second row's characters, the second row is lit MORE
+    /// than the first (the asymmetric trail still glows behind, so "row 0
+    /// fully base" would be wrong) — the sweep may not die at the end of
+    /// the first visual row.
+    #[test]
+    fn beam_crosses_row_boundaries() {
+        let mut s = spinner();
+
+        let max_row_dist = |buf: &Buffer, y: u16, base: (u8, u8, u8)| {
+            (0..4)
+                .map(|x| dist(fg_rgb(buf, x, y).unwrap(), base))
+                .max()
+                .unwrap()
+        };
+
+        // Beam centred on row 0 (char_norm ≈ 1/7): row 0 lit, row 1 near base.
+        s.set_beam_pos(1.0 / 7.0);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 4, 2));
+        s.render_row(&mut buf, 0, 0, 4, 0);
+        s.render_row(&mut buf, 0, 1, 4, 4);
+        let base = rgba_color(RGBA::from_ints(128, 128, 128, 255));
+        let base_rgb = match base {
+            Color::Rgb(r, g, b) => (r, g, b),
+            _ => unreachable!(),
+        };
+        assert!(
+            max_row_dist(&buf, 0, base_rgb) > 60,
+            "row 0 must be lit while the beam is over it"
+        );
+        assert!(
+            max_row_dist(&buf, 1, base_rgb) < 15,
+            "row 1 must stay near base colour while the beam is over row 0"
+        );
+
+        // Beam centred on row 1 (char_norm ≈ 5/7): row 1 lit MORE than
+        // row 0 (the trail behind the beam still glows over the row-0 tail).
+        s.set_beam_pos(5.0 / 7.0);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 4, 2));
+        s.render_row(&mut buf, 0, 0, 4, 0);
+        s.render_row(&mut buf, 0, 1, 4, 4);
+        let row0 = max_row_dist(&buf, 0, base_rgb);
+        let row1 = max_row_dist(&buf, 1, base_rgb);
+        assert!(
+            row1 > row0 + 30,
+            "row 1 must light up when the beam reaches it (row1={row1}, row0={row0}) — the sweep crosses the wrap"
+        );
+        assert!(row1 > 60, "row 1 must actually be lit (row1={row1})");
+    }
+
+    /// `render` is exactly `render_row(…, 0)`: the single-row callers keep
+    /// the exact old behaviour.
+    #[test]
+    fn render_delegates_to_render_row_at_offset_zero() {
+        let mut s = spinner();
+        s.set_beam_pos(0.4);
+        let mut a = Buffer::empty(Rect::new(0, 0, 8, 1));
+        let mut b = Buffer::empty(Rect::new(0, 0, 8, 1));
+        s.render(&mut a, 0, 0, 8);
+        s.render_row(&mut b, 0, 0, 8, 0);
+        for x in 0..8 {
+            assert_eq!(fg_rgb(&a, x, 0), fg_rgb(&b, x, 0), "mismatch at col {x}");
+            assert_eq!(
+                a.cell((x, 0)).unwrap().symbol(),
+                b.cell((x, 0)).unwrap().symbol()
+            );
+        }
+    }
+
+    /// Rows past the end of the text paint nothing (a caller that wraps
+    /// shorter than the spinner's text must not crash or overdraw).
+    #[test]
+    fn render_row_past_the_end_is_a_noop() {
+        let s = spinner();
+        let mut buf = Buffer::empty(Rect::new(0, 0, 4, 1));
+        let before = row_snapshot(&buf);
+        s.render_row(&mut buf, 0, 0, 4, 8);
+        assert_eq!(
+            row_snapshot(&buf),
+            before,
+            "offset == char_count must not paint"
+        );
+        s.render_row(&mut buf, 0, 0, 4, 100);
+        assert_eq!(row_snapshot(&buf), before);
+    }
+
+    /// One cell of a painted row: `(symbol, fg colour)`.
+    type Cell = (char, Option<(u8, u8, u8)>);
+
+    fn row_snapshot(buf: &Buffer) -> Vec<Cell> {
+        (0..buf.area().width)
+            .map(|x| {
+                let c = buf.cell((x, 0)).unwrap();
+                (c.symbol().chars().next().unwrap(), fg_rgb(buf, x, 0))
+            })
+            .collect()
     }
 }

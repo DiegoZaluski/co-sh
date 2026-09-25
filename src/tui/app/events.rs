@@ -11,16 +11,50 @@ use crate::notification;
 use crate::routes::session::delete::terminated_loop_save_target;
 use crate::routes::session::queue_choice::QueueTarget;
 use crate::session_store::is_valid_session;
-use crate::types::SessionStatus;
+use crate::types::{Part, Session, SessionStatus};
 use crate::ui::dialogs::DialogType;
 use cosh::harness::HarnessEvent;
 use cosh::harness::context::ContextManagerState;
 
 /// Process-wide sequence for live-created tool parts' `tool_call_id`s. The
 /// id is the identity per-box UI state (expand/collapse, LSP-notes toggle)
-/// is keyed by — unique per part, stable once assigned. (Spinner text is
-/// still keyed by `{tool}_{part_idx}`; see the temp_part below.)
-static TOOL_CALL_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// AND the spinner map key — unique per part across the WHOLE app run,
+/// stable once assigned.
+///
+/// The counter is SEEDED above every id a restored session already carries:
+/// persisted parts keep their `call-N` ids from the previous process run
+/// (`ensure_tool_call_ids` only fills blanks, it does not renumber), so an
+/// unseeded counter would restart at `call-0` on every app start and
+/// collide with the transcript's historical ids — the new call would share
+/// a spinner/expansion key with an old row, resurrecting the very
+/// re-animation bug the call-id keying was introduced to fix. Seeding is
+/// idempotent per run: each seed advances the counter past the observed
+/// maximum, and the atomic takes the largest value seen.
+pub(crate) static TOOL_CALL_SEQ: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Advance [`TOOL_CALL_SEQ`] past every `call-N` id carried by the given
+/// session's tool parts. Called when a persisted session becomes current
+/// (and again whenever any session is loaded), so the next live `call-N`
+/// allocation can never reuse an id already present in a restored
+/// transcript.
+pub fn seed_tool_call_seq_beyond_session(session: &Session) {
+    let mut max_seen: u64 = TOOL_CALL_SEQ.load(std::sync::atomic::Ordering::Relaxed);
+    for msg in &session.messages {
+        for part in &msg.parts {
+            if let Part::Tool(t) = part
+                && let Some(id) = &t.tool_call_id
+                && let Some(digits) = id.strip_prefix("call-")
+                && let Ok(n) = digits.parse::<u64>()
+            {
+                max_seen = max_seen.max(n);
+            }
+        }
+    }
+    // `fetch_max` keeps the highest value across all seeds; the next
+    // `fetch_add` then returns an id STRICTLY above every seen one.
+    TOOL_CALL_SEQ.fetch_max(max_seen + 1, std::sync::atomic::Ordering::Relaxed);
+}
 
 impl App {
     pub(super) fn handle_events(&mut self) -> io::Result<bool> {
@@ -336,6 +370,10 @@ impl App {
                     let Some(session) = self.state.current_session_mut() else {
                         continue;
                     };
+                    let tool_call_id = format!(
+                        "call-{}",
+                        TOOL_CALL_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    );
                     let part = Part::Tool(ToolPart {
                         tool: tool.clone(),
                         input,
@@ -345,10 +383,7 @@ impl App {
                         // expand/collapse state is keyed by. Without it all
                         // boxes of a tool type shared one key and toggled
                         // together (live parts used to be created with None).
-                        tool_call_id: Some(format!(
-                            "call-{}",
-                            TOOL_CALL_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                        )),
+                        tool_call_id: Some(tool_call_id.clone()),
                         is_start: true,
                         is_streaming: false,
                         cached_line_count: None,
@@ -368,18 +403,27 @@ impl App {
                             model: None,
                         }),
                     }
-                    // Session borrow dropped; create spinner for the new tool call.
-                    // This ensures the beam is visible even if ToolResult arrives
-                    // before the next render (fast tools like read).
-                    {
-                        let display = crate::routes::session::tool_render::tool_display(&tool);
-                        let part_idx = self
-                            .state
-                            .current_session()
-                            .and_then(|s| s.messages.last())
-                            .map(|m| m.parts.len().saturating_sub(1))
-                            .unwrap_or(0);
-                        let tool_id = format!("{}_{}", display, part_idx);
+                    // Session borrow dropped; pre-create the spinner for the
+                    // new tool call so the beam is visible even if ToolResult
+                    // arrives before the next render (fast tools like read).
+                    // Pre-create ONLY under the key the part's renderer will
+                    // actually use (render_generic-managed tools pre-create
+                    // under the generic key; spinner-less renderers skip — a
+                    // pre-created entry under a key no renderer reads leaks
+                    // one forever-Active spinner per call).
+                    let display = crate::routes::session::tool_render::tool_display(&tool);
+                    let part_idx = self
+                        .state
+                        .current_session()
+                        .and_then(|s| s.messages.last())
+                        .map(|m| m.parts.len().saturating_sub(1))
+                        .unwrap_or(0);
+                    let tool_id = crate::routes::session::tool_render::renderer_spinner_key(
+                        display,
+                        Some(tool_call_id.as_str()),
+                        part_idx as u16,
+                    );
+                    if let Some(tool_id) = tool_id {
                         let text = {
                             let temp_part = ToolPart {
                                 tool: tool.clone(),

@@ -17,7 +17,7 @@ use cosh_tui::core::lib::rgba::RGBA;
 
 use super::RIGHT_PANEL_WIDTH;
 
-use cosh_tui::core::renderables::markdown::estimate_height;
+use cosh_tui::core::renderables::markdown::{MarkdownRenderable, estimate_height};
 use ratatui::buffer::{Buffer, Cell};
 
 use crate::types::{Part, Session, ToolStatus};
@@ -49,53 +49,36 @@ pub(crate) const SUBAGENT_REBUILD_INTERVAL: Duration = Duration::from_millis(100
 /// header instead of hiding every subagent.
 pub(crate) const MIN_WINDOW_ROWS: i32 = 3;
 
-/// Distinguishable, CHEERFUL highlighter-style area colors for subagent
-/// CLIs — light pinks, lavenders, baby blues, mints (marca-texto feel). One
-/// is drawn ONCE per agent CLI per session (see [`RightPanelState::pick_color`])
-/// and never reused by another CLI, so each spawned agent keeps the same
-/// visual identity while it runs. Blended over the section background they
-/// read as a clear, bright per-agent hue.
-const AGENT_PALETTE: [(u8, u8, u8); 12] = [
-    (255, 153, 204), // pink highlighter
-    (255, 179, 186), // light rose
-    (255, 214, 165), // peach
-    (255, 236, 139), // pastel yellow
-    (177, 240, 134), // light lime
-    (134, 239, 172), // mint green
-    (110, 231, 183), // teal mint
-    (103, 232, 249), // cheerful cyan
-    (125, 211, 252), // baby blue
-    (147, 197, 253), // periwinkle
-    (196, 181, 253), // lavender
-    (233, 168, 253), // orchid
-];
-
-/// One drawable line of a running sub-agent's live activity (Phase 3b.2).
-/// Each variant renders as exactly ONE visual row inside the sub-agent box
-/// (the renderer truncates to the wrap width; the thought variant is
-/// pre-wrapped by [`activity_lines`]).
+/// One drawable unit of a running sub-agent's live activity (Phase 3b.2).
+/// `Tool`/`Diff`/`Plan` are pre-wrapped by [`activity_lines`] into visual
+/// rows that all fit the box's text width: the FIRST row carries the
+/// marker/spinner, the rest draw indented under it. `Message`/`Thought`
+/// are whole markdown BLOCKS whose row count comes from
+/// [`activity_block_height`] — the renderer and the height math share that
+/// helper, so they can never disagree.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum SubagentActivityLine {
-    /// A tool call line: `✓ read src/main.rs`-style. `InProgress` selects
-    /// the spinner rendering (luminous sweep); the other statuses draw the
-    /// ✓/✗/· marker.
+    /// A tool call: `✓ read src/main.rs`-style. `InProgress` selects the
+    /// spinner rendering (luminous sweep) on the first row; the other
+    /// statuses draw the ✓/✗/· marker. `rows[0]` is the first visual row.
     Tool {
         id: String,
-        text: String,
+        rows: Vec<String>,
         status: ToolCallStatus,
     },
-    /// A file-edit diff summary: `path +N −M`.
-    Diff(String),
-    /// A plan entry with its checkbox glyph (☐/☑/☒).
+    /// A file-edit diff summary: `path +N −M`, wrapped.
+    Diff(Vec<String>),
+    /// A plan entry with its checkbox glyph (☐/☑/☒) on the first row.
     Plan {
         status: PlanEntryStatus,
-        text: String,
+        rows: Vec<String>,
     },
-    /// One wrapped visual row of the sub-agent's message text (normal
-    /// text style, not dimmed — it is the agent speaking).
-    Message(String),
-    /// One wrapped visual row of the sub-agent's thinking.
-    Thought(String),
+    /// One markdown block of the sub-agent's message text (normal text
+    /// color, not dimmed — it is the agent speaking). `index` is the
+    /// timeline position: the block render cache's key.
+    Message { index: usize, text: String },
+    /// One markdown block of the sub-agent's thinking (dimmed).
+    Thought { index: usize, text: String },
 }
 
 /// The short, lowercase tool marker shown before the title (user decision:
@@ -115,43 +98,89 @@ fn tool_kind_name(kind: ToolKind) -> &'static str {
     }
 }
 
+/// The total visual rows the sub-agent's live activity occupies at
+/// `wrap_w` — the height math in [`RightPanelState::subagent_section_rows`]
+/// and the renderer must agree, so both derive from [`activity_lines`]:
+/// single-row lines cost 1, `Message`/`Thought` markdown blocks cost
+/// [`activity_block_height`].
+pub(crate) fn activity_visual_rows(activity: &SubagentActivity, wrap_w: u16) -> u16 {
+    activity_lines(activity, wrap_w)
+        .iter()
+        .map(|line| line.visual_rows(wrap_w))
+        .fold(0u16, u16::saturating_add)
+}
+
+impl SubagentActivityLine {
+    /// Visual rows this drawable unit occupies at `wrap_w` — the height
+    /// math ([`activity_visual_rows`]) and the renderer both consume this,
+    /// so they can never disagree. `Tool`/`Diff`/`Plan` arrive pre-wrapped
+    /// (one row per element); `Message`/`Thought` are markdown blocks
+    /// estimated by [`activity_block_height`].
+    pub(crate) fn visual_rows(&self, wrap_w: u16) -> u16 {
+        match self {
+            SubagentActivityLine::Tool { rows, .. }
+            | SubagentActivityLine::Diff(rows)
+            | SubagentActivityLine::Plan { rows, .. } => {
+                u16::try_from(rows.len().max(1)).unwrap_or(u16::MAX)
+            }
+            SubagentActivityLine::Message { text, .. }
+            | SubagentActivityLine::Thought { text, .. } => activity_block_height(text, wrap_w),
+        }
+    }
+}
+
 /// The drawable activity lines of one running sub-agent session, in
 /// CHRONOLOGICAL order (mini-chat): transcript entries render in arrival
 /// order, so tool calls, thoughts and message text climb upward as new
 /// content arrives — the same flow as the main chat. Called ONLY for
 /// running sessions — activity is cleared on completion, so finished
-/// windows render nothing.
+/// windows render nothing. Tool/plan/diff lines are pre-wrapped with
+/// [`wrap_chars`] (first row + `*Cont` rows); `Message`/`Thought` carry
+/// their whole markdown block plus its timeline `index` (cache key).
 pub(crate) fn activity_lines(
     activity: &SubagentActivity,
     wrap_w: u16,
 ) -> Vec<SubagentActivityLine> {
     let mut out = Vec::new();
-    for entry in &activity.timeline {
+    for (index, entry) in activity.timeline.iter().enumerate() {
         match entry {
             SubagentTimelineEntry::Message { text } => {
-                let clean = sanitize_subagent_text(text);
-                for row in wrap_chars(clean.trim(), wrap_w) {
-                    out.push(SubagentActivityLine::Message(row));
+                // The severity header is consumed metadata, never displayed:
+                // the FINAL report streams through this timeline and its
+                // first line is `<!-- severity: ... -->` (mandatory since
+                // the report-side enforcement). Same strip the rendered
+                // body uses (subagent_visible_body → extract_severity), so
+                // live mini-chat and completed body agree. Height and
+                // renderer both derive from HERE, so stripping at this one
+                // point keeps the row math in lockstep.
+                let clean = sanitize_subagent_text(subagent_visible_body(text));
+                if clean.trim().is_empty() {
+                    continue;
                 }
+                out.push(SubagentActivityLine::Message { index, text: clean });
             }
             SubagentTimelineEntry::Thought { text } => {
                 let clean = sanitize_subagent_text(text);
-                for row in wrap_chars(clean.trim(), wrap_w) {
-                    out.push(SubagentActivityLine::Thought(row));
+                if clean.trim().is_empty() {
+                    continue;
                 }
+                out.push(SubagentActivityLine::Thought { index, text: clean });
             }
             SubagentTimelineEntry::Tool(call) => {
                 let name = tool_kind_name(call.kind);
                 let detail = call.detail.clone().unwrap_or_else(|| call.title.clone());
+                // The marker/spinner occupies the leading 2 columns and the
+                // text starts at x+2 on EVERY row — wrap at the indented
+                // width so continuation rows fit their drawing area.
                 out.push(SubagentActivityLine::Tool {
                     id: call.id.clone(),
-                    text: format!("{name} {detail}"),
+                    rows: wrap_chars(&format!("{name} {detail}"), wrap_w.saturating_sub(2)),
                     status: call.status,
                 });
                 if let Some(diff) = &call.diff {
-                    out.push(SubagentActivityLine::Diff(format!(
-                        "{} +{} −{}",
-                        diff.path, diff.added, diff.removed
+                    out.push(SubagentActivityLine::Diff(wrap_chars(
+                        &format!("{} +{} −{}", diff.path, diff.added, diff.removed),
+                        wrap_w.saturating_sub(2),
                     )));
                 }
             }
@@ -159,7 +188,7 @@ pub(crate) fn activity_lines(
                 for entry in entries {
                     out.push(SubagentActivityLine::Plan {
                         status: entry.status,
-                        text: entry.content.clone(),
+                        rows: wrap_chars(&entry.content, wrap_w.saturating_sub(2)),
                     });
                 }
             }
@@ -168,11 +197,11 @@ pub(crate) fn activity_lines(
     out
 }
 
-/// Total visual rows the activity block occupies at `wrap_w` (the height
-/// math in [`RightPanelState::subagent_section_rows`] and the renderer must
-/// agree — both go through [`activity_lines`]).
-pub(crate) fn activity_visual_rows(activity: &SubagentActivity, wrap_w: u16) -> u16 {
-    u16::try_from(activity_lines(activity, wrap_w).len()).unwrap_or(u16::MAX)
+/// Visual rows one `Message`/`Thought` block occupies at `wrap_w`: the
+/// project's markdown layout estimator (the SAME algorithm the body uses),
+/// floored at one row. Shared by the height math and the renderer.
+pub(crate) fn activity_block_height(text: &str, wrap_w: u16) -> u16 {
+    estimate_height(text, wrap_w).max(1)
 }
 
 /// Split a subagent PTY output into the optional main-agent input line
@@ -240,7 +269,7 @@ pub(crate) fn subagent_visible_body(body: &str) -> &str {
 ///
 /// Internal subagents and older persisted entries store their report as plain
 /// text, which deliberately passes through unchanged.
-fn subagent_display_output(output: String) -> String {
+pub(crate) fn subagent_display_output(output: String) -> String {
     serde_json::from_str::<cosh_tools::subagent::SubAgentCallOutput>(&output)
         .map(|result| result.output)
         .unwrap_or(output)
@@ -394,12 +423,58 @@ pub(crate) struct SubagentBodyCache {
     /// Theme colors the cells were styled with (fg + box bg) — the palette
     /// derives from these, so a live theme switch must invalidate.
     pub(crate) theme_key: u64,
-    /// The area tint (agent color blended over the theme background) the
-    /// body was rendered on — a different agent window at the same slot
-    /// must re-render with its own tint.
+    /// The area tint (default box background, or the verdict's severity
+    /// blended over it) the body was rendered on — cached cells carry
+    /// concrete colors, so a different tint must re-render.
     pub(crate) bg: RGBA,
     /// Row-major rendered cells, `wrap_w` × `h`.
     pub(crate) cells: Vec<Cell>,
+}
+
+/// Persistent renderer of ONE live-activity block (a `Message`/`Thought`
+/// timeline entry) of a running subagent window — the per-block counterpart
+/// of the chat's streaming `MarkdownRenderable`: the renderer instance
+/// PERSISTS across frames, so `set_content` re-parses only the changed tail
+/// and its per-block render cache survives, instead of a fresh cold-cache
+/// renderer on every streamed chunk. The scratch buffer it paints into is
+/// reused too; the panel blits its cells row by row.
+pub(crate) struct SubagentBlockRenderer {
+    /// Wrap width the renderer is laid out at.
+    pub(crate) wrap_w: u16,
+    /// Theme colors the renderer is styled with — a live theme switch must
+    /// rebuild it (rendered cells carry concrete colors).
+    pub(crate) theme_key: u64,
+    /// The area tint the block is rendered on (default box background, or
+    /// the verdict's severity blended over it) — a different tint must
+    /// rebuild.
+    pub(crate) bg: RGBA,
+    /// Whether the block is a `Thought` (dimmed fg) rather than a `Message`
+    /// — a different fg must rebuild.
+    pub(crate) dimmed: bool,
+    /// The text the renderer currently holds — the exact invalidation key
+    /// for streaming edits (a length check alone could miss same-length
+    /// rewrites).
+    pub(crate) text: String,
+    /// The persistent chat-style renderer: `set_content` re-parses only the
+    /// changed tail and closed blocks come back from its internal cache.
+    pub(crate) md: MarkdownRenderable,
+    /// Scratch the renderer paints into (reused across frames).
+    pub(crate) scratch: Buffer,
+}
+
+/// Manual `Debug`: `MarkdownRenderable` is not `Debug` (it holds an LRU of
+/// rendered cells), and [`RightPanelState`] derives `Debug` — report the
+/// layout inputs instead of the opaque renderer.
+impl std::fmt::Debug for SubagentBlockRenderer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SubagentBlockRenderer")
+            .field("wrap_w", &self.wrap_w)
+            .field("theme_key", &self.theme_key)
+            .field("bg", &self.bg)
+            .field("dimmed", &self.dimmed)
+            .field("text_len", &self.text.len())
+            .finish_non_exhaustive()
+    }
 }
 
 /// A single todo item from the LLM's plan_todo_write tool.
@@ -442,9 +517,9 @@ pub struct PtySession {
     pub(crate) subagent_activity: SubagentActivity,
     /// Review outcome declared by the report's `<!-- severity: ... -->`
     /// header (Phase 3b.1). `None` for bash sessions, non-review tasks and
-    /// reports without a header — the box keeps its neutral per-agent color.
-    /// Consumed at completion (live) or rehydration (persisted); the header
-    /// itself is stripped at render time, never shown.
+    /// reports without a header — the box keeps the section's default
+    /// color. Consumed at completion (live) or rehydration (persisted);
+    /// the header itself is stripped at render time, never shown.
     pub(crate) severity: Option<cosh_tools::subagent::severity::Severity>,
 }
 
@@ -963,6 +1038,17 @@ pub struct RightPanelState {
     /// are matched by session id, so evicted sessions never serve stale
     /// cells.
     pub(crate) subagent_body_cache: Vec<Option<SubagentBodyCache>>,
+    /// Persistent per-entry markdown renderers of the LIVE activity blocks
+    /// (running subagent windows), keyed by `{session_id}:{timeline index}`
+    /// — the per-block counterpart of `subagent_body_cache` for the
+    /// `Message`/`Thought` entries drawn by `draw_activity_lines`. The
+    /// renderer instance survives across frames (chat-style `set_content`
+    /// incremental parsing; closed sub-blocks come back from its internal
+    /// cache), so a fast stream re-renders only the changed tail instead of
+    /// a cold full block per chunk. The height `h` each entry stores is the
+    /// SAME `activity_block_height` number the row math reserves, so the
+    /// blit and the layout agree by construction.
+    pub(crate) subagent_activity_cache: HashMap<String, SubagentBlockRenderer>,
     /// Reusable scratch buffer for blitting the visible slice of a session's
     /// markdown body: the markdown renderer lays out from content row 0, so
     /// the full body is rendered here, copied into the body cache, and only
@@ -1000,24 +1086,18 @@ pub struct RightPanelState {
     /// (`session index in pty_sessions`, top, bottom exclusive) — resolves
     /// which AGENT queue a click targeted.
     pub(crate) subagent_window_layouts: Vec<(usize, i32, i32)>,
-    /// Area color assigned to each EXTERNAL agent CLI on first sight
-    /// (random palette draw, never reused by another CLI). Internal
-    /// subagents are NOT in this map: they always use [`Self::host_color`].
-    agent_colors: HashMap<String, RGBA>,
-    /// The main (cosh) agent's own area color; shared by every internal
-    /// subagent. Drawn once per session like the external ones.
-    host_color: RGBA,
-    /// Entropy counter for the random palette draws (`RandomState` is
-    /// re-seeded per instance; this keeps consecutive draws distinct).
-    rng_counter: u64,
     /// Directory holding this state instance's spilled outputs. Unique per
     /// instance; removed on drop.
     spill_dir: PathBuf,
 
     // ── Auto-scroll tracking ────────────────────────────────────────
-    /// Set to `true` when the user manually scrolls (up/down);
-    /// set to `false` by `scroll_to_bottom()`. Used by `is_scrolled_up()`
-    /// to decide whether to auto-scroll on new output.
+    /// Set to `true` when the user scrolls UP (away from the live edge);
+    /// cleared when a scroll-down reaches the bottom again or by
+    /// `scroll_to_bottom()`. Used by `is_scrolled_up()` to decide whether to
+    /// auto-follow on new output — the chat's sticky-bottom rule: a
+    /// scroll-down mid-content keeps the follow paused, reaching the bottom
+    /// re-arms it. (Panel-wide flag: one section reaching the bottom re-arms
+    /// the follow for all of them.)
     pub user_scrolled_away: bool,
 
     // ── Section layout (populated on render, consumed by mouse events) ──
@@ -1065,7 +1145,7 @@ pub struct RightPanelState {
 
 impl RightPanelState {
     pub fn new() -> Self {
-        let mut state = Self {
+        let state = Self {
             todos: Vec::new(),
             todo_strike_frames: HashMap::new(),
             todo_seen_contents: HashSet::new(),
@@ -1075,6 +1155,7 @@ impl RightPanelState {
             section_activity_order: [0; 3],
             pty_gen: 0,
             subagent_body_cache: Vec::new(),
+            subagent_activity_cache: HashMap::new(),
             bash_buffer_cache: Vec::new(),
             bash_cache_gen: 0,
             bash_cache_w: 0,
@@ -1115,107 +1196,12 @@ impl RightPanelState {
             agent_navs: HashMap::new(),
             visible_subagents: Vec::new(),
             subagent_window_layouts: Vec::new(),
-            agent_colors: HashMap::new(),
-            host_color: RGBA::from_ints(
-                AGENT_PALETTE[0].0,
-                AGENT_PALETTE[0].1,
-                AGENT_PALETTE[0].2,
-                255,
-            ),
-            rng_counter: 0,
             spill_dir: Self::fresh_spill_dir(),
             scroll_y: 0,
             content_height: 0,
             visible_height: 0,
         };
-        // The host agent draws its own area color once per session; every
-        // internal subagent inherits it.
-        state.host_color = state.pick_color();
         state
-    }
-
-    /// Draw a random, not-yet-used palette color for a new agent CLI.
-    /// Randomness is native (`RandomState` is seeded uniquely per instance)
-    /// plus a monotonic counter; when the palette is exhausted, distinct
-    /// variants are derived by mixing toward white/black until unused.
-    fn pick_color(&mut self) -> RGBA {
-        use std::collections::hash_map::RandomState;
-        use std::hash::{BuildHasher, Hasher};
-        // Colors already spoken for: every assigned CLI AND the host's own
-        // (internal subagents share it, so nobody else may take it).
-        let mut used: Vec<RGBA> = self.agent_colors.values().copied().collect();
-        used.push(self.host_color);
-        self.rng_counter = self.rng_counter.wrapping_add(1);
-        let seed = {
-            let mut hasher = RandomState::new().build_hasher();
-            hasher.write_u64(self.rng_counter);
-            hasher.write_u64(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.subsec_nanos() as u64)
-                    .unwrap_or(0),
-            );
-            hasher.finish()
-        };
-
-        // First pass: an unused palette entry picked by the seed.
-        let free: Vec<usize> = AGENT_PALETTE
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| {
-                let c = RGBA::from_ints(c.0, c.1, c.2, 255);
-                !used.contains(&c)
-            })
-            .map(|(i, _)| i)
-            .collect();
-        if let Some(&idx) = free.get((seed % free.len().max(1) as u64) as usize) {
-            let (r, g, b) = AGENT_PALETTE[idx];
-            return RGBA::from_ints(r, g, b, 255);
-        }
-        // Palette exhausted: mix the seed-indexed entry toward white/black
-        // in alternating steps (delta computed in i32 so BOTH directions
-        // produce real variants) until a color nobody holds is found.
-        let base = AGENT_PALETTE[(seed % AGENT_PALETTE.len() as u64) as usize];
-        for step in 1..=8u32 {
-            let t = step as f32 / 9.0;
-            let target = if step % 2 == 1 { 255 } else { 0 };
-            let mix = |ch: u8| -> u8 {
-                let v = i32::from(ch) as f32 + (target - i32::from(ch)) as f32 * t;
-                v.round().clamp(0.0, 255.0) as u8
-            };
-            let candidate = RGBA::from_ints(mix(base.0), mix(base.1), mix(base.2), 255);
-            if !used.contains(&candidate) {
-                return candidate;
-            }
-        }
-        // Practically unreachable: derive hash-based candidates until one
-        // is unused (bounded, then the last derived value wins).
-        for j in 0..64u64 {
-            let candidate = RGBA::from_ints(
-                (seed >> j) as u8,
-                (seed >> (8 + j)) as u8,
-                (seed >> (16 + j)) as u8,
-                255,
-            );
-            if !used.contains(&candidate) {
-                return candidate;
-            }
-        }
-        RGBA::from_ints(seed as u8, (seed >> 8) as u8, (seed >> 16) as u8, 255)
-    }
-
-    /// The area color of an agent queue: external CLIs keep their assigned
-    /// draw; INTERNAL subagents (empty agent name) always share the main
-    /// agent's own color.
-    pub fn agent_area_color(&self, agent: &str) -> RGBA {
-        if agent.is_empty() {
-            self.host_color
-        } else {
-            self.agent_colors
-                .get(agent)
-                .copied()
-                .unwrap_or(self.host_color)
-        }
     }
 
     /// Unique spill directory for a new state instance:
@@ -1713,13 +1699,33 @@ impl RightPanelState {
     /// sentinel set by [`scroll_to_bottom`](Self::scroll_to_bottom) until the
     /// render path clamps them (which only happens when content overflows).
     /// A raw `+ delta` would overflow and panic in debug builds.
+    ///
+    /// Auto-follow rule (the chat's sticky-bottom behavior): only scrolling
+    /// UP — toward older content — pauses the follow; a scroll that moves or
+    /// stays at the bottom keeps it, and scrolling back down to the bottom
+    /// re-arms it. A no-op scroll (already at the clamp) changes nothing, so
+    /// wheel-up against the top never kills the live view either.
     fn scroll_section_by(&mut self, kind: SectionKind, delta: i32) {
-        self.user_scrolled_away = true;
+        let cur = self.section_scroll(kind);
         let next = match kind {
             SectionKind::Todo => self.todo_scroll_y.saturating_add(delta).max(0),
             SectionKind::Bash => self.bash_scroll_y.saturating_add(delta).max(0),
             SectionKind::Subagent => self.subagent_scroll_y.saturating_add(delta).max(0),
         };
+        if next == cur {
+            return;
+        }
+        if delta < 0 {
+            self.user_scrolled_away = true;
+        } else {
+            // Scrolling toward newer content: pinning at (or past) the
+            // bottom — `next` may transiently exceed `max_scroll` and is
+            // clamped by the next render — means the user is back at the
+            // live edge, so follow re-arms. Between bottom and the viewport
+            // top the user is deliberately reading: follow stays paused.
+            let max_scroll = self.section_max_scroll(kind);
+            self.user_scrolled_away = next < max_scroll;
+        }
         self.set_section_scroll(kind, next);
     }
 
@@ -2087,13 +2093,6 @@ impl RightPanelState {
                 if s.command == prefix && s.is_finished() {
                     s.superseded = true;
                 }
-            }
-            // External CLIs draw their area color ONCE (first spawn) and
-            // keep it for the whole session; internal subagents (empty
-            // agent) share the host color and never enter the draw.
-            if !agent.is_empty() && !self.agent_colors.contains_key(agent) {
-                let color = self.pick_color();
-                self.agent_colors.insert(agent.to_string(), color);
             }
             // A pin whose target was just superseded by this new spawn is
             // stale: that old window left the default display, and keeping
@@ -2630,12 +2629,6 @@ impl Drop for RightPanelState {
     }
 }
 
-/// Palette entries for tests (light/vivid property checks).
-#[cfg(test)]
-pub(crate) fn palette_entries() -> Vec<(u8, u8, u8)> {
-    AGENT_PALETTE.to_vec()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2890,6 +2883,60 @@ mod tests {
         // A NEW subagent session starts with empty activity again.
         state.start_pty("subagent: opencode".to_string(), None);
         assert!(state.pty_sessions[1].subagent_activity.timeline.is_empty());
+    }
+
+    /// REGRESSION (user-visible): the severity header is consumed metadata —
+    /// it tints the box and must NEVER appear as report text. The final
+    /// review report streams through the mini-chat timeline, and its first
+    /// line is the (now mandatory) `<!-- severity: ... -->` header, so the
+    /// timeline used to display the raw comment while the report was being
+    /// written. `activity_lines` strips it with the same extractor the
+    /// rendered body uses.
+    #[test]
+    fn activity_lines_consume_the_severity_header_from_message_text() {
+        let mut activity = SubagentActivity::default();
+        activity.apply(&SubagentEvent::Message {
+            text: "<!-- severity: yellow -->\n\n# CODE REVIEW\n\nOne MAJOR finding.\n".to_string(),
+        });
+
+        let lines = activity_lines(&activity, 60);
+        assert_eq!(lines.len(), 1);
+        let SubagentActivityLine::Message { text, .. } = &lines[0] else {
+            panic!("expected a Message block");
+        };
+        assert!(
+            !text.contains("severity"),
+            "the header must be consumed, never displayed: {text:?}"
+        );
+        assert!(
+            text.contains("CODE REVIEW"),
+            "the body must survive: {text:?}"
+        );
+
+        // The height math consumes the SAME stripped text (both derive from
+        // activity_lines), so rows cannot disagree with what is drawn.
+        let rows = activity_visual_rows(&activity, 60);
+        let stripped = activity_block_height(
+            subagent_visible_body(
+                "<!-- severity: yellow -->\n\n# CODE REVIEW\n\nOne MAJOR finding.\n",
+            ),
+            60,
+        );
+        assert_eq!(rows, stripped);
+
+        // A message WITHOUT a header is untouched.
+        let mut plain = SubagentActivity::default();
+        plain.apply(&SubagentEvent::Message {
+            text: "just a normal message".to_string(),
+        });
+        let lines = activity_lines(&plain, 60);
+        assert_eq!(
+            lines[0],
+            SubagentActivityLine::Message {
+                index: 0,
+                text: "just a normal message".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -3147,18 +3194,19 @@ mod tests {
         assert_eq!(lines.len(), 2);
         // Tool line: NO icon, just the lowercase tool name + the extracted
         // detail (user decision) — status drives the marker, not the text.
+        // The line is PRE-WRAPPED: one row fits the 60-col width.
         assert_eq!(
             lines[0],
             SubagentActivityLine::Tool {
                 id: "c1".to_string(),
-                text: "read src/main.rs".to_string(),
+                rows: vec!["read src/main.rs".to_string()],
                 status: ToolCallStatus::Completed,
             }
         );
         // Diff summary under the call.
         assert_eq!(
             lines[1],
-            SubagentActivityLine::Diff("src/main.rs +12 −3".to_string())
+            SubagentActivityLine::Diff(vec!["src/main.rs +12 −3".to_string()])
         );
     }
 
@@ -3177,7 +3225,7 @@ mod tests {
             lines[0],
             SubagentActivityLine::Tool {
                 id: "c1".to_string(),
-                text: "exec Doing something".to_string(),
+                rows: vec!["exec Doing something".to_string()],
                 status: ToolCallStatus::InProgress,
             }
         );
@@ -3206,31 +3254,32 @@ mod tests {
         });
 
         let lines = activity_lines(&activity, 20);
-        // 2 plan rows + the wrapped thought rows.
+        // 2 plan entries + the thought's markdown block.
         assert!(lines.len() >= 3);
         assert_eq!(
             lines[0],
             SubagentActivityLine::Plan {
                 status: PlanEntryStatus::Completed,
-                text: "done task".to_string(),
+                rows: vec!["done task".to_string()],
             }
         );
         assert_eq!(
             lines[1],
             SubagentActivityLine::Plan {
                 status: PlanEntryStatus::Pending,
-                text: "pending task".to_string(),
+                rows: vec!["pending task".to_string()],
             }
         );
-        // The thought occupies the LAST rows (its tail is what is shown).
+        // The thought occupies the LAST row (its tail is what is shown) —
+        // now one whole markdown block instead of pre-wrapped rows.
         assert!(matches!(
             lines.last(),
-            Some(SubagentActivityLine::Thought(_))
+            Some(SubagentActivityLine::Thought { .. })
         ));
     }
 
     #[test]
-    fn activity_visual_rows_match_activity_lines_len() {
+    fn activity_visual_rows_counts_a_wrapped_tool_row() {
         let mut activity = SubagentActivity::default();
         activity.apply(&SubagentEvent::ToolCall {
             id: "c1".to_string(),
@@ -3554,6 +3603,92 @@ mod tests {
         assert_eq!(todos.todo_scroll_y, i32::MAX - 5);
     }
 
+    /// Regression: ANY manual scroll used to set `user_scrolled_away`, so a
+    /// single wheel-down mid-stream permanently killed the right panel's
+    /// auto-follow — new output stopped yanking the viewport and the user
+    /// had to keep scrolling manually to catch up. The chat's sticky-bottom
+    /// rule holds now: only scrolling UP pauses the follow; a scroll-down
+    /// while reading mid-content keeps it paused, and reaching the bottom
+    /// re-arms it. A no-op scroll (against a clamp) changes nothing.
+    #[test]
+    fn scroll_follow_rearms_at_the_bottom_and_survives_scroll_down() {
+        let mut state = RightPanelState::new();
+        state.start_pty("echo static".to_string(), None);
+        let body: String = (0..40).map(|i| format!("line {i}\n")).collect();
+        state.update_last_pty(body);
+        // Viewport (0, 30) → inner_h 27; the 40-line buffer overflows, so
+        // max_scroll = 13 and the offsets below land mid-content.
+        state.push_section_layout(SectionKind::Bash, 0, 30);
+
+        // Live view pinned at the bottom sentinel: a wheel-DOWN is a no-op
+        // (saturates at the clamp) and must NOT pause the follow.
+        state.scroll_to_bottom();
+        state.scroll_down_at(5, 3);
+        assert!(
+            !state.is_scrolled_up(),
+            "scroll-down at the bottom keeps auto-follow"
+        );
+
+        // Scrolling UP pauses the follow (the user wants to read).
+        state.scroll_up_at(5, 8);
+        assert!(state.is_scrolled_up(), "scroll-up pauses auto-follow");
+
+        // Scroll-down MID-content stays paused: the user is reading, not
+        // returning to the live edge (offsets set directly — the render
+        // normally clamps them — to exercise the branch deterministically).
+        state.bash_scroll_y = 4;
+        state.user_scrolled_away = true;
+        state.scroll_down_at(5, 3);
+        assert!(
+            state.is_scrolled_up(),
+            "scroll-down mid-content stays paused (still reading)"
+        );
+
+        // Reaching the bottom (scroll-down past max_scroll; the next render
+        // clamps to the pinned bottom) re-arms the follow.
+        state.scroll_down_at(5, 40);
+        assert!(
+            !state.is_scrolled_up(),
+            "reaching the bottom re-arms auto-follow"
+        );
+
+        // Wheel-up against the TOP is a no-op: an armed follow stays armed
+        // (scrolling up against the clamp changes no offset).
+        state.bash_scroll_y = 0;
+        state.scroll_up_at(5, 3);
+        assert!(
+            !state.is_scrolled_up(),
+            "no-op scroll at the top keeps auto-follow"
+        );
+        assert_eq!(state.bash_scroll_y, 0);
+    }
+
+    /// Same rule inside the SUBAGENT box: wheel-down while pinned at the
+    /// bottom sentinel is a no-op that keeps the follow armed, so the
+    /// streaming box never stops climbing unless the user scrolls up.
+    #[test]
+    fn subagent_scroll_down_at_bottom_keeps_auto_follow() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: opencode".to_string(), None);
+        let body = (0..40)
+            .map(|i| format!("Line {i} of the stream\n"))
+            .collect::<String>();
+        state.update_last_pty(body);
+        state.push_section_layout(SectionKind::Subagent, 0, 30);
+        state.scroll_to_bottom();
+
+        state.scroll_down_at(5, 3);
+        assert!(
+            !state.is_scrolled_up(),
+            "wheel-down at the bottom keeps the subagent auto-follow"
+        );
+        state.scroll_up_at(5, 3);
+        assert!(
+            state.is_scrolled_up(),
+            "wheel-up pauses the subagent auto-follow"
+        );
+    }
+
     /// Sessions are NEVER evicted (history stays navigable); beyond the
     /// in-memory window the oldest FINISHED outputs are spilled to disk and
     /// reloaded lazily. Running sessions always stay in memory.
@@ -3711,62 +3846,6 @@ mod tests {
 
         // Same content, wider box → fewer rows (width is part of the key).
         assert!(state.bash_buffer(40).len() < buf.len());
-    }
-
-    // ── Per-CLI area colors ─────────────────────────────────────────
-
-    /// Every external agent CLI draws its area color ONCE and keeps it for
-    /// the whole session; no two CLIs ever share a color; internal
-    /// subagents (empty agent name) share the HOST color instead.
-    #[test]
-    fn agent_area_colors_are_unique_stable_and_host_shared() {
-        let mut state = RightPanelState::new();
-        let host = state.agent_area_color("");
-
-        for agent in ["opencode", "clint", "kilo", "codex"] {
-            state.start_pty(format!("subagent: {agent}"), None);
-            state.complete_last_pty("report\n".to_string());
-        }
-        // Re-spawn the same CLI: same color, still unique across CLIs.
-        state.start_pty("subagent: opencode".to_string(), None);
-
-        let opencode = state.agent_area_color("opencode");
-        assert_eq!(
-            state.agent_area_color("opencode"),
-            opencode,
-            "same CLI keeps its color across spawns"
-        );
-
-        let mut all: Vec<RGBA> = vec![host];
-        for agent in ["opencode", "clint", "kilo", "codex"] {
-            let c = state.agent_area_color(agent);
-            assert!(!all.contains(&c), "{agent} color collides: {c:?}");
-            all.push(c);
-        }
-        assert_eq!(
-            state.agent_area_color(""),
-            host,
-            "internal subagents always share the HOST color"
-        );
-    }
-
-    /// The whole palette can be consumed without panic or collision; after
-    /// exhaustion, derived colors are still unique.
-    #[test]
-    fn color_draw_survives_palette_exhaustion() {
-        let mut state = RightPanelState::new();
-        for i in 0..AGENT_PALETTE.len() + 4 {
-            state.start_pty(format!("subagent: agent{i}"), None);
-        }
-        let mut seen: Vec<RGBA> = vec![state.agent_area_color("")];
-        for i in 0..AGENT_PALETTE.len() + 4 {
-            let c = state.agent_area_color(&format!("agent{i}"));
-            assert!(
-                !seen.contains(&c),
-                "agent{i} reused a color: {c:?} in {seen:?}"
-            );
-            seen.push(c);
-        }
     }
 
     /// The subagent rows account for wrapped command-header and input

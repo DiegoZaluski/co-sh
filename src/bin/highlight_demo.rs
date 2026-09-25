@@ -203,7 +203,7 @@ fn main() -> io::Result<()> {
                 horizontal: 2,
                 vertical: 2,
             });
-            spinner.render(frame.buffer_mut(), inner.x, inner.y);
+            spinner.render(frame.buffer_mut(), inner.x, inner.y, inner.width);
 
             // Footer with instructions.
             let footer_text = format!(

@@ -142,6 +142,9 @@ impl AppState {
     /// every other box of the same tool.
     pub fn add_session(&mut self, mut session: Session) {
         session.ensure_tool_call_ids();
+        // Live ids must never collide with a restored transcript's ids (see
+        // `seed_tool_call_seq_beyond_session`).
+        crate::app::events::seed_tool_call_seq_beyond_session(&session);
         let summary = SessionSummary {
             session_id: session.id.clone(),
             title: session.title.clone(),
@@ -215,6 +218,9 @@ impl AppState {
             // Same normalization as `add_session`: restored sessions must not
             // share per-tool-type expansion keys across boxes.
             session.ensure_tool_call_ids();
+            // And live ids must never collide with this restored transcript's
+            // ids (see `seed_tool_call_seq_beyond_session`).
+            crate::app::events::seed_tool_call_seq_beyond_session(&session);
             self.session_cache.put(session_id.to_string(), session);
             true
         } else {

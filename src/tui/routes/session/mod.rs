@@ -3848,13 +3848,17 @@ impl SessionView {
                     // agent bursts.
                     let has_active_spinner = msg.parts.iter().enumerate().any(|(pi, part)| {
                         matches!(part, Part::Tool(t)
-                            if self.tool_state.tool_spinners
-                                .get(&format!(
-                                    "{}_{}",
-                                    tool_render::tool_display(&t.tool),
-                                    pi
-                                ))
-                                .is_some_and(|s| !s.is_idle()))
+                        if tool_render::renderer_spinner_key(
+                            tool_render::tool_display(&t.tool),
+                            t.tool_call_id.as_deref(),
+                            pi as u16,
+                        )
+                        .is_some_and(|key| {
+                            self.tool_state
+                                .tool_spinners
+                                .get(&key)
+                                .is_some_and(|s| !s.is_idle())
+                        }))
                     });
                     let token = msg_content_token(msg, config_tok, max_w, &self.tool_state);
                     let cache_hit = !is_streaming_msg

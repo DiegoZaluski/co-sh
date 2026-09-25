@@ -48,7 +48,7 @@ mod agent_loop;
 mod commands;
 mod compaction;
 mod dialogs;
-mod events;
+pub(crate) mod events;
 mod gateway_recommendation;
 mod keys;
 mod mouse;

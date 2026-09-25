@@ -2773,6 +2773,227 @@ fn sweep_idle_spinners_drops_only_finished_ones() {
     assert!(state.tool_spinners.contains_key("run-1"));
 }
 
+/// Regression: a FINISHED tool's spinner re-animated when another call of
+/// the same tool type started. The spinner map was keyed by
+/// `{display}_{part_idx}`, and `part_idx` is unique only WITHIN one message,
+/// so two same-tool calls in different messages collided on one key: the
+/// second call flipped the shared entry back to Active and the older row
+/// rendered a beam again. Keys are `tool_call_id`-based now, so each call
+/// owns its spinner and starting a twin call never resurrects the old one.
+#[test]
+fn same_tool_call_in_a_later_message_does_not_reanimate_the_old_spinner() {
+    use super::tool_render::{ToolRenderState, spinner_key};
+    use crate::types::{ToolPart, ToolStatus};
+
+    let theme = test_theme();
+    let mut state = ToolRenderState::new();
+
+    // Two same-tool calls, both at part_idx 0 of their own message: the
+    // identity is the tool_call_id, so the keys must differ.
+    let key_a = spinner_key("task", Some("call-1"), 0);
+    let key_b = spinner_key("task", Some("call-2"), 0);
+    assert_ne!(key_a, key_b, "distinct tool_call_ids must not share a key");
+
+    let part = |id: &str, status: ToolStatus| ToolPart {
+        tool: "task".into(),
+        input: serde_json::json!({}),
+        output: None,
+        status,
+        tool_call_id: Some(id.into()),
+        is_start: true,
+        is_streaming: false,
+        cached_line_count: None,
+        lsp_notes: None,
+    };
+
+    // Call A runs, completes, and its beam sweeps out to Idle.
+    state.manage_tool_spinner(&key_a, &part("call-1", ToolStatus::Running), &theme, true);
+    assert!(
+        state.tool_spinners[&key_a].is_active(),
+        "running call → Active"
+    );
+    state.manage_tool_spinner(
+        &key_a,
+        &part("call-1", ToolStatus::Completed),
+        &theme,
+        false,
+    );
+    let finished = state.tool_spinners.get_mut(&key_a).unwrap();
+    for _ in 0..20 {
+        finished.advance(1.0);
+    }
+    assert!(finished.is_idle(), "completed call's beam must reach Idle");
+
+    // Call B starts: same tool, same part_idx, later message.
+    state.manage_tool_spinner(&key_b, &part("call-2", ToolStatus::Running), &theme, true);
+
+    // A's entry must STILL be idle — starting B may not resurrect it — and
+    // B must have its own Active spinner.
+    assert!(
+        state.tool_spinners[&key_a].is_idle(),
+        "the old call's spinner must stay Idle when an identical new call starts"
+    );
+    assert!(
+        state.tool_spinners[&key_b].is_active(),
+        "the new call gets its own Active spinner"
+    );
+}
+
+/// Contract: `renderer_spinner_key` must mirror `dispatch_tool`'s renderer
+/// mapping exactly — the key the handler pre-creates (and the cache-bypass
+/// check queries) has to be the key the part's renderer manages, or the
+/// entry is orphaned (forever-Active leak with call-id keys) or missed
+/// (frozen beam in the top-clipped cache path).
+#[test]
+fn renderer_spinner_key_mirrors_the_dispatch_mapping() {
+    use super::tool_render::{renderer_spinner_key, spinner_key};
+
+    // The seven inline renderers manage their OWN display's key.
+    for display in [
+        "bash",
+        "glob",
+        "read",
+        "grep",
+        "webfetch",
+        "websearch",
+        "task",
+    ] {
+        assert_eq!(
+            renderer_spinner_key(display, Some("call-1"), 0).as_deref(),
+            Some(spinner_key(display, Some("call-1"), 0).as_str()),
+            "{display} manages its own display key"
+        );
+    }
+    // Block renderers draw NO spinner — pre-creation must skip them.
+    for display in ["write", "edit", "question", "todo"] {
+        assert!(
+            renderer_spinner_key(display, Some("call-1"), 0).is_none(),
+            "{display} renders no spinner and must not pre-create one"
+        );
+    }
+    // Everything else falls through to render_generic: the key is GENERIC's,
+    // not the tool's own display (skill/recall_search/unknown tools).
+    assert_eq!(
+        renderer_spinner_key("skill", Some("call-1"), 0).as_deref(),
+        Some(spinner_key("generic", Some("call-1"), 0).as_str()),
+        "generic-managed tools key under the generic display"
+    );
+    assert_eq!(
+        renderer_spinner_key("some_unknown_tool", Some("call-1"), 0).as_deref(),
+        Some(spinner_key("generic", Some("call-1"), 0).as_str()),
+    );
+    // Id-less legacy parts keep the positional fallback.
+    assert_eq!(
+        renderer_spinner_key("bash", None, 3).as_deref(),
+        Some("bash_3")
+    );
+}
+
+/// Regression: `TOOL_CALL_SEQ` is process-wide and used to restart at
+/// `call-0` on every app start, while restored transcripts KEEP their
+/// persisted `call-N` ids (`ensure_tool_call_ids` only fills blanks). A
+/// resumed session's first live call therefore collided with a historical
+/// row's spinner/expansion key, resurrecting the re-animation bug. The
+/// counter must be seeded past every id the restored session carries — via
+/// the same paths a restore actually takes (`add_session` /
+/// `ensure_session_cached`).
+#[test]
+fn seeding_the_call_seq_beyond_a_restored_session_prevents_cross_restart_collisions() {
+    use crate::app::events::{TOOL_CALL_SEQ, seed_tool_call_seq_beyond_session};
+
+    // A restored transcript carrying historical ids (as persisted parts do).
+    let restored = Session {
+        id: "restored".into(),
+        title: "Restored".into(),
+        created_at: 0,
+        title_generated: false,
+        provider: None,
+        model: None,
+        reasoning: None,
+        ctx_ids: Default::default(),
+        messages: vec![Message {
+            id: "m1".into(),
+            role: MessageRole::Assistant,
+            parts: vec![
+                Part::Tool(ToolPart {
+                    tool: "bash_run".into(),
+                    input: Default::default(),
+                    output: None,
+                    status: ToolStatus::Completed,
+                    tool_call_id: Some("call-0".into()),
+                    is_start: false,
+                    is_streaming: false,
+                    cached_line_count: None,
+                    lsp_notes: None,
+                }),
+                Part::Tool(ToolPart {
+                    tool: "fs_read".into(),
+                    input: Default::default(),
+                    output: None,
+                    status: ToolStatus::Completed,
+                    tool_call_id: Some("call-9".into()),
+                    is_start: false,
+                    is_streaming: false,
+                    cached_line_count: None,
+                    lsp_notes: None,
+                }),
+            ],
+            created_at: 0,
+            agent: None,
+            model: None,
+        }],
+    };
+
+    seed_tool_call_seq_beyond_session(&restored);
+
+    // The next live allocation must be STRICTLY above every id in the
+    // transcript — never `call-0` .. `call-9`, or it would share a spinner
+    // key with one of those rows. (Tests run in parallel: other tests may
+    // have advanced the counter further, which only strengthens the bound.)
+    let next = TOOL_CALL_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        next > 9,
+        "next live tool_call_id (call-{next}) collides with the restored transcript's call-0..call-9"
+    );
+
+    // Seeding is monotonic: seeding a session with SMALLER ids (an older
+    // transcript restored later) must not rewind the counter.
+    let older = Session {
+        id: "older".into(),
+        title: "Older".into(),
+        created_at: 0,
+        title_generated: false,
+        provider: None,
+        model: None,
+        reasoning: None,
+        ctx_ids: Default::default(),
+        messages: vec![Message {
+            id: "m2".into(),
+            role: MessageRole::Assistant,
+            parts: vec![Part::Tool(ToolPart {
+                tool: "bash_run".into(),
+                input: Default::default(),
+                output: None,
+                status: ToolStatus::Completed,
+                tool_call_id: Some("call-2".into()),
+                is_start: false,
+                is_streaming: false,
+                cached_line_count: None,
+                lsp_notes: None,
+            })],
+            created_at: 0,
+            agent: None,
+            model: None,
+        }],
+    };
+    seed_tool_call_seq_beyond_session(&older);
+    let next2 = TOOL_CALL_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        next2 > 9,
+        "seeding an older transcript rewound the sequence below the previously seen maximum"
+    );
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Memory-growth benchmark (runs explicitly; normal CI ignores it)
 // ────────────────────────────────────────────────────────────────────────────
@@ -5112,6 +5333,58 @@ fn question_copy_text_matches_screen() {
         tool_copy_text(&part).as_deref(),
         question_markdown(&part).as_deref()
     );
+}
+
+/// REGRESSION (user-visible): the severity header is consumed metadata — it
+/// must never reach the user's clipboard. `part.output` for subagent_call is
+/// the persisted SubAgentCallOutput envelope whose first line is the
+/// `<!-- severity: ... -->` header (mandatory since the report-side
+/// enforcement); the copy text must unwrap the envelope and strip the
+/// header, mirroring what the box displays.
+#[test]
+fn subagent_copy_text_consumes_the_envelope_and_the_severity_header() {
+    use super::tool_render::tool_copy_text;
+
+    let envelope = serde_json::json!({
+        "output": "<!-- severity: yellow -->\n\n# CODE REVIEW\n\nOne MAJOR finding.\n",
+        "stop_reason": "end_turn"
+    })
+    .to_string();
+    let part = ToolPart {
+        tool: "subagent_call".into(),
+        input: serde_json::json!({"agent": "opencode", "input": "review"}),
+        output: Some(envelope),
+        status: ToolStatus::Completed,
+        tool_call_id: Some("c1".into()),
+        is_start: true,
+        is_streaming: false,
+        cached_line_count: None,
+        lsp_notes: None,
+    };
+    let copied = tool_copy_text(&part).expect("a completed subagent has copy text");
+    assert!(
+        !copied.contains("severity") && !copied.contains("\"stop_reason\""),
+        "the envelope AND the header must be consumed: {copied:?}"
+    );
+    assert!(
+        copied.contains("CODE REVIEW"),
+        "the report body must survive: {copied:?}"
+    );
+
+    // The internal path stores the report as plain text (no envelope): the
+    // header is still stripped, the body untouched.
+    let plain_part = ToolPart {
+        tool: "subagent_call".into(),
+        input: serde_json::json!({"input": "review"}),
+        output: Some("<!-- severity: green -->\nAll good.".into()),
+        status: ToolStatus::Completed,
+        tool_call_id: Some("c2".into()),
+        is_start: true,
+        is_streaming: false,
+        cached_line_count: None,
+        lsp_notes: None,
+    };
+    assert_eq!(tool_copy_text(&plain_part).as_deref(), Some("All good."));
 }
 
 #[test]

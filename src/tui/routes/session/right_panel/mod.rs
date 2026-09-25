@@ -15,8 +15,9 @@ pub mod types;
 
 use todo::{render_todo_section, todo_section_height};
 use types::{
-    PtySession, RightPanelState, SubagentActivityLine, SubagentBodyCache, activity_lines,
-    sanitize_subagent_text, split_subagent_output, subagent_visible_body, wrap_chars,
+    PtySession, RightPanelState, SubagentActivityLine, SubagentBlockRenderer, SubagentBodyCache,
+    activity_lines, sanitize_subagent_text, split_subagent_output, subagent_visible_body,
+    wrap_chars,
 };
 
 use std::collections::HashMap;
@@ -37,8 +38,9 @@ fn contrast_fg(bg: RGBA) -> RGBA {
 }
 
 /// Linear blend of two colors: `t = 0` returns `base`, `t = 1` returns
-/// `accent`. Used to tint a subagent window's background with its agent
-/// color while staying close enough to the theme to keep text readable.
+/// `accent`. Used to tint a subagent window's background with its review
+/// verdict color while staying close enough to the theme to keep text
+/// readable.
 fn blend(base: RGBA, accent: RGBA, t: f32) -> RGBA {
     let mix = |a: u8, b: u8| -> u8 { (f32::from(a) * (1.0 - t) + f32::from(b) * t).round() as u8 };
     let (ar, ag, ab, _) = base.to_ints();
@@ -612,32 +614,28 @@ fn render_subagent_section(
     if let (Some(first), Some(last)) = (sessions.first(), sessions.last()) {
         for (pad_y, sess_idx) in [(box_y, first.0), (box_y + box_h.saturating_sub(1), last.0)] {
             if pad_y < box_y + box_h {
-                // A review window's severity color wins over the agent
-                // color (same rule as the window tints below); a padding
-                // row must never read as belonging to a different verdict.
-                let tint = if let Some(sev) = state.pty_sessions[sess_idx].severity {
-                    blend(theme.background_element, severity_rgba(sev, theme), 0.18)
-                } else if let Some(agent) = state.pty_sessions[sess_idx].subagent_agent() {
-                    blend(
-                        theme.background_element,
-                        state.agent_area_color(agent),
-                        0.18,
-                    )
-                } else {
-                    continue;
-                };
-                let mut fill = BoxRenderable::new();
-                fill.set_background_color(Some(tint.into()));
-                fill.render_self(buf, Rect::new(x, pad_y, max_w, 1));
+                // Only a review verdict still colors the frame: the severity
+                // tint extends to the padding rows so the box edge never
+                // reads as belonging to a different verdict. Without a
+                // verdict the padding keeps the box's own default color.
+                if let Some(sev) = state.pty_sessions[sess_idx].severity {
+                    let tint = blend(theme.background_element, severity_rgba(sev, theme), 0.18);
+                    let mut fill = BoxRenderable::new();
+                    fill.set_background_color(Some(tint.into()));
+                    fill.render_self(buf, Rect::new(x, pad_y, max_w, 1));
+                }
             }
         }
     }
     // ONE read-only pass builds each window's area tint — method calls
     // borrow all of `state`, so nothing of this shape may run inside the
-    // render loop. A review window with a consumed severity header tints
-    // green/yellow/red (Phase 3b.1) instead of its agent color. The accent
-    // (the unblended color) doubles as the running tool-call spinner's
-    // highlight color, so a red verdict window also sweeps red.
+    // render loop. Per-agent colors are GONE: every window keeps the
+    // section's default box color (the same background bash and the TODO
+    // panel use), because color is now reserved for MEANING — only a
+    // code-review verdict tints its window green/yellow/red (Phase 3b.1).
+    // The accent (the unblended color) doubles as the running tool-call
+    // spinner's highlight color, so a red verdict window also sweeps red;
+    // without a verdict the sweep runs in the plain text color.
     let (tints, accents): (Vec<RGBA>, Vec<RGBA>) = sessions
         .iter()
         .map(|(_, s)| match s.severity {
@@ -645,11 +643,7 @@ fn render_subagent_section(
                 let accent = severity_rgba(sev, theme);
                 (blend(theme.background_element, accent, 0.18), accent)
             }
-            None => {
-                let agent = s.subagent_agent().unwrap_or("");
-                let accent = state.agent_area_color(agent);
-                (blend(theme.background_element, accent, 0.18), accent)
-            }
+            None => (theme.background_element, theme.text),
         })
         .unzip();
 
@@ -681,6 +675,7 @@ fn render_subagent_section(
     // Spinner keys that are InProgress THIS frame — the map is pruned to
     // this set after the loop so finished calls stop animating.
     let mut live_spinner_keys: Vec<String> = Vec::new();
+    let mut live_block_keys: Vec<String> = Vec::new();
 
     for (window, (sess_idx, session)) in sessions.iter().enumerate() {
         let sess_rows = i32::from(rows_all.get(*sess_idx).copied().unwrap_or(1));
@@ -766,7 +761,16 @@ fn render_subagent_section(
         // windows have none (activity is cleared on completion), so this
         // contributes nothing for history entries.
         let activity = activity_lines(&session.subagent_activity, wrap_w);
-        let activity_h = activity.len() as i32;
+        // The single height source is the shared `visual_rows` helper:
+        // multi-row wrapped tool lines and markdown Message/Thought blocks
+        // cost what they will actually draw, so the body starts below the
+        // LAST drawn row and the renderer can never disagree.
+        let activity_h = i32::from(
+            activity
+                .iter()
+                .map(|l| l.visual_rows(wrap_w))
+                .fold(0u16, u16::saturating_add),
+        );
         let body_start = content_row + head_h + input_h + activity_h;
         draw_activity_lines(
             buf,
@@ -784,7 +788,9 @@ fn render_subagent_section(
             session.id.as_str(),
             subagent_spinners,
             &mut live_spinner_keys,
+            &mut live_block_keys,
             rebuild_regions,
+            &mut state.subagent_activity_cache,
             &mut state.subagent_text_regions,
         );
         // Markdown body: blit the visible slice of the previously rendered
@@ -830,7 +836,8 @@ fn render_subagent_section(
                     let mut md = MarkdownRenderable::new(Some(clean));
                     md.set_fg(Some(ColorInput::RGBA(theme.text)));
                     // The body is rendered ON the window's area tint so the
-                    // blitted cells keep the agent's color underneath.
+                    // blitted cells keep the window's color underneath
+                    // (default box background, or the verdict's severity).
                     md.set_bg(Some(ColorInput::RGBA(tint)));
                     crate::util::markdown::apply_theme(&mut md, theme);
                     md.render_self(scratch, area);
@@ -906,10 +913,18 @@ fn render_subagent_section(
 
     // Prune spinner entries that left the InProgress state this frame (the
     // call finished or its window completed): finished calls must not keep
-    // animating state alive across turns.
+    // animating state alive across turns. The block renderers follow the
+    // same pattern keyed by timeline index: entries whose index vanished
+    // (timeline bounded at 200; sessions finish) are dropped so their
+    // markdown state and scratch buffers do not accumulate.
     let live: std::collections::HashSet<&str> =
         live_spinner_keys.iter().map(String::as_str).collect();
     subagent_spinners.retain(|key, _| live.contains(key.as_str()));
+    let live_blocks: std::collections::HashSet<&str> =
+        live_block_keys.iter().map(String::as_str).collect();
+    state
+        .subagent_activity_cache
+        .retain(|key, _| live_blocks.contains(key.as_str()));
 
     highlight_section_selection(
         buf,
@@ -930,15 +945,24 @@ fn render_subagent_section(
 ///
 /// Rendering per variant (design decisions from the user):
 /// - Tool: NO icons — the lowercase tool name (`read`, `edit`, `search`,
-///   …) followed by the extracted detail (path/query/URL). InProgress calls
-///   render through the luminous-sweep [`HighlightSpinner`] (highlight =
-///   window accent, so a red-verdict window sweeps red); the other
-///   statuses draw a plain ✓/✗/· marker colored success/error/text.
-/// - Diff: one dimmed `path +N −M` line under the call.
+///   …) followed by the extracted detail (path/query/URL), wrapped to the
+///   box's text width (the wrap happens in [`activity_lines`]; every row
+///   draws indented at `x + 2`, so the wrap width is `wrap_w − 2`).
+///   InProgress calls render their first row through the luminous-sweep
+///   [`HighlightSpinner`] (highlight = window accent: a verdict window
+///   sweeps in its severity color, a verdict-less one in the plain text
+///   color), clamped to the text width so the animation can
+///   never bleed across the box edge; the other statuses draw a plain
+///   ✓/✗/· marker colored success/error/text.
+/// - Diff: dimmed `path +N −M` rows under the call.
 /// - Plan: compact checkbox glyphs (☐ pending/in-progress, ☑ completed —
 ///   the outer TODO panel's row style is deliberately NOT reused: it takes
 ///   too much width inside the box).
-/// - Thought: dimmed (text_muted) wrapped rows of the latest thought, the
+/// - Message/Thought: whole markdown blocks rendered through
+///   [`MarkdownRenderable`] with their cells cached per
+///   `{session_id}:{index}` (same philosophy as the finished-window body
+///   cache, per-block granularity). Message draws in the normal text
+///   color (the agent speaking); Thought draws dimmed (text_muted) — the
 ///   same "opaque thinking" treatment as the main agent's reasoning but
 ///   always visible (no hidden state).
 ///
@@ -946,6 +970,9 @@ fn render_subagent_section(
 /// `rebuild_regions`. Spinner map entries are created/updated keyed by
 /// `{session_id}:{call_id}`; `live_keys` collects the InProgress keys so
 /// the caller can prune finished entries after the window loop.
+/// `live_block_keys` does the same for the block renderer map: every
+/// Message/Thought timeline index seen this frame is collected so entries
+/// whose index vanished (timeline bounded, sessions finished) are pruned.
 #[allow(clippy::too_many_arguments)]
 fn draw_activity_lines(
     buf: &mut Buffer,
@@ -956,22 +983,25 @@ fn draw_activity_lines(
     scroll_y: i32,
     content_bottom: i32,
     wrap_w: u16,
-    _tint: RGBA,
+    tint: RGBA,
     accent: RGBA,
     theme: &Theme,
     text_style: Style,
     session_id: &str,
     spinners: &mut HashMap<String, HighlightSpinner>,
     live_keys: &mut Vec<String>,
+    live_block_keys: &mut Vec<String>,
     rebuild_regions: bool,
+    block_cache: &mut HashMap<String, SubagentBlockRenderer>,
     regions: &mut Vec<TextRegion>,
 ) {
     let marker_style_ok = Style::default().fg(rgba_color(theme.success));
     let marker_style_err = Style::default().fg(rgba_color(theme.error));
     let dimmed_style = Style::default().fg(rgba_color(theme.text_muted));
+    let theme_key = subagent_theme_key(theme);
 
-    for (offset, line) in lines.iter().enumerate() {
-        let row = start_row + offset as i32;
+    let mut row = start_row;
+    for line in lines {
         // Spinner liveness is tracked BEFORE the clip check: an off-screen
         // running call keeps its animation entry, so scrolling it back in
         // does not restart the sweep from phase 0.
@@ -983,152 +1013,280 @@ fn draw_activity_lines(
         {
             live_keys.push(format!("{session_id}:{id}"));
         }
-        if row < scroll_y || row >= content_bottom {
-            continue;
-        }
-        let line_y = inner_y + (row - scroll_y) as u16;
         match line {
-            SubagentActivityLine::Tool { id, text, status } => {
-                let key = format!("{session_id}:{id}");
-                match status {
-                    ToolCallStatus::InProgress => {
-                        // Create the spinner on first sight of this call;
-                        // afterwards only keep its text in sync (titles do
-                        // not change while running, but stay defensive).
-                        let spinner = spinners.entry(key).or_insert_with(|| {
-                            HighlightSpinner::new(text, accent, theme.text_muted)
-                        });
-                        if spinner.text() != text {
-                            spinner.set_text(text);
-                        }
-                        spinner.set_colors(accent, theme.text_muted);
-                        spinner.render(buf, x, line_y);
-                        let shown = text.chars().count().min(wrap_w as usize);
-                        if rebuild_regions {
-                            regions.push(TextRegion::one_row(
-                                row,
-                                x,
-                                x + shown as u16,
-                                text.clone(),
-                            ));
-                        }
+            SubagentActivityLine::Tool { id, rows, status } => {
+                for (ri, seg) in rows.iter().enumerate() {
+                    let r = row + ri as i32;
+                    if r < scroll_y || r >= content_bottom {
+                        continue;
                     }
-                    ToolCallStatus::Completed => {
-                        draw_text(buf, "✓", x, line_y, wrap_w, marker_style_ok);
-                        draw_text(
-                            buf,
-                            text,
-                            x + 2,
-                            line_y,
-                            wrap_w.saturating_sub(2),
-                            text_style,
-                        );
-                        if rebuild_regions {
-                            regions.push(TextRegion::one_row(
-                                row,
-                                x,
-                                x + wrap_w,
-                                format!("✓ {text}"),
-                            ));
+                    let line_y = inner_y + (r - scroll_y) as u16;
+                    match status {
+                        ToolCallStatus::InProgress => {
+                            // ONE spinner per running call, keyed by
+                            // session+call id, holding the FULL concatenated
+                            // label. The beam is normalised over that whole
+                            // string, so the sweep flows ACROSS the wrapped
+                            // rows — a broken path like `src/tui/routes/…`
+                            // is swept to its end instead of dying at the
+                            // first wrap. render_row paints this row's slice
+                            // at the row's cumulative character offset; the
+                            // spinner's base colour IS the dimmed style, so
+                            // rows far from the beam still read as muted
+                            // continuation text.
+                            let key = format!("{session_id}:{id}");
+                            // The spinner filters control characters out of
+                            // its text (`HighlightSpinner::new`), so the
+                            // concatenated label and the per-row offsets must
+                            // be built from the SAME filtered rows — raw
+                            // offsets would desync the row slices (and, with
+                            // a mismatched text, `set_text` would reset the
+                            // beam every frame).
+                            let clean: Vec<String> = rows
+                                .iter()
+                                .map(|s| s.chars().filter(|c| !c.is_control()).collect::<String>())
+                                .collect();
+                            let joined: String = clean.concat();
+                            let start_char: usize =
+                                clean.iter().take(ri).map(|s| s.chars().count()).sum();
+                            let spinner = spinners.entry(key).or_insert_with(|| {
+                                HighlightSpinner::new(&joined, accent, theme.text_muted)
+                            });
+                            if spinner.text() != joined {
+                                spinner.set_text(&joined);
+                            }
+                            spinner.set_colors(accent, theme.text_muted);
+                            // The row's own width is the paint limit: a shared
+                            // `wrap_w` would let a SHORT row (wrap_chars
+                            // produces variable-length rows) also paint the
+                            // first chars of the NEXT row's slice — the
+                            // duplicated-text corruption found in review.
+                            let row_chars = seg.chars().count() as u16;
+                            spinner.render_row(
+                                buf,
+                                x + 2,
+                                line_y,
+                                row_chars.min(wrap_w.saturating_sub(2)),
+                                start_char,
+                            );
+                            if rebuild_regions {
+                                // The spinner paints the text at the shared
+                                // x + 2 indent — the region must start there
+                                // or extraction is shifted by two columns.
+                                regions.push(TextRegion::one_row(
+                                    r,
+                                    x + 2,
+                                    x + wrap_w,
+                                    seg.clone(),
+                                ));
+                            }
                         }
-                    }
-                    ToolCallStatus::Failed => {
-                        draw_text(buf, "✗", x, line_y, wrap_w, marker_style_err);
-                        draw_text(
-                            buf,
-                            text,
-                            x + 2,
-                            line_y,
-                            wrap_w.saturating_sub(2),
-                            text_style,
-                        );
-                        if rebuild_regions {
-                            regions.push(TextRegion::one_row(
-                                row,
-                                x,
-                                x + wrap_w,
-                                format!("✗ {text}"),
-                            ));
+                        ToolCallStatus::Completed => {
+                            if ri == 0 {
+                                draw_text(buf, "✓", x, line_y, wrap_w, marker_style_ok);
+                            }
+                            draw_text(
+                                buf,
+                                seg,
+                                x + 2,
+                                line_y,
+                                wrap_w.saturating_sub(2),
+                                text_style,
+                            );
+                            if rebuild_regions {
+                                let text = if ri == 0 {
+                                    format!("✓ {seg}")
+                                } else {
+                                    seg.clone()
+                                };
+                                regions.push(TextRegion::one_row(r, x, x + wrap_w, text));
+                            }
                         }
-                    }
-                    // Pending / Unknown: dimmed dot, not yet running.
-                    _ => {
-                        draw_text(buf, "·", x, line_y, wrap_w, dimmed_style);
-                        draw_text(
-                            buf,
-                            text,
-                            x + 2,
-                            line_y,
-                            wrap_w.saturating_sub(2),
-                            dimmed_style,
-                        );
-                        if rebuild_regions {
-                            regions.push(TextRegion::one_row(
-                                row,
-                                x,
-                                x + wrap_w,
-                                format!("· {text}"),
-                            ));
+                        ToolCallStatus::Failed => {
+                            if ri == 0 {
+                                draw_text(buf, "✗", x, line_y, wrap_w, marker_style_err);
+                            }
+                            draw_text(
+                                buf,
+                                seg,
+                                x + 2,
+                                line_y,
+                                wrap_w.saturating_sub(2),
+                                text_style,
+                            );
+                            if rebuild_regions {
+                                let text = if ri == 0 {
+                                    format!("✗ {seg}")
+                                } else {
+                                    seg.clone()
+                                };
+                                regions.push(TextRegion::one_row(r, x, x + wrap_w, text));
+                            }
+                        }
+                        // Pending / Unknown: dimmed dot, not yet running.
+                        _ => {
+                            if ri == 0 {
+                                draw_text(buf, "·", x, line_y, wrap_w, dimmed_style);
+                            }
+                            draw_text(
+                                buf,
+                                seg,
+                                x + 2,
+                                line_y,
+                                wrap_w.saturating_sub(2),
+                                dimmed_style,
+                            );
+                            if rebuild_regions {
+                                let text = if ri == 0 {
+                                    format!("· {seg}")
+                                } else {
+                                    seg.clone()
+                                };
+                                regions.push(TextRegion::one_row(r, x, x + wrap_w, text));
+                            }
                         }
                     }
                 }
             }
-            SubagentActivityLine::Diff(summary) => {
-                // Indent under its tool line; counts stay dimmed so the
+            SubagentActivityLine::Diff(rows) => {
+                // Indented under its tool line; counts stay dimmed so the
                 // path dominates.
-                draw_text(
-                    buf,
-                    summary,
-                    x + 2,
-                    line_y,
-                    wrap_w.saturating_sub(2),
-                    dimmed_style,
-                );
-                if rebuild_regions {
-                    regions.push(TextRegion::one_row(row, x, x + wrap_w, summary.clone()));
+                for (ri, seg) in rows.iter().enumerate() {
+                    let r = row + ri as i32;
+                    if r < scroll_y || r >= content_bottom {
+                        continue;
+                    }
+                    let line_y = inner_y + (r - scroll_y) as u16;
+                    draw_text(
+                        buf,
+                        seg,
+                        x + 2,
+                        line_y,
+                        wrap_w.saturating_sub(2),
+                        dimmed_style,
+                    );
+                    if rebuild_regions {
+                        regions.push(TextRegion::one_row(r, x + 2, x + wrap_w, seg.clone()));
+                    }
                 }
             }
-            SubagentActivityLine::Plan { status, text } => {
+            SubagentActivityLine::Plan { status, rows } => {
                 let (glyph, style) = match status {
                     PlanEntryStatus::Completed => ("☑", marker_style_ok),
                     PlanEntryStatus::InProgress => ("☐", text_style),
                     PlanEntryStatus::Pending => ("☐", dimmed_style),
                     _ => ("☐", dimmed_style),
                 };
-                draw_text(buf, glyph, x, line_y, wrap_w, style);
-                draw_text(
-                    buf,
-                    text,
-                    x + 2,
-                    line_y,
-                    wrap_w.saturating_sub(2),
-                    text_style,
-                );
-                if rebuild_regions {
-                    regions.push(TextRegion::one_row(
-                        row,
-                        x,
-                        x + wrap_w,
-                        format!("{glyph} {text}"),
-                    ));
+                for (ri, seg) in rows.iter().enumerate() {
+                    let r = row + ri as i32;
+                    if r < scroll_y || r >= content_bottom {
+                        continue;
+                    }
+                    let line_y = inner_y + (r - scroll_y) as u16;
+                    if ri == 0 {
+                        draw_text(buf, glyph, x, line_y, wrap_w, style);
+                    }
+                    draw_text(buf, seg, x + 2, line_y, wrap_w.saturating_sub(2), style);
+                    if rebuild_regions {
+                        let text = if ri == 0 {
+                            format!("{glyph} {seg}")
+                        } else {
+                            seg.clone()
+                        };
+                        regions.push(TextRegion::one_row(r, x, x + wrap_w, text));
+                    }
                 }
             }
-            SubagentActivityLine::Message(text) => {
-                // Normal text style — the agent speaking, not thinking.
-                draw_text(buf, text, x, line_y, wrap_w, text_style);
-                if rebuild_regions {
-                    regions.push(TextRegion::one_row(row, x, x + wrap_w, text.clone()));
+            SubagentActivityLine::Message { index, text }
+            | SubagentActivityLine::Thought { index, text } => {
+                // Whole markdown blocks: a PERSISTENT per-entry renderer
+                // (chat-style, like the streaming body's `tail_md`) feeds a
+                // reusable scratch that is blitted row by row. The renderer
+                // instance survives across frames, so `set_content`
+                // re-parses only the streamed tail and closed sub-blocks
+                // come back from its internal cache — a fresh cold-cache
+                // renderer per chunk was the previous design (and the
+                // right-panel bottleneck pattern at body scale).
+                let dimmed = matches!(line, SubagentActivityLine::Thought { .. });
+                let fg = if dimmed { theme.text_muted } else { theme.text };
+                let h = usize::from(line.visual_rows(wrap_w));
+                let key = format!("{session_id}:{index}");
+                live_block_keys.push(key.clone());
+                let stale = block_cache.get(&key).is_none_or(|e| {
+                    e.wrap_w != wrap_w
+                        || e.theme_key != theme_key
+                        || e.bg != tint
+                        || e.dimmed != dimmed
+                });
+                if stale {
+                    let mut md = MarkdownRenderable::new(Some(text.clone()));
+                    md.set_fg(Some(ColorInput::RGBA(fg)));
+                    // Rendered ON the window's area tint so the blitted
+                    // cells keep the window's color underneath (default box
+                    // background, or the verdict's severity).
+                    md.set_bg(Some(ColorInput::RGBA(tint)));
+                    crate::util::markdown::apply_theme(&mut md, theme);
+                    let area = Rect::new(0, 0, wrap_w, h as u16);
+                    block_cache.insert(
+                        key.clone(),
+                        SubagentBlockRenderer {
+                            wrap_w,
+                            theme_key,
+                            bg: tint,
+                            dimmed,
+                            text: text.clone(),
+                            md,
+                            scratch: Buffer::empty(area),
+                        },
+                    );
                 }
-            }
-            SubagentActivityLine::Thought(text) => {
-                // Always visible, dimmed — the sub-agent's "opaque thinking"
-                // treatment (no hidden toggle here).
-                draw_text(buf, text, x, line_y, wrap_w, dimmed_style);
-                if rebuild_regions {
-                    regions.push(TextRegion::one_row(row, x, x + wrap_w, text.clone()));
+                let entry = block_cache.get_mut(&key).unwrap_or_else(|| {
+                    panic!("live block entry {key} must exist (just inserted or valid)")
+                });
+                if entry.text != *text {
+                    // Incremental chat-style update: only the changed tail
+                    // re-parses; closed blocks reuse their cached rows.
+                    entry.md.set_content(text.clone());
+                    entry.text = text.clone();
+                }
+                let area = Rect::new(0, 0, wrap_w, h as u16);
+                if entry.scratch.area() != &area {
+                    entry.scratch.resize(area);
+                }
+                // `render_self` fills the whole area with the background
+                // first, so no separate clearing is needed.
+                entry.md.render_self(&mut entry.scratch, area);
+                for ri in 0..h {
+                    let r = row + ri as i32;
+                    if r < scroll_y || r >= content_bottom {
+                        continue;
+                    }
+                    let dst_y = inner_y + (r - scroll_y) as u16;
+                    for dx in 0..wrap_w {
+                        let cell = entry.scratch.cell((dx, ri as u16)).cloned();
+                        if let Some(dst) = buf.cell_mut((x + dx, dst_y)) {
+                            *dst = cell.unwrap_or_default();
+                        }
+                    }
+                    // Selection text regions from the same painted cells,
+                    // so extraction matches the display.
+                    if rebuild_regions {
+                        let row_cells: Vec<ratatui::buffer::Cell> = (0..wrap_w)
+                            .map(|dx| {
+                                entry
+                                    .scratch
+                                    .cell((dx, ri as u16))
+                                    .cloned()
+                                    .unwrap_or_default()
+                            })
+                            .collect();
+                        let trimmed = text_from_cell_row(&row_cells, wrap_w as usize);
+                        regions.push(TextRegion::one_row(r, x, x + wrap_w, trimmed));
+                    }
                 }
             }
         }
+        row += i32::from(line.visual_rows(wrap_w));
     }
 }
 
@@ -1431,12 +1589,10 @@ mod tests {
                 gap, 1,
                 "exactly one margin row between windows: bands {bands:?}"
             );
-            // The margin shares the window's area tint (blank text only).
-            let want = rgba_color(blend(
-                theme.background_element,
-                state.agent_area_color(state.pty_sessions[pair[0].0].subagent_agent().unwrap()),
-                0.18,
-            ));
+            // The margin shares the nearest window's tint — with per-agent
+            // colors gone, a margin between two verdict-less windows is
+            // plain box background (and still blank).
+            let want = rgba_color(theme.background_element);
             let margin_cell = buf.cell((1u16, pair[0].2 as u16)).map(|c| c.bg);
             assert_eq!(margin_cell, Some(want), "margin must carry the area tint");
             let margin = row_text(&buf, pair[0].2 as u16);
@@ -1465,11 +1621,12 @@ mod tests {
         );
     }
 
-    /// Each rendered subagent window carries its OWN area tint: external
-    /// CLIs get distinct blended backgrounds and the INTERNAL subagent
-    /// (empty agent name) shares the host color.
+    /// Per-agent area colors are GONE: every subagent window (external CLI
+    /// or internal) renders on the section's DEFAULT box color — the same
+    /// background bash and the TODO panel use. Color is reserved for
+    /// meaning: only a review verdict tints a window.
     #[test]
-    fn subagent_windows_render_per_agent_area_tints() {
+    fn subagent_windows_render_default_box_background() {
         let theme = test_theme();
         let mut state = RightPanelState::new();
         state.subagent_rebuild_interval = std::time::Duration::ZERO;
@@ -1481,25 +1638,947 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, 50, 30));
         render_subagent_section(&mut buf, 0, 0, 50, 30, &mut state, &theme, true);
 
-        // One content row pair per session (header + 1 body row), stacked
+        // One content row per session (header + 1 body row), stacked
         // in chronological order from inner_y = TOP_GAP + TOP_PAD = 2,
         // separated by the 1-row margin between consecutive windows.
-        let expected: Vec<ratatui::style::Color> = ["kilo", "opencode", ""]
+        let plain = rgba_color(theme.background_element);
+        for row in [3usize, 6, 9] {
+            let got = buf.cell((1u16, row as u16)).map(|c| c.bg);
+            assert_eq!(
+                got,
+                Some(plain),
+                "row {row} bg must be the default box background"
+            );
+        }
+    }
+
+    /// Color carries MEANING: a review verdict (the consumed
+    /// `<!-- severity: ... -->` header) tints its window green/yellow/red,
+    /// while a verdict-less window keeps the default box color.
+    #[test]
+    fn subagent_windows_tint_only_by_review_verdict() {
+        let theme = test_theme();
+        let mut state = RightPanelState::new();
+        state.subagent_rebuild_interval = std::time::Duration::ZERO;
+        // First window: red verdict (short body → header + 1 body row, so
+        // both windows sit at the same known rows). Second: no header.
+        state.start_pty("subagent: kilo".to_string(), None);
+        state.complete_last_pty("<!-- severity: red -->\nBug found.\n".to_string());
+        state.start_pty("subagent: opencode".to_string(), None);
+        state.complete_last_pty("report line\n".to_string());
+
+        let mut buf = Buffer::empty(Rect::new(0, 0, 50, 30));
+        render_subagent_section(&mut buf, 0, 0, 50, 30, &mut state, &theme, true);
+
+        let red_tint = rgba_color(blend(
+            theme.background_element,
+            severity_rgba(cosh_tools::subagent::severity::Severity::Red, &theme),
+            0.18,
+        ));
+        let plain = rgba_color(theme.background_element);
+        let got_red = buf.cell((1u16, 3u16)).map(|c| c.bg);
+        assert_eq!(got_red, Some(red_tint), "verdict window must tint red");
+        let got_plain = buf.cell((1u16, 6u16)).map(|c| c.bg);
+        assert_eq!(
+            got_plain,
+            Some(plain),
+            "verdict-less window keeps the default box background"
+        );
+    }
+
+    /// PROPERTY: no streaming-typical markdown shape paints MORE rows than
+    /// `estimate_height` reserves when rendered through the REAL activity
+    /// path (themed fg/bg + apply_theme). If one did, the block's tail
+    /// would be clipped at the reserved height and the NEXT activity item
+    /// would paint where the tail should be (the reported overlap).
+    #[test]
+    fn activity_block_estimate_matches_real_paint_height() {
+        use cosh_tui::core::renderable::Renderable;
+        use cosh_tui::core::renderables::markdown::estimate_height;
+
+        let theme = test_theme();
+        let shapes: Vec<(&str, String)> = vec![
+            ("long single paragraph", "word ".repeat(120)),
+            ("thought fragments no spaces", "x".repeat(400)),
+            ("unclosed table", "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 ".to_string()),
+            ("closed table", "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n".to_string()),
+            (
+                "table long cells",
+                "| aaaaaaaaaaaaaaaa | bbbbbbbbbbbbbbbb |\n|---|---|\n| cccccccccccccccc | dddddddddddddddd |\n".to_string(),
+            ),
+            ("crlf lines", "line one\r\nline two\r\nline three\r\n".to_string()),
+            (
+                "multi paragraph + heading",
+                "# Head\n\npara one\n\npara two\n\n- li one\n- li two\n".to_string(),
+            ),
+            ("fence unclosed", "```rust\nfn main() {}\n".to_string()),
+            (
+                "blockquote stream",
+                "> quoted chunk one\n> quoted chunk two\n> three".to_string(),
+            ),
+            (
+                "list unclosed item",
+                "- item one\n- item two with a very long tail that must wrap around the column width for sure".to_string(),
+            ),
+            ("nested list", "- a\n  - b\n    - c\n- d\n".to_string()),
+            ("cjk paragraph", "汉字测试 ".repeat(40)),
+            ("cjk long word", "漢".repeat(100)),
+            ("emoji line", "🚀🔥 ".repeat(30)),
+            (
+                "accented paragraph",
+                "ação coração pinga é útil ".repeat(20),
+            ),
+            (
+                "long inline code",
+                format!("`{}`", "x".repeat(100)),
+            ),
+            ("long heading", format!("# {}", "word ".repeat(40))),
+            ("setext heading", format!("Setext\n{}", "=".repeat(60))),
+            (
+                "autolink long",
+                "https://example.com/very/long/path/segment/that/wraps/around".to_string(),
+            ),
+            ("hr", "---".to_string()),
+            ("nested quote", "> > deep\n> > quote".to_string()),
+            (
+                "mixed doc",
+                "# Título\n\nparágrafo com acentuação\n\n- item um\n- item dois\n\n```rust\nfn x() {}\n```\n".to_string(),
+            ),
+        ];
+        for w in [30u16, 40, 48, 60, 76, 96, 120] {
+            for (name, body) in &shapes {
+                let est = usize::from(estimate_height(body, w));
+                let mut buf = Buffer::empty(Rect::new(0, 0, w, est as u16 + 12));
+                // EXACT real-path setup: themed fg, tint bg, apply_theme.
+                let mut md = MarkdownRenderable::new(Some(body.clone()));
+                md.set_fg(Some(ColorInput::RGBA(theme.text)));
+                md.set_bg(Some(ColorInput::RGBA(theme.background_element)));
+                crate::util::markdown::apply_theme(&mut md, &theme);
+                md.render_self(&mut buf, Rect::new(0, 0, w, (est + 12) as u16));
+                let last_paint = (0..(est + 12))
+                    .filter(|&y| {
+                        (0..w).any(|x| buf.cell((x, y as u16)).is_some_and(|c| c.symbol() != " "))
+                    })
+                    .map(|y| y + 1)
+                    .max()
+                    .unwrap_or(0);
+                assert!(
+                    last_paint <= est,
+                    "OVERLAP: {name} w={w} paints {last_paint} rows but estimate reserves {est}"
+                );
+            }
+        }
+    }
+
+    /// REGRESSION: a REAL interleaved timeline (thought chunks → tool
+    /// call → message chunks) rendered frame by frame must paint its items
+    /// in chronological order WITHOUT overlap: the tool-call row must sit
+    /// strictly below the last painted thought row, and the message rows
+    /// strictly below the tool row. Uses the REAL 100 ms throttle and the
+    /// app's auto-follow so the streaming conditions match production.
+    #[test]
+    fn interleaved_timeline_paints_in_order_without_overlap() {
+        use cosh_tools::subagent::events::{SubagentEvent, ToolCallStatus, ToolKind};
+
+        let theme = test_theme();
+        let mut state = RightPanelState::new();
+        // REAL throttle: frames arrive faster than 100 ms (no sleeps), so
+        // the static rows cache serves stale heights while the activity
+        // grows — the exact streaming condition of a fast CLI.
+        state.subagent_rebuild_interval = std::time::Duration::from_millis(100);
+        state.start_pty("subagent: opencode".to_string(), None);
+
+        // A realistic opencode-like turn: per step, a thought burst, a tool
+        // call and a message sentence; then a final conclusion message.
+        let mut events: Vec<SubagentEvent> = Vec::new();
+        for i in 0..6 {
+            events.push(SubagentEvent::Thought {
+                text: format!("pensando no passo {i} com bastante detalhe; "),
+            });
+            events.push(SubagentEvent::ToolCall {
+                id: format!("c{i}"),
+                title: "Reading files".to_string(),
+                kind: ToolKind::Read,
+                status: ToolCallStatus::InProgress,
+                raw_input: Some(serde_json::json!({ "path": format!("src/f{i}.rs") })),
+            });
+            events.push(SubagentEvent::Message {
+                text: format!("passo {i} concluído. "),
+            });
+        }
+        events.push(SubagentEvent::Message {
+            text: "Conclusão: tudo verificado e certo.".to_string(),
+        });
+
+        let wrap_w = 48u16;
+        for (frame, event) in events.iter().enumerate() {
+            state.update_subagent_activity(event);
+            // The app auto-follows on every visible change.
+            if !state.is_scrolled_up() {
+                state.scroll_to_bottom();
+            }
+            let rows = state.subagent_section_rows_for_display(wrap_w);
+            let natural = (BOX_OVERHEAD + i32::from(rows.iter().sum::<u16>())).max(4) as u16;
+            let mut buf = Buffer::empty(Rect::new(0, 0, 50, natural));
+            render_subagent_section(&mut buf, 0, 0, 50, natural, &mut state, &theme, false);
+            let rows_painted: Vec<String> = (0..natural).map(|y| row_text(&buf, y)).collect();
+
+            // NO OVERLAP: a row carrying a tool detail never carries
+            // thought/message words, and vice versa.
+            for (y, row) in rows_painted.iter().enumerate() {
+                let has_tool = row.contains("src/f");
+                let has_thought = row.contains("pensando");
+                let has_msg = row.contains("passo") || row.contains("Conclusão");
+                assert!(
+                    !(has_tool && (has_thought || has_msg)),
+                    "frame {frame}: OVERLAP on screen row {y}: {row:?}"
+                );
+            }
+
+            // CHRONOLOGY: tool c{i} paints below its preceding thought.
+            if frame >= 2 {
+                let tool_row = rows_painted
+                    .iter()
+                    .position(|r| r.contains("src/f0"))
+                    .unwrap();
+                let thought_row = rows_painted
+                    .iter()
+                    .position(|r| r.contains("pensando no passo 0"))
+                    .unwrap();
+                assert!(
+                    thought_row < tool_row,
+                    "frame {frame}: tool c0 (row {tool_row}) must paint BELOW thought 0 (row {thought_row})"
+                );
+            }
+        }
+
+        // The final frame must show the newest content (auto-follow).
+        let rows = state.subagent_section_rows_for_display(wrap_w);
+        let natural = (BOX_OVERHEAD + i32::from(rows.iter().sum::<u16>())).max(4) as u16;
+        let mut buf = Buffer::empty(Rect::new(0, 0, 50, natural));
+        render_subagent_section(&mut buf, 0, 0, 50, natural, &mut state, &theme, false);
+        let final_rows: Vec<String> = (0..natural).map(|y| row_text(&buf, y)).collect();
+        assert!(
+            final_rows.iter().any(|r| r.contains("Conclusão")),
+            "final message must be visible with auto-follow; rows: {final_rows:?}"
+        );
+    }
+
+    /// REGRESSION: same interleaved stream as above but rendered in a
+    /// CONSTRAINED viewport (inner_h smaller than the content — scroll
+    /// active, clip bands live) with hostile event shapes mixed in: tool
+    /// updates carrying diffs, plan replacements, multi-line titles (tool
+    /// rows are NOT sanitized), long markdown with fences, and a message
+    /// long enough to trip `bounded_tail`.
+    #[test]
+    fn constrained_viewport_hostile_events_paint_without_overlap() {
+        use cosh_tools::subagent::events::{SubagentEvent, ToolCallStatus, ToolKind};
+
+        let theme = test_theme();
+        let mut state = RightPanelState::new();
+        state.subagent_rebuild_interval = std::time::Duration::from_millis(100);
+        state.start_pty("subagent: opencode".to_string(), None);
+
+        let mut events: Vec<SubagentEvent> = Vec::new();
+        for i in 0..6 {
+            events.push(SubagentEvent::Thought {
+                text: format!("pensando no passo {i}: analisando módulos e dependências\n\n- ponto um\n- ponto dois\n"),
+            });
+            events.push(SubagentEvent::ToolCall {
+                id: format!("c{i}"),
+                title: format!("step {i}\nsecond line of title"),
+                kind: ToolKind::Read,
+                status: ToolCallStatus::InProgress,
+                raw_input: Some(serde_json::json!({ "path": format!("src/f{i}.rs") })),
+            });
+            events.push(SubagentEvent::ToolCallUpdate {
+                id: format!("c{i}"),
+                status: Some(ToolCallStatus::Completed),
+                title: None,
+                raw_output: None,
+                content: cosh_tools::subagent::events::ToolOutputBlock::default(),
+            });
+            events.push(SubagentEvent::Plan {
+                entries: (0..=i)
+                    .map(|j| cosh_tools::subagent::events::PlanEntry {
+                        content: format!("tarefa {j} com descrição"),
+                        status: if j < i {
+                            cosh_tools::subagent::events::PlanEntryStatus::Completed
+                        } else {
+                            cosh_tools::subagent::events::PlanEntryStatus::InProgress
+                        },
+                        priority: cosh_tools::subagent::events::PlanEntryPriority::Medium,
+                    })
+                    .collect(),
+            });
+            events.push(SubagentEvent::Message {
+                text: format!("passo {i} concluído.\n\n```rust\nfn exemplo_{i}() {{}}\n```\n"),
+            });
+        }
+        // Long message to trip bounded_tail (8000 bytes).
+        events.push(SubagentEvent::Message {
+            text: "x".repeat(9000),
+        });
+        events.push(SubagentEvent::Message {
+            text: "Conclusão final após tudo.".to_string(),
+        });
+
+        let wrap_w = 48u16;
+        for (frame, event) in events.iter().enumerate() {
+            state.update_subagent_activity(event);
+            if !state.is_scrolled_up() {
+                state.scroll_to_bottom();
+            }
+            let rows = state.subagent_section_rows_for_display(wrap_w);
+            let natural = (BOX_OVERHEAD + i32::from(rows.iter().sum::<u16>())).max(4) as u16;
+            // CONSTRAINED viewport: half the natural height (scroll active).
+            let inner_h = (natural / 2).max(4);
+            let mut buf = Buffer::empty(Rect::new(0, 0, 50, inner_h));
+            render_subagent_section(&mut buf, 0, 0, 50, inner_h, &mut state, &theme, false);
+            let painted: Vec<String> = (0..inner_h).map(|y| row_text(&buf, y)).collect();
+
+            for (y, row) in painted.iter().enumerate() {
+                let has_tool = row.contains("src/f");
+                let has_thought = row.contains("pensando") || row.contains("ponto um");
+                let has_msg = row.contains("passo") || row.contains("Conclusão");
+                assert!(
+                    !(has_tool && (has_thought || has_msg)),
+                    "frame {frame}: OVERLAP on screen row {y}: {row:?}"
+                );
+            }
+            // Newest content must be reachable (auto-follow shows the tail).
+            if frame == events.len() - 1 {
+                assert!(
+                    painted.iter().any(|r| r.contains("Conclusão")),
+                    "final message must be visible with auto-follow in constrained viewport; rows: {painted:?}"
+                );
+            }
+        }
+    }
+
+    /// REGRESSION (live run): the subagent box's tool spinner held only the
+    /// FIRST wrapped row, so its beam swept a few characters and died at the
+    /// wrap — a label like "edit src/tui/routes/…" never lit "/routes/…".
+    /// The spinner must hold the FULL concatenated label (beam normalised
+    /// over the whole string) and every visible row must be painted through
+    /// `render_row` at its cumulative character offset, so the sweep flows
+    /// across the wrap.
+    #[test]
+    fn wrapped_tool_label_is_swept_across_row_boundaries() {
+        use cosh_tools::subagent::events::{SubagentEvent, ToolCallStatus, ToolKind};
+        use ratatui::style::Color;
+
+        let fg_rgb = |buf: &Buffer, x: u16, y: u16| match buf.cell((x, y))?.style().fg {
+            Some(Color::Rgb(r, g, b)) => Some((r, g, b)),
+            _ => None,
+        };
+        let dist = |a: (u8, u8, u8), b: (u8, u8, u8)| {
+            i32::from(a.0.abs_diff(b.0))
+                + i32::from(a.1.abs_diff(b.1))
+                + i32::from(a.2.abs_diff(b.2))
+        };
+
+        let theme = test_theme();
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: opencode".to_string(), None);
+        // The detail is long enough that wrap_chars MUST break it onto
+        // several rows at the panel's wrap width.
+        state.update_subagent_activity(&SubagentEvent::ToolCall {
+            id: "c1".to_string(),
+            title: "src/tui/routes/session/tool_render.rs".to_string(),
+            kind: ToolKind::Edit,
+            status: ToolCallStatus::InProgress,
+            raw_input: None,
+        });
+
+        let wrap_w = 30u16;
+        let session = state.pty_sessions.last().expect("pty session");
+        let activity = activity_lines(&session.subagent_activity, wrap_w);
+        let Some(SubagentActivityLine::Tool { id, rows, status }) = activity
             .iter()
-            .map(|a| {
-                rgba_color(blend(
-                    theme.background_element,
-                    state.agent_area_color(a),
-                    0.18,
-                ))
+            .find(|l| matches!(l, SubagentActivityLine::Tool { .. }))
+        else {
+            panic!("tool line missing");
+        };
+        assert_eq!(status, &ToolCallStatus::InProgress);
+        assert!(
+            rows.len() >= 2,
+            "the test needs a wrapped label (got {rows:?})"
+        );
+        let session_id = session.id.clone();
+        let id = id.clone();
+        let rows: Vec<String> = rows.clone();
+
+        let mut spinners = HashMap::new();
+        let mut live_keys = Vec::new();
+        let mut live_block_keys = Vec::new();
+        let mut block_cache = HashMap::new();
+        let mut regions = Vec::new();
+        let mut paint = |spinners: &mut HashMap<String, HighlightSpinner>| {
+            let mut buf = Buffer::empty(Rect::new(0, 0, 40, 6));
+            draw_activity_lines(
+                &mut buf,
+                0,
+                0,
+                &activity,
+                0,
+                0,
+                6,
+                wrap_w,
+                theme.background_element,
+                RGBA::from_ints(255, 107, 48, 255),
+                &theme,
+                Style::default().fg(rgba_color(theme.text)),
+                &session_id,
+                spinners,
+                &mut live_keys,
+                &mut live_block_keys,
+                false,
+                &mut block_cache,
+                &mut regions,
+            );
+            buf
+        };
+
+        // First paint creates the spinner for the WHOLE label.
+        let _ = paint(&mut spinners);
+        let key = format!("{session_id}:{id}");
+        let spinner = spinners.get(&key).expect("spinner created");
+        assert_eq!(
+            spinner.text(),
+            rows.concat(),
+            "the spinner must hold the full concatenated label, not just row 0"
+        );
+
+        // Each row paints EXACTLY its own slice — a short row must not also
+        // paint the head of the next row's slice (the duplicate-text
+        // corruption the review probe found when every row shared one
+        // max_w). Symbol-level, so a colour-only pass cannot mask it.
+        let buf = paint(&mut spinners);
+        for (i, row) in rows.iter().enumerate() {
+            let painted: String = (0..row.chars().count() as u16)
+                .map(|cx| {
+                    buf.cell((2 + cx, i as u16))
+                        .and_then(|c| c.symbol().chars().next())
+                        .unwrap_or(' ')
+                })
+                .collect();
+            assert_eq!(
+                painted, *row,
+                "row {i} must paint exactly its own slice of the label"
+            );
+            // Nothing may be painted past the row's own text either.
+            let tail = buf.cell((2 + row.chars().count() as u16, i as u16));
+            if let Some(c) = tail {
+                assert_eq!(
+                    c.symbol().chars().next().unwrap(),
+                    ' ',
+                    "row {i} must not paint past its own text"
+                );
+            }
+        }
+
+        // Beam centred on the LAST row: that row must light up MORE than
+        // row 0 (the sweep crossed the wrap instead of dying at it).
+        let total: usize = rows.iter().map(|r| r.chars().count()).sum();
+        let offsets: Vec<usize> = rows
+            .iter()
+            .scan(0usize, |acc, r| {
+                let start = *acc;
+                *acc += r.chars().count();
+                Some(start)
             })
             .collect();
-        let mut seen: Vec<ratatui::style::Color> = Vec::new();
-        for (row, want) in [3usize, 6, 9].iter().zip(expected.iter()) {
-            let got = buf.cell((1u16, *row as u16)).map(|c| c.bg);
-            assert_eq!(got, Some(*want), "row {row} bg must be the area tint");
-            assert!(!seen.contains(&got.unwrap()), "tints must differ per CLI");
-            seen.push(got.unwrap());
+        let last = rows.len() - 1;
+        let centre = offsets[last] + rows[last].chars().count() / 2;
+        let spinner = spinners.get_mut(&key).unwrap();
+        spinner.set_beam_pos(centre as f32 / (total - 1) as f32);
+        let buf = paint(&mut spinners);
+
+        let base = rgba_color(theme.text_muted);
+        let base_rgb = match base {
+            Color::Rgb(r, g, b) => (r, g, b),
+            _ => unreachable!(),
+        };
+        let max_row_dist = |y: u16| {
+            (0..rows[last].chars().count() as u16)
+                .filter_map(|cx| fg_rgb(&buf, 2 + cx, y))
+                .map(|rgb| dist(rgb, base_rgb))
+                .max()
+                .unwrap()
+        };
+        let row0 = max_row_dist(0);
+        let row_last = max_row_dist(last as u16);
+        assert!(
+            row_last > row0 + 30,
+            "the beam must light the continuation row when it reaches it (last={row_last}, row0={row0})"
+        );
+        assert!(row_last > 60, "the continuation row must actually be lit");
+    }
+
+    /// PROPERTY (deterministic fuzz): random interleavings of
+    /// message/thought chunks, tool calls/updates and plans, rendered
+    /// frame by frame at several widths with the REAL throttle active.
+    /// Every timeline entry carries unique `X<i>start`/`X<i>end` markers;
+    /// any painted row that mixes markers of two DIFFERENT entries — same
+    /// family or not — means the height math and the painter disagree (the
+    /// reported overlap).
+    #[test]
+    fn fuzz_activity_paint_order_and_no_overlap() {
+        use cosh_tools::subagent::events::{
+            PlanEntry, PlanEntryPriority, PlanEntryStatus, SubagentEvent, ToolCallStatus, ToolKind,
+        };
+
+        let theme = test_theme();
+        let shapes: &[&str] = &[
+            "texto simples {m}\n",
+            "título {m}\n\nparágrafo longo: {f}\n",
+            "- bullet um {m}\n- bullet dois\n",
+            "```rust\nfn f_{m}() {{}}\n```\n",
+            "| a | b |\n|---|---|\n| {m} | x |\n",
+            "> citação {m}\n> segunda linha\n",
+            "{f} sem espaços {m}\n",
+            "# h {m}\n\ntail {f}\n",
+        ];
+        let words = ["word", "supercalifragilístico", "ação", "漢字", "🚀"];
+        let mut s: u64 = 0xCAFE_BABE;
+        let mut next = move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        // Parse all "Xn{start,end}" markers in a row → unique (family, idx)
+        // pairs. A row carrying markers of two different entries fails.
+        let markers_on = |row: &str| -> Vec<(char, usize)> {
+            let bytes = row.as_bytes();
+            let mut out = Vec::new();
+            let mut i = 0;
+            while i < bytes.len() {
+                if bytes[i].is_ascii_uppercase() {
+                    let fam = row[i..].chars().next().unwrap();
+                    let mut j = i + 1;
+                    while j < bytes.len() && bytes[j].is_ascii_digit() {
+                        j += 1;
+                    }
+                    if j > i + 1
+                        && let Ok(idx) = row[i + 1..j].parse::<usize>()
+                    {
+                        for kind in ["start", "end"] {
+                            if row[j..].starts_with(kind) {
+                                out.push((fam, idx));
+                                break;
+                            }
+                        }
+                    }
+                }
+                i += 1;
+            }
+            out.sort_unstable();
+            out.dedup();
+            out
+        };
+
+        for case in 0..120u32 {
+            let wrap_w = 36u16 + (next() % 28) as u16; // 36..=63
+            let mut state = RightPanelState::new();
+            state.subagent_rebuild_interval = std::time::Duration::from_millis(100);
+            state.start_pty("subagent: fuzz".to_string(), None);
+
+            let mut events: Vec<SubagentEvent> = Vec::new();
+            let n_steps = 3 + (next() % 5) as usize;
+            for i in 0..n_steps {
+                let shape = shapes[(next() as usize) % shapes.len()];
+                let filler =
+                    words[(next() as usize) % words.len()].repeat((2 + next() % 12) as usize);
+                events.push(SubagentEvent::Message {
+                    text: shape
+                        .replace("{m}", &format!("M{i}start M{i}end"))
+                        .replace("{f}", &filler),
+                });
+                // A thought burst (coalesces into one growing block).
+                for c in 0..1 + next() % 3 {
+                    events.push(SubagentEvent::Thought {
+                        text: format!("K{i}start pensamento {c} sobre o passo {i} K{i}end "),
+                    });
+                }
+                events.push(SubagentEvent::ToolCall {
+                    id: format!("t{i}"),
+                    title: format!("edit T{i}start src/m{i}.rs T{i}end"),
+                    kind: ToolKind::Edit,
+                    status: ToolCallStatus::InProgress,
+                    raw_input: Some(serde_json::json!({
+                        "path": format!("T{i}start src/f{i}.rs T{i}end")
+                    })),
+                });
+                events.push(SubagentEvent::ToolCallUpdate {
+                    id: format!("t{i}"),
+                    status: Some(ToolCallStatus::Completed),
+                    title: None,
+                    raw_output: None,
+                    content: cosh_tools::subagent::events::ToolOutputBlock::default(),
+                });
+                if next() % 2 == 0 {
+                    events.push(SubagentEvent::Plan {
+                        entries: (0..=i)
+                            .map(|j| PlanEntry {
+                                content: format!("P{j}start tarefa {j} P{j}end"),
+                                status: PlanEntryStatus::Completed,
+                                priority: PlanEntryPriority::Medium,
+                            })
+                            .collect(),
+                    });
+                }
+            }
+
+            for (frame, event) in events.iter().enumerate() {
+                state.update_subagent_activity(event);
+                if !state.is_scrolled_up() {
+                    state.scroll_to_bottom();
+                }
+                let rows = state.subagent_section_rows_for_display(wrap_w);
+                let natural = (BOX_OVERHEAD + i32::from(rows.iter().sum::<u16>())).max(4) as u16;
+                let mut buf = Buffer::empty(Rect::new(0, 0, wrap_w + 2, natural));
+                render_subagent_section(
+                    &mut buf,
+                    0,
+                    0,
+                    wrap_w + 2,
+                    natural,
+                    &mut state,
+                    &theme,
+                    false,
+                );
+                let painted: Vec<String> = (0..natural).map(|y| row_text(&buf, y)).collect();
+
+                for (y, row) in painted.iter().enumerate() {
+                    let ms = markers_on(row);
+                    if ms.len() > 1 {
+                        panic!(
+                            "case {case} w={wrap_w} frame {frame}: OVERLAP on row {y} \
+                             (markers {ms:?}): {row:?}"
+                        );
+                    }
+                }
+                if frame == events.len() - 1 {
+                    let last = format!("M{}end", n_steps - 1);
+                    assert!(
+                        painted.iter().any(|r| r.contains(&last)),
+                        "case {case} w={wrap_w}: newest message marker {last} not visible; \
+                         rows: {painted:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// REGRESSION: replay the REAL captured opencode streams
+    /// (`subagent_stream_capture.json`, 20 events; and
+    /// `subagent_stream_capture2.json`, multi-tool with narration, 86
+    /// events) frame by frame, embedded via `include_str!` from the
+    /// `testdata` directory. Every captured Message/Thought chunk is
+    /// replayed with a unique `Xn{start,end}` marker appended when its
+    /// timeline entry COALESCES no more (detected by simulating the same
+    /// coalescing rule the timeline uses), so a marker must paint EXACTLY
+    /// once, inside its entry's band — any overlap moves it onto another
+    /// entry's rows or duplicates it.
+    #[test]
+    fn subagent_captured_opencode_stream_replay_has_no_overlap() {
+        use cosh_tools::subagent::events::SubagentEvent;
+
+        let theme = test_theme();
+        const CAPTURE1: &str = include_str!("testdata/subagent_stream_capture.json");
+        const CAPTURE2: &str = include_str!("testdata/subagent_stream_capture2.json");
+        for (name, raw) in [("single-tool", CAPTURE1), ("multi-tool", CAPTURE2)] {
+            let parsed: serde_json::Value = serde_json::from_str(raw).expect("parse capture");
+            let events = parsed["events"].as_array().expect("events array");
+            let report = parsed["report"].as_str().expect("report");
+
+            let mut state = RightPanelState::new();
+            state.subagent_rebuild_interval = std::time::Duration::from_millis(100);
+            state.start_pty("subagent: opencode".to_string(), None);
+            state.update_last_pty(
+                crate::routes::session::right_panel::types::subagent_input_line(
+                    "multi-step tool narration prompt …",
+                )
+                .expect("echo"),
+            );
+
+            // Faithful mirror of `SubagentActivity::apply` coalescing: a
+            // Message/Thought chunk joins the timeline's LAST entry when it
+            // is of the same kind; ToolCall pushes an entry (only NEW ids —
+            // re-announcements patch); ToolCallUpdate patches (no entry);
+            // Plan pushes once, then replaces in place; Usage/Mode/Info
+            // touch nothing. `entry_of[j]` = timeline entry index that
+            // event j belongs to (or touched).
+            let mut entry_kinds: Vec<&str> = Vec::new();
+            let mut seen_tool_ids: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            let mut entry_of: Vec<i64> = Vec::new();
+            for ev in events.iter() {
+                let ev = &ev["event"];
+                let kind = ev["kind"].as_str().expect("kind");
+                match kind {
+                    "Message" | "Thought" => {
+                        let coalesces = entry_kinds.last().is_some_and(|k| *k == kind);
+                        if !coalesces {
+                            entry_kinds.push(kind);
+                        }
+                        entry_of.push(entry_kinds.len() as i64 - 1);
+                    }
+                    "ToolCall" => {
+                        let id = ev["id"].as_str().unwrap_or_default().to_string();
+                        if seen_tool_ids.insert(id) {
+                            entry_kinds.push("Tool");
+                        }
+                        entry_of.push(entry_kinds.len() as i64 - 1);
+                    }
+                    // Patching/ignorable events: they touch the LAST entry
+                    // at most — attribute them to it (never a new entry).
+                    _ => entry_of.push(entry_kinds.len() as i64 - 1),
+                }
+            }
+            // The marker of a Message/Thought entry lands on its LAST
+            // chunk event: once that frame renders, the entry's text is
+            // final and the marker must paint exactly once from then on.
+            let mut marker_text: std::collections::HashMap<usize, String> =
+                std::collections::HashMap::new();
+            for (j, ev) in events.iter().enumerate() {
+                let kind = ev["event"]["kind"].as_str().unwrap_or("");
+                if kind != "Message" && kind != "Thought" {
+                    continue;
+                }
+                let entry = entry_of[j];
+                let is_last_chunk_of_entry = !events[j + 1..].iter().any(|later| {
+                    let k2 = later["event"]["kind"].as_str().unwrap_or("");
+                    (k2 == "Message" || k2 == "Thought")
+                        && entry_of[events.iter().position(|e| std::ptr::eq(e, later)).unwrap()]
+                            == entry
+                });
+                if is_last_chunk_of_entry {
+                    let fam = if kind == "Message" { 'M' } else { 'K' };
+                    marker_text.insert(j, format!("{fam}{entry}end "));
+                }
+            }
+
+            let wrap_w = 48u16;
+            for (frame, ev) in events.iter().enumerate() {
+                let ev = &ev["event"];
+                let event = match ev["kind"].as_str().expect("kind") {
+                    "Message" => SubagentEvent::Message {
+                        text: format!(
+                            "{}{}",
+                            ev["text"].as_str().expect("text"),
+                            marker_text.get(&frame).cloned().unwrap_or_default()
+                        ),
+                    },
+                    "Thought" => SubagentEvent::Thought {
+                        text: format!(
+                            "{}{}",
+                            ev["text"].as_str().expect("text"),
+                            marker_text.get(&frame).cloned().unwrap_or_default()
+                        ),
+                    },
+                    "ToolCall" => SubagentEvent::ToolCall {
+                        id: ev["id"].as_str().expect("id").to_string(),
+                        title: ev["title"].as_str().unwrap_or_default().to_string(),
+                        kind: serde_json::from_value(ev["tool_kind"].clone()).unwrap(),
+                        status: serde_json::from_value(ev["status"].clone()).unwrap(),
+                        raw_input: ev["raw_input"]
+                            .as_object()
+                            .map(|o| serde_json::Value::Object(o.clone())),
+                    },
+                    "ToolCallUpdate" => SubagentEvent::ToolCallUpdate {
+                        id: ev["id"].as_str().expect("id").to_string(),
+                        status: ev["status"].as_str().map(|s| {
+                            serde_json::from_value(serde_json::Value::String(s.into())).unwrap()
+                        }),
+                        title: ev["title"].as_str().map(str::to_string),
+                        raw_output: ev["raw_output"]
+                            .as_object()
+                            .map(|o| serde_json::Value::Object(o.clone())),
+                        content: serde_json::from_value(ev["content"].clone()).unwrap(),
+                    },
+                    "Usage" => SubagentEvent::Usage {
+                        context_window: ev["context_window"].as_u64().unwrap_or(0),
+                        tokens_in_context: ev["tokens_in_context"].as_u64().unwrap_or(0),
+                    },
+                    other => panic!("unexpected captured kind {other}"),
+                };
+                state.update_subagent_activity(&event);
+                if !state.is_scrolled_up() {
+                    state.scroll_to_bottom();
+                }
+                let rows = state.subagent_section_rows_for_display(wrap_w);
+                let natural = (BOX_OVERHEAD + i32::from(rows.iter().sum::<u16>())).max(4) as u16;
+                let mut buf = Buffer::empty(Rect::new(0, 0, wrap_w + 2, natural));
+                render_subagent_section(
+                    &mut buf,
+                    0,
+                    0,
+                    wrap_w + 2,
+                    natural,
+                    &mut state,
+                    &theme,
+                    false,
+                );
+                let painted: Vec<String> = (0..natural).map(|y| row_text(&buf, y)).collect();
+
+                // Every completed-entry marker paints EXACTLY ONCE in this
+                // frame (it belongs to a stable, coalesced timeline entry).
+                // NOTE: an entry that will GROW later has no marker yet.
+                for (lc, marker) in &marker_text {
+                    if *lc > frame {
+                        continue; // its entry is still streaming
+                    }
+                    let count = painted.iter().filter(|r| r.contains(marker)).count();
+                    assert_eq!(
+                        count, 1,
+                        "{name} frame {frame}: marker {marker} painted {count}× (overlap or loss); rows: {painted:?}"
+                    );
+                }
+            }
+
+            // Final settled frame: the report replaces the activity.
+            state.complete_last_pty(format!("→ placeholder\n{report}"));
+            state.subagent_rebuild_interval = std::time::Duration::ZERO;
+            let rows = state.subagent_section_rows_for_display(wrap_w);
+            let natural = (BOX_OVERHEAD + i32::from(rows.iter().sum::<u16>())).max(4) as u16;
+            let mut buf = Buffer::empty(Rect::new(0, 0, wrap_w + 2, natural));
+            render_subagent_section(
+                &mut buf,
+                0,
+                0,
+                wrap_w + 2,
+                natural,
+                &mut state,
+                &theme,
+                false,
+            );
+            let painted: Vec<String> = (0..natural).map(|y| row_text(&buf, y)).collect();
+            // A distinctive tail of the report must be visible.
+            let tail = report.lines().next_back().unwrap_or(report);
+            let probe = tail.split_whitespace().next_back().unwrap_or(tail);
+            let probe = &probe[..probe.len().min(12)];
+            assert!(
+                painted.iter().any(|r| r.contains(probe)),
+                "{name}: final report fragment {probe:?} must be visible in the body; rows: {painted:?}"
+            );
+        }
+    }
+
+    /// REGRESSION: the FULL panel path — `render_right_panel` with the
+    /// real budget/fit/scroll machinery, a bash section competing for
+    /// space, and TWO subagent windows (both captured opencode streams
+    /// replayed concurrently via `include_str!` testdata) — must keep the
+    /// two streams' tool rows separated: no row may mix one window's tool
+    /// title with the other's file paths.
+    #[test]
+    fn subagent_two_windows_full_panel_no_cross_overlap() {
+        use cosh_tools::subagent::events::SubagentEvent;
+
+        let theme = test_theme();
+        let raw1 = include_str!("testdata/subagent_stream_capture.json");
+        let raw2 = include_str!("testdata/subagent_stream_capture2.json");
+        let parsed1: serde_json::Value = serde_json::from_str(raw1).expect("parse");
+        let parsed2: serde_json::Value = serde_json::from_str(raw2).expect("parse");
+
+        let mut state = RightPanelState::new();
+        state.subagent_rebuild_interval = std::time::Duration::from_millis(100);
+        // A bash PTY competes for the same budget (production has both).
+        state.start_pty("echo static bash output".to_string(), None);
+        state.update_last_pty("static bash line\n".repeat(30));
+        state.complete_last_pty("static bash line\n".repeat(30));
+        // Window 1 (idx 1): the single-tool capture; Window 2 (idx 2):
+        // multi-tool. Each gets its own input echo like production.
+        state.start_pty("subagent: opencode".to_string(), None);
+        state.start_pty("subagent: kilo".to_string(), None);
+        for idx in [0usize, 1] {
+            let echo = crate::routes::session::right_panel::types::subagent_input_line(
+                format!("multi-step prompt {idx} …").as_str(),
+            )
+            .expect("echo");
+            state.pty_sessions[idx + 1].output = echo;
+        }
+
+        let events1 = parsed1["events"].as_array().expect("events");
+        let events2 = parsed2["events"].as_array().expect("events");
+        let n_frames = events1.len().max(events2.len());
+
+        // Interleave: window 1 replays capture1 events, window 2 capture2,
+        // on the same frames — two streams running concurrently, the
+        // hardest production condition.
+        for frame in 0..n_frames {
+            for (stream, events) in [(1usize, events1), (2usize, events2)] {
+                if frame >= events.len() {
+                    continue;
+                }
+                let ev = &events[frame]["event"];
+                let event = match ev["kind"].as_str().expect("kind") {
+                    "Message" => SubagentEvent::Message {
+                        text: ev["text"].as_str().expect("text").to_string(),
+                    },
+                    "Thought" => SubagentEvent::Thought {
+                        text: ev["text"].as_str().expect("text").to_string(),
+                    },
+                    "ToolCall" => SubagentEvent::ToolCall {
+                        id: ev["id"].as_str().expect("id").to_string(),
+                        title: ev["title"].as_str().unwrap_or_default().to_string(),
+                        kind: serde_json::from_value(ev["tool_kind"].clone()).unwrap(),
+                        status: serde_json::from_value(ev["status"].clone()).unwrap(),
+                        raw_input: ev["raw_input"]
+                            .as_object()
+                            .map(|o| serde_json::Value::Object(o.clone())),
+                    },
+                    "ToolCallUpdate" => SubagentEvent::ToolCallUpdate {
+                        id: ev["id"].as_str().expect("id").to_string(),
+                        status: ev["status"].as_str().map(|s| {
+                            serde_json::from_value(serde_json::Value::String(s.into())).unwrap()
+                        }),
+                        title: ev["title"].as_str().map(str::to_string),
+                        raw_output: ev["raw_output"]
+                            .as_object()
+                            .map(|o| serde_json::Value::Object(o.clone())),
+                        content: serde_json::from_value(ev["content"].clone()).unwrap(),
+                    },
+                    "Usage" => SubagentEvent::Usage {
+                        context_window: ev["context_window"].as_u64().unwrap_or(0),
+                        tokens_in_context: ev["tokens_in_context"].as_u64().unwrap_or(0),
+                    },
+                    other => panic!("unexpected captured kind {other}"),
+                };
+                // Route to the right window: `update_subagent_activity`
+                // targets the last RUNNING subagent session. With bash at
+                // index 0 and the two windows at 1/2: stream 1 events must
+                // reach window 1, so swap (1,2) around the call to make it
+                // last; stream 2 events reach window 2 directly (it is the
+                // last one by default).
+                if stream == 1 {
+                    state.pty_sessions.swap(1, 2);
+                }
+                state.update_subagent_activity(&event);
+                if stream == 1 {
+                    state.pty_sessions.swap(1, 2);
+                }
+            }
+            // NO auto-follow here: production auto-follows only when the
+            // user has not scrolled; a scrolled-away panel is a valid
+            // steady state, and the clamp path is what must not overlap.
+            let mut buf = Buffer::empty(Rect::new(0, 0, 110, 44));
+            render_right_panel(&mut buf, Rect::new(0, 0, 110, 44), &mut state, &theme, 110);
+            let painted: Vec<String> = (0..44).map(|y| row_text(&buf, y)).collect();
+            // The tool ids of the two captures never collide, so a row
+            // carrying details of BOTH streams (`src/f` paths + grep) is
+            // impossible when layout is correct. Check no row mixes the
+            // two captures' tool titles with the other's paths.
+            for (y, row) in painted.iter().enumerate() {
+                let has_read1 = row.contains("closure.rs");
+                let has_grep2 = row.contains("TurnClosure");
+                assert!(
+                    !(has_read1 && has_grep2),
+                    "frame {frame}: cross-window overlap on row {y}: {row:?}"
+                );
+            }
         }
     }
 
@@ -2156,66 +3235,45 @@ mod tests {
         }
     }
 
-    /// REGRESSION: the subagent box's TOP/BOTTOM padding rows are painted
-    /// with the NEAREST window's area tint — no background-colored hole
-    /// above the first agent or below the last one.
+    /// REGRESSION: the subagent box's TOP/BOTTOM padding rows follow the
+    /// NEAREST window's color — a verdict tints them with its severity, a
+    /// verdict-less window leaves the default box background (no hole and
+    /// no stray color).
     #[test]
-    fn subagent_box_padding_rows_use_nearest_agent_tint() {
+    fn subagent_box_padding_rows_follow_nearest_window_color() {
         let theme = test_theme();
         let mut state = RightPanelState::new();
         state.subagent_rebuild_interval = std::time::Duration::ZERO;
         state.text_regions_w = 38;
-        for cmd in ["subagent: kilo", "subagent: opencode"] {
-            state.start_pty(cmd.to_string(), None);
-            state.complete_last_pty("report line\n".to_string());
-        }
+        // First window carries a red verdict; last one carries none.
+        state.start_pty("subagent: kilo".to_string(), None);
+        state
+            .complete_last_pty("<!-- severity: red -->\n\n## Critical\n\nBug found.\n".to_string());
+        state.start_pty("subagent: opencode".to_string(), None);
+        state.complete_last_pty("report line\n".to_string());
         // Direct renderer call with a known geometry.
         let max_h = 12u16;
         let mut buf = Buffer::empty(Rect::new(0, 0, 50, max_h));
         render_subagent_section(&mut buf, 0, 0, 50, max_h, &mut state, &theme, false);
 
         let box_y = 1u16; // TOP_GAP
-        let box_h = max_h; // max_h already excludes TOP_GAP at caller level? renderer re-adds... use actual fills:
-        let _ = box_h;
         let top_bg = buf.cell((1u16, box_y)).map(|c| c.bg);
         let bottom_bg = buf.cell((1u16, max_h - 1)).map(|c| c.bg);
-        let first_tint = blend(
+        let red_tint = blend(
             theme.background_element,
-            state.agent_area_color("kilo"),
+            severity_rgba(cosh_tools::subagent::severity::Severity::Red, &theme),
             0.18,
         );
-        let last_tint = blend(
-            theme.background_element,
-            state.agent_area_color("opencode"),
-            0.18,
-        );
+        let plain = theme.background_element;
         assert_eq!(
             top_bg,
-            Some(rgba_color(first_tint)),
-            "top pad = first window tint"
+            Some(rgba_color(red_tint)),
+            "top pad = first window's verdict tint"
         );
         assert_eq!(
             bottom_bg,
-            Some(rgba_color(last_tint)),
-            "bottom pad = last window tint"
+            Some(rgba_color(plain)),
+            "bottom pad = default box background (last window has no verdict)"
         );
-        // And they differ from each other (two distinct agents).
-        assert_ne!(top_bg, bottom_bg);
-    }
-
-    /// The palette is highlighter-cheerful: every entry is LIGHT (high
-    /// per-channel brightness) so tints read as bright marca-texto hues.
-    #[test]
-    fn agent_palette_is_vivid_and_light() {
-        for (r, g, b) in types::palette_entries() {
-            let lum = 0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b);
-            assert!(
-                lum > 170.0,
-                "palette entry ({r},{g},{b}) too dark (lum {lum})"
-            );
-            let mx = r.max(g).max(b);
-            let mn = r.min(g).min(b);
-            assert!(mx - mn > 40, "palette entry ({r},{g},{b}) looks gray/dead");
-        }
     }
 }
