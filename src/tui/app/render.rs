@@ -7,8 +7,8 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 
 use super::{
-    App, AppMode, BUG_REPORT_TEXT, EMPTY_SESSION_PROMPT_MIN_WIDTH, EMPTY_SESSION_PROMPT_RATIO,
-    MIN_PROMPT_RESERVE_ROWS, SessionArea,
+    App, AppMode, BACK_LINK_TEXT, BUG_REPORT_TEXT, EMPTY_SESSION_PROMPT_MIN_WIDTH,
+    EMPTY_SESSION_PROMPT_RATIO, MIN_PROMPT_RESERVE_ROWS, SessionArea,
 };
 use crate::left_panel::{MIN_WIDTH_FOR_LEFT_PANEL, Mode};
 use crate::logo::LOGO_CHAT;
@@ -16,7 +16,7 @@ use crate::routes::home::footer::HomeFooterView;
 use crate::routes::session::footer::FooterView;
 use crate::routes::session::right_panel::render_right_panel;
 use crate::state::PendingQueues;
-use crate::theme::rgba_color;
+use crate::theme::{Theme, rgba_color};
 use cosh_tui::core::lib::unicode_util::word_wrap;
 
 /// Render a 10-character budget bar like `▓▓▓▓▓░░░░░` from a 0-100 percentage.
@@ -81,12 +81,21 @@ impl App {
                 && self.session_view.is_sticky_bottom);
         // Keep the one-off correction spinner animated whenever the agent
         // loop is not already using that shared row above the prompt.
+        // The agent spinner itself also holds live frames: a Working session
+        // with the user scrolled away from the bottom (not sticky), no
+        // streaming text and no active tool spinner otherwise reached the
+        // idle path, dropping the beam animation to ~5 fps.
+        let agent_spinner_live = self.state.status == crate::types::SessionStatus::Working
+            && self.agent_spinner_bass.is_some();
+        live = live || agent_spinner_live;
         live = live
-            || (self.prompt_correction_active
-                && !(self.state.status == crate::types::SessionStatus::Working
-                    && self.agent_spinner_bass.is_some()));
+            || (self.prompt_correction_active && !agent_spinner_live);
         live = live || self.rag_spinner_active();
         live = live || has_active_spinner;
+        // Free-gateway recommendation: its fake-streaming text advances per
+        // rendered frame (wall-clock-compensated, so no chars are lost, but a
+        // 200 ms idle gap made it visibly chunky).
+        live = live || self.free_gateway_dialog.visible;
         // TODO completion strikes: while any strike animation is running the
         // panel must redraw every frame, even in an idle session — otherwise
         // the sweep would freeze mid-label until the next unrelated event.
@@ -115,17 +124,23 @@ impl App {
 
             let bg_color = rgba_color(self.theme.background);
             let _bg_start = Instant::now();
-            // Optimized background fill: set char + style per cell, but
-            // skip the CellDiffOption::None that the original code had.
-            // The default CellDiffOption::Update detects char/style
-            // changes correctly, reducing overhead by ~33%.
+            // Background fill via a flat style patch: `Terminal::swap_buffers`
+            // resets the draw buffer to `Cell::EMPTY` (symbol " ") before every
+            // frame, so the symbol loop below the old implementation was
+            // redundant work — only the style channels need writing. One
+            // `Style` merge over the backing `Vec<Cell>` per row is an order
+            // of magnitude cheaper than two virtual calls per cell and keeps
+            // the frame pacer comfortably in its 60 fps tier.
             let empty_style = Style::default().bg(bg_color);
-            for y in area.y..area.bottom() {
-                for x in area.x..area.right() {
-                    if let Some(cell) = buf.cell_mut((x, y)) {
-                        cell.set_symbol(" ");
-                        cell.set_style(empty_style);
-                    }
+            let buf_w = buf.area.width as usize;
+            let start_row = area.y as usize;
+            let end_row = area.bottom() as usize;
+            let col_start = area.x as usize;
+            let col_end = area.right() as usize;
+            for row in start_row..end_row {
+                let base = row * buf_w;
+                for cell in &mut buf.content[base + col_start..base + col_end] {
+                    cell.set_style(empty_style);
                 }
             }
             let _bg_us = _bg_start.elapsed().as_micros();
@@ -141,14 +156,34 @@ impl App {
                 );
             }
 
-            let header_style = Style::default().fg(rgba_color(self.theme.text_muted));
-            let title_chars: Vec<char> = "← esc".chars().collect();
+            let title_chars: Vec<char> = BACK_LINK_TEXT.chars().collect();
+            let title_w = title_chars.len() as u16;
+            let back_link_area = (area.width > 1).then(|| {
+                Rect::new(
+                    area.x + 1,
+                    area.y,
+                    title_w.min(area.width.saturating_sub(1)),
+                    1,
+                )
+            });
+            let back_link_fg = if let Some(link_area) = back_link_area
+                && self.last_mouse_x >= link_area.x
+                && self.last_mouse_x < link_area.right()
+                && self.last_mouse_y >= link_area.y
+                && self.last_mouse_y < link_area.bottom()
+            {
+                rgba_color(self.theme.text)
+            } else {
+                rgba_color(self.theme.text_muted)
+            };
+            let header_style = Style::default().fg(back_link_fg);
             for (i, ch) in title_chars.iter().enumerate() {
                 if let Some(cell) = buf.cell_mut((area.x + 1 + i as u16, area.y)) {
                     cell.set_char(*ch);
                     cell.set_style(header_style);
                 }
             }
+            self.back_link_area = back_link_area;
 
             let bug_w = BUG_REPORT_TEXT.chars().count() as u16;
 
@@ -314,7 +349,7 @@ impl App {
             let is_session_mode = matches!(self.mode(), AppMode::Session);
             if is_session_mode {
                 let header_strip = Rect::new(main_area.x, area.y, main_area.width, 1);
-                let hint_w = "← esc".chars().count() as u16;
+                let hint_w = BACK_LINK_TEXT.chars().count() as u16;
                 let protected_hint = Rect::new(area.x + 1, area.y, hint_w, 1);
                 let (fg_r, fg_g, fg_b, _) = self.theme.text.to_ints();
                 // Night-window gate (see component/sparkle.rs): local
@@ -472,15 +507,20 @@ impl App {
             };
             // Pending queued-message region (color-coded rows above the prompt).
             // Rows are word-wrapped, so a single queued message can occupy
-            // several visual lines.
-            let pending_h = if is_session && !hide_prompt_and_spinner {
+            // several visual lines. The wrap runs ONCE per frame here: the
+            // old code word-wrapped every queued message twice per frame
+            // (once for the height, once inside the renderer), doubling the
+            // grapheme-aware `word_wrap` cost on every frame while messages
+            // are queued.
+            let pending_rows = if is_session && !hide_prompt_and_spinner {
                 let pending_w = main_area.width.saturating_sub(4);
                 self.state
                     .current_pending_queues()
-                    .map_or(0, |q| Self::pending_queue_rows(q, pending_w).len() as u16)
+                    .map(|q| Self::pending_queue_rows(q, pending_w))
             } else {
-                0
+                None
             };
+            let pending_h = pending_rows.as_ref().map_or(0, Vec::len) as u16;
             // Queue-choice dialog (same position as question/permission).
             let queue_choice_h = if is_session && self.queue_choice_dialog.visible {
                 self.queue_choice_dialog
@@ -747,8 +787,19 @@ impl App {
                     }
                     // Pending queued messages, color-coded per queue, above the
                     // prompt (never rendered while a dialog covers that spot).
-                    if !hide_prompt_and_spinner && pending_h > 0 {
-                        self.render_pending_queues(buf, pending_area);
+                    // The rows were wrapped once at the top of this frame;
+                    // painting reuses them (no second word-wrap per frame).
+                    if let Some(rows) = &pending_rows
+                        && !hide_prompt_and_spinner
+                        && !rows.is_empty()
+                    {
+                        Self::draw_pending_queue_rows(
+                            buf,
+                            pending_area,
+                            rows,
+                            self.hovered_queue_row,
+                            &self.theme,
+                        );
                     }
                     // Scroll-to-bottom pill: painted after every inline layer
                     // sharing its row (transcript, pending queues) so it is
@@ -769,6 +820,7 @@ impl App {
                             pending_area.y.saturating_sub(1),
                             session_area,
                             &self.theme,
+                            delta_time,
                         );
                     }
                     // Hide spinner and prompt when dialog is visible (like OpenCode)
@@ -921,20 +973,37 @@ impl App {
         if rows.is_empty() {
             return;
         }
+        Self::draw_pending_queue_rows(buf, area, &rows, self.hovered_queue_row, &self.theme);
+    }
+
+    /// Paint pre-wrapped pending-queue rows (see [`Self::pending_queue_rows`]).
+    ///
+    /// Split from [`Self::render_pending_queues`] so the render path can wrap
+    /// the queued messages ONCE per frame (the height computation and the
+    /// painter share the same rows instead of re-wrapping them).
+    fn draw_pending_queue_rows(
+        buf: &mut ratatui::buffer::Buffer,
+        area: Rect,
+        rows: &[(usize, usize, String)],
+        hover: Option<usize>,
+        theme: &Theme,
+    ) {
+        if rows.is_empty() {
+            return;
+        }
         // The hovered row swaps its queue color for pure WHITE so the focus
         // clearly stands out against every theme surface (and against the
         // prompt box, which shares the element/panel colors). `contrast_on`
         // flips the row text to black for readability.
         let hover_bg = RGBA::from_hex("#FFFFFF");
-        let hover = self.hovered_queue_row;
         let mut y = area.y;
         for (row, (queue_idx, _, line)) in rows.iter().enumerate() {
             let bg = if hover == Some(row) {
                 hover_bg
             } else if *queue_idx == 0 {
-                self.theme.queue_next_loop
+                theme.queue_next_loop
             } else {
-                self.theme.queue_next_request
+                theme.queue_next_request
             };
             Self::draw_pending_row(
                 buf,
@@ -943,8 +1012,8 @@ impl App {
                 y,
                 area.width,
                 bg,
-                self.theme.background_panel,
-                self.theme.accent,
+                theme.background_panel,
+                theme.accent,
             );
             y += 1;
             if y >= area.bottom() {

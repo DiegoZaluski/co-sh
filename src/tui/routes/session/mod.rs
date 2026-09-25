@@ -53,6 +53,53 @@ const fn left_border_chars() -> BorderCharacters {
     }
 }
 
+/// Copy `rows` full rows of `src_cells` (a `stride`-wide cell grid) into
+/// `buf` starting at (`dst_x`, `dst_y`).
+///
+/// The render loop's hottest blits used to go through `buf.cell_mut((x, y))`
+/// per cell — each call pays a position→index conversion plus bounds check.
+/// `Buffer` stores cells contiguous per row, so copying one `Cell` slice per
+/// row amortizes that to a single bounds check per row: the per-frame cost of
+/// scrolling/streaming a large transcript drops accordingly (this is what
+/// keeps the adaptive frame pacer in the smooth 60 fps tier on mid-range
+/// Windows laptops).
+///
+/// Rows are skipped (not partially copied) when the destination row falls
+/// outside `buf`'s area, matching the old per-cell `cell_mut(..) == None`
+/// behavior; `count` cells are copied from the start of each source row.
+fn blit_cell_rows(
+    buf: &mut Buffer,
+    dst_x: u16,
+    dst_y: u16,
+    src_cells: &[Cell],
+    stride: usize,
+    first_row: usize,
+    rows: usize,
+    count: usize,
+) {
+    let buf_w = usize::from(buf.area.width);
+    let buf_h = usize::from(buf.area.height);
+    if stride == 0 || buf_w == 0 {
+        return;
+    }
+    let count = count.min(stride).min(buf_w);
+    for row in 0..rows {
+        let src_base = (first_row + row) * stride;
+        let Some(src) = src_cells.get(src_base..src_base + count) else {
+            break;
+        };
+        let dst_row = usize::from(dst_y) + row;
+        if dst_row >= buf_h {
+            break;
+        }
+        let dst_base = dst_row * buf_w + usize::from(dst_x);
+        let Some(dst) = buf.content.get_mut(dst_base..dst_base + count) else {
+            break;
+        };
+        dst.clone_from_slice(src);
+    }
+}
+
 /// Draws the expand/collapse hint styled as a button: highlighted with the
 /// theme primary color as a marker-like background so it reads as clickable.
 fn draw_hint_button(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, theme: &Theme) {
@@ -459,6 +506,11 @@ pub struct SessionView {
     /// streaming no longer allocates/frees a large buffer every frame, which
     /// fragmented the heap and degraded the TUI over the process lifetime.
     scratch: Option<ratatui::buffer::Buffer>,
+    /// Reusable buffer for `tool_spinners` map keys. The per-message
+    /// spinner check used to `format!` a fresh `String` for every tool part
+    /// of every visible message on every frame; reusing one allocation keeps
+    /// the scroll-path lookup allocation-free.
+    spinner_key_scratch: String,
     /// Monotonic frame counter — recency stamp for the render-cache LRU.
     render_frame: u64,
     /// Last frame each message's cached cells/regions were used (hit or
@@ -528,13 +580,16 @@ impl SessionView {
     /// (the keyboard ScrollToBottom flow already covers that), while a genuine
     /// drift — or the agent outrunning a slow reader — shows it.
     const PILL_APPEAR_ROWS: i32 = 3;
-    /// Per-frame fraction the pill's slide/opacity progress moves toward its
-    /// target: fast pop-in, slightly faster retract (feels snappier going
-    /// away). Applied every rendered frame — the live loop keeps frames
-    /// coming while the agent works, and each wheel notch produces a frame
-    /// while idle.
-    const PILL_EASE_IN: f32 = 0.30;
-    const PILL_EASE_OUT: f32 = 0.55;
+    /// Time the slide/opacity pop-in takes (seconds). Time-based, not
+    /// per-frame: the render loop oscillates between 30 and 60 fps (frame
+    /// pacer hysteresis), and a per-frame step made the pill land in ~3
+    /// frames at 60 fps but ~6 at 30 — visibly different speeds for the same
+    /// gesture. Dividing the real frame delta by these durations keeps the
+    /// animation's wall-clock speed identical at either cadence.
+    const PILL_POP_IN_SECS: f32 = 0.12;
+    /// Retract is slightly faster than the pop-in so the button never
+    /// lingers once the user is back at the bottom.
+    const PILL_FADE_OUT_SECS: f32 = 0.06;
     /// How many rows above the settled spot the pill starts its slide from
     /// (quadratic-eased, so it lands while still translucent).
     const PILL_SLIDE_ROWS: f32 = 2.0;
@@ -583,6 +638,7 @@ impl SessionView {
             msg_cache_h: Vec::new(),
             msg_cache_text_regions: Vec::new(),
             scratch: None,
+            spinner_key_scratch: String::new(),
             render_frame: 0,
             msg_cache_last_used: Vec::new(),
             msg_cache_bytes: 0,
@@ -2427,9 +2483,7 @@ impl SessionView {
             let temp_cells = temp.content();
             let stride = width as usize;
             for dy in 0..msg_h as usize {
-                for dx in 0..stride {
-                    cells.push(temp_cells[dy * stride + dx].clone());
-                }
+                cells.extend_from_slice(&temp_cells[dy * stride..(dy + 1) * stride]);
             }
             self.streaming_msg = Some(streaming::StreamingMessageCache {
                 message_id: msg.id.clone(),
@@ -2457,20 +2511,20 @@ impl SessionView {
             let row_end = part_offset + text_h;
 
             // Grow the cell buffer, preserving content; fill the new rows with
-            // the background and carry the border glyph down.
+            // the background and carry the border glyph down. Row-slice fills
+            // replace the per-cell `set_bg`/`set_char` calls (each clone is an
+            // inline `CompactString`, so the fill stays allocation-free).
             let stride = width as usize;
             let new_cap = stride * msg_h as usize;
             if new_cap > sc.cells.len() {
                 let border = sc.cells.first().cloned().unwrap_or_default();
+                let mut bg_cell = Cell::default();
+                bg_cell.set_bg(rgba_color(theme.background));
+                bg_cell.set_char(' ');
                 sc.cells.resize(new_cap, Cell::default());
                 for dy in old_h..msg_h {
                     let base = dy as usize * stride;
-                    for dx in 1..stride {
-                        let mut c = Cell::default();
-                        c.set_bg(rgba_color(theme.background));
-                        c.set_char(' ');
-                        sc.cells[base + dx] = c;
-                    }
+                    sc.cells[base..base + stride].fill(bg_cell.clone());
                     sc.cells[base] = border.clone();
                 }
             }
@@ -2480,6 +2534,9 @@ impl SessionView {
             // `dy` lives at `dy * tc_w` in the cache's content.
             let tc_cells = text_cache.content();
             let tc_w = max_w as usize;
+            let mut bg_cell = Cell::default();
+            bg_cell.set_bg(rgba_color(theme.background));
+            bg_cell.set_char(' ');
             for dy in render_row..text_h {
                 let dst_row = part_offset + dy;
                 if dst_row >= msg_h {
@@ -2487,15 +2544,10 @@ impl SessionView {
                 }
                 let dst_base = dst_row as usize * stride;
                 let src_base = dy as usize * tc_w;
-                for dx in 1..stride {
-                    let mut c = Cell::default();
-                    c.set_bg(rgba_color(theme.background));
-                    c.set_char(' ');
-                    sc.cells[dst_base + dx] = c;
-                }
-                for dx in 0..tc_w {
-                    sc.cells[dst_base + x_off as usize + dx] = tc_cells[src_base + dx].clone();
-                }
+                sc.cells[dst_base + 1..dst_base + stride].fill(bg_cell.clone());
+                sc.cells
+                    [dst_base + x_off as usize..dst_base + x_off as usize + tc_w]
+                    .clone_from_slice(&tc_cells[src_base..src_base + tc_w]);
             }
             sc.height = msg_h;
             sc.last_tail = Some((part_offset + render_row, row_end));
@@ -3528,6 +3580,7 @@ impl SessionView {
         anchor_y: u16,
         area: Rect,
         theme: &Theme,
+        delta_time: f64,
     ) {
         let viewport_h = i32::from(area.height);
         let max_scroll = (self.total_height - viewport_h).max(0);
@@ -3539,12 +3592,16 @@ impl SessionView {
         // keeps fading (natural exit), but the hit rect is gone from the
         // first retract frame.
         let active = from_bottom > Self::PILL_APPEAR_ROWS;
+        // Progress advances by the REAL frame delta (time-based), not a
+        // per-frame constant — see the duration constants above.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let dt = delta_time.max(0.0) as f32;
         if !active && self.pill_progress > 0.0 {
-            // Retract slightly faster than the pop-in so the button never
-            // lingers once the user is back at the bottom.
-            self.pill_progress = (self.pill_progress - Self::PILL_EASE_OUT).max(0.0);
+            self.pill_progress =
+                (self.pill_progress - dt / Self::PILL_FADE_OUT_SECS).max(0.0);
         } else if active && self.pill_progress < 1.0 {
-            self.pill_progress = (self.pill_progress + Self::PILL_EASE_IN).min(1.0);
+            self.pill_progress =
+                (self.pill_progress + dt / Self::PILL_POP_IN_SECS).min(1.0);
         }
         let t = self.pill_progress;
         if t <= 0.0 {
@@ -3820,15 +3877,16 @@ impl SessionView {
                     let vis_h =
                         ((cached_h as i32).min(vp_bottom - msg_top) - src_y as i32).max(0) as u16;
                     let dst_x = inner_area.x;
-                    for dy in 0..vis_h {
-                        let base = (src_y + dy) as usize * cached_w;
-                        let dst_line_y = dst_y + dy;
-                        for dx in 0..cached_w {
-                            if let Some(dst) = buf.cell_mut((dst_x + dx as u16, dst_line_y)) {
-                                *dst = sc.cells[base + dx].clone();
-                            }
-                        }
-                    }
+                    blit_cell_rows(
+                        buf,
+                        dst_x,
+                        dst_y,
+                        &sc.cells,
+                        cached_w,
+                        usize::from(src_y),
+                        usize::from(vis_h),
+                        cached_w,
+                    );
                     render_actual_h = cached_h as i32;
                 }
             } else if msg_bottom > vp_top && msg_top < vp_bottom {
@@ -3845,20 +3903,21 @@ impl SessionView {
                     // A global "any spinner in the session" check forced every
                     // top-clipped message to re-render fully on every frame
                     // while any tool animated — the main per-frame cost during
-                    // agent bursts.
+                    // agent bursts. The key is assembled into a reused buffer
+                    // instead of a per-part `format!` allocation per frame.
+                    let spinner_key = &mut self.spinner_key_scratch;
+                    let tool_spinners = &self.tool_state.tool_spinners;
                     let has_active_spinner = msg.parts.iter().enumerate().any(|(pi, part)| {
-                        matches!(part, Part::Tool(t)
-                        if tool_render::renderer_spinner_key(
-                            tool_render::tool_display(&t.tool),
-                            t.tool_call_id.as_deref(),
-                            pi as u16,
-                        )
-                        .is_some_and(|key| {
-                            self.tool_state
-                                .tool_spinners
-                                .get(&key)
+                        matches!(part, Part::Tool(t) if {
+                            tool_render::renderer_spinner_key_into(
+                                spinner_key,
+                                tool_render::tool_display(&t.tool),
+                                t.tool_call_id.as_deref(),
+                                pi as u16,
+                            ) && tool_spinners
+                                .get(spinner_key.as_str())
                                 .is_some_and(|s| !s.is_idle())
-                        }))
+                        })
                     });
                     let token = msg_content_token(msg, config_tok, max_w, &self.tool_state);
                     let cache_hit = !is_streaming_msg
@@ -3878,16 +3937,16 @@ impl SessionView {
                         let dst_y = vp_top as u16;
                         let vis_h = ((cached_h as i32).min(vp_bottom - msg_top) - src_y as i32)
                             .max(0) as u16;
-                        for dy in 0..vis_h {
-                            let base = (src_y + dy) as usize * cached_w;
-                            for dx in 0..cached_w {
-                                if let Some(dst) =
-                                    buf.cell_mut((inner_area.x + dx as u16, dst_y + dy))
-                                {
-                                    *dst = cached_cells[base + dx].clone();
-                                }
-                            }
-                        }
+                        blit_cell_rows(
+                            buf,
+                            inner_area.x,
+                            dst_y,
+                            cached_cells,
+                            cached_w,
+                            usize::from(src_y),
+                            usize::from(vis_h),
+                            cached_w,
+                        );
                         render_actual_h = cached_h as i32;
                     } else {
                         // ── Fall back: temp buffer render (scratch reused across frames) ──
@@ -3945,16 +4004,16 @@ impl SessionView {
                         let temp_cells = temp.content();
                         let total_stride = inner_area.width as usize;
                         let dst_x = inner_area.x;
-                        for dy in 0..vis_h {
-                            let temp_y = src_y + dy;
-                            let dst_line_y = dst_y + dy;
-                            let base = temp_y as usize * total_stride;
-                            for dx in 0..total_stride {
-                                if let Some(dst) = buf.cell_mut((dst_x + dx as u16, dst_line_y)) {
-                                    *dst = temp_cells[base + dx].clone();
-                                }
-                            }
-                        }
+                        blit_cell_rows(
+                            buf,
+                            dst_x,
+                            dst_y,
+                            temp_cells,
+                            total_stride,
+                            usize::from(src_y),
+                            usize::from(vis_h),
+                            total_stride,
+                        );
 
                         // Save non-streaming messages to cache
                         if !is_streaming_msg && actual_h > 0 {
@@ -3966,9 +4025,7 @@ impl SessionView {
                             let mut cells = Vec::with_capacity(total_stride * ah as usize);
                             for dy in 0..ah {
                                 let base = dy as usize * total_stride;
-                                for dx in 0..total_stride {
-                                    cells.push(temp_cells[base + dx].clone());
-                                }
+                                cells.extend_from_slice(&temp_cells[base..base + total_stride]);
                             }
                             // Text regions are still content-only (no border/margin text).
                             let x_off_text = inner_area.x + 3;
@@ -4065,16 +4122,16 @@ impl SessionView {
                         let temp_cells = temp.content();
                         let line_stride = full_area.width as usize;
                         let dst_x = inner_area.x;
-                        for dy in 0..vis_h {
-                            let temp_y = src_y + dy;
-                            let dst_line_y = dst_y + dy;
-                            let base = temp_y as usize * line_stride;
-                            for dx in 0..line_stride {
-                                if let Some(dst) = buf.cell_mut((dst_x + dx as u16, dst_line_y)) {
-                                    *dst = temp_cells[base + dx].clone();
-                                }
-                            }
-                        }
+                        blit_cell_rows(
+                            buf,
+                            dst_x,
+                            dst_y,
+                            temp_cells,
+                            line_stride,
+                            usize::from(src_y),
+                            usize::from(vis_h),
+                            line_stride,
+                        );
                     }
                 } else if is_assistant_non_error && msg_bottom <= vp_bottom {
                     // ── Fully visible assistant: render directly, use actual height ──
@@ -4096,16 +4153,16 @@ impl SessionView {
                             if let Some(ref cached_cells) = self.msg_cache_cells[idx] {
                                 let w = self.msg_cache_w[idx] as usize;
                                 let h = self.msg_cache_h[idx];
-                                for dy in 0..visible_h.min(h) {
-                                    let base = dy as usize * w;
-                                    for dx in 0..w {
-                                        if let Some(cell) = buf
-                                            .cell_mut((inner_area.x + dx as u16, visible_top + dy))
-                                        {
-                                            *cell = cached_cells[base + dx].clone();
-                                        }
-                                    }
-                                }
+                                blit_cell_rows(
+                                    buf,
+                                    inner_area.x,
+                                    visible_top,
+                                    cached_cells,
+                                    w,
+                                    0,
+                                    visible_h.min(h) as usize,
+                                    w,
+                                );
                                 render_actual_h = h as i32;
 
                                 // Ensure text regions are cached for this message.
@@ -4154,15 +4211,17 @@ impl SessionView {
                             if !is_streaming_msg {
                                 let ah = render_actual_h as u16;
                                 let w = inner_area.width as usize;
+                                // Row-slice read: the saved rows are fully
+                                // inside the buffer's area (they were just
+                                // painted there), so one bounds-checked slice
+                                // per row replaces a per-cell `buf.cell(..)`.
+                                let buf_w = buf.area.width as usize;
+                                let buf_x = inner_area.x as usize;
                                 let mut cells = Vec::with_capacity(w * ah as usize);
                                 for dy in 0..ah {
-                                    for dx in 0..w {
-                                        let c = buf
-                                            .cell((inner_area.x + dx as u16, visible_top + dy))
-                                            .cloned()
-                                            .unwrap_or_default();
-                                        cells.push(c);
-                                    }
+                                    let base =
+                                        (visible_top + dy) as usize * buf_w + buf_x;
+                                    cells.extend_from_slice(&buf.content[base..base + w]);
                                 }
                                 // Region text is content-only (x1 = inner_area.x + 3):
                                 // the border/margin columns are stripped by
@@ -4336,17 +4395,16 @@ impl SessionView {
                                     let temp_cells = temp.content();
                                     let total_stride = inner_area.width as usize;
                                     let dst_x = inner_area.x;
-                                    for dy in 0..vis_h {
-                                        let base = dy as usize * total_stride;
-                                        let dst_line_y = dst_y + dy;
-                                        for dx in 0..total_stride {
-                                            if let Some(dst) =
-                                                buf.cell_mut((dst_x + dx as u16, dst_line_y))
-                                            {
-                                                *dst = temp_cells[base + dx].clone();
-                                            }
-                                        }
-                                    }
+                                    blit_cell_rows(
+                                        buf,
+                                        dst_x,
+                                        dst_y,
+                                        temp_cells,
+                                        total_stride,
+                                        0,
+                                        usize::from(vis_h),
+                                        total_stride,
+                                    );
 
                                     render_actual_h = actual_h.max(1);
 
@@ -4357,9 +4415,9 @@ impl SessionView {
                                         let mut cells = Vec::with_capacity(w * ah as usize);
                                         for dy in 0..ah {
                                             let base = dy as usize * total_stride;
-                                            for dx in 0..w {
-                                                cells.push(temp_cells[base + dx].clone());
-                                            }
+                                            cells.extend_from_slice(
+                                                &temp_cells[base..base + w],
+                                            );
                                         }
                                         // Region text is content-only (x1 = inner_area.x
                                         // + 3): the border/margin columns are stripped

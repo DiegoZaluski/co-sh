@@ -1,4 +1,5 @@
 use std::io;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -122,6 +123,9 @@ fn apply_background_preference(mut t: Theme, transparent_background: bool) -> Th
     }
     t
 }
+
+/// Header back button label.
+const BACK_LINK_TEXT: &str = "← esc";
 
 /// Header link that opens the project's bug-report page.
 /// TODO: replace the URL with the real GitHub issues URL.
@@ -476,6 +480,8 @@ pub struct App {
     sidebar_focused: bool,
     /// Clickable area of the "bug report" header link (None when not drawn).
     bug_link_area: Option<Rect>,
+    /// Clickable area of the header's back/escape button (None when not drawn).
+    back_link_area: Option<Rect>,
     /// Astra-style starfield flourish in the session header (see
     /// `component/sparkle.rs`). Session-router-only: armed per session id,
     /// drawn exclusively on blank cells of the header row.
@@ -728,6 +734,7 @@ impl App {
             needs_full_redraw: false,
             sidebar_focused: false,
             bug_link_area: None,
+            back_link_area: None,
             update_event_rx,
             update_event_tx,
             update_changelog_url: None,
@@ -887,10 +894,23 @@ impl App {
             }
 
             let draw_started = Instant::now();
-            terminal.draw(|frame| {
+            // Synchronized Output (DEC 2026): the frame diff is emitted while
+            // the terminal suppresses visual updates, so Windows Terminal (and
+            // other conforming terminals) paints the WHOLE frame atomically
+            // instead of applying escape sequences line-by-line — the visible
+            // "gradual painting" during streaming on Windows. Unsupported
+            // terminals ignore the marker, so this is safe everywhere.
+            let _ = terminal.backend_mut().write_all(b"\x1b[?2026h");
+            // `.map(|_| ())`: `draw` returns a `CompletedFrame` that borrows
+            // the terminal — dropping it before the `EndSynchronizedUpdate`
+            // write keeps the borrow checker (and the frame alive) happy.
+            let draw_result = terminal.draw(|frame| {
                 self.render(frame, delta_secs);
-            })?;
+            }).map(|_| ());
+            let _ = terminal.backend_mut().write_all(b"\x1b[?2026l");
+            let _ = terminal.backend_mut().flush();
             pacer.record_draw(draw_started.elapsed());
+            draw_result?;
 
             if self.live_requested || self.session_view.pill_animating() {
                 // When auto-scroll is active, don't block on event::poll.
@@ -902,7 +922,7 @@ impl App {
                 if event::poll(Duration::from_millis(8))? && self.handle_events()? {
                     break;
                 }
-            } else if self.handle_events()? {
+            } else if self.handle_events_with_wait(self.idle_wait())? {
                 break;
             }
 
@@ -970,17 +990,24 @@ impl App {
             .unwrap_or_default()
             .as_millis() as u64;
 
-        let session_records = self.session_records();
-        let session_tokens = crate::usage::total_tokens(&session_records);
-        let session_cost = Self::sum_cost(&session_records);
+        // Iterate by reference — cloning the session's records every frame
+        // (this panel repaints each frame while open) showed up as a
+        // per-frame allocation proportional to the session's request count.
+        let session_iter = || {
+            self.usage_records
+                .iter()
+                .filter(|r| Some(r.session_id.as_str()) == self.state.current_session_id.as_deref())
+        };
+        let session_tokens = crate::usage::total_tokens_iter(session_iter());
+        let session_cost = Self::sum_cost_iter(session_iter());
 
         let period = summarize(&self.usage_records, self.usage_period, now_ms);
 
         crate::left_panel::dashboard::DashboardData {
             session_tokens,
             session_cost,
-            period,
             period_enum: self.usage_period,
+            period,
         }
     }
 
@@ -1001,12 +1028,24 @@ impl App {
     /// `None` when no record resolved a price yet (no provider-reported cost
     /// and no catalog estimate) — a guessed `$0` is never reported.
     fn session_cost(&self) -> Option<f64> {
-        let records = self.session_records();
-        Self::sum_cost(&records)
+        let Some(sid) = self.state.current_session_id.as_deref() else {
+            return None;
+        };
+        // Runs on the render hot path (header, every frame): iterate by
+        // reference instead of cloning the session's records into a Vec.
+        Self::sum_cost_iter(
+            self.usage_records
+                .iter()
+                .filter(|r| r.session_id == sid),
+        )
     }
 
-    /// Sum the resolved costs of `records`; `None` when none resolved.
-    fn sum_cost(records: &[crate::usage::UsageRecord]) -> Option<f64> {
+    /// Sum the resolved costs of an iterator of records; `None` when none
+    /// resolved.
+    fn sum_cost_iter<'a, I>(records: I) -> Option<f64>
+    where
+        I: IntoIterator<Item = &'a crate::usage::UsageRecord>,
+    {
         let mut total = 0.0;
         let mut has = false;
         for r in records {
@@ -1016,6 +1055,11 @@ impl App {
             }
         }
         has.then_some(total)
+    }
+
+    /// Sum the resolved costs of `records`; `None` when none resolved.
+    fn sum_cost(records: &[crate::usage::UsageRecord]) -> Option<f64> {
+        Self::sum_cost_iter(records.iter())
     }
 
     /// Resolve a request's recorded cost as `(value, reported)`.

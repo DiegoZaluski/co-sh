@@ -6212,7 +6212,9 @@ fn render_pill_once(view: &mut SessionView, area: Rect) -> Buffer {
 fn render_pill_anchored(view: &mut SessionView, area: Rect, anchor_y: u16) -> Buffer {
     let mut buf = Buffer::empty(area);
     let theme = test_theme();
-    view.render_pill_overlay(&mut buf, anchor_y, area, &theme);
+    // One 60 fps frame's worth of delta — the pill animation is time-based,
+    // so tests step it frame-by-frame with a realistic frame delta.
+    view.render_pill_overlay(&mut buf, anchor_y, area, &theme, 1.0 / 60.0);
     buf
 }
 

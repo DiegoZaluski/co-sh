@@ -58,7 +58,100 @@ pub fn seed_tool_call_seq_beyond_session(session: &Session) {
 
 impl App {
     pub(super) fn handle_events(&mut self) -> io::Result<bool> {
-        // NOTE: no toast tick here. `handle_events()` is only reached when
+        self.handle_events_with_wait(Duration::from_millis(50))
+    }
+
+    /// How long the idle loop may block waiting for input before redrawing.
+    ///
+    /// Every animation in the TUI is time-based (cursor blink, toast
+    /// auto-dismiss, sparkle, paste-burst window, dialog spinners), so an
+    /// idle frame only needs to happen when the next one of those deadlines
+    /// arrives. Blocking until then instead of the fixed 50 ms drops the
+    /// idle redraw rate from ~20 fps to the animation cadence — on mid-range
+    /// Windows laptops that removes a permanent CPU/thermal tax that made
+    /// every other frame feel slow. Live frames (streaming, spinners,
+    /// auto-scroll) never reach this path: `run()` bypasses it entirely via
+    /// the frame-pacer wait.
+    pub(super) fn idle_wait(&self) -> Duration {
+        const DEFAULT: Duration = Duration::from_millis(200);
+        const MIN: Duration = Duration::from_millis(16);
+
+        // Toast countdown: repaint as soon as the remaining lifetime can
+        // still change the visible state (its progress is not animated
+        // frame-by-frame, so the expiry tick is the only deadline).
+        if let Some(toast) = &self.toast_state.current {
+            return MIN.max(Duration::from_millis(toast.duration_ms.saturating_sub(self.toast_state.elapsed)));
+        }
+
+        // Cursor blink: the prompt cursor is On for the first 500 ms after
+        // activity, then toggles every 500 ms — wake at the next toggle.
+        let now = std::time::SystemTime::now();
+        let blink_deadline = |cursor: &crate::component::cursor::Cursor| -> Option<Duration> {
+            let idle_ms = now.duration_since(cursor.last_input_at).ok()?.as_millis() as u64;
+            if idle_ms < 500 {
+                // Steady-on until the blink cycle starts.
+                return Some(Duration::from_millis(500 - idle_ms));
+            }
+            let into_cycle = now
+                .duration_since(cursor.blink_start)
+                .ok()?
+                .as_millis() as u64
+                % 1000;
+            Some(Duration::from_millis(1000 - into_cycle))
+        };
+        if matches!(self.mode(), AppMode::Session)
+            && !self.question_dialog.visible
+            && !self.permission_dialog.visible
+            && !self.queue_choice_dialog.visible
+            && !self.free_gateway_dialog.visible
+        {
+            if let Some(wait) = blink_deadline(&self.prompt_view.cursor) {
+                return wait.max(MIN);
+            }
+        }
+        // Modal dialog stack cursors blink too.
+        if let Some(d) = self.dialog.current()
+            && let Some(wait) = blink_deadline(&d.cursor)
+        {
+            return wait.max(MIN);
+        }
+
+        // RAG input and AddProvider search bar have blinking cursors as well
+        // (neither route activates the live-render gate on its own).
+        if let Some(wait) = blink_deadline(&self.add_provider_view.search_bar.cursor) {
+            return wait.max(MIN);
+        }
+        #[cfg(feature = "embed")]
+        if let Some(wait) = blink_deadline(&self.rag_view.url_input.cursor) {
+            return wait.max(MIN);
+        }
+
+        // Paste burst in flight: the flush is due BURST_WINDOW after the
+        // last absorbed key — wake exactly then so a long paste lands
+        // atomically at the right moment instead of up to 200 ms late.
+        if self.paste_burst_pending_flush_deadline() {
+            return MIN;
+        }
+
+        // Header sparkle flourish: time-driven starfield — keep redraws at
+        // animation cadence while it plays.
+        if self.sparkle.is_animating() {
+            return Duration::from_millis(33);
+        }
+
+        // ModelList loading spinner on top of the dialog stack: frame-counted
+        // (advanced per rendered frame), so it needs regular idle frames.
+        if let Some(d) = self.dialog.current()
+            && matches!(d.dialog_type, DialogType::ModelList { loading: true, .. })
+        {
+            return Duration::from_millis(33);
+        }
+
+        DEFAULT
+    }
+
+    pub(super) fn handle_events_with_wait(&mut self, wait: Duration) -> io::Result<bool> {
+        // NOTE: no toast tick here. `handle_events*()` is only reached when
         // input events are pending (during the agent loop it can be skipped
         // for whole seconds while the user watches the stream), so a tick
         // with a fixed step would let toasts outlive their programmed
@@ -74,7 +167,7 @@ impl App {
         // burst ended. Draining the whole buffer per call applies every
         // pending input BEFORE the next render, keeping the cursor speed
         // constant at any event rate.
-        if !event::poll(Duration::from_millis(50))? {
+        if !event::poll(wait)? {
             return Ok(false);
         }
 

@@ -102,6 +102,13 @@ impl SparkleState {
         self.render_at(frame, Instant::now(), buf);
     }
 
+    /// Whether the flourish is currently playing (Visible phase). The idle
+    /// render loop uses this to keep its poll timeout short — a time-driven
+    /// animation would otherwise step at the (much slower) idle redraw rate.
+    pub const fn is_animating(&self) -> bool {
+        matches!(self.phase, Phase::Visible(_))
+    }
+
     fn render_at(&mut self, frame: SparkleFrame<'_>, now: Instant, buf: &mut Buffer) {
         // Dismiss outside the session router or without a session; a new
         // session id arms a fresh flourish.

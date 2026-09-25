@@ -736,6 +736,25 @@ impl App {
 
         let mouse = MouseEvent::new(event_type, button, x, y, modifiers);
 
+        // Header back button — invoke the same Esc pipeline used by the
+        // keyboard so every route keeps its existing return/close behavior.
+        // Handle on release so one click cannot execute Esc twice (Down + Up).
+        if event_type == MouseEventType::Up
+            && button == MouseButton::Left
+            && self.back_link_area.is_some_and(|link_area| {
+                x >= link_area.x
+                    && x < link_area.right()
+                    && y >= link_area.y
+                    && y < link_area.bottom()
+            })
+        {
+            self.process_key_event(crossterm::event::KeyEvent::new(
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+            ))?;
+            return Ok(true);
+        }
+
         // Bug report link in the header — clicking opens the GitHub issues page.
         if let Some(link_area) = self.bug_link_area
             && x >= link_area.x

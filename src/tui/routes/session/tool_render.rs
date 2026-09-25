@@ -647,15 +647,41 @@ pub fn renderer_spinner_key(
     tool_call_id: Option<&str>,
     part_idx: u16,
 ) -> Option<String> {
+    let mut key = String::new();
+    renderer_spinner_key_into(&mut key, display, tool_call_id, part_idx).then_some(key)
+}
+
+/// Write the key used by a tool renderer into a reusable buffer.
+///
+/// This keeps the cache-bypass check allocation-free while sharing the exact
+/// key mapping with [`renderer_spinner_key`].
+pub fn renderer_spinner_key_into(
+    key: &mut String,
+    display: &str,
+    tool_call_id: Option<&str>,
+    part_idx: u16,
+) -> bool {
     if matches!(display, "write" | "edit" | "question" | "todo") {
-        return None;
+        return false;
     }
     let key_display = if tool_pre_creates_spinner(display) {
         display
     } else {
         "generic"
     };
-    Some(spinner_key(key_display, tool_call_id, part_idx))
+    key.clear();
+    key.push_str(key_display);
+    match tool_call_id {
+        Some(id) => {
+            key.push(':');
+            key.push_str(id);
+        }
+        None => {
+            key.push('_');
+            let _ = write!(key, "{part_idx}");
+        }
+    }
+    true
 }
 
 pub fn render_shell(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
