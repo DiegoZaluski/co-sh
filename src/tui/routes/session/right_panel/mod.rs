@@ -48,13 +48,39 @@ fn blend(base: RGBA, accent: RGBA, t: f32) -> RGBA {
     RGBA::from_ints(mix(ar, br), mix(ag, bg_), mix(ab, bb), 255)
 }
 
-/// Box-tint accent for a review severity (Phase 3b.1): the theme's
-/// success/warning/error colors stand in for green/yellow/red.
-fn severity_rgba(sev: cosh_tools::subagent::severity::Severity, theme: &Theme) -> RGBA {
+/// Opacity of the severity background tint: how much of the verdict color
+/// mixes into the window's background. Raised from the original 0.18: the
+/// near-black box background dragged every tint's luminance down so far
+/// that the theme's amber warning read as BROWN (dark yellow is
+/// perceptually brown), and even green/red barely registered. The value is
+/// set by the yellow end: yellow only reads as yellow above roughly 40%
+/// lightness, and mixing over the near-black background needs ~0.65 to
+/// get there (#FACC15 → #A78914, a goldenrod clearly in the yellow hue
+/// family — brown sits around hue 30°, this at 49°). At that opacity
+/// green lands on #1B8543 and red on #A03132, both unmistakable, and the
+/// light body text keeps workable contrast on DARK backgrounds (≈3.8:1
+/// on green, ≈5.7:1 on red, ≈2.7:1 on the golden yellow — the least
+/// readable of the three, accepted so the verdict color survives the
+/// blend; on light-background themes the same opacity would need its own
+/// audit, out of scope here).
+const SEVERITY_TINT_ALPHA: f32 = 0.65;
+
+/// Verdict colors for a review-severity box tint: a dedicated palette of
+/// pure, vivid, mid-tone green/yellow/red, deliberately NOT the theme's
+/// success/warning/error stand-ins. Two findings forced the change: theme
+/// semantic colors are not hue-stable across themes (the `orng` theme's
+/// `success` is blue), and dark or earthy tones collapse through the
+/// background blend into perceptually different colors — the cosh theme's
+/// amber `warning` (#D4A742) at the old 18% blend over the near-black
+/// background read as brown, not yellow. These constants are
+/// theme-independent, so a verdict always reads as the same green/yellow/
+/// red in every theme; the unblended color also drives the running
+/// tool-call spinner's beam, where the yellow shows at full vividness.
+fn severity_rgba(sev: cosh_tools::subagent::severity::Severity) -> RGBA {
     match sev {
-        cosh_tools::subagent::severity::Severity::Green => theme.success,
-        cosh_tools::subagent::severity::Severity::Yellow => theme.warning,
-        cosh_tools::subagent::severity::Severity::Red => theme.error,
+        cosh_tools::subagent::severity::Severity::Green => RGBA::from_hex("#22C55E"),
+        cosh_tools::subagent::severity::Severity::Yellow => RGBA::from_hex("#FACC15"),
+        cosh_tools::subagent::severity::Severity::Red => RGBA::from_hex("#EF4444"),
     }
 }
 
@@ -619,7 +645,11 @@ fn render_subagent_section(
                 // reads as belonging to a different verdict. Without a
                 // verdict the padding keeps the box's own default color.
                 if let Some(sev) = state.pty_sessions[sess_idx].severity {
-                    let tint = blend(theme.background_element, severity_rgba(sev, theme), 0.18);
+                    let tint = blend(
+                        theme.background_element,
+                        severity_rgba(sev),
+                        SEVERITY_TINT_ALPHA,
+                    );
                     let mut fill = BoxRenderable::new();
                     fill.set_background_color(Some(tint.into()));
                     fill.render_self(buf, Rect::new(x, pad_y, max_w, 1));
@@ -640,8 +670,11 @@ fn render_subagent_section(
         .iter()
         .map(|(_, s)| match s.severity {
             Some(sev) => {
-                let accent = severity_rgba(sev, theme);
-                (blend(theme.background_element, accent, 0.18), accent)
+                let accent = severity_rgba(sev);
+                (
+                    blend(theme.background_element, accent, SEVERITY_TINT_ALPHA),
+                    accent,
+                )
             }
             None => (theme.background_element, theme.text),
         })
@@ -1672,8 +1705,8 @@ mod tests {
 
         let red_tint = rgba_color(blend(
             theme.background_element,
-            severity_rgba(cosh_tools::subagent::severity::Severity::Red, &theme),
-            0.18,
+            severity_rgba(cosh_tools::subagent::severity::Severity::Red),
+            SEVERITY_TINT_ALPHA,
         ));
         let plain = rgba_color(theme.background_element);
         let got_red = buf.cell((1u16, 3u16)).map(|c| c.bg);
@@ -3261,8 +3294,8 @@ mod tests {
         let bottom_bg = buf.cell((1u16, max_h - 1)).map(|c| c.bg);
         let red_tint = blend(
             theme.background_element,
-            severity_rgba(cosh_tools::subagent::severity::Severity::Red, &theme),
-            0.18,
+            severity_rgba(cosh_tools::subagent::severity::Severity::Red),
+            SEVERITY_TINT_ALPHA,
         );
         let plain = theme.background_element;
         assert_eq!(
