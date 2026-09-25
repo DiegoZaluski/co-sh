@@ -1,5 +1,47 @@
-use super::{App, HOME_LOCK, mod_key};
+use super::{App, HOME_LOCK, isolate_home, mod_key};
 use crossterm::event::{KeyCode, KeyModifiers};
+
+/// Tab (ToggleMode) persists the cycled-to mode as the user's preference:
+/// a NEW App instance starts in that mode instead of the Build default.
+/// A legacy config without a mode selection keeps starting in Build.
+#[tokio::test]
+async fn toggled_mode_persists_and_restores_for_new_sessions() {
+    use cosh::harness::Mode;
+
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    assert_eq!(app.state.mode, Mode::Build);
+
+    // One Tab: Build → Ask, and the selection is persisted.
+    app.process_key_event(mod_key(KeyCode::Tab, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.state.mode, Mode::Ask);
+    assert_eq!(
+        crate::util::setup::Setup::load().persisted_mode(),
+        Some(Mode::Ask),
+        "the cycled-to mode must be saved as the preference"
+    );
+
+    // A fresh app (new session) restores the persisted mode.
+    let restored = App::new("/tmp".to_string());
+    assert_eq!(
+        restored.state.mode, Mode::Ask,
+        "a new session must start in the last used mode"
+    );
+
+    // A legacy setup.json without a mode selection starts in Build.
+    let dir = std::env::var("COSH_CONFIG_DIR").expect("HOME tests isolate the config dir");
+    std::fs::write(
+        std::path::Path::new(&dir).join("setup.json"),
+        r#"{"appearance": {}}"#,
+    )
+    .unwrap();
+    let legacy = App::new("/tmp".to_string());
+    assert_eq!(legacy.state.mode, Mode::Build);
+}
 
 /// Alt+← / Alt+→ (NextAgent/PrevAgent keymap bindings) must switch the
 /// right-panel focus across agent queues — the ONLY way to reach a
