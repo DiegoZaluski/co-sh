@@ -1499,6 +1499,7 @@ dependencies = [
  "parking_lot",
  "pulldown-cmark",
  "ratatui",
+ "rayon",
  "rcgen",
  "regex",
  "reqwest 0.13.4",

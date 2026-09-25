@@ -62,6 +62,10 @@ chrono = "0.4"
 log = { version = "0.4", features = ["std"] }
 dotenvy = "0.15.7"
 anyhow = "1"
+# Parallel cold rebuild of the session view's height cache (a left-panel
+# toggle re-estimates every message height; see SessionView's width-snapshot
+# logic). Same crate/version the workspace already uses in cosh-sdk.
+rayon = "1"
 # Reused workspace-wide at these exact versions (see crates/cosh-sdk,
 # crates/cosh-tools, crates/cosh-recall): error enums, header maps, URL
 # parsing for the MCP client. Not new crates, just newly direct.
