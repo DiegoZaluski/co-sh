@@ -193,6 +193,11 @@ impl App {
                     && should_show_right_panel(self.terminal_size().width, &self.state.right_panel)
                     && self.is_in_right_panel(x)
                 {
+                    // A header button click maximizes/restores a section and
+                    // must NOT start a drag selection or focus a slot.
+                    if self.state.right_panel.header_click(x, y) {
+                        return Ok(true);
+                    }
                     self.state.right_panel.focus_at(y);
                     self.state.right_panel.begin_selection(x, y);
                     return Ok(true);

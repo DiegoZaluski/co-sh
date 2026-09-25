@@ -6571,7 +6571,7 @@ fn bench_left_panel_toggle_reflow_time() {
 #[test]
 #[ignore = "diagnostic probe; run explicitly in release"]
 fn bench_height_cache_width_switch_probe() {
-    let theme = test_theme();
+    // let theme = test_theme();
     let config = test_config();
     let session = bench_long_session(400);
 
@@ -6641,7 +6641,12 @@ fn bench_toggle_frame_decomposition() {
     eprintln!("warm render at closed width: {:?}", t.elapsed());
 
     // Toggle: render with a narrower session area (as app does).
-    let open_area = Rect::new(crate::left_panel::LEFT_PANEL_WIDTH, 0, area.width - crate::left_panel::LEFT_PANEL_WIDTH, area.height);
+    let open_area = Rect::new(
+        crate::left_panel::LEFT_PANEL_WIDTH,
+        0,
+        area.width - crate::left_panel::LEFT_PANEL_WIDTH,
+        area.height,
+    );
     let t = std::time::Instant::now();
     view.render(&mut buf, open_area, &state, &theme, &config, 0.016);
     eprintln!("toggle frame (open): {:?}", t.elapsed());

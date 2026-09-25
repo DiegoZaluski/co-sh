@@ -904,6 +904,35 @@ impl SubagentActivity {
     }
 }
 
+/// Icon-only label of the header button that brings the MIXED view back
+/// (a "mosaic/grid" glyph: the tiled multi-section layout it restores).
+/// Drawn as a bare text-colored glyph — no background pill.
+pub const MIXED_HEADER_ICON: &str = "\u{25E9}";
+
+/// Button labels for each section kind, as drawn in the panel header.
+pub const HEADER_SECTION_LABELS: [(SectionKind, &str); 3] = [
+    (SectionKind::Todo, "TODO"),
+    (SectionKind::Bash, "Bash"),
+    (SectionKind::Subagent, "Subagent"),
+];
+
+/// One clickable region of the right panel's header row. `target: None` is
+/// the icon-only mixed button (back to the tiled multi-section view);
+/// `Some(kind)` maximizes that section over the whole panel. The mixed
+/// button is ALWAYS present while two or more sections exist — including
+/// while a section is maximized — so switching the owner costs one click.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeaderButton {
+    /// Section the button maximizes, or `None` for the mixed button.
+    pub target: Option<SectionKind>,
+    /// First screen column of the button (inclusive).
+    pub x0: u16,
+    /// Last screen column of the button (exclusive).
+    pub x1: u16,
+    /// Screen row the button occupies (the header row).
+    pub top: u16,
+}
+
 /// Identifies which section of the right panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SectionKind {
@@ -1108,6 +1137,15 @@ pub struct RightPanelState {
     /// (`session index in pty_sessions`, top, bottom exclusive) — resolves
     /// which AGENT queue a click targeted.
     pub(crate) subagent_window_layouts: Vec<(usize, i32, i32)>,
+    /// Section currently maximized over the whole panel (`None` = the mixed
+    /// view). Set by clicking the section's header button, cleared by the
+    /// restore button, and auto-cleared when the maximized section loses its
+    /// content (a maximized panel must never render empty).
+    pub maximized_section: Option<SectionKind>,
+    /// Clickable regions of the header row from the last render (consumed by
+    /// `header_click`). Cleared with the section layouts when the panel is
+    /// hidden.
+    header_buttons: Vec<HeaderButton>,
     /// Directory holding this state instance's spilled outputs. Unique per
     /// instance; removed on drop.
     spill_dir: PathBuf,
@@ -1218,6 +1256,8 @@ impl RightPanelState {
             agent_navs: HashMap::new(),
             visible_subagents: Vec::new(),
             subagent_window_layouts: Vec::new(),
+            maximized_section: None,
+            header_buttons: Vec::new(),
             spill_dir: Self::fresh_spill_dir(),
             scroll_y: 0,
             content_height: 0,
@@ -1615,6 +1655,45 @@ impl RightPanelState {
         self.section_layouts.clear();
         // Stale window bands must never map a click to an agent queue.
         self.subagent_window_layouts.clear();
+        // Stale header buttons must never map a click to a section either.
+        self.header_buttons.clear();
+    }
+
+    /// The clickable header buttons of the last render (empty when the mixed
+    /// view shows fewer than two sections — the buttons only exist when there
+    /// is something to prioritize).
+    pub fn header_buttons(&self) -> &[HeaderButton] {
+        &self.header_buttons
+    }
+
+    /// Hit-test the header row: maximize the clicked section, or (on the
+    /// mixed button) bring the mixed view back. Returns whether the click
+    /// landed on a button (otherwise the click belongs to other handlers).
+    pub fn header_click(&mut self, x: u16, y: u16) -> bool {
+        let Some(button) = self
+            .header_buttons
+            .iter()
+            .find(|b| y == b.top && x >= b.x0 && x < b.x1)
+            .copied()
+        else {
+            return false;
+        };
+        self.maximized_section = button.target;
+        true
+    }
+
+    /// Screen rect `(x0, x1 exclusive, top, bottom exclusive)` of the button
+    /// that maximizes `kind` in the last render, for tests and hit-test callers.
+    pub fn header_button_rect(&self, kind: SectionKind) -> Option<(u16, u16, u16, u16)> {
+        self.header_buttons
+            .iter()
+            .find_map(|b| (b.target == Some(kind)).then_some((b.x0, b.x1, b.top, b.top + 1)))
+    }
+
+    /// Register the header buttons rendered this frame (called by the renderer
+    /// after it has drawn the header row).
+    pub(crate) fn set_header_buttons(&mut self, buttons: Vec<HeaderButton>) {
+        self.header_buttons = buttons;
     }
 
     /// Record the layout of one visible section (called by the renderer).

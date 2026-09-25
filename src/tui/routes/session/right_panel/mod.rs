@@ -214,6 +214,105 @@ fn subagent_natural_height(state: &mut RightPanelState, wrap_w: u16) -> i32 {
     }
 }
 
+/// Compute the clickable rects of the header row: one button per EXISTING
+/// section plus the icon-only mixed button right-aligned at the edge. The
+/// buttons exist whenever two or more boxes EXIST — the rule counts the
+/// sections present in the panel, not the ones currently displayed, so the
+/// buttons survive maximization and switching the owner costs one click.
+/// The mixed button is set apart from the section buttons by 2 columns.
+fn build_header_buttons(
+    x: u16,
+    y: u16,
+    max_w: u16,
+    present: &[bool; 3],
+) -> Vec<types::HeaderButton> {
+    let mut buttons = Vec::new();
+    // The mixed button owns the header's right edge: the bare glyph (1 col)
+    // plus one clearance column on each side, 2 columns apart from the
+    // section buttons.
+    let icon_w = types::MIXED_HEADER_ICON.chars().count() as u16;
+    let mixed_x1 = x.saturating_add(max_w);
+    let mixed_x0 = mixed_x1.saturating_sub(icon_w + 2);
+    let section_limit = mixed_x0.saturating_sub(2);
+    let mut cx = x;
+    for (kind, label) in types::HEADER_SECTION_LABELS {
+        if !present[types::section_kind_index(kind)] {
+            continue;
+        }
+        let w = label.chars().count() as u16 + 2;
+        if cx.saturating_add(w) > section_limit {
+            break;
+        }
+        buttons.push(types::HeaderButton {
+            target: Some(kind),
+            x0: cx,
+            x1: cx + w,
+            top: y,
+        });
+        cx += w + 1;
+    }
+    buttons.push(types::HeaderButton {
+        target: None,
+        x0: mixed_x0,
+        x1: mixed_x1,
+        top: y,
+    });
+    buttons
+}
+
+/// Paint the header buttons computed by [`build_header_buttons`]: the section
+/// buttons are bare text on the panel background — no background of their
+/// own, like the mixed icon beside them — and the section that currently owns
+/// the panel (`selected`) has its LABEL painted in the fixed selection color
+/// so the user can see at a glance which button is active.
+fn draw_header_row(
+    buf: &mut Buffer,
+    buttons: &[types::HeaderButton],
+    selected: Option<types::SectionKind>,
+    theme: &Theme,
+) {
+    for button in buttons {
+        match button.target {
+            Some(kind) => {
+                let label = types::HEADER_SECTION_LABELS
+                    .iter()
+                    .find(|(k, _)| *k == kind)
+                    .map(|(_, label)| *label)
+                    .unwrap_or("");
+                // The selected section's label is painted in the fixed
+                // selection color — the FONT changes, the background stays
+                // the panel's own; the highlight follows the clicks and
+                // vanishes when the mixed view returns.
+                let fg = if selected == Some(kind) {
+                    theme.primary
+                } else {
+                    theme.text
+                };
+                let style = Style::default().fg(rgba_color(fg));
+                let padded = format!(" {label} ");
+                // Width must cover exactly the chip: an oversized bound
+                // would overflow draw_text's internal `checked_add` and
+                // silently skip drawing (the draw_chip contract).
+                let w = padded.chars().count() as u16;
+                draw_text(buf, &padded, button.x0, button.top, w, style);
+            }
+            // The mixed button NEVER takes the selection color: it is a
+            // layout-level control, not a member of the group.
+            None => {
+                let style = Style::default().fg(rgba_color(theme.text));
+                draw_text(
+                    buf,
+                    types::MIXED_HEADER_ICON,
+                    button.x0 + 1,
+                    button.top,
+                    1,
+                    style,
+                );
+            }
+        }
+    }
+}
+
 /// Render the right panel with section-based layout and dynamic space borrowing.
 pub fn render_right_panel(
     buf: &mut Buffer,
@@ -240,6 +339,30 @@ pub fn render_right_panel(
 
     state.visible_height = viewport_h;
 
+    let (has_todos, has_bash, has_subagent) = count_sections(state);
+    let present_mask = [has_todos, has_bash, has_subagent];
+
+    // ── Phase M: the maximized section ───────────────────────────────
+    // A section that lost its content while maximized (todo list cleared,
+    // last PTY finished) falls back to the mixed view: a maximized panel
+    // must never render empty.
+    if let Some(kind) = state.maximized_section
+        && !present_mask[types::section_kind_index(kind)]
+    {
+        state.maximized_section = None;
+    }
+    // The header exists whenever two or more boxes EXIST (the rule counts
+    // the sections present in the panel, not the ones currently displayed,
+    // so the buttons survive maximization). It owns row 0 only: the 1-row
+    // margin below it IS each section's own TOP_GAP row, so the boxes begin
+    // exactly one row down — the same single-row rhythm as before.
+    let header_rows =
+        if state.maximized_section.is_some() || present_mask.iter().filter(|p| **p).count() >= 2 {
+            1u16
+        } else {
+            0
+        };
+
     // ── Phase 0: resolve the visible subagent windows ────────────────
     // The subagent section owns its area and may BORROW leftover space
     // from the todo/bash areas (loans have no time guarantee — owners
@@ -247,8 +370,22 @@ pub fn render_right_panel(
     // window selection ranks focused > pinned > running > finished so
     // the queue being navigated is never hidden by stale content.
     let wrap_w = inner_w.saturating_sub(2);
-    let (has_todos, has_bash, has_subagent) = count_sections(state);
-    {
+    state.subagent_wrap_w = wrap_w;
+    if state.maximized_section.is_some() {
+        // Maximized: the section owns the whole viewport (minus the header
+        // rows and the bottom margin), so the subagent window budget is the
+        // full space instead of the mixed view's leftover.
+        if has_subagent {
+            let budget = (viewport_h
+                - i32::from(header_rows)
+                - i32::from(has_subagent) * BOX_OVERHEAD
+                - BOTTOM_MARGIN)
+                .max(types::MIN_WINDOW_ROWS);
+            state.resolve_visible_subagents(wrap_w, budget);
+        } else {
+            state.visible_subagents.clear();
+        }
+    } else {
         let fixed_nat = natural_section_height(state, inner_w, types::SectionKind::Todo)
             + natural_section_height(state, inner_w, types::SectionKind::Bash);
         let present = i32::from(has_todos) + i32::from(has_bash) + i32::from(has_subagent);
@@ -262,8 +399,8 @@ pub fn render_right_panel(
         // budget: without it a tall window list would grow back over the
         // reserved row in Phase 2.
         let budget =
-            (viewport_h - gaps - fixed_nat - frame - BOTTOM_MARGIN).max(types::MIN_WINDOW_ROWS);
-        state.subagent_wrap_w = wrap_w;
+            (viewport_h - gaps - fixed_nat - frame - BOTTOM_MARGIN - i32::from(header_rows))
+                .max(types::MIN_WINDOW_ROWS);
         if has_subagent {
             state.resolve_visible_subagents(wrap_w, budget);
         } else {
@@ -277,6 +414,14 @@ pub fn render_right_panel(
         (types::SectionKind::Bash, has_bash),
         (types::SectionKind::Subagent, has_subagent),
     ];
+
+    // Maximized: the chosen section alone owns the panel; the other sections
+    // are not laid out (their bands would still map mouse events to hidden
+    // content).
+    let sections_info: Vec<(types::SectionKind, bool)> = match state.maximized_section {
+        Some(kind) => sections_info.iter().map(|&(k, _)| (k, k == kind)).collect(),
+        None => sections_info.to_vec(),
+    };
 
     let visible: Vec<(types::SectionKind, i32)> = sections_info
         .iter()
@@ -297,7 +442,9 @@ pub fn render_right_panel(
     // The bottom margin is carved out of the layout space up front: every
     // section is capped to what fits ABOVE the reserved row, so the gap
     // survives even when sections are squeezed to their scrollable bands.
-    let available = viewport_h - gap_total - BOTTOM_MARGIN;
+    // The header rows (button row + its 1-row margin) are reserved the same
+    // way: sections never grow back over the header.
+    let available = viewport_h - gap_total - BOTTOM_MARGIN - i32::from(header_rows);
     let base_h = available / count;
 
     let mut allocations = vec![0i32; visible.len()];
@@ -367,7 +514,20 @@ pub fn render_right_panel(
     state.clear_section_layouts();
     let rebuild_regions =
         state.pty_gen != state.text_regions_gen || inner_w != state.text_regions_w;
-    let mut cur_y = viewport_top;
+
+    // ── Phase H: the header row ──────────────────────────────────────
+    // The header owns row 0; the margin below it IS each section's own
+    // TOP_GAP row, so the boxes begin exactly one row down (the same
+    // single-row rhythm the mixed view already had). The buttons are
+    // recomputed each frame so a section appearing or disappearing updates
+    // the row immediately.
+    let mut cur_y = viewport_top + i32::from(header_rows);
+    if header_rows > 0 {
+        let buttons = build_header_buttons(inner_x, viewport_top as u16, inner_w, &present_mask);
+        draw_header_row(buf, &buttons, state.maximized_section, theme);
+        state.set_header_buttons(buttons);
+    }
+
     for (pos, &idx) in render_order.iter().enumerate() {
         let (kind, natural_h) = visible[idx];
         let allocated = allocations[idx].max(1) as u16;
@@ -1633,6 +1793,11 @@ mod tests {
             }
         }
         s
+    }
+
+    /// Whether ANY cell of the `x0..x1` span at row `y` carries `fg`.
+    fn column_fg_has(buf: &Buffer, x0: u16, x1: u16, y: u16, fg: ratatui::style::Color) -> bool {
+        (x0..x1).any(|x| buf.cell((x, y)).map(|c| c.fg) == Some(fg))
     }
 
     /// The subagent body is rendered as markdown (like the chat content):
@@ -3432,5 +3597,491 @@ mod tests {
             Some(rgba_color(plain)),
             "bottom pad = default box background (last window has no verdict)"
         );
+    }
+
+    /// Panel state with one section of each kind (todo + bash + subagent).
+    fn full_panel_state() -> RightPanelState {
+        let mut state = RightPanelState::new();
+        state.set_todos(vec![types::TodoItem {
+            status: "pending".to_string(),
+            content: "task one".to_string(),
+        }]);
+        state.start_pty("ls".to_string(), None);
+        state.complete_last_pty("out\n".to_string());
+        state.start_pty("subagent: kilo".to_string(), None);
+        state.complete_last_pty("report\n".to_string());
+        state
+    }
+
+    /// The header buttons only appear when TWO OR MORE sections are present:
+    /// with a single section there is nothing to prioritize, so the layout
+    /// must stay exactly as before (content at the very top, no header row).
+    #[test]
+    fn header_buttons_appear_only_with_two_or_more_sections() {
+        let theme = test_theme();
+        let mut state = RightPanelState::new();
+        state.start_pty("ls".to_string(), None);
+        state.complete_last_pty("out\n".to_string());
+        let area = Rect::new(0, 0, 50, 30);
+        let mut buf = Buffer::empty(area);
+        render_right_panel(&mut buf, area, &mut state, &theme, 120);
+
+        assert!(
+            state.header_button_rect(types::SectionKind::Bash).is_none(),
+            "a single section must not show header buttons"
+        );
+        assert!(
+            !row_text(&buf, 0).contains("Bash"),
+            "no header row with one section"
+        );
+
+        // A second section appears: the header row now carries one button per
+        // present section, and the content begins BELOW header + its gap row.
+        state.set_todos(vec![types::TodoItem {
+            status: "pending".to_string(),
+            content: "task one".to_string(),
+        }]);
+        buf = Buffer::empty(area);
+        render_right_panel(&mut buf, area, &mut state, &theme, 120);
+        let header = row_text(&buf, 0);
+        assert!(
+            header.contains("TODO") && header.contains("Bash"),
+            "header must carry one button per present section, got {header:?}"
+        );
+        assert!(
+            state.section_layouts.iter().all(|l| l.top >= 1),
+            "sections must start right below the header (their own TOP_GAP row is the margin)"
+        );
+    }
+
+    /// Clicking a section's header button maximizes it: that section becomes
+    /// the SOLE owner of the panel area and the other sections vanish.
+    #[test]
+    fn bash_button_maximizes_bash_over_the_whole_panel() {
+        let theme = test_theme();
+        let mut state = full_panel_state();
+        // Long bash output so the maximized box actually fills the area
+        // (a fresh bash session: the last PTY above is the subagent's).
+        state.start_pty("ls".to_string(), None);
+        state.complete_last_pty(
+            (0..40)
+                .map(|i| format!("bash line {i}\n"))
+                .collect::<String>(),
+        );
+        let area = Rect::new(0, 0, 50, 30);
+        let mut buf = Buffer::empty(area);
+        render_right_panel(&mut buf, area, &mut state, &theme, 120);
+
+        let (x0, x1, top, _bottom) = state
+            .header_button_rect(types::SectionKind::Bash)
+            .expect("bash button present with 3 sections");
+        assert!(
+            !state.header_click(x0.saturating_sub(1), top),
+            "a click left of the buttons must not be consumed"
+        );
+        assert!(state.header_click((x0 + x1) / 2, top));
+        assert_eq!(
+            state.maximized_section,
+            Some(types::SectionKind::Bash),
+            "the clicked button maximizes its section"
+        );
+
+        buf = Buffer::empty(area);
+        render_right_panel(&mut buf, area, &mut state, &theme, 120);
+        let text: String = (0..30).map(|y| row_text(&buf, y)).collect();
+        assert!(text.contains("bash line"), "bash owns the panel");
+        assert!(!text.contains("task one"), "todo is hidden while maximized");
+        assert!(
+            !text.contains("subagent:"),
+            "subagent is hidden while maximized"
+        );
+        let band = state
+            .section_layouts
+            .iter()
+            .find(|l| l.kind == types::SectionKind::Bash)
+            .expect("bash rendered");
+        assert_eq!(
+            band.top, 1,
+            "maximized section starts right below the header row"
+        );
+        assert!(
+            band.bottom >= 29,
+            "maximized section must fill the panel down to the bottom margin, got {band:?}"
+        );
+    }
+
+    /// The icon-only mixed button is ALWAYS present while two or more boxes
+    /// exist — including while a section owns the panel — so switching the
+    /// owner costs ONE click. It sits at the RIGHT edge of the header, apart
+    /// from the section buttons, and paints no background: a bare white
+    /// glyph on the panel background.
+    #[test]
+    fn mixed_button_stays_visible_and_right_aligned_while_maximized() {
+        let theme = test_theme();
+        let mut state = full_panel_state();
+        let area = Rect::new(0, 0, 50, 30);
+        let mut buf = Buffer::empty(area);
+        render_right_panel(&mut buf, area, &mut state, &theme, 120);
+
+        let (x0, x1, top, _bottom) = state
+            .header_button_rect(types::SectionKind::Bash)
+            .expect("bash button present");
+        assert!(state.header_click((x0 + x1) / 2, top));
+        buf = Buffer::empty(area);
+        render_right_panel(&mut buf, area, &mut state, &theme, 120);
+
+        // While maximized the section buttons REMAIN (one click to switch
+        // the owner) and the mixed icon remains too.
+        let header = row_text(&buf, 0);
+        assert!(
+            header.contains("Bash") && header.contains(types::MIXED_HEADER_ICON),
+            "maximized header must keep the section buttons and the mixed icon, got {header:?}"
+        );
+        assert!(state.header_button_rect(types::SectionKind::Bash).is_some());
+
+        // The mixed button is the RIGHTMOST button, separated from the rest.
+        let mixed = state
+            .header_buttons()
+            .iter()
+            .find(|b| b.target.is_none())
+            .copied()
+            .expect("mixed button present while maximized");
+        let others_x1 = state
+            .header_buttons()
+            .iter()
+            .filter(|b| b.target.is_some())
+            .map(|b| b.x1)
+            .max()
+            .expect("section buttons present while maximized");
+        assert!(
+            mixed.x0 > others_x1,
+            "mixed button must sit right of the section buttons, got mixed {}..{} vs others ..{others_x1}",
+            mixed.x0,
+            mixed.x1
+        );
+        assert_eq!(
+            mixed.x1,
+            state
+                .header_buttons()
+                .iter()
+                .map(|b| b.x1)
+                .max()
+                .unwrap_or(0),
+            "the mixed button must touch the header's right edge"
+        );
+
+        // No background pill: the glyph keeps the panel's own background and
+        // a bright (text-colored) foreground.
+        let icon_x = (mixed.x0 + mixed.x1) / 2;
+        let cell = buf.cell((icon_x, top)).expect("icon cell painted");
+        assert_eq!(
+            cell.bg,
+            rgba_color(theme.background_panel),
+            "the mixed button must paint NO background of its own"
+        );
+        assert_eq!(
+            cell.fg,
+            rgba_color(theme.text),
+            "the mixed glyph must be plain text-colored (white)"
+        );
+
+        // One click on the mixed icon brings the mixed view back.
+        assert!(state.header_click((mixed.x0 + mixed.x1) / 2, top));
+        assert_eq!(state.maximized_section, None, "mixed brings mixed back");
+
+        buf = Buffer::empty(area);
+        render_right_panel(&mut buf, area, &mut state, &theme, 120);
+        let text: String = (0..30).map(|y| row_text(&buf, y)).collect();
+        assert!(text.contains("task one"), "todo is back");
+        assert!(text.contains("subagent:"), "subagent is back");
+        assert!(text.contains("out"), "bash is back");
+    }
+
+    /// The owner section's button carries a FIXED highlight color after the
+    /// click, so the user can see at a glance which section is selected; the
+    /// highlight moves when another section button is clicked and disappears
+    /// when the mixed button is clicked. The mixed button itself NEVER takes
+    /// the highlight.
+    #[test]
+    fn selected_section_button_is_highlighted_and_follows_the_clicks() {
+        let theme = test_theme();
+        let mut state = full_panel_state();
+        let area = Rect::new(0, 0, 50, 30);
+        let mut buf = Buffer::empty(area);
+        render_right_panel(&mut buf, area, &mut state, &theme, 120);
+
+        let click = |state: &mut RightPanelState, kind: types::SectionKind| {
+            let (x0, x1, top, _) = state
+                .header_button_rect(kind)
+                .unwrap_or_else(|| panic!("{kind:?} button present"));
+            assert!(state.header_click((x0 + x1) / 2, top));
+        };
+
+        // Nothing is selected in the mixed view: no button carries the
+        // selection color yet.
+        for kind in [
+            types::SectionKind::Todo,
+            types::SectionKind::Bash,
+            types::SectionKind::Subagent,
+        ] {
+            let (x0, x1, top, _) = state.header_button_rect(kind).expect("button present");
+            assert!(
+                !column_fg_has(&buf, x0, x1, top, rgba_color(theme.primary)),
+                "no button may be highlighted before any click"
+            );
+        }
+
+        // Clicking Bash selects it: its chip takes the selection color while
+        // the other section buttons keep the plain band color.
+        click(&mut state, types::SectionKind::Bash);
+        buf = Buffer::empty(area);
+        render_right_panel(&mut buf, area, &mut state, &theme, 120);
+        let (bx0, bx1, top, _) = state
+            .header_button_rect(types::SectionKind::Bash)
+            .expect("bash button");
+        let (tx0, tx1, _, _) = state
+            .header_button_rect(types::SectionKind::Todo)
+            .expect("todo button");
+        assert!(
+            column_fg_has(&buf, bx0, bx1, top, rgba_color(theme.primary)),
+            "the clicked section's button must carry the selection color"
+        );
+        assert!(
+            !column_fg_has(&buf, tx0, tx1, top, rgba_color(theme.primary)),
+            "the unselected buttons keep the plain band color"
+        );
+
+        // Clicking Subagent moves the highlight; Bash returns to the band.
+        click(&mut state, types::SectionKind::Subagent);
+        buf = Buffer::empty(area);
+        render_right_panel(&mut buf, area, &mut state, &theme, 120);
+        let (sx0, sx1, stop, _) = state
+            .header_button_rect(types::SectionKind::Subagent)
+            .expect("subagent button");
+        assert!(
+            column_fg_has(&buf, sx0, sx1, stop, rgba_color(theme.primary)),
+            "the highlight must follow the newest click"
+        );
+        assert!(
+            !column_fg_has(&buf, bx0, bx1, top, rgba_color(theme.primary)),
+            "the dethroned button returns to the band color"
+        );
+
+        // Clicking the mixed icon clears the highlight — and the mixed
+        // button itself never takes it.
+        let mixed = state
+            .header_buttons()
+            .iter()
+            .find(|b| b.target.is_none())
+            .copied()
+            .expect("mixed button present");
+        assert!(state.header_click((mixed.x0 + mixed.x1) / 2, stop));
+        buf = Buffer::empty(area);
+        render_right_panel(&mut buf, area, &mut state, &theme, 120);
+        for kind in [
+            types::SectionKind::Todo,
+            types::SectionKind::Bash,
+            types::SectionKind::Subagent,
+        ] {
+            let (x0, x1, top, _) = state.header_button_rect(kind).expect("button present");
+            assert!(
+                !column_fg_has(&buf, x0, x1, top, rgba_color(theme.primary)),
+                "no section button may stay highlighted after the mixed click"
+            );
+        }
+        assert!(
+            !column_fg_has(&buf, mixed.x0, mixed.x1, stop, rgba_color(theme.primary)),
+            "the mixed button must never carry the selection color"
+        );
+
+        // Hardening: when the maximized section's content vanishes, the
+        // fallback to the mixed view must clear the highlight in the SAME
+        // frame — the highlight is derived from the maximized state the
+        // layout itself just cleared. Every bash session ends while Bash
+        // owns the panel; only the subagent PTY survives, so bash is no
+        // longer present and the layout must fall back.
+        click(&mut state, types::SectionKind::Bash);
+        state.pty_sessions.retain(|p| p.is_subagent());
+        buf = Buffer::empty(area);
+        render_right_panel(&mut buf, area, &mut state, &theme, 120);
+        assert_eq!(
+            state.maximized_section, None,
+            "the vanished section must fall back to the mixed view"
+        );
+        // The bash button is gone with the section; the surviving buttons
+        // carry no highlight after the fallback.
+        let (rx0, rx1, rtop, _) = state
+            .header_button_rect(types::SectionKind::Subagent)
+            .expect("subagent button still present (2 boxes remain)");
+        assert!(
+            !column_fg_has(&buf, rx0, rx1, rtop, rgba_color(theme.primary)),
+            "the highlight must clear in the same frame as the fallback"
+        );
+    }
+
+    /// The section buttons are BARE TEXT on the panel background: no button
+    /// carries a background of its own, the gaps between buttons included —
+    /// the header row is one uninterrupted stretch of panel background from
+    /// the first section button through the mixed icon. Only the FONT color
+    /// distinguishes the buttons: an unselected label is ordinary text color,
+    /// and the selected one takes the theme's primary.
+    #[test]
+    fn section_buttons_are_bare_text_on_the_panel_background() {
+        let theme = test_theme();
+        let mut state = full_panel_state();
+        let area = Rect::new(0, 0, 50, 30);
+        let mut buf = Buffer::empty(area);
+        render_right_panel(&mut buf, area, &mut state, &theme, 120);
+
+        let buttons = state.header_buttons();
+        let first = buttons
+            .iter()
+            .find(|b| b.target == Some(types::SectionKind::Todo))
+            .copied()
+            .expect("todo button present");
+        let mixed = buttons
+            .iter()
+            .find(|b| b.target.is_none())
+            .copied()
+            .expect("mixed button present");
+        let top = first.top;
+
+        // The whole header stretch is bare panel background: no element
+        // fill anywhere, the between-button gaps included.
+        let panel = rgba_color(theme.background_panel);
+        let element = rgba_color(theme.background_element);
+        for x in first.x0..mixed.x1 {
+            assert_eq!(
+                buf.cell((x, top)).map(|c| c.bg),
+                Some(panel),
+                "the header row is bare panel background, col {x}"
+            );
+            assert_ne!(
+                buf.cell((x, top)).map(|c| c.bg),
+                Some(element),
+                "no element fill may remain in the header row, col {x}"
+            );
+        }
+        // An unselected label is ordinary text color on that bare ground.
+        let text = rgba_color(theme.text);
+        assert_eq!(
+            buf.cell(((first.x0 + first.x1) / 2, top)).map(|c| c.fg),
+            Some(text),
+            "the unselected label is plain text color"
+        );
+        // The icon cell itself stays bare panel background.
+        assert_eq!(
+            buf.cell(((mixed.x0 + mixed.x1) / 2, top)).map(|c| c.bg),
+            Some(panel),
+            "the mixed icon keeps its bare background"
+        );
+    }
+
+    /// Switching the owner while a section owns the panel costs exactly ONE
+    /// click: the section buttons stay registered while maximized, so the
+    /// user never has to detour through the mixed view.
+    #[test]
+    fn switching_owner_while_maximized_takes_a_single_click() {
+        let theme = test_theme();
+        let mut state = full_panel_state();
+        let area = Rect::new(0, 0, 50, 30);
+        let mut buf = Buffer::empty(area);
+        render_right_panel(&mut buf, area, &mut state, &theme, 120);
+
+        let (bx0, bx1, top, _) = state
+            .header_button_rect(types::SectionKind::Bash)
+            .expect("bash button present");
+        assert!(state.header_click((bx0 + bx1) / 2, top));
+        buf = Buffer::empty(area);
+        render_right_panel(&mut buf, area, &mut state, &theme, 120);
+        assert_eq!(state.maximized_section, Some(types::SectionKind::Bash));
+
+        // One click on the Subagent button swaps the owner directly.
+        let (sx0, sx1, stop, _) = state
+            .header_button_rect(types::SectionKind::Subagent)
+            .expect("subagent button stays registered while maximized");
+        assert_eq!(stop, top, "all buttons share the header row");
+        assert!(state.header_click((sx0 + sx1) / 2, stop));
+        assert_eq!(
+            state.maximized_section,
+            Some(types::SectionKind::Subagent),
+            "the owner must switch in a single click, no mixed-view detour"
+        );
+
+        buf = Buffer::empty(area);
+        render_right_panel(&mut buf, area, &mut state, &theme, 120);
+        let text: String = (0..30).map(|y| row_text(&buf, y)).collect();
+        assert!(text.contains("subagent:"), "subagent now owns the panel");
+        assert!(!text.contains("bash line"), "bash was dethroned");
+    }
+
+    /// A maximized section that loses its content must fall back to the mixed
+    /// view instead of rendering an empty maximized panel.
+    #[test]
+    fn maximized_section_that_disappears_falls_back_to_mixed() {
+        let theme = test_theme();
+        let mut state = RightPanelState::new();
+        state.set_todos(vec![types::TodoItem {
+            status: "pending".to_string(),
+            content: "task one".to_string(),
+        }]);
+        state.start_pty("ls".to_string(), None);
+        state.complete_last_pty("out\n".to_string());
+        let area = Rect::new(0, 0, 50, 30);
+        let mut buf = Buffer::empty(area);
+        render_right_panel(&mut buf, area, &mut state, &theme, 120);
+
+        let (x0, x1, top, _bottom) = state
+            .header_button_rect(types::SectionKind::Todo)
+            .expect("todo button present");
+        assert!(state.header_click((x0 + x1) / 2, top));
+        assert_eq!(state.maximized_section, Some(types::SectionKind::Todo));
+
+        // The todo list is cleared while maximized on it.
+        state.set_todos(vec![]);
+        buf = Buffer::empty(area);
+        render_right_panel(&mut buf, area, &mut state, &theme, 120);
+        assert_eq!(
+            state.maximized_section, None,
+            "a vanished section must fall back to the mixed view"
+        );
+        let text: String = (0..30).map(|y| row_text(&buf, y)).collect();
+        assert!(text.contains("out"), "bash is visible again");
+    }
+
+    /// The header keeps the EXISTING one-row margin below it: row 1 must stay
+    /// bare panel background. The margin IS the section's own TOP_GAP row, so
+    /// section bands legitimately BEGIN there — what may never occupy the row
+    /// is a section BOX (its content or its element background).
+    #[test]
+    fn header_row_keeps_one_blank_row_below_it() {
+        let theme = test_theme();
+        let mut state = full_panel_state();
+        let area = Rect::new(0, 0, 50, 30);
+        let mut buf = Buffer::empty(area);
+        render_right_panel(&mut buf, area, &mut state, &theme, 120);
+
+        let panel_bg = rgba_color(theme.background_panel);
+        for x in 0u16..50 {
+            assert_eq!(
+                buf.cell((x, 1)).map(|c| c.bg),
+                Some(panel_bg),
+                "row 1 must stay bare panel background (the margin below the header), col {x}"
+            );
+        }
+        assert!(
+            state.section_layouts.iter().all(|l| l.top >= 1),
+            "bands begin at the margin row, whose blank look comes from their TOP_GAP"
+        );
+        // No section may paint its ELEMENT background on the margin row: the
+        // boxes themselves (content + framing) start at row 2.
+        let element_bg = rgba_color(theme.background_element);
+        for x in 0u16..50 {
+            assert_ne!(
+                buf.cell((x, 1)).map(|c| c.bg),
+                Some(element_bg),
+                "no section box may fill the margin row with its own background, col {x}"
+            );
+        }
     }
 }
