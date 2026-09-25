@@ -445,7 +445,7 @@ impl App {
                         && summary.title_generated
                         && self.state.status == crate::types::SessionStatus::Idle
                     {
-                        self.toast_state.show(crate::ui::toast::ToastOptions {
+                        self.toast_state.show_tooltip(crate::ui::toast::ToastOptions {
                             title: None,
                             message: summary.title.clone(),
                             variant: crate::ui::toast::ToastVariant::Info,

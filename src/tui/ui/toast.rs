@@ -53,6 +53,11 @@ impl Default for ToastOptions {
 pub struct ToastState {
     pub current: Option<ToastOptions>,
     pub elapsed: u64,
+    /// Whether the toast currently occupying the slot is a REAL (event-driven)
+    /// toast, so per-frame hover tooltips must not take it over. Cleared in
+    /// `tick()` at the exact moment the toast is dismissed, so suppression
+    /// and visibility always end together — no wall-clock/frame-tick drift.
+    real_toast_showing: bool,
 }
 
 impl ToastState {
@@ -60,12 +65,38 @@ impl ToastState {
         Self {
             current: None,
             elapsed: 0,
+            real_toast_showing: false,
         }
     }
 
-    pub fn show(&mut self, options: ToastOptions) {
+    /// Shared slot assignment for both toast kinds.
+    fn set_current(&mut self, options: ToastOptions) {
         self.current = Some(options);
         self.elapsed = 0;
+    }
+
+    pub fn show(&mut self, options: ToastOptions) {
+        // A real toast reserves the slot for its whole display window: while
+        // it shows, per-frame hover tooltips must not take it over.
+        self.real_toast_showing = true;
+        self.set_current(options);
+    }
+
+    /// Show a low-priority hover tooltip.
+    ///
+    /// The tooltip re-fires every frame while the pointer rests on an item,
+    /// so without arbitration it instantly overwrites any real (event-driven)
+    /// toast shown by an action under that same pointer — e.g. clicking a
+    /// session locked by another process. While a real toast is showing, the
+    /// tooltip is dropped; once the slot is free the tooltip shows as usual.
+    pub fn show_tooltip(&mut self, options: ToastOptions) {
+        if self.real_toast_showing {
+            return;
+        }
+        // Deliberately NOT via `show`: a tooltip must not reserve the slot
+        // against later tooltips (hovering a second item right after the
+        // first must still show its own tooltip).
+        self.set_current(options);
     }
 
     pub fn tick(&mut self, dt: u64) {
@@ -74,6 +105,8 @@ impl ToastState {
             if self.elapsed >= toast.duration_ms {
                 self.current = None;
                 self.elapsed = 0;
+                // The slot frees exactly when the toast leaves the screen.
+                self.real_toast_showing = false;
             }
         }
     }
@@ -206,6 +239,80 @@ mod tests {
         state.tick(10_000);
         assert!(state.current.is_none());
         assert_eq!(state.elapsed, 0);
+    }
+
+    fn tooltip_options(message: &str) -> ToastOptions {
+        ToastOptions {
+            title: None,
+            message: message.to_string(),
+            variant: ToastVariant::Info,
+            duration_ms: 3_000,
+        }
+    }
+
+    /// A real (event-driven) toast — e.g. "session open in another cosh
+    /// process" after a refused click — must survive the per-frame tooltip
+    /// re-fire while the pointer rests on the same row.
+    #[test]
+    fn tooltip_cannot_overwrite_a_showing_real_toast() {
+        let mut state = ToastState::new();
+        let mut blocked = toast(4_000);
+        blocked.message = "blocked".to_string();
+        state.show(blocked);
+
+        state.show_tooltip(tooltip_options("session 3"));
+        assert_eq!(
+            state.current.as_ref().unwrap().message,
+            "blocked",
+            "the per-frame tooltip must not take the slot of a showing real toast"
+        );
+    }
+
+    /// Once the real toast expires, the tooltip slot frees up: hovering the
+    /// same row shows the title tooltip again.
+    #[test]
+    fn tooltip_returns_after_the_real_toast_expires() {
+        let mut state = ToastState::new();
+        let mut blocked = toast(50);
+        blocked.message = "blocked".to_string();
+        state.show(blocked);
+
+        state.show_tooltip(tooltip_options("hover title"));
+        assert_ne!(state.current.as_ref().unwrap().message, "hover title");
+
+        // Tick the real toast past its duration: the slot must free exactly
+        // when the toast is dismissed.
+        state.tick(51);
+        assert!(state.current.is_none(), "the real toast must be gone");
+        state.show_tooltip(tooltip_options("hover title"));
+        assert_eq!(
+            state.current.as_ref().unwrap().message,
+            "hover title",
+            "the tooltip must return once the real toast is dismissed"
+        );
+    }
+
+    /// Tooltips never suppress each other: hovering a second item right
+    /// after the first swaps the tooltip. And a real toast still outranks a
+    /// showing tooltip.
+    #[test]
+    fn tooltips_do_not_suppress_each_other_but_real_toasts_win() {
+        let mut state = ToastState::new();
+        state.show_tooltip(tooltip_options("a"));
+        state.show_tooltip(tooltip_options("b"));
+        assert_eq!(state.current.as_ref().unwrap().message, "b");
+
+        state.show(toast(4_000));
+        assert_eq!(state.current.as_ref().unwrap().message, "m");
+    }
+
+    /// Before any real toast has been shown, tooltips behave exactly as
+    /// before (no suppression state to trip over).
+    #[test]
+    fn tooltip_shows_without_prior_real_toast() {
+        let mut state = ToastState::new();
+        state.show_tooltip(tooltip_options("first"));
+        assert_eq!(state.current.as_ref().unwrap().message, "first");
     }
 
     /// The toast box hugs its content instead of using the old hardcoded
