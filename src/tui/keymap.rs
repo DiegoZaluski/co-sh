@@ -33,6 +33,14 @@ pub enum Action {
     PrevSession,
     ToggleMode,
     ClearQueue,
+    /// Maximize the Subagent section over the right panel (header hint F1).
+    MaximizeSubagent,
+    /// Maximize the Bash section over the right panel (header hint F2).
+    MaximizeBash,
+    /// Maximize the TODO section over the right panel (header hint F3).
+    MaximizeTodo,
+    /// Bring the right panel's mixed view back (header hint F4, the ◩ icon).
+    MaximizeMixedView,
 }
 
 #[derive(Debug, Clone)]
@@ -204,6 +212,34 @@ impl KeyMap {
                     KeyBinding {
                         key: Down,
                         modifiers: KeyModifiers::CONTROL,
+                    },
+                ),
+                (
+                    Action::MaximizeSubagent,
+                    KeyBinding {
+                        key: KeyCode::F(1),
+                        modifiers: KeyModifiers::NONE,
+                    },
+                ),
+                (
+                    Action::MaximizeBash,
+                    KeyBinding {
+                        key: KeyCode::F(2),
+                        modifiers: KeyModifiers::NONE,
+                    },
+                ),
+                (
+                    Action::MaximizeTodo,
+                    KeyBinding {
+                        key: KeyCode::F(3),
+                        modifiers: KeyModifiers::NONE,
+                    },
+                ),
+                (
+                    Action::MaximizeMixedView,
+                    KeyBinding {
+                        key: KeyCode::F(4),
+                        modifiers: KeyModifiers::NONE,
                     },
                 ),
                 // 'n'/'p' for NextSession/PrevSession intentionally omitted

@@ -53,33 +53,36 @@ fn blend(base: RGBA, accent: RGBA, t: f32) -> RGBA {
 /// near-black box background dragged every tint's luminance down so far
 /// that the theme's amber warning read as BROWN (dark yellow is
 /// perceptually brown), and even green/red barely registered. The value is
-/// set by the yellow end: yellow only reads as yellow above roughly 40%
-/// lightness, and mixing over the near-black background needs ~0.65 to
-/// get there (#FACC15 → #A78914, a goldenrod clearly in the yellow hue
-/// family — brown sits around hue 30°, this at 49°). At that opacity
-/// green lands on #1B8543 and red on #A03132, both unmistakable, and the
-/// light body text keeps workable contrast on DARK backgrounds (≈3.8:1
-/// on green, ≈5.7:1 on red, ≈2.7:1 on the golden yellow — the least
-/// readable of the three, accepted so the verdict color survives the
-/// blend; on light-background themes the same opacity would need its own
-/// audit, out of scope here).
+/// set by the middle severity: the color must survive the blend still
+/// recognizable as its own family — orange lands on #A8642D (copper, hue
+/// ~27°, squarely between red and green), green on #1B8543 and red on
+/// #A03132, all three unmistakable. At that opacity the light body text
+/// keeps workable contrast on DARK backgrounds (≈3.8:1 on green, ≈5.7:1
+/// on red, ≈3.7:1 on the copper orange — the least readable of the three,
+/// accepted so the verdict color survives the blend; on light-background
+/// themes the same opacity would need its own audit, out of scope here).
 const SEVERITY_TINT_ALPHA: f32 = 0.65;
 
 /// Verdict colors for a review-severity box tint: a dedicated palette of
-/// pure, vivid, mid-tone green/yellow/red, deliberately NOT the theme's
+/// pure, vivid, mid-tone green/orange/red, deliberately NOT the theme's
 /// success/warning/error stand-ins. Two findings forced the change: theme
 /// semantic colors are not hue-stable across themes (the `orng` theme's
 /// `success` is blue), and dark or earthy tones collapse through the
 /// background blend into perceptually different colors — the cosh theme's
 /// amber `warning` (#D4A742) at the old 18% blend over the near-black
-/// background read as brown, not yellow. These constants are
-/// theme-independent, so a verdict always reads as the same green/yellow/
-/// red in every theme; the unblended color also drives the running
-/// tool-call spinner's beam, where the yellow shows at full vividness.
+/// background read as brown, not yellow. The middle severity therefore
+/// carries an ORANGE origin color: yellow, even light, darkened through
+/// the blend into a burnt goldenrod that still read as dirty yellow-brown,
+/// while orange darkens into copper — a family that survives. These
+/// constants are theme-independent, so a verdict always reads as the same
+/// green/orange/red in every theme; the unblended color also drives the
+/// running tool-call spinner's beam, where the orange shows at full
+/// vividness. The enum variant keeps its protocol name (`Severity::Yellow`
+/// is the wire format's middle severity); only the rendered color moved.
 fn severity_rgba(sev: cosh_tools::subagent::severity::Severity) -> RGBA {
     match sev {
         cosh_tools::subagent::severity::Severity::Green => RGBA::from_hex("#22C55E"),
-        cosh_tools::subagent::severity::Severity::Yellow => RGBA::from_hex("#FACC15"),
+        cosh_tools::subagent::severity::Severity::Yellow => RGBA::from_hex("#FB923C"),
         cosh_tools::subagent::severity::Severity::Red => RGBA::from_hex("#EF4444"),
     }
 }
@@ -215,8 +218,8 @@ fn subagent_natural_height(state: &mut RightPanelState, wrap_w: u16) -> i32 {
 }
 
 /// Compute the clickable rects of the header row: one button per EXISTING
-/// section plus the icon-only mixed button right-aligned at the edge. The
-/// buttons exist whenever two or more boxes EXIST — the rule counts the
+/// section plus the hint-and-icon mixed button right-aligned at the edge.
+/// The buttons exist whenever two or more boxes EXIST — the rule counts the
 /// sections present in the panel, not the ones currently displayed, so the
 /// buttons survive maximization and switching the owner costs one click.
 /// The mixed button is set apart from the section buttons by 2 columns.
@@ -227,19 +230,20 @@ fn build_header_buttons(
     present: &[bool; 3],
 ) -> Vec<types::HeaderButton> {
     let mut buttons = Vec::new();
-    // The mixed button owns the header's right edge: the bare glyph (1 col)
-    // plus one clearance column on each side, 2 columns apart from the
-    // section buttons.
+    // The mixed button owns the header's right edge: the function-key hint
+    // painted BEFORE the glyph plus one clearance column on each side, 2
+    // columns apart from the section buttons.
     let icon_w = types::MIXED_HEADER_ICON.chars().count() as u16;
+    let hint_w = types::HEADER_MIXED_HINT.chars().count() as u16;
     let mixed_x1 = x.saturating_add(max_w);
-    let mixed_x0 = mixed_x1.saturating_sub(icon_w + 2);
+    let mixed_x0 = mixed_x1.saturating_sub(icon_w + hint_w + 2);
     let section_limit = mixed_x0.saturating_sub(2);
     let mut cx = x;
     for (kind, label) in types::HEADER_SECTION_LABELS {
         if !present[types::section_kind_index(kind)] {
             continue;
         }
-        let w = label.chars().count() as u16 + 2;
+        let w = label.chars().count() as u16 + 1;
         if cx.saturating_add(w) > section_limit {
             break;
         }
@@ -289,7 +293,10 @@ fn draw_header_row(
                     theme.text
                 };
                 let style = Style::default().fg(rgba_color(fg));
-                let padded = format!(" {label} ");
+                // The drawn text must match the hit rect exactly: one
+                // leading space plus the label — the trailing padding the
+                // old pill-shaped chip had is gone with the background.
+                let padded = format!(" {label}");
                 // Width must cover exactly the chip: an oversized bound
                 // would overflow draw_text's internal `checked_add` and
                 // silently skip drawing (the draw_chip contract).
@@ -297,13 +304,24 @@ fn draw_header_row(
                 draw_text(buf, &padded, button.x0, button.top, w, style);
             }
             // The mixed button NEVER takes the selection color: it is a
-            // layout-level control, not a member of the group.
+            // layout-level control, not a member of the group. Its
+            // function-key hint is painted BEFORE the glyph — the only
+            // hint that sits ahead of its control — as bare text, no
+            // background of its own.
             None => {
                 let style = Style::default().fg(rgba_color(theme.text));
                 draw_text(
                     buf,
-                    types::MIXED_HEADER_ICON,
+                    types::HEADER_MIXED_HINT,
                     button.x0 + 1,
+                    button.top,
+                    types::HEADER_MIXED_HINT.chars().count() as u16,
+                    style,
+                );
+                draw_text(
+                    buf,
+                    types::MIXED_HEADER_ICON,
+                    button.x0 + 1 + types::HEADER_MIXED_HINT.chars().count() as u16,
                     button.top,
                     1,
                     style,
@@ -830,7 +848,7 @@ fn render_subagent_section(
     // render loop. Per-agent colors are GONE: every window keeps the
     // section's default box color (the same background bash and the TODO
     // panel use), because color is now reserved for MEANING — only a
-    // code-review verdict tints its window green/yellow/red (Phase 3b.1).
+    // code-review verdict tints its window green/orange/red (Phase 3b.1).
     // The accent (the unblended color) doubles as the running tool-call
     // spinner's highlight color, so a red verdict window also sweeps red;
     // without a verdict the sweep runs in the plain text color.
@@ -1975,7 +1993,7 @@ mod tests {
     }
 
     /// Color carries MEANING: a review verdict (the consumed
-    /// `<!-- severity: ... -->` header) tints its window green/yellow/red,
+    /// `<!-- severity: ... -->` header) tints its window green/orange/red,
     /// while a verdict-less window keeps the default box color.
     #[test]
     fn subagent_windows_tint_only_by_review_verdict() {
@@ -2006,6 +2024,57 @@ mod tests {
             Some(plain),
             "verdict-less window keeps the default box background"
         );
+    }
+
+    /// The middle severity renders ORANGE, not yellow: over the near-black
+    /// element background even a light yellow blends down into a burnt
+    /// goldenrod that reads as dirty yellow-brown, while an orange blends
+    /// into copper — still clearly between red and green. The test pins the
+    /// HUE BAND of the blended tint (orange ≈ 15..45°, yellow begins past
+    /// 45°) so the constant cannot drift back into the yellow family.
+    #[test]
+    fn yellow_verdict_tints_orange_not_yellow() {
+        let theme = test_theme();
+        let tint = blend(
+            theme.background_element,
+            severity_rgba(cosh_tools::subagent::severity::Severity::Yellow),
+            SEVERITY_TINT_ALPHA,
+        );
+        let (r, g, b, _) = tint.to_ints();
+        // Standard RGB hue in degrees (max-channel method; sRGB and linear
+        // hue agree closely for this saturated a color, so the plain
+        // formula is enough to pin the family).
+        let (min, max) = (r.min(g).min(b) as f32, r.max(g).max(b) as f32);
+        let delta = max - min;
+        let hue = if delta == 0.0 {
+            0.0
+        } else if max as u8 == r {
+            60.0 * ((g as f32 - b as f32) / delta % 6.0)
+        } else if max as u8 == g {
+            60.0 * ((b as f32 - r as f32) / delta + 2.0)
+        } else {
+            60.0 * ((r as f32 - g as f32) / delta + 4.0)
+        };
+        let hue = if hue < 0.0 { hue + 360.0 } else { hue };
+        assert!(
+            (15.0..45.0).contains(&hue),
+            "the middle-severity tint must be ORANGE (hue 15..45°), got {hue:.1}° for #{tint:X?}"
+        );
+        // The tint must also stay distinct from its neighbors on BOTH ends:
+        // red's hue is near 0, green's near 140 — the orange band separates
+        // the three verdicts even after the dark blend.
+        let red = blend(
+            theme.background_element,
+            severity_rgba(cosh_tools::subagent::severity::Severity::Red),
+            SEVERITY_TINT_ALPHA,
+        );
+        let green = blend(
+            theme.background_element,
+            severity_rgba(cosh_tools::subagent::severity::Severity::Green),
+            SEVERITY_TINT_ALPHA,
+        );
+        assert_ne!(tint, red, "middle tint must differ from red");
+        assert_ne!(tint, green, "middle tint must differ from green");
     }
 
     /// PROPERTY: no streaming-typical markdown shape paints MORE rows than
@@ -3974,6 +4043,118 @@ mod tests {
             buf.cell(((mixed.x0 + mixed.x1) / 2, top)).map(|c| c.bg),
             Some(panel),
             "the mixed icon keeps its bare background"
+        );
+    }
+
+    /// The header buttons read Subagent, Bash, TODO in that order — Subagent
+    /// FIRST — and every control carries its function-key hint: F1 AFTER the
+    /// Subagent label, F2 after Bash, F3 after TODO, and F4 BEFORE the mixed
+    /// glyph, the only hint that sits ahead of its control.
+    #[test]
+    fn header_buttons_list_subagent_first_with_function_key_hints() {
+        let theme = test_theme();
+        let mut state = full_panel_state();
+        let area = Rect::new(0, 0, 50, 30);
+        let mut buf = Buffer::empty(area);
+        render_right_panel(&mut buf, area, &mut state, &theme, 120);
+
+        let buttons = state.header_buttons();
+        let sub = buttons
+            .iter()
+            .find(|b| b.target == Some(types::SectionKind::Subagent))
+            .copied()
+            .expect("subagent button present");
+        let bash = buttons
+            .iter()
+            .find(|b| b.target == Some(types::SectionKind::Bash))
+            .copied()
+            .expect("bash button present");
+        let todo = buttons
+            .iter()
+            .find(|b| b.target == Some(types::SectionKind::Todo))
+            .copied()
+            .expect("todo button present");
+        let mixed = buttons
+            .iter()
+            .find(|b| b.target.is_none())
+            .copied()
+            .expect("mixed button present");
+
+        assert!(
+            sub.x0 < bash.x0 && bash.x0 < todo.x0,
+            "buttons must read Subagent, Bash, TODO left to right, got sub {} bash {} todo {}",
+            sub.x0,
+            bash.x0,
+            todo.x0
+        );
+        assert!(
+            todo.x1 < mixed.x0,
+            "the mixed button stays right of the section buttons"
+        );
+
+        let top = sub.top;
+        let header = row_text(&buf, top);
+        assert!(
+            header.contains("Subagent F1"),
+            "subagent hint AFTER its label, got {header:?}"
+        );
+        assert!(
+            header.contains("Bash F2"),
+            "bash hint AFTER its label, got {header:?}"
+        );
+        assert!(
+            header.contains("TODO F3"),
+            "todo hint AFTER its label, got {header:?}"
+        );
+        let f4_pos = header
+            .find("F4")
+            .unwrap_or_else(|| panic!("mixed hint F4 must be on the row, got {header:?}"));
+        let icon_pos = header
+            .find(types::MIXED_HEADER_ICON)
+            .unwrap_or_else(|| panic!("the mixed glyph must be on the row, got {header:?}"));
+        assert!(
+            f4_pos < icon_pos,
+            "the mixed hint sits BEFORE the glyph, got {header:?}"
+        );
+    }
+
+    /// The REAL panel width (42 columns, inner 38) must still fit every
+    /// control: the hinted labels made the row longer, and a button that no
+    /// longer fits is silently dropped by the build loop — the TODO button
+    /// vanished from the real panel while the 50-column test area kept
+    /// hiding the regression.
+    #[test]
+    fn all_section_buttons_fit_the_real_panel_width() {
+        let theme = test_theme();
+        let mut state = full_panel_state();
+        let area = Rect::new(0, 0, RIGHT_PANEL_WIDTH, 30);
+        let mut buf = Buffer::empty(area);
+        render_right_panel(&mut buf, area, &mut state, &theme, 120);
+
+        for kind in [
+            types::SectionKind::Subagent,
+            types::SectionKind::Bash,
+            types::SectionKind::Todo,
+        ] {
+            assert!(
+                state.header_button_rect(kind).is_some(),
+                "{kind:?} button must exist at the real panel width"
+            );
+        }
+        let top = state
+            .header_button_rect(types::SectionKind::Subagent)
+            .map(|(_, _, top, _)| top)
+            .expect("subagent button present");
+        let header = row_text(&buf, top);
+        assert!(
+            header.contains("Subagent F1")
+                && header.contains("Bash F2")
+                && header.contains("TODO F3"),
+            "all three hinted labels must render at the real width, got {header:?}"
+        );
+        assert!(
+            header.contains("F4") && header.contains(types::MIXED_HEADER_ICON),
+            "the mixed hint and glyph must render at the real width, got {header:?}"
         );
     }
 

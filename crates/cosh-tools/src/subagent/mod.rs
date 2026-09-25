@@ -57,7 +57,8 @@ pub mod internal;
 pub mod sandbox;
 /// Severity DSL for code-review reports: the `code_review` prompt contract
 /// (`<!-- severity: ... -->` header) and its extraction. The header tints
-/// the sub-agent box green/yellow/red and is never rendered.
+/// the sub-agent box green/orange/red (the wire's middle value stays named
+/// `yellow`; only the rendered color is orange) and is never rendered.
 pub mod severity;
 pub mod types;
 

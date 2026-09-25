@@ -909,11 +909,17 @@ impl SubagentActivity {
 /// Drawn as a bare text-colored glyph — no background pill.
 pub const MIXED_HEADER_ICON: &str = "\u{25E9}";
 
-/// Button labels for each section kind, as drawn in the panel header.
+/// Function-key hint painted BEFORE the mixed glyph — the only control
+/// whose hint sits ahead of it, read as `F4 ◩`.
+pub const HEADER_MIXED_HINT: &str = "F4 ";
+
+/// Button labels for each section kind, as drawn in the panel header, in
+/// display order — Subagent FIRST — each carrying the function key that
+/// maximizes it AFTER the label.
 pub const HEADER_SECTION_LABELS: [(SectionKind, &str); 3] = [
-    (SectionKind::Todo, "TODO"),
-    (SectionKind::Bash, "Bash"),
-    (SectionKind::Subagent, "Subagent"),
+    (SectionKind::Subagent, "Subagent F1"),
+    (SectionKind::Bash, "Bash F2"),
+    (SectionKind::Todo, "TODO F3"),
 ];
 
 /// One clickable region of the right panel's header row. `target: None` is
@@ -2370,7 +2376,7 @@ impl RightPanelState {
             // Review reports declare their outcome in a leading
             // `<!-- severity: ... -->` header; consume it here (the render
             // strips the header itself in 3b.2) so the box can tint green/
-            // yellow/red. Bash sessions never carry one — the parse returns
+            // orange/red. Bash sessions never carry one — the parse returns
             // None and the box color is untouched.
             if session.is_subagent() {
                 session.severity = severity;

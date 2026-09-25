@@ -78,6 +78,10 @@ const SHORTCUTS: &[ShortcutLine] = &[
     ShortcutLine::Key("\u{2190}/\u{2192}", "Step panel history (focused slot)"),
     ShortcutLine::Key("Alt+\u{2190}/\u{2192}", "Switch agent queue"),
     ShortcutLine::Key("Shift+B / Shift+N", "Cycle agent queue (panel focused)"),
+    ShortcutLine::Key("F1", "Maximize Subagent section"),
+    ShortcutLine::Key("F2", "Maximize Bash section"),
+    ShortcutLine::Key("F3", "Maximize TODO section"),
+    ShortcutLine::Key("F4", "Restore mixed view"),
 ];
 
 /// Geometry of the shortcuts overlay, derived from its own rows: the widest
@@ -4195,5 +4199,50 @@ mod hook_panel_tests {
             &entry("nvidia", "deepseek-v4-pro"),
             "openrouter"
         ));
+    }
+}
+
+#[cfg(test)]
+mod shortcuts_tests {
+    use super::{SHORTCUTS, ShortcutLine};
+
+    /// The Key rows of one section: everything that follows its `Header`
+    /// until the next `Header`, gaps skipped.
+    fn section_keys(name: &str) -> Vec<(&'static str, &'static str)> {
+        let start = SHORTCUTS
+            .iter()
+            .position(|l| matches!(l, ShortcutLine::Header(t) if *t == name))
+            .unwrap_or_else(|| panic!("{name} section must exist"));
+        SHORTCUTS[start + 1..]
+            .iter()
+            .take_while(|l| !matches!(l, ShortcutLine::Header(_)))
+            .filter_map(|l| match l {
+                ShortcutLine::Key(k, d) => Some((*k, *d)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The right-panel section must end with the function-key owner
+    /// switches the header buttons advertise: F1 Subagent, F2 Bash, F3
+    /// TODO, F4 mixed — in that order, so the help teaches the same
+    /// mapping the button hints show.
+    #[test]
+    fn right_panel_section_documents_the_function_key_owner_switches() {
+        let rows = section_keys("Right panel");
+        assert!(
+            rows.len() >= 4,
+            "the Right panel section must carry the F1-F4 owner switches"
+        );
+        let tail = &rows[rows.len() - 4..];
+        assert_eq!(
+            tail,
+            &[
+                ("F1", "Maximize Subagent section"),
+                ("F2", "Maximize Bash section"),
+                ("F3", "Maximize TODO section"),
+                ("F4", "Restore mixed view"),
+            ][..]
+        );
     }
 }

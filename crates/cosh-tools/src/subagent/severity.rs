@@ -21,9 +21,10 @@
 //! survives copy-through without being reformatted.
 //!
 //! The header is CONSUMED by the client: it is stripped from the rendered
-//! report and only drives the sub-agent box color (green/yellow/red). A
-//! report without a header (or a non-review task) leaves the box's neutral
-//! per-agent color untouched.
+//! report and only drives the sub-agent box color (green/orange/red — the
+//! wire's middle value stays named `yellow`; only the rendered color is
+//! orange). A report without a header (or a non-review task) leaves the
+//! box's neutral per-agent color untouched.
 
 use serde::{Deserialize, Serialize};
 

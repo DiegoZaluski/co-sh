@@ -28,7 +28,8 @@ async fn toggled_mode_persists_and_restores_for_new_sessions() {
     // A fresh app (new session) restores the persisted mode.
     let restored = App::new("/tmp".to_string());
     assert_eq!(
-        restored.state.mode, Mode::Ask,
+        restored.state.mode,
+        Mode::Ask,
         "a new session must start in the last used mode"
     );
 
@@ -414,4 +415,59 @@ async fn esc_with_confirm_dialog_visible_does_not_set_stop_signal() {
         "confirm-dialog ESC must not set the stop signal (sovereignty)"
     );
     assert!(!app.is_confirm_dialog_visible());
+}
+
+/// The function-key hints the header buttons advertise must actually WORK:
+/// F1 maximizes Subagent, F2 Bash, F3 TODO, and F4 brings the mixed view
+/// back — the same owner switch a click on the button performs, as a
+/// keyboard shortcut beside the mouse path.
+#[tokio::test]
+async fn function_keys_f1_to_f4_switch_the_panel_owner() {
+    use crate::routes::session::right_panel::types::{RightPanelState, TodoItem};
+
+    let _home = HOME_LOCK.lock();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    let mut panel = RightPanelState::new();
+    panel.set_todos(vec![TodoItem {
+        status: "pending".to_string(),
+        content: "task one".to_string(),
+    }]);
+    panel.start_pty("ls".to_string(), None);
+    panel.complete_last_pty("out\n".to_string());
+    panel.start_pty("subagent: kilo".to_string(), None);
+    panel.complete_last_pty("report\n".to_string());
+    app.state.right_panel = panel;
+
+    app.process_key_event(mod_key(KeyCode::F(1), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(
+        app.state.right_panel.maximized_section,
+        Some(crate::routes::session::right_panel::types::SectionKind::Subagent),
+        "F1 must maximize the Subagent section"
+    );
+
+    app.process_key_event(mod_key(KeyCode::F(2), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(
+        app.state.right_panel.maximized_section,
+        Some(crate::routes::session::right_panel::types::SectionKind::Bash),
+        "F2 must maximize the Bash section"
+    );
+
+    app.process_key_event(mod_key(KeyCode::F(3), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(
+        app.state.right_panel.maximized_section,
+        Some(crate::routes::session::right_panel::types::SectionKind::Todo),
+        "F3 must maximize the TODO section"
+    );
+
+    app.process_key_event(mod_key(KeyCode::F(4), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(
+        app.state.right_panel.maximized_section, None,
+        "F4 must bring the mixed view back"
+    );
 }

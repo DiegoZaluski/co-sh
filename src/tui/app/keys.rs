@@ -1082,7 +1082,36 @@ impl App {
                 }
             }
 
+            // Function-key owner switches for the right panel header (the
+            // F1–F4 hints the buttons advertise): maximize one section or
+            // restore the mixed view — the same state change a header click
+            // performs. Session-scoped so Home/Settings never react to them.
+            use crate::routes::session::right_panel::types::SectionKind;
             match action {
+                Some(crate::keymap::Action::MaximizeSubagent) => {
+                    if matches!(self.mode(), AppMode::Session) {
+                        self.state.right_panel.maximized_section = Some(SectionKind::Subagent);
+                        return Ok(false);
+                    }
+                }
+                Some(crate::keymap::Action::MaximizeBash) => {
+                    if matches!(self.mode(), AppMode::Session) {
+                        self.state.right_panel.maximized_section = Some(SectionKind::Bash);
+                        return Ok(false);
+                    }
+                }
+                Some(crate::keymap::Action::MaximizeTodo) => {
+                    if matches!(self.mode(), AppMode::Session) {
+                        self.state.right_panel.maximized_section = Some(SectionKind::Todo);
+                        return Ok(false);
+                    }
+                }
+                Some(crate::keymap::Action::MaximizeMixedView) => {
+                    if matches!(self.mode(), AppMode::Session) {
+                        self.state.right_panel.maximized_section = None;
+                        return Ok(false);
+                    }
+                }
                 Some(crate::keymap::Action::ScrollUp) => {
                     if self.sidebar_focused
                         && self.sidebar.open
