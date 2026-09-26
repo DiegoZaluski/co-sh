@@ -630,13 +630,11 @@ impl App {
             if matches!(self.mode(), AppMode::InternalTools) && !self.dialog.visible() {
                 match key.code {
                     KeyCode::Up => {
-                        let list_area = 20; // max visible items estimate based on terminal
-                        self.internal_tools_view.select_prev(list_area);
+                        self.internal_tools_view.select_prev();
                         return Ok(false);
                     }
                     KeyCode::Down => {
-                        let list_area = 20;
-                        self.internal_tools_view.select_next(list_area);
+                        self.internal_tools_view.select_next();
                         return Ok(false);
                     }
                     KeyCode::Enter | KeyCode::Char(' ') => {

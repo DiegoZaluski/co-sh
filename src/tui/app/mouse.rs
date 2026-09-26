@@ -557,8 +557,7 @@ impl App {
                     } else if matches!(self.mode(), AppMode::Home) {
                         self.home_view.select_prev();
                     } else if matches!(self.mode(), AppMode::InternalTools) {
-                        let list_area = 20;
-                        self.internal_tools_view.select_prev(list_area);
+                        self.internal_tools_view.select_prev();
                     } else if matches!(self.mode(), AppMode::Router) {
                         match self.router_view.focus {
                             FocusTarget::Fallbacks => self.router_view.select_prev_fallback(),
@@ -643,8 +642,7 @@ impl App {
                     } else if matches!(self.mode(), AppMode::Home) {
                         self.home_view.select_next();
                     } else if matches!(self.mode(), AppMode::InternalTools) {
-                        let list_area = 20;
-                        self.internal_tools_view.select_next(list_area);
+                        self.internal_tools_view.select_next();
                     } else if matches!(self.mode(), AppMode::Router) {
                         match self.router_view.focus {
                             FocusTarget::Fallbacks => self.router_view.select_next_fallback(),

@@ -96,6 +96,16 @@ pub struct InternalToolsView {
     pub selection: ListSelection,
     pub disabled: HashSet<String>,
     pub changed: bool,
+    /// How many rows actually fit in the current viewport. Updated on every
+    /// render so that scrolling, clamping and mouse hit-testing all agree on
+    /// the same value — otherwise items scroll out of view while free space
+    /// below the list is wasted (same fix as the ADD Provider router).
+    visible_count: usize,
+    /// Buffer row of the first visible list item, captured at render time.
+    /// The vertical centering depends on the exact area the render used, so
+    /// the mouse path must reuse it instead of re-deriving it from its own
+    /// (differently sized) area.
+    list_start_y: u16,
 }
 
 impl InternalToolsView {
@@ -104,16 +114,18 @@ impl InternalToolsView {
             selection: ListSelection::new(),
             disabled: HashSet::new(),
             changed: false,
+            visible_count: 0,
+            list_start_y: 0,
         }
     }
 
-    pub fn select_next(&mut self, visible_count: usize) {
-        self.selection.set_visible_count(visible_count);
+    pub fn select_next(&mut self) {
+        self.selection.set_visible_count(self.visible_count.max(1));
         self.selection.select_next(internal_tools().len());
     }
 
-    pub fn select_prev(&mut self, visible_count: usize) {
-        self.selection.set_visible_count(visible_count);
+    pub fn select_prev(&mut self) {
+        self.selection.set_visible_count(self.visible_count.max(1));
         self.selection.select_prev(internal_tools().len());
     }
 
@@ -126,20 +138,29 @@ impl InternalToolsView {
     }
 
     fn find_row_for_mouse(&self, mouse: &MouseEvent, area: Rect) -> Option<usize> {
+        // Use the viewport the render computed, so hit-testing matches what
+        // is actually drawn on screen. The mouse path receives a slightly
+        // different area, and re-deriving the centered block from it shifted
+        // every row by one (see the ADD Provider router's regression test).
+        let count = self.visible_count.min(internal_tools().len());
+        if count == 0 {
+            return None;
+        }
         let my = mouse.y;
         let mx = mouse.x;
         let max_row_w = max_row_width();
         if max_row_w == 0 {
             return None;
         }
-        let list_start_y = content_start_y(area) + 2;
+
+        let list_start_y = self.list_start_y;
+
         let row_x = area.x + (area.width.saturating_sub(max_row_w as u16)) / 2;
-        let visible_count = visible_items(area);
         let hit = mx >= row_x && mx < row_x + max_row_w as u16;
         if !hit {
             return None;
         }
-        for i in 0..visible_count {
+        for i in 0..count {
             let idx = self.selection.scroll_offset + i;
             if idx >= internal_tools().len() {
                 break;
@@ -163,7 +184,6 @@ impl InternalToolsView {
 
         // title
         let title = "Internal Tools";
-        let count = visible_items(area).min(internal_tools().len());
         let start_y = content_start_y(area);
 
         let max_w = max_row_width();
@@ -182,11 +202,14 @@ impl InternalToolsView {
         }
 
         // Clamp selection and scroll before rendering
-        self.selection.set_visible_count(count);
+        let count = visible_items(area).min(internal_tools().len());
+        self.visible_count = count;
+        self.selection.set_visible_count(count.max(1));
         self.selection.clamp(internal_tools().len());
 
         // tools list aligned
         let list_start_y = start_y + 2;
+        self.list_start_y = list_start_y;
         if max_w == 0 {
             return;
         }
@@ -257,6 +280,103 @@ const fn visible_items(area: Rect) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::ThemeRegistry;
+    use cosh_tui::core::types::{MouseButton, MouseEventType, MouseModifiers};
+
+    fn click(x: u16, y: u16) -> MouseEvent {
+        MouseEvent::new(
+            MouseEventType::Down,
+            MouseButton::Left,
+            x,
+            y,
+            MouseModifiers::none(),
+        )
+    }
+
+    /// Regression: navigation must use the viewport the render computed, not
+    /// a hardcoded estimate. With a stale/too-small visible count the list
+    /// started scrolling while free space was still available below.
+    #[test]
+    fn scroll_fits_the_real_viewport() {
+        let theme = ThemeRegistry::new().themes[0].theme.clone();
+        // Tall viewport: every tool fits with room to spare.
+        let area = Rect::new(0, 0, 100, 60);
+        let mut view = InternalToolsView::new();
+        let mut buf = Buffer::empty(area);
+        view.render(&mut buf, area, &theme);
+
+        assert_eq!(
+            view.visible_count,
+            internal_tools().len(),
+            "viewport must fit the whole list"
+        );
+        for _ in 0..internal_tools().len() {
+            view.select_next();
+        }
+        assert_eq!(
+            view.selection.scroll_offset,
+            0,
+            "scroll must stay at 0 while everything fits"
+        );
+    }
+
+    /// Regression: `find_row_for_mouse` must reuse the list geometry the
+    /// render captured instead of re-deriving it from the mouse path's area,
+    /// which is a different height and would shift every hit by a row.
+    #[test]
+    fn mouse_hits_match_the_rendered_list_rows() {
+        let theme = ThemeRegistry::new().themes[0].theme.clone();
+        let term = Rect::new(0, 0, 100, 30);
+
+        // Render path (src/tui/app/render.rs): `session_area.height` is the
+        // terminal height − 3 and the InternalTools branch subtracts 1 more.
+        let render_area = Rect::new(0, 1, 100, term.height - 4);
+        // Mouse path (src/tui/app/mouse.rs): terminal height − 4, a different
+        // height than the render area.
+        let mouse_area = Rect::new(0, 1, 100, term.height - 4 + 1);
+
+        let mut view = InternalToolsView::new();
+        let mut buf = Buffer::empty(term);
+        view.render(&mut buf, render_area, &theme);
+
+        assert!(
+            view.visible_count > 0,
+            "viewport must show at least one row"
+        );
+        let max_w = max_row_width();
+        let row_x = render_area.x + (render_area.width.saturating_sub(max_w as u16)) / 2;
+        let name_x = row_x + 2;
+
+        // Sanity: a tool really is drawn on the first list row.
+        let drawn = (0..10u16).any(|dx| {
+            buf.cell((name_x + dx, view.list_start_y))
+                .is_some_and(|cell| cell.symbol() != " ")
+        });
+        assert!(
+            drawn,
+            "no tool drawn at first list row y={}",
+            view.list_start_y
+        );
+
+        // Every drawn row must map to its own index even though the mouse
+        // path hands us a differently sized area.
+        for i in 0..view.visible_count.min(5) {
+            let y = view.list_start_y + i as u16;
+            assert_eq!(
+                view.handle_mouse(&click(name_x, y), mouse_area),
+                Some(i),
+                "click on drawn row y={y} misaligned"
+            );
+        }
+
+        // Rows just outside the drawn list must not hit anything.
+        assert_eq!(
+            view.handle_mouse(&click(name_x, view.list_start_y - 1), mouse_area),
+            None
+        );
+        let below = view.list_start_y + view.visible_count as u16;
+        assert_eq!(view.handle_mouse(&click(name_x, below), mouse_area), None);
+    }
 
     /// Every entry in the Internal Tools list has a unique name so toggling
     /// one row never masks another.
