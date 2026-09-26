@@ -21,8 +21,9 @@
 //!
 //! [`extract_text_in_region`] treats the drag's focus column as INCLUSIVE,
 //! mirroring what selection painters highlight (`lx1..=lx2`): the glyph the
-//! user sees painted under the release point is part of the copy. A
-//! single-cell band (a plain click, not a drag) copies nothing.
+//! user sees painted under the release point is part of the copy. This
+//! includes the single-cell band of a drag that starts and ends on the same
+//! cell, which copies exactly that one glyph.
 
 use ratatui::buffer::Cell;
 
@@ -180,7 +181,10 @@ pub fn cells_to_text_regions(
 ///
 /// Column bounds are INCLUSIVE on both ends: the glyph under the focus cell
 /// is part of the selection, matching what both highlight painters draw
-/// (`lx1..=lx2`). A single-cell band (no drag movement) copies nothing.
+/// (`lx1..=lx2`). A same-cell band is a valid selection too — it copies
+/// exactly that one glyph. Distinguishing a drag from a bare click is the
+/// event layer's job (mouse-down followed by drag events vs. a plain
+/// down+up release); this extractor never second-guesses geometry.
 pub fn extract_text_in_region(
     regions: &[TextRegion],
     start_content_y: i32,
@@ -189,11 +193,6 @@ pub fn extract_text_in_region(
     end_x: u16,
 ) -> String {
     let mut result = String::new();
-    // A selection spanning a single cell is a plain click, not a drag —
-    // copy nothing (a click must not trigger the copy toast).
-    if start_content_y == end_content_y && start_x == end_x {
-        return String::new();
-    }
     for region in regions {
         if region.y1 > end_content_y || region.y2 <= start_content_y {
             continue;
@@ -370,7 +369,9 @@ mod tests {
             extract_text_in_region(std::slice::from_ref(&region), 0, 0, 0, 5),
             "hello"
         );
-        // A single-cell band is a click, not a drag: copy nothing.
-        assert_eq!(extract_text_in_region(&[region], 0, 0, 3, 3), "");
+        // A same-cell band copies exactly that glyph: a drag that starts and
+        // ends on one cell selects the single character under it (bare
+        // clicks never reach the extractor — the event layer filters them).
+        assert_eq!(extract_text_in_region(&[region], 0, 0, 3, 3), "l");
     }
 }
