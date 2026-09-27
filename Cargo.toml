@@ -1,5 +1,5 @@
 [workspace]
-members = [
+members = ["crates/cosh-onnx",
   "crates/cosh-recall",
   "crates/cosh-sdk",
   "crates/cosh-tools",
@@ -39,7 +39,9 @@ path = "crates/cosh-tools"
 path = "crates/cosh-tui"
 
 [dependencies.fastembed]
-version = "5"
+# Pinned to 7: it selects `ort =2.0.0-rc.13` (ndarray, std, api-24), matching
+# cosh-onnx so the workspace builds a single ort.
+version = "7"
 optional = true
 
 [[bin]]

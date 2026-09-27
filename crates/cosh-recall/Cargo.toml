@@ -21,8 +21,10 @@ thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# Local text embedding via fastembed (ONNX Runtime)
-fastembed = { version = "5", optional = true }
+# Local text embedding via fastembed (ONNX Runtime). Version 7 pins
+# `ort =2.0.0-rc.13` (features ndarray, std, api-24), which is the exact
+# configuration cosh-onnx uses, so a single ort build serves both.
+fastembed = { version = "7", optional = true }
 
 # Vector database
 lancedb = { version = "0.30", optional = true }

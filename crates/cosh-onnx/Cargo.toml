@@ -1,0 +1,57 @@
+[package]
+name = "cosh-onnx"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Same ort build fastembed 7 selects (features ndarray, std, api-24), so the
+# workspace compiles ONNX Runtime once and links it for both crates.
+# download-binaries ships the prebuilt onnxruntime static library; without it
+# ort-sys has nothing to link (no system libonnxruntime here).
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["ndarray", "std", "api-24", "download-binaries", "tls-rustls"] }
+# The HF fast tokenizer behind the Tokenizer trait. Same version and feature
+# set fastembed 7 selects, so a single tokenizers build serves both crates.
+tokenizers = { version = "0.23.2", default-features = false, features = ["onig"] }
+# Hub downloads (ONNXAgent load path). The sync/ureq API matches fastembed's
+# hf-hub feature set, so a single hf-hub build serves both crates.
+hf-hub = { version = "0.5", default-features = false, features = ["ureq", "native-tls"] }
+# Warnings surface through the log facade (workspace convention) instead of
+# Python's warnings module.
+log = "0.4"
+# Atomic tokenizer-config patching (the _fix_tokenizer_config port).
+tempfile = "3"
+# Checkpoint digest verification (hub); sha2 and hex are already in
+# the workspace lockfile.
+sha2 = "0.10"
+hex = "0.4"
+# PredictContext.run_id (hooks.rs) — uuid4().hex, matching the upstream format.
+uuid = { version = "1", default-features = false, features = ["v4"] }
+# preserve_order keeps serde_json::Map insertion-ordered, mirroring Python dict
+# ordering that the question/criteria rendering depends on.
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror = "2"
+# lang.rs replicates Python's str.isalpha/isalnum/isupper/islower and
+# unicodedata.combining exactly (general category L* / Nd, the Uppercase and
+# Lowercase binary properties, the canonical combining class). Already in the
+# workspace lockfile via tokenizers' icu stack, so no new crates are added.
+icu_properties = "2.2.0"
+
+# email.rs ports
+# regex crate cannot express. 0.17 is already in the workspace lockfile via
+# tiktoken-rs, so no new crate version is introduced.
+fancy-regex = "0.17"
+
+[dev-dependencies]
+# benches/parity.rs: typed access to the shared dataset records. serde_json
+# (a normal dependency) covers the parsing; derive covers the record struct.
+serde = { version = "1", features = ["derive"] }
+
+# The parity benchmark is a driver, not a harness: it runs the real facade
+# over the shared seed-generated dataset and appends JSONL records for the
+# Python twin to join against (see benches/parity.rs and the run notes).
+[[bench]]
+name = "parity"
+harness = false
+
+[lints]
+workspace = true
