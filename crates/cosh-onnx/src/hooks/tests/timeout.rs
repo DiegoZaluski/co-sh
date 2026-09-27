@@ -85,7 +85,7 @@ fn instance_level_timeout_applies_and_per_call_overrides_it() {
 #[test]
 fn a_fast_hook_is_unaffected_by_a_timeout() {
     let _registry = registry_isolation();
-    let mut agent = agent();
+    let agent = agent();
     let per_call = PerCall {
         on_predict_end: Some(Arc::new(|_ctx: &mut PredictContext| Ok(()))),
         hooks_timeout: Some(1.0),
@@ -104,7 +104,7 @@ fn a_timed_hook_writes_its_mutations_back() {
     // the tokenizer: the start hook's state rewrite must reach `encode`,
     // exactly like the untimed rewrite test.
     let seen = Arc::new(Mutex::new(Vec::new()));
-    let mut agent = recorded_agent(Arc::clone(&seen));
+    let agent = recorded_agent(Arc::clone(&seen));
     let per_call = PerCall {
         on_predict_start: Some(Arc::new(|ctx: &mut PredictContext| {
             ctx.states = vec![json!("timed-rewrite")];
@@ -148,7 +148,7 @@ fn validate_timeout_rejects_non_positive_values() {
         err
     );
     // A zero timeout passed per call is rejected before any hook runs.
-    let mut agent = agent();
+    let agent = agent();
     let per_call = PerCall {
         hooks_timeout: Some(0.0),
         ..PerCall::default()

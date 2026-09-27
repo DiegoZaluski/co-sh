@@ -3,7 +3,7 @@ use super::*;
 // ------------------------------------------------- test_empty_questions.py (ONNX half)
 #[test]
 fn empty_questions_return_the_empty_response_for_supported_states() {
-    let mut agent = bare_onnx(
+    let agent = bare_onnx(
         json!({}),
         vec![vec![2.0, 1.0, 0.0], vec![2.0, 0.0, 0.0]],
         vec![vec![0.7, 0.3], vec![0.4, 0.6]],
@@ -28,7 +28,7 @@ fn empty_questions_return_the_empty_response_for_supported_states() {
 
 #[test]
 fn empty_responses_do_not_share_mutable_containers() {
-    let mut agent = bare_onnx(json!({}), vec![], vec![]);
+    let agent = bare_onnx(json!({}), vec![], vec![]);
     let empty = json!({
         "model": "laya-rl-agent-onnx",
         "answers": {},

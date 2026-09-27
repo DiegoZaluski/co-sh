@@ -131,7 +131,7 @@ fn evict_and_unload_memory_release() {
     struct MockAgent;
     impl AgentLike for MockAgent {
         fn system_one(
-            &mut self,
+            &self,
             _state: &Value,
             _questions: &Map<String, Value>,
             _lang: Option<&str>,

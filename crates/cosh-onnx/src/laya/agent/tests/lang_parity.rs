@@ -3,7 +3,7 @@ use super::*;
 // ------------------------------------------------- test_onnx_lang_parity.py
 #[test]
 fn lang_override_changes_the_calibrated_probabilities() {
-    let mut agent = bare_onnx(
+    let agent = bare_onnx(
         json!({"de": {"temperature": [3.0, 3.0, 3.0]}}),
         vec![vec![2.0, 1.0, 0.0], vec![2.0, 0.0, 0.0]],
         vec![vec![0.7, 0.3], vec![0.4, 0.6]],

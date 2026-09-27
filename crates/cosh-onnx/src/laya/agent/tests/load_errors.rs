@@ -3,7 +3,7 @@ use super::*;
 // ------------------------------------------------- test_load_errors.py: options over budget
 #[test]
 fn options_over_budget_raise_and_name_the_question() {
-    let mut agent = bare_onnx(json!({}), vec![], vec![]);
+    let agent = bare_onnx(json!({}), vec![], vec![]);
     // `build_sequence` never drops markers by itself: the guard fires only
     // when the whole sequence overflows `max_len` and the `[m for m in
     // markers if m < max_len]` filter cuts them. Upstream pins this with the

@@ -24,11 +24,13 @@ use crate::error::{Error, Result};
 /// The `tokenizers` crate here encodes through `&self`, so the lock is an
 /// implementation detail of the concrete tokenizer wrapper, not of
 /// this trait.
-/// `Send` is a supertrait so a boxed tokenizer can sit inside an agent that
-/// the Router shares across threads (upstream's thread-safety guarantees,
-/// #95): `Arc<Mutex<OnnxAgent>>` is `Send + Sync` exactly when the agent is
-/// `Send`.
-pub trait Tokenizer: Send {
+/// `Send + Sync` are supertraits so a boxed tokenizer can sit inside an
+/// agent that the Router shares across threads **by reference** (upstream's
+/// thread-safety guarantees, #95): a resident is now an
+/// `Arc<dyn AgentLike>` with no outer mutex, so every field it carries must
+/// be `Sync`. The concrete [`HfTokenizer`] already synchronises its inner
+/// fast tokenizer on a mutex.
+pub trait Tokenizer: Send + Sync {
     /// `tok(text, add_special_tokens=False, truncation=..., max_length=...)["input_ids"]`.
     ///
     /// `max_length` is only honoured when `truncation` is set, matching the
@@ -104,7 +106,7 @@ impl HfTokenizer {
 
 impl Tokenizer for HfTokenizer {
     fn encode(&self, text: &str, truncation: bool, max_length: Option<usize>) -> Vec<u32> {
-        let tok = self.inner.lock().unwrap();
+        let tok = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         // `truncation=True, max_length=N` on a single sequence keeps the first
         // N tokens of the full encoding; truncating the produced ids is the
         // same tokens at the same cost, and leaves the shared tokenizer

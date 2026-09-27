@@ -14,7 +14,7 @@ use crate::error::Result;
 use crate::laya::agent::{self, OnnxAgent};
 use crate::laya::router::BUNDLE_REPO;
 use serde_json::{Map, Value};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// `laya.load`: build one checkpoint into a shared [`DecisionModel`].
 ///
@@ -57,9 +57,10 @@ pub fn load(kind: ModelKind, options: &LoadOptions) -> Result<Arc<dyn DecisionMo
         options.hooks_raise.unwrap_or(true),
         options.hooks_concurrent.unwrap_or(true),
         options.hooks_timeout,
+        options.intra_op_threads,
     )?;
     Ok(Arc::new(OnnxModel {
-        agent: Arc::new(Mutex::new(agent)),
+        agent: Arc::new(agent),
         model_id,
     }))
 }
@@ -82,10 +83,13 @@ fn resolve(kind: ModelKind) -> (String, Option<String>) {
     }
 }
 
-/// The ONNX agent behind the facade handle: the shared-agent lock the Router
-/// uses, exposed through the [`DecisionModel`] surface.
+/// The ONNX agent behind the facade handle: the shared-agent handle the
+/// Router uses, exposed through the [`DecisionModel`] surface. An `Arc`
+/// clone shares one agent with no outer lock — a prediction reads immutable
+/// state and drives interior-mutable seams, so `decide` calls run
+/// concurrently (the forward pass itself serialises inside `OrtSession`).
 struct OnnxModel {
-    agent: Arc<Mutex<OnnxAgent>>,
+    agent: Arc<OnnxAgent>,
     model_id: String,
 }
 
@@ -95,11 +99,7 @@ impl DecisionModel for OnnxModel {
     }
 
     fn revision(&self) -> Option<String> {
-        self.agent
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .revision
-            .clone()
+        self.agent.revision.clone()
     }
 
     fn decide(
@@ -110,16 +110,13 @@ impl DecisionModel for OnnxModel {
         max_len: Option<usize>,
         head_max_len: Option<usize>,
     ) -> Result<Value> {
-        self.agent
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .system_one(
-                state,
-                questions,
-                lang,
-                max_len,
-                head_max_len,
-                &crate::hooks::PerCall::default(),
-            )
+        self.agent.system_one(
+            state,
+            questions,
+            lang,
+            max_len,
+            head_max_len,
+            &crate::hooks::PerCall::default(),
+        )
     }
 }

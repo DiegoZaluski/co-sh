@@ -133,7 +133,7 @@ impl StubAgent {
 
 impl AgentLike for StubAgent {
     fn system_one(
-        &mut self,
+        &self,
         _state: &Value,
         _questions: &Map<String, Value>,
         _lang: Option<&str>,

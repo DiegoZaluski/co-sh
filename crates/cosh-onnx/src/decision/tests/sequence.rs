@@ -15,18 +15,18 @@ use crate::runtime::tokenizer::Tokenizer;
 /// The `_SeqTok` tokenizer from the upstream test: ids are assigned per new
 /// word, 100 + insertion order.
 struct SeqTok {
-    vocab: std::cell::RefCell<std::collections::HashMap<String, u32>>,
+    vocab: std::sync::Mutex<std::collections::HashMap<String, u32>>,
 }
 
 impl SeqTok {
     fn new() -> Self {
-        Self { vocab: std::cell::RefCell::new(std::collections::HashMap::new()) }
+        Self { vocab: std::sync::Mutex::new(std::collections::HashMap::new()) }
     }
 }
 
 impl Tokenizer for SeqTok {
     fn encode(&self, text: &str, truncation: bool, max_length: Option<usize>) -> Vec<u32> {
-        let mut vocab = self.vocab.borrow_mut();
+        let mut vocab = self.vocab.lock().unwrap_or_else(|e| e.into_inner());
         let mut ids = Vec::new();
         for w in text.split_whitespace() {
             let next = 100 + vocab.len() as u32;
@@ -73,7 +73,7 @@ fn truncate_left_keeps_the_tail() {
         let ids = build_sequence(&tok, &json!("one two three"), &q, &opts).unwrap().0;
         let mut want: Vec<u32> = kept
             .iter()
-            .map(|w| *tok.vocab.borrow().get(*w).unwrap())
+            .map(|w| *tok.vocab.lock().unwrap().get(*w).unwrap())
             .collect();
         want.push(tok.sep_token_id());
         assert_eq!(&ids[full - 1..], want.as_slice(), "room={}", room);

@@ -245,6 +245,19 @@ pub(crate) fn skip_default_hooks() -> bool {
     SKIP_DEFAULTS.with(Cell::get)
 }
 
+/// Whether a call would run any hook at all — the fast-path probe for the
+/// no-hooks prediction path. False only when every source is empty: the
+/// process-wide defaults (unless suppressed on this thread), the installed
+/// hooks and the per-call hooks. Reading the default registry takes its
+/// mutex, so call this once per prediction, not per question.
+pub(crate) fn no_hooks_active(installed: &[SharedHook], per_call: &PerCall) -> bool {
+    per_call.hooks.is_empty()
+        && per_call.on_predict_start.is_none()
+        && per_call.on_predict_end.is_none()
+        && installed.is_empty()
+        && (skip_default_hooks() || lock_registry().is_empty())
+}
+
 /// The process-wide hooks, a copy, in order. Empty unless set via
 /// [`set_default_hooks`].
 pub fn default_hooks() -> Vec<SharedHook> {
@@ -424,11 +437,9 @@ fn call_hook(
             *ctx = timed_ctx;
             outcome
         }
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(Error::Timeout(format!(
-            "cosh-onnx: hook {} exceeded {}s",
-            name,
-            py_g(timeout)
-        ))),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            Err(crate::error::Error::hook_timeout(&name, timeout))
+        }
         // The worker exited without sending: it could only abort or be
         // cancelled before the send, which is neither a hook failure nor a
         // timeout.

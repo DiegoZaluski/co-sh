@@ -498,7 +498,7 @@ fn round4(x: f64) -> f64 {
 /// `questions`, the raw answers are returned. `return_details` returns a
 /// `DecisionResult` instead of the plain values.
 pub fn decide(
-    runner: &mut impl PredictRunner,
+    runner: &impl PredictRunner,
     state: &Value,
     schema: Option<&Value>,
     questions: Option<&Map<String, Value>>,

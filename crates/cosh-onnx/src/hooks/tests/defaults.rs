@@ -47,7 +47,7 @@ fn add_default_hook_appends_in_order_and_clear_empties() {
     let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     crate::hooks::add_default_hook(tag(&log, "a"));
     crate::hooks::add_default_hook(tag(&log, "b"));
-    let mut agent = agent();
+    let agent = agent();
     agent
         .system_one(
             &json!("s0"),
@@ -74,7 +74,7 @@ fn defaults_set_after_construction_still_apply() {
     clear_default_hooks();
     let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     // The agent is built before any default hook exists.
-    let mut agent = agent();
+    let agent = agent();
     // ...and the defaults are installed only afterwards: compose_hooks reads
     // the registry at call time, so they must still fire.
     crate::hooks::add_default_hook(tag(&log, "late"));

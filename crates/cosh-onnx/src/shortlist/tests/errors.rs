@@ -32,9 +32,9 @@ fn empty_criteria_and_duplicates_raise() {
 #[test]
 fn missing_criteria_raises() {
     let embed = TableEmbed::from_pairs(&option_texts_table());
-    let mut agent = Recorder::new();
+    let agent = Recorder::new();
     let err = predict_shortlist(
-        &mut agent,
+         &agent,
         &json!("pay me"),
         json!({"intent": {"type": "choice"}}).as_object().expect("map"),
         &embed,
@@ -56,9 +56,9 @@ fn bad_embed_shape_raises_before_predict() {
         }
     }
     let (full, _sentinel) = full_criteria();
-    let mut agent = Recorder::new();
+    let agent = Recorder::new();
     let err = predict_shortlist(
-        &mut agent,
+         &agent,
         &json!("pay me"),
         json!({"intent": {"type": "choice", "instructions": "Which desk?", "criteria": full}})
             .as_object()
@@ -68,20 +68,23 @@ fn bad_embed_shape_raises_before_predict() {
     )
     .expect_err("bad embed shape");
     assert!(matches!(err, Error::Value(_)), "err/bad embed shape");
-    assert_eq!(agent.calls.len(), 0, "err/bad shape does not call predict");
+    assert!(
+        agent.calls.lock().unwrap_or_else(|e| e.into_inner()).is_empty(),
+        "err/bad shape does not call predict"
+    );
 }
 
 #[test]
 fn predict_must_return_a_dict() {
     struct NullRunner;
     impl PredictRunner for NullRunner {
-        fn predict(&mut self, _state: &Value, _questions: &Map<String, Value>) -> Result<Value> {
+        fn predict(&self, _state: &Value, _questions: &Map<String, Value>) -> Result<Value> {
             Ok(Value::Null)
         }
     }
-    let mut runner = NullRunner;
+    let runner = NullRunner;
     let err = predict_shortlist(
-        &mut runner,
+         &runner,
         &json!("pay me"),
         json!({"intent": {"type": "choice", "criteria": criteria_value()}})
             .as_object()

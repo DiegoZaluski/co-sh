@@ -38,16 +38,14 @@ use crate::decision::confidence::{
 use crate::decision::question::{
     check_question, qtype_code, render_options, serialize_state, to_internal,
 };
-use crate::decision::sequence::{build_sequence, BuildOptions};
+use crate::decision::sequence::{build_sequence_with_options, BuildOptions};
 use crate::error::{Error, Result};
 use crate::hub::{resolve_revision, snapshot_revision, verify_digests};
 use crate::pycompat::{py_float, py_g, py_repr_str, py_repr_value, round4};
 use crate::runtime::batch::{collate_items, CollateItem};
 #[cfg(test)]
 use crate::runtime::batch::CollatedBatch;
-use crate::runtime::session::{ort_error, OrtSession, SessionRunner};
-#[cfg(test)]
-use crate::runtime::session::SessionOutput;
+use crate::runtime::session::{ort_error, OrtSession, SessionOutput, SessionRunner};
 use crate::runtime::tokenizer::{fix_tokenizer_config, HfTokenizer, Tokenizer};
 
 /// Per-language temperature overrides, built exactly as the PyTorch Agent does
@@ -100,6 +98,10 @@ pub struct OnnxAgent {
 /// `hooks_concurrent=false` serialises hooks that are not safe to run in
 /// parallel, and `hooks_timeout` bounds each hook call in seconds (`None`
 /// means no limit).
+///
+/// `intra_op_threads` is a Rust-only addition (no upstream counterpart): a
+/// cap on the session's ONNX Runtime intra-op thread pool. `None` keeps
+/// ORT's default. See [`LoadOptions::intra_op_threads`].
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn load_agent(
     model_id_or_path: &str,
@@ -114,6 +116,7 @@ pub(crate) fn load_agent(
     hooks_raise: bool,
     hooks_concurrent: bool,
     hooks_timeout: Option<f64>,
+    intra_op_threads: Option<usize>,
 ) -> Result<OnnxAgent> {
     let mut resolved_revision: Option<String> = None;
     let model_dir: PathBuf = if Path::new(model_id_or_path).exists() {
@@ -274,10 +277,16 @@ pub(crate) fn load_agent(
     // Initialize ONNX Runtime session. Graph optimization ALL is functionally
     // neutral and free at inference time; without it ORT runs the unoptimized
     // graph. CPU-only: see the module docs for the CUDA note.
-    let session = ort::session::Session::builder()
+    let mut builder = ort::session::Session::builder()
         .map_err(ort_error)?
         .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)
-        .map_err(ort_error)?
+        .map_err(ort_error)?;
+    if let Some(threads) = intra_op_threads {
+        builder = builder
+            .with_intra_threads(threads)
+            .map_err(ort_error)?;
+    }
+    let session = builder
         .with_execution_providers([ort::ep::CPU::default().build()])
         .map_err(ort_error)?
         .commit_from_file(onnx_path)
@@ -287,7 +296,7 @@ pub(crate) fn load_agent(
         model_id: model_id_or_path.to_string(),
         cfg,
         tok: Box::new(tok),
-        session: Box::new(OrtSession { session }),
+        session: Box::new(OrtSession::new(session)),
         temperature_raw: Vec::new(),
         temperature_by_options_raw: Map::new(),
         temperature: [1.0, 1.0, 1.0],
@@ -446,7 +455,7 @@ impl OnnxAgent {
     /// original failure (Python chains it as `__context__`; here it is
     /// logged).
     pub fn system_one(
-        &mut self,
+        &self,
         state: &Value,
         questions: &Map<String, Value>,
         lang: Option<&str>,
@@ -454,6 +463,22 @@ impl OnnxAgent {
         head_max_len: Option<usize>,
         per_call: &crate::hooks::PerCall,
     ) -> Result<Value> {
+        // Fast path: no hook from any source would observe this call, so the
+        // hook cycle (and the context clones it exists to feed) is skipped
+        // entirely. Behaviour-identical: with no active hooks, `dispatch`
+        // never fires, no context mutation can happen, and the result of the
+        // full cycle below is exactly `infer(state, questions, ...)`.
+        // The per-call timeout is validated first — the full path rejects it
+        // before any hook runs, and a caller must get the same rejection
+        // when no hook is registered. `hooks_raise` is only read by
+        // `dispatch`, so it is not consulted here.
+        if let Some(value) = per_call.hooks_timeout {
+            crate::hooks::validate_timeout(Some(value))?;
+        }
+        if crate::hooks::no_hooks_active(&self.hooks, per_call) {
+            return self.infer(state, questions, lang, max_len, head_max_len);
+        }
+
         let active = crate::hooks::compose_hooks(&self.hooks, per_call);
         let raise_errors = per_call.hooks_raise.unwrap_or(self.hooks_raise);
         let timeout = match per_call.hooks_timeout {
@@ -545,7 +570,7 @@ impl OnnxAgent {
 
     /// `predict = system_one` (the upstream alias).
     pub fn predict(
-        &mut self,
+        &self,
         state: &Value,
         questions: &Map<String, Value>,
         lang: Option<&str>,
@@ -556,27 +581,9 @@ impl OnnxAgent {
         self.system_one(state, questions, lang, max_len, head_max_len, per_call)
     }
 
-    /// `ONNXAgent._infer`: validate, build one row per question, run a single
-    /// forward pass, and decode the typed answers.
-    pub fn infer(
-        &mut self,
-        state: &Value,
-        questions: &Map<String, Value>,
-        lang: Option<&str>,
-        max_len: Option<usize>,
-        head_max_len: Option<usize>,
-    ) -> Result<Value> {
-        let ids: Vec<String> = questions.keys().cloned().collect();
-        if ids.is_empty() {
-            return Ok(json!({
-                "model": "laya-rl-agent-onnx",
-                "answers": {},
-                "usage": {"input_tokens": 0, "output_tokens": 0}
-            }));
-        }
-        for qid in &ids {
-            check_question(qid, &questions[qid])?;
-        }
+    /// The token budget for a call: the caller override, else the config
+    /// value, else the upstream default (512 / 192).
+    fn token_budgets(&self, max_len: Option<usize>, head_max_len: Option<usize>) -> (usize, usize) {
         let max_len = max_len
             .or_else(|| self.cfg.get("max_len").and_then(Value::as_u64).map(|v| v as usize))
             .unwrap_or(512);
@@ -588,7 +595,33 @@ impl OnnxAgent {
                     .map(|v| v as usize)
             })
             .unwrap_or(192);
+        (max_len, head_max_len)
+    }
 
+    /// The response for zero questions (the `_infer` early return).
+    fn empty_payload(&self) -> Value {
+        json!({
+            "model": "laya-rl-agent-onnx",
+            "answers": {},
+            "usage": {"input_tokens": 0, "output_tokens": 0}
+        })
+    }
+
+    /// The row builder of `_infer`, shared by the single and batch shapes:
+    /// validate every question, tokenize the state once, and build one
+    /// internal question shape plus one collate row per question, in
+    /// `questions` key order.
+    fn build_rows(
+        &self,
+        state: &Value,
+        questions: &Map<String, Value>,
+        max_len: usize,
+        head_max_len: usize,
+    ) -> Result<(Vec<CollateItem>, Vec<Value>)> {
+        let ids: Vec<String> = questions.keys().cloned().collect();
+        for qid in &ids {
+            check_question(qid, &questions[qid])?;
+        }
         // Tokenize the shared state once and reuse it across questions, instead
         // of re-serializing and re-tokenizing the same document inside
         // build_sequence per question.
@@ -600,9 +633,13 @@ impl OnnxAgent {
         for qid in &ids {
             // One owned internal shape per question: `build_sequence` and
             // `render_options` borrow the same value, and the value is then
-            // moved into `internals` for the decode loop.
+            // moved into `internals` for the decode loop. The options render
+            // once and feed both the sequence build and the marker-count
+            // check below (`build_sequence` and `render_options` agree on
+            // the option count by construction).
             let q = to_internal(&questions[qid])?;
             let q_value = Value::Object(q);
+            let rendered = render_options(&q_value)?;
             let opts = BuildOptions {
                 max_len,
                 head_max_len,
@@ -610,8 +647,9 @@ impl OnnxAgent {
                 truncate_left,
                 state_ids: Some(&state_ids),
             };
-            let (seq, markers) = build_sequence(&*self.tok, state, &q_value, &opts)?;
-            if markers.len() != render_options(&q_value)?.len() {
+            let (seq, markers) =
+                build_sequence_with_options(&*self.tok, state, &q_value, &opts, &rendered)?;
+            if markers.len() != rendered.len() {
                 return Err(Error::Value(format!(
                     "question {} options exceed head_max_len={}",
                     py_repr_str(qid),
@@ -635,111 +673,192 @@ impl OnnxAgent {
             });
             internals.push(q_value);
         }
+        Ok((items, internals))
+    }
 
+    /// `ONNXAgent._infer`: validate, build one row per question, run a single
+    /// forward pass, and decode the typed answers.
+    pub fn infer(
+        &self,
+        state: &Value,
+        questions: &Map<String, Value>,
+        lang: Option<&str>,
+        max_len: Option<usize>,
+        head_max_len: Option<usize>,
+    ) -> Result<Value> {
+        if questions.is_empty() {
+            return Ok(self.empty_payload());
+        }
+        let (max_len, head_max_len) = self.token_budgets(max_len, head_max_len);
+        let (items, internals) = self.build_rows(state, questions, max_len, head_max_len)?;
         let pad_id = self.tok.pad_token_id();
         let batch = collate_items(&[items], pad_id)
             .ok_or_else(|| Error::Value("collate_items returned nothing for a non-empty batch".to_string()))?;
         let outputs = self.session.run(&batch)?;
-        let n_tokens: u32 = batch.attention_mask.iter().flatten().sum();
-
+        let ids: Vec<String> = questions.keys().cloned().collect();
         let mut answers = Map::new();
         for (r, qid) in ids.iter().enumerate() {
-            let q = &internals[r];
-            // Number of option markers for this row (the logit width k).
-            let k = batch.marker_mask[r].iter().filter(|b| **b).count();
-            let qt = qtype_code(q["t"].as_str().unwrap_or_default()).unwrap_or(2);
-            let mut t_scale = self
-                .temperature_by_options
-                .get(&temp_bucket(qt, k))
-                .copied()
-                .unwrap_or(self.temperature[qt as usize]);
-            // Python truthiness: an empty `lang` string is falsy and falls
-            // through to the base temperatures.
-            if let Some(lang) = lang.filter(|l| !l.is_empty()) {
-                let norm = lang.split('-').next().unwrap_or("").to_lowercase();
-                if let Some(l_cfg) = self.lang_temperatures.get(&norm) {
-                    t_scale = l_cfg
-                        .temperature_by_options
-                        .get(&temp_bucket(qt, k))
-                        .copied()
-                        .unwrap_or(l_cfg.temperature[qt as usize]);
-                }
-            }
-            let logits = &outputs[r].logits;
-            let z: Vec<f64> = logits.iter().take(k).map(|v| *v as f64 / t_scale).collect();
-            let p = softmax(&z);
-
-            let conf_score = round4(confidence_from_probs(&p, k));
-            // `answer_confidence` is the calibrated max(p) confidence, reported
-            // on every question type so a caller can gate across types on one
-            // number.
-            let ans_conf = round4(answer_confidence(&p, k));
-            let act = softmax(&outputs[r].act_logits.iter().map(|v| *v as f64).collect::<Vec<_>>());
-            let mut ext = Map::new();
-            ext.insert("act_probability".into(), json!(round4(act.first().copied().unwrap_or(0.0))));
-
-            let answer = match q["t"].as_str().unwrap_or_default() {
-                "choice" => {
-                    let keys: Vec<String> =
-                        q["crit"].as_object().map(|m| m.keys().cloned().collect()).unwrap_or_default();
-                    let mut probabilities = Map::new();
-                    for (kk, v) in keys.iter().zip(&p) {
-                        probabilities.insert(kk.clone(), json!(round4(*v)));
-                    }
-                    let choice = keys
-                        .get(argmax(&p))
-                        .cloned()
-                        .unwrap_or_default();
-                    json!({
-                        "type": "choice",
-                        "choice": choice,
-                        "probabilities": probabilities,
-                        "confidence": conf_score,
-                        "answer_confidence": ans_conf,
-                        "action": ext,
-                    })
-                }
-                "score" => {
-                    let crit = q["crit"].as_array().cloned().unwrap_or_default();
-                    let exp_score: f64 = p.iter().enumerate().map(|(i, v)| i as f64 * v).sum();
-                    let mut legend = Map::new();
-                    let mut probabilities = Map::new();
-                    for (i, c) in crit.iter().enumerate() {
-                        legend.insert(i.to_string(), c.clone());
-                        probabilities.insert(
-                            i.to_string(),
-                            json!(round4(p.get(i).copied().unwrap_or(0.0))),
-                        );
-                    }
-                    json!({
-                        "type": "score",
-                        "score": round4(exp_score),
-                        "legend": legend,
-                        "probabilities": probabilities,
-                        "confidence": conf_score,
-                        "answer_confidence": ans_conf,
-                        "action": ext,
-                    })
-                }
-                _ => {
-                    let p1 = p.get(1).copied().unwrap_or(0.0);
-                    json!({
-                        "type": "noul",
-                        "noul": round4(p1),
-                        "confidence": round4(p1.max(1.0 - p1)),
-                        "answer_confidence": ans_conf,
-                        "action": ext,
-                    })
-                }
-            };
-            answers.insert(qid.clone(), answer);
+            let k = batch.row_markers(r);
+            answers.insert(qid.clone(), self.decode_row(&internals[r], &outputs[r], k, lang));
         }
-
+        let n_tokens: u32 = (0..batch.n_rows).map(|r| batch.row_tokens(r)).sum();
         Ok(json!({
             "model": "laya-rl-agent-onnx",
             "answers": answers,
             "usage": {"input_tokens": n_tokens, "output_tokens": 0}
         }))
+    }
+
+    /// The batch shape of `infer`: one shared question schema and token
+    /// budget over many states, chunked into forward passes of `batch_size`
+    /// states (`None` = all states in one pass; the trait default's
+    /// one-pass-per-state is `Some(1)`).
+    ///
+    /// Every state's rows share one collated batch and one `session.run` per
+    /// chunk; each per-state payload keeps its own `usage` (`input_tokens`
+    /// counts only that state's rows), so a caller reading `usage` sees the
+    /// same numbers the single-state path reports. Hooks do not run here —
+    /// `predict_batch` falls back to the per-state `system_one` cycle when
+    /// any hook is installed.
+    pub fn infer_batch(
+        &self,
+        states: &[Value],
+        questions: &Map<String, Value>,
+        lang: Option<&str>,
+        max_len: Option<usize>,
+        head_max_len: Option<usize>,
+        batch_size: Option<usize>,
+    ) -> Result<Vec<Value>> {
+        if states.is_empty() {
+            return Ok(Vec::new());
+        }
+        if questions.is_empty() {
+            return Ok(states.iter().map(|_| self.empty_payload()).collect());
+        }
+        let (max_len, head_max_len) = self.token_budgets(max_len, head_max_len);
+        let mut rows: Vec<Vec<CollateItem>> = Vec::with_capacity(states.len());
+        let mut internals: Vec<Vec<Value>> = Vec::with_capacity(states.len());
+        for state in states {
+            let (items, internal) = self.build_rows(state, questions, max_len, head_max_len)?;
+            rows.push(items);
+            internals.push(internal);
+        }
+        let ids: Vec<String> = questions.keys().cloned().collect();
+        let pad_id = self.tok.pad_token_id();
+        let chunk = batch_size.unwrap_or(states.len()).max(1);
+        let mut results = Vec::with_capacity(states.len());
+        for (base, chunk_rows) in rows.chunks(chunk).enumerate() {
+            let flat: Vec<CollateItem> = chunk_rows.iter().flatten().cloned().collect();
+            let batch = collate_items(&[flat], pad_id)
+                .ok_or_else(|| Error::Value("collate_items returned nothing for a non-empty batch".to_string()))?;
+            let outputs = self.session.run(&batch)?;
+            let mut offset = 0usize;
+            for (s, items) in chunk_rows.iter().enumerate() {
+                let mut answers = Map::new();
+                for (r, qid) in ids.iter().enumerate() {
+                    let row = offset + r;
+                    let k = batch.row_markers(row);
+                    let internal = &internals[base * chunk + s][r];
+                    answers.insert(qid.clone(), self.decode_row(internal, &outputs[row], k, lang));
+                }
+                let n_tokens: u32 =
+                    (offset..offset + items.len()).map(|row| batch.row_tokens(row)).sum();
+                offset += items.len();
+                results.push(json!({
+                    "model": "laya-rl-agent-onnx",
+                    "answers": answers,
+                    "usage": {"input_tokens": n_tokens, "output_tokens": 0}
+                }));
+            }
+        }
+        Ok(results)
+    }
+
+    /// Decode one collated row: the typed answer for the internal question
+    /// `q` from the row's logits, at the temperature scale for `lang` over
+    /// the row's option-marker count `k`.
+    fn decode_row(&self, q: &Value, output: &SessionOutput, k: usize, lang: Option<&str>) -> Value {
+        let qt = qtype_code(q["t"].as_str().unwrap_or_default()).unwrap_or(2);
+        let mut t_scale = self
+            .temperature_by_options
+            .get(&temp_bucket(qt, k))
+            .copied()
+            .unwrap_or(self.temperature[qt as usize]);
+        // Python truthiness: an empty `lang` string is falsy and falls
+        // through to the base temperatures.
+        if let Some(lang) = lang.filter(|l| !l.is_empty()) {
+            let norm = lang.split('-').next().unwrap_or("").to_lowercase();
+            if let Some(l_cfg) = self.lang_temperatures.get(&norm) {
+                t_scale = l_cfg
+                    .temperature_by_options
+                    .get(&temp_bucket(qt, k))
+                    .copied()
+                    .unwrap_or(l_cfg.temperature[qt as usize]);
+            }
+        }
+        let z: Vec<f64> = output.logits.iter().take(k).map(|v| *v as f64 / t_scale).collect();
+        let p = softmax(&z);
+
+        let conf_score = round4(confidence_from_probs(&p, k));
+        // `answer_confidence` is the calibrated max(p) confidence, reported
+        // on every question type so a caller can gate across types on one
+        // number.
+        let ans_conf = round4(answer_confidence(&p, k));
+        let act = softmax(&output.act_logits.iter().map(|v| *v as f64).collect::<Vec<_>>());
+        let mut ext = Map::new();
+        ext.insert("act_probability".into(), json!(round4(act.first().copied().unwrap_or(0.0))));
+
+        match q["t"].as_str().unwrap_or_default() {
+            "choice" => {
+                let keys: Vec<String> =
+                    q["crit"].as_object().map(|m| m.keys().cloned().collect()).unwrap_or_default();
+                let mut probabilities = Map::new();
+                for (kk, v) in keys.iter().zip(&p) {
+                    probabilities.insert(kk.clone(), json!(round4(*v)));
+                }
+                let choice = keys.get(argmax(&p)).cloned().unwrap_or_default();
+                json!({
+                    "type": "choice",
+                    "choice": choice,
+                    "probabilities": probabilities,
+                    "confidence": conf_score,
+                    "answer_confidence": ans_conf,
+                    "action": ext,
+                })
+            }
+            "score" => {
+                let crit = q["crit"].as_array().cloned().unwrap_or_default();
+                let exp_score: f64 = p.iter().enumerate().map(|(i, v)| i as f64 * v).sum();
+                let mut legend = Map::new();
+                let mut probabilities = Map::new();
+                for (i, c) in crit.iter().enumerate() {
+                    legend.insert(i.to_string(), c.clone());
+                    probabilities.insert(
+                        i.to_string(),
+                        json!(round4(p.get(i).copied().unwrap_or(0.0))),
+                    );
+                }
+                json!({
+                    "type": "score",
+                    "score": round4(exp_score),
+                    "legend": legend,
+                    "probabilities": probabilities,
+                    "confidence": conf_score,
+                    "answer_confidence": ans_conf,
+                    "action": ext,
+                })
+            }
+            _ => {
+                let p1 = p.get(1).copied().unwrap_or(0.0);
+                json!({
+                    "type": "noul",
+                    "noul": round4(p1),
+                    "confidence": round4(p1.max(1.0 - p1)),
+                    "answer_confidence": ans_conf,
+                    "action": ext,
+                })
+            }
+        }
     }
 
     // HookRegistry surface: hooks can be added, removed or scoped after
@@ -817,7 +936,7 @@ fn argmax(p: &[f64]) -> usize {
 
 /// A caller that can answer questions — `decide` consumes this.
 impl crate::decision::model::PredictRunner for OnnxAgent {
-    fn predict(&mut self, state: &Value, questions: &Map<String, Value>) -> Result<Value> {
+    fn predict(&self, state: &Value, questions: &Map<String, Value>) -> Result<Value> {
         // `runner.predict = system_one` upstream, so the hooks around the
         // decision fire through `structured.decide` as well.
         self.system_one(
@@ -840,7 +959,7 @@ impl crate::decision::model::PredictRunner for OnnxAgent {
 /// `agent.system_one(...)` with no hook arguments.
 impl crate::decision::model::AgentLike for OnnxAgent {
     fn system_one(
-        &mut self,
+        &self,
         state: &Value,
         questions: &Map<String, Value>,
         lang: Option<&str>,
@@ -865,6 +984,45 @@ impl crate::decision::model::AgentLike for OnnxAgent {
         self.revision.clone()
     }
 
+    /// The ONNX batch shape: without installed hooks, all states share one
+    /// collated batch per `batch_size` chunk and a single forward pass per
+    /// chunk. With hooks installed, the per-state hook cycle is preserved
+    /// (upstream `Agent.predict_batch` runs hooks around every `_infer`,
+    /// so the default one-`system_one`-per-state path is the parity shape).
+    fn predict_batch(
+        &self,
+        states: &[Value],
+        questions: &Map<String, Value>,
+        batch_size: Option<usize>,
+        lang: Option<&str>,
+        max_len: Option<usize>,
+        head_max_len: Option<usize>,
+    ) -> Result<Vec<Value>> {
+        if crate::hooks::no_hooks_active(&self.hooks, &crate::hooks::PerCall::default()) {
+            return self.infer_batch(
+                states,
+                questions,
+                lang,
+                max_len,
+                head_max_len,
+                batch_size,
+            );
+        }
+        states
+            .iter()
+            .map(|state| {
+                self.system_one(
+                    state,
+                    questions,
+                    lang,
+                    max_len,
+                    head_max_len,
+                    &crate::hooks::PerCall::default(),
+                )
+            })
+            .collect()
+    }
+
     fn has_lang_temperatures(&self) -> bool {
         !self.lang_temperatures.is_empty()
     }
@@ -881,8 +1039,8 @@ pub(crate) struct StubSession {
 
 #[cfg(test)]
 impl SessionRunner for StubSession {
-    fn run(&mut self, batch: &CollatedBatch) -> Result<Vec<SessionOutput>> {
-        let n = batch.input_ids.len();
+    fn run(&self, batch: &CollatedBatch) -> Result<Vec<SessionOutput>> {
+        let n = batch.n_rows;
         Ok((0..n)
             .map(|r| SessionOutput {
                 logits: self.logits.get(r).cloned().unwrap_or_default(),
@@ -995,6 +1153,7 @@ pub fn load(
         hooks_raise,
         hooks_concurrent,
         hooks_timeout,
+        None,
     )
 }
 

@@ -6,7 +6,7 @@
 //! schema decisions) depend on.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
@@ -14,20 +14,26 @@ use crate::error::Result;
 use crate::hooks::{PredictHook, SharedHook};
 
 /// A caller that can answer questions; the upstream `runner.predict`.
+///
+/// `&self`: a prediction only reads immutable model state (temperatures,
+/// config); the tokenizer and session are interior-mutable seams
+/// (`HfTokenizer`, `OrtSession`), so a shared runner predicts concurrently.
 pub trait PredictRunner {
     /// Run one prediction; returns the full result object (`answers`,
     /// `usage`, ...).
-    fn predict(&mut self, state: &Value, questions: &Map<String, Value>) -> Result<Value>;
+    fn predict(&self, state: &Value, questions: &Map<String, Value>) -> Result<Value>;
 }
 
-/// A resident agent handle: the duck-typed [`AgentLike`] behind the mutex
-/// every prediction shares (upstream: one `Agent` object shared by all
-/// callers, inference deliberately left outside the lifecycle lock so
-/// concurrent predictions serialise only on the agent itself).
+/// A resident agent handle: the duck-typed [`AgentLike`] shared by every
+/// prediction. An `Arc` clone shares one agent with no outer lock — a
+/// prediction only reads immutable model state, and the mutable seams
+/// (session, tokenizer, hook lock) are interior to the agent (upstream: one
+/// `Agent` object shared by all callers, inference serialised on the
+/// interpreter).
 ///
 /// Lives here because [`DecisionModel`] hands out exactly this handle — the
 /// Router and the facade share one shape of residency.
-pub type SharedAgent = Arc<Mutex<Box<dyn AgentLike>>>;
+pub type SharedAgent = Arc<dyn AgentLike>;
 
 /// The agent-like surface the Router drives (`agent.system_one`,
 /// `agent.predict_batch`, `agent.revision`, `agent.lang_temperatures`).
@@ -43,12 +49,18 @@ pub type SharedAgent = Arc<Mutex<Box<dyn AgentLike>>>;
 /// Rust signature carries `lang` as an `Option` parameter, so the tolerance
 /// is structural (an implementor that ignores the language simply ignores
 /// the argument) and no retry path exists to get wrong.
-pub trait AgentLike: Send {
+///
+/// `Send + Sync` supertraits: a resident is shared by reference
+/// ([`SharedAgent`]) and predicts concurrently. Upstream's `&mut self` comes
+/// from Python's single-threaded interpreter, not from the model — a
+/// prediction reads immutable state (temperatures, config) and drives
+/// interior-mutable seams (session, tokenizer, hook lock).
+pub trait AgentLike: Send + Sync {
     /// `agent.system_one(state, questions, lang=..., max_len=...,
     /// head_max_len=...)`. The Router passes `lang` on every call (None
     /// included), exactly as upstream passes `lang=effective_lang`.
     fn system_one(
-        &mut self,
+        &self,
         state: &Value,
         questions: &Map<String, Value>,
         lang: Option<&str>,
@@ -64,7 +76,7 @@ pub trait AgentLike: Send {
     /// per-language temperatures (upstream adds the kwarg only when not
     /// None, which an `Option` parameter expresses directly).
     fn predict_batch(
-        &mut self,
+        &self,
         states: &[Value],
         questions: &Map<String, Value>,
         _batch_size: Option<usize>,
@@ -172,6 +184,14 @@ pub struct LoadOptions {
     pub hooks_concurrent: Option<bool>,
     /// Per-hook-call bound in seconds; `None` means no limit.
     pub hooks_timeout: Option<f64>,
+    /// Rust-only addition (no upstream counterpart): cap the ONNX Runtime
+    /// intra-op thread pool of the session. `None` keeps ORT's default (one
+    /// pool sized to the machine per session — a Router holding several
+    /// residents then stacks that many pools). A small value deduplicates
+    /// the CPU budget across residents. Opt-in because the parallel
+    /// reduction order inside ORT can differ from the default pool's, and
+    /// this port's contract is bit-stable confidence numbers.
+    pub intra_op_threads: Option<usize>,
 }
 
 /// A loaded decision model: one checkpoint built for inference, shared by

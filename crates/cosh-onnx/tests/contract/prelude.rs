@@ -62,7 +62,7 @@ fn the_prelude_resolves_every_advertised_name() {
         .unwrap()
         .clone();
     // k >= n passes through without calling the embedder.
-    let out = predict_shortlist(&mut Runner, &json!("q"), &questions, &Stub, 1).unwrap();
+    let out = predict_shortlist(&Runner, &json!("q"), &questions, &Stub, 1).unwrap();
     assert!(out["shortlist"]["dept"]["passthrough"] == json!(true));
     let cached = cached_embed_fn(Stub, 4096).unwrap(); // named export present
     drop(cached);
@@ -72,7 +72,7 @@ fn the_prelude_resolves_every_advertised_name() {
     let _: Result<()> = Err(e);
 
     // Schema decisions.
-    let result = decide(&mut Runner, &json!("state"), Some(&json!({})), None, false);
+    let result = decide(&Runner, &json!("state"), Some(&json!({})), None, false);
     assert!(result.is_err(), "empty schema is an error");
 }
 
@@ -89,7 +89,7 @@ impl EmbedFn for Stub {
 struct Runner;
 
 impl cosh_onnx::decision::model::PredictRunner for Runner {
-    fn predict(&mut self, _state: &Value, _questions: &Map<String, Value>) -> Result<Value> {
+    fn predict(&self, _state: &Value, _questions: &Map<String, Value>) -> Result<Value> {
         Ok(json!({}))
     }
 }

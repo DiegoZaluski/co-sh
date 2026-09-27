@@ -124,12 +124,12 @@ impl EmbedFn for BoomEmbed {
 
 /// Stand-in for Agent: records the questions handed to predict.
 struct Recorder {
-    calls: Vec<(Value, Map<String, Value>)>,
+    calls: Mutex<Vec<(Value, Map<String, Value>)>>,
 }
 
 impl Recorder {
     fn new() -> Self {
-        Self { calls: Vec::new() }
+        Self { calls: Mutex::new(Vec::new()) }
     }
 }
 
@@ -154,8 +154,11 @@ fn answers(questions: &Map<String, Value>) -> Value {
 }
 
 impl PredictRunner for Recorder {
-    fn predict(&mut self, state: &Value, questions: &Map<String, Value>) -> Result<Value> {
-        self.calls.push((state.clone(), questions.clone()));
+    fn predict(&self, state: &Value, questions: &Map<String, Value>) -> Result<Value> {
+        self.calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((state.clone(), questions.clone()));
         Ok(answers(questions))
     }
 }

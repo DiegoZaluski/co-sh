@@ -214,21 +214,21 @@ fn rejections() {
 // --------------------------------------------------------------- decide
 struct FakeRunner {
     answers: Map<String, Value>,
-    calls: Vec<Map<String, Value>>,
+    calls: std::sync::Mutex<Vec<Map<String, Value>>>,
 }
 
 impl FakeRunner {
     fn new(answers: Map<String, Value>) -> Self {
-        Self { answers, calls: Vec::new() }
+        Self { answers, calls: std::sync::Mutex::new(Vec::new()) }
     }
 }
 
 impl crate::decision::model::PredictRunner for FakeRunner {
-    fn predict(&mut self, state: &Value, questions: &Map<String, Value>) -> Result<Value> {
+    fn predict(&self, state: &Value, questions: &Map<String, Value>) -> Result<Value> {
         let mut call = Map::new();
         call.insert("state".into(), state.clone());
         call.insert("questions".into(), Value::Object(questions.clone()));
-        self.calls.push(call);
+        self.calls.lock().unwrap_or_else(|e| e.into_inner()).push(call);
         Ok(json!({
             "answers": Value::Object(self.answers.clone()),
             "usage": {"input_tokens": 1, "output_tokens": 0},
@@ -239,22 +239,20 @@ impl crate::decision::model::PredictRunner for FakeRunner {
 
 #[test]
 fn decide_schema_flow() {
-    let mut runner = FakeRunner::new(answers_fixture());
-    let out = decide(&mut runner, &json!("some state"), Some(&schema()), None, false).unwrap();
+    let runner = FakeRunner::new(answers_fixture());
+    let out = decide( &runner, &json!("some state"), Some(&schema()), None, false).unwrap();
     assert_eq!(out["department"], json!("billing"));
     // builds questions
-    assert_eq!(
-        runner.calls[0]["questions"]["department"]["type"],
-        json!("choice")
-    );
+    let calls = runner.calls.lock().unwrap_or_else(|e| e.into_inner());
+    assert_eq!(calls[0]["questions"]["department"]["type"], json!("choice"));
     // forwards state
-    assert_eq!(runner.calls[0]["state"], json!("some state"));
+    assert_eq!(calls[0]["state"], json!("some state"));
 }
 
 #[test]
 fn decide_details() {
-    let mut runner = FakeRunner::new(answers_fixture());
-    let details = decide(&mut runner, &json!("some state"), Some(&schema()), None, true)
+    let runner = FakeRunner::new(answers_fixture());
+    let details = decide( &runner, &json!("some state"), Some(&schema()), None, true)
         .unwrap();
     assert_eq!(details["confidence"]["department"], json!(0.9));
     assert_eq!(
@@ -267,14 +265,14 @@ fn decide_details() {
 
 #[test]
 fn decide_questions_pass_through_returns_answers() {
-    let mut runner = FakeRunner::new(
+    let runner = FakeRunner::new(
         serde_json::from_str::<Map<String, Value>>(
             r#"{"a": {"type": "noul", "noul": 0.9, "confidence": 0.9}}"#,
         )
         .unwrap(),
     );
     let out = decide(
-        &mut runner,
+         &runner,
         &json!("s"),
         None,
         Some(
@@ -291,10 +289,10 @@ fn decide_questions_pass_through_returns_answers() {
 
 #[test]
 fn decide_requires_exactly_one_of_schema_or_questions() {
-    let mut runner = FakeRunner::new(answers_fixture());
-    let err = decide(&mut runner, &json!("s"), None, None, false).unwrap_err();
+    let runner = FakeRunner::new(answers_fixture());
+    let err = decide( &runner, &json!("s"), None, None, false).unwrap_err();
     assert_eq!(err.to_string(), "pass exactly one of schema= or questions=");
-    let err = decide(&mut runner, &json!("s"), Some(&schema()), Some(&Map::new()), false)
+    let err = decide( &runner, &json!("s"), Some(&schema()), Some(&Map::new()), false)
         .unwrap_err();
     assert_eq!(err.to_string(), "pass exactly one of schema= or questions=");
 }

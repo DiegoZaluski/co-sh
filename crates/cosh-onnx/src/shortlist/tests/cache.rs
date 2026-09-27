@@ -10,16 +10,20 @@ fn pipe_reduced_choice_scores_inside_the_shortlist() {
         "intent": {"type": "choice", "instructions": "Which desk?", "criteria": full},
         "urgency": score_question(),
     });
-    let mut agent = Recorder::new();
+    let agent = Recorder::new();
     let piped = predict_shortlist(
-        &mut agent,
+         &agent,
         &json!("I was charged twice"),
         pipe_q.as_object().expect("map"),
         &TableEmbed::from_pairs(&full_vectors()),
         2,
     )
     .expect("predict_shortlist");
-    let scored = to_internal(&agent.calls[0].1["intent"]).expect("internal");
+    let scored_questions = {
+        let calls = agent.calls.lock().unwrap_or_else(|e| e.into_inner());
+        calls[0].1.clone()
+    };
+    let scored = to_internal(&scored_questions["intent"]).expect("internal");
     assert_eq!(
         scored["crit"].as_object().expect("map").len(),
         2,
@@ -347,9 +351,9 @@ fn cache_inside_predict_shortlist() {
     let pipe_q = json!({
         "intent": {"type": "choice", "instructions": "category", "criteria": criteria_value()}
     });
-    let mut agent = Recorder::new();
+    let agent = Recorder::new();
     predict_shortlist(
-        &mut agent,
+         &agent,
         &json!("pay me"),
         pipe_q.as_object().expect("map"),
         &pipe_cached,
@@ -357,7 +361,7 @@ fn cache_inside_predict_shortlist() {
     )
     .expect("first");
     let pipe_b = predict_shortlist(
-        &mut agent,
+         &agent,
         &json!("refund please"),
         pipe_q.as_object().expect("map"),
         &pipe_cached,

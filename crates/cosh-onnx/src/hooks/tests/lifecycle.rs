@@ -62,7 +62,7 @@ fn onnx_skip_short_circuits_inference() {
 fn start_hook_rewrite_is_what_gets_encoded() {
     let _registry = registry_isolation();
     let seen = Arc::new(Mutex::new(Vec::new()));
-    let mut agent = recorded_agent(Arc::clone(&seen));
+    let agent = recorded_agent(Arc::clone(&seen));
     let per_call = PerCall {
         on_predict_start: Some(Arc::new(|ctx: &mut PredictContext| {
             ctx.states = vec![json!("rewritten")];
@@ -86,7 +86,7 @@ fn start_hook_rewrite_is_what_gets_encoded() {
 #[test]
 fn end_hook_rewrite_is_returned() {
     let _registry = registry_isolation();
-    let mut agent = agent();
+    let agent = agent();
     let per_call = PerCall {
         on_predict_end: Some(Arc::new(|ctx: &mut PredictContext| {
             ctx.results = Some(vec![json!({"model": "replaced"})]);
@@ -105,7 +105,7 @@ fn end_hook_rewrite_is_returned() {
 #[test]
 fn run_id_is_shared_by_start_and_end_and_differs_per_call() {
     let _registry = registry_isolation();
-    let mut agent = agent();
+    let agent = agent();
     let ids: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     for _ in 0..2 {
         let ids2 = Arc::clone(&ids);
@@ -136,7 +136,7 @@ fn run_id_is_shared_by_start_and_end_and_differs_per_call() {
 #[test]
 fn end_context_sees_usage_and_elapsed_ms() {
     let _registry = registry_isolation();
-    let mut agent = agent();
+    let agent = agent();
     let usage: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
     let elapsed: Arc<Mutex<Option<f64>>> = Arc::new(Mutex::new(None));
     let usage2 = Arc::clone(&usage);

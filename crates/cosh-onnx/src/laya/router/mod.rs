@@ -471,6 +471,15 @@ fn default_agent_factory(
     subfolder: Option<&str>,
     revision: Option<&str>,
 ) -> Result<Box<dyn AgentLike>> {
+    // Router-side opt-in for the session thread cap, mirroring
+    // `LoadOptions::intra_op_threads` for the facade path. The Router
+    // factory signature is upstream-shaped (no options struct), so the
+    // environment is the only channel; `COSH_ONNX_INTRA_THREADS` is a
+    // positive integer. Absent/invalid keeps ORT's default.
+    let intra_op_threads = std::env::var("COSH_ONNX_INTRA_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0);
     Ok(Box::new(crate::laya::agent::load_agent(
         repo,
         "laya.onnx",
@@ -484,6 +493,7 @@ fn default_agent_factory(
         true,
         true,
         None,
+        intra_op_threads,
     )?))
 }
 
@@ -684,7 +694,7 @@ impl Router {
                 .cloned()
                 .unwrap_or_else(|| self.revision.clone());
             let built = (self.factory)(spec.repo(), spec.subfolder(), revision.as_deref())?;
-            let shared = Arc::new(Mutex::new(built));
+            let shared: SharedAgent = Arc::from(built);
             lc.agents.push((key.to_string(), shared.clone()));
             lc.order.push(key.to_string());
             evicted = Self::evict_locked(&mut lc, self.max_loaded());
@@ -771,7 +781,7 @@ impl Router {
     /// parameters.
     pub fn attach(&self, name: &str, agent: Box<dyn AgentLike>) -> Result<SharedAgent> {
         let key = normalise_name(name)?;
-        let shared = Arc::new(Mutex::new(agent));
+        let shared: SharedAgent = Arc::from(agent);
         {
             let mut lc = self.lock_lifecycle();
             // Replacing an existing agent keeps its insertion position (an
@@ -862,10 +872,7 @@ impl Router {
             .agents
             .iter()
             .map(|(name, agent)| {
-                let revision = agent
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .revision();
+                let revision = agent.revision();
                 (name.clone(), revision)
             })
             .collect()
@@ -1206,8 +1213,7 @@ impl Router {
                     // upstream's `agent.system_one(state, questions,
                     // lang=...)` leaves the agent's own hooks untouched.
                     let _guard = hooks::skip_default_hooks_guard();
-                    let mut locked = agent.lock().unwrap_or_else(|e| e.into_inner());
-                    match locked.system_one(
+                    match agent.system_one(
                         &ctx.states[0],
                         &ctx.questions,
                         effective_lang.as_deref(),
@@ -1440,12 +1446,9 @@ impl Router {
                 // Split each checkpoint group again on what the start hooks
                 // left: schema, token budgets and the forwarded language all
                 // keep a group to one shared shape.
-                let has_lang_temperatures = {
-                    let locked = agent.lock().unwrap_or_else(|e| e.into_inner());
-                    locked.has_lang_temperatures()
-                };
+                let has_lang_temperatures = agent.has_lang_temperatures();
                 let mut question_groups: Vec<QuestionGroup> = Vec::new();
-                for (i, ctx) in started.iter_mut() {
+                for (pos, (i, ctx)) in started.iter_mut().enumerate() {
                     if let Some(results) = &mut ctx.results {
                         // A cache hit short-circuits inference; the `routing`
                         // key predict adds is set here, before any
@@ -1482,13 +1485,13 @@ impl Router {
                         g.schema == schema && g.overrides == overrides && g.lang == lang_key
                     });
                     match existing {
-                        Some(g) => g.items.push(*i),
+                        Some(g) => g.items.push(pos),
                         None => question_groups.push(QuestionGroup {
                             questions: ctx.questions.clone(),
                             schema,
                             overrides,
                             lang: lang_key,
-                            items: vec![*i],
+                            items: vec![pos],
                         }),
                     }
                 }
@@ -1505,17 +1508,13 @@ impl Router {
                     let states: Vec<Value> = group
                         .items
                         .iter()
-                        .map(|i| {
-                            let (_, ctx) = started
-                                .iter()
-                                .find(|(j, _)| j == i)
-                                .expect("group items index into started");
+                        .map(|&pos| {
+                            let (_, ctx) = &started[pos];
                             ctx.states[0].clone()
                         })
                         .collect();
                     let _guard = hooks::skip_default_hooks_guard();
-                    let mut locked = agent.lock().unwrap_or_else(|e| e.into_inner());
-                    match locked.predict_batch(
+                    match agent.predict_batch(
                         &states,
                         &group.questions,
                         batch_size,
@@ -1532,11 +1531,8 @@ impl Router {
                                 )));
                                 break;
                             }
-                            for (i, result) in group.items.iter().zip(batch_results) {
-                                let (_, ctx) = started
-                                    .iter_mut()
-                                    .find(|(j, _)| j == i)
-                                    .expect("group items index into started");
+                            for (&pos, result) in group.items.iter().zip(batch_results) {
+                                let (i, ctx) = &mut started[pos];
                                 let mut result = result;
                                 if let Value::Object(map) = &mut result {
                                     map.insert("routing".to_string(), decisions[*i].to_value());
@@ -1672,7 +1668,9 @@ impl Router {
 
 /// One forward-pass group inside [`Router::predict_batch`]: the schema the
 /// grouping split on, kept for the call, plus the token budgets and the
-/// forwarded language.
+/// forwarded language. `items` holds positions into the current group's
+/// `started` vector (added in `started` order), not request indices — the
+/// request index is `started[pos].0`.
 struct QuestionGroup {
     questions: Map<String, Value>,
     schema: String,
@@ -1733,7 +1731,7 @@ impl PredictOptions<'_> {
 }
 
 impl crate::decision::model::PredictRunner for Router {
-    fn predict(&mut self, state: &Value, questions: &Map<String, Value>) -> Result<Value> {
+    fn predict(&self, state: &Value, questions: &Map<String, Value>) -> Result<Value> {
         Router::predict(self, state, questions, &PredictOptions::default())
     }
 }

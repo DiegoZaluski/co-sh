@@ -25,7 +25,7 @@ struct FakeBatchAgent {
 
 impl AgentLike for FakeBatchAgent {
     fn predict_batch(
-        &mut self,
+        &self,
         states: &[Value],
         questions: &Map<String, Value>,
         batch_size: Option<usize>,
@@ -49,7 +49,7 @@ impl AgentLike for FakeBatchAgent {
     }
 
     fn system_one(
-        &mut self,
+        &self,
         state: &Value,
         questions: &Map<String, Value>,
         lang: Option<&str>,
@@ -464,7 +464,7 @@ struct LangRecordingAgent {
 
 impl AgentLike for LangRecordingAgent {
     fn predict_batch(
-        &mut self,
+        &self,
         states: &[Value],
         _questions: &Map<String, Value>,
         _batch_size: Option<usize>,
@@ -483,7 +483,7 @@ impl AgentLike for LangRecordingAgent {
     }
 
     fn system_one(
-        &mut self,
+        &self,
         _state: &Value,
         _questions: &Map<String, Value>,
         lang: Option<&str>,

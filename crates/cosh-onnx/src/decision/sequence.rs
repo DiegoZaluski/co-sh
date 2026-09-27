@@ -32,8 +32,21 @@ pub fn build_sequence(
     q: &Value,
     opts: &BuildOptions<'_>,
 ) -> Result<(Vec<u32>, Vec<usize>)> {
-    let mask_tok = tok.mask_token();
     let rendered = render_options(q)?;
+    build_sequence_with_options(tok, state, q, opts, &rendered)
+}
+
+/// The [`build_sequence`] core for callers that already rendered the
+/// question's options — the agent path renders once and reuses both the
+/// sequence and the option count, instead of re-rendering per use.
+pub(crate) fn build_sequence_with_options(
+    tok: &dyn Tokenizer,
+    state: &Value,
+    q: &Value,
+    opts: &BuildOptions<'_>,
+    rendered: &[String],
+) -> Result<(Vec<u32>, Vec<usize>)> {
+    let mask_tok = tok.mask_token();
     let order: Vec<usize> = match opts.option_order {
         Some(order) => order.to_vec(),
         None => (0..rendered.len()).collect(),

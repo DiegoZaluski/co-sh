@@ -99,7 +99,7 @@ pub fn shortlist_choice(
 /// `shortlist[qid]` holds `labels` (rank order), `scores` (cosine, or `null`
 /// when nothing was dropped), `k`, `n`, and `passthrough`.
 pub fn predict_shortlist(
-    runner: &mut impl PredictRunner,
+    runner: &impl PredictRunner,
     state: &Value,
     questions: &Map<String, Value>,
     embed_fn: &dyn EmbedFn,

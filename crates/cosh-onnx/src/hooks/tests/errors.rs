@@ -8,7 +8,7 @@ use super::*;
 #[test]
 fn hooks_raise_true_propagates_the_hook_failure() {
     let _registry = registry_isolation();
-    let mut agent = agent();
+    let agent = agent();
     let per_call = PerCall {
         on_predict_start: Some(Arc::new(|_ctx: &mut PredictContext| {
             Err(Error::Value("hook boom".to_string()))
@@ -24,7 +24,7 @@ fn hooks_raise_true_propagates_the_hook_failure() {
 #[test]
 fn hooks_raise_false_continues_and_infers() {
     let _registry = registry_isolation();
-    let mut agent = agent();
+    let agent = agent();
     let per_call = PerCall {
         on_predict_start: Some(Arc::new(|_ctx: &mut PredictContext| {
             Err(Error::Value("hook boom".to_string()))

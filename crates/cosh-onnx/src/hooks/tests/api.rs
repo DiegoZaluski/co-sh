@@ -62,7 +62,7 @@ fn a_no_op_hook_is_harmless() {
 fn predict_is_an_alias_of_system_one() {
     let _registry = registry_isolation();
     // `ONNXAgent.predict is ONNXAgent.system_one` upstream.
-    let mut agent = agent();
+    let agent = agent();
     let via_system_one = agent
         .system_one(
             &json!("s"),

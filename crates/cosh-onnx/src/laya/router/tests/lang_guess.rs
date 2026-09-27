@@ -424,7 +424,7 @@ struct RecordingAgent {
 
 impl AgentLike for RecordingAgent {
     fn system_one(
-        &mut self,
+        &self,
         state: &Value,
         _questions: &Map<String, Value>,
         _lang: Option<&str>,

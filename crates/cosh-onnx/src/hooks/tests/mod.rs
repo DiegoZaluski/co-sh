@@ -144,7 +144,7 @@ impl Hook for BadErrHook {
 struct FailingSession;
 
 impl SessionRunner for FailingSession {
-    fn run(&mut self, _batch: &CollatedBatch) -> Result<Vec<SessionOutput>> {
+    fn run(&self, _batch: &CollatedBatch) -> Result<Vec<SessionOutput>> {
         Err(Error::Runtime("infer boom".to_string()))
     }
 }

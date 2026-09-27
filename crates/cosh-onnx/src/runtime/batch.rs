@@ -5,7 +5,10 @@
 //! the crate's decision models build on. The training-only `target`/`label`
 //! fields of the upstream function are omitted: model training is out of
 //! scope for this port.
-
+//!
+//! The collated buffers are stored flat (one allocation per field, row-major)
+//! so the session can hand them to ORT as tensors without re-flattening; the
+//! row accessors below keep the per-row view the decode path reads.
 
 
 /// One encoded row handed to [`collate_items`]: token ids, marker positions
@@ -30,16 +33,41 @@ pub struct CollateItem {
 /// read only through `marker_mask`.
 #[derive(Debug, Clone)]
 pub struct CollatedBatch {
-    /// `[n, L]`, `pad_id` padded.
-    pub input_ids: Vec<Vec<u32>>,
-    /// `[n, L]`, 1 over real tokens.
-    pub attention_mask: Vec<Vec<u32>>,
-    /// `[n, kmax]`, zero-padded marker positions.
-    pub marker_pos: Vec<Vec<u32>>,
-    /// `[n, kmax]`, true over a row's own markers.
-    pub marker_mask: Vec<Vec<bool>>,
+    /// Number of rows (states × questions).
+    pub n_rows: usize,
+    /// Padded sequence length `[n, width]`.
+    pub width: usize,
+    /// Widest marker count `[n, kmax]`.
+    pub kmax: usize,
+    /// Flat row-major `[n * width]`, `pad_id` padded.
+    pub input_ids: Vec<u32>,
+    /// Flat row-major `[n * width]`, 1 over real tokens.
+    pub attention_mask: Vec<u32>,
+    /// Flat row-major `[n * kmax]`, zero-padded marker positions.
+    pub marker_pos: Vec<u32>,
+    /// Flat row-major `[n * kmax]`, true over a row's own markers.
+    pub marker_mask: Vec<bool>,
     /// `[n]`, question type per row.
     pub qtype: Vec<u8>,
+}
+
+impl CollatedBatch {
+    /// The attention row of one batch row.
+    pub fn attention_row(&self, row: usize) -> &[u32] {
+        &self.attention_mask[row * self.width..(row + 1) * self.width]
+    }
+    /// The marker-mask row of one batch row.
+    pub fn marker_row(&self, row: usize) -> &[bool] {
+        &self.marker_mask[row * self.kmax..(row + 1) * self.kmax]
+    }
+    /// The number of real tokens in one batch row (the row's `usage` count).
+    pub fn row_tokens(&self, row: usize) -> u32 {
+        self.attention_row(row).iter().sum()
+    }
+    /// The number of option markers in one batch row (the logit width `k`).
+    pub fn row_markers(&self, row: usize) -> usize {
+        self.marker_row(row).iter().filter(|b| **b).count()
+    }
 }
 /// `collate_items(batch, pad_id)`; `None` on an empty batch, as upstream.
 pub fn collate_items(batch: &[Vec<CollateItem>], pad_id: u32) -> Option<CollatedBatch> {
@@ -50,19 +78,22 @@ pub fn collate_items(batch: &[Vec<CollateItem>], pad_id: u32) -> Option<Collated
     let n = items.len();
     let width = items.iter().map(|it| it.ids.len()).max().unwrap();
     let kmax = items.iter().map(|it| it.markers.len()).max().unwrap();
-    let mut input_ids = vec![vec![pad_id; width]; n];
-    let mut attention_mask = vec![vec![0u32; width]; n];
-    let mut marker_pos = vec![vec![0u32; kmax]; n];
-    let mut marker_mask = vec![vec![false; kmax]; n];
+    let mut input_ids = vec![pad_id; n * width];
+    let mut attention_mask = vec![0u32; n * width];
+    let mut marker_pos = vec![0u32; n * kmax];
+    let mut marker_mask = vec![false; n * kmax];
     for (i, it) in items.iter().enumerate() {
-        input_ids[i][..it.ids.len()].copy_from_slice(&it.ids);
-        attention_mask[i][..it.ids.len()].fill(1);
+        input_ids[i * width..i * width + it.ids.len()].copy_from_slice(&it.ids);
+        attention_mask[i * width..i * width + it.ids.len()].fill(1);
         for (k, m) in it.markers.iter().enumerate() {
-            marker_pos[i][k] = *m as u32;
-            marker_mask[i][k] = true;
+            marker_pos[i * kmax + k] = *m as u32;
+            marker_mask[i * kmax + k] = true;
         }
     }
     Some(CollatedBatch {
+        n_rows: n,
+        width,
+        kmax,
         input_ids,
         attention_mask,
         marker_pos,

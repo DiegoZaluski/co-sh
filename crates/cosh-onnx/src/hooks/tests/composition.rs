@@ -51,7 +51,7 @@ impl Hook for Counter {
 fn per_call_hook_sequences_run_in_order() {
     let _registry = registry_isolation();
     let seq: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
-    let mut agent = agent();
+    let agent = agent();
     let per_call = PerCall {
         hooks: vec![
             Arc::new(Counter { seq: Arc::clone(&seq), n: 1 }) as SharedHook,

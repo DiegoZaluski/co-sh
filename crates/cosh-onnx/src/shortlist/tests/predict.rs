@@ -7,7 +7,7 @@ fn mock_predict_sees_only_the_shortlist() {
     let (full, sentinel) = full_criteria();
     // cosine vs [1, 0]: tech=1, sales=0.707, billing=0, other=0. k=2 ->
     // tech, sales.
-    let mut agent = Recorder::new();
+    let agent = Recorder::new();
     let questions = json!({
         "intent": {"type": "choice", "instructions": "Which desk?", "criteria": full},
         "urgency": score_question(),
@@ -16,7 +16,7 @@ fn mock_predict_sees_only_the_shortlist() {
     });
     let state = json!("I was charged twice");
     let result = predict_shortlist(
-        &mut agent,
+         &agent,
         &state,
         questions.as_object().expect("map"),
         &TableEmbed::from_pairs(&full_vectors()),
@@ -24,9 +24,12 @@ fn mock_predict_sees_only_the_shortlist() {
     )
     .expect("predict_shortlist");
 
-    assert_eq!(agent.calls.len(), 1, "predict/called once");
-    let (got_state, got_questions) = &agent.calls[0];
-    assert_eq!(got_state, &state, "predict/state is the same value");
+    assert_eq!(agent.calls.lock().unwrap_or_else(|e| e.into_inner()).len(), 1, "predict/called once");
+    let (got_state, got_questions) = {
+        let calls = agent.calls.lock().unwrap_or_else(|e| e.into_inner());
+        (calls[0].0.clone(), calls[0].1.clone())
+    };
+    assert_eq!(got_state, state, "predict/state is the same value");
     let intent = &got_questions["intent"];
     let kept: Vec<&String> = intent["criteria"].as_object().expect("map").keys().collect();
     assert_eq!(
@@ -104,17 +107,17 @@ fn mock_predict_sees_only_the_shortlist() {
 fn shortlist_key_is_on_the_copy() {
     // The predict return is copied before shortlist is attached.
     struct Holding {
-        seen: Option<Map<String, Value>>,
+        seen: std::sync::Mutex<Option<Map<String, Value>>>,
     }
     impl PredictRunner for Holding {
-        fn predict(&mut self, _state: &Value, questions: &Map<String, Value>) -> Result<Value> {
-            self.seen = Some(questions.clone());
+        fn predict(&self, _state: &Value, questions: &Map<String, Value>) -> Result<Value> {
+            *self.seen.lock().unwrap_or_else(|e| e.into_inner()) = Some(questions.clone());
             Ok(json!({"model": "fake", "answers": {}}))
         }
     }
-    let mut runner = Holding { seen: None };
+    let runner = Holding { seen: std::sync::Mutex::new(None) };
     let out = predict_shortlist(
-        &mut runner,
+        &runner,
         &json!("pay me"),
         json!({"intent": {"type": "choice", "criteria": criteria_value()}})
             .as_object()
@@ -124,7 +127,15 @@ fn shortlist_key_is_on_the_copy() {
     )
     .expect("predict_shortlist");
     assert!(
-        out.get("shortlist").is_some() && runner.seen.expect("seen").get("shortlist").is_none(),
+        out.get("shortlist").is_some()
+            && runner
+                .seen
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .expect("seen")
+                .get("shortlist")
+                .is_none(),
         "result/shortlist key is on the copy"
     );
 }
@@ -133,9 +144,9 @@ fn shortlist_key_is_on_the_copy() {
 fn pass_through_reaches_predict_unchanged() {
     let (full, _sentinel) = full_criteria();
     let original_q = json!({"type": "choice", "instructions": "Which desk?", "criteria": full});
-    let mut agent = Recorder::new();
+    let agent = Recorder::new();
     let out = predict_shortlist(
-        &mut agent,
+         &agent,
         &json!("I was charged twice"),
         json!({"intent": original_q}).as_object().expect("map"),
         &BoomEmbed,
@@ -147,9 +158,9 @@ fn pass_through_reaches_predict_unchanged() {
         json!(true),
         "pass/flag"
     );
-    let mut agent99 = Recorder::new();
+    let agent99 = Recorder::new();
     let out99 = predict_shortlist(
-        &mut agent99,
+         &agent99,
         &json!("x"),
         json!({"intent": {"type": "choice", "instructions": "Which desk?", "criteria": full}})
             .as_object()
@@ -177,16 +188,20 @@ fn list_criteria_reach_predict_in_rank_order() {
     let list_questions = json!({
         "intent": {"type": "choice", "instructions": "Which?", "criteria": ["alpha", "beta", "gamma"]}
     });
-    let mut agent = Recorder::new();
+    let agent = Recorder::new();
     predict_shortlist(
-        &mut agent,
+         &agent,
         &json!("hello"),
         list_questions.as_object().expect("map"),
         &list_q_embed,
         2,
     )
     .expect("predict_shortlist");
-    let received = &agent.calls[0].1["intent"]["criteria"];
+    let received_questions = {
+        let calls = agent.calls.lock().unwrap_or_else(|e| e.into_inner());
+        calls[0].1.clone()
+    };
+    let received = &received_questions["intent"]["criteria"];
     assert_eq!(
         received,
         &json!(["beta", "alpha"]),
@@ -198,7 +213,7 @@ fn list_criteria_reach_predict_in_rank_order() {
         "list/caller criteria unchanged"
     );
     // Agent._to_internal accepts them and keys follow the shortlist
-    let internal = to_internal(&agent.calls[0].1["intent"]).expect("internal");
+    let internal = to_internal(&received_questions["intent"]).expect("internal");
     let crit_keys: Vec<&String> = internal["crit"].as_object().expect("map").keys().collect();
     assert_eq!(
         crit_keys,
