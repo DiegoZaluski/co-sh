@@ -724,7 +724,20 @@ impl App {
                                             && y >= area.y
                                             && y < area.bottom() =>
                                     {
-                                        Some((y - area.y) as usize)
+                                        // Map the hovered visual row onto the
+                                        // MESSAGE that owns it (the layout
+                                        // carries each message's own padding
+                                        // rows, and pads resolve to their
+                                        // owner too). Hovering any row of a
+                                        // message highlights its whole band.
+                                        let row = (y - area.y) as usize;
+                                        self.state
+                                            .current_pending_queues()
+                                            .and_then(|q| {
+                                                App::pending_queue_layout(q, area.width)
+                                                    .get(row)
+                                                    .map(|entry| entry.owner())
+                                            })
                                     }
                                     _ => None,
                                 }
@@ -1128,22 +1141,27 @@ impl App {
             && y < pending_area.bottom()
         {
             if let Some(queues) = self.state.current_pending_queues() {
-                // Rows are word-wrapped: map the clicked visual row back to
-                // its (queue, message) using the same row expansion the
-                // renderer uses.
+                // Map the clicked visual row back to the message that owns it
+                // using the same layout the renderer draws — including each
+                // message's own padding rows, which resolve to their owner.
                 let row = (y - pending_area.y) as usize;
-                let rows = App::pending_queue_rows(queues, pending_area.width);
-                let Some((queue_idx, msg_idx, _)) = rows.get(row) else {
+                let Some((queue_idx, msg_idx)) = App::pending_queue_layout(
+                    queues,
+                    pending_area.width,
+                )
+                .get(row)
+                .map(|entry| entry.owner())
+                else {
                     return Ok(true);
                 };
-                let (queue, index, text) = if *queue_idx == 0 {
-                    match queues.next_loop.get(*msg_idx) {
-                        Some(text) => (QueueTarget::NextLoop, *msg_idx, text.clone()),
+                let (queue, index, text) = if queue_idx == 0 {
+                    match queues.next_loop.get(msg_idx) {
+                        Some(text) => (QueueTarget::NextLoop, msg_idx, text.clone()),
                         None => return Ok(true),
                     }
                 } else {
-                    match queues.next_request.get(*msg_idx) {
-                        Some(text) => (QueueTarget::NextRequest, *msg_idx, text.clone()),
+                    match queues.next_request.get(msg_idx) {
+                        Some(text) => (QueueTarget::NextRequest, msg_idx, text.clone()),
                         None => return Ok(true),
                     }
                 };

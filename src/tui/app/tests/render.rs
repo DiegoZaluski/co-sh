@@ -1,5 +1,6 @@
 use super::{App, HOME_LOCK, format_tokens, isolate_home};
 use crate::app::FramePacer;
+use crate::app::render::PendingQueueRow;
 use std::time::Duration;
 
 #[test]
@@ -23,11 +24,12 @@ fn frame_pacer_uses_60_fps_when_cheap_and_30_fps_under_load() {
 }
 
 /// Long queued messages must word-wrap across several visual rows instead of
-/// being truncated: `pending_queue_rows` expands every queued message into
-/// one or more `(queue_index, message_index, line)` entries using the same
-/// grapheme-aware `word_wrap` primitive as the chat transcript.
+/// being truncated: `pending_queue_layout` expands every queued message into
+/// one or more `Text` entries using the same grapheme-aware `word_wrap`
+/// primitive as the chat transcript, each bracketed by the message's own
+/// `Pad` rows.
 #[test]
-fn pending_queue_rows_wrap_long_messages() {
+fn pending_queue_layout_wrap_long_messages() {
     use crate::state::PendingQueues;
     use std::collections::VecDeque;
 
@@ -41,46 +43,58 @@ fn pending_queue_rows_wrap_long_messages() {
 
     // Width 30 → text width 24 (┃ + 2 pad left, 2 pad right + ┃), symmetric
     // like the prompt box's chrome.
-    let rows = App::pending_queue_rows(&queues, 30);
+    let rows = App::pending_queue_layout(&queues, 30);
 
-    // Every wrapped line fits within the text width.
-    for (_, _, line) in &rows {
-        assert!(
-            line.chars().count() <= 24,
-            "wrapped line exceeds width: {line:?}"
-        );
+    // Every wrapped text line fits within the text width.
+    for row in &rows {
+        if let PendingQueueRow::Text(_, _, line) = row {
+            assert!(
+                line.chars().count() <= 24,
+                "wrapped line exceeds width: {line:?}"
+            );
+        }
     }
     // No characters are lost: rejoining the wrapped lines recovers the
     // message (modulo the injected line breaks).
     let joined: String = rows
         .iter()
-        .filter(|(qi, mi, _)| *qi == 1 && *mi == 1)
-        .map(|(_, _, l)| l.as_str())
+        .filter_map(|row| match row {
+            PendingQueueRow::Text(qi, mi, line) if *qi == 1 && *mi == 1 => {
+                Some(line.as_str())
+            }
+            _ => None,
+        })
         .collect::<Vec<_>>()
         .join("");
     assert_eq!(
         joined.replace(' ', ""),
         "umamensagembemlongaquecomcertezanaocabeemumalinhaso"
     );
-    // The short message is a single row; the long one wraps into several.
-    assert_eq!(
+    // The short message is a single text row; the long one wraps into
+    // several.
+    let text_rows = |qi: usize, mi: usize| {
         rows.iter()
-            .filter(|(qi, mi, _)| *qi == 1 && *mi == 0)
-            .count(),
-        1
-    );
-    assert!(
-        rows.iter()
-            .filter(|(qi, mi, _)| *qi == 1 && *mi == 1)
+            .filter(|row| matches!(row, PendingQueueRow::Text(q, m, _) if *q == qi && *m == mi))
             .count()
-            > 1
-    );
+    };
+    assert_eq!(text_rows(1, 0), 1);
+    assert!(text_rows(1, 1) > 1);
+    // Every message carries its OWN padding: two messages never share a pad
+    // row, so the layout interleaves [pad, text..., pad] per message.
+    let pad_owners: Vec<(usize, usize)> = rows
+        .iter()
+        .filter_map(|row| match row {
+            PendingQueueRow::Pad(qi, mi) => Some((*qi, *mi)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(pad_owners, vec![(1, 0), (1, 0), (1, 1), (1, 1)]);
 }
 
-/// An empty queued message still renders one (blank) row instead of
-/// disappearing from the strip.
+/// An empty queued message still renders its text row (plus its own padding)
+/// instead of disappearing from the strip.
 #[test]
-fn pending_queue_rows_keep_empty_messages_visible() {
+fn pending_queue_layout_keep_empty_messages_visible() {
     use crate::state::PendingQueues;
     use std::collections::VecDeque;
 
@@ -88,9 +102,16 @@ fn pending_queue_rows_keep_empty_messages_visible() {
         next_loop: VecDeque::from([String::new()]),
         next_request: VecDeque::new(),
     };
-    let rows = App::pending_queue_rows(&queues, 40);
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0], (0, 0, String::new()));
+    let rows = App::pending_queue_layout(&queues, 40);
+    // The empty message owns its top pad, its single (blank) text row and
+    // its bottom pad.
+    assert_eq!(rows.len(), 3);
+    assert!(matches!(rows[0], PendingQueueRow::Pad(0, 0)));
+    assert!(matches!(
+        rows[1],
+        PendingQueueRow::Text(0, 0, ref line) if line.is_empty()
+    ));
+    assert!(matches!(rows[2], PendingQueueRow::Pad(0, 0)));
 }
 
 #[test]

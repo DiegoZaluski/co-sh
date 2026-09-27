@@ -1,6 +1,7 @@
 use super::super::{App, HOME_LOCK, isolate_home};
 use crate::routes::session::queue_choice::QueueTarget;
 use crate::types::{Message, SessionStatus};
+use cosh::harness::Mode;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 fn key(code: KeyCode) -> KeyEvent {
@@ -523,18 +524,146 @@ async fn queue_actions_dialog_renders_title_and_options() {
 async fn hovered_queue_row_background_is_white() {
     let _guard = HOME_LOCK.lock();
     let mut app = app_with_queues();
-    app.hovered_queue_row = Some(0);
-    let area = ratatui::layout::Rect::new(2, 10, 60, 4);
+    // Hover now identifies the owning MESSAGE as `(queue_index, msg_index)`:
+    // message 0 of the next-request queue. Highlighting a message lights up
+    // its whole band (text rows AND its own padding rows).
+    app.hovered_queue_row = Some((1, 0));
+    // app_with_queues() has 2 next-loop + 2 next-request messages; the
+    // layout interleaves [pad, text, pad] per message, so the strip holds
+    // 4 × 3 = 12 rows: next-loop rows at y=5..=10, next-request rows at
+    // y=11..=16.
+    let area = ratatui::layout::Rect::new(2, 5, 60, 12);
     let mut buf = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 80, 24));
     app.render_pending_queues(&mut buf, area);
-    // Row 0 is hovered: pure white background; row 1 keeps its queue color.
+    // Layout row 6 is the top pad of next-request message 0: hovered →
+    // white.
     assert_eq!(
-        buf[(5, 10)].style().bg,
-        Some(ratatui::style::Color::Rgb(255, 255, 255))
+        buf[(5, 11)].style().bg,
+        Some(ratatui::style::Color::Rgb(255, 255, 255)),
+        "hovering a message must highlight its own padding too"
+    );
+    // Layout row 7 is its text row: hovered → white as well.
+    assert_eq!(
+        buf[(5, 12)].style().bg,
+        Some(ratatui::style::Color::Rgb(255, 255, 255)),
+        "hovered message text row must be white"
+    );
+    // Layout row 9 starts the SECOND next-request message (its top pad): it
+    // must keep the queue color — hovering one message never bleeds into
+    // the next one's band.
+    assert_ne!(
+        buf[(5, 14)].style().bg,
+        Some(ratatui::style::Color::Rgb(255, 255, 255)),
+        "the next message's band must not be highlighted"
+    );
+    // The next-loop band above is untouched too.
+    assert_ne!(
+        buf[(5, 5)].style().bg,
+        Some(ratatui::style::Color::Rgb(255, 255, 255)),
+        "the next-loop band must not be highlighted"
+    );
+}
+
+// ── Mode-colored end cap with NEXT / CLOSURE labels ──────────────────────
+
+/// Each message band ends in a ~20% mode-colored cap labeling its queue:
+/// the cap fill uses the current harness mode's color (Yolo → theme.warning
+/// here), keeps it even while the band is hovered, and writes CLOSURE
+/// (next-loop) / NEXT (next-request) bold on the band's middle row, with
+/// black-or-white text per the cap background's luminance.
+#[tokio::test]
+async fn queue_cap_paints_mode_color_and_labels() {
+    let _guard = HOME_LOCK.lock();
+    let mut app = app_with_queues();
+    app.state.mode = Mode::Yolo;
+    // 4 messages × 3 layout rows (pad, text, pad) = 12 rows. Loop rows sit
+    // at layout rows 0..=5, request rows at 6..=11; each band's middle row
+    // (start + len/2) carries the cap label.
+    let area = ratatui::layout::Rect::new(2, 5, 60, 12);
+    let mut buf = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 80, 24));
+    app.render_pending_queues(&mut buf, area);
+
+    let (r, g, b, _) = app.theme.warning.to_ints();
+    let cap_bg = ratatui::style::Color::Rgb(r, g, b);
+    // The ~80% of the band outside the cap is the mode color lightened
+    // toward white (15% white blend): a lighter wash of the same hue.
+    let up = |c: u8| (f32::from(c) * 0.85 + 255.0 * 0.15).round() as u8;
+    let band_bg = ratatui::style::Color::Rgb(up(r), up(g), up(b));
+    // Cap width = max(60 * 20%, 9) = 12 columns, right-aligned before the
+    // right `┃` (column 61): columns 49..=60. Row 0 is a top pad row — the
+    // cap fills it in the mode color.
+    assert_eq!(
+        buf[(50, 5)].style().bg,
+        Some(cap_bg),
+        "cap fill must use the current mode's color"
+    );
+    // The band's own background is the lightened mode color.
+    assert_eq!(
+        buf[(10, 5)].style().bg,
+        Some(band_bg),
+        "band background must be the mode color lightened toward white"
     );
     assert_ne!(
-        buf[(5, 11)].style().bg,
-        Some(ratatui::style::Color::Rgb(255, 255, 255))
+        buf[(10, 5)].style().bg,
+        Some(cap_bg),
+        "the cap must be a deeper chip on the lighter band"
+    );
+    // The side `┃` rails paint in the mode color too (the same hue the
+    // prompt's side borders use), so the strip connects with the prompt.
+    // The left rail sits at area.x (column 2), the right at column 61.
+    assert_eq!(
+        buf[(2, 5)].style().fg,
+        Some(cap_bg),
+        "left rail must use the current mode's color"
+    );
+    assert_eq!(
+        buf[(61, 5)].style().fg,
+        Some(cap_bg),
+        "right rail must use the current mode's color"
+    );
+
+    let cap_row = |y: u16| -> String { (49..61).map(|x| buf[(x, y)].symbol()).collect() };
+    // Loop bands (middle rows at layout rows 1 and 4 → y=6 and y=9) read
+    // CLOSURE — those messages only leave the queue when a fresh agent loop
+    // starts, closing out the current run.
+    assert!(cap_row(6).contains("CLOSURE"), "got {:?}", cap_row(6));
+    assert!(cap_row(9).contains("CLOSURE"), "got {:?}", cap_row(9));
+    // Request bands (middle rows at layout rows 7 and 10 → y=12 and y=15)
+    // read NEXT — those messages go out on the very next request of the
+    // running loop.
+    assert!(cap_row(12).contains("NEXT"), "got {:?}", cap_row(12));
+    assert!(cap_row(15).contains("NEXT"), "got {:?}", cap_row(15));
+
+    // Label cells are bold, and their text is black or white per the cap
+    // background's luminance (never the band's own text color).
+    let label_cell = &buf[(53, 6)]; // inside "CLOSURE": label_x 49 + (12-7)/2
+    assert!(
+        label_cell
+            .style()
+            .add_modifier
+            .contains(ratatui::style::Modifier::BOLD),
+        "cap label must be bold"
+    );
+    assert!(
+        label_cell.style().fg == Some(ratatui::style::Color::Rgb(0, 0, 0))
+            || label_cell.style().fg == Some(ratatui::style::Color::Rgb(255, 255, 255)),
+        "cap label must be black or white per the cap luminance"
+    );
+
+    // Hovering a message keeps the cap's mode color — it is the identity
+    // chip, not part of the white highlight.
+    app.hovered_queue_row = Some((1, 0));
+    let mut buf2 = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 80, 24));
+    app.render_pending_queues(&mut buf2, area);
+    assert_ne!(
+        buf2[(50, 11)].style().bg,
+        Some(ratatui::style::Color::Rgb(255, 255, 255)),
+        "hover must not whiten the cap"
+    );
+    assert_eq!(
+        buf2[(50, 11)].style().bg,
+        Some(cap_bg),
+        "hovered band's cap keeps the mode color"
     );
 }
 
