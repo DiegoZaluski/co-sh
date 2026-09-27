@@ -23,13 +23,14 @@ fn frame_pacer_uses_60_fps_when_cheap_and_30_fps_under_load() {
     assert_eq!(pacer.interval(), Duration::from_micros(16_667));
 }
 
-/// Long queued messages must word-wrap across several visual rows instead of
-/// being truncated: `pending_queue_layout` expands every queued message into
-/// one or more `Text` entries using the same grapheme-aware `word_wrap`
-/// primitive as the chat transcript, each bracketed by the message's own
-/// `Pad` rows.
+/// Long queued messages must be visually TRUNCATED to a single row instead of
+/// word-wrapping: `pending_queue_layout` yields exactly ONE `Text` entry per
+/// queued message — a display-width-aware prefix of the message fitting the
+/// columns outside the mode-colored end cap — bracketed by the message's own
+/// `Pad` rows. Only the strip's preview is cut; the queued text itself is
+/// untouched.
 #[test]
-fn pending_queue_layout_wrap_long_messages() {
+fn pending_queue_layout_truncates_long_messages() {
     use crate::state::PendingQueues;
     use std::collections::VecDeque;
 
@@ -41,46 +42,45 @@ fn pending_queue_layout_wrap_long_messages() {
         ]),
     };
 
-    // Width 30 → text width 24 (┃ + 2 pad left, 2 pad right + ┃), symmetric
-    // like the prompt box's chrome.
+    // Width 30 → cap width 9 → text width 30 − (9 + 5) = 16 display columns
+    // (┃ + 2 pad + text + gap + cap + ┃).
     let rows = App::pending_queue_layout(&queues, 30);
 
-    // Every wrapped text line fits within the text width.
+    // Every text line fits within the text width.
     for row in &rows {
         if let PendingQueueRow::Text(_, _, line) = row {
             assert!(
-                line.chars().count() <= 24,
-                "wrapped line exceeds width: {line:?}"
+                line.chars().count() <= 16,
+                "truncated line exceeds width: {line:?}"
             );
         }
     }
-    // No characters are lost: rejoining the wrapped lines recovers the
-    // message (modulo the injected line breaks).
-    let joined: String = rows
-        .iter()
-        .filter_map(|row| match row {
-            PendingQueueRow::Text(qi, mi, line) if *qi == 1 && *mi == 1 => {
-                Some(line.as_str())
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("");
-    assert_eq!(
-        joined.replace(' ', ""),
-        "umamensagembemlongaquecomcertezanaocabeemumalinhaso"
-    );
-    // The short message is a single text row; the long one wraps into
-    // several.
+    // A long message yields exactly ONE text row (no wrap): a prefix of the
+    // message — nothing invented, the remainder simply vanishes. The layout
+    // is [pad, text, pad] per message: message 0's text at rows[1], message
+    // 1's at rows[4].
     let text_rows = |qi: usize, mi: usize| {
         rows.iter()
             .filter(|row| matches!(row, PendingQueueRow::Text(q, m, _) if *q == qi && *m == mi))
             .count()
     };
     assert_eq!(text_rows(1, 0), 1);
-    assert!(text_rows(1, 1) > 1);
+    assert_eq!(text_rows(1, 1), 1, "a long message must never wrap");
+    let truncated = match &rows[4] {
+        PendingQueueRow::Text(_, _, line) => line.clone(),
+        _ => panic!("expected text row"),
+    };
+    let long = "uma mensagem bem longa que com certeza nao cabe em uma linha so";
+    assert!(long.starts_with(&truncated), "got {truncated:?}");
+    assert!(truncated.chars().count() < long.chars().count(), "must cut");
+    // The short message is untouched.
+    assert_eq!(truncated, "uma mensagem bem"); // 16 cols
+    match &rows[1] {
+        PendingQueueRow::Text(_, _, line) => assert_eq!(line, "short"),
+        _ => panic!("expected text row"),
+    }
     // Every message carries its OWN padding: two messages never share a pad
-    // row, so the layout interleaves [pad, text..., pad] per message.
+    // row, so the layout interleaves [pad, text, pad] per message.
     let pad_owners: Vec<(usize, usize)> = rows
         .iter()
         .filter_map(|row| match row {
@@ -89,6 +89,29 @@ fn pending_queue_layout_wrap_long_messages() {
         })
         .collect();
     assert_eq!(pad_owners, vec![(1, 0), (1, 0), (1, 1), (1, 1)]);
+}
+
+/// Truncation must never split a wide grapheme: a wide (double-column)
+/// character that no longer fits is dropped whole, keeping the row within
+/// its display-width budget.
+#[test]
+fn pending_queue_layout_truncation_never_splits_wide_graphemes() {
+    use crate::state::PendingQueues;
+    use std::collections::VecDeque;
+
+    // 8 wide CJK chars = 16 display columns — exactly the text width at
+    // width 30; the 9th wide char does not fit and is dropped whole.
+    let queues = PendingQueues {
+        next_loop: VecDeque::new(),
+        next_request: VecDeque::from(["日本語テキスト日本語テキスト日本".to_string()]),
+    };
+    let rows = App::pending_queue_layout(&queues, 30);
+    let line = match &rows[1] {
+        PendingQueueRow::Text(_, _, line) => line.clone(),
+        _ => panic!("expected text row"),
+    };
+    // Exactly the first 8 wide chars (16 cols) fit; the 9th is dropped whole.
+    assert_eq!(line, "日本語テキスト日");
 }
 
 /// An empty queued message still renders its text row (plus its own padding)

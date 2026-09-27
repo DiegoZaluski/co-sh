@@ -17,7 +17,7 @@ use crate::routes::session::footer::FooterView;
 use crate::routes::session::right_panel::render_right_panel;
 use crate::state::PendingQueues;
 use crate::theme::{Theme, rgba_color};
-use cosh_tui::core::lib::unicode_util::word_wrap;
+use cosh_tui::core::lib::unicode_util::graphemes_with_width;
 
 /// Render a 10-character budget bar like `▓▓▓▓▓░░░░░` from a 0-100 percentage.
 pub(super) fn render_budget_bar(pct: u8) -> String {
@@ -535,12 +535,10 @@ impl App {
                 0
             };
             // Pending queued-message region (color-coded rows above the prompt).
-            // Rows are word-wrapped, so a single queued message can occupy
-            // several visual lines. The wrap runs ONCE per frame here: the
-            // old code word-wrapped every queued message twice per frame
-            // (once for the height, once inside the renderer), doubling the
-            // grapheme-aware `word_wrap` cost on every frame while messages
-            // are queued.
+            // Each queued message is ONE visual line, visually truncated to
+            // the band's width (never word-wrapped). The layout runs ONCE per
+            // frame here: renderer, height and mouse hit-testing share the
+            // same rows.
             let pending_rows = if is_session && !hide_prompt_and_spinner {
                 let pending_w = main_area.width.saturating_sub(4);
                 self.state
@@ -985,15 +983,14 @@ impl App {
         )
     }
 
-    /// Visual rows of the pending queues, word-wrapped to fit `width`
-    /// columns, one layout entry per drawn row. A long message yields
-    /// consecutive `Text` entries sharing its indices — one per wrapped
-    /// line — bracketed by its own `Pad` rows. Shared by the renderer and the
-    /// height/geometry helpers so mouse hit-testing always matches what is
-    /// drawn. Wrapping reuses the same `word_wrap` primitive as the chat
-    /// transcript (grapheme-aware), control characters stripped first. When
-    /// the band is wide enough, the wrap reserves the right-hand columns of
-    /// the mode-colored end cap (`pending_cap_width`).
+    /// Visual rows of the pending queues, one layout entry per drawn row.
+    /// Each queued message yields exactly ONE `Text` row — visually truncated
+    /// to the columns available outside the mode-colored end cap, never
+    /// word-wrapped (the full text still goes to the model; only the strip's
+    /// preview is cut) — bracketed by its own `Pad` rows. Shared by the
+    /// renderer and the height/geometry helpers so mouse hit-testing always
+    /// matches what is drawn. Truncation is display-width aware
+    /// (`graphemes_with_width`), control characters stripped first.
     pub(super) fn pending_queue_layout(
         queues: &PendingQueues,
         width: u16,
@@ -1003,13 +1000,19 @@ impl App {
             Some(cap_w) => width.saturating_sub(cap_w + 5),
             None => width.saturating_sub(6), // ┃ + 2 pad left, 2 pad right + ┃
         } as usize;
-        let wrap = |text: &str| -> Vec<String> {
+        let one_line = |text: &str| -> String {
             let clean: String = text.chars().filter(|c| !c.is_control()).collect();
-            if clean.is_empty() {
-                vec![String::new()]
-            } else {
-                word_wrap(&clean, text_w.max(1) as u16)
+            let mut line = String::new();
+            let mut used = 0usize;
+            for (grapheme, w) in graphemes_with_width(&clean) {
+                let w = usize::from(w);
+                if used + w > text_w.max(1) {
+                    break; // visual cut: no ellipsis, the rest simply vanishes
+                }
+                line.push_str(grapheme);
+                used += w;
             }
+            line
         };
         let mut rows = Vec::new();
         for (qi, queue) in [&queues.next_loop, &queues.next_request]
@@ -1021,9 +1024,7 @@ impl App {
                 // neighboring messages are always separated and the strip's
                 // outer edges get one pad row too.
                 rows.push(PendingQueueRow::Pad(qi, mi));
-                for line in wrap(text) {
-                    rows.push(PendingQueueRow::Text(qi, mi, line));
-                }
+                rows.push(PendingQueueRow::Text(qi, mi, one_line(text)));
                 rows.push(PendingQueueRow::Pad(qi, mi));
             }
         }
@@ -1031,8 +1032,9 @@ impl App {
     }
 
     /// Render the pending queued messages above the prompt, each preserving
-    /// FIFO order. Long messages word-wrap across several visual lines (same
-    /// wrapping as the chat transcript) instead of being truncated. Each
+    /// FIFO order. Long messages are visually truncated to the band's
+    /// available width — outside the mode cap — instead of word-wrapping;
+    /// the full text is still queued for the model. Each
     /// message's band is a lighter wash of the current mode's color, ending
     /// in a full-strength mode-colored cap labeling its queue
     /// (NEXT / CLOSURE).
@@ -1271,7 +1273,7 @@ impl App {
         }
         // Message text starts 3 columns in (┃ + 2 pad) and stops 3 short of
         // the right edge (2 pad + ┃), symmetric like the prompt box;
-        // `text` is pre-wrapped and pre-filtered by `pending_queue_layout`.
+        // `text` is pre-truncated and pre-filtered by `pending_queue_layout`.
         let text_x = x + 3;
         let text_right = x + width - 3;
         let text_style = Style::default().fg(fg).bg(bg_color);
