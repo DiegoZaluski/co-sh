@@ -301,8 +301,11 @@ pub struct App {
     pub(crate) active_loop_session_id: Option<String>,
     /// Pending-queue row (render order: next-loop rows first, then
     /// next-request rows) currently under the mouse cursor — drives the
-    /// opencode-style hover highlight above the prompt.
-    pub(super) hovered_queue_row: Option<usize>,
+    /// opencode-style hover highlight above the prompt. Identifies the
+    /// MESSAGE that owns the row as `(queue_index, message_index)`: the
+    /// message's own padding rows resolve to it too, so hovering any row of
+    /// a message highlights its whole band.
+    pub(super) hovered_queue_row: Option<(usize, usize)>,
     /// Until when the agent loop may not consume the next queued message.
     /// Set to `now + QUEUE_ACTIONS_GRACE` whenever a Queue Actions box is
     /// opened; while a Queue Actions box is open the hold applies regardless
@@ -1498,11 +1501,15 @@ impl App {
         } = self.session_main_area(area);
         // Rows are word-wrapped, so a single queued message may occupy
         // several visual lines — count the same rows the renderer draws.
+        // The layout already carries each message's own internal padding
+        // (one pad row above and below its text), so the strip height is
+        // simply the number of layout rows. Empty queues still reserve
+        // nothing.
         let pending_w = main_area.width.saturating_sub(4);
         let pending_h = self
             .state
             .current_pending_queues()
-            .map_or(0, |q| App::pending_queue_rows(q, pending_w).len() as u16);
+            .map_or(0, |q| App::pending_queue_layout(q, pending_w).len() as u16);
         if pending_h == 0 {
             return None;
         }

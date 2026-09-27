@@ -6037,12 +6037,15 @@ fn copy_selection_word_integrity_on_focus_column() {
         copied_mid.ends_with("token"),
         "release must keep the focus glyph: got {copied_mid:?}"
     );
-    // 5) A single-cell band is a plain click, not a drag: copies nothing (a
-    //    click must not trigger the copy toast).
+    // 5) A same-cell band (drag starting and ending on one cell) selects
+    //    exactly that glyph — the single-character copy. Bare clicks never
+    //    reach the extractor: app/mouse.rs only calls it when `is_drag`
+    //    (a down+up without movement never enters this path). `last_col` is
+    //    the row's final glyph, so the copied cell is `visible`'s last char.
     assert_eq!(
         view.get_text_in_region(last_col, row, last_col, row),
-        "",
-        "a single-cell selection is a click and must copy nothing"
+        visible.chars().last().unwrap_or_default().to_string(),
+        "a same-cell band must copy exactly the glyph under it"
     );
 }
 
