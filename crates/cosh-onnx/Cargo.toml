@@ -12,9 +12,12 @@ ort = { version = "=2.0.0-rc.13", default-features = false, features = ["ndarray
 # The HF fast tokenizer behind the Tokenizer trait. Same version and feature
 # set fastembed 7 selects, so a single tokenizers build serves both crates.
 tokenizers = { version = "0.23.2", default-features = false, features = ["onig"] }
-# Hub downloads (ONNXAgent load path). The sync/ureq API matches fastembed's
-# hf-hub feature set, so a single hf-hub build serves both crates.
-hf-hub = { version = "0.5", default-features = false, features = ["ureq", "native-tls"] }
+# Hub downloads (ONNXAgent load path). The sync/ureq API; without the
+# native-tls feature hf-hub 0.5 builds its ureq agent on Rustls, matching
+# ort's tls-rustls — no OpenSSL in this crate's graph. (The workspace `embed`
+# feature re-adds native-tls via fastembed 7's default feature set; feature
+# unification keeps it a single hf-hub build either way.)
+hf-hub = { version = "0.5", default-features = false, features = ["ureq"] }
 # Warnings surface through the log facade (workspace convention) instead of
 # Python's warnings module.
 log = "0.4"
