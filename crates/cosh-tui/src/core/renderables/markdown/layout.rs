@@ -114,7 +114,17 @@ fn block_kind_from_head(head: &str) -> BlockKind {
         Some(b'`') | Some(b'~') => {
             let run = b.iter().take_while(|&&c| c == b[0]).count();
             if run >= 3 {
-                BlockKind::CodeBlock
+                // The info string is the rest of the FIRST fence line. Do
+                // NOT strip fence characters from it: pulldown treats
+                // "``` ~~~" as a TAGGED fence whose info is "~~~" (only
+                // whitespace separates the info from the marker), and this
+                // classification must agree with classify()'s info.trim().
+                let info = t[run..].trim_matches([' ', '\t']);
+                if info.is_empty() {
+                    BlockKind::CodeBlockLangless
+                } else {
+                    BlockKind::CodeBlock
+                }
             } else {
                 BlockKind::Paragraph
             }
