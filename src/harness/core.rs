@@ -1589,6 +1589,19 @@ impl Harness {
         }
         // Same wiring as a loop start: the shared stop flag reaches the
         // summarizer's stream loop and the TUI sees the summary streamed live.
+        //
+        // Clear the flag BEFORE adopting it: every summarizer entry point
+        // races it against the connect future BEFORE connecting, so a flag
+        // still set from an earlier interaction (ESC/Interrupt) aborts the
+        // manual pass with `CompactionErr::Interrupted` before a single byte
+        // leaves the process — and retrying `/compact` can never succeed.
+        // The flag belongs to the PREVIOUS turn; a compaction that is being
+        // started right now must begin from a clean slate. This is the
+        // harness-side half of the same contract `start_agent_loop` honours;
+        // the TUI clears its copy in `start_manual_compaction`, and this
+        // clears whatever arrives through the API, keeping the fix
+        // self-contained instead of relying on every caller remembering.
+        let _ = stop_signal.swap(false, std::sync::atomic::Ordering::Relaxed);
         self.stop_signal = Some(stop_signal);
         self.reasoning_tx = Some(tx.clone());
         self.context_manager
@@ -5462,6 +5475,20 @@ impl Harness {
     /// `Err(msg)` simulates a connector failure.
     pub(crate) fn with_mock_chat(mut self, response: Result<&str, &str>) -> Self {
         self.mock_chat_response = Some(response.map(|s| s.to_string()).map_err(|s| s.to_string()));
+        self
+    }
+
+    /// The summarizer calls made so far — one `(provider, model)` per call.
+    /// Test accessor for test modules outside `core.rs` (e.g. `test/`).
+    pub(crate) fn mock_compaction_calls(&self) -> &[(String, String)] {
+        &self.mock_compaction_models
+    }
+
+    /// Replace the agent connector (test-only): points the loop and the
+    /// summarizer at a local streaming server so the REAL SDK path runs with
+    /// no test mocks in the way.
+    pub(crate) fn with_connector(mut self, connector: Connector) -> Self {
+        self.connector = connector;
         self
     }
 

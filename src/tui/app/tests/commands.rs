@@ -546,6 +546,57 @@ async fn slash_compact_refuses_without_a_session_context() {
     );
 }
 
+/// Regression for the "silent summarization death" wedge: an earlier
+/// ESC/Interrupt leaves the SHARED stop flag set, and `start_manual_compaction`
+/// used to clone it WITHOUT clearing — `compact_on_demand` then raced the
+/// still-set flag at every summarizer's pre-connect select, so `/compact`
+/// failed silently no matter how often it was retried (the fix clears the
+/// flag before the clone, mirroring `start_agent_loop`'s contract).
+#[tokio::test]
+async fn slash_compact_clears_a_wedged_stop_flag_before_spawning() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    // A session with persisted context records, so the command passes its
+    // guards and actually spawns the compaction task.
+    app.start_new_session();
+    app.state
+        .current_session_mut()
+        .expect("session")
+        .messages = vec![crate::types::Message {
+        id: "msg-0".into(),
+        role: crate::types::MessageRole::User,
+        parts: vec![crate::types::Part::Text(crate::types::TextPart {
+            text: "earlier prompt".into(),
+            synthetic: false,
+        })],
+        created_at: 0,
+        agent: None,
+        model: None,
+    }];
+    let state: cosh::harness::ContextManagerState = Default::default();
+    app.session_store
+        .save_session_with_context(&app.state.current_session().unwrap().clone(), &state);
+
+    // The wedge: the previous interaction left the shared flag set.
+    app.stop_signal.store(true, std::sync::atomic::Ordering::Relaxed);
+
+    let cmd = slash_cmd("compact");
+    app.run_slash_command(&cmd);
+    // The task started (the guards passed)…
+    assert!(
+        app.manual_compaction_active,
+        "the compaction task must spawn in a valid idle session"
+    );
+    // …and the flag the task inherits is CLEAR: the pre-connect select in
+    // the summarizer must never observe the previous interaction's ESC.
+    assert!(
+        !app.stop_signal.load(std::sync::atomic::Ordering::Relaxed),
+        "start_manual_compaction must clear the shared stop flag before the \
+         compaction task clones it — a wedged flag kills /compact silently"
+    );
+}
+
 /// `/background` toggles the base background between the theme color and the
 /// terminal default: ON zeroes the alpha (RGB preserved, so luminance
 /// derivations keep working), OFF restores the exact registry color. Each
