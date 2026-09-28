@@ -39,7 +39,7 @@ pub enum Action {
     MaximizeBash,
     /// Maximize the TODO section over the right panel (header hint F3).
     MaximizeTodo,
-    /// Bring the right panel's mixed view back (header hint F4, the ◩ icon).
+    /// Bring the right panel's mixed view back (header hint F4).
     MaximizeMixedView,
 }
 

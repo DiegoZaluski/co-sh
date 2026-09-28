@@ -218,11 +218,13 @@ fn subagent_natural_height(state: &mut RightPanelState, wrap_w: u16) -> i32 {
 }
 
 /// Compute the clickable rects of the header row: one button per EXISTING
-/// section plus the hint-and-icon mixed button right-aligned at the edge.
+/// section plus the hint-only mixed button right-aligned at the edge.
 /// The buttons exist whenever two or more boxes EXIST — the rule counts the
 /// sections present in the panel, not the ones currently displayed, so the
 /// buttons survive maximization and switching the owner costs one click.
-/// The mixed button is set apart from the section buttons by 2 columns.
+/// Consecutive section buttons keep three spare columns between them (the
+/// middle one carries the centered delimiter); one clearance column stays
+/// between the last section button and the mixed button.
 fn build_header_buttons(
     x: u16,
     y: u16,
@@ -230,20 +232,18 @@ fn build_header_buttons(
     present: &[bool; 3],
 ) -> Vec<types::HeaderButton> {
     let mut buttons = Vec::new();
-    // The mixed button owns the header's right edge: the function-key hint
-    // painted BEFORE the glyph plus one clearance column on each side, 2
-    // columns apart from the section buttons.
-    let icon_w = types::MIXED_HEADER_ICON.chars().count() as u16;
+    // The mixed button owns the header's right edge: the bare "F4" hint
+    // plus one clearance column on each side.
     let hint_w = types::HEADER_MIXED_HINT.chars().count() as u16;
     let mixed_x1 = x.saturating_add(max_w);
-    let mixed_x0 = mixed_x1.saturating_sub(icon_w + hint_w + 2);
-    let section_limit = mixed_x0.saturating_sub(2);
+    let mixed_x0 = mixed_x1.saturating_sub(hint_w + 2);
+    let section_limit = mixed_x0.saturating_sub(1);
     let mut cx = x;
     for (kind, label) in types::HEADER_SECTION_LABELS {
         if !present[types::section_kind_index(kind)] {
             continue;
         }
-        let w = label.chars().count() as u16 + 1;
+        let w = label.chars().count() as u16;
         if cx.saturating_add(w) > section_limit {
             break;
         }
@@ -253,7 +253,10 @@ fn build_header_buttons(
             x1: cx + w,
             top: y,
         });
-        cx += w + 1;
+        // Three spare columns between consecutive buttons: the delimiter
+        // rides in the MIDDLE one (`next.x0 - 2`), one empty column away
+        // from the previous label AND one away from the next — centered.
+        cx += w + 3;
     }
     buttons.push(types::HeaderButton {
         target: None,
@@ -266,64 +269,88 @@ fn build_header_buttons(
 
 /// Paint the header buttons computed by [`build_header_buttons`]: the section
 /// buttons are bare text on the panel background — no background of their
-/// own, like the mixed icon beside them — and the section that currently owns
-/// the panel (`selected`) has its LABEL painted in the fixed selection color
-/// so the user can see at a glance which button is active.
+/// own, like the mixed hint beside them — and the section that currently owns
+/// the panel (`selected`) has its LABEL painted white so the user can see at
+/// a glance which button is active; the resting labels share the dim band
+/// color with the delimiter between them. Between two consecutive section
+/// buttons the layout's spare column carries the faint
+/// [`types::HEADER_SECTION_SEPARATOR`] delimiter — a pure divider, never a
+/// button.
+///
+/// The resting color is NOT the raw box background: as a 1-cell glyph on the
+/// panel background it would be invisible (#0E0E11 on #000000 in the default
+/// theme), so [`header_band_color`] lifts it toward the text color while
+/// keeping the recessed feel.
+fn header_band_color(theme: &Theme) -> RGBA {
+    blend(theme.background_element, theme.text, 0.25)
+}
+
 fn draw_header_row(
     buf: &mut Buffer,
     buttons: &[types::HeaderButton],
     selected: Option<types::SectionKind>,
     theme: &Theme,
 ) {
-    for button in buttons {
+    for (i, button) in buttons.iter().enumerate() {
         match button.target {
             Some(kind) => {
+                // The delimiter between two consecutive section buttons
+                // rides in the MIDDLE of the three spare columns the layout
+                // leaves between them (`cx += w + 3`): one empty column away
+                // from each neighbor label. It is OUTSIDE both hit rects —
+                // the previous button ends at `x0 - 3` exclusive — so a
+                // click on it falls through to nothing. Painted in the dim
+                // band color derived from the boxes' background, a pure
+                // divider that never takes the selection color.
+                if i > 0
+                    && buttons[i - 1].target.is_some()
+                    && let Some(sep_x) = button.x0.checked_sub(2)
+                {
+                    let sep_style = Style::default().fg(rgba_color(header_band_color(theme)));
+                    draw_text(
+                        buf,
+                        types::HEADER_SECTION_SEPARATOR,
+                        sep_x,
+                        button.top,
+                        types::HEADER_SECTION_SEPARATOR.chars().count() as u16,
+                        sep_style,
+                    );
+                }
                 let label = types::HEADER_SECTION_LABELS
                     .iter()
                     .find(|(k, _)| *k == kind)
                     .map(|(_, label)| *label)
                     .unwrap_or("");
-                // The selected section's label is painted in the fixed
-                // selection color — the FONT changes, the background stays
-                // the panel's own; the highlight follows the clicks and
-                // vanishes when the mixed view returns.
+                // The selected section's label is painted WHITE — the FONT
+                // changes, the background stays the panel's own; the
+                // highlight follows the clicks and vanishes when the mixed
+                // view returns. Resting labels share the dim band color of
+                // the delimiter between them.
                 let fg = if selected == Some(kind) {
-                    theme.primary
-                } else {
                     theme.text
+                } else {
+                    header_band_color(theme)
                 };
                 let style = Style::default().fg(rgba_color(fg));
-                // The drawn text must match the hit rect exactly: one
-                // leading space plus the label — the trailing padding the
-                // old pill-shaped chip had is gone with the background.
-                let padded = format!(" {label}");
-                // Width must cover exactly the chip: an oversized bound
-                // would overflow draw_text's internal `checked_add` and
-                // silently skip drawing (the draw_chip contract).
-                let w = padded.chars().count() as u16;
-                draw_text(buf, &padded, button.x0, button.top, w, style);
+                // The drawn text must match the hit rect exactly: the bare
+                // label — no leading space (the chip padding is gone with
+                // the background, and the spare columns now belong to the
+                // centered delimiter).
+                let w = label.chars().count() as u16;
+                draw_text(buf, label, button.x0, button.top, w, style);
             }
             // The mixed button NEVER takes the selection color: it is a
-            // layout-level control, not a member of the group. Its
-            // function-key hint is painted BEFORE the glyph — the only
-            // hint that sits ahead of its control — as bare text, no
-            // background of its own.
+            // layout-level control, not a member of the group. Its bare
+            // "F4" hint keeps the dim band color — the resting look the
+            // section buttons share — with no glyph and no background.
             None => {
-                let style = Style::default().fg(rgba_color(theme.text));
+                let style = Style::default().fg(rgba_color(header_band_color(theme)));
                 draw_text(
                     buf,
                     types::HEADER_MIXED_HINT,
                     button.x0 + 1,
                     button.top,
                     types::HEADER_MIXED_HINT.chars().count() as u16,
-                    style,
-                );
-                draw_text(
-                    buf,
-                    types::MIXED_HEADER_ICON,
-                    button.x0 + 1 + types::HEADER_MIXED_HINT.chars().count() as u16,
-                    button.top,
-                    1,
                     style,
                 );
             }
@@ -3723,6 +3750,87 @@ mod tests {
         );
     }
 
+    /// Between two consecutive section buttons the header paints the faint
+    /// `·` delimiter in the dim band color (derived from the boxes' own
+    /// background) — a pure divider, CENTERED between the labels: one empty
+    /// column on each side. It rides in the middle spare column — a click on
+    /// it must fall through — and NEVER appears before the first section
+    /// button or before the mixed button.
+    #[test]
+    fn header_separator_sits_between_section_buttons_only() {
+        let theme = test_theme();
+        let mut state = full_panel_state();
+        let area = Rect::new(0, 0, 50, 30);
+        let mut buf = Buffer::empty(area);
+        render_right_panel(&mut buf, area, &mut state, &theme, 120);
+
+        let buttons = state.header_buttons().to_vec();
+        let section_buttons: Vec<_> = buttons
+            .iter()
+            .filter(|b| b.target.is_some())
+            .copied()
+            .collect();
+        assert!(section_buttons.len() >= 2, "three sections present");
+        let top = section_buttons[0].top;
+
+        // Every consecutive pair of section buttons carries the delimiter in
+        // the MIDDLE of the three spare columns between them, painted in the
+        // dim band color.
+        let sep_fg = rgba_color(header_band_color(&theme));
+        for pair in section_buttons.windows(2) {
+            let (prev, next) = (pair[0], pair[1]);
+            assert_eq!(
+                next.x0,
+                prev.x1 + 3,
+                "the layout leaves exactly three spare columns between buttons"
+            );
+            // The delimiter cell itself, one empty column on EACH side.
+            // (`next.x0` itself belongs to the NEXT button's hit rect and is
+            // legitimately clickable, so it is not probed here.)
+            for x in [next.x0 - 2, next.x0 - 1] {
+                let cell = buf.cell((x, top)).expect("separator cell");
+                if x == next.x0 - 2 {
+                    assert_eq!(cell.symbol(), types::HEADER_SECTION_SEPARATOR);
+                    assert_eq!(
+                        cell.fg, sep_fg,
+                        "the delimiter must be font-painted in the dim band color"
+                    );
+                    // The divider is NOT a button: a click on its column is
+                    // consumed by nothing.
+                    assert!(
+                        !state.header_click(x, top),
+                        "the separator column must not be clickable"
+                    );
+                } else {
+                    assert_ne!(
+                        cell.symbol(),
+                        types::HEADER_SECTION_SEPARATOR,
+                        "the delimiter must be centered: col {x} must stay empty"
+                    );
+                    assert!(
+                        !state.header_click(x, top),
+                        "the spare columns must not be clickable"
+                    );
+                }
+            }
+        }
+
+        // No delimiter before the FIRST section button or before the mixed
+        // button — it only separates consecutive section buttons.
+        let mixed = buttons
+            .iter()
+            .find(|b| b.target.is_none())
+            .expect("mixed button present");
+        for x in [section_buttons[0].x0 - 1, mixed.x0 - 1] {
+            let cell = buf.cell((x, top)).expect("edge cell");
+            assert_ne!(
+                cell.symbol(),
+                types::HEADER_SECTION_SEPARATOR,
+                "no delimiter before the first section button or the mixed button"
+            );
+        }
+    }
+
     /// Clicking a section's header button maximizes it: that section becomes
     /// the SOLE owner of the panel area and the other sections vanish.
     #[test]
@@ -3779,11 +3887,11 @@ mod tests {
         );
     }
 
-    /// The icon-only mixed button is ALWAYS present while two or more boxes
+    /// The hint-only mixed button is ALWAYS present while two or more boxes
     /// exist — including while a section owns the panel — so switching the
     /// owner costs ONE click. It sits at the RIGHT edge of the header, apart
-    /// from the section buttons, and paints no background: a bare white
-    /// glyph on the panel background.
+    /// from the section buttons, and paints no background: a bare dim
+    /// band-colored "F4" on the panel background.
     #[test]
     fn mixed_button_stays_visible_and_right_aligned_while_maximized() {
         let theme = test_theme();
@@ -3800,11 +3908,11 @@ mod tests {
         render_right_panel(&mut buf, area, &mut state, &theme, 120);
 
         // While maximized the section buttons REMAIN (one click to switch
-        // the owner) and the mixed icon remains too.
+        // the owner) and the mixed hint remains too.
         let header = row_text(&buf, 0);
         assert!(
-            header.contains("Bash") && header.contains(types::MIXED_HEADER_ICON),
-            "maximized header must keep the section buttons and the mixed icon, got {header:?}"
+            header.contains("Bash") && header.contains(types::HEADER_MIXED_HINT),
+            "maximized header must keep the section buttons and the mixed hint, got {header:?}"
         );
         assert!(state.header_button_rect(types::SectionKind::Bash).is_some());
 
@@ -3839,10 +3947,10 @@ mod tests {
             "the mixed button must touch the header's right edge"
         );
 
-        // No background pill: the glyph keeps the panel's own background and
-        // a bright (text-colored) foreground.
-        let icon_x = (mixed.x0 + mixed.x1) / 2;
-        let cell = buf.cell((icon_x, top)).expect("icon cell painted");
+        // No background pill: the hint keeps the panel's own background and
+        // the dim band color — the resting look the section buttons share.
+        let hint_x = (mixed.x0 + mixed.x1) / 2;
+        let cell = buf.cell((hint_x, top)).expect("hint cell painted");
         assert_eq!(
             cell.bg,
             rgba_color(theme.background_panel),
@@ -3850,11 +3958,11 @@ mod tests {
         );
         assert_eq!(
             cell.fg,
-            rgba_color(theme.text),
-            "the mixed glyph must be plain text-colored (white)"
+            rgba_color(header_band_color(&theme)),
+            "the mixed hint must be dim band-colored (never white)"
         );
 
-        // One click on the mixed icon brings the mixed view back.
+        // One click on the mixed hint brings the mixed view back.
         assert!(state.header_click((mixed.x0 + mixed.x1) / 2, top));
         assert_eq!(state.maximized_section, None, "mixed brings mixed back");
 
@@ -3887,7 +3995,9 @@ mod tests {
         };
 
         // Nothing is selected in the mixed view: no button carries the
-        // selection color yet.
+        // white focus color yet — every resting label is in the dim band
+        // color (the same one the delimiter between them uses).
+        let band = rgba_color(header_band_color(&theme));
         for kind in [
             types::SectionKind::Todo,
             types::SectionKind::Bash,
@@ -3895,13 +4005,17 @@ mod tests {
         ] {
             let (x0, x1, top, _) = state.header_button_rect(kind).expect("button present");
             assert!(
-                !column_fg_has(&buf, x0, x1, top, rgba_color(theme.primary)),
-                "no button may be highlighted before any click"
+                !column_fg_has(&buf, x0, x1, top, rgba_color(theme.text)),
+                "no button may carry the white focus color before any click"
+            );
+            assert!(
+                column_fg_has(&buf, x0, x1, top, band),
+                "every resting button carries the dim band color"
             );
         }
 
-        // Clicking Bash selects it: its chip takes the selection color while
-        // the other section buttons keep the plain band color.
+        // Clicking Bash selects it: its label turns WHITE while the other
+        // section buttons keep the dim band color.
         click(&mut state, types::SectionKind::Bash);
         buf = Buffer::empty(area);
         render_right_panel(&mut buf, area, &mut state, &theme, 120);
@@ -3912,15 +4026,16 @@ mod tests {
             .header_button_rect(types::SectionKind::Todo)
             .expect("todo button");
         assert!(
-            column_fg_has(&buf, bx0, bx1, top, rgba_color(theme.primary)),
-            "the clicked section's button must carry the selection color"
+            column_fg_has(&buf, bx0, bx1, top, rgba_color(theme.text)),
+            "the clicked section's label must turn white"
         );
         assert!(
-            !column_fg_has(&buf, tx0, tx1, top, rgba_color(theme.primary)),
-            "the unselected buttons keep the plain band color"
+            !column_fg_has(&buf, tx0, tx1, top, rgba_color(theme.text))
+                && column_fg_has(&buf, tx0, tx1, top, band),
+            "the unselected buttons keep the dim band color"
         );
 
-        // Clicking Subagent moves the highlight; Bash returns to the band.
+        // Clicking Subagent moves the white label; Bash returns to the band.
         click(&mut state, types::SectionKind::Subagent);
         buf = Buffer::empty(area);
         render_right_panel(&mut buf, area, &mut state, &theme, 120);
@@ -3928,15 +4043,16 @@ mod tests {
             .header_button_rect(types::SectionKind::Subagent)
             .expect("subagent button");
         assert!(
-            column_fg_has(&buf, sx0, sx1, stop, rgba_color(theme.primary)),
-            "the highlight must follow the newest click"
+            column_fg_has(&buf, sx0, sx1, stop, rgba_color(theme.text)),
+            "the white label must follow the newest click"
         );
         assert!(
-            !column_fg_has(&buf, bx0, bx1, top, rgba_color(theme.primary)),
+            !column_fg_has(&buf, bx0, bx1, top, rgba_color(theme.text))
+                && column_fg_has(&buf, bx0, bx1, top, band),
             "the dethroned button returns to the band color"
         );
 
-        // Clicking the mixed icon clears the highlight — and the mixed
+        // Clicking the mixed hint clears the highlight — and the mixed
         // button itself never takes it.
         let mixed = state
             .header_buttons()
@@ -3954,13 +4070,20 @@ mod tests {
         ] {
             let (x0, x1, top, _) = state.header_button_rect(kind).expect("button present");
             assert!(
-                !column_fg_has(&buf, x0, x1, top, rgba_color(theme.primary)),
-                "no section button may stay highlighted after the mixed click"
+                !column_fg_has(&buf, x0, x1, top, rgba_color(theme.text))
+                    && column_fg_has(&buf, x0, x1, top, band),
+                "no section button may stay white after the mixed click"
             );
         }
+        // The mixed button's own color is INDEPENDENT of the selection: it
+        // keeps the dim band color whether or not a section owns the panel.
+        // (The focus color would be white, so "never highlighted" is
+        // structural — the mixed arm of draw_header_row never reads
+        // `selected` — and verified by the unchanged color here.)
         assert!(
-            !column_fg_has(&buf, mixed.x0, mixed.x1, stop, rgba_color(theme.primary)),
-            "the mixed button must never carry the selection color"
+            column_fg_has(&buf, mixed.x0, mixed.x1, stop, band)
+                && !column_fg_has(&buf, mixed.x0, mixed.x1, stop, rgba_color(theme.text)),
+            "the mixed button keeps its own dim band color"
         );
 
         // Hardening: when the maximized section's content vanishes, the
@@ -3983,7 +4106,7 @@ mod tests {
             .header_button_rect(types::SectionKind::Subagent)
             .expect("subagent button still present (2 boxes remain)");
         assert!(
-            !column_fg_has(&buf, rx0, rx1, rtop, rgba_color(theme.primary)),
+            !column_fg_has(&buf, rx0, rx1, rtop, rgba_color(theme.text)),
             "the highlight must clear in the same frame as the fallback"
         );
     }
@@ -3991,7 +4114,7 @@ mod tests {
     /// The section buttons are BARE TEXT on the panel background: no button
     /// carries a background of its own, the gaps between buttons included —
     /// the header row is one uninterrupted stretch of panel background from
-    /// the first section button through the mixed icon. Only the FONT color
+    /// the first section button through the mixed hint. Only the FONT color
     /// distinguishes the buttons: an unselected label is ordinary text color,
     /// and the selected one takes the theme's primary.
     #[test]
@@ -4031,18 +4154,18 @@ mod tests {
                 "no element fill may remain in the header row, col {x}"
             );
         }
-        // An unselected label is ordinary text color on that bare ground.
-        let text = rgba_color(theme.text);
+        // An unselected label is in the dim band color on that bare ground.
+        let band = rgba_color(header_band_color(&theme));
         assert_eq!(
             buf.cell(((first.x0 + first.x1) / 2, top)).map(|c| c.fg),
-            Some(text),
-            "the unselected label is plain text color"
+            Some(band),
+            "the unselected label is the dim band color"
         );
         // The icon cell itself stays bare panel background.
         assert_eq!(
             buf.cell(((mixed.x0 + mixed.x1) / 2, top)).map(|c| c.bg),
             Some(panel),
-            "the mixed icon keeps its bare background"
+            "the mixed hint keeps its bare background"
         );
     }
 
@@ -4109,12 +4232,14 @@ mod tests {
         let f4_pos = header
             .find("F4")
             .unwrap_or_else(|| panic!("mixed hint F4 must be on the row, got {header:?}"));
-        let icon_pos = header
-            .find(types::MIXED_HEADER_ICON)
-            .unwrap_or_else(|| panic!("the mixed glyph must be on the row, got {header:?}"));
+        // The bare "F4" is the mixed control itself now — no glyph beside
+        // it, so the hint is simply the rightmost label on the row.
+        let todo_pos = header
+            .find("TODO F3")
+            .unwrap_or_else(|| panic!("todo hint must be on the row, got {header:?}"));
         assert!(
-            f4_pos < icon_pos,
-            "the mixed hint sits BEFORE the glyph, got {header:?}"
+            todo_pos < f4_pos,
+            "the mixed hint must sit right of the section labels, got {header:?}"
         );
     }
 
@@ -4153,8 +4278,8 @@ mod tests {
             "all three hinted labels must render at the real width, got {header:?}"
         );
         assert!(
-            header.contains("F4") && header.contains(types::MIXED_HEADER_ICON),
-            "the mixed hint and glyph must render at the real width, got {header:?}"
+            header.contains(types::HEADER_MIXED_HINT),
+            "the mixed hint must render at the real width, got {header:?}"
         );
     }
 

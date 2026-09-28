@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use pulldown_cmark::{Event, Options, Parser, Tag};
+use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag};
 
 /// Number of trailing blocks kept "unstable" during incremental parsing.
 ///
@@ -16,7 +16,14 @@ pub(crate) const TRAILING_UNSTABLE_BLOCKS: usize = 2;
 pub(crate) enum BlockKind {
     Paragraph,
     Heading,
+    /// Fenced code block WITH an info string ("```rust"): it paints its own
+    /// label row, which doubles as the visual gap above the code.
     CodeBlock,
+    /// Fenced/indented code block WITHOUT an info string ("```"): it paints
+    /// its own blank top-padding row instead of a label, so — like the tagged
+    /// variant — it owns its top gap and must not be given ANOTHER one by
+    /// the inter-block separator rule.
+    CodeBlockLangless,
     Table,
     List,
     BlockQuote,
@@ -94,6 +101,13 @@ impl BlockKind {
 /// rules) are always spaced from their neighbours; adjacent paragraphs are
 /// separated only when the source had an explicit blank line between them.
 ///
+/// Language-less code fences are the exception: their renderer paints a
+/// blank top-padding row itself (the twin of their bottom padding), so they
+/// always arrive with their own top gap and must NOT be handed another one
+/// by this rule — otherwise a fence after a separated block would show a
+/// double-height gap. They still SEPARATE from their predecessors visually;
+/// only this rule's contribution is waived because the block owns the gap.
+///
 /// Mirrors the reference renderer's top-level margin rule: spacing is a
 /// property of the block PAIR, never of the cursor feed alone.
 pub(crate) fn needs_inter_block_margin(
@@ -101,6 +115,10 @@ pub(crate) fn needs_inter_block_margin(
     cur: BlockKind,
     gap_newlines: usize,
 ) -> bool {
+    if cur == BlockKind::CodeBlockLangless {
+        // The fence paints its own top padding row.
+        return false;
+    }
     if prev.is_separated() || cur.is_separated() {
         return true;
     }
@@ -111,7 +129,14 @@ fn classify(tag: &Tag<'_>) -> BlockKind {
     match tag {
         Tag::Paragraph => BlockKind::Paragraph,
         Tag::Heading { .. } => BlockKind::Heading,
-        Tag::CodeBlock(_) => BlockKind::CodeBlock,
+        Tag::CodeBlock(kind) => {
+            match kind {
+                CodeBlockKind::Fenced(info) if !info.trim().is_empty() => BlockKind::CodeBlock,
+                // Fenced without an info string, or indented code: the
+                // renderer paints a blank top-padding row instead of a label.
+                _ => BlockKind::CodeBlockLangless,
+            }
+        }
         Tag::Table(_) => BlockKind::Table,
         Tag::List(_) => BlockKind::List,
         Tag::BlockQuote(_) => BlockKind::BlockQuote,
@@ -270,6 +295,32 @@ mod tests {
         // Fenced code block ranges cover the fences but not the trailing
         // blank line after them.
         assert_eq!(md.source(&md.blocks[2]), "```rust\nfn x() {}\n```");
+    }
+
+    #[test]
+    fn langless_fence_is_its_own_kind() {
+        // Fenced without an info string: the renderer paints its own blank
+        // top-padding row, so the pair rule must NOT hand it a second gap.
+        let md = parse_blocks_incremental("```\ncode\n```", None);
+        assert_eq!(kinds(&md), vec![BlockKind::CodeBlockLangless]);
+        assert!(!needs_inter_block_margin(
+            BlockKind::Paragraph,
+            BlockKind::CodeBlockLangless,
+            2
+        ));
+
+        // Tagged fences keep the classic kind (their label row is the gap).
+        let md = parse_blocks_incremental("```rust\nfn x() {}\n```", None);
+        assert_eq!(kinds(&md), vec![BlockKind::CodeBlock]);
+        assert!(needs_inter_block_margin(
+            BlockKind::Paragraph,
+            BlockKind::CodeBlock,
+            2
+        ));
+
+        // Indented code blocks are langless too.
+        let md = parse_blocks_incremental("    indented code", None);
+        assert_eq!(kinds(&md), vec![BlockKind::CodeBlockLangless]);
     }
 
     #[test]

@@ -1382,7 +1382,9 @@ impl MarkdownRenderable {
     /// Inter-block spacing follows source semantics: "separated" kinds
     /// (headings, lists, code fences, tables, quotes, rules) always get a
     /// blank row to their neighbours; adjacent paragraphs only when the
-    /// source had an explicit blank line between them.
+    /// source had an explicit blank line between them. Language-less fences
+    /// are the exception: they paint their own blank top-padding row (see
+    /// [`Self::render_code_block`]) and must not be handed a second gap.
     ///
     /// Blockquotes recurse: each quote body renders into its own child canvas
     /// offset past the quote bar (see [`Self::render_quote`]).
@@ -1992,9 +1994,12 @@ impl MarkdownRenderable {
         let mut byte_offset = 0;
 
         // Language-tagged blocks draw a label row on the CURRENT (fresh)
-        // row and start their code below it; language-less blocks start the
-        // code directly on the current row. Either way no leading blank row
-        // is ever allocated — inter-block margins handle external spacing.
+        // row and start their code below it; language-less blocks draw a
+        // blank top-padding row there instead — the twin of their bottom
+        // padding. Either way the block OWNS its top gap: it renders even
+        // when no inter-block margin applies (first block of a document,
+        // fence inside a quote or list item), where the old rule left the
+        // code glued to whatever was above.
         if !hl_lang.is_empty() && *y < max_y {
             Self::fill_row(buf, area_x, *y, max_x, Style::default().bg(code_bg));
 
@@ -2013,10 +2018,13 @@ impl MarkdownRenderable {
                 }
                 lx += 1;
             }
+        } else if *y < max_y {
+            // Language-less: one blank background row = top padding.
+            Self::fill_row(buf, area_x, *y, max_x, Style::default().bg(code_bg));
         }
-        // False when the cursor sits on the just-drawn label row, so the
-        // first code line advances; true for language-less blocks.
-        let mut on_code_row = hl_lang.is_empty();
+        // False in both cases: the cursor sits on the just-drawn label or
+        // padding row, so the first code line advances to a fresh row.
+        let mut on_code_row = false;
         *x = area_x.saturating_add(CODE_PAD_H);
 
         for line in text.lines() {
