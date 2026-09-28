@@ -2005,16 +2005,29 @@ impl SessionView {
         streaming: bool,
     ) {
         let mut border_box = BoxRenderable::new();
-        border_box.set_background_color(Some(theme.background_panel.into()));
+        // The `┃` rails sit on the chat background like the prompt box: the
+        // panel band is painted separately, one column short of each rail.
         border_box.set_border_color(Some(agent_color.into()));
         border_box.set_border_sides(BorderSidesConfig {
             left: true,
             top: false,
-            right: false,
+            right: true,
             bottom: false,
         });
         border_box.set_custom_border_chars(left_border_chars());
         border_box.render_self(buf, area);
+
+        let mut bg_box = BoxRenderable::new();
+        bg_box.set_background_color(Some(theme.background_panel.into()));
+        // The band stops one column short of the left/right edges so the `┃`
+        // rails sit on the chat background, mirroring the prompt box.
+        let bg_area = Rect::new(
+            area.x + 1,
+            area.y,
+            area.width.saturating_sub(2),
+            area.height,
+        );
+        bg_box.render_self(buf, bg_area);
 
         let x_off = area.x + 3;
         let max_w = area.width.saturating_sub(6);
@@ -2075,16 +2088,29 @@ impl SessionView {
 
         if is_error {
             let mut border_box = BoxRenderable::new();
-            border_box.set_background_color(Some(theme.background_panel.into()));
+            // The `┃` rails sit on the chat background like the prompt box:
+            // the panel band is painted separately, one column short of each.
             border_box.set_border_color(Some(theme.error.into()));
             border_box.set_border_sides(BorderSidesConfig {
                 left: true,
                 top: false,
-                right: false,
+                right: true,
                 bottom: false,
             });
             border_box.set_custom_border_chars(left_border_chars());
             border_box.render_self(buf, area);
+
+            let mut bg_box = BoxRenderable::new();
+            bg_box.set_background_color(Some(theme.background_panel.into()));
+            // The band stops one column short of the left/right edges so the
+            // `┃` rails sit on the chat background, mirroring the prompt box.
+            let bg_area = Rect::new(
+                area.x + 1,
+                area.y,
+                area.width.saturating_sub(2),
+                area.height,
+            );
+            bg_box.render_self(buf, bg_area);
 
             let error_style = Style::default()
                 .fg(rgba_color(theme.text_muted))
