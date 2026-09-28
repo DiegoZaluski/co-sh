@@ -18,18 +18,19 @@ fn test_text_wrapping() {
     assert_eq!(h, 3, "200 chars at 80 wide = 3 lines");
 }
 
-/// Language-less code block with 2 lines: no label row, so the visible
-/// height is 2 code rows + bottom padding (1) = 3 rows. As the LAST block of
-/// a document it also drops its trailing feed row. Pinned EXACT so a
-/// regression in the accounting cannot hide inside a loose range.
+/// Language-less code block with 2 lines: its own blank top-padding row
+/// (the twin of the bottom padding) + 2 code rows = 3 rows. As the LAST
+/// block of a document it also drops its trailing feed row, and its top
+/// padding replaces the inter-block margin it used to rely on. Pinned EXACT
+/// so a regression in the accounting cannot hide inside a loose range.
 #[test]
 fn test_code_block_lines() {
     let text = "```\nline1\nline2\n```";
     let h = estimate_height(text, 80);
     assert_eq!(
-        h, 2,
-        "2-line code block estimates its PAINTED rows only — the phantom \
-         trailing blank is not reserved (got {h})"
+        h, 3,
+        "2-line langless block = 1 top-padding row + 2 code rows — the \
+         phantom trailing blank is not reserved (got {h})"
     );
 }
 
@@ -206,6 +207,69 @@ fn scan_glyph_rows(buf: &Buffer, w: u16, h: u16) -> u16 {
         }
     }
     last_row.map(|r| r + 1).unwrap_or(0)
+}
+
+/// Row index of the first row whose cell at `x` holds the glyph `ch`
+/// (a cheap positional oracle: code content starts at `CODE_PAD_H` = 2).
+fn glyph_row(buf: &Buffer, x: u16, h: u16, ch: char) -> Option<u16> {
+    (0..h).find(|&y| buf.cell((x, y)).is_some_and(|c| c.symbol().starts_with(ch)))
+}
+
+/// The language-less fence's top gap must be INTRINSIC to the block — the
+/// twin of its bottom padding — not borrowed from the inter-block margin
+/// rule. Regression pins for the three shapes that used to lose the gap:
+/// fence as the FIRST block (no predecessor to borrow a margin from), and
+/// fences inside a quote or a list item (inter-block margins only exist
+/// between top-level blocks). A fence after a separated block must show
+/// exactly ONE blank row, not two (the margin is waived — the fence brings
+/// its own gap), matching the labelled variant's geometry.
+#[test]
+fn test_langless_fence_owns_top_padding() {
+    fn render(text: &str, w: u16, h: u16) -> Buffer {
+        let mut buf = Buffer::empty(Rect::new(0, 0, w, h));
+        let md = MarkdownRenderable::new(Some(text.to_string()));
+        md.render_self(&mut buf, Rect::new(0, 0, w, h));
+        buf
+    }
+
+    // First block: code starts on row 1 (was row 0 — glued to the top).
+    let buf = render("```\ncode\n```", 40, 6);
+    assert_eq!(
+        glyph_row(&buf, 2, 6, 'c'),
+        Some(1),
+        "langless fence as first block must paint its own top padding row"
+    );
+    // Final block: the trailing bottom-padding/feed rows are blank, so the
+    // estimate counts only up to the last glyph row (padding + code = 2).
+    assert_eq!(estimate_height("```\ncode\n```", 40), 2);
+
+    // After a paragraph: para(0), ONE blank row(1), code(2) — no double gap.
+    let buf = render("para\n\n```\ncode\n```", 40, 8);
+    assert_eq!(glyph_row(&buf, 0, 8, 'p'), Some(0));
+    assert_eq!(
+        glyph_row(&buf, 2, 8, 'c'),
+        Some(2),
+        "margin must be waived: the fence's own padding is the only gap"
+    );
+
+    // Inside a quote: quote(0), padding row(1), code(2).
+    let buf = render("> quote\n>\n> ```\n> code\n> ```", 40, 8);
+    assert_eq!(glyph_row(&buf, 2, 8, 'q'), Some(0));
+    assert_eq!(
+        glyph_row(&buf, 4, 8, 'c'),
+        Some(2),
+        "quote contents have no margin rule at all: the padding row is the gap"
+    );
+
+    // Inside a list item: item(0), padding row(1), code(2). The fence's
+    // content aligns with the item's content column (x=2).
+    let buf = render("- item\n\n  ```\n  code\n  ```", 40, 8);
+    assert_eq!(glyph_row(&buf, 2, 8, 'i'), Some(0));
+    assert_eq!(
+        glyph_row(&buf, 2, 8, 'c'),
+        Some(2),
+        "list-embedded fences rely on the intrinsic padding row too"
+    );
 }
 
 /// Pins `estimate_height` against the ACTUAL rendered rows for code blocks
