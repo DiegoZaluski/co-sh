@@ -1112,8 +1112,8 @@ fn test_bash_output_expand_toggles_and_grows_height() {
         .filter(|&ch| ch != ' ')
         .collect();
     assert!(
-        above_glyphs.iter().all(|&c| c == '┃'),
-        "the row above the bash title is blank top padding (only the border)"
+        above_glyphs.is_empty(),
+        "the row above the bash title is blank top padding (no border)"
     );
 
     // Click inside the bash block (second part, so it starts after the text part).
@@ -2043,8 +2043,8 @@ fn test_glob_output_expand_shows_grouped_list() {
         .filter(|&ch| ch != ' ')
         .collect();
     assert!(
-        above_glyphs.iter().all(|&c| c == '┃'),
-        "the row above the Glob title is blank top padding (only the border)"
+        above_glyphs.is_empty(),
+        "the row above the Glob title is blank top padding (no border)"
     );
 
     // Click inside the glob block.

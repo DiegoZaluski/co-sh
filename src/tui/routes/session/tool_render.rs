@@ -731,7 +731,7 @@ pub fn render_shell(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
         border_box.set_background_color(Some(ctx.theme.background_panel.into()));
         border_box.set_border_color(Some(ctx.theme.background.into()));
         border_box.set_border_sides(BorderSidesConfig {
-            left: true,
+            left: false,
             top: false,
             right: false,
             bottom: false,
@@ -742,10 +742,10 @@ pub fn render_shell(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
             bottom_left: ' ',
             bottom_right: ' ',
             horizontal: ' ',
-            vertical: '┃',
+            vertical: ' ',
             top_t: ' ',
             bottom_t: ' ',
-            left_t: '┃',
+            left_t: ' ',
             right_t: ' ',
             cross: ' ',
         });
@@ -1019,7 +1019,7 @@ pub fn render_edit(ctx: &mut ToolRenderCtx, part: &ToolPart) {
         border_box.set_background_color(Some(ctx.theme.background_panel.into()));
         border_box.set_border_color(Some(ctx.theme.background.into()));
         border_box.set_border_sides(BorderSidesConfig {
-            left: true,
+            left: false,
             top: false,
             right: false,
             bottom: false,
@@ -1030,10 +1030,10 @@ pub fn render_edit(ctx: &mut ToolRenderCtx, part: &ToolPart) {
             bottom_left: ' ',
             bottom_right: ' ',
             horizontal: ' ',
-            vertical: '┃',
+            vertical: ' ',
             top_t: ' ',
             bottom_t: ' ',
-            left_t: '┃',
+            left_t: ' ',
             right_t: ' ',
             cross: ' ',
         });
@@ -1343,7 +1343,7 @@ pub fn render_glob(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
     border_box.set_background_color(Some(ctx.theme.background_panel.into()));
     border_box.set_border_color(Some(ctx.theme.background.into()));
     border_box.set_border_sides(BorderSidesConfig {
-        left: true,
+        left: false,
         top: false,
         right: false,
         bottom: false,
@@ -1354,10 +1354,10 @@ pub fn render_glob(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
         bottom_left: ' ',
         bottom_right: ' ',
         horizontal: ' ',
-        vertical: '┃',
+        vertical: ' ',
         top_t: ' ',
         bottom_t: ' ',
-        left_t: '┃',
+        left_t: ' ',
         right_t: ' ',
         cross: ' ',
     });
@@ -1457,7 +1457,7 @@ pub fn render_read(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
         border_box.set_background_color(Some(ctx.theme.background_panel.into()));
         border_box.set_border_color(Some(ctx.theme.background.into()));
         border_box.set_border_sides(BorderSidesConfig {
-            left: true,
+            left: false,
             top: false,
             right: false,
             bottom: false,
@@ -1468,10 +1468,10 @@ pub fn render_read(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
             bottom_left: ' ',
             bottom_right: ' ',
             horizontal: ' ',
-            vertical: '┃',
+            vertical: ' ',
             top_t: ' ',
             bottom_t: ' ',
-            left_t: '┃',
+            left_t: ' ',
             right_t: ' ',
             cross: ' ',
         });
@@ -1840,15 +1840,8 @@ pub fn render_todo(ctx: &mut ToolRenderCtx, part: &ToolPart) {
     let area = Rect::new(ctx.x, ctx.y, area_w, box_h);
 
     let bg_style = Style::default().bg(rgba_color(ctx.theme.background_panel));
-    let border_style = Style::default()
-        .fg(rgba_color(ctx.theme.background))
-        .bg(rgba_color(ctx.theme.background_panel));
     for ly in ctx.y..ctx.y + box_h {
-        if let Some(cell) = ctx.buf.cell_mut((ctx.x, ly)) {
-            cell.set_char('\u{2503}');
-            cell.set_style(border_style);
-        }
-        for lx in ctx.x + 1..ctx.x + area_w {
+        for lx in ctx.x..ctx.x + area_w {
             if let Some(cell) = ctx.buf.cell_mut((lx, ly)) {
                 cell.set_char(' ');
                 cell.set_style(bg_style);
