@@ -904,14 +904,10 @@ impl SubagentActivity {
     }
 }
 
-/// Icon-only label of the header button that brings the MIXED view back
-/// (a "mosaic/grid" glyph: the tiled multi-section layout it restores).
-/// Drawn as a bare text-colored glyph — no background pill.
-pub const MIXED_HEADER_ICON: &str = "\u{25E9}";
-
-/// Function-key hint painted BEFORE the mixed glyph — the only control
-/// whose hint sits ahead of it, read as `F4 ◩`.
-pub const HEADER_MIXED_HINT: &str = "F4 ";
+/// Function-key hint of the mixed button — the bare "F4": no trailing
+/// space and no glyph beside it; the hit rect keeps one clearance column
+/// on each side of the hint.
+pub const HEADER_MIXED_HINT: &str = "F4";
 
 /// Button labels for each section kind, as drawn in the panel header, in
 /// display order — Subagent FIRST — each carrying the function key that
@@ -922,8 +918,16 @@ pub const HEADER_SECTION_LABELS: [(SectionKind, &str); 3] = [
     (SectionKind::Todo, "TODO F3"),
 ];
 
+/// Delimiter painted between CONSECUTIVE section buttons of the header row
+/// (`Subagent F1 · Bash F2 · TODO F3`) — a pure separator: it sits in the
+/// spare column the layout already leaves between two buttons, is never part
+/// of any button's hit rect, and never takes the selection color. Painted in
+/// the boxes' own background color (the same fill bash, subagent and the
+/// TODO panel use) applied to the FONT, so it reads as a faint divider.
+pub const HEADER_SECTION_SEPARATOR: &str = "·";
+
 /// One clickable region of the right panel's header row. `target: None` is
-/// the icon-only mixed button (back to the tiled multi-section view);
+/// the hint-only mixed button (back to the tiled multi-section view);
 /// `Some(kind)` maximizes that section over the whole panel. The mixed
 /// button is ALWAYS present while two or more sections exist — including
 /// while a section is maximized — so switching the owner costs one click.
