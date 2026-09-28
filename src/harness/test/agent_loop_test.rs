@@ -3,7 +3,9 @@ use super::super::core::INTERRUPTED_MARKER;
 use super::super::core::result_is_useless;
 use super::super::events::HarnessEvent;
 use crate::harness::context::{ContextItem, ContextManagerState};
+use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[tokio::test]
@@ -1774,4 +1776,258 @@ async fn test_stream_chat_with_messages_stop_yields_interrupted_marker() {
 
     let result = h.stream_chat_with_messages("sys", &[], |_| {}).await;
     assert_eq!(result.unwrap_err(), INTERRUPTED_MARKER);
+}
+
+// ── Termination checkup (decision-model audit) ────────────────────────────
+//
+// The harness audit seam: a stub `Checkup` (no ONNX runtime needed) covers
+// the three behaviours the real `OnnxCheckup` adapter relies on:
+//   1. a confident `NotTerminated` verdict VETOES a natural completion —
+//      the loop continues instead of ending with `Done`;
+//   2. the verdict only vetoes at or above the configured confidence floor
+//      — a low-confidence `NotTerminated` is ignored (fail-open);
+//   3. a heuristic guard stop (loop detection) records the verdict on the
+//      terminal `Done` event, so an improper stop is never silent.
+
+use crate::harness::core::MAX_ITERATIONS;
+use crate::harness::{Checkup, TerminationDecision, TerminationVerdict};
+
+/// A scripted `Checkup`: replays the queued verdicts in order, defaulting to
+/// `Terminated` once the queue drains (fail-open behaviour).
+struct StubCheckup {
+    verdicts: Mutex<VecDeque<TerminationVerdict>>,
+}
+
+impl StubCheckup {
+    fn with_verdicts(verdicts: Vec<TerminationVerdict>) -> Arc<dyn Checkup> {
+        Arc::new(Self {
+            verdicts: Mutex::new(verdicts.into()),
+        })
+    }
+}
+
+impl Checkup for StubCheckup {
+    fn review_termination(&self, _final_text: &str) -> TerminationVerdict {
+        let mut queue = self.verdicts.lock().unwrap();
+        queue
+            .pop_front()
+            .unwrap_or(TerminationVerdict {
+                decision: TerminationDecision::Terminated,
+                confidence: 0.0,
+            })
+    }
+}
+
+fn not_terminated(confidence: f64) -> TerminationVerdict {
+    TerminationVerdict {
+        decision: TerminationDecision::NotTerminated,
+        confidence,
+    }
+}
+
+fn terminated(confidence: f64) -> TerminationVerdict {
+    TerminationVerdict {
+        decision: TerminationDecision::Terminated,
+        confidence,
+    }
+}
+
+/// Collect events until a terminal one arrives (same pump as the tests
+/// above), returning them.
+async fn pump_terminal_events(
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<HarnessEvent>,
+) -> Vec<HarnessEvent> {
+    let mut events = Vec::new();
+    let timeout = tokio::time::Duration::from_secs(8);
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        match tokio::time::timeout(tokio::time::Duration::from_millis(100), rx.recv()).await {
+            Ok(Some(event)) => {
+                let is_terminal = matches!(
+                    event,
+                    HarnessEvent::Done { .. }
+                        | HarnessEvent::Stopped { .. }
+                        | HarnessEvent::Error { .. }
+                );
+                events.push(event);
+                if is_terminal {
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(_) => continue,
+        }
+    }
+    events
+}
+
+#[tokio::test]
+async fn checkup_veto_continues_a_premature_natural_completion() {
+    // Stream 1: a final-sounding text turn (stop reason) that the model
+    // judges NOT terminated → the loop must continue. Stream 2: a turn the
+    // model judges terminated → `Done`.
+    let mut h = Harness::new_test()
+        .with_mock_streams(vec![
+            Ok(vec!["Looks", " done"]),
+            Ok(vec!["Actually finished", " now"]),
+        ])
+        .with_mock_finish_reason(Some("stop"))
+        .with_mock_finish_reason(Some("stop"))
+        .with_checkup(StubCheckup::with_verdicts(vec![
+            not_terminated(0.9),
+            terminated(0.9),
+        ]))
+        .with_checkup_min_confidence(0.5);
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stop_signal = Arc::new(AtomicBool::new(false));
+    let handle = tokio::spawn(async move {
+        h.run_agent_loop("do the thing", tx, answer_rx, perm_rx, stop_signal)
+            .await;
+    });
+    let events = pump_terminal_events(rx).await;
+    handle.abort();
+
+    // Two streamed turns (the veto continued the loop), then `Done`.
+    let done_count = events
+        .iter()
+        .filter(|e| matches!(e, HarnessEvent::Done { .. }))
+        .count();
+    assert_eq!(done_count, 1, "exactly one Done, events={events:?}");
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, HarnessEvent::Toast { .. })),
+        "the veto must be visible to the user (Toast), events={events:?}"
+    );
+}
+
+#[tokio::test]
+async fn checkup_low_confidence_verdict_does_not_veto() {
+    // Same shape as above, but the `NotTerminated` verdict is BELOW the
+    // configured floor → fail-open: the natural completion stands.
+    let mut h = Harness::new_test()
+        .with_mock_stream(Ok(vec!["Looks", " done"]))
+        .with_mock_finish_reason(Some("stop"))
+        .with_checkup(StubCheckup::with_verdicts(vec![not_terminated(0.3)]))
+        .with_checkup_min_confidence(0.5);
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stop_signal = Arc::new(AtomicBool::new(false));
+    let handle = tokio::spawn(async move {
+        h.run_agent_loop("do the thing", tx, answer_rx, perm_rx, stop_signal)
+            .await;
+    });
+    let events = pump_terminal_events(rx).await;
+    handle.abort();
+
+    // A single turn → straight to `Done`; the low-confidence verdict must
+    // NOT have forced a second turn.
+    assert!(
+        matches!(events.last(), Some(HarnessEvent::Done { context, .. }) if !context.items.is_empty()),
+        "the loop must end naturally, got {:?}",
+        events.last()
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, HarnessEvent::Done { .. }))
+            .count(),
+        1,
+        "exactly one Done (no veto), events={events:?}"
+    );
+}
+
+#[tokio::test]
+async fn checkup_records_the_verdict_on_a_guard_stop() {
+    // Identical tool calls trip the loop detector; the stub verdict is
+    // recorded on the terminal `Done` so the improper stop is not silent.
+    let streams: Vec<Result<Vec<&str>, &str>> = (0..20)
+        .map(|_| Ok(vec![r#"{"name": "test_tool", "arguments": {"x": "same"}}"#]))
+        .collect();
+    let mut h = Harness::new_test()
+        .with_test_tool(
+            "test_tool",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "x": { "type": "string" } },
+                "required": ["x"]
+            }),
+        )
+        .with_mock_streams(streams)
+        .with_checkup(StubCheckup::with_verdicts(vec![not_terminated(0.9)]))
+        .with_checkup_min_confidence(0.5);
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stop_signal = Arc::new(AtomicBool::new(false));
+    let handle = tokio::spawn(async move {
+        h.run_agent_loop("repeat", tx, answer_rx, perm_rx, stop_signal)
+            .await;
+    });
+    let events = pump_terminal_events(rx).await;
+    handle.abort();
+
+    let verdicts: Vec<&String> = events
+        .iter()
+        .filter_map(|e| match e {
+            HarnessEvent::Done { checkup_verdict, .. } => checkup_verdict.as_ref(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        verdicts.len(),
+        1,
+        "the guard stop must carry exactly one recorded verdict, events={events:?}"
+    );
+    assert!(
+        verdicts[0].contains("loop-detection") && verdicts[0].contains("not-terminated"),
+        "the verdict must name the guard and the decision, got {verdicts:?}"
+    );
+}
+
+#[tokio::test]
+async fn checkup_veto_is_bounded_by_max_iterations() {
+    // The natural-completion veto runs with `finished == true`, so the
+    // `!finished` MAX_ITERATIONS guard never bounds it — the veto itself
+    // must. The stub says NOT terminated for every turn below the cap
+    // (`iteration < MAX_ITERATIONS` vetoes; the first turn is iteration 1);
+    // at `iteration == MAX_ITERATIONS` the veto fails and the plain `Done`
+    // must fire instead of the loop running forever.
+    let streams: Vec<Result<Vec<&str>, &str>> = (0..MAX_ITERATIONS)
+        .map(|_| Ok(vec!["Still", " working"]))
+        .collect();
+    let verdicts: Vec<TerminationVerdict> =
+        (0..MAX_ITERATIONS - 1).map(|_| not_terminated(0.9)).collect();
+    let mut h = Harness::new_test()
+        .with_mock_streams(streams)
+        .with_mock_finish_reason(Some("stop"))
+        .with_checkup(StubCheckup::with_verdicts(verdicts))
+        .with_checkup_min_confidence(0.5);
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stop_signal = Arc::new(AtomicBool::new(false));
+    let handle = tokio::spawn(async move {
+        h.run_agent_loop("never done", tx, answer_rx, perm_rx, stop_signal)
+            .await;
+    });
+    let events = pump_terminal_events(rx).await;
+    handle.abort();
+
+    // Exactly one terminal `Done` — the cap ended the loop, not the veto.
+    let done_count = events
+        .iter()
+        .filter(|e| matches!(e, HarnessEvent::Done { .. }))
+        .count();
+    assert_eq!(
+        done_count, 1,
+        "the MAX_ITERATIONS cap must bound the veto, events={events:?}"
+    );
 }

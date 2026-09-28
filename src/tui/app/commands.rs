@@ -468,6 +468,7 @@ impl App {
                     let _ = event_tx.send(HarnessEvent::Error {
                         message: format!("connector: {e}"),
                         context: None,
+                        checkup_verdict: None,
                     });
                     ManualCompactionOutcome::Failed
                 }

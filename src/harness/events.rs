@@ -74,6 +74,11 @@ pub enum HarnessEvent {
     Done {
         /// Context manager state for persistence (the JSONL session log).
         context: ContextManagerState,
+        /// The decision model's audit of this stop, when a `Checkup` is
+        /// attached: the verdict recorded at a heuristic guard stop, so an
+        /// improper stop is never silent. `None` when the stop is explicit
+        /// (stop tool, Esc), natural-completion-approved, or unaudited.
+        checkup_verdict: Option<String>,
     },
     /// The agent loop was interrupted by a stop request.
     Stopped {
@@ -121,6 +126,9 @@ pub enum HarnessEvent {
     Error {
         message: String,
         context: Option<ContextManagerState>,
+        /// The decision model's audit of this stop (same contract as
+        /// [`HarnessEvent::Done::checkup_verdict`]).
+        checkup_verdict: Option<String>,
     },
     /// Models list loaded from the provider.
     ModelsLoaded {

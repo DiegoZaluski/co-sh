@@ -317,6 +317,13 @@ impl App {
         // check) when the wrapper is built below, inside the thread.
         let skills_config = self.setup.skills.clone();
 
+        // Decision-model checkup config (Settings screen → setup.json).
+        // Cloned into the agent thread; the resident model loads at
+        // harness assembly time (never hot), inside the thread, exactly
+        // once per assembly — fail-open disables the audit on load error.
+        #[cfg(feature = "onnx")]
+        let checkup_config = self.setup.checkup.clone();
+
         // RAG recall context
         // 1) Description suffix (what the model sees in the tool doc)
         #[cfg(feature = "embed")]
@@ -441,6 +448,7 @@ impl App {
                                 let _ = event_tx.send(HarnessEvent::Error {
                                     message: format!("auto: no fallback available ({last_err})"),
                                     context: None,
+                                    checkup_verdict: None,
                                 });
                                 return;
                             }
@@ -489,6 +497,7 @@ impl App {
                                 let _ = event_tx.send(HarnessEvent::Error {
                                     message: format!("connector: {e}"),
                                     context: None,
+                                    checkup_verdict: None,
                                 });
                                 return;
                             }
@@ -502,6 +511,52 @@ impl App {
                         .with_local_base_urls(local_base_urls)
                         .with_skills(skills_config.to_skills())
                         .with_mcp_config(mcp_config);
+
+                    // The resident decision model: loaded exactly once per
+                    // harness assembly (never hot) and handed to the harness
+                    // as a ready `Arc<dyn Checkup>`. Load failure fails open
+                    // — the loop runs unaudited, exactly as without the
+                    // feature. The harness never chooses which model to
+                    // load; a future consumer of the engine receives the
+                    // same resident.
+                    #[cfg(feature = "onnx")]
+                    if checkup_config.termination.enabled {
+                        let kind = match &checkup_config.model {
+                            crate::util::setup::CheckupModel::English => {
+                                cosh_onnx::ModelKind::English
+                            }
+                            crate::util::setup::CheckupModel::Multilingual => {
+                                cosh_onnx::ModelKind::Multilingual
+                            }
+                            crate::util::setup::CheckupModel::TypedDecisions => {
+                                cosh_onnx::ModelKind::TypedDecisions
+                            }
+                            crate::util::setup::CheckupModel::Custom { repo, subfolder } => {
+                                cosh_onnx::ModelKind::Custom {
+                                    repo: repo.clone(),
+                                    subfolder: subfolder.clone(),
+                                }
+                            }
+                        };
+                        use cosh::harness::events::{HarnessEvent, ToastVariant};
+                        match cosh::harness::checkup::OnnxCheckup::load(kind) {
+                            Some(checkup) => {
+                                harness = harness
+                                    .with_checkup(std::sync::Arc::new(checkup))
+                                    .with_checkup_min_confidence(
+                                        checkup_config.termination.min_confidence,
+                                    );
+                            }
+                            None => {
+                                let _ = event_tx.send(HarnessEvent::Toast {
+                                    message: "Termination checkup enabled but the model \
+                                              failed to load; the audit is disabled."
+                                        .to_string(),
+                                    variant: ToastVariant::Warning,
+                                });
+                            }
+                        }
+                    }
 
                     // Connect MCP servers before the header snapshot: the
                     // first extractor/native-tools view must see them.
@@ -580,6 +635,7 @@ impl App {
                 let _ = event_tx_panic.send(HarnessEvent::Error {
                     message: format!("panic: {msg}"),
                     context: None,
+                    checkup_verdict: None,
                 });
             }
         });
@@ -728,6 +784,7 @@ impl App {
             // resets the status — no LLM was ever involved.
             let _ = event_tx.send(HarnessEvent::Done {
                 context: context.save_state(),
+                checkup_verdict: None,
             });
         });
     }

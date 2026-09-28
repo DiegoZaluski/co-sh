@@ -617,6 +617,14 @@ pub struct Harness {
     /// Remaining fallback (provider, model) pairs to try if the current
     /// connector's API call fails.
     fallbacks: Vec<(String, String)>,
+    /// The decision-model audit seam (`harness::checkup`). `None` when the
+    /// binary has no ONNX runtime or the user never enabled the termination
+    /// audit — the loop then behaves exactly as it always did.
+    checkup: Option<Arc<dyn super::checkup::Checkup>>,
+    /// The consumer floor for the termination audit: a `NotTerminated`
+    /// verdict only continues the loop when its confidence reaches this
+    /// threshold (from `setup.checkup.termination.min_confidence`).
+    checkup_min_confidence: f64,
     summarization_models: Vec<(String, String)>,
     summarization_connector: Option<Connector>,
     summarization_window: Option<usize>,
@@ -756,6 +764,8 @@ impl Harness {
             agent_permissions: HashSet::new(),
             approved_paths: HashSet::new(),
             fallbacks: Vec::new(),
+            checkup: None,
+            checkup_min_confidence: 0.6,
             summarization_models: Vec::new(),
             summarization_connector: None,
             summarization_window: None,
@@ -817,6 +827,29 @@ impl Harness {
     #[must_use]
     pub fn with_fallbacks(mut self, fallbacks: Vec<(String, String)>) -> Self {
         self.fallbacks = fallbacks;
+        self
+    }
+
+    /// Attach the decision-model audit seam (`harness::checkup`). The
+    /// harness never chooses which model to load — the app layer hands over
+    /// the ready, shared resident; without one the loop is unaudited.
+    #[must_use]
+    pub fn with_checkup(mut self, checkup: Arc<dyn super::checkup::Checkup>) -> Self {
+        self.checkup = Some(checkup);
+        self
+    }
+
+    /// The consumer floor for the termination audit (from
+    /// `setup.checkup.termination.min_confidence`): a `NotTerminated`
+    /// verdict only vetoes a natural completion when its calibrated
+    /// confidence reaches this threshold.
+    ///
+    /// The floor is clamped to `[0.0, 1.0]`: a user-set value above 1.0
+    /// would silently disable the veto entirely, and a negative one would
+    /// make even a ~0.0-confidence verdict continue the loop.
+    #[must_use]
+    pub fn with_checkup_min_confidence(mut self, min_confidence: f64) -> Self {
+        self.checkup_min_confidence = min_confidence.clamp(0.0, 1.0);
         self
     }
 
@@ -994,16 +1027,53 @@ impl Harness {
     /// and its snapshot travels with the event: the transcript restores the
     /// styled error line after a restart, while the model never sees a
     /// provider failure as assistant output.
+    ///
+    /// `checkup_verdict`: the decision model's audit of the stop, from
+    /// [`Self::review_guard_stop`] — `None` for explicit stops (hook halt)
+    /// and infrastructure failures (provider error, context window).
     fn emit_terminal_error(
         &mut self,
         tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
         msg: String,
+        checkup_verdict: Option<String>,
     ) {
         self.context_manager.add_error(&format!("Error: {msg}"));
         let _ = tx.send(super::events::HarnessEvent::Error {
             message: msg,
             context: Some(self.context_manager.save_state()),
+            checkup_verdict,
         });
+    }
+
+    /// Audit a heuristic guard stop (MAX_TOOL_RETRIES, MAX_ITERATIONS, loop
+    /// detection) with the decision model. The stop itself always stands —
+    /// the guards are cost/safety nets — but the verdict is recorded on the
+    /// terminal event and toasted when the model disagrees, so an improper
+    /// stop is never silent. Returns `None` when no checkup is attached.
+    ///
+    /// The review runs over the most recent assistant text in the context
+    /// manager (the last thing the model said before the guard fired).
+    fn review_guard_stop(&self, guard: &str) -> Option<String> {
+        let checkup = self.checkup.as_ref()?;
+        let last_text = self.context_manager.last_assistant_text().unwrap_or_default();
+        let verdict = checkup.review_termination(&last_text);
+        use super::checkup::TerminationDecision;
+        let label = match verdict.decision {
+            TerminationDecision::Terminated => "terminated",
+            TerminationDecision::NotTerminated => "not-terminated",
+        };
+        let summary = format!(
+            "termination checkup @ {guard}: {label} (confidence {:.2})",
+            verdict.confidence
+        );
+        // A guard firing while the model believes the task is NOT done is a
+        // suspicious stop — surface it instead of only recording it.
+        if verdict.decision == TerminationDecision::NotTerminated {
+            log::warn!("{summary}");
+        } else {
+            log::debug!("{summary}");
+        }
+        Some(summary)
     }
 
     /// Builds the system header for the LLM.
@@ -3317,6 +3387,9 @@ impl Harness {
         }
         let repeats = loop_window.iter().filter(|s| **s == sig).count();
         if loop_window.len() == LOOP_DETECTION_WINDOW_SIZE && repeats > LOOP_DETECTION_MAX_REPEATS {
+            // Heuristic guard: the stop stands, but the decision model
+            // audits it so an improper stop is never silent.
+            let verdict = self.review_guard_stop("loop-detection");
             self.context_manager.close_loop();
             let _ = tx.send(super::events::HarnessEvent::Toast {
                 message: "Agent stopped: repeated identical tool calls \
@@ -3327,6 +3400,7 @@ impl Harness {
             let _ = tx.send(self.lsp_snapshot_event());
             let _ = tx.send(super::events::HarnessEvent::Done {
                 context: self.context_manager.save_state(),
+                checkup_verdict: verdict,
             });
             return true;
         }
@@ -3952,7 +4026,7 @@ impl Harness {
                 } else {
                     e.clone()
                 };
-                self.emit_terminal_error(&tx, user_msg);
+                self.emit_terminal_error(&tx, user_msg, None);
                 if e != CONTEXT_WINDOW_MARKER {
                     use super::events::ToastVariant;
                     let _ = tx.send(HarnessEvent::Toast {
@@ -4014,10 +4088,14 @@ impl Harness {
                 // complete.
                 if iteration >= MAX_ITERATIONS {
                     // log::debug!("run_agent_loop MAX_ITERATIONS={MAX_ITERATIONS} reached");
+                    // Heuristic guard: the stop stands, but the decision
+                    // model audits it so an improper stop is never silent.
+                    let verdict = self.review_guard_stop("max-iterations");
                     self.context_manager.close_loop();
                     let _ = tx.send(self.lsp_snapshot_event());
                     let _ = tx.send(HarnessEvent::Done {
                         context: self.context_manager.save_state(),
+                        checkup_verdict: verdict,
                     });
                     terminal_sent = true;
                     break;
@@ -4225,7 +4303,9 @@ impl Harness {
                         // Halt stops the entire turn
                         if hr.halt {
                             let msg = "Turn halted by hook".to_string();
-                            self.emit_terminal_error(&tx, msg);
+                            // Explicit user intent via hook config — never
+                            // reviewed by the model.
+                            self.emit_terminal_error(&tx, msg, None);
                             terminal_sent = true;
                             break;
                         }
@@ -4240,7 +4320,8 @@ impl Harness {
                             let msg = format!(
                                 "{MAX_TOOL_RETRIES} consecutive tool call failures. Agent loop interrupted."
                             );
-                            self.emit_terminal_error(&tx, msg);
+                            let verdict = self.review_guard_stop("max-tool-retries");
+                            self.emit_terminal_error(&tx, msg, verdict);
                             terminal_sent = true;
                             break;
                         }
@@ -4319,7 +4400,8 @@ impl Harness {
                                 let msg = format!(
                                     "{MAX_TOOL_RETRIES} consecutive tool call failures. Agent loop interrupted."
                                 );
-                                self.emit_terminal_error(&tx, msg);
+                                let verdict = self.review_guard_stop("max-tool-retries");
+                                self.emit_terminal_error(&tx, msg, verdict);
                                 terminal_sent = true;
                                 break;
                             }
@@ -4590,7 +4672,9 @@ impl Harness {
                                     log::debug!(
                                         "run_agent_loop POST_HOOK_HALT tool={tool_name_str}"
                                     );
-                                    self.emit_terminal_error(&tx, reason);
+                                    // Explicit user intent via hook config —
+                                    // never reviewed by the model.
+                                    self.emit_terminal_error(&tx, reason, None);
                                     terminal_sent = true;
                                     break;
                                 }
@@ -4682,7 +4766,8 @@ impl Harness {
                                     "{MAX_TOOL_RETRIES} consecutive tool call \
                                      failures. Agent loop interrupted."
                                 );
-                                self.emit_terminal_error(&tx, msg);
+                                let verdict = self.review_guard_stop("max-tool-retries");
+                                self.emit_terminal_error(&tx, msg, verdict);
                                 terminal_sent = true;
                                 break;
                             }
@@ -4728,11 +4813,14 @@ impl Harness {
                     // Give it another chance with the correction prompt.
                     if iteration >= MAX_ITERATIONS {
                         // Safety net — emit a terminal event so the TUI does
-                        // not stay in a "running" state.
+                        // not stay in a "running" state. Heuristic guard:
+                        // the stop stands, but the decision model audits it.
+                        let verdict = self.review_guard_stop("max-iterations");
                         self.context_manager.close_loop();
                         let _ = tx.send(self.lsp_snapshot_event());
                         let _ = tx.send(HarnessEvent::Done {
                             context: self.context_manager.save_state(),
+                            checkup_verdict: verdict,
                         });
                         break;
                     }
@@ -4767,11 +4855,14 @@ impl Harness {
                 if !finished {
                     if iteration >= MAX_ITERATIONS {
                         // Safety net — emit a terminal event so the TUI does
-                        // not stay in a "running" state.
+                        // not stay in a "running" state. Heuristic guard:
+                        // the stop stands, but the decision model audits it.
+                        let verdict = self.review_guard_stop("max-iterations");
                         self.context_manager.close_loop();
                         let _ = tx.send(self.lsp_snapshot_event());
                         let _ = tx.send(HarnessEvent::Done {
                             context: self.context_manager.save_state(),
+                            checkup_verdict: verdict,
                         });
                         break;
                     }
@@ -4800,6 +4891,45 @@ impl Harness {
                 // No tools, no extraction failures, deliberate completion —
                 // conversation is complete. The final text response becomes
                 // the loop's Closure.
+                //
+                // Ambiguous stop: the model stopped talking, but only the
+                // text itself says whether the task is actually done. When a
+                // checkup is attached, a confident `NotTerminated` verdict
+                // vetoes the stop and steers the loop to continue (bounded
+                // by MAX_ITERATIONS, like every other continuation).
+                if let Some(checkup) = self.checkup.as_ref()
+                    // An empty final response is a degenerate review input
+                    // for the decision model — treat it as a plain stop.
+                    && !assistant_response.is_empty()
+                {
+                    let verdict = checkup.review_termination(&assistant_response);
+                    if verdict.decision == super::checkup::TerminationDecision::NotTerminated
+                        && verdict.confidence >= self.checkup_min_confidence
+                        // Bound the veto like every other continuation: this
+                        // arm is reached with `finished == true`, so the
+                        // `!finished` MAX_ITERATIONS check above never sees
+                        // it — without this bound a persistent model/checkup
+                        // disagreement on text-only turns would never stop.
+                        && iteration < MAX_ITERATIONS
+                    {
+                        log::debug!(
+                            "run_agent_loop checkup vetoed natural completion \
+                             (confidence {:.2}) — continuing",
+                            verdict.confidence
+                        );
+                        let _ = tx.send(HarnessEvent::Toast {
+                            message: "Termination checkup: the task does not look \
+                                      finished; the agent is continuing."
+                                .to_string(),
+                            variant: ToastVariant::Info,
+                        });
+                        current_input = "Your previous response read as final, but the \
+                             task does not appear complete. Continue exactly where \
+                             you left off and finish the remaining work."
+                            .to_string();
+                        continue;
+                    }
+                }
                 // log::debug!("run_agent_loop DONE (no tools)");
                 self.context_manager.close_loop();
                 // Final LSP snapshot: this break skips the per-cycle emission
@@ -4807,6 +4937,9 @@ impl Harness {
                 let _ = tx.send(self.lsp_snapshot_event());
                 let _ = tx.send(HarnessEvent::Done {
                     context: self.context_manager.save_state(),
+                    // The natural completion IS the audited decision: an
+                    // approved stop carries no annotation.
+                    checkup_verdict: None,
                 });
                 break;
             }
@@ -5412,6 +5545,8 @@ impl Harness {
             agent_permissions: HashSet::new(),
             approved_paths: HashSet::new(),
             fallbacks: Vec::new(),
+            checkup: None,
+            checkup_min_confidence: 0.6,
             summarization_models: Vec::new(),
             summarization_connector: None,
             summarization_window: None,

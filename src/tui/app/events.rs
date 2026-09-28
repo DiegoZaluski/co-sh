@@ -776,7 +776,25 @@ impl App {
                     }
                 }
 
-                HarnessEvent::Done { context } => {
+                HarnessEvent::Done {
+                    context,
+                    checkup_verdict,
+                } => {
+                    // The decision model's audit of a heuristic guard stop:
+                    // an improper stop is never silent.
+                    // Record-everywhere, toast-on-disagreement: the verdict
+                    // is on the terminal event for observability, but a
+                    // guard stop the model AGREES with needs no toast.
+                    if let Some(verdict) =
+                        checkup_verdict.filter(|v| v.contains("not-terminated"))
+                    {
+                        self.toast_state.show(crate::ui::toast::ToastOptions {
+                            title: Some("Termination checkup".into()),
+                            message: verdict,
+                            variant: crate::ui::toast::ToastVariant::Info,
+                            duration_ms: 6000,
+                        });
+                    }
                     self.state.status = SessionStatus::Idle;
                     self.agent_spinner_bass = None;
                     self.stream_msg_id = None;
@@ -1126,7 +1144,26 @@ impl App {
                     }
                 }
 
-                HarnessEvent::Error { message, context } => {
+                HarnessEvent::Error {
+                    message,
+                    context,
+                    checkup_verdict,
+                } => {
+                    // The decision model's audit of a heuristic guard stop:
+                    // an improper stop is never silent.
+                    // Record-everywhere, toast-on-disagreement: the verdict
+                    // is on the terminal event for observability, but a
+                    // guard stop the model AGREES with needs no toast.
+                    if let Some(verdict) =
+                        checkup_verdict.filter(|v| v.contains("not-terminated"))
+                    {
+                        self.toast_state.show(crate::ui::toast::ToastOptions {
+                            title: Some("Termination checkup".into()),
+                            message: verdict,
+                            variant: crate::ui::toast::ToastVariant::Info,
+                            duration_ms: 6000,
+                        });
+                    }
                     self.state.status = SessionStatus::Retry {
                         message: message.clone(),
                         action: None,

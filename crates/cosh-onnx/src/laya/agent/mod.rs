@@ -150,7 +150,8 @@ pub(crate) fn load_agent(
         let cache_repo = hf_hub::Cache::from_env().repo(repo.clone());
         let cached_cfg = cache_repo.get(&config_rel);
         let cached_tok = cache_repo.get(&format!("{}tokenizer/tokenizer.json", prefix));
-        if let (Some(cfg_file), Some(_)) = (cached_cfg, cached_tok) {
+        let cached_onnx = cache_repo.get(&format!("{}laya.onnx", prefix));
+        if let (Some(cfg_file), Some(_), Some(_)) = (cached_cfg, cached_tok, cached_onnx) {
             // The snapshot root: the config sits at
             // <cache>/models--*/snapshots/<sha>[/<sub>]/rl_agent_config.json.
             let mut dir = cfg_file.parent().unwrap_or(Path::new(".")).to_path_buf();
@@ -188,6 +189,7 @@ pub(crate) fn load_agent(
                     return false;
                 };
                 stripped == "rl_agent_config.json"
+                    || stripped == "laya.onnx"
                     || stripped.starts_with("tokenizer/")
                     || stripped.starts_with("encoder/")
             };
@@ -232,6 +234,24 @@ pub(crate) fn load_agent(
         }
         model_dir = joined;
     }
+
+    // The graph path is resolved relative to the process CWD, which only
+    // works for local checkpoints. A hub-downloaded snapshot keeps
+    // laya.onnx inside the snapshot dir, so fall back to the model dir
+    // when the CWD does not have the file (an explicit user path that
+    // exists still wins).
+    let onnx_path: String = if Path::new(onnx_path).exists() {
+        onnx_path.to_string()
+    } else {
+        let in_model_dir = model_dir.join(onnx_path);
+        if in_model_dir.exists() {
+            in_model_dir.to_string_lossy().into_owned()
+        } else {
+            // Keep the original: the exists() check below reports it.
+            onnx_path.to_string()
+        }
+    };
+    let onnx_path: &str = &onnx_path;
 
     // Verify integrity before any file in the checkpoint is parsed or executed.
     verify_digests(&model_dir, expected_sha256, Some(Path::new(onnx_path)))?;

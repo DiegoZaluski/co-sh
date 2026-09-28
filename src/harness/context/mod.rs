@@ -698,6 +698,21 @@ impl ContextManager {
         });
     }
 
+    /// The most recent assistant TEXT in the history — the last thing the
+    /// model said. Used by the termination checkup to audit heuristic guard
+    /// stops (MAX_TOOL_RETRIES / MAX_ITERATIONS / loop detection): unlike
+    /// [`Self::final_answer`], this works before `close_loop`, scanning back
+    /// past tool calls/results. `None` when the model never produced text
+    /// (a guard fired over pure tool work).
+    #[must_use]
+    pub fn last_assistant_text(&self) -> Option<String> {
+        self.items.iter().rev().find_map(|item| match item {
+            ContextItem::Assistant { original, .. } => Some(original.clone()),
+            ContextItem::Closure { content, .. } => Some(content.clone()),
+            _ => None,
+        })
+    }
+
     /// Record a USER-TYPED shell command (Command mode) as a HIDDEN
     /// display-only timeline item: persisted to the session JSONL for the
     /// user, but immediately registered in the `hidden` set so

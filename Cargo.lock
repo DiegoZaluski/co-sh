@@ -1481,6 +1481,7 @@ dependencies = [
  "anyhow",
  "arboard",
  "chrono",
+ "cosh-onnx",
  "cosh-recall",
  "cosh-sdk",
  "cosh-tools",

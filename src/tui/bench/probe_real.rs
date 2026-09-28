@@ -251,6 +251,7 @@ async fn probe_real_session() {
     app.event_tx
         .send(HarnessEvent::Done {
             context: super::bench_e2e::realistic_context(100),
+            checkup_verdict: None,
         })
         .unwrap();
     let t = std::time::Instant::now();

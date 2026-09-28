@@ -3,6 +3,7 @@
 //! Bridges LLM responses to tool execution through three tiers:
 //! internal harness tools, local cosh-tools, and external MCP servers.
 
+pub mod checkup;
 pub mod context;
 pub mod core;
 pub mod correction_memory;
@@ -17,6 +18,7 @@ pub mod truncate;
 #[cfg(test)]
 mod test;
 
+pub use checkup::{Checkup, TerminationDecision, TerminationVerdict};
 pub use context::{ContextDisplayInfo, ContextManager, ContextManagerState};
 pub use core::ManualCompactionOutcome;
 pub use core::{Harness, Mode};

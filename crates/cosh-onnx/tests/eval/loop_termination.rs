@@ -450,3 +450,134 @@ fn loop_termination_eval() {
         c_total
     );
 }
+
+/// Confidence-floor sweep: pick the `min_confidence` default from the
+/// measured curve instead of a convention.
+///
+/// The harness consumer vetoes a natural completion only when the model says
+/// `running` AND its calibrated `answer_confidence` reaches the floor. This
+/// test replays exactly that decision over the loop corpus for every floor
+/// in the sweep and reports, per threshold:
+///
+/// - `missed_stops` — running examples the consumer let end (the model said
+///   `terminated`, or said `running` below the floor): an agent loop dies
+///   mid-task. The primary cost — minimize first.
+/// - `false_continues` — terminated examples the consumer kept running: a
+///   wasted turn, bounded by MAX_ITERATIONS. The secondary cost.
+///
+/// The recommended floor is the smallest one reaching the maximum number of
+/// correct consumer decisions (fewest missed stops, then fewest false
+/// continues). Run with the same env vars as the eval above:
+///
+/// ```text
+/// LAYA_EVAL_MODEL_DIR=/tmp/laya-eval/multilingual \
+/// LAYA_EVAL_ONNX=/tmp/laya-eval/multilingual/laya.onnx \
+/// cargo test -p cosh-onnx --test loop_termination_eval confidence_sweep -- --nocapture
+/// ```
+#[test]
+fn confidence_floor_sweep() {
+    let Some(model_dir) = std::env::var("LAYA_EVAL_MODEL_DIR")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        eprintln!("skipping confidence_floor_sweep: set LAYA_EVAL_MODEL_DIR");
+        return;
+    };
+    let onnx_path = match std::env::var("LAYA_EVAL_ONNX") {
+        Ok(p) if !p.is_empty() => p,
+        _ => format!("{model_dir}/laya.onnx"),
+    };
+    let model = load(
+        ModelKind::Custom {
+            repo: model_dir.clone(),
+            subfolder: None,
+        },
+        &LoadOptions {
+            onnx_path: Some(onnx_path),
+            hooks_concurrent: Some(false),
+            ..LoadOptions::default()
+        },
+    )
+    .unwrap_or_else(|e| panic!("failed to load {model_dir}: {e}"));
+
+    let qs = loop_questions();
+    // One pass over the corpus: (expected terminated, said running,
+    // answer_confidence) per loop example.
+    let mut observations: Vec<(bool, bool, f64)> = Vec::new();
+    for example in EXAMPLES.iter().filter(|e| !e.control) {
+        let state = json!({"message": example.message});
+        let result = model
+            .decide(&state, &qs, None, None, None)
+            .unwrap_or_else(|e| panic!("predict failed for {:?}: {e}", example.message));
+        let answers = &result["answers"];
+        let said_running =
+            choice_correct(answers, "loop_terminated", "running").is_some_and(|c| c);
+        let confidence = answer_confidence(answers, "loop_terminated").unwrap_or(0.0);
+        observations.push((example.terminated, said_running, confidence));
+    }
+
+    // The consumer decision at floor f: veto (continue) iff said_running
+    // AND confidence >= f.
+    let floor_candidates: Vec<f64> = (0..=20).map(|i| i as f64 / 20.0).collect();
+    println!("\n=== confidence-floor sweep: {model_dir} ===");
+    println!("| floor | missed_stops | false_continues | correct |");
+    println!("|---|---|---|---|");
+    let mut best: Option<(f64, usize, usize)> = None; // (floor, missed, false)
+    for &floor in &floor_candidates {
+        let mut missed_stops = 0usize;
+        let mut false_continues = 0usize;
+        for &(terminated, said_running, confidence) in &observations {
+            let veto = said_running && confidence >= floor;
+            if !terminated && !veto {
+                missed_stops += 1;
+            }
+            if terminated && veto {
+                false_continues += 1;
+            }
+        }
+        let correct = observations.len() - missed_stops - false_continues;
+        println!(
+            "| {:.2} | {} | {} | {} |",
+            floor,
+            missed_stops,
+            false_continues,
+            correct
+        );
+        // Tie-break towards the HIGHEST floor with identical results:
+        // the bottom of an optimal plateau (e.g. 0.00) vetoes every
+        // "running" answer regardless of confidence, disabling the gate;
+        // the top edge keeps the same measured optimum while the floor
+        // still filters low-confidence verdicts.
+        let better = match best {
+            None => true,
+            Some((_, bm, bf)) => (missed_stops, false_continues) <= (bm, bf),
+        };
+        if better {
+            best = Some((floor, missed_stops, false_continues));
+        }
+    }
+    let (floor, missed, false_c) = best.expect("sweep always runs");
+    println!(
+        "recommended min_confidence default: {floor:.2} \
+         (missed_stops={missed}, false_continues={false_c} over {} examples)",
+        observations.len()
+    );
+    // The sweep cannot pick a floor with ANY missed stop when a
+    // zero-missed floor exists: dying mid-task is the primary cost.
+    let zero_missed_floor = floor_candidates.iter().copied().find(|&f| {
+        observations
+            .iter()
+            .filter(|&&(terminated, said_running, confidence)| {
+                !terminated && said_running && confidence < f
+            })
+            .count()
+            == 0
+    });
+    if let Some(zero_floor) = zero_missed_floor {
+        assert!(
+            missed == 0 || floor >= zero_floor,
+            "the recommended floor {floor} misses {missed} stops while \
+             {zero_floor} would miss none"
+        );
+    }
+}

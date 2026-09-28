@@ -135,8 +135,11 @@ async fn bash_run_dangerous_pattern_rejected() {
 #[tokio::test]
 async fn bash_run_ls_output_is_complete() {
     let tools = make_tools();
+    // `ls -1` (one entry per line): plain `ls` packs entries into
+    // PTY-width columns, so the line count depends on the terminal
+    // width and on how many files happen to sit at the repo root.
     let result = tools
-        .dispatch("bash_run", json!({"command": "ls"}))
+        .dispatch("bash_run", json!({"command": "ls -1"}))
         .await
         .unwrap();
     assert!(!result.is_empty(), "ls should produce output");

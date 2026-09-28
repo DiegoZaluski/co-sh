@@ -30,6 +30,11 @@ pub struct Setup {
     pub cache: Cache,
     /// Skill-discovery configuration (Settings screen).
     pub skills: SkillsConfig,
+    /// Decision-model checkup configuration (Settings screen). The section
+    /// names the DOMAIN, not the technology: the ONNX runtime is gated by
+    /// the build feature (`onnx`), while this schema stays backend-agnostic
+    /// and grows with new audited decisions as siblings of `termination`.
+    pub checkup: CheckupConfig,
     /// Master switch for the LSP engine (kept flat: it has no sub-options).
     pub lsp: bool,
     /// Registered MCP servers (empty when the user never added one, so
@@ -58,6 +63,7 @@ impl Default for Setup {
             mode: Mode::default(),
             cache: Cache::default(),
             skills: SkillsConfig::default(),
+            checkup: CheckupConfig::default(),
             lsp: true,
             mcp: McpConfig::default(),
             editor: String::new(),
@@ -269,6 +275,79 @@ pub fn format_cache_duration(min: u32) -> String {
         format!("{min}m")
     } else {
         format!("{}h{:02}m", min / 60, min % 60)
+    }
+}
+
+// Checkup
+
+/// Decision-model checkup configuration (`setup.json` → `checkup`).
+///
+/// The section names the DOMAIN, not the technology: the ONNX runtime is
+/// gated by the build feature (`onnx`), while this schema stays
+/// backend-agnostic. What belongs to the **resident model** (checkpoint
+/// identity) lives at the section root; what belongs to an **audited
+/// decision** (enable, confidence floor) lives in a sub-key named after the
+/// decision domain — every future audited decision becomes a sibling of
+/// `termination`, never a rename of existing config.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct CheckupConfig {
+    /// The resident decision model: one checkpoint identity shared by the
+    /// whole app. Its `kind` strings are exactly the names
+    /// `ModelKind::name()` publishes (`english` / `multilingual` /
+    /// `typed-decisions`) plus `custom` — no translation map.
+    pub model: CheckupModel,
+    /// The agent-loop termination audit (the current audited decision).
+    pub termination: TerminationCheckup,
+}
+
+/// The resident model's checkpoint identity — a kind-discriminated schema
+/// mapping 1:1 to `cosh_onnx::ModelKind` (named variants + `Custom`), so a
+/// new model family becomes a new `kind` without a config migration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CheckupModel {
+    /// The English root checkpoint (`ModelKind::English`).
+    #[default]
+    English,
+    /// The multilingual checkpoint (`ModelKind::Multilingual`).
+    Multilingual,
+    /// The typed-decisions checkpoint (`ModelKind::TypedDecisions`).
+    TypedDecisions,
+    /// A raw hub repo id, a bundled `(repo, subfolder)` checkpoint, or a
+    /// local checkpoint directory (`ModelKind::Custom`).
+    Custom {
+        /// The repo id or local path.
+        repo: String,
+        /// One checkpoint out of a bundling repo.
+        subfolder: Option<String>,
+    },
+}
+
+/// The agent-loop termination audit config: whether the decision model
+/// reviews ambiguous stops, and how confident a "not finished" verdict must
+/// be before it vetoes the loop's end.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TerminationCheckup {
+    /// Opt-in per decision: the audit only runs when explicitly enabled
+    /// (default false — the loop behaves exactly as it always did).
+    pub enabled: bool,
+    /// Consumer floor for the calibrated `answer_confidence`: a
+    /// `NotTerminated` verdict only continues the loop at or above it.
+    /// The 0.6 default is the top edge of the optimal plateau measured
+    /// by the confidence-floor sweep over the loop-termination corpus
+    /// (missed_stops=1, false_continues=3 across floors 0.00–0.60;
+    /// higher floors lose their optimum fast: 0.65 → 2 missed stops).
+    pub min_confidence: f64,
+}
+
+impl Default for TerminationCheckup {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_confidence: 0.6,
+        }
     }
 }
 
@@ -929,5 +1008,55 @@ mod tests {
         // An old config without the `model` category loads with no selection.
         let legacy: Setup = serde_json::from_str(r#"{"appearance": {}}"#).unwrap();
         assert_eq!(legacy.persisted_model(), None);
+    }
+
+    /// The checkup section: legacy files without it load as "off with the
+    /// placeholder floor", the kind-discriminated model round-trips 1:1
+    /// against `ModelKind` shapes (named variants + `Custom` with repo/
+    /// subfolder), and the termination audit keeps its own enable flag and
+    /// confidence floor.
+    #[test]
+    fn checkup_section_defaults_and_kind_roundtrip() {
+        // Legacy file without the section → audit off, default floor.
+        let legacy: Setup = serde_json::from_str("{}").unwrap();
+        assert!(!legacy.checkup.termination.enabled);
+        assert!((legacy.checkup.termination.min_confidence - 0.6).abs() < f64::EPSILON);
+        assert!(matches!(
+            legacy.checkup.model,
+            super::CheckupModel::English
+        ));
+
+        // Round-trip of a named kind + enabled audit.
+        let mut setup = Setup::default();
+        setup.checkup.model = super::CheckupModel::Multilingual;
+        setup.checkup.termination.enabled = true;
+        setup.checkup.termination.min_confidence = 0.8;
+        let json = serde_json::to_string_pretty(&setup).unwrap();
+        let loaded: Setup = serde_json::from_str(&json).unwrap();
+        assert!(matches!(loaded.checkup.model, super::CheckupModel::Multilingual));
+        assert!(loaded.checkup.termination.enabled);
+        assert!((loaded.checkup.termination.min_confidence - 0.8).abs() < f64::EPSILON);
+
+        // The `custom` kind round-trips its repo/subfolder payload.
+        let custom_json = serde_json::json!({
+            "checkup": {
+                "model": {
+                    "kind": "custom",
+                    "repo": "/tmp/laya-eval/english",
+                    "subfolder": null
+                },
+                "termination": {"enabled": true, "min_confidence": 0.7}
+            }
+        });
+        let parsed: Setup = serde_json::from_value(custom_json).unwrap();
+        match parsed.checkup.model {
+            super::CheckupModel::Custom { repo, subfolder } => {
+                assert_eq!(repo, "/tmp/laya-eval/english");
+                assert_eq!(subfolder, None);
+            }
+            other => panic!("expected Custom, got {other:?}"),
+        }
+        assert!(parsed.checkup.termination.enabled);
+        assert!((parsed.checkup.termination.min_confidence - 0.7).abs() < f64::EPSILON);
     }
 }

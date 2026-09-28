@@ -176,6 +176,7 @@ async fn probe_drain_costs() {
         "Done(full save)",
         HarnessEvent::Done {
             context: super::bench_e2e::realistic_context(100),
+            checkup_verdict: None,
         },
     );
     terminal.draw(|f| app.render(f, 0.033)).unwrap();

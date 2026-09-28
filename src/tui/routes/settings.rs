@@ -98,6 +98,16 @@ fn settings_items() -> &'static [SettingsItem] {
             description: "Share anonymous usage aggregates (no code, no paths, no prompts). On by default; disable here or via COSH_TELEMETRY=off. Takes effect on the next launch",
             event: "",
         },
+        // The termination checkup only exists in binaries with the ONNX
+        // runtime: no runtime in the build, no item in the TUI — the same
+        // pattern the `embed` feature uses.
+        #[cfg(feature = "onnx")]
+        SettingsItem {
+            id: "checkup_termination",
+            label: "Termination checkup",
+            description: "A local decision model reviews ambiguous loop stops and can continue an agent that stopped mid-task. Costs local inference per turn; the model loads at assembly time. Takes effect on the next launch",
+            event: "",
+        },
     ]
 }
 
@@ -126,6 +136,20 @@ fn cache_choice_value(id: &str, setup: &Setup) -> Option<String> {
         } else {
             truncate(&setup.skills.dirs.join(":"), COMMAND_PREVIEW_LEN * 2)
         }),
+        #[cfg(feature = "onnx")]
+        // The row renders "label: value" instead of the ✔/✗ switch, so the
+        // value carries BOTH the audit state and the checkpoint identity.
+        "checkup_termination" => Some(if !setup.checkup.termination.enabled {
+            "off".into()
+        } else {
+            let checkpoint = match &setup.checkup.model {
+                crate::util::setup::CheckupModel::English => "english",
+                crate::util::setup::CheckupModel::Multilingual => "multilingual",
+                crate::util::setup::CheckupModel::TypedDecisions => "typed-decisions",
+                crate::util::setup::CheckupModel::Custom { repo, .. } => repo,
+            };
+            format!("on · {}", truncate(checkpoint, COMMAND_PREVIEW_LEN))
+        }),
         _ => None,
     }
 }
@@ -138,6 +162,8 @@ fn is_enabled(item: &SettingsItem, setup: &Setup) -> bool {
         return match item.id {
             "lsp" => setup.lsp,
             "telemetry" => setup.telemetry,
+            #[cfg(feature = "onnx")]
+            "checkup_termination" => setup.checkup.termination.enabled,
             _ => false,
         };
     }
@@ -676,6 +702,16 @@ impl SettingsView {
                 // Choice settings (cache TTL/retention) open a duration
                 // input box instead of toggling a switch — the value is a
                 // free-form user choice, not a hardcoded cycle.
+                //
+                // The termination checkup is NOT that: its "value" is the
+                // read-only resident checkpoint identity, so activation
+                // toggles the audit switch instead of opening an input.
+                #[cfg(feature = "onnx")]
+                if item.event.is_empty() && item.id == "checkup_termination" {
+                    setup.checkup.termination.enabled = !setup.checkup.termination.enabled;
+                    self.selection.clamp(selectable_rows(setup).len());
+                    return Some(SettingsAction::ToggleSaved);
+                }
                 if cache_choice_value(item.id, setup).is_some() {
                     return Some(SettingsAction::OpenCacheInput { setting: item.id });
                 }

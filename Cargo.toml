@@ -12,6 +12,10 @@ embed = ["cosh-tools/embed", "fastembed"]
 lancedb = ["cosh-recall/lancedb"]
 fastembed = ["cosh-recall/fastembed", "dep:fastembed"]
 cloud = ["cosh-recall/cloud"]
+# The ONNX decision engine (cosh-onnx): gates the heavy ONNX runtime
+# (`ort`/`tokenizers`) out of the dependency graph. Without it the binary
+# never links ONNX Runtime and the harness compiles the Checkup trait only.
+onnx = ["dep:cosh-onnx"]
 
 [package]
 description = "..."
@@ -34,6 +38,10 @@ path = "crates/cosh-sdk"
 
 [dependencies.cosh-tools]
 path = "crates/cosh-tools"
+
+[dependencies.cosh-onnx]
+path = "crates/cosh-onnx"
+optional = true
 
 [dependencies.cosh-tui]
 path = "crates/cosh-tui"

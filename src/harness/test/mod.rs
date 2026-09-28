@@ -5,6 +5,8 @@ pub(crate) mod chat_tests;
 pub(crate) mod command_mode;
 pub(crate) mod dispatch;
 // pub(crate) mod find_dispatch;
+#[cfg(feature = "onnx")]
+pub(crate) mod checkup_onnx;
 pub(crate) mod internal_tool;
 pub(crate) mod loop_latency;
 pub(crate) mod manual_compaction;
