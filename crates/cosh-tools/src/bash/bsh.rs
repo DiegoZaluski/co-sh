@@ -25,6 +25,8 @@ use std::sync::Arc;
 #[cfg(unix)]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 use tokio::io::AsyncReadExt;
 use tokio::io::{Error, ErrorKind};
 use tokio_stream::Stream;
@@ -77,6 +79,29 @@ pub fn critical_bash_patterns() -> &'static [Regex] {
 // Constants & lazy statics
 
 const BUFFER_SIZE: usize = 4096;
+
+/// How often the Unix PTY read loop wakes up to run the input-wait watchdog.
+#[cfg(unix)]
+const WATCHDOG_TICK_MS: libc::c_int = 250;
+
+/// How long a child may sit in raw (non-canonical) terminal mode — the
+/// signature of an interactive pager/TUI waiting for keystrokes the harness
+/// can never send — before the input-wait watchdog kills it.
+#[cfg(unix)]
+const WATCHDOG_RAW_MODE_GRACE: Duration = Duration::from_secs(2);
+
+/// Diagnostic emitted on stderr when the input-wait watchdog kills a child.
+///
+/// Deliberately DESCRIPTIVE ONLY — no suggested commands. This message only
+/// appears when the auto-fix layer could not rewrite the command with
+/// 100% certainty (otherwise there is nothing to kill), so any specific
+/// advice could be wrong for the unknown case; the model infers the fix
+/// itself for the retry.
+#[cfg(unix)]
+const WATCHDOG_MESSAGE: &str =
+    "input-wait watchdog: killed a process that entered raw (interactive) \
+     terminal mode and waited for keyboard input the harness cannot provide \
+     (interactive pager/editor/TUI).";
 
 static ENV_VAR_PATTERN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*$").unwrap());
@@ -254,6 +279,11 @@ pub(super) fn validate_bash_patterns(command: &str) -> Result<(), String> {
 /// `bash -c <command>` as a child process in the given `cwd`.
 /// Returns a stream of [`SpawnOutput`] items.
 ///
+/// Before spawning, the command goes through [`auto_fix_command`]: when the
+/// command can be rewritten into a provably non-blocking form with 100%
+/// certainty, the rewritten form runs and a `auto-fix: …` note is yielded as
+/// the first stderr item. Ambiguous commands run unchanged.
+///
 /// When `timeout_ms` is `Some(ms)`, the child is killed after `ms`
 /// milliseconds and the stream yields a final item with
 /// `signal: Some(-1)` and `exit_code: None`.
@@ -261,14 +291,15 @@ pub(super) fn validate_bash_patterns(command: &str) -> Result<(), String> {
 /// # Errors
 ///
 /// Returns [`BashError`] if the command is an absolute path or matches a
-/// dangerous security pattern.
-pub fn run<'a>(
+/// dangerous security pattern. Both the original and the auto-fixed command
+/// are validated, so a rewrite can never smuggle a pattern past the guards.
+pub fn run(
     timeout_ms: Option<u64>,
     env: &Option<Vec<(String, String)>>,
     pty: bool,
-    command: &'a str,
-    cwd: &'a str,
-) -> Result<Pin<Box<dyn Stream<Item = SpawnOutput> + Send + 'a>>, BashError> {
+    command: &str,
+    cwd: &str,
+) -> Result<Pin<Box<dyn Stream<Item = SpawnOutput> + Send>>, BashError> {
     // Guards
     // On Windows, POSIX-style absolute commands (`/bin/echo hi`) are NOT
     // `Path::is_absolute`, but Git Bash resolves them against its MSYS root
@@ -288,21 +319,57 @@ pub fn run<'a>(
         });
     }
 
+    // Auto-fix: rewrite paged commands when 100% certain; ambiguous
+    // commands pass through unchanged (the input-wait watchdog remains the
+    // backstop, so the worst case is the pre-existing behavior). The
+    // rewritten command is owned by this frame and moved into the 'static
+    // stream below, so the stream never borrows a local.
+    #[cfg(any(unix, windows))]
+    let (fixed_command, autofix_note) = auto_fix_command(command);
+    #[cfg(any(unix, windows))]
+    if fixed_command != command
+        && let Err(err) = validate_bash_patterns(&fixed_command)
+    {
+        return Err(BashError {
+            text_err: Some(err),
+            exec_err: None,
+        });
+    }
+    #[cfg(any(unix, windows))]
+    let command: String = fixed_command;
+    #[cfg(not(any(unix, windows)))]
+    let command: String = command.to_string();
+    #[cfg(not(any(unix, windows)))]
+    let autofix_note: Option<String> = None;
+
     let env = (*env).clone();
+    let cwd = cwd.to_string();
     let use_pty = pty;
 
     Ok(Box::pin(stream! {
+        // Surface the rewrite first, so consumers see exactly which command
+        // is about to run (the model must know it did not run verbatim).
+        if let Some(note) = autofix_note {
+            yield SpawnOutput {
+                stdout: vec![],
+                stderr: note.into_bytes(),
+                exit_code: None,
+                signal: None,
+                truncated: false,
+            };
+        }
+
         let mut stream: Pin<Box<dyn Stream<Item = Result<SpawnOutput, Error>> + Send>> = if use_pty {
             #[cfg(any(unix, windows))]
             {
-                spawn_bash_pty(env, cwd, command, timeout_ms)
+                spawn_bash_pty(env, &cwd, &command, timeout_ms)
             }
             #[cfg(not(any(unix, windows)))]
             {
-                spawn_bash(env, cwd, command, timeout_ms)
+                spawn_bash(env, cwd.as_str(), command.as_str(), timeout_ms)
             }
         } else {
-            spawn_bash(env, cwd, command, timeout_ms)
+            spawn_bash(env, cwd.as_str(), command.as_str(), timeout_ms)
         };
         while let Some(item) = stream.next().await {
             match item {
@@ -327,6 +394,224 @@ pub fn run<'a>(
     }))
 }
 
+/// Default environment variables injected into every spawned bash to keep the
+/// child process non-interactive.
+///
+/// Interactive pagers (`less`, `more`) and editors are the most common cause
+/// of a command "hanging": when stdout is a PTY (or the pager is inherited
+/// from the harness's own environment), tools like `git` launch `less` on
+/// `git log` / `git diff`, which then blocks forever waiting for keystrokes
+/// that never arrive — the run only ends when the timeout fires.
+const NON_INTERACTIVE_DEFAULTS: &[(&str, &str)] = &[
+    // Plain-text pagers: never launch an interactive pager.
+    ("PAGER", "cat"),
+    ("GIT_PAGER", "cat"),
+    ("MANPAGER", "cat"),
+    // If a pager still runs (e.g. an explicit `| less`), environment flags
+    // CANNOT make it non-interactive: less reads keystrokes directly from
+    // /dev/tty, so it blocks forever inside a PTY no matter what LESS/PAGER
+    // vars say. That case is handled by the input-wait watchdog in
+    // spawn_bash_pty, not by environment variables.
+    // Editors must never open an interactive UI inside a spawned command.
+    ("GIT_EDITOR", "true"),
+    ("EDITOR", "true"),
+    ("VISUAL", "true"),
+];
+
+/// Compute which non-interactive defaults still need to be injected.
+///
+/// Any variable **explicitly** provided by the caller wins over the default:
+/// only the defaults whose keys are absent from `caller_env` are returned.
+/// Note that an inherited value from the parent process's environment does
+/// NOT win — the parent may itself run under `PAGER=less`, which is exactly
+/// the hang this mechanism prevents.
+fn non_interactive_defaults(
+    caller_env: &Option<Vec<(String, String)>>,
+) -> Vec<(&'static str, &'static str)> {
+    let caller_keys: Vec<&str> = caller_env
+        .as_ref()
+        .map(|pairs| pairs.iter().map(|(k, _)| k.as_str()).collect())
+        .unwrap_or_default();
+    NON_INTERACTIVE_DEFAULTS
+        .iter()
+        .copied()
+        .filter(|(key, _)| !caller_keys.contains(key))
+        .collect()
+}
+
+// --- Auto-fix: deterministic rewrites of commands that would block on an ---
+// --- interactive pager, applied before spawn. Fallback = current behavior. ---
+//
+// The rewrite layer ONLY fires when it can be 100% certain the rewrite is
+// safe (no quoting, no shell operators it doesn't understand). When it
+// cannot be certain, it returns the command untouched and the input-wait
+// watchdog remains the backstop — so the worst case is exactly the
+// pre-existing behavior.
+
+/// Regex: `git [env-prefixes] [global-flags...] <paged-subcommand>` at the
+/// start of the command line. The `git` token is captured so the rewrite can
+/// insert `--no-pager` at its exact position even with env prefixes present.
+/// Global flags that consume a separate value are enumerated explicitly
+/// (`-c`, `-C`, `--git-dir`, `--work-tree`, `--namespace`,
+/// `--super-prefix` — git's fixed global-option list); anything else stays
+/// unmatched → no rewrite.
+#[cfg(any(unix, windows))]
+static AUTO_FIX_GIT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        concat!(
+            r"^(?:\s*[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(git)",
+            r"(?:\s+(?:",
+            r"-[cC]\s+\S+",                                                   // -c <name>=<value> / -C <path>
+            r"|--(?:git-dir|work-tree|namespace|super-prefix)\s+\S+",         // --opt <value>
+            r"|-{1,2}[\w-]+\S*",                                              // valueless global flags
+            r"))*",
+            r"(?:\s+(log|diff|show|blame|shortlog|reflog|whatchanged)\b)",
+        ),
+    )
+    .unwrap()
+});
+
+/// Regex: a final pipeline segment that is ONLY a pager plus flag tokens:
+/// `... | less`, `| less -X`. Anything else in the tail makes the match
+/// fail → no rewrite (fallback stays the watchdog): a filename argument
+/// would make the pager ignore stdin, and a `>`/`<` redirect must never be
+/// swallowed by the replacement.
+#[cfg(any(unix, windows))]
+static AUTO_FIX_PIPE_PAGER_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\|\s*(less|more|most)\b(?:\s+-{1,2}[\w][\w-]*)*\s*$").unwrap()
+});
+
+/// Regex: `less`/`more` invoked as the command itself with plain filename
+/// arguments (no flags — flags would be invalid for `cat`).
+#[cfg(any(unix, windows))]
+static AUTO_FIX_PAGER_CMD_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(less|more)\s+([^;|&]+)$").unwrap());
+
+/// Rewrite `command` so it cannot block on an interactive pager, when doing
+/// so is 100% certain; otherwise return the command unchanged.
+///
+/// Returns `(possibly-rewritten-command, note)` where `note` — when present —
+/// describes the rewrite and MUST be surfaced to the caller (the model) as
+/// stderr, so it knows exactly which command actually ran.
+///
+/// Certainty rules shared by every pattern below:
+/// - no quotes of any kind in the command (a quoted string containing e.g.
+///   `git log` must not be rewritten);
+/// - anything ambiguous → no rewrite (the watchdog stays the backstop).
+///
+/// Rules are applied repeatedly until the command stabilizes (bounded), so
+/// composite forms like `git log | less` are resolved by a single applicable
+/// rule — the pipeline rule — instead of stacking rewrites.
+#[cfg(any(unix, windows))]
+pub(crate) fn auto_fix_command(command: &str) -> (String, Option<String>) {
+    use regex::Captures;
+
+    // Applies at most one rule. Returns `Some((rewritten, note))` or `None`.
+    fn apply_one(command: &str) -> Option<(String, String)> {
+        // Already explicitly non-paged via git's own flag → nothing to do.
+        // Also stops the fix loop right after a git rewrite.
+        if command.contains("--no-pager") {
+            return None;
+        }
+
+        // Rule A: final pipeline segment is a pager → replace it with `cat`
+        // (same bytes, no pagination). The regex guarantees the segment is
+        // the tail of the command and contains no `|`, `;` or `&`.
+        if AUTO_FIX_PIPE_PAGER_RE.is_match(command) {
+            let fixed = AUTO_FIX_PIPE_PAGER_RE.replace(command, |_: &Captures| "| cat");
+            return Some((
+                fixed.into_owned(),
+                "auto-fix: replaced the trailing pager in the pipeline with `cat` to keep the output complete".to_string(),
+            ));
+        }
+
+        // Rule B: `git [env-prefixes] [global-flags] <paged-subcommand>` →
+        // insert `--no-pager` right after `git`. Only when NOT piped: with
+        // stdout attached to a pipe git never launches its pager anyway,
+        // and the flag would be pure noise. Compound commands are also
+        // refused: in `git log && less file`, fixing only the git segment
+        // would leave a blocking pager behind — a partial rewrite is not
+        // 100% certain, so anything with `;` or `&` passes through.
+        if !command.contains('|')
+            && !command.contains(';')
+            && !command.contains('&')
+            && let Some(cap) = AUTO_FIX_GIT_RE.captures(command)
+        {
+            let git_token = cap.get(1)?;
+            let sub = cap.get(2)?.as_str();
+            // Insert right after the captured `git` token — not at the
+            // match start, which can be preceded by env assignments.
+            let insert_at = git_token.end();
+            let mut fixed = String::with_capacity(command.len() + "--no-pager ".len());
+            fixed.push_str(&command[..insert_at]);
+            fixed.push_str(" --no-pager");
+            fixed.push_str(&command[insert_at..]);
+            return Some((
+                fixed,
+                format!("auto-fix: inserted `--no-pager` into `git {sub}` to prevent an interactive pager"),
+            ));
+        }
+
+        // Rule C: `less/more <plain filenames>` → `cat <filenames>`. The
+        // args must not start a token with `-` (less flags are not valid
+        // cat flags) and the regex excludes `;`, `|`, `&`.
+        if let Some(cap) = AUTO_FIX_PAGER_CMD_RE.captures(command) {
+            let args = cap.get(2)?.as_str();
+            if args.split_whitespace().all(|tok| !tok.starts_with('-')) {
+                let pager = cap.get(1)?.as_str();
+                return Some((
+                    format!("cat {args}"),
+                    format!("auto-fix: replaced `{pager}` with `cat` to print the file(s) directly"),
+                ));
+            }
+            // `less -X file` etc. → not certain → no rewrite.
+        }
+
+        None
+    }
+
+    // Global certainty gate: any quoting anywhere in the line disqualifies
+    // every rule. A quoted literal could contain the patterns below without
+    // being a command (`echo "git log"`); regex cannot prove intent, so we
+    // refuse to touch it.
+    if command.contains('"') || command.contains('\'') || command.contains('`') {
+        return (command.to_string(), None);
+    }
+
+    // Multi-line commands are out of scope for every rule: a `\n` can hide
+    // a second command or a heredoc body that a single-line-oriented
+    // rewrite would corrupt or silently delete.
+    if command.contains('\n') {
+        return (command.to_string(), None);
+    }
+
+    // An explicit git pager opt-in (`--paginate`) must win over our
+    // insertion: git's --paginate/--no-pager are last-wins, so inserting
+    // --no-pager BEFORE it would re-enable the pager and the note would
+    // claim a fix that does not happen. Refuse → watchdog fallback.
+    if command.contains("--paginate") {
+        return (command.to_string(), None);
+    }
+
+    // Fix loop: apply one rule at a time until nothing applies. The bound
+    // is defensive — every rule is convergent, but never risk unbounded
+    // rewriting on a pathological input.
+    let mut current = command.to_string();
+    let mut notes: Vec<String> = Vec::new();
+    for _ in 0..4 {
+        match apply_one(&current) {
+            Some((fixed, note)) => {
+                notes.push(note);
+                current = fixed;
+            }
+            None => break,
+        }
+    }
+
+    let note = (!notes.is_empty()).then(|| notes.join("; "));
+    (current, note)
+}
+
 /// Spawn a bash process and return its output as an async stream.
 ///
 /// When `timeout_ms` is `Some(ms)`, the child is killed after `ms`
@@ -337,21 +622,26 @@ pub fn run<'a>(
 ///
 /// Panics if the child process stdout or stderr pipe cannot be taken (this
 /// only happens if [`std::process::Stdio::piped`] was not set).
-pub(crate) fn spawn_bash<'a>(
+pub(crate) fn spawn_bash(
     env: Option<Vec<(String, String)>>,
-    cwd: &'a str,
-    command: &'a str,
+    cwd: impl Into<String>,
+    command: impl Into<String>,
     timeout_ms: Option<u64>,
-) -> Pin<Box<dyn Stream<Item = Result<SpawnOutput, Error>> + Send + 'a>> {
+) -> Pin<Box<dyn Stream<Item = Result<SpawnOutput, Error>> + Send>> {
+    // Own `cwd`/`command` up front so the returned stream is 'static — it
+    // must never borrow a caller's string, because `run()` passes an
+    // auto-fixed command that is a local of its own frame.
+    let cwd = cwd.into();
+    let command = command.into();
     let mut buffer_stdout = [0u8; BUFFER_SIZE];
     let mut buffer_stderr = [0u8; BUFFER_SIZE];
     let mut cmd = tokio::process::Command::new(resolve_bash());
 
     Box::pin(stream! {
-        if let Some(env) = env {
+        if let Some(ref env) = env {
             let valid_pattern = env_var_pattern();
             for (key, value) in env {
-                if !valid_pattern.is_match(&key) {
+                if !valid_pattern.is_match(key) {
                     yield Err(Error::new(
                         ErrorKind::InvalidInput,
                         format!("invalid env variable name: {key}"),
@@ -360,6 +650,13 @@ pub(crate) fn spawn_bash<'a>(
                 }
                 cmd.env(key, value);
             }
+        }
+
+        // Non-interactive defaults: caller-provided env wins, inherited env
+        // does not. Prevents pagers/editors from hanging on the piped path
+        // when the parent process itself runs under e.g. PAGER=less.
+        for (key, value) in non_interactive_defaults(&env) {
+            cmd.env(key, value);
         }
 
         // Empty cwd means "inherit the parent process's working directory".
@@ -528,13 +825,14 @@ pub(crate) fn spawn_bash<'a>(
 ///
 /// # Safety
 ///
-/// The three `unsafe` blocks in this function are:
+/// The `unsafe` blocks in this function are:
 ///
 /// | Location | Call | Invariant |
 /// |---|---|---|
 /// | Stream setup | `pipe2` | `pipe_fds` is a valid pointer to 2 `i32`s |
 /// | Timeout handler | `write` + `close` on `pipe_tx` | `pipe_tx` is a valid fd, not used after |
 /// | Blocking task | `poll`, `read`, `close` on `pipe_rx` and `pty_fd` | Both fds are valid and open for the lifetime of `poll_fds`; `pipe_rx` is closed once after use |
+/// | Watchdog check | `mem::zeroed` + `tcgetattr` on `pty_fd` | `termios` is a fully-owned stack out-buffer, zeroed before the call; `pty_fd` is valid and open for the loop's lifetime (POSIX: `tcgetattr` on a PTY master reads the attached slave's line discipline) |
 ///
 /// These are trivially verified by inspection — the pipe fds are created
 /// together, one is consumed per side, and each is closed exactly once.
@@ -619,10 +917,19 @@ pub(crate) fn spawn_bash_pty(
                 cmd_builder.cwd(&cwd);
             }
 
+            // Non-interactive defaults: caller-provided env wins, inherited
+            // env does not. The PTY makes stdout look like an interactive
+            // terminal, so git etc. would otherwise launch a full-screen
+            // pager (less) that blocks forever waiting for keystrokes.
+            let non_interactive = non_interactive_defaults(&env);
+
             if let Some(env) = env {
                 for (key, value) in env {
                     cmd_builder.env(key, value);
                 }
+            }
+            for (key, value) in non_interactive {
+                cmd_builder.env(key, value);
             }
 
             let mut child = match pair.slave.spawn_command(cmd_builder) {
@@ -664,10 +971,17 @@ pub(crate) fn spawn_bash_pty(
             ];
 
             let mut buf = [0u8; BUFFER_SIZE];
+            // Input-wait watchdog state: timestamp of the first consecutive
+            // observation of raw (non-canonical) terminal mode, if any.
+            let mut watchdog_raw_since: Option<Instant> = None;
             loop {
-                let n_ready = loop {
+                // Watchdog tick or I/O readiness: poll's return value is
+                // not needed — revents below drive every event handler.
+                let _n_ready = loop {
 
-                    let res = unsafe { libc::poll(poll_fds.as_mut_ptr(), 2, -1) };
+                    // Bounded timeout so the loop wakes up periodically to
+                    // run the input-wait watchdog even with no I/O.
+                    let res = unsafe { libc::poll(poll_fds.as_mut_ptr(), 2, WATCHDOG_TICK_MS) };
                     if res < 0_i32 {
                         let err = std::io::Error::last_os_error();
                         if err.raw_os_error() == Some(libc::EINTR) {
@@ -679,10 +993,10 @@ pub(crate) fn spawn_bash_pty(
                     break res;
                 };
 
-                if n_ready == 0_i32 {
-                    // Spurious wakeup (shouldn't happen with -1 timeout).
-                    continue;
-                }
+                // n_ready == 0 (watchdog tick, nothing readable): fall
+                // through — all revents are zero, so every event handler
+                // below no-ops and control reaches the input-wait check at
+                // the bottom of the loop.
 
                 // Self-pipe has data → timeout requested by the async handler.
                 if poll_fds[1].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
@@ -740,6 +1054,40 @@ pub(crate) fn spawn_bash_pty(
                         }
                     }
                     break;
+                }
+
+                // Input-wait watchdog: a live child that keeps the terminal
+                // in non-canonical (raw) mode is an interactive pager/editor/
+                // TUI waiting for keystrokes. Those keystrokes would come
+                // from /dev/tty, which the harness never writes to, so the
+                // child can only be freed by killing it. Environment vars
+                // cannot prevent this hang (the pager reads the TTY
+                // directly). A brief raw-mode flip is normal (line editing,
+                // `read -n`), hence the sustained-raw-mode grace window.
+                let child_alive = matches!(child.try_wait(), Ok(None));
+                if !child_alive {
+                    watchdog_raw_since = None;
+                } else {
+                    let mut termios: libc::termios = unsafe { std::mem::zeroed() };
+                    let is_raw = unsafe { libc::tcgetattr(pty_fd, &mut termios) } == 0
+                        && termios.c_lflag & libc::ICANON == 0;
+                    if !is_raw {
+                        watchdog_raw_since = None;
+                    } else {
+                        let since =
+                            *watchdog_raw_since.get_or_insert_with(Instant::now);
+                        if since.elapsed() >= WATCHDOG_RAW_MODE_GRACE {
+                            let _ = child.kill();
+                            let _ = tx.send(Ok(SpawnOutput {
+                                stdout: vec![],
+                                stderr: WATCHDOG_MESSAGE.as_bytes().to_vec(),
+                                exit_code: None,
+                                signal: None,
+                                truncated: false,
+                            }));
+                            break;
+                        }
+                    }
                 }
             }
 
