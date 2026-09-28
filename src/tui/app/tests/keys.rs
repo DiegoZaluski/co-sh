@@ -315,11 +315,12 @@ async fn esc_while_working_sets_stop_signal_despite_sidebar_focus() {
     assert!(!app.sidebar_focused, "ESC keeps unfocusing the sidebar");
 }
 
-/// Regression: ESC while Working must flag the stop signal even when the
-/// slash menu is open (the old gate only cleared the prompt and closed
-/// the menu).
+/// Regression (PRIORITY RULE): with the slash menu open, ESC belongs to
+/// the BOX first — it closes the menu and must NOT interrupt a running
+/// agent loop. Only the SECOND Esc, with no box open anymore, flags the
+/// stop signal.
 #[tokio::test]
-async fn esc_while_working_sets_stop_signal_despite_slash_menu() {
+async fn esc_while_working_closes_slash_menu_first_stop_on_second_esc() {
     let _home = HOME_LOCK.lock();
     let mut app = App::new("/tmp".to_string());
     app.state.add_empty_session("t".into(), "t".into(), 0);
@@ -328,17 +329,99 @@ async fn esc_while_working_sets_stop_signal_despite_slash_menu() {
     app.slash_menu.visible = true;
     app.prompt_view.input = "/pl".into();
 
+    // First Esc: closes the box, loop keeps running.
     app.process_key_event(mod_key(KeyCode::Esc, KeyModifiers::NONE))
         .unwrap();
 
     assert!(
-        app.stop_signal.load(std::sync::atomic::Ordering::Relaxed),
-        "ESC with the slash menu open must still interrupt the loop"
+        !app.stop_signal.load(std::sync::atomic::Ordering::Relaxed),
+        "ESC with the slash menu open must close the box, not stop the loop"
     );
     assert!(!app.slash_menu.visible, "ESC keeps closing the slash menu");
+
+    // Second Esc: no box open anymore — now the loop is interrupted.
+    app.process_key_event(mod_key(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+    assert!(
+        app.stop_signal.load(std::sync::atomic::Ordering::Relaxed),
+        "the SECOND Esc (no box open) must interrupt the loop"
+    );
 }
 
-/// Regression: ESC on the permission dialog used to only DENY the pending
+/// Regression (PRIORITY RULE, the motivating bug): the model-picker box
+/// opened via slash commands must own ESC while an agent loop runs — the
+/// first Esc closes the box (restoring the original model) and the loop
+/// keeps going; only the second Esc, with no box left on screen,
+/// interrupts the loop.
+#[tokio::test]
+async fn esc_while_working_closes_model_dialog_first_stop_on_second_esc() {
+    let _home = HOME_LOCK.lock();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    app.state.status = crate::types::SessionStatus::Working;
+    app.open_model_dialog();
+    assert!(app.is_model_dialog_visible());
+
+    // First Esc: closes the box, loop keeps running.
+    app.process_key_event(mod_key(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+
+    assert!(
+        !app.stop_signal.load(std::sync::atomic::Ordering::Relaxed),
+        "ESC on the model dialog must close the box, not stop the loop"
+    );
+    assert!(
+        !app.is_model_dialog_visible(),
+        "ESC keeps closing the model dialog"
+    );
+
+    // Second Esc: no box open anymore — now the loop is interrupted.
+    app.process_key_event(mod_key(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+    assert!(
+        app.stop_signal.load(std::sync::atomic::Ordering::Relaxed),
+        "the SECOND Esc (no box open) must interrupt the loop"
+    );
+}
+
+/// Regression (PRIORITY RULE): the queue-choice box (shown when a message
+/// is typed while the agent runs) also owns ESC — the first Esc dismisses
+/// it (message stays in the input, nothing queued) and the loop keeps
+/// running; the second Esc interrupts the loop.
+#[tokio::test]
+async fn esc_while_working_closes_queue_choice_first_stop_on_second_esc() {
+    let _home = HOME_LOCK.lock();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    app.state.status = crate::types::SessionStatus::Working;
+    app.queue_choice_dialog.open("queued text".to_string());
+    assert!(app.queue_choice_dialog.visible);
+
+    // First Esc: closes the box, loop keeps running.
+    app.process_key_event(mod_key(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+
+    assert!(
+        !app.stop_signal.load(std::sync::atomic::Ordering::Relaxed),
+        "ESC on the queue-choice dialog must close the box, not stop the loop"
+    );
+    assert!(
+        !app.queue_choice_dialog.visible,
+        "ESC keeps dismissing the queue-choice dialog"
+    );
+
+    // Second Esc: no box open anymore — now the loop is interrupted.
+    app.process_key_event(mod_key(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+    assert!(
+        app.stop_signal.load(std::sync::atomic::Ordering::Relaxed),
+        "the SECOND Esc (no box open) must interrupt the loop"
+    );
+}
+
+/// ESC on the permission dialog used to only DENY the pending
 /// permission — the loop kept running (the model would just try something
 /// else). ESC must now interrupt the loop as well.
 #[tokio::test]

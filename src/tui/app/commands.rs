@@ -1,5 +1,6 @@
 use cosh::harness::HarnessEvent;
 use cosh_tui::core::lib::rgba::RGBA;
+use std::sync::atomic::Ordering;
 
 use super::App;
 use super::BUG_REPORT_URL;
@@ -404,6 +405,15 @@ impl App {
         let retention = self.setup.openai_cache_retention().map(String::from);
         let reasoning = self.llm_config.reasoning.clone();
         let cwd = self.state.working_directory.clone();
+        // Clear the shared stop flag BEFORE handing it to the compaction
+        // task: the flag belongs to the PREVIOUS interaction (ESC/Interrupt),
+        // and every summarizer entry races it before connecting — a flag
+        // still set from an earlier turn aborts the manual pass at its
+        // pre-connect select, retrying /compact changes nothing, and the
+        // mechanism only comes back after an app reboot. Same contract the
+        // agent-loop start path already honours (`store(false)` in
+        // `start_agent_loop`).
+        self.stop_signal.store(false, Ordering::Relaxed);
         let stop_signal = self.stop_signal.clone();
         let event_tx = self.event_tx.clone();
         self.manual_compaction_active = true;
