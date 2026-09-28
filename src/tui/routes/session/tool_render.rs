@@ -565,6 +565,26 @@ pub(crate) fn edit_diff_content(part: &ToolPart) -> Option<String> {
     }
 }
 
+/// How many rows the edit diff box's body paints at the given chat width —
+/// capped at 30 exactly like `render_edit`'s body area. Shared by the
+/// renderer and `estimate_part_height` so both derive the box height from
+/// the SAME source. The count comes from `DiffRenderable::painted_rows`,
+/// NOT from `diff.lines().count()`: the split view (chat width ≥ 100)
+/// pairs consecutive `-`/`+` source lines on one row, so sizing the box by
+/// raw line count left up to ~2× its height in unpainted panel rows below
+/// the content — a bottom padding several times the top padding.
+pub(crate) fn edit_box_rows(part: &ToolPart, max_w: u16) -> u16 {
+    let Some(diff_content) = edit_diff_content(part) else {
+        return 0;
+    };
+    let mut diff = DiffRenderable::new(Some(diff_content));
+    diff.set_show_line_numbers(true);
+    if max_w >= 100 {
+        diff.set_view_mode(DiffViewMode::Split);
+    }
+    diff.painted_rows(max_w).min(30) as u16
+}
+
 /// Heuristic: does the output string look like a unified diff?
 pub(crate) fn looks_like_unified_diff(output: &str) -> bool {
     output.starts_with("--- ") || output.starts_with("diff --git ")
@@ -1006,12 +1026,25 @@ pub fn render_edit(ctx: &mut ToolRenderCtx, part: &ToolPart) {
     let diff_content = edit_diff_content(part);
 
     if let Some(ref diff_content) = diff_content {
-        let diff_lines = diff_content.lines().count() as u16;
+        let diff_rows = edit_box_rows(part, ctx.max_w);
+        // The split leaves pad their gutter by one leaf-colored column
+        // (DiffRenderable::SPLIT_PAD), so the box gives back one column of
+        // its own left padding: content sits at x+2 instead of x+3 and the
+        // line numbers land on the same column they occupied before the
+        // leaf padding existed (net indentation unchanged). The body widens
+        // by that same column (max_w - 2 instead of -3), so the box's right
+        // chrome shrinks to 2 columns too and both side margins stay
+        // symmetric.
+        //
+        // The title row is gone entirely: the diff's own `--- a/` / `+++ b/`
+        // file headers already show the path. The box keeps one top padding
+        // row above the body and one bottom padding row below it:
+        // diff_rows + 2.
         let area = Rect::new(
             ctx.x,
             ctx.y,
-            ctx.max_w.saturating_add(3),
-            diff_lines.min(30) + 3,
+            ctx.max_w.saturating_add(2),
+            diff_rows + 2,
         );
         *ctx.line_h = area.height;
 
@@ -1039,22 +1072,11 @@ pub fn render_edit(ctx: &mut ToolRenderCtx, part: &ToolPart) {
         });
         border_box.render_self(ctx.buf, area);
 
-        let title = filepath.clone();
-        let title_style = Style::default().fg(rgba_color(ctx.theme.text_muted));
-        draw_text_line(
-            ctx.buf,
-            &title,
-            ctx.x + 3,
-            ctx.y + 1,
-            ctx.max_w.saturating_sub(3),
-            title_style,
-        );
-
         let diff_area = Rect::new(
-            ctx.x + 3,
-            ctx.y + 2,
-            ctx.max_w.saturating_sub(3),
-            diff_lines.min(30),
+            ctx.x + 2,
+            ctx.y + 1,
+            ctx.max_w.saturating_sub(2),
+            diff_rows,
         );
         let mut diff = DiffRenderable::new(Some(diff_content.clone()));
         diff.set_show_line_numbers(true);

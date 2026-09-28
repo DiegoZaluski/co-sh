@@ -5644,6 +5644,239 @@ fn write_edit_estimate_matches_render_in_all_states() {
     }
 }
 
+/// Regression: the edit diff box must be sized by the rows the
+/// `DiffRenderable` actually PAINTS, not by the diff's raw source lines. At
+/// chat width >= 100 the Split view pairs each consecutive `-` with the
+/// following `+` on the SAME row — sizing by raw line count left up to ~2x
+/// the diff height as blank panel rows below the content (a giant
+/// bottom padding, wildly disproportionate to the 1-row top padding).
+#[test]
+fn edit_diff_box_height_matches_painted_rows_in_split_view() {
+    use super::tool_render::{ToolRenderCtx, ToolRenderState, dispatch_tool};
+
+    let theme = test_theme();
+    let config = test_config();
+    // >= 100 turns on DiffViewMode::Split in render_edit.
+    let max_w: u16 = 120;
+
+    // 20 remove/add pairs + 2 file headers + 1 hunk header = 43 source
+    // lines, but the split view paints only 3 + 20 = 23 rows.
+    let mut diff = String::from("--- a/foo\n+++ b/foo\n@@ -1,20 +1,20 @@\n");
+    for i in 0..20 {
+        diff.push_str(&format!("-old {i}\n+new {i}\n"));
+    }
+    let part = ToolPart {
+        tool: "fs_edit".into(),
+        input: serde_json::json!({"filePath": "src/main.rs"}),
+        output: Some(diff),
+        status: ToolStatus::Completed,
+        tool_call_id: Some("e-split".into()),
+        is_start: true,
+        is_streaming: false,
+        cached_line_count: None,
+        lsp_notes: None,
+    };
+
+    let est = SessionView::estimate_part_height(
+        &Part::Tool(part.clone()),
+        max_w,
+        &config,
+        &MessageRole::Assistant,
+        &ToolRenderState::new(),
+    );
+    let mut buf = Buffer::empty(Rect::new(0, 0, max_w + 3, 60));
+    let mut state = ToolRenderState::new();
+    let mut line_h = 0u16;
+    {
+        let mut ctx = ToolRenderCtx {
+            buf: &mut buf,
+            x: 0,
+            y: 0,
+            line_h: &mut line_h,
+            max_w,
+            state: &mut state,
+            theme: &theme,
+        };
+        dispatch_tool(&mut ctx, &part, 0);
+    }
+    let actual = line_h
+        + if SessionView::tool_is_block(&part) {
+            2
+        } else {
+            0
+        };
+    assert_eq!(
+        est, actual,
+        "estimate ({est}) != render real ({actual}): the box was sized by \
+         raw diff line count instead of painted split rows"
+    );
+    // And the internal padding is symmetric: exactly 1 blank row above the
+    // first painted row and 1 below the last one (top/bottom padding rows).
+    // The box has no title row — the diff's own headers show the path.
+    let painted_rows = 23u16;
+    assert_eq!(
+        line_h,
+        painted_rows + 2,
+        "box height must be painted rows + top pad + bottom pad (no title row)"
+    );
+}
+
+/// Regression: the unified view indents its line-number gutter by the same
+/// leaf-colored padding column (LEAF_PAD) the split panels use — so at any
+/// chat width the line numbers land on the same column and both views'
+/// paddings stay proportional (1 leaf column + 2 box chrome columns).
+#[test]
+fn edit_diff_unified_view_indents_line_numbers_inside_leaf() {
+    use super::tool_render::{ToolRenderCtx, ToolRenderState, dispatch_tool};
+
+    let theme = test_theme();
+    let config = test_config();
+    // < 100 keeps render_edit on the unified view.
+    let max_w: u16 = 80;
+
+    let diff = "--- a/foo\n+++ b/foo\n@@ -1,1 +1,1 @@\n-old\n+new\n";
+    let part = ToolPart {
+        tool: "fs_edit".into(),
+        input: serde_json::json!({"filePath": "src/main.rs"}),
+        output: Some(diff.to_string()),
+        status: ToolStatus::Completed,
+        tool_call_id: Some("e-pad-u".into()),
+        is_start: true,
+        is_streaming: false,
+        cached_line_count: None,
+        lsp_notes: None,
+    };
+
+    let mut buf = Buffer::empty(Rect::new(0, 0, max_w + 3, 20));
+    let mut state = ToolRenderState::new();
+    let mut line_h = 0u16;
+    {
+        let mut ctx = ToolRenderCtx {
+            buf: &mut buf,
+            x: 0,
+            y: 0,
+            line_h: &mut line_h,
+            max_w,
+            state: &mut state,
+            theme: &theme,
+        };
+        dispatch_tool(&mut ctx, &part, 0);
+    }
+
+    // The body starts at x=2 / y=1 (no title row; 1 row of top padding). The
+    // first `-` line paints on buffer row 4, after the top padding row, the
+    // two file headers and the hunk header.
+    let row = 4;
+    let cell_bg = |x: u16| buf.cell((x, row)).map(|c| c.bg);
+    let glyph = |x: u16| {
+        buf.cell((x, row))
+            .map(|c| c.symbol().to_string())
+            .unwrap_or_default()
+    };
+
+    // One leaf-colored padding column before the gutter…
+    let pad_bg = cell_bg(2).expect("leaf padding cell");
+    let sign_bg = cell_bg(5).expect("sign cell");
+    assert_eq!(
+        pad_bg, sign_bg,
+        "unified padding column must share the removed leaf's background"
+    );
+    // …visually distinct from the box chrome on its left…
+    let chrome_bg = cell_bg(0).expect("box chrome cell");
+    assert_ne!(pad_bg, chrome_bg, "padding must not be box background");
+    // …with the gutter shifted exactly one column: number at x+3, sign at x+5.
+    assert_eq!(glyph(3), "1", "line number starts one column in");
+    assert_eq!(glyph(5), "-", "sign follows the padded gutter");
+}
+
+/// Regression: in split view each leaf must indent its line-number gutter by
+/// one leaf-colored padding column (LEAF_PAD): the padding shares the leaf's
+/// own background, the numbers of BOTH leaves start at the same offset inside
+/// their panel, and the padding column is visually distinct from the box
+/// background around it.
+#[test]
+fn edit_diff_split_view_indents_line_numbers_inside_leaves() {
+    use super::tool_render::{ToolRenderCtx, ToolRenderState, dispatch_tool};
+
+    let theme = test_theme();
+    let config = test_config();
+    // >= 100 turns on DiffViewMode::Split in render_edit.
+    let max_w: u16 = 120;
+
+    let diff = "--- a/foo\n+++ b/foo\n@@ -1,1 +1,1 @@\n-old\n+new\n";
+    let part = ToolPart {
+        tool: "fs_edit".into(),
+        input: serde_json::json!({"filePath": "src/main.rs"}),
+        output: Some(diff.to_string()),
+        status: ToolStatus::Completed,
+        tool_call_id: Some("e-pad".into()),
+        is_start: true,
+        is_streaming: false,
+        cached_line_count: None,
+        lsp_notes: None,
+    };
+
+    let mut buf = Buffer::empty(Rect::new(0, 0, max_w + 3, 20));
+    let mut state = ToolRenderState::new();
+    let mut line_h = 0u16;
+    {
+        let mut ctx = ToolRenderCtx {
+            buf: &mut buf,
+            x: 0,
+            y: 0,
+            line_h: &mut line_h,
+            max_w,
+            state: &mut state,
+            theme: &theme,
+        };
+        dispatch_tool(&mut ctx, &part, 0);
+    }
+
+    // The diff body starts at x=2 (the box gives back the leaf padding
+    // column) / y=0 — the box has NO title row (the diff's own `--- a/` /
+    // `+++ b/` headers show the path), so the body sits on the box's first
+    // row. Over the 118-wide body the split layout puts the left panel at
+    // [2, 60), the separator column at 60 and the right panel at [61, 120)
+    // — with the box spanning [0, 122), both side chrome margins are 2
+    // columns. The first -/+ pair paints on buffer row 4 (after the top
+    // padding row, the two file headers and the hunk header).
+    let row = 4;
+
+    // Each leaf's gutter sits exactly one padding column inside its panel,
+    // and that padding column carries the LEAF's own background (red on the
+    // left, green on the right) — not the box background.
+    let cell_bg = |x: u16| buf.cell((x, row)).map(|c| c.bg);
+    let left_pad = cell_bg(2).expect("left leaf padding cell");
+    let left_sign = cell_bg(5).expect("left leaf sign cell");
+    assert_eq!(
+        left_pad, left_sign,
+        "left leaf padding must share the removed leaf's background"
+    );
+    let right_pad = cell_bg(61).expect("right leaf padding cell");
+    let right_sign = cell_bg(64).expect("right leaf sign cell");
+    assert_eq!(
+        right_pad, right_sign,
+        "right leaf padding must share the added leaf's background"
+    );
+    // The padding must differ from the separator column so the indent reads
+    // as part of the leaf, not as box background.
+    let sep = cell_bg(60).expect("separator cell");
+    assert_ne!(left_pad, sep, "left padding must not be box background");
+    assert_ne!(right_pad, sep, "right padding must not be box background");
+
+    // Symmetry: both leaves start their line number at the same offset
+    // relative to their panel edge, and the signs align the same way.
+    let glyph = |x: u16| {
+        buf.cell((x, row))
+            .map(|c| c.symbol().to_string())
+            .unwrap_or_default()
+    };
+    assert_eq!(glyph(3), "1", "left line number starts one column in");
+    assert_eq!(glyph(62), "1", "right line number starts one column in");
+    assert_eq!(glyph(5), "-", "left sign follows the padded gutter");
+    assert_eq!(glyph(64), "+", "right sign follows the padded gutter");
+}
+
 /// Regression: a block tool's copy regions must sit on the rows the renderer
 /// actually draws — the walk's top margin plus the box's internal padding put
 /// the title at part_top+2 and body line 0 at part_top+3 — and rows scrolled

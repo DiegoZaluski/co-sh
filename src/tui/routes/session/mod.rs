@@ -1817,15 +1817,17 @@ impl SessionView {
                         let lines = formatted.len().max(1) as u16;
                         lines + 4
                     } else if tool_render::tool_display(&t.tool) == "edit" {
-                        // Same extraction as render_edit (shared helper) so the
-                        // line count matches the drawn diff exactly.
-                        let diff_lines = tool_render::edit_diff_content(t)
-                            .as_deref()
-                            .map(|d| d.lines().count().min(30) as u16)
-                            .unwrap_or(0);
-                        // line_h = diff_lines + 3 (padding + title + gap)
-                        // + 2 for external margins (top + bottom)
-                        diff_lines + 5
+                        // Same source as render_edit (shared helper) so the
+                        // row count matches the drawn diff exactly. The count
+                        // is PAINTED rows, not source lines: the split view
+                        // (chat width ≥ 100) pairs consecutive `-`/`+` lines
+                        // on one row, and sizing by raw line count left up to
+                        // ~2× the diff height as blank bottom padding.
+                        let diff_rows = tool_render::edit_box_rows(t, max_w);
+                        // line_h = diff_rows + 2 (top padding + body +
+                        // bottom padding; no title — the diff shows the path
+                        // itself) + 2 for external margins (top + bottom)
+                        diff_rows + 4
                     } else if tool_render::tool_display(&t.tool) == "write" {
                         // Same source as render_write (shared helper): the box
                         // previews `input.content` (capped at 20 rows), NOT the
@@ -3533,10 +3535,18 @@ impl SessionView {
                                 // two output lines unreachable — whenever the
                                 // cells cache was cold.
                                 let is_block = Self::tool_is_block(t);
+                                // The edit box has NO title row (the diff's
+                                // own `--- a/` / `+++ b/` headers show the
+                                // path) — its body starts one row higher than
+                                // the other block tools and no label region
+                                // may be emitted.
+                                let edit_block = is_block && tool_display_name == "edit";
                                 let label_off = if is_block { 2 } else { 0 };
                                 let body_off = if question_summary {
                                     0
                                 } else if tool_display_name == "todo" {
+                                    2
+                                } else if edit_block {
                                     2
                                 } else if is_block {
                                     3
@@ -3545,8 +3555,11 @@ impl SessionView {
                                 };
                                 // A failed todo with output draws its box (not the
                                 // inline label) — only the empty-output failure
-                                // keeps the label row.
+                                // keeps the label row. The edit box never draws
+                                // a title row (the diff's own headers show the
+                                // path), so no label region for it either.
                                 let draws_label = !question_summary
+                                    && !edit_block
                                     && (tool_display_name != "todo"
                                         || (matches!(
                                             t.status,

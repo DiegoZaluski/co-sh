@@ -456,6 +456,13 @@ impl DiffRenderable {
         }
     }
 
+    /// Leaf padding: columns of leaf-colored blank space between the area's
+    /// left edge and the line-number gutter. Shifts the gutter (and the
+    /// content after it) off the leaf edge; the trailing background fill
+    /// mirrors it on the right edge. Shared by BOTH views — split panels and
+    /// the unified leaf — so their line numbers land on the same column.
+    const LEAF_PAD: u16 = 1;
+
     /// Render one line within a split panel.
     fn render_split_line(
         &self,
@@ -504,6 +511,22 @@ impl DiffRenderable {
             .fg(rgba_color(self.line_number_fg));
 
         let mut x = layout.x;
+
+        // Leaf padding: LEAF_PAD columns of gutter background between the
+        // panel's left edge and the line-number gutter. Everything after it
+        // (numbers, sign, content) shifts right by the same amount, so both
+        // leaves indent their gutter identically; the trailing background
+        // fill mirrors this on the panel's right edge.
+        for _ in 0..Self::LEAF_PAD {
+            if x >= max_x_panel {
+                break;
+            }
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_char(' ');
+                cell.set_style(ln_style);
+            }
+            x += 1;
+        }
 
         // Line number
         if self.show_line_numbers {
@@ -750,6 +773,20 @@ impl Renderable for DiffRenderable {
 }
 
 impl DiffRenderable {
+    /// Number of buffer rows `render_self` paints for an area `area_width`
+    /// columns wide (the view mode is chosen exactly as `render_self` does).
+    /// The split view pairs consecutive removes with adds on shared rows, so
+    /// it paints FEWER rows than the diff has source lines; the unified view
+    /// may paint more (long lines wrap). Box callers size themselves from
+    /// this so their bottom padding stays symmetric.
+    pub fn painted_rows(&self, area_width: u16) -> usize {
+        if self.view_mode == DiffViewMode::Split && area_width >= 50 {
+            self.build_split_lines().len()
+        } else {
+            self.parse_lines().len()
+        }
+    }
+
     fn render_unified_view(&self, buf: &mut Buffer, area: Rect) {
         let lines = self.parse_lines();
         if lines.is_empty() {
@@ -800,7 +837,12 @@ impl DiffRenderable {
                 _ => ' ',
             };
 
-            let content_max_w = area.width.saturating_sub(gutter_w);
+            // The leaf padding column is carved out of the content width so
+            // wrapped lines never bleed into the right edge.
+            let content_max_w = area
+                .width
+                .saturating_sub(gutter_w)
+                .saturating_sub(Self::LEAF_PAD);
             if content_max_w == 0 {
                 continue;
             }
@@ -817,6 +859,20 @@ impl DiffRenderable {
                     break;
                 }
                 let mut x = area.x;
+
+                // Leaf padding: one leaf-colored column before the gutter on
+                // every visual row (continuation rows too), mirroring the
+                // split panels so both views indent identically.
+                for _ in 0..Self::LEAF_PAD {
+                    if x >= max_x {
+                        break;
+                    }
+                    if let Some(cell) = buf.cell_mut((x, y)) {
+                        cell.set_char(' ');
+                        cell.set_style(ln_style);
+                    }
+                    x += 1;
+                }
 
                 if wl_idx == 0 {
                     // Render line number area (gutter)
