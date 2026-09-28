@@ -66,24 +66,39 @@ impl App {
                 return Ok(false);
             }
 
-            // ESC sovereign while an agent loop is running: whatever
-            // incidental UI state is active (a prompt/field text selection,
-            // the left panel focus, the slash menu, the permission dialog, an
-            // overlay), the FIRST job of ESC is to interrupt the loop.
-            // Flag the shared stop signal here — before any gate below can
-            // swallow the key — then let ESC fall through so it still
-            // performs its normal local action (clear selection, close
-            // menu/dialog). Regression: those gates used to consume ESC
-            // without setting `stop_signal`, so the loop kept running.
-            // `Retry` is covered too: an Error event can flip the status
-            // while a loop is still winding down, and ESC must still stop
-            // it. (Idle no-op: the flag is reset by `start_agent_loop`.)
+            // ESC sovereign while an agent loop is running: with NO modal
+            // box on screen, whatever incidental UI state is active (a
+            // prompt/field text selection, the left panel focus, the slash
+            // menu, the permission dialog, an overlay), the FIRST job of
+            // ESC is to interrupt the loop. Flag the shared stop signal
+            // here — before any gate below can swallow the key — then let
+            // ESC fall through so it still performs its normal local
+            // action (clear selection, close menu/dialog). Regression:
+            // those gates used to consume ESC without setting
+            // `stop_signal`, so the loop kept running. `Retry` is covered
+            // too: an Error event can flip the status while a loop is
+            // still winding down, and ESC must still stop it. (Idle
+            // no-op: the flag is reset by `start_agent_loop`.)
+            //
+            // PRIORITY RULE: when a modal box IS open (model picker,
+            // theme picker, reasoning sub-dialog, message/queue actions,
+            // text inputs, registration forms, the queue-choice and
+            // free-gateway dialogs, …) ESC belongs to the BOX first —
+            // its own handler below closes it and the loop keeps
+            // running. Interrupting the loop is the SECOND Esc's job,
+            // once no box is open. The Confirm dialog and the
+            // provider-key picker never reach this point (their
+            // sovereignty gates above consume every key), and the
+            // question / permission dialogs are exempt on purpose: their
+            // Esc is a semantic REJECT of the pending tool call /
+            // permission request, not a mere close.
             if key.code == KeyCode::Esc
                 && matches!(
                     self.state.status,
                     crate::types::SessionStatus::Working
                         | crate::types::SessionStatus::Retry { .. }
                 )
+                && !self.modal_box_open()
             {
                 self.stop_signal.store(true, Ordering::Relaxed);
             }
@@ -1280,28 +1295,65 @@ impl App {
                     self.submit_prompt_message(msg);
                 }
                 Some(crate::keymap::Action::Interrupt) => {
-                    if self.state.status == crate::types::SessionStatus::Working {
-                        self.stop_signal.store(true, Ordering::Relaxed);
-                    } else if self.queue_choice_dialog.visible {
+                    // PRIORITY RULE: a modal box owns ESC first — dismiss
+                    // it and leave the agent loop running. Only with no
+                    // box open does ESC interrupt the loop (the top gate
+                    // already flagged the stop signal in that case; the
+                    // question / permission dialogs keep their semantic
+                    // REJECT semantics — an answer is sent to the model).
+                    if self.queue_choice_dialog.visible {
                         self.queue_choice_dialog.hide();
                         self.prompt_view.focus();
+                        return Ok(false);
                     } else if self.question_dialog.visible {
                         self.question_dialog.visible = false;
                         let _ = self
                             .answer_tx
                             .send(Err("User dismissed the question dialog".into()));
                         self.prompt_view.focus();
+                        return Ok(false);
                     } else if self.free_gateway_dialog.visible {
                         self.free_gateway_dialog.hide();
                         self.restore_pending_gateway_message();
+                        return Ok(false);
                     } else if self.dialog.visible() {
                         self.pending_delete = None;
                         self.clear_rag_pending_state();
                         self.dialog.pop();
+                        return Ok(false);
+                    } else if self.state.status == crate::types::SessionStatus::Working {
+                        self.stop_signal.store(true, Ordering::Relaxed);
                     }
                 }
                 Some(crate::keymap::Action::Cancel) => {
-                    if self.state.status == crate::types::SessionStatus::Working {
+                    // PRIORITY RULE (same as Interrupt above): a modal box
+                    // owns ESC first — dismiss it and leave the agent loop
+                    // running. Clearing the queues is only the
+                    // no-box-open cancel of a running loop. Each dismissal
+                    // RETURNS: the box was the Esc's target, so the key
+                    // must never continue into the no-box paths below
+                    // (which include the leave-to-Home session exit).
+                    if self.queue_choice_dialog.visible {
+                        self.queue_choice_dialog.hide();
+                        self.prompt_view.focus();
+                        return Ok(false);
+                    } else if self.question_dialog.visible {
+                        self.question_dialog.visible = false;
+                        let _ = self
+                            .answer_tx
+                            .send(Err("User dismissed the question dialog".into()));
+                        self.prompt_view.focus();
+                        return Ok(false);
+                    } else if self.free_gateway_dialog.visible {
+                        self.free_gateway_dialog.hide();
+                        self.restore_pending_gateway_message();
+                        return Ok(false);
+                    } else if self.dialog.visible() {
+                        self.pending_delete = None;
+                        self.clear_rag_pending_state();
+                        self.dialog.pop();
+                        return Ok(false);
+                    } else if self.state.status == crate::types::SessionStatus::Working {
                         self.stop_signal.store(true, Ordering::Relaxed);
                         // Clear pending queues: the user explicitly
                         // cancelled, so queued follow-ups should not
@@ -1317,23 +1369,7 @@ impl App {
                         self.hovered_queue_row = None;
                         return Ok(false);
                     }
-                    if self.queue_choice_dialog.visible {
-                        self.queue_choice_dialog.hide();
-                        self.prompt_view.focus();
-                    } else if self.question_dialog.visible {
-                        self.question_dialog.visible = false;
-                        let _ = self
-                            .answer_tx
-                            .send(Err("User dismissed the question dialog".into()));
-                        self.prompt_view.focus();
-                    } else if self.free_gateway_dialog.visible {
-                        self.free_gateway_dialog.hide();
-                        self.restore_pending_gateway_message();
-                    } else if self.dialog.visible() {
-                        self.pending_delete = None;
-                        self.clear_rag_pending_state();
-                        self.dialog.pop();
-                    } else if matches!(self.mode(), AppMode::Session) {
+                    if matches!(self.mode(), AppMode::Session) {
                         self.state.current_session_id = None;
                         // Back to Home: the header widget is gone, so its
                         // state must not survive into the next session.
