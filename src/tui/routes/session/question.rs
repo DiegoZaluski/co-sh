@@ -5,7 +5,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 
-use cosh_tools::question::types::{AnswerItem, CUSTOM_RESPONSE_LABEL, QuestionItem, QuestionType};
+use cosh_tools::question::types::{AnswerItem, QuestionItem, QuestionType};
 use cosh_tui::core::lib::border::{BorderCharacters, BorderSidesConfig};
 use cosh_tui::core::lib::rgba::RGBA;
 use cosh_tui::core::renderable::Renderable;
@@ -183,6 +183,32 @@ impl LineEdit {
         self.cursor = (h_scroll + clicked).min(len);
     }
 
+    /// Char index of the first character of display line `line` when the
+    /// text is hard-wrapped at `field_w` columns (see
+    /// [`QuestionDialog::wrap_preserving`]). Clamped to the text length.
+    fn line_start_char(&self, line: usize, field_w: usize) -> usize {
+        let lines = QuestionDialog::wrap_preserving(&self.text, field_w as u16);
+        let chars_in_lines: Vec<usize> = lines.iter().map(|l| l.chars().count()).collect();
+        let upto: usize = chars_in_lines.iter().take(line).sum();
+        upto.min(self.text.chars().count())
+    }
+
+    /// Display line (0-based) and column within that line for the char
+    /// position `cursor`, when the text is hard-wrapped at `field_w`
+    /// columns.
+    fn cursor_line_col(&self, field_w: usize) -> (usize, usize) {
+        let lines = QuestionDialog::wrap_preserving(&self.text, field_w as u16);
+        let mut remaining = self.cursor;
+        for (li, l) in lines.iter().enumerate() {
+            let len = l.chars().count();
+            if remaining <= len {
+                return (li, remaining);
+            }
+            remaining -= len;
+        }
+        (lines.len().saturating_sub(1), remaining)
+    }
+
     /// Byte offset of the `char_pos`-th character in `text`.
     fn char_to_byte(text: &str, char_pos: usize) -> usize {
         text.char_indices()
@@ -261,12 +287,15 @@ pub struct QuestionDialog {
 
 /// One flat display row inside the options viewport. Every variant occupies
 /// exactly one terminal row, so hit-testing is a plain index comparison.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum OptFlatRow {
     /// Wrapped line of selectable option `row`.
     Label { row: usize, text: String },
-    /// The SingleChoice custom-answer input line below the custom row.
-    CustomInput,
+    /// One wrapped line of the SingleChoice custom-answer input. When the
+    /// typed draft exceeds the field width it hard-wraps onto the next
+    /// display row instead of scrolling inline, so `line` indexes the draft's
+    /// display lines (see [`QuestionDialog::custom_input_lines`]).
+    CustomInput { line: usize },
     /// Blank breathing row after option `row`'s block, so adjacent options
     /// read as separate items. Never trailing: the last block sits directly
     /// above the footer.
@@ -1072,16 +1101,29 @@ impl QuestionDialog {
                         continue;
                     }
                     match frow {
-                        OptFlatRow::CustomInput => {
+                        OptFlatRow::CustomInput { line } => {
                             // Clicking the input focuses the custom row and
                             // places the cursor, mirroring Text input clicks.
+                            // The draft wraps across rows, so the click's row
+                            // contributes its own char offset.
                             if let Some(custom) = custom_idx {
                                 self.selected_row = custom;
                             }
                             let text_x = inner_x + 2;
                             if let Some(s) = self.state.get_mut(tab) {
                                 let field_w = inner_w.saturating_sub(2) as usize;
-                                s.custom.place_cursor_from_click(x, text_x, field_w);
+                                let line_start = s.custom.line_start_char(*line, field_w);
+                                let clicked = (i64::from(x).saturating_sub(i64::from(text_x)))
+                                    .max(0) as usize;
+                                let line_len = s
+                                    .custom
+                                    .value()
+                                    .chars()
+                                    .skip(line_start)
+                                    .take(field_w)
+                                    .count();
+                                s.custom.cursor = (line_start + clicked.min(line_len))
+                                    .min(s.custom.value().chars().count());
                             }
                             self.cursor.note_activity();
                             return true;
@@ -1208,9 +1250,10 @@ impl QuestionDialog {
             padding_vertical + rows + tab_chrome + footer
         } else if let Some(q) = self.questions.get(self.current_tab) {
             let q_lines = Self::wrap_text(&q.question, inner_w).len() as u16;
-            let p_lines = q.purpose.as_ref().map_or(0, |p| {
-                Self::wrap_decorated(p, "  (", ")", inner_w).len() as u16
-            });
+            let p_lines = q
+                .purpose
+                .as_ref()
+                .map_or(0, |p| Self::wrap_flush(p, "(", ")", inner_w).len() as u16);
             let opt_rows = self.option_row_count(self.current_tab, inner_w);
             padding_vertical + q_lines.max(1) + p_lines + opt_rows + tab_chrome + footer
         } else {
@@ -1366,6 +1409,25 @@ impl QuestionDialog {
         lines
     }
 
+    /// Hard-wrap `text` at `width` columns, preserving every character: each
+    /// output line holds exactly `width` chars (the last one may be shorter),
+    /// so joining the lines reproduces the input modulo trailing spaces.
+    /// Used by the custom-answer input, whose draft must wrap onto the next
+    /// display row instead of scrolling inline; cursor<->line mapping relies
+    /// on this fixed-width property.
+    fn wrap_preserving(text: &str, width: u16) -> Vec<String> {
+        let width = usize::from(width).max(1);
+        let mut out: Vec<String> = Vec::new();
+        let mut it = text.chars().peekable();
+        if it.peek().is_none() {
+            out.push(String::new());
+        }
+        while it.peek().is_some() {
+            out.push(it.by_ref().take(width).collect());
+        }
+        out
+    }
+
     /// Wrap a decorated hint: `prefix` (e.g. `"  ("`) goes on the first line,
     /// continuation lines are indented to align under it, and `suffix` (e.g.
     /// `")"`) is appended to the final line.
@@ -1394,10 +1456,40 @@ impl QuestionDialog {
         out
     }
 
+    /// Wrap a hint flush with the surrounding text: `prefix` (e.g. `"("`)
+    /// leads line 0 and `suffix` closes the last line, but continuation lines
+    /// start at column 0 — no indentation relative to the text above, so the
+    /// hint reads at the same column as the question it annotates.
+    fn wrap_flush(text: &str, prefix: &str, suffix: &str, width: u16) -> Vec<String> {
+        let prefix_w = prefix.chars().count() as u16;
+        let inner = width.saturating_sub(prefix_w);
+        let body = Self::wrap_text(text, inner);
+        let body_len = body.len();
+        let mut out: Vec<String> = Vec::with_capacity(body_len);
+        for (i, l) in body.into_iter().enumerate() {
+            if i == 0 {
+                if body_len == 1 {
+                    out.push(format!("{prefix}{l}{suffix}"));
+                } else {
+                    out.push(format!("{prefix}{l}"));
+                }
+            } else {
+                out.push(l);
+            }
+        }
+        if body_len > 1
+            && let Some(last) = out.last_mut()
+        {
+            last.push_str(suffix);
+        }
+        out
+    }
+
     /// Wrapped display lines for each option of the given tab. The option text
     /// width excludes the 3-column indicator (`◉ ` / `☐ ` etc.). For
-    /// `SingleChoice` the last entry is always the virtual
-    /// [`CUSTOM_RESPONSE_LABEL`] row appended by the TUI.
+    /// `SingleChoice` the last entry is the virtual custom row, which renders
+    /// NO label: its placeholder already announces the affordance, so the
+    /// block is just the input lines.
     fn option_wrapped_lines(&self, tab: usize, inner_w: u16) -> Vec<Vec<String>> {
         let Some(q) = self.questions.get(tab) else {
             return Vec::new();
@@ -1417,7 +1509,10 @@ impl QuestionDialog {
                 for opt in Self::option_labels(q) {
                     out.push(Self::wrap_text(&Self::display_option(q, opt), opt_w));
                 }
-                out.push(Self::wrap_text(CUSTOM_RESPONSE_LABEL, opt_w));
+                // The custom row keeps its virtual selectable index
+                // (`options.len()`) but draws no label line — the input (with
+                // its placeholder) IS the row.
+                out.push(Vec::new());
                 out
             }
         }
@@ -1432,7 +1527,8 @@ impl QuestionDialog {
     }
 
     /// Flat display rows of the options viewport for `tab`, in order: every
-    /// wrapped option line, the custom input line below the custom row, and a
+    /// wrapped option line, the custom input lines below the custom row (the
+    /// typed draft hard-wraps across as many rows as it needs), and a
     /// blank gap row after each option block — between blocks so the eye can
     /// tell where one option ends and the next begins, plus one trailing the
     /// custom input so it never glues to the footer. Each entry is exactly
@@ -1451,7 +1547,13 @@ impl QuestionDialog {
             let is_custom_input =
                 self.custom_index(tab) == Some(row) && self.should_show_custom_input(tab);
             if is_custom_input {
-                out.push(OptFlatRow::CustomInput);
+                // The custom draft wraps: one flat row per display line of
+                // the typed text (the placeholder is itself one line), so
+                // the user keeps typing onto the next row.
+                let input_lines = self.custom_input_lines(tab, inner_w);
+                for li in 0..input_lines.len() {
+                    out.push(OptFlatRow::CustomInput { line: li });
+                }
             }
             if row < last || is_custom_input {
                 out.push(OptFlatRow::Gap { row });
@@ -1460,25 +1562,41 @@ impl QuestionDialog {
         out
     }
 
+    /// The custom-answer draft's display lines at `inner_w`: the placeholder
+    /// when empty, otherwise [`Self::wrap_preserving`] of the typed text.
+    fn custom_input_lines(&self, tab: usize, inner_w: u16) -> Vec<String> {
+        let field_w = inner_w.saturating_sub(2); // after the "  " prefix
+        match self.state.get(tab) {
+            Some(s) if !s.custom.is_empty() => Self::wrap_preserving(s.custom.value(), field_w),
+            _ => vec![CUSTOM_PLACEHOLDER.to_string()],
+        }
+    }
+
     /// Absolute flat-row range `[start, end)` of selectable option `row`
-    /// (including its custom input line when present). `None` when `row` is
+    /// (including its custom input lines when present). `None` when `row` is
     /// out of range (e.g. an empty `MultiChoice` payload rejected later).
     fn option_flat_range(&self, tab: usize, inner_w: u16, row: usize) -> Option<(usize, usize)> {
         let flat = self.flat_option_rows(tab, inner_w);
-        let start = flat
-            .iter()
-            .position(|r| matches!(r, OptFlatRow::Label { row: r, .. } if *r == row))?;
+        let start = if self.custom_index(tab) == Some(row) {
+            // The custom row draws no label line: its block starts at its
+            // first input line.
+            flat.iter()
+                .position(|r| matches!(r, OptFlatRow::CustomInput { line: 0 }))
+        } else {
+            flat.iter()
+                .position(|r| matches!(r, OptFlatRow::Label { row: r, .. } if *r == row))
+        }?;
         // The block runs through the option's wrapped lines plus, for the
-        // custom row, its trailing input line (by construction it follows
-        // immediately).
+        // custom row, ALL of its wrapped input lines (by construction they
+        // follow immediately; the trailing gap terminates the block).
         let mut end = start;
         while end < flat.len() {
             match &flat[end] {
                 OptFlatRow::Label { row: r, .. } if *r == row => end += 1,
-                OptFlatRow::CustomInput => {
-                    // Only reachable right after the custom row's own lines.
+                OptFlatRow::CustomInput { .. } => {
+                    // Consume every consecutive input row so a multi-line
+                    // draft stays inside the viewport when the focus follows.
                     end += 1;
-                    break;
                 }
                 _ => break,
             }
@@ -1639,7 +1757,7 @@ impl QuestionDialog {
                 .saturating_sub(1); // 1-row gap above the options
             let mut text_lines: Vec<String> = Self::wrap_text(&q.question, inner_w);
             if let Some(ref purpose) = q.purpose {
-                text_lines.extend(Self::wrap_decorated(purpose, "  (", ")", inner_w));
+                text_lines.extend(Self::wrap_flush(purpose, "(", ")", inner_w));
             }
             let max_scroll = text_lines.len().saturating_sub(text_h as usize);
             let scroll = self.text_scroll.min(max_scroll);
@@ -1947,8 +2065,8 @@ impl QuestionDialog {
         {
             let ry = start_y + vi as u16;
             match frow {
-                OptFlatRow::CustomInput => {
-                    self.render_custom_input(buf, inner_x, inner_w, ry, theme, now);
+                OptFlatRow::CustomInput { line } => {
+                    self.render_custom_input(buf, inner_x, inner_w, ry, *line, theme, now);
                 }
                 // Breathing row: leave the panel background alone so the
                 // options above and below read as separate items.
@@ -2027,27 +2145,26 @@ impl QuestionDialog {
         }
     }
 
-    /// Render the SingleChoice custom-answer input line (single-line field
-    /// with placeholder + blinking cursor, mirroring the Text tab).
+    /// Render one display line of the SingleChoice custom-answer input. The
+    /// typed draft hard-wraps at the field width: line `line` of
+    /// [`Self::custom_input_lines`] is drawn on the given row (line 0 carries
+    /// the placeholder when the draft is empty), so an answer longer than the
+    /// field continues on the row below instead of scrolling inline. The
+    /// blinking cursor sits on the line holding the cursor position.
+    #[allow(clippy::too_many_arguments)]
     fn render_custom_input(
         &self,
         buf: &mut Buffer,
         inner_x: u16,
         inner_w: u16,
         y: u16,
+        line: usize,
         theme: &Theme,
         now: SystemTime,
     ) {
         let state = self.state.get(self.current_tab);
         let input = state.map_or(String::new(), |s| s.custom.value().to_owned());
-        let cursor_pos = state.map_or(0, |s| s.custom.cursor);
-        let chars: Vec<char> = input.chars().collect();
         let field_w = inner_w.saturating_sub(2) as usize; // after "  " prefix
-        let h_scroll = if cursor_pos >= field_w && chars.len() > field_w {
-            cursor_pos - field_w + 1
-        } else {
-            0
-        };
         let show_placeholder = input.is_empty();
         let input_fg = if show_placeholder {
             rgba_color(theme.text_muted)
@@ -2057,12 +2174,43 @@ impl QuestionDialog {
         let bg = rgba_color(theme.background_panel);
         let style = Style::default().fg(input_fg).bg(bg);
 
-        draw_text_line(buf, "  ", inner_x, y, inner_w, style);
+        // The custom block has no label row: the input itself is the row, so
+        // line 0 carries the same focus/commit marker as the options (the
+        // placeholder already announces the affordance).
+        let (prefix, prefix_style) = if line == 0 {
+            let custom = self.custom_index(self.current_tab);
+            let is_committed = custom.is_some_and(|c| {
+                self.state
+                    .get(self.current_tab)
+                    .is_some_and(|s| s.single_selection == Some(c))
+            });
+            let is_focused = self.is_custom_focused();
+            if is_committed || is_focused {
+                let col = if is_committed {
+                    theme.accent
+                } else {
+                    theme.secondary
+                };
+                ("🞴 ", Style::default().fg(rgba_color(col)))
+            } else {
+                ("  ", style)
+            }
+        } else {
+            ("  ", style)
+        };
+        draw_text_line(buf, prefix, inner_x, y, inner_w, prefix_style);
         let text_x = inner_x + 2;
         let visible: String = if show_placeholder {
-            CUSTOM_PLACEHOLDER.chars().take(field_w).collect()
+            if line == 0 {
+                CUSTOM_PLACEHOLDER.chars().take(field_w).collect()
+            } else {
+                String::new()
+            }
         } else {
-            chars.iter().skip(h_scroll).take(field_w).collect()
+            self.custom_input_lines(self.current_tab, inner_w)
+                .get(line)
+                .cloned()
+                .unwrap_or_default()
         };
         for (i, ch) in visible.chars().enumerate() {
             let cx = text_x + i as u16;
@@ -2076,19 +2224,25 @@ impl QuestionDialog {
         }
 
         // Blinking cursor only while the custom row is focused; otherwise the
-        // typed draft stays visible without stealing the blink.
+        // typed draft stays visible without stealing the blink. It renders on
+        // the display line holding the cursor char position.
         if self.is_custom_focused() {
-            let cursor_cell = cursor_pos.saturating_sub(h_scroll);
-            let cx = text_x + cursor_cell as u16;
-            if cx <= text_x + field_w as u16
-                && let Some(cell) = buf.cell_mut((cx, y))
-            {
-                match self.cursor.current_state(now) {
-                    CursorState::On => {
-                        cell.set_style(Style::default().fg(bg).bg(rgba_color(theme.text)));
-                    }
-                    CursorState::Off | CursorState::Blur => {
-                        cell.set_style(Style::default().fg(rgba_color(theme.text_muted)).bg(bg));
+            let (cursor_line, cursor_col) =
+                state.map_or((0, 0), |s| s.custom.cursor_line_col(field_w));
+            if cursor_line == line && cursor_col <= field_w {
+                let cx = text_x + cursor_col as u16;
+                if cx <= text_x + field_w as u16
+                    && let Some(cell) = buf.cell_mut((cx, y))
+                {
+                    match self.cursor.current_state(now) {
+                        CursorState::On => {
+                            cell.set_style(Style::default().fg(bg).bg(rgba_color(theme.text)));
+                        }
+                        CursorState::Off | CursorState::Blur => {
+                            cell.set_style(
+                                Style::default().fg(rgba_color(theme.text_muted)).bg(bg),
+                            );
+                        }
                     }
                 }
             }
@@ -2294,10 +2448,10 @@ mod tests {
             Some(vec![long]),
         )]);
         // 80 chars at width 37 (40 - 3 indicator column) → 3 wrapped rows,
-        // plus the TUI-owned virtual custom row (1 wrapped row), its
+        // plus the TUI-owned virtual custom row (no label), its
         // always-visible input line (+1), the breathing gap between the two
         // blocks (+1) and the trailing gap below the input (+1).
-        assert_eq!(d.option_row_count(0, 40), 7);
+        assert_eq!(d.option_row_count(0, 40), 6);
         assert_eq!(d.option_wrapped_lines(0, 40).len(), 2);
         assert_eq!(d.option_wrapped_lines(0, 40)[0].len(), 3);
     }
@@ -2473,6 +2627,27 @@ mod tests {
     }
 
     #[test]
+    fn flush_hint_has_no_indentation() {
+        // The purpose hint must read at the same column as the question text:
+        // "(" leads line 0 and continuation lines start at column 0.
+        assert_eq!(
+            QuestionDialog::wrap_flush("why?", "(", ")", 40),
+            vec!["(why?)"]
+        );
+        let lines = QuestionDialog::wrap_flush(
+            "this purpose text is far too long for the box width",
+            "(",
+            ")",
+            20,
+        );
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].starts_with('('));
+        // Continuation lines are flush, not indented under the prefix.
+        assert!(!lines[1].starts_with(' '));
+        assert!(lines[2].ends_with(')'));
+    }
+
+    #[test]
     fn decorated_hint_wraps_with_indent_and_suffix() {
         let lines = QuestionDialog::wrap_decorated(
             "this purpose text is far too long for the box width",
@@ -2513,7 +2688,9 @@ mod tests {
         assert_eq!(d.custom_index(0), Some(2));
         let wrapped = d.option_wrapped_lines(0, 40);
         assert_eq!(wrapped.len(), 3);
-        assert_eq!(wrapped[2], vec![super::CUSTOM_RESPONSE_LABEL.to_string()]);
+        // The custom row draws no label: the input (with its placeholder) IS
+        // the row.
+        assert_eq!(wrapped[2], Vec::<String>::new());
         // Other types never get the custom row.
         d.show_questions(vec![question(
             "m1",
@@ -2581,6 +2758,149 @@ mod tests {
         let answers = d.build_answers();
         assert_eq!(answers[0].selected, Some(vec!["my way".to_string()]));
         assert_eq!(d.question_summary(0), "my way");
+    }
+
+    #[test]
+    fn custom_input_wraps_onto_next_display_row() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        // A draft wider than the field must wrap onto the next display row
+        // instead of scrolling inline: each display line holds exactly
+        // `field_w` chars and the flat rows grow accordingly.
+        let mut d = QuestionDialog::new();
+        d.show_questions(vec![single_choice("s1", vec!["A"], Some("A"))]);
+        d.handle_key(KeyCode::Down); // focus the custom row
+        let draft = "abcde".repeat(9); // 45 chars
+        for ch in draft.chars() {
+            d.handle_key(KeyCode::Char(ch));
+        }
+        let inner_w = 40u16; // field_w = 38: labels fit on one row, the draft wraps
+        use super::OptFlatRow;
+        assert_eq!(
+            d.flat_option_rows(0, inner_w),
+            vec![
+                OptFlatRow::Label {
+                    row: 0,
+                    text: "A (Recommended)".to_string()
+                },
+                OptFlatRow::Gap { row: 0 },
+                OptFlatRow::CustomInput { line: 0 },
+                OptFlatRow::CustomInput { line: 1 },
+                OptFlatRow::Gap { row: 1 },
+            ]
+        );
+        // The wrapped lines hold exactly field_w chars each (last may be
+        // shorter) and the cursor maps onto the second line's end.
+        let lines = d.custom_input_lines(0, inner_w);
+        assert_eq!(lines[0].chars().count(), 38);
+        assert_eq!(lines[1], "deabcde");
+        assert_eq!(d.state[0].custom.cursor_line_col(38), (1, 7));
+        // Rendering must show both halves of the draft.
+        let theme = test_theme();
+        let area = Rect::new(0, 0, 45, 24); // inner_w = 40
+        let mut buf = Buffer::empty(area);
+        d.render(&mut buf, area, &theme, std::time::SystemTime::now());
+        let screen = screen_text(&buf);
+        // Each display row carries its own half of the draft.
+        let rows: Vec<&str> = screen.split('\n').collect();
+        assert!(
+            rows.iter().any(|r| r.contains(&lines[0])),
+            "first wrap row visible:\n{screen}"
+        );
+        assert!(
+            rows.iter().any(|r| r.contains(&lines[1])),
+            "second wrap row visible:\n{screen}"
+        );
+        // Alignment contract: every wrapped line of the draft starts at the
+        // same column (the text start after the "  "/marker prefix), so the
+        // input reads as a single field, not as loose rows. Column compared
+        // in chars: String::find is byte-based and line 0 may carry the
+        // multi-byte 🞴 marker before the text.
+        let char_col = |row: &str, needle: &str| row.find(needle).map(|b| row[..b].chars().count());
+        let row0 = rows.iter().position(|r| r.contains(&lines[0])).unwrap();
+        let row1 = rows.iter().rposition(|r| r.contains(&lines[1])).unwrap();
+        assert_eq!(
+            char_col(rows[row0], &lines[0]),
+            char_col(rows[row1], &lines[1]),
+            "continuation line must align with the draft's text start:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn overflow_viewport_keeps_wrapped_draft_lines_visible() {
+        use ratatui::layout::Rect;
+        // Last-resort overflow (small terminal): when the multi-line draft's
+        // custom block is focused, the viewport must scroll far enough to
+        // show ALL its wrapped input lines — including the one holding the
+        // cursor — not just the first.
+        let opts: Vec<String> = (1..=10)
+            .map(|i| format!("Option {i} with quite a lot of explanatory text padded to wrap"))
+            .collect();
+        let mut d = QuestionDialog::new();
+        d.show_questions(vec![QuestionItem {
+            id: "big".to_string(),
+            question: "pick?".to_string(),
+            question_type: QuestionType::SingleChoice,
+            options: Some(
+                opts.into_iter()
+                    .map(cosh_tools::question::types::QuestionOption::from_label)
+                    .collect(),
+            ),
+            ..QuestionItem::default()
+        }]);
+        // Walk the focus to the virtual custom row (index = options.len()),
+        // then type a draft that wraps to several display lines.
+        for _ in 0..10 {
+            d.handle_key(KeyCode::Down);
+        }
+        let draft = "x".repeat(100);
+        for ch in draft.chars() {
+            d.handle_key(KeyCode::Char(ch));
+        }
+        assert!(d.is_custom_focused());
+        let inner_w = 35u16; // field_w = 33 → 4 display lines
+        let lines = d.custom_input_lines(0, inner_w);
+        assert!(lines.len() >= 3, "draft must wrap to several lines");
+
+        let area = Rect::new(0, 0, 40, 14);
+        let height = d.required_height(area.width).min(area.height);
+        let footer_y = height.saturating_sub(2);
+        let start_y = 1u16;
+        let opt_rows = d.option_row_count(0, inner_w);
+        let text_h = footer_y
+            .saturating_sub(start_y)
+            .saturating_sub(opt_rows)
+            .saturating_sub(1);
+        let option_y = start_y + text_h + 1;
+        let capacity = footer_y.saturating_sub(option_y) as usize;
+        d.render(
+            &mut ratatui::buffer::Buffer::empty(area),
+            area,
+            &test_theme(),
+            std::time::SystemTime::now(),
+        );
+        // Every wrapped input line of the focused block is on screen.
+        assert!(
+            d.opt_scroll + capacity >= d.option_flat_range(0, inner_w, d.selected_row).unwrap().1,
+            "custom block end must fit inside the viewport: scroll={} capacity={capacity}",
+            d.opt_scroll
+        );
+    }
+
+    #[test]
+    fn wrap_preserving_joins_back_to_input() {
+        // Fixed-width property the cursor<->line mapping relies on.
+        for text in ["", "a", "abcdefghij", "abcdefghijk"] {
+            for w in [1u16, 3, 10] {
+                let lines = QuestionDialog::wrap_preserving(text, w);
+                assert_eq!(lines.join(""), text);
+                assert!(
+                    lines.iter().all(|l| l.chars().count() <= w as usize),
+                    "{text:?} at width {w}: {lines:?}"
+                );
+                assert!(!lines.is_empty());
+            }
+        }
     }
 
     #[test]
@@ -2653,12 +2973,12 @@ mod tests {
     fn single_choice_custom_input_row_counts_in_height() {
         let mut d = QuestionDialog::new();
         d.show_questions(vec![single_choice("s1", vec!["A"], Some("A"))]);
-        // The box starts pre-expanded: 1 option + gap + custom label + its
-        // input line + trailing gap below the input, upfront — focusing the
-        // custom row shifts nothing.
-        assert_eq!(d.option_row_count(0, 40), 5);
+        // The box starts pre-expanded: 1 option + gap + the custom input (its
+        // own row, no label) + trailing gap below the input, upfront —
+        // focusing the custom row shifts nothing.
+        assert_eq!(d.option_row_count(0, 40), 4);
         d.handle_key(KeyCode::Down);
-        assert_eq!(d.option_row_count(0, 40), 5);
+        assert_eq!(d.option_row_count(0, 40), 4);
     }
 
     #[test]
@@ -2744,7 +3064,7 @@ mod tests {
         // the custom input (placeholder) is already on screen, nothing only
         // appears after navigating first.
         assert!(screen.contains("Snapshots because y (Recommended)"));
-        assert!(screen.contains(super::CUSTOM_RESPONSE_LABEL));
+        // The custom row draws no label: its placeholder IS the affordance.
         assert!(
             screen.contains(super::CUSTOM_PLACEHOLDER),
             "custom input must be visible upfront:\n{screen}"
@@ -2792,7 +3112,6 @@ mod tests {
         d.render(&mut buf, area, &theme, std::time::SystemTime::now());
         assert_eq!(d.opt_scroll, 0);
         let screen = screen_text(&buf);
-        assert!(!screen.contains(super::CUSTOM_RESPONSE_LABEL));
         assert!(
             screen.contains('↓'),
             "footer must flag folded rows:\n{screen}"
@@ -2813,7 +3132,6 @@ mod tests {
             "overflow must scroll instead of stranding the focus"
         );
         let screen2 = screen_text(&buf2);
-        assert!(screen2.contains(super::CUSTOM_RESPONSE_LABEL));
         assert!(screen2.contains(super::CUSTOM_PLACEHOLDER));
         assert!(
             screen2.contains('↑'),
@@ -2863,10 +3181,11 @@ mod tests {
         );
         assert!(rows[5].contains('B'), "second option after its gap");
         // Trailing breathing gap below the custom input: it must never glue
-        // to the footer hints.
-        assert!(rows[8].contains("Type your custom answer..."));
-        assert!(border_only(rows[9]), "bottom gap below the input");
-        assert!(rows[10].contains("enter"), "footer hints after the gap");
+        // to the footer hints. The custom row draws no label — the input
+        // (placeholder) IS the row.
+        assert!(rows[7].contains("Type your custom answer..."));
+        assert!(border_only(rows[8]), "bottom gap below the input");
+        assert!(rows[9].contains("enter"), "footer hints after the gap");
     }
 
     #[test]
@@ -2876,14 +3195,14 @@ mod tests {
         // space remains (only the App-level responsive clamp may scroll).
         let mut d = QuestionDialog::new();
         d.show_questions(vec![single_choice("s1", vec!["A"], Some("A"))]);
-        // content = question(1) + options(A + gap + custom + always-on
-        // input + trailing gap = 5) = 6
-        // → chrome(3) + tabs(0) + content(6) + footer(1) = 10.
-        assert_eq!(d.required_height(80), 10);
+        // content = question(1) + options(A + gap + custom input (no label)
+        // + trailing gap = 4) = 5
+        // → chrome(3) + tabs(0) + content(5) + footer(1) = 9.
+        assert_eq!(d.required_height(80), 9);
 
         // Huge payload: 30 one-row options interleaved with 30 gap rows +
-        // custom + input + trailing gap = 63 option rows,
-        // content = 1 + 63 = 64 → uncapped: 3 + 64 + 1 = 68.
+        // custom input + trailing gap = 62 option rows,
+        // content = 1 + 62 = 63 → uncapped: 3 + 63 + 1 = 67.
         let many: Vec<String> = (0..30).map(|i| format!("Option {i}")).collect();
         let mut d2 = QuestionDialog::new();
         d2.show_questions(vec![QuestionItem {
@@ -2897,7 +3216,7 @@ mod tests {
             ),
             ..QuestionItem::default()
         }]);
-        assert_eq!(d2.required_height(80), 3 + 64 + 1);
+        assert_eq!(d2.required_height(80), 3 + 63 + 1);
     }
 
     #[test]

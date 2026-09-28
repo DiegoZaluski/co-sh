@@ -731,13 +731,11 @@ impl App {
                                         // owner too). Hovering any row of a
                                         // message highlights its whole band.
                                         let row = (y - area.y) as usize;
-                                        self.state
-                                            .current_pending_queues()
-                                            .and_then(|q| {
-                                                App::pending_queue_layout(q, area.width)
-                                                    .get(row)
-                                                    .map(|entry| entry.owner())
-                                            })
+                                        self.state.current_pending_queues().and_then(|q| {
+                                            App::pending_queue_layout(q, area.width)
+                                                .get(row)
+                                                .map(|entry| entry.owner())
+                                        })
                                     }
                                     _ => None,
                                 }
@@ -1145,12 +1143,10 @@ impl App {
                 // using the same layout the renderer draws — including each
                 // message's own padding rows, which resolve to their owner.
                 let row = (y - pending_area.y) as usize;
-                let Some((queue_idx, msg_idx)) = App::pending_queue_layout(
-                    queues,
-                    pending_area.width,
-                )
-                .get(row)
-                .map(|entry| entry.owner())
+                let Some((queue_idx, msg_idx)) =
+                    App::pending_queue_layout(queues, pending_area.width)
+                        .get(row)
+                        .map(|entry| entry.owner())
                 else {
                     return Ok(true);
                 };

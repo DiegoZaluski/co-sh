@@ -473,7 +473,10 @@ impl App {
         let now = Instant::now();
         !self.paste_burst.shadow_is_empty()
             && self.paste_burst.run_replayable()
-            && (self.paste_burst.last_text_key_at.is_some_and(|t| is_recent(t, now))
+            && (self
+                .paste_burst
+                .last_text_key_at
+                .is_some_and(|t| is_recent(t, now))
                 || self
                     .paste_burst
                     .last_absorbed_enter_at

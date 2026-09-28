@@ -85,9 +85,7 @@ async fn slash_toolcall_command_opens_tool_call_dialog() {
 async fn todo_completion_strike_animation_frames() {
     let _guard = HOME_LOCK.lock();
     isolate_home();
-    use crate::routes::session::right_panel::types::{
-        TodoItem, TODO_STRIKE_TOTAL_FRAMES,
-    };
+    use crate::routes::session::right_panel::types::{TODO_STRIKE_TOTAL_FRAMES, TodoItem};
 
     let mut app = App::new("/tmp".to_string());
     let todo = |status: &str, content: &str| TodoItem {
@@ -172,9 +170,10 @@ async fn todo_completion_strike_animation_frames() {
     // "old" is a NEW item arriving already completed in this same update —
     // from the tool's point of view it was just completed too, so it animates
     // as well (only the panel's very first snapshot strikes instantly).
-    app.state
-        .right_panel
-        .set_todos(vec![todo("in_progress", "sweep me"), todo("completed", "old")]);
+    app.state.right_panel.set_todos(vec![
+        todo("in_progress", "sweep me"),
+        todo("completed", "old"),
+    ]);
     let panel = &mut app.state.right_panel;
     let first = panel.todo_strike_frame(1).expect("strike just armed");
     assert_eq!(
@@ -189,9 +188,10 @@ async fn todo_completion_strike_animation_frames() {
 
     // The every-update repetition with the same list must keep the same
     // running counter alive, not re-arm (which would restart the sweep).
-    app.state
-        .right_panel
-        .set_todos(vec![todo("in_progress", "sweep me"), todo("completed", "old")]);
+    app.state.right_panel.set_todos(vec![
+        todo("in_progress", "sweep me"),
+        todo("completed", "old"),
+    ]);
     let panel = &mut app.state.right_panel;
     assert_eq!(
         panel.todo_strike_frame(1),
@@ -560,10 +560,7 @@ async fn slash_compact_clears_a_wedged_stop_flag_before_spawning() {
     // A session with persisted context records, so the command passes its
     // guards and actually spawns the compaction task.
     app.start_new_session();
-    app.state
-        .current_session_mut()
-        .expect("session")
-        .messages = vec![crate::types::Message {
+    app.state.current_session_mut().expect("session").messages = vec![crate::types::Message {
         id: "msg-0".into(),
         role: crate::types::MessageRole::User,
         parts: vec![crate::types::Part::Text(crate::types::TextPart {
@@ -579,7 +576,8 @@ async fn slash_compact_clears_a_wedged_stop_flag_before_spawning() {
         .save_session_with_context(&app.state.current_session().unwrap().clone(), &state);
 
     // The wedge: the previous interaction left the shared flag set.
-    app.stop_signal.store(true, std::sync::atomic::Ordering::Relaxed);
+    app.stop_signal
+        .store(true, std::sync::atomic::Ordering::Relaxed);
 
     let cmd = slash_cmd("compact");
     app.run_slash_command(&cmd);

@@ -153,7 +153,9 @@ async fn repro_summarizer_dies_silently_to_orphan_stop_signal() {
     assert!(
         !events.iter().any(|e| matches!(
             e,
-            HarnessEvent::LlmCompaction { event: LlmCompactionEvent::Finished }
+            HarnessEvent::LlmCompaction {
+                event: LlmCompactionEvent::Finished
+            }
         )),
         "the wedged flag must abort the summarizer call before any response; events={events:?}"
     );
@@ -180,7 +182,9 @@ async fn repro_summarizer_dies_silently_to_orphan_stop_signal() {
     // "sem motivo óbvio" of the report — an Interrupted classification emits
     // no toast on the automatic path.
     assert!(
-        !events.iter().any(|e| matches!(e, HarnessEvent::Toast { .. })),
+        !events
+            .iter()
+            .any(|e| matches!(e, HarnessEvent::Toast { .. })),
         "the death must be unexplained — that is the bug; events={events:?}"
     );
     // The turn does not recover the context: still over the trigger, no
@@ -233,7 +237,8 @@ async fn repro_budget_climbs_past_100pct_after_one_silent_death() {
         r#"{{"name": "test_tool", "arguments": {{"x": "{}"}}}}"#,
         "b".repeat(4_000)
     )]));
-    h.mock_stream_queue.push_back(Ok(vec!["final answer".to_string()]));
+    h.mock_stream_queue
+        .push_back(Ok(vec!["final answer".to_string()]));
 
     let stop_signal = Arc::new(AtomicBool::new(false));
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -285,9 +290,19 @@ async fn repro_budget_climbs_past_100pct_after_one_silent_death() {
     // ongoing explains the climbing budget.
     let failures = events
         .iter()
-        .filter(|e| matches!(e, HarnessEvent::LlmCompaction { event: LlmCompactionEvent::Failed }))
+        .filter(|e| {
+            matches!(
+                e,
+                HarnessEvent::LlmCompaction {
+                    event: LlmCompactionEvent::Failed
+                }
+            )
+        })
         .count();
-    assert_eq!(failures, 1, "one dead attempt, then silence; events={events:?}");
+    assert_eq!(
+        failures, 1,
+        "one dead attempt, then silence; events={events:?}"
+    );
 }
 
 /// PROVES the `/compact` fix: even with the TUI's shared stop flag still

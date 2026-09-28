@@ -402,7 +402,12 @@ async fn bench_e2e_agent_loop() {
         let mut ft = FrameStats::new("done_save_transition");
         let context = super::bench_e2e::realistic_context(100);
         let t = std::time::Instant::now();
-        app.event_tx.send(HarnessEvent::Done { context, checkup_verdict: None }).unwrap();
+        app.event_tx
+            .send(HarnessEvent::Done {
+                context,
+                checkup_verdict: None,
+            })
+            .unwrap();
         app.poll_events();
         ft.drain_ms.push(t.elapsed().as_secs_f64() * 1000.0);
         let t2 = std::time::Instant::now();

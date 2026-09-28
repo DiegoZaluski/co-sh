@@ -1040,12 +1040,7 @@ pub fn render_edit(ctx: &mut ToolRenderCtx, part: &ToolPart) {
         // file headers already show the path. The box keeps one top padding
         // row above the body and one bottom padding row below it:
         // diff_rows + 2.
-        let area = Rect::new(
-            ctx.x,
-            ctx.y,
-            ctx.max_w.saturating_add(2),
-            diff_rows + 2,
-        );
+        let area = Rect::new(ctx.x, ctx.y, ctx.max_w.saturating_add(2), diff_rows + 2);
         *ctx.line_h = area.height;
 
         let mut border_box = BoxRenderable::new();
@@ -1072,12 +1067,7 @@ pub fn render_edit(ctx: &mut ToolRenderCtx, part: &ToolPart) {
         });
         border_box.render_self(ctx.buf, area);
 
-        let diff_area = Rect::new(
-            ctx.x + 2,
-            ctx.y + 1,
-            ctx.max_w.saturating_sub(2),
-            diff_rows,
-        );
+        let diff_area = Rect::new(ctx.x + 2, ctx.y + 1, ctx.max_w.saturating_sub(2), diff_rows);
         let mut diff = DiffRenderable::new(Some(diff_content.clone()));
         diff.set_show_line_numbers(true);
         diff.set_added_bg(ctx.theme.diff_added_bg);

@@ -134,8 +134,7 @@ impl App {
             });
             return false;
         }
-        self.state.right_panel =
-            crate::routes::session::right_panel::types::RightPanelState::new();
+        self.state.right_panel = crate::routes::session::right_panel::types::RightPanelState::new();
         self.rehydrate_right_panel();
         self.session_view.hovered_msg_idx = None;
         self.title_generated = true;

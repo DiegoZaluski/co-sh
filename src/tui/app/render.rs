@@ -117,8 +117,7 @@ impl App {
         let agent_spinner_live = self.state.status == crate::types::SessionStatus::Working
             && self.agent_spinner_bass.is_some();
         live = live || agent_spinner_live;
-        live = live
-            || (self.prompt_correction_active && !agent_spinner_live);
+        live = live || (self.prompt_correction_active && !agent_spinner_live);
         live = live || self.rag_spinner_active();
         live = live || has_active_spinner;
         // Free-gateway recommendation: its fake-streaming text advances per
@@ -474,12 +473,13 @@ impl App {
                         && summary.title_generated
                         && self.state.status == crate::types::SessionStatus::Idle
                     {
-                        self.toast_state.show_tooltip(crate::ui::toast::ToastOptions {
-                            title: None,
-                            message: summary.title.clone(),
-                            variant: crate::ui::toast::ToastVariant::Info,
-                            duration_ms: 3000,
-                        });
+                        self.toast_state
+                            .show_tooltip(crate::ui::toast::ToastOptions {
+                                title: None,
+                                message: summary.title.clone(),
+                                variant: crate::ui::toast::ToastVariant::Info,
+                                duration_ms: 3000,
+                            });
                     }
                 }
             }
@@ -991,10 +991,7 @@ impl App {
     /// renderer and the height/geometry helpers so mouse hit-testing always
     /// matches what is drawn. Truncation is display-width aware
     /// (`graphemes_with_width`), control characters stripped first.
-    pub(super) fn pending_queue_layout(
-        queues: &PendingQueues,
-        width: u16,
-    ) -> Vec<PendingQueueRow> {
+    pub(super) fn pending_queue_layout(queues: &PendingQueues, width: u16) -> Vec<PendingQueueRow> {
         let text_w = match Self::pending_cap_width(width) {
             // ┃ + 2 pad + text + gap + cap + ┃
             Some(cap_w) => width.saturating_sub(cap_w + 5),
@@ -1095,11 +1092,7 @@ impl App {
     /// queue 0 ("next agent loop", sent only when a fresh loop starts) reads
     /// CLOSURE — it closes out the current loop's run.
     fn queue_cap_label(queue_idx: usize) -> &'static str {
-        if queue_idx == 0 {
-            "CLOSURE"
-        } else {
-            "NEXT"
-        }
+        if queue_idx == 0 { "CLOSURE" } else { "NEXT" }
     }
 
     /// Paint the pre-computed pending-queue layout (see

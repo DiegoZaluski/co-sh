@@ -1055,7 +1055,10 @@ impl Harness {
     /// manager (the last thing the model said before the guard fired).
     fn review_guard_stop(&self, guard: &str) -> Option<String> {
         let checkup = self.checkup.as_ref()?;
-        let last_text = self.context_manager.last_assistant_text().unwrap_or_default();
+        let last_text = self
+            .context_manager
+            .last_assistant_text()
+            .unwrap_or_default();
         let verdict = checkup.review_termination(&last_text);
         use super::checkup::TerminationDecision;
         let label = match verdict.decision {
@@ -4650,7 +4653,8 @@ impl Harness {
                     {
                         for p in &allow_once_paths {
                             match allow_once_tool.as_str() {
-                                "fs_read" | "fs_write" | "fs_edit" | "fs_edit_lines" | "fs_ast_edit" | "fs_rollback" => {
+                                "fs_read" | "fs_write" | "fs_edit" | "fs_edit_lines"
+                                | "fs_ast_edit" | "fs_rollback" => {
                                     cosh.remove_fs_allowlist_path(p);
                                 }
                                 "find_glob" | "find_grep" => {
@@ -5025,7 +5029,8 @@ impl Harness {
         if let Some(cosh) = cosh_tools.as_mut() {
             for p in &paths {
                 match tool_name {
-                    "fs_read" | "fs_write" | "fs_edit" | "fs_edit_lines" | "fs_ast_edit" | "fs_rollback" => {
+                    "fs_read" | "fs_write" | "fs_edit" | "fs_edit_lines" | "fs_ast_edit"
+                    | "fs_rollback" => {
                         log::debug!("add_paths_to_allowlist fs allowed: {:?}", p);
                         cosh.add_fs_allowlist_path(p.clone());
                     }
@@ -5112,10 +5117,8 @@ impl Harness {
                 // decision is kept for the report side: the internal turn's
                 // final report gets the header ENFORCED in
                 // `run_internal_subagent`.
-                let is_review = cosh_tools::subagent::severity::is_review_task(
-                    &call_input,
-                    input.code_review,
-                );
+                let is_review =
+                    cosh_tools::subagent::severity::is_review_task(&call_input, input.code_review);
                 let call_input = cosh_tools::subagent::severity::with_severity_contract(
                     &call_input,
                     input.code_review,
@@ -5465,8 +5468,7 @@ impl Harness {
                             // would misreport it.
                             let report = if is_review && !report.trim().is_empty() {
                                 cosh_tools::subagent::severity::enforce_severity_header(
-                                    &report,
-                                    true,
+                                    &report, true,
                                 )
                             } else {
                                 report
