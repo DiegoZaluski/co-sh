@@ -66,6 +66,17 @@ impl App {
                 return Ok(false);
             }
 
+            // ESC clears a question-dialog copy selection BEFORE the loop
+            // interrupt and the dialog dispatch: the question dialog's own
+            // Esc is a semantic REJECT of the pending tool call (it dismisses
+            // the dialog and stops the agent loop), so a mere selection-clear
+            // must consume the key instead. A second Esc then reaches the
+            // dialog and keeps its reject meaning.
+            if key.code == KeyCode::Esc && self.question_dialog.has_selection() {
+                self.question_dialog.clear_selection();
+                return Ok(false);
+            }
+
             // ESC sovereign while an agent loop is running: with NO modal
             // box on screen, whatever incidental UI state is active (a
             // prompt/field text selection, the left panel focus, the slash
@@ -167,6 +178,16 @@ impl App {
                     let text = self.rag_view.selected_field_text();
                     selection::copy_selection(&text, &mut self.toast_state);
                     self.rag_view.clear_field_selection();
+                    return Ok(false);
+                }
+                // While the question dialog is open (it hides the prompt) a
+                // drag selection on its question text or answer fields copies
+                // through the same shared clipboard helper as every other
+                // copy path.
+                if matches!(self.mode(), AppMode::Session) && self.question_dialog.has_selection() {
+                    let text = self.question_dialog.selected_text();
+                    selection::copy_selection(&text, &mut self.toast_state);
+                    self.question_dialog.clear_selection();
                     return Ok(false);
                 }
                 // If there is text selected in the prompt, copy it instead of quitting.
