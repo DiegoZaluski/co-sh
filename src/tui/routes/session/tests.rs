@@ -5787,6 +5787,32 @@ fn edit_diff_unified_view_indents_line_numbers_inside_leaf() {
     // …with the gutter shifted exactly one column: number at x+3, sign at x+5.
     assert_eq!(glyph(3), "1", "line number starts one column in");
     assert_eq!(glyph(5), "-", "sign follows the padded gutter");
+
+    // The file headers read in the diff's own red/green — painted on the
+    // FONT (fg), never as a background. Row 1 is `--- a/foo`, row 2 is
+    // `+++ b/foo` (the body starts at y=1, after the top padding row). The
+    // header TEXT starts at x=7: leaf pad (2) + number (3) + space (4) +
+    // sign (5) + space (6) — the gutter itself keeps its own style.
+    let cell_fg = |x: u16, r: u16| buf.cell((x, r)).map(|c| c.fg);
+    let removed_fg = crate::theme::rgba_color(theme.diff_highlight_removed);
+    let added_fg = crate::theme::rgba_color(theme.diff_highlight_added);
+    assert_eq!(
+        cell_fg(7, 1),
+        Some(removed_fg),
+        "`---` file header text must use the removed sign color as its font color"
+    );
+    assert_eq!(
+        cell_fg(7, 2),
+        Some(added_fg),
+        "`+++` file header text must use the added sign color as its font color"
+    );
+    // The header background stays the context one — the color is font-only.
+    let bg_row1 = buf.cell((7, 1)).map(|c| c.bg);
+    let bg_row2 = buf.cell((7, 2)).map(|c| c.bg);
+    assert_eq!(
+        bg_row1, bg_row2,
+        "both file headers keep the same (context) background — only the font is colored"
+    );
 }
 
 /// Regression: in split view each leaf must indent its line-number gutter by

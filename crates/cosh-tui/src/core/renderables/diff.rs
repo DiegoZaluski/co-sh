@@ -506,6 +506,14 @@ impl DiffRenderable {
         );
 
         let content_style = Style::default().bg(default_bg);
+        // File headers (`--- a/` / `+++ b/`) read in the same red/green the
+        // sign characters use — painted on the FONT, background untouched —
+        // so they match the unified view's header coloring.
+        let content_style = match line {
+            Some(li) if matches!(li.line_type, DiffLineType::FileHeader) => content_style
+                .fg(rgba_color(self.file_header_fg(&li.content))),
+            _ => content_style,
+        };
         let ln_style = Style::default()
             .bg(default_bg)
             .fg(rgba_color(self.line_number_fg));
@@ -656,7 +664,21 @@ impl DiffRenderable {
         }
     }
 
-    fn line_styles(&self, lt: DiffLineType) -> (Style, Style, Style) {
+    /// Foreground for the `--- a/` / `+++ b/` file headers: the removed /
+    /// added sign colors, so the headers read in the same red/green the diff
+    /// lines use — painted on the FONT, never as a background. Anything else
+    /// (none today) keeps the hunk-header color.
+    fn file_header_fg(&self, content: &str) -> RGBA {
+        if content.starts_with("+++") {
+            self.added_sign_color
+        } else if content.starts_with("---") {
+            self.removed_sign_color
+        } else {
+            self.hunk_header_fg
+        }
+    }
+
+    fn line_styles(&self, lt: DiffLineType, content: &str) -> (Style, Style, Style) {
         // returns (sign_style, content_style, ln_style)
         match lt {
             DiffLineType::Add => {
@@ -691,7 +713,7 @@ impl DiffRenderable {
             }
             DiffLineType::FileHeader => {
                 let bg = rgba_color(self.context_bg);
-                let fg = rgba_color(self.hunk_header_fg);
+                let fg = rgba_color(self.file_header_fg(content));
                 (
                     Style::default().bg(bg).fg(fg),
                     Style::default().bg(bg).fg(fg),
@@ -812,7 +834,8 @@ impl DiffRenderable {
                 break;
             }
 
-            let (sign_style, content_style, ln_style) = self.line_styles(li.line_type);
+            let (sign_style, content_style, ln_style) =
+                self.line_styles(li.line_type, &li.content);
             let content_w = Self::content_part(&li.content, li.line_type);
             let line_num = match li.line_type {
                 DiffLineType::Add => li.new_ln,
