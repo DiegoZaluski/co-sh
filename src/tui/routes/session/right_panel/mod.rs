@@ -5,7 +5,7 @@ use cosh_tui::core::renderables::markdown::MarkdownRenderable;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 
 use crate::theme::{Theme, rgba_color};
 use crate::util::text_region::{TextRegion, text_from_cell_row};
@@ -272,10 +272,7 @@ fn build_header_buttons(
 /// own, like the mixed hint beside them — and the section that currently owns
 /// the panel (`selected`) has its LABEL painted white so the user can see at
 /// a glance which button is active; the resting labels share the dim band
-/// color with the delimiter between them. Between two consecutive section
-/// buttons the layout's spare column carries the faint
-/// [`types::HEADER_SECTION_SEPARATOR`] delimiter — a pure divider, never a
-/// button.
+/// color.
 ///
 /// The resting color is NOT the raw box background: as a 1-cell glyph on the
 /// panel background it would be invisible (#0E0E11 on #000000 in the default
@@ -291,31 +288,9 @@ fn draw_header_row(
     selected: Option<types::SectionKind>,
     theme: &Theme,
 ) {
-    for (i, button) in buttons.iter().enumerate() {
+    for button in buttons.iter() {
         match button.target {
             Some(kind) => {
-                // The delimiter between two consecutive section buttons
-                // rides in the MIDDLE of the three spare columns the layout
-                // leaves between them (`cx += w + 3`): one empty column away
-                // from each neighbor label. It is OUTSIDE both hit rects —
-                // the previous button ends at `x0 - 3` exclusive — so a
-                // click on it falls through to nothing. Painted in the dim
-                // band color derived from the boxes' background, a pure
-                // divider that never takes the selection color.
-                if i > 0
-                    && buttons[i - 1].target.is_some()
-                    && let Some(sep_x) = button.x0.checked_sub(2)
-                {
-                    let sep_style = Style::default().fg(rgba_color(header_band_color(theme)));
-                    draw_text(
-                        buf,
-                        types::HEADER_SECTION_SEPARATOR,
-                        sep_x,
-                        button.top,
-                        types::HEADER_SECTION_SEPARATOR.chars().count() as u16,
-                        sep_style,
-                    );
-                }
                 let label = types::HEADER_SECTION_LABELS
                     .iter()
                     .find(|(k, _)| *k == kind)
@@ -331,7 +306,9 @@ fn draw_header_row(
                 } else {
                     header_band_color(theme)
                 };
-                let style = Style::default().fg(rgba_color(fg));
+                let style = Style::default()
+                    .fg(rgba_color(fg))
+                    .add_modifier(Modifier::BOLD);
                 // The drawn text must match the hit rect exactly: the bare
                 // label — no leading space (the chip padding is gone with
                 // the background, and the spare columns now belong to the
@@ -344,7 +321,9 @@ fn draw_header_row(
             // "F4" hint keeps the dim band color — the resting look the
             // section buttons share — with no glyph and no background.
             None => {
-                let style = Style::default().fg(rgba_color(header_band_color(theme)));
+                let style = Style::default()
+                    .fg(rgba_color(header_band_color(theme)))
+                    .add_modifier(Modifier::BOLD);
                 draw_text(
                     buf,
                     types::HEADER_MIXED_HINT,
@@ -3748,87 +3727,6 @@ mod tests {
             state.section_layouts.iter().all(|l| l.top >= 1),
             "sections must start right below the header (their own TOP_GAP row is the margin)"
         );
-    }
-
-    /// Between two consecutive section buttons the header paints the faint
-    /// `·` delimiter in the dim band color (derived from the boxes' own
-    /// background) — a pure divider, CENTERED between the labels: one empty
-    /// column on each side. It rides in the middle spare column — a click on
-    /// it must fall through — and NEVER appears before the first section
-    /// button or before the mixed button.
-    #[test]
-    fn header_separator_sits_between_section_buttons_only() {
-        let theme = test_theme();
-        let mut state = full_panel_state();
-        let area = Rect::new(0, 0, 50, 30);
-        let mut buf = Buffer::empty(area);
-        render_right_panel(&mut buf, area, &mut state, &theme, 120);
-
-        let buttons = state.header_buttons().to_vec();
-        let section_buttons: Vec<_> = buttons
-            .iter()
-            .filter(|b| b.target.is_some())
-            .copied()
-            .collect();
-        assert!(section_buttons.len() >= 2, "three sections present");
-        let top = section_buttons[0].top;
-
-        // Every consecutive pair of section buttons carries the delimiter in
-        // the MIDDLE of the three spare columns between them, painted in the
-        // dim band color.
-        let sep_fg = rgba_color(header_band_color(&theme));
-        for pair in section_buttons.windows(2) {
-            let (prev, next) = (pair[0], pair[1]);
-            assert_eq!(
-                next.x0,
-                prev.x1 + 3,
-                "the layout leaves exactly three spare columns between buttons"
-            );
-            // The delimiter cell itself, one empty column on EACH side.
-            // (`next.x0` itself belongs to the NEXT button's hit rect and is
-            // legitimately clickable, so it is not probed here.)
-            for x in [next.x0 - 2, next.x0 - 1] {
-                let cell = buf.cell((x, top)).expect("separator cell");
-                if x == next.x0 - 2 {
-                    assert_eq!(cell.symbol(), types::HEADER_SECTION_SEPARATOR);
-                    assert_eq!(
-                        cell.fg, sep_fg,
-                        "the delimiter must be font-painted in the dim band color"
-                    );
-                    // The divider is NOT a button: a click on its column is
-                    // consumed by nothing.
-                    assert!(
-                        !state.header_click(x, top),
-                        "the separator column must not be clickable"
-                    );
-                } else {
-                    assert_ne!(
-                        cell.symbol(),
-                        types::HEADER_SECTION_SEPARATOR,
-                        "the delimiter must be centered: col {x} must stay empty"
-                    );
-                    assert!(
-                        !state.header_click(x, top),
-                        "the spare columns must not be clickable"
-                    );
-                }
-            }
-        }
-
-        // No delimiter before the FIRST section button or before the mixed
-        // button — it only separates consecutive section buttons.
-        let mixed = buttons
-            .iter()
-            .find(|b| b.target.is_none())
-            .expect("mixed button present");
-        for x in [section_buttons[0].x0 - 1, mixed.x0 - 1] {
-            let cell = buf.cell((x, top)).expect("edge cell");
-            assert_ne!(
-                cell.symbol(),
-                types::HEADER_SECTION_SEPARATOR,
-                "no delimiter before the first section button or the mixed button"
-            );
-        }
     }
 
     /// Clicking a section's header button maximizes it: that section becomes

@@ -918,14 +918,6 @@ pub const HEADER_SECTION_LABELS: [(SectionKind, &str); 3] = [
     (SectionKind::Todo, "TODO F3"),
 ];
 
-/// Delimiter painted between CONSECUTIVE section buttons of the header row
-/// (`Subagent F1 · Bash F2 · TODO F3`) — a pure separator: it sits in the
-/// spare column the layout already leaves between two buttons, is never part
-/// of any button's hit rect, and never takes the selection color. Painted in
-/// the boxes' own background color (the same fill bash, subagent and the
-/// TODO panel use) applied to the FONT, so it reads as a faint divider.
-pub const HEADER_SECTION_SEPARATOR: &str = "·";
-
 /// One clickable region of the right panel's header row. `target: None` is
 /// the hint-only mixed button (back to the tiled multi-section view);
 /// `Some(kind)` maximizes that section over the whole panel. The mixed
