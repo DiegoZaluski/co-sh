@@ -64,6 +64,14 @@ path = "src/bin/cosh_uninstall.rs"
 name = "highlight-demo"
 path = "src/bin/highlight_demo.rs"
 
+# The decision daemon, gated on the same feature as the ONNX runtime: the
+# daemon exists only when the model does, and without `onnx` the binary is
+# never built at all.
+[[bin]]
+name = "cosh-decisiond"
+path = "src/daemon/decision/main.rs"
+required-features = ["onnx"]
+
 # ---
 [dependencies]
 serde_json = "1.0"
@@ -80,6 +88,9 @@ rayon = "1"
 # crates/cosh-tools, crates/cosh-recall): error enums, header maps, URL
 # parsing for the MCP client. Not new crates, just newly direct.
 thiserror = "2"
+# The activation lock (`flock`) that serializes daemon bind races — see
+# `daemon::activation`. Same crate/version cosh-tools already carries.
+libc = "0.2"
 http = "1"
 url = "2"
 # GitHub release check for the home update banner (same crate/version the

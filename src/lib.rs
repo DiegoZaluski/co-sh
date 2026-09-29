@@ -1,3 +1,4 @@
+pub mod daemon;
 pub mod harness;
 pub mod mcp;
 pub mod telemetry;

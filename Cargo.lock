@@ -1493,6 +1493,7 @@ dependencies = [
  "getrandom 0.3.4",
  "http",
  "keyring",
+ "libc",
  "log",
  "lru",
  "notify-rust",

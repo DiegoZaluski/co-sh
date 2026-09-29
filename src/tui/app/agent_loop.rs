@@ -513,45 +513,50 @@ impl App {
                         .with_mcp_config(mcp_config);
 
                     // The decision-model audit seam (`harness::checkup`),
-                    // attached with the PROCESS-WIDE resident model: the
-                    // first turn loads it, later turns share the same `Arc`
-                    // (the harness is assembled per turn; the model's
-                    // lifetime is not). Load failure fails open — the loop
-                    // runs unaudited, exactly as without the feature. The
+                    // attached over the SHARED decision daemon: the model
+                    // (graph + ORT session) is resident in one daemon
+                    // process every cosh instance talks to, instead of one
+                    // per-process resident per open app. The daemon loads
+                    // the model on the first decide (with its own retry
+                    // window), so assembly never blocks on a load; any
+                    // daemon failure is a per-review fail-open, and the
+                    // loop behaves exactly as without the model. The
                     // harness never chooses which model to load; a future
-                    // consumer of the engine receives the same resident.
+                    // consumer of the engine passes its own kind the same
+                    // way.
                     #[cfg(feature = "onnx")]
                     if checkup_config.termination.enabled {
-                        let kind = match &checkup_config.model {
-                            crate::util::setup::CheckupModel::English => {
-                                cosh_onnx::ModelKind::English
-                            }
-                            crate::util::setup::CheckupModel::Multilingual => {
-                                cosh_onnx::ModelKind::Multilingual
-                            }
-                            crate::util::setup::CheckupModel::TypedDecisions => {
-                                cosh_onnx::ModelKind::TypedDecisions
-                            }
-                            crate::util::setup::CheckupModel::Custom { repo, subfolder } => {
-                                cosh_onnx::ModelKind::Custom {
-                                    repo: repo.clone(),
-                                    subfolder: subfolder.clone(),
-                                }
-                            }
-                        };
+                        use cosh::daemon::decision::{IpcCheckup, Kind};
                         use cosh::harness::events::{HarnessEvent, ToastVariant};
-                        match cosh::harness::checkup::OnnxCheckup::load(kind) {
-                            Some(checkup) => {
+
+                        // The setup kind converts to the wire kind by
+                        // serde alone — both schemas are tagged by `kind`
+                        // in snake case, so there is no translation map to
+                        // keep in sync.
+                        let wire_kind: Option<Kind> = serde_json::to_value(&checkup_config.model)
+                            .ok()
+                            .and_then(|v| serde_json::from_value(v).ok());
+                        match wire_kind {
+                            // Assembly never loads anything: the daemon
+                            // loads the model on the first decide,
+                            // throttled by its own retry window. A broken
+                            // setup surfaces as per-review fail-opens, not
+                            // as a missing checkup.
+                            Some(kind) => {
+                                let checkup = IpcCheckup::new(kind);
                                 harness = harness
                                     .with_checkup(std::sync::Arc::new(checkup))
                                     .with_checkup_min_confidence(
                                         checkup_config.termination.min_confidence,
                                     );
                             }
+                            // Invalid config is a broken SETUP, not a turn
+                            // failure: toast and assemble WITHOUT the
+                            // audit (fail-open) — never abort the turn.
                             None => {
                                 let _ = event_tx.send(HarnessEvent::Toast {
-                                    message: "Termination checkup enabled but the model \
-                                              failed to load; the audit is disabled."
+                                    message: "Termination checkup enabled but the model config \
+                                              is invalid; the audit is disabled."
                                         .to_string(),
                                     variant: ToastVariant::Warning,
                                 });
