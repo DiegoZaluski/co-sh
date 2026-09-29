@@ -258,7 +258,7 @@ fn compaction_line(part: &CompactionPart, now: u64) -> String {
         .unwrap_or_else(|| now.saturating_sub(part.started_at));
     // Millisecond precision — the second counter flips visibly.
     let secs = elapsed as f64 / 1000.0;
-    format!("llm compaction · {secs:.3}s")
+    format!("llm compaction · {secs:.3}")
 }
 
 /// Max body lines of the COLLAPSED "Summarizing" box. When the streamed
@@ -1029,10 +1029,10 @@ impl SessionView {
             bottom_left: ' ',
             bottom_right: ' ',
             horizontal: ' ',
-            vertical: '┃',
+            vertical: ' ',
             top_t: ' ',
             bottom_t: ' ',
-            left_t: '┃',
+            left_t: ' ',
             right_t: ' ',
             cross: ' ',
         });
@@ -1042,10 +1042,13 @@ impl SessionView {
         // 1 blank row of padding above the title (the bottom pad is the last
         // row of the box); matches SUMMARIZING_PAD_V in summarizing_height.
         let title_y = y + SUMMARIZING_PAD_V;
-        // `+`/`-` match the adjacent Thought block's expand/collapse affordance.
-        let mut title = if expanded { "- " } else { "+ " }.to_string();
-        title.push_str(&format!("Summarizing · {secs:.3}s"));
-        let title_style = Style::default().fg(rgba_color(theme.secondary));
+        // Keep the expanded-state collapse affordance without a marker on the
+        // collapsed title.
+        let mut title = if expanded { "- " } else { "" }.to_string();
+        title.push_str(&format!("Summarizing · {secs:.3}"));
+        let title_style = Style::default()
+            .fg(rgba_color(theme.text_muted))
+            .add_modifier(Modifier::ITALIC);
         draw_text_line(
             buf,
             &title,
@@ -3732,7 +3735,7 @@ impl SessionView {
                                     // on screen — never raw md syntax.
                                     let expanded = self.tool_state.is_expanded(&summarizing_id(c));
                                     let mut cy = content_offset;
-                                    let mut title = if expanded { "- " } else { "+ " }.to_string();
+                                    let mut title = if expanded { "- " } else { "" }.to_string();
                                     title.push_str("Summarizing");
                                     if p_top >= vp_top {
                                         text_regions.push(TextRegion::one_row(

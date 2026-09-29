@@ -2161,7 +2161,7 @@ fn compaction_line_formatting() {
         elapsed_ms: Some(2_340),
         text: String::new(),
     };
-    assert_eq!(compaction_line(&llm, 0), "llm compaction · 2.340s");
+    assert_eq!(compaction_line(&llm, 0), "llm compaction · 2.340");
     let llm_running = CompactionPart {
         phase: CompactionPhase::Llm,
         started_at: 10_000,
@@ -2170,12 +2170,12 @@ fn compaction_line_formatting() {
     };
     assert_eq!(
         compaction_line(&llm_running, 11_500),
-        "llm compaction · 1.500s"
+        "llm compaction · 1.500"
     );
-    // Millisecond precision: one tick later the same line shows 1.501s.
+    // Millisecond precision: one tick later the same line shows 1.501.
     assert_eq!(
         compaction_line(&llm_running, 11_501),
-        "llm compaction · 1.501s"
+        "llm compaction · 1.501"
     );
 }
 
@@ -2401,15 +2401,29 @@ fn test_summarizing_box_collapsed_tail_and_expand() {
         title_row > 0,
         "the Summarizing title has 1 row of padding above it"
     );
-    // The padding row must be blank except for the box's left border (┃).
+    let title_x = (0..area.width)
+        .find(|&x| {
+            buf.cell((x, title_row))
+                .is_some_and(|cell| cell.symbol() == "S")
+        })
+        .expect("Summarizing title text");
+    let title_cell = buf.cell((title_x, title_row)).expect("title cell");
+    assert_eq!(title_cell.fg, crate::theme::rgba_color(theme.text_muted));
+    assert!(
+        title_cell
+            .modifier
+            .contains(ratatui::style::Modifier::ITALIC)
+    );
+
+    // The padding row must remain blank without a vertical border glyph.
     let above_glyphs: Vec<char> = (0..area.width)
         .filter_map(|cx| buf.cell((cx, title_row - 1)))
         .filter_map(|c| c.symbol().chars().next())
         .filter(|&ch| ch != ' ')
         .collect();
     assert!(
-        above_glyphs.iter().all(|&c| c == '┃'),
-        "the row above the title is blank top padding (only the border)"
+        above_glyphs.is_empty(),
+        "the row above the title must be blank"
     );
 
     // 1 row of bottom padding below the last content row (the "Click to
@@ -2429,8 +2443,8 @@ fn test_summarizing_box_collapsed_tail_and_expand() {
         .filter(|&ch| ch != ' ')
         .collect();
     assert!(
-        below_glyphs.iter().all(|&c| c == '┃'),
-        "the row below the hint is blank bottom padding (only the border)"
+        below_glyphs.is_empty(),
+        "the row below the hint must be blank"
     );
 
     // A long line must WRAP DOWN inside the box — the whole 200-char run
