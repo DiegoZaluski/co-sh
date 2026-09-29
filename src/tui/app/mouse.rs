@@ -65,6 +65,32 @@ impl App {
             }
         };
 
+        let mouse = MouseEvent::new(event_type, button, x, y, modifiers);
+
+        // The slash menu owns its visible rows for hover, click, and wheel
+        // input. Route it before the generic session selection/scroll logic so
+        // those events cannot leak through to the transcript or prompt.
+        if self.slash_menu.visible
+            && !self.dialog.visible()
+            && matches!(self.mode(), AppMode::Session)
+            && let Some(prompt_area) = self.compute_prompt_area()
+        {
+            match self
+                .slash_menu
+                .handle_mouse(&mouse, prompt_area, &self.theme)
+            {
+                crate::ui::slash_menu::SlashMenuMouseAction::Execute => {
+                    self.prompt_view.note_activity();
+                    if let Some(cmd) = self.slash_menu.get_selected_command().cloned() {
+                        self.run_slash_command(&cmd);
+                    }
+                    return Ok(true);
+                }
+                crate::ui::slash_menu::SlashMenuMouseAction::Consumed => return Ok(true),
+                crate::ui::slash_menu::SlashMenuMouseAction::None => {}
+            }
+        }
+
         // Selection / drag tracking
         // We must handle Down and Drag events for the prompt area INSIDE this match
         // because they return early below and never reach the component dispatch section.
@@ -804,8 +830,6 @@ impl App {
             return Ok(true);
         }
 
-        let mouse = MouseEvent::new(event_type, button, x, y, modifiers);
-
         // Header back button — invoke the same Esc pipeline used by the
         // keyboard so every route keeps its existing return/close behavior.
         // Handle on release so one click cannot execute Esc twice (Down + Up).
@@ -1002,55 +1026,6 @@ impl App {
                     return Ok(true);
                 }
                 DialogAction::None => {}
-            }
-        }
-
-        // Slash menu. Modal dialogs own every click while visible (the dialog
-        // block above handles and returns on every hit), so the menu only
-        // handles clicks when no dialog is open — it can never steal a click
-        // from a modal (e.g. "Yes" on the quit confirm).
-        if self.slash_menu.visible
-            && !self.dialog.visible()
-            && matches!(self.mode(), AppMode::Session)
-        {
-            let is_session = matches!(self.mode(), AppMode::Session);
-            let area = self.terminal_size();
-            let sidebar_w = if self.sidebar.open && area.width >= MIN_WIDTH_FOR_LEFT_PANEL {
-                self.left_panel_width()
-            } else {
-                0
-            };
-            let main_area = Rect::new(
-                area.x + sidebar_w,
-                area.y,
-                area.width.saturating_sub(sidebar_w),
-                area.height,
-            );
-            let footer_y = main_area.bottom().saturating_sub(1);
-            let prompt_budget = footer_y
-                .saturating_sub(area.y + 1)
-                .saturating_sub(MIN_PROMPT_RESERVE_ROWS);
-            let prompt_h = if is_session {
-                self.prompt_view
-                    .required_height(main_area.width.saturating_sub(4), prompt_budget)
-            } else {
-                0
-            };
-            let prompt_area = Rect::new(
-                main_area.x + 2,
-                footer_y.saturating_sub(prompt_h),
-                main_area.width.saturating_sub(4),
-                prompt_h,
-            );
-            if self
-                .slash_menu
-                .handle_mouse(&mouse, prompt_area, &self.theme)
-            {
-                self.prompt_view.note_activity();
-                if let Some(cmd) = self.slash_menu.get_selected_command().cloned() {
-                    self.run_slash_command(&cmd);
-                }
-                return Ok(true);
             }
         }
 

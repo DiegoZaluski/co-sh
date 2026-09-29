@@ -1,5 +1,5 @@
 use cosh_tui::core::lib::rgba::RGBA;
-use cosh_tui::core::types::MouseEvent;
+use cosh_tui::core::types::{MouseButton, MouseEvent, MouseEventType};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
@@ -56,6 +56,13 @@ fn selected_foreground_color(bg: RGBA, fallback: RGBA) -> Color {
 pub struct SlashCommand {
     pub name: String,
     pub desc: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlashMenuMouseAction {
+    None,
+    Consumed,
+    Execute,
 }
 
 /// OpenCode-faithful slash ("/") autocomplete menu.
@@ -205,11 +212,16 @@ impl SlashMenu {
         (start, len)
     }
 
-    /// Handle a mouse click on the slash menu. Returns true if the click selected a command.
+    /// Handle mouse input using the same selected index as keyboard navigation.
     /// `prompt_area` is the same area passed to `render()`.
-    pub fn handle_mouse(&mut self, mouse: &MouseEvent, prompt_area: Rect, _theme: &Theme) -> bool {
+    pub fn handle_mouse(
+        &mut self,
+        mouse: &MouseEvent,
+        prompt_area: Rect,
+        _theme: &Theme,
+    ) -> SlashMenuMouseAction {
         if !self.visible {
-            return false;
+            return SlashMenuMouseAction::None;
         }
         let idxs = self.filtered_indices();
         let (start, visible_rows) = self.visible_window(&idxs);
@@ -222,20 +234,40 @@ impl SlashMenu {
         let x = mouse.x;
         let y = mouse.y;
 
-        // Check if click is within menu bounds
+        // Check if the pointer is within the menu bounds.
         if x < prompt_area.x || x >= prompt_area.x + menu_width {
-            return false;
+            return SlashMenuMouseAction::None;
         }
         if y < menu_y_start || y >= menu_y_start + max_rows as u16 {
-            return false;
+            return SlashMenuMouseAction::None;
         }
 
         let row = (y - menu_y_start) as usize;
-        if row < visible_rows {
+        if !matches!(
+            mouse.event_type,
+            MouseEventType::ScrollUp | MouseEventType::ScrollDown
+        ) && row < visible_rows
+        {
             self.selected = idxs[start + row];
         }
 
-        true
+        match mouse.event_type {
+            MouseEventType::ScrollUp => {
+                self.select_prev();
+                SlashMenuMouseAction::Consumed
+            }
+            MouseEventType::ScrollDown => {
+                self.select_next();
+                SlashMenuMouseAction::Consumed
+            }
+            MouseEventType::Move | MouseEventType::Drag | MouseEventType::Down => {
+                SlashMenuMouseAction::Consumed
+            }
+            MouseEventType::Up if mouse.button == MouseButton::Left && !idxs.is_empty() => {
+                SlashMenuMouseAction::Execute
+            }
+            MouseEventType::Up => SlashMenuMouseAction::Consumed,
+        }
     }
 
     /// Render autocomplete menu inline above prompt (like `OpenCode`).
@@ -341,5 +373,67 @@ impl SlashMenu {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::theme::ThemeRegistry;
+
+    fn mouse(event_type: MouseEventType, x: u16, y: u16) -> MouseEvent {
+        MouseEvent::new(
+            event_type,
+            MouseButton::Left,
+            x,
+            y,
+            cosh_tui::core::types::MouseModifiers::none(),
+        )
+    }
+
+    #[test]
+    fn hover_moves_the_shared_selection() {
+        let mut menu = SlashMenu::new();
+        menu.update("/");
+        let prompt_area = Rect::new(10, 10, 40, 4);
+        let theme = ThemeRegistry::new().default_theme().clone();
+
+        let action = menu.handle_mouse(&mouse(MouseEventType::Move, 20, 6), prompt_area, &theme);
+
+        assert_eq!(action, SlashMenuMouseAction::Consumed);
+        assert_eq!(menu.selected, 2);
+    }
+
+    #[test]
+    fn wheel_navigation_uses_the_keyboard_selection_state() {
+        let mut menu = SlashMenu::new();
+        menu.update("/");
+        let prompt_area = Rect::new(10, 10, 40, 4);
+        let theme = ThemeRegistry::new().default_theme().clone();
+
+        let down = menu.handle_mouse(
+            &mouse(MouseEventType::ScrollDown, 20, 6),
+            prompt_area,
+            &theme,
+        );
+        assert_eq!(down, SlashMenuMouseAction::Consumed);
+        assert_eq!(menu.selected, 1);
+
+        let up = menu.handle_mouse(&mouse(MouseEventType::ScrollUp, 20, 6), prompt_area, &theme);
+        assert_eq!(up, SlashMenuMouseAction::Consumed);
+        assert_eq!(menu.selected, 0);
+    }
+
+    #[test]
+    fn click_on_an_option_executes_the_hovered_selection() {
+        let mut menu = SlashMenu::new();
+        menu.update("/");
+        let prompt_area = Rect::new(10, 10, 40, 4);
+        let theme = ThemeRegistry::new().default_theme().clone();
+
+        let action = menu.handle_mouse(&mouse(MouseEventType::Up, 20, 7), prompt_area, &theme);
+
+        assert_eq!(action, SlashMenuMouseAction::Execute);
+        assert_eq!(menu.selected, 3);
     }
 }
