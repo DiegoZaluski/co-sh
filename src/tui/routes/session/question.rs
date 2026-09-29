@@ -15,6 +15,7 @@ use cosh_tui::core::types::MouseEvent;
 use super::super::super::component::cursor::{Cursor, CursorState};
 use super::super::super::theme::Theme;
 use crate::theme::rgba_color;
+use crate::util::edit_history::{EditHistory, EditKind, RedoOutcome, UndoOutcome};
 use crate::util::field_selection::DragSelection;
 
 fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
@@ -81,9 +82,21 @@ struct LineEdit {
     text: String,
     /// Cursor position in chars (always on a char boundary).
     cursor: usize,
+    /// Edit history (Ctrl+Z / Ctrl+Y / Ctrl+C clear) shared with the chat
+    /// prompt — the same `util::edit_history` kernel, fed through
+    /// `record_text` (this field has no compressed-paste mappings).
+    history: EditHistory,
 }
 
 impl LineEdit {
+    fn new() -> Self {
+        Self {
+            text: String::new(),
+            cursor: 0,
+            history: EditHistory::new(),
+        }
+    }
+
     fn value(&self) -> &str {
         &self.text
     }
@@ -92,11 +105,25 @@ impl LineEdit {
         self.text.is_empty()
     }
 
+    /// Record the current (post-mutation) state into the edit history.
+    ///
+    /// `cursor` here is a CHAR index, while the kernel's snapshots carry
+    /// BYTE-offset cursors: the kernel only uses it for the caret delta
+    /// (a per-keystroke ±1 signature), so the unit mismatch never changes
+    /// which side of the coalescing gate an edit lands on. Keep every
+    /// `EditKind::Delete` recorded here at most one char wide — a wider
+    /// delete must go through `delete_char_range`/`clear_all` paths.
+    fn record(&mut self, kind: EditKind) {
+        self.history
+            .record_text(self.text.clone(), self.cursor, kind);
+    }
+
     /// Insert `ch` at the cursor and advance it.
     fn insert_char(&mut self, ch: char) {
         let byte = Self::char_to_byte(&self.text, self.cursor.min(self.text.chars().count()));
         self.text.insert(byte, ch);
         self.cursor += 1;
+        self.record(EditKind::Type);
     }
 
     /// Delete the character before the cursor (Backspace).
@@ -105,6 +132,7 @@ impl LineEdit {
             let byte = Self::char_to_byte(&self.text, self.cursor - 1);
             self.text.remove(byte);
             self.cursor -= 1;
+            self.record(EditKind::Delete);
         }
     }
 
@@ -113,6 +141,7 @@ impl LineEdit {
         if self.cursor < self.text.chars().count() {
             let byte = Self::char_to_byte(&self.text, self.cursor);
             self.text.remove(byte);
+            self.record(EditKind::Delete);
         }
     }
 
@@ -159,14 +188,55 @@ impl LineEdit {
         if start < byte {
             self.text.drain(start..byte);
             self.cursor = Self::byte_to_char(&self.text, start);
+            self.record(EditKind::Delete);
         }
     }
 
-    /// Insert pre-filtered (single-line) text at the cursor — bracketed paste.
+    /// Insert pre-filtered (single-line) text at the cursor — bracketed
+    /// paste. Recorded as one atomic Paste step: a single Ctrl+Z removes
+    /// the whole paste, matching the chat prompt.
     fn insert_str(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
         let byte = Self::char_to_byte(&self.text, self.cursor);
         self.text.insert_str(byte, text);
         self.cursor += text.chars().count();
+        self.record(EditKind::Paste);
+    }
+
+    /// Ctrl+C on this field: wipe the content. Recorded as one atomic
+    /// Replace step, so a single Ctrl+Z brings the wiped draft back
+    /// exactly (same readline-style clear as the chat prompt).
+    fn clear_all(&mut self) {
+        if self.text.is_empty() && self.cursor == 0 {
+            return;
+        }
+        self.text.clear();
+        self.cursor = 0;
+        self.record(EditKind::Replace);
+    }
+
+    /// Ctrl+Z: step back one edit-history step and apply the restored
+    /// snapshot (text + cursor).
+    fn undo(&mut self) -> UndoOutcome {
+        let outcome = self.history.undo();
+        self.apply_snapshot();
+        outcome
+    }
+
+    /// Ctrl+Y: step forward again and apply the restored snapshot.
+    fn redo(&mut self) -> RedoOutcome {
+        let outcome = self.history.redo();
+        self.apply_snapshot();
+        outcome
+    }
+
+    /// Copy the history's mirrored state back into the live field.
+    fn apply_snapshot(&mut self) {
+        let (text, cursor, _) = self.history.snapshot();
+        self.text = text.to_string();
+        self.cursor = cursor.min(self.text.chars().count());
     }
 
     /// Place the cursor from a click at column `x` over the input line whose
@@ -245,8 +315,8 @@ impl QuestionState {
         Self {
             single_selection: None,
             multi_selection: Vec::new(),
-            text: LineEdit::default(),
-            custom: LineEdit::default(),
+            text: LineEdit::new(),
+            custom: LineEdit::new(),
             answered: false,
         }
     }
@@ -460,12 +530,12 @@ impl QuestionDialog {
             SelectionRegion::TextAnswer { tab } => self
                 .state
                 .get(tab)
-                .and_then(|s| Self::slice_char_range(&sel, s.text.value()))
+                .and_then(|s| sel.slice_char_range_of(sel.field(), s.text.value()))
                 .unwrap_or_default(),
             SelectionRegion::CustomAnswer { tab } => self
                 .state
                 .get(tab)
-                .and_then(|s| Self::slice_char_range(&sel, s.custom.value()))
+                .and_then(|s| sel.slice_char_range_of(sel.field(), s.custom.value()))
                 .unwrap_or_default(),
         }
     }
@@ -483,15 +553,6 @@ impl QuestionDialog {
             rows.extend(Self::wrap_flush(purpose, "(", ")", width));
         }
         rows
-    }
-
-    /// Slice `text` by the selection's CHAR range, `None` when the selection
-    /// belongs to another region or covers nothing. The shared kernel stores
-    /// plain offsets; this surface addresses chars, so the slice is taken
-    /// char-wise here.
-    fn slice_char_range(sel: &DragSelection<SelectionRegion>, text: &str) -> Option<String> {
-        let (s, e) = sel.range_for(sel.field(), text.chars().count())?;
-        Some(text.chars().skip(s).take(e - s).collect())
     }
 
     /// The selection as a CHAR range over the Text answer's draft, when it
@@ -771,6 +832,36 @@ impl QuestionDialog {
         self.cursor.note_activity();
     }
 
+    /// Ctrl+C on the Text answer: wipe the whole field (readline-style
+    /// kill). Recorded as ONE atomic Replace step, so a single Ctrl+Z
+    /// brings the draft back exactly — same contract as the chat prompt.
+    fn text_clear_field(&mut self) {
+        self.clear_selection();
+        if let Some(s) = self.state.get_mut(self.current_tab) {
+            s.text.clear_all();
+        }
+        self.cursor.note_activity();
+    }
+
+    /// Ctrl+Z on the Text answer: step back one edit-history step (the
+    /// shared kernel, same coalescing as the chat prompt).
+    fn text_undo(&mut self) {
+        self.clear_selection();
+        if let Some(s) = self.state.get_mut(self.current_tab) {
+            let _ = s.text.undo();
+        }
+        self.cursor.note_activity();
+    }
+
+    /// Ctrl+Y on the Text answer: reapply the most recently undone edit.
+    fn text_redo(&mut self) {
+        self.clear_selection();
+        if let Some(s) = self.state.get_mut(self.current_tab) {
+            let _ = s.text.redo();
+        }
+        self.cursor.note_activity();
+    }
+
     /// Whether the custom-answer input for the current tab is focused: a
     /// `SingleChoice` tab with the virtual custom row highlighted.
     fn is_custom_focused(&self) -> bool {
@@ -879,6 +970,68 @@ impl QuestionDialog {
         self.cursor.note_activity();
     }
 
+    /// Ctrl+C on the custom draft: wipe the whole field (readline-style
+    /// kill). One atomic Replace step — a single Ctrl+Z restores it.
+    fn custom_clear_field(&mut self) {
+        self.clear_selection();
+        if let Some(s) = self.state.get_mut(self.current_tab) {
+            s.custom.clear_all();
+        }
+        self.cursor.note_activity();
+    }
+
+    /// Ctrl+Z on the custom draft: step back one edit-history step.
+    fn custom_undo(&mut self) {
+        self.clear_selection();
+        if let Some(s) = self.state.get_mut(self.current_tab) {
+            let _ = s.custom.undo();
+        }
+        self.cursor.note_activity();
+    }
+
+    /// Ctrl+Y on the custom draft: reapply the most recently undone edit.
+    fn custom_redo(&mut self) {
+        self.clear_selection();
+        if let Some(s) = self.state.get_mut(self.current_tab) {
+            let _ = s.custom.redo();
+        }
+        self.cursor.note_activity();
+    }
+
+    /// Ctrl+C from the App gate: wipe the focused answer field (Text input
+    /// or custom draft). Returns whether anything was cleared — the gate
+    /// consumes the key either way while the dialog owns the keyboard (Esc
+    /// is the dialog's dismissal; the quit-confirm stays out of reach).
+    pub fn clear_focused_field(&mut self) -> bool {
+        if !self.visible {
+            return false;
+        }
+        // Mirror the clear branch below so "was empty" is read from the
+        // exact field about to be wiped.
+        let was_empty = if self.is_custom_focused() {
+            self.state
+                .get(self.current_tab)
+                .is_none_or(|s| s.custom.is_empty())
+        } else if self
+            .questions
+            .get(self.current_tab)
+            .is_some_and(|q| q.question_type == QuestionType::Text)
+        {
+            self.state
+                .get(self.current_tab)
+                .is_none_or(|s| s.text.is_empty())
+        } else {
+            // Confirm tab / option rows: nothing to clear.
+            return false;
+        };
+        if self.is_custom_focused() {
+            self.custom_clear_field();
+        } else {
+            self.text_clear_field();
+        }
+        !was_empty
+    }
+
     /// Paste text into the current Text question's answer at the cursor
     /// (bracketed paste from the terminal, like the chat prompt). Also serves
     /// the SingleChoice custom-answer input when its virtual row is focused.
@@ -981,6 +1134,21 @@ impl QuestionDialog {
                     self.text_delete_word_before_cursor();
                     return true;
                 }
+                // Ctrl+C wipes the field (readline kill), Ctrl+Z / Ctrl+Y
+                // step the shared edit-history kernel back/forward — the
+                // same triple the chat prompt answers.
+                KeyCode::Char('c') if ctrl => {
+                    self.text_clear_field();
+                    return true;
+                }
+                KeyCode::Char('z') if ctrl => {
+                    self.text_undo();
+                    return true;
+                }
+                KeyCode::Char('y') if ctrl => {
+                    self.text_redo();
+                    return true;
+                }
                 KeyCode::Char(_) if ctrl => {
                     return true;
                 }
@@ -1064,6 +1232,20 @@ impl QuestionDialog {
                 }
                 KeyCode::Char('w') if ctrl => {
                     self.custom_delete_word_before_cursor();
+                    return true;
+                }
+                // Same triple as the Text arm and the chat prompt: Ctrl+C
+                // wipes, Ctrl+Z undoes, Ctrl+Y redoes.
+                KeyCode::Char('c') if ctrl => {
+                    self.custom_clear_field();
+                    return true;
+                }
+                KeyCode::Char('z') if ctrl => {
+                    self.custom_undo();
+                    return true;
+                }
+                KeyCode::Char('y') if ctrl => {
+                    self.custom_redo();
                     return true;
                 }
                 KeyCode::Char(_) if ctrl => {
@@ -4142,5 +4324,124 @@ mod tests {
         // SingleChoice answer only materialises on Enter).
         assert_eq!(d.state[0].custom.value(), "custom ");
         assert_eq!(d.build_answers()[0].selected, None);
+    }
+
+    fn ctrl(code: KeyCode) -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::CONTROL)
+    }
+
+    /// Ctrl+C wipes the field, Ctrl+Z undoes one step, Ctrl+Y redoes — the
+    /// same triple the chat prompt answers, on the Text answer field. The
+    /// wipe is one atomic step: a single Ctrl+Z restores the whole draft.
+    #[test]
+    fn text_answer_clear_undo_redo() {
+        let mut d = QuestionDialog::new();
+        d.show_questions(vec![question("t1", QuestionType::Text, None)]);
+        for ch in "hello".chars() {
+            d.handle_key(KeyCode::Char(ch));
+        }
+        assert_eq!(d.state[0].text.value(), "hello");
+
+        d.handle_key_event(ctrl(KeyCode::Char('c')));
+        assert_eq!(d.state[0].text.value(), "");
+
+        // The wipe is one atomic Replace step: a single Ctrl+Z restores
+        // the whole draft.
+        d.handle_key_event(ctrl(KeyCode::Char('z')));
+        assert_eq!(d.state[0].text.value(), "hello");
+
+        // Redo walks forward through the cleared state (the clear is one
+        // edit in the history, so it is redone exactly once)...
+        d.handle_key_event(ctrl(KeyCode::Char('y')));
+        assert_eq!(d.state[0].text.value(), "");
+        // ...and undo brings the draft back again: the cycle is symmetric.
+        d.handle_key_event(ctrl(KeyCode::Char('z')));
+        assert_eq!(d.state[0].text.value(), "hello");
+    }
+
+    /// Continuous typing coalesces: the burst `abc`, the typo-fix
+    /// backspace and the retyped `d` all happen within the coalescing
+    /// window, so they are ONE undo step back to the pre-session state —
+    /// matching the chat prompt.
+    #[test]
+    fn text_answer_typing_flow_coalesces_into_one_step() {
+        let mut d = QuestionDialog::new();
+        d.show_questions(vec![question("t1", QuestionType::Text, None)]);
+        for ch in "abc".chars() {
+            d.handle_key(KeyCode::Char(ch));
+        }
+        d.handle_key(KeyCode::Backspace);
+        assert_eq!(d.state[0].text.value(), "ab");
+        d.handle_key(KeyCode::Char('d'));
+        assert_eq!(d.state[0].text.value(), "abd");
+
+        // One Ctrl+Z undoes the whole typing flow (kind switches do NOT
+        // break the session — users fix typos mid-flow)...
+        d.handle_key_event(ctrl(KeyCode::Char('z')));
+        assert_eq!(d.state[0].text.value(), "");
+        // ...and there is nothing before the draft.
+        d.handle_key_event(ctrl(KeyCode::Char('z')));
+        assert_eq!(d.state[0].text.value(), "", "nothing before the draft");
+    }
+
+    /// A bracketed paste is one atomic Paste step: a single Ctrl+Z removes
+    /// the whole paste (chat prompt contract), then Ctrl+Y brings it back.
+    #[test]
+    fn text_answer_paste_is_one_undo_step() {
+        let mut d = QuestionDialog::new();
+        d.show_questions(vec![question("t1", QuestionType::Text, None)]);
+        d.handle_key(KeyCode::Char('x'));
+        d.handle_paste("pasted text");
+        assert_eq!(d.state[0].text.value(), "xpasted text");
+
+        d.handle_key_event(ctrl(KeyCode::Char('z')));
+        assert_eq!(d.state[0].text.value(), "x", "whole paste undone at once");
+        d.handle_key_event(ctrl(KeyCode::Char('y')));
+        assert_eq!(d.state[0].text.value(), "xpasted text");
+    }
+
+    /// Same triple on the SingleChoice custom draft, driven through the
+    /// real key pipeline (Down twice reaches the custom row).
+    #[test]
+    fn custom_answer_clear_undo_redo() {
+        let mut d = QuestionDialog::new();
+        d.show_questions(vec![single_choice("s1", vec!["A", "B"], Some("A"))]);
+        d.handle_key(KeyCode::Down); // rows: 0=A, 1=B, 2=custom
+        d.handle_key(KeyCode::Down);
+        for ch in "draft".chars() {
+            d.handle_key(KeyCode::Char(ch));
+        }
+        assert_eq!(d.state[0].custom.value(), "draft");
+
+        d.handle_key_event(ctrl(KeyCode::Char('c')));
+        assert_eq!(d.state[0].custom.value(), "");
+        d.handle_key_event(ctrl(KeyCode::Char('z')));
+        assert_eq!(d.state[0].custom.value(), "draft");
+        // Redo walks forward through the cleared state exactly once; undo
+        // brings the draft back (symmetric cycle, same as the prompt).
+        d.handle_key_event(ctrl(KeyCode::Char('y')));
+        assert_eq!(d.state[0].custom.value(), "");
+        d.handle_key_event(ctrl(KeyCode::Char('z')));
+        assert_eq!(d.state[0].custom.value(), "draft");
+    }
+
+    /// `clear_focused_field` (the App's Ctrl+C gate) mirrors the focused
+    /// field's emptiness and refuses to clear outside the two inputs.
+    #[test]
+    fn clear_focused_field_reports_and_scopes() {
+        let mut d = QuestionDialog::new();
+        d.show_questions(vec![question("t1", QuestionType::Text, None)]);
+        assert!(!d.clear_focused_field(), "already empty: nothing cleared");
+        d.handle_key(KeyCode::Char('a'));
+        assert!(d.clear_focused_field(), "cleared content reported");
+        assert_eq!(d.state[0].text.value(), "");
+
+        // The confirm tab owns no input: the gate reports "nothing cleared"
+        // instead of touching option rows.
+        let mut d2 = QuestionDialog::new();
+        d2.show_questions(vec![question("t1", QuestionType::Text, None)]);
+        d2.handle_key(KeyCode::Enter); // marks answered; single tab stays
+        d2.current_tab = d2.tab_count(); // confirm screen
+        assert!(!d2.clear_focused_field());
     }
 }

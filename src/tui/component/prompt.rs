@@ -9,13 +9,13 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
-use super::prompt_history::{EditKind, PromptHistory, RedoOutcome, UndoOutcome};
 use crate::component::cursor::{Cursor, CursorState};
 use crate::logo::ChatLogo;
 use crate::lsp_colors;
 use crate::state::AppState;
 use crate::theme::{Theme, rgba_color};
 use crate::types::{AgentColors, MessageRole, Part, Session};
+use crate::util::edit_history::{EditHistory, EditKind, RedoOutcome, UndoOutcome};
 
 const BASE_H: u16 = 2;
 const AGENT_H: u16 = 1;
@@ -205,7 +205,7 @@ pub struct PromptView {
     /// Edit history for the draft (Ctrl+Z / Ctrl+Y). Private on purpose:
     /// every draft mutation must go through the recording methods below so
     /// the mirror never diverges from `input` for longer than one operation.
-    history: PromptHistory,
+    history: EditHistory,
     /// The chat-logo animation (a single "O" with a red center and a laser beam).
     pub logo: ChatLogo,
     /// Snapshot of `(input.len(), cursor_pos)` from the previous frame, used to
@@ -233,7 +233,7 @@ impl PromptView {
             sel_end: None,
             correction_selection: false,
             pasted_parts: Vec::new(),
-            history: PromptHistory::new(),
+            history: EditHistory::new(),
             logo: ChatLogo::new(),
             last_input_snapshot: None,
             was_visible: false,
@@ -396,7 +396,7 @@ impl PromptView {
         self.history_index = -1;
         self.pasted_parts.clear();
         self.clear_selection();
-        // One atomic, marked group: the first Ctrl+Z after a correction
+        // One atomic, marked step: the first Ctrl+Z after a correction
         // restores the exact pre-correction draft (never a mid-state), and
         // the marker lets the key handler toast the transition.
         self.history
@@ -405,8 +405,9 @@ impl PromptView {
     }
 
     /// Insert a character at the cursor — the normal typing path — and
-    /// record it into the edit history (consecutive Type ops coalesce into
-    /// one Ctrl+Z group, matching universal editor granularity).
+    /// record it into the edit history as a typing-flow operation
+    /// (consecutive typing coalesces by TIME into one undo step; see
+    /// `EditHistory::record`).
     pub fn type_char(&mut self, ch: char) {
         let pos = self.cursor_pos;
         self.input.insert(pos, ch);
@@ -427,7 +428,7 @@ impl PromptView {
 
     /// Replace the whole draft programmatically (queue re-edit, message
     /// actions, slash command, gateway restore) and record it as one
-    /// atomic Replace group — a single Ctrl+Z reverts the whole load.
+    /// atomic Replace step — a single Ctrl+Z reverts the whole load.
     pub fn set_draft(&mut self, text: String) {
         self.input = text;
         self.cursor_pos = self.input.len();
@@ -439,7 +440,7 @@ impl PromptView {
     }
 
     /// Ctrl+C while the prompt is focused: wipe the WHOLE draft — text,
-    /// cursor, paste placeholders — as ONE atomic Replace group, so a
+    /// cursor, paste placeholders — as ONE atomic Replace step, so a
     /// single Ctrl+Z restores everything. Unlike `clear_draft` (the
     /// slash-menu dismiss path) the edit history is KEPT: the clear is a
     /// normal, reversible edit.
@@ -452,9 +453,9 @@ impl PromptView {
         self.record_edit(EditKind::Replace);
     }
 
-    /// Ctrl+Z: step back one edit group and apply the restored snapshot
-    /// (text, cursor, paste mappings). A group boundary is always a whole
-    /// state: mid-group intermediate states are never surfaced.
+    /// Ctrl+Z: step back one recorded operation and apply the restored
+    /// snapshot (text, cursor, paste mappings). Every step is a whole
+    /// state; no intermediate state is ever surfaced.
     pub fn undo(&mut self) -> UndoOutcome {
         let outcome = self.history.undo();
         self.apply_snapshot();
@@ -646,7 +647,7 @@ impl PromptView {
             self.input.insert_str(pos, &normalized);
             self.cursor_pos = pos + normalized.len();
         }
-        // One atomic group per paste: a single Ctrl+Z removes the whole
+        // One atomic step per paste: a single Ctrl+Z removes the whole
         // inserted block (compressed or not).
         self.record_edit(EditKind::Paste);
     }

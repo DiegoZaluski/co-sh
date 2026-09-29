@@ -27,10 +27,11 @@ fn type_text(app: &mut App, text: &str) {
     }
 }
 
-/// Ctrl+Z removes the whole coalesced typing burst (the "last sentence"
-/// convention); Ctrl+Y brings it back.
+/// Ctrl+Z coalesces continuous typing: one step removes the whole chunk
+/// typed without a pause (the `type_text` helper types fast, well inside
+/// the 500ms window); Ctrl+Y brings it back.
 #[tokio::test]
-async fn ctrl_z_removes_the_last_typed_burst_and_ctrl_y_restores_it() {
+async fn ctrl_z_removes_the_typed_chunk_and_ctrl_y_restores_it() {
     let _home = HOME_LOCK.lock();
     isolate_home();
     let mut app = session_app();
@@ -41,16 +42,18 @@ async fn ctrl_z_removes_the_last_typed_burst_and_ctrl_y_restores_it() {
     app.process_key_event(ctrl(KeyCode::Char('z'))).unwrap();
     assert_eq!(app.prompt_view.input, "");
 
+    // Ctrl+Y reapplies the coalesced chunk exactly.
     app.process_key_event(ctrl(KeyCode::Char('y'))).unwrap();
     assert_eq!(app.prompt_view.input, "olá mundo");
     // The cursor survived the round trip.
     assert_eq!(app.prompt_view.cursor_pos, app.prompt_view.input.len());
 }
 
-/// Delete and type bursts are separate groups: one Ctrl+Z undoes only the
-/// backspace run that followed the typing.
+/// Backspaces right after typing join the same continuous-typing session
+/// (users fix typos mid-flow): ONE Ctrl+Z undoes the whole flow back to
+/// the pre-session state.
 #[tokio::test]
-async fn undo_after_backspaces_restores_the_deleted_text_only() {
+async fn undo_after_backspaces_restores_the_deleted_text_too() {
     let _home = HOME_LOCK.lock();
     isolate_home();
     let mut app = session_app();
@@ -60,8 +63,14 @@ async fn undo_after_backspaces_restores_the_deleted_text_only() {
     app.process_key_event(key(KeyCode::Backspace)).unwrap();
     assert_eq!(app.prompt_view.input, "primei");
 
+    // The typing + backspace flow is ONE coalesced step (it began on the
+    // empty draft, so the pre-session state is ""): a single Ctrl+Z undoes
+    // the whole flow — the deleted characters go with the typed text.
     app.process_key_event(ctrl(KeyCode::Char('z'))).unwrap();
-    assert_eq!(app.prompt_view.input, "primeira");
+    assert_eq!(app.prompt_view.input, "");
+    // And there is nothing before the pre-session state.
+    app.process_key_event(ctrl(KeyCode::Char('z'))).unwrap();
+    assert_eq!(app.prompt_view.input, "");
 }
 
 /// The prompt corrector's rewrite is ONE atomic history group: the first
@@ -93,8 +102,10 @@ async fn ctrl_z_after_a_correction_restores_the_original_prompt() {
     );
 }
 
-/// Editing the corrected text first undoes the EDITS; the next Ctrl+Z
-/// crosses the correction boundary back to the original draft.
+/// Editing the corrected text first undoes the EDITS as one coalesced step
+/// (the note was typed in a continuous flow); once they are gone, the next
+/// Ctrl+Z crosses the correction boundary back to the original draft in a
+/// single atomic step.
 #[tokio::test]
 async fn undo_first_reverts_edits_then_crosses_the_correction_boundary() {
     let _home = HOME_LOCK.lock();
@@ -107,9 +118,13 @@ async fn undo_first_reverts_edits_then_crosses_the_correction_boundary() {
     type_text(&mut app, " Ok");
     assert_eq!(app.prompt_view.input, "Rascunho corrigido. Ok");
 
+    // One Ctrl+Z removes the appended note as a whole (continuous typing
+    // coalesces into one step)...
     app.process_key_event(ctrl(KeyCode::Char('z'))).unwrap();
     assert_eq!(app.prompt_view.input, "Rascunho corrigido.");
 
+    // ...and the next step crosses the correction boundary as one atomic
+    // step.
     app.process_key_event(ctrl(KeyCode::Char('z'))).unwrap();
     assert_eq!(app.prompt_view.input, "rascunho");
 }
@@ -158,9 +173,11 @@ async fn ctrl_z_works_while_the_slash_menu_is_open() {
         "typing a slash command opens the menu"
     );
 
+    // The typing coalesced into one step: a single Ctrl+Z removes the
+    // whole command chunk.
     app.process_key_event(ctrl(KeyCode::Char('z'))).unwrap();
     assert_eq!(app.prompt_view.input, "");
-    // The undo resync closed the menu (empty input has no command to show).
+    // Empty input has no command to show: the resync closed the menu.
     assert!(!app.slash_menu.visible);
 
     app.process_key_event(ctrl(KeyCode::Char('y'))).unwrap();
@@ -175,15 +192,17 @@ async fn typing_after_undo_discards_the_redo_branch() {
     let mut app = session_app();
 
     type_text(&mut app, "abc");
+    // The typing coalesced into one step, so one Ctrl+Z empties the draft.
     app.process_key_event(ctrl(KeyCode::Char('z'))).unwrap();
     assert_eq!(app.prompt_view.input, "");
 
-    type_text(&mut app, "x");
-    assert_eq!(app.prompt_view.input, "x");
+    // A new edit appends to the live draft ("" + "d").
+    type_text(&mut app, "d");
+    assert_eq!(app.prompt_view.input, "d");
 
     app.process_key_event(ctrl(KeyCode::Char('y'))).unwrap();
-    // Noop redo must NOT have restored "abc".
-    assert_eq!(app.prompt_view.input, "x");
+    // Noop redo must NOT have restored anything.
+    assert_eq!(app.prompt_view.input, "d");
 }
 
 /// Ctrl+C with the prompt focused clears the whole draft; a single Ctrl+Z

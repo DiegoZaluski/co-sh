@@ -6,13 +6,13 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use super::{App, AppMode, PendingSessionDelete};
 use crate::component::prompt::PromptView;
-use crate::component::prompt_history::{RedoOutcome, UndoOutcome};
 use crate::fallback;
 use crate::left_panel::sessions::SessionsAction;
 use crate::left_panel::{MIN_WIDTH_FOR_LEFT_PANEL, Mode};
 use crate::routes::home::HomeAction;
 use crate::routes::router::FocusTarget;
 use crate::ui::dialogs::DialogType;
+use crate::util::edit_history::{RedoOutcome, UndoOutcome};
 use crate::util::selection;
 
 impl App {
@@ -190,6 +190,16 @@ impl App {
                     self.question_dialog.clear_selection();
                     return Ok(false);
                 }
+                // Same gate, no selection: Ctrl+C wipes the focused answer
+                // field (readline-style kill, same as the prompt below). The
+                // clear is recorded as ONE atomic Replace step, so a single
+                // Ctrl+Z brings the field back exactly. The key is consumed
+                // while the dialog owns the keyboard either way — Esc is the
+                // dialog's dismissal, the quit-confirm stays out of reach.
+                if matches!(self.mode(), AppMode::Session) && self.question_dialog.visible {
+                    self.question_dialog.clear_focused_field();
+                    return Ok(false);
+                }
                 // If there is text selected in the prompt, copy it instead of quitting.
                 if matches!(self.mode(), AppMode::Session) && self.prompt_view.has_selection() {
                     let text = self.prompt_view.selected_text();
@@ -211,7 +221,7 @@ impl App {
                 // falls through to the quit-confirm below — that way a
                 // double Ctrl+C still leaves the app naturally: the first
                 // press wipes the draft, the second quits. The clear is
-                // recorded as ONE atomic Replace group, so a single Ctrl+Z
+                // recorded as ONE atomic Replace step, so a single Ctrl+Z
                 // brings the draft back exactly. Sits AFTER the selection
                 // gates on purpose: a live selection still copies
                 // (universal convention); the clear only fires with
@@ -1728,7 +1738,7 @@ impl App {
                                 // with NO Shift fallback needed. A Ctrl+Z right
                                 // after a prompt correction restores the
                                 // ORIGINAL pre-correction draft (the correction
-                                // is one atomic history group); the toast
+                                // is one atomic history step); the toast
                                 // reports that transition, Ctrl+Y reapplies.
                                 if key.modifiers.contains(KeyModifiers::CONTROL) {
                                     if ch == 'z' {
@@ -1795,7 +1805,7 @@ impl App {
         self.slash_menu.update(&self.prompt_view.input);
     }
 
-    /// Ctrl+Z on the chat prompt: step back one edit-history group (last
+    /// Ctrl+Z on the chat prompt: step back one edit-history step (last
     /// typing/deletion burst, paste, programmatic load, or a WHOLE prompt
     /// correction back to the original draft). The slash menu re-syncs
     /// because the draft text just changed under it.
