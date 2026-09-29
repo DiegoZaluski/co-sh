@@ -30,73 +30,94 @@ pub const POST_TOOL_USE_EVENT: &str = "PostToolUse";
 /// Maximum characters of a hook command shown in list rows.
 const COMMAND_PREVIEW_LEN: usize = 34;
 
+/// Horizontal breathing room between a section's contour and its content,
+/// on each side (columns). The contour itself has no side walls — only the
+/// closed `╭…╮` / `╰…╯` top and bottom rows — so this padding is what keeps
+/// the content from touching the drawn margins.
+const BOX_PAD: usize = 2;
+
+/// Reorder/remove controls drawn on summarizer-model rows. Render and the
+/// mouse hit zones must agree on this width.
+const SUMMARIZER_CONTROLS: &str = "[ ↑ ] [ ↓ ] [ × ]";
+
 // Catalog
 
-/// One top-level entry of the Settings list. `id` keys the activation
-/// behaviour; `label` is the option name; `description` explains what the
-/// setting controls; `event` selects which hook list the entry manages.
+/// One top-level entry of the Settings list. `id` keys dialogs and tests;
+/// `label` is the option name; `description` explains what the setting
+/// controls; `kind` drives BOTH rendering and activation.
 struct SettingsItem {
     id: &'static str,
     label: &'static str,
     description: &'static str,
-    event: &'static str,
+    kind: SettingKind,
 }
 
-fn settings_items() -> &'static [SettingsItem] {
-    &[
+/// What an item renders as and does on activation. Keeping the behaviour in
+/// the catalog means adding a setting is ONE struct literal — never edits
+/// scattered across render, enable-check and activation dispatch.
+#[derive(PartialEq, Eq)]
+enum SettingKind {
+    /// Hook category: a toggle plus (while enabled) the event's hook list.
+    HookList(&'static str),
+    /// Fallback-model list with its Add/edit sub-rows.
+    ModelList,
+    /// Registered MCP servers with their Add action.
+    ServerList,
+    /// Boolean switch flipped in place on activation.
+    Switch(SwitchAction),
+    /// Value row rendered as "label: value"; activation opens an input box.
+    Choice(ChoiceInput),
+}
+
+#[derive(PartialEq, Eq)]
+enum SwitchAction {
+    /// Flip `setup.lsp`; the caller resyncs the harness's process-wide flag.
+    Lsp,
+    /// Flip telemetry consent; effective on the next launch.
+    Telemetry,
+    /// Flip the item's own persisted field and report
+    /// [`SettingsAction::ToggleSaved`].
+    Persist,
+}
+
+#[derive(PartialEq, Eq)]
+enum ChoiceInput {
+    /// Cache-duration input keyed by the Settings-item id
+    /// ("anthropic_cache_ttl" / "openai_cache_retention").
+    Cache(&'static str),
+    /// Editor-command input (the file explorer launches it).
+    Editor,
+    /// Skill-directories input (`setup.skills.dirs`).
+    Skills,
+}
+
+/// A bordered group of related settings. Sections order from most-touched
+/// (per-session knobs) to rarely-changed infrastructure.
+struct SettingsSection {
+    title: &'static str,
+    items: &'static [SettingsItem],
+}
+
+const AUTOMATION: SettingsSection = SettingsSection {
+    title: "Automation",
+    items: &[
+        SettingsItem {
+            id: "summarization_models",
+            label: "Summarization models",
+            description: "Fallback models used for context summarization",
+            kind: SettingKind::ModelList,
+        },
         SettingsItem {
             id: "hooks",
             label: "PreToolUse hooks",
-            description: "Run custom shell commands before every tool call",
-            event: PRE_TOOL_USE_EVENT,
+            description: "Shell commands run before every tool call",
+            kind: SettingKind::HookList(PRE_TOOL_USE_EVENT),
         },
         SettingsItem {
             id: "post_tool_use_hooks",
             label: "PostToolUse hooks",
-            description: "Run custom shell commands after every successful tool call",
-            event: POST_TOOL_USE_EVENT,
-        },
-        SettingsItem {
-            id: "anthropic_cache_ttl",
-            label: "Anthropic cache TTL",
-            description: "How long Anthropic's prompt cache survives between turns (1h costs 2x per write but rides out long tool calls)",
-            event: "",
-        },
-        SettingsItem {
-            id: "openai_cache_retention",
-            label: "OpenAI cache retention",
-            description: "How long OpenAI may keep your prompt cache (24h helps resumed sessions; older models ignore it)",
-            event: "",
-        },
-        SettingsItem {
-            id: "lsp",
-            label: "Language servers",
-            description: "Run language servers for diagnostics, hover, symbols and related `lsp_*` tools",
-            event: "",
-        },
-        SettingsItem {
-            id: "summarization_models",
-            label: "Summarization models",
-            description: "Only these models, in order. Empty: use the agent model. Enter: edit; Delete: remove; Alt+Up/Down: reorder",
-            event: "",
-        },
-        SettingsItem {
-            id: "editor",
-            label: "Editor",
-            description: "Terminal editor for the file explorer (Ctrl+F). Enter: edit. Empty: first of nvim, vim, nano found on $PATH",
-            event: "",
-        },
-        SettingsItem {
-            id: "skill_dirs",
-            label: "Skill directories",
-            description: "Where the skills_* tools look for SKILL.md packs (colon-separated paths, ~ expands to $HOME). Enter: edit. Empty: ~/.skills",
-            event: "",
-        },
-        SettingsItem {
-            id: "telemetry",
-            label: "Telemetry",
-            description: "Share anonymous usage aggregates (no code, no paths, no prompts). On by default; disable here or via COSH_TELEMETRY=off. Takes effect on the next launch",
-            event: "",
+            description: "Shell commands run after every successful tool call",
+            kind: SettingKind::HookList(POST_TOOL_USE_EVENT),
         },
         // The termination checkup only exists in binaries with the ONNX
         // runtime: no runtime in the build, no item in the TUI — the same
@@ -105,10 +126,102 @@ fn settings_items() -> &'static [SettingsItem] {
         SettingsItem {
             id: "checkup_termination",
             label: "Termination checkup",
-            description: "A local decision model reviews ambiguous loop stops and can continue an agent that stopped mid-task. Costs local inference per turn; the model loads at assembly time. Takes effect on the next launch",
-            event: "",
+            description: "A local model reviews ambiguous loop stops and may resume the agent (local inference per turn)",
+            kind: SettingKind::Switch(SwitchAction::Persist),
         },
+    ],
+};
+
+const MODELS_AND_CACHING: SettingsSection = SettingsSection {
+    title: "Models & caching",
+    items: &[
+        SettingsItem {
+            id: "anthropic_cache_ttl",
+            label: "Anthropic cache TTL",
+            description: "Prompt-cache lifetime for Anthropic (1h writes cost 2×)",
+            kind: SettingKind::Choice(ChoiceInput::Cache("anthropic_cache_ttl")),
+        },
+        SettingsItem {
+            id: "openai_cache_retention",
+            label: "OpenAI cache retention",
+            description: "How long OpenAI may keep your prompt cache",
+            kind: SettingKind::Choice(ChoiceInput::Cache("openai_cache_retention")),
+        },
+    ],
+};
+
+const ENVIRONMENT: SettingsSection = SettingsSection {
+    title: "Environment",
+    items: &[
+        SettingsItem {
+            id: "editor",
+            label: "Editor",
+            description: "Terminal editor opened by the file explorer (Ctrl+F)",
+            kind: SettingKind::Choice(ChoiceInput::Editor),
+        },
+        SettingsItem {
+            id: "skill_dirs",
+            label: "Skill directories",
+            description: "Where the skills_* tools look for SKILL.md packs",
+            kind: SettingKind::Choice(ChoiceInput::Skills),
+        },
+        SettingsItem {
+            id: "lsp",
+            label: "Language servers",
+            description: "Language servers powering diagnostics, hover and symbols",
+            kind: SettingKind::Switch(SwitchAction::Lsp),
+        },
+    ],
+};
+
+// External capability sources (stdio/HTTP tool servers today; plugins, ACP
+// and similar integrations would land here). Kept semantically separate
+// from Environment (local workspace tooling) so future items have a home.
+const INTEGRATIONS: SettingsSection = SettingsSection {
+    title: "Integrations",
+    items: &[SettingsItem {
+        id: "mcp",
+        label: "MCP servers",
+        description: "External tool servers connected over stdio or HTTP",
+        kind: SettingKind::ServerList,
+    }],
+};
+
+const GENERAL: SettingsSection = SettingsSection {
+    title: "General",
+    items: &[SettingsItem {
+        id: "telemetry",
+        label: "Telemetry",
+        description: "Anonymous usage aggregates; disable here or with COSH_TELEMETRY=off. Applies next launch",
+        kind: SettingKind::Switch(SwitchAction::Telemetry),
+    }],
+};
+
+fn sections() -> &'static [SettingsSection] {
+    &[
+        AUTOMATION,
+        MODELS_AND_CACHING,
+        ENVIRONMENT,
+        INTEGRATIONS,
+        GENERAL,
     ]
+}
+
+/// Flat catalog in display order: (global index, item). Row indices in
+/// [`SettingsRow::Category`] and activation dispatch are these indexes.
+fn all_items() -> impl Iterator<Item = (usize, &'static SettingsItem)> {
+    sections()
+        .iter()
+        .flat_map(|section| section.items.iter())
+        .enumerate()
+}
+
+/// Catalog item by flat display index (the `Category(row)` index).
+fn item_at(index: usize) -> &'static SettingsItem {
+    all_items()
+        .find(|(i, _)| *i == index)
+        .map(|(_, item)| item)
+        .expect("category index within the catalog")
 }
 
 /// The current value of a CHOICE setting (rendered in place of the ✔/✗
@@ -136,6 +249,12 @@ fn cache_choice_value(id: &str, setup: &Setup) -> Option<String> {
         } else {
             truncate(&setup.skills.dirs.join(":"), COMMAND_PREVIEW_LEN * 2)
         }),
+        // The MCP category row renders as a count, never a ✔/✗ switch:
+        // toggling belongs to the individual server rows below it.
+        "mcp" => Some(format!(
+            "{} configured",
+            setup.mcp.servers.len()
+        )),
         #[cfg(feature = "onnx")]
         // The row renders "label: value" instead of the ✔/✗ switch, so the
         // value carries BOTH the audit state and the checkpoint identity.
@@ -154,20 +273,19 @@ fn cache_choice_value(id: &str, setup: &Setup) -> Option<String> {
     }
 }
 
-/// Each category owns its own switch, so toggling one never leaks into the
-/// other event. Items WITHOUT an event (empty string) are standalone
-/// switches.
+/// Each hook category owns its own switch, so toggling one never leaks
+/// into the other event.
 fn is_enabled(item: &SettingsItem, setup: &Setup) -> bool {
-    if item.event.is_empty() {
-        return match item.id {
-            "lsp" => setup.lsp,
-            "telemetry" => setup.telemetry,
-            #[cfg(feature = "onnx")]
-            "checkup_termination" => setup.checkup.termination.enabled,
-            _ => false,
-        };
+    match item.kind {
+        SettingKind::HookList(event) => setup.hooks.is_event_enabled(event),
+        SettingKind::Switch(SwitchAction::Lsp) => setup.lsp,
+        SettingKind::Switch(SwitchAction::Telemetry) => setup.telemetry,
+        #[cfg(feature = "onnx")]
+        // The checkup renders as a choice ("off" / "on · checkpoint") but
+        // its ON/OFF state is the switch itself.
+        SettingKind::Switch(SwitchAction::Persist) => setup.checkup.termination.enabled,
+        _ => false,
     }
-    setup.hooks.is_event_enabled(item.event)
 }
 
 pub fn hook_entries<'a>(setup: &'a Setup, event: &str) -> &'a [HookEntry] {
@@ -291,7 +409,7 @@ pub fn validate_hook(
 pub enum SettingsRow {
     SummarizationModel(usize),
     AddSummarizationModel,
-    /// Top-level setting (index into `settings_items()`).
+    /// Top-level setting (index into the flat catalog `all_items()`).
     Category(usize),
     /// Configured hook of one event.
     Hook {
@@ -319,13 +437,17 @@ enum Line {
     SummarizationModel(usize),
     AddSummarizationModel,
     Title,
+    /// Section contour: the opening `╭─ Title ───…` row or the closing
+    /// `╰────…` row of one [`SettingsSection`]. Never selectable.
+    SectionBorder {
+        title: &'static str,
+        /// `true` = opening border (carries the title), `false` = closing.
+        top: bool,
+    },
     Blank,
     /// One wrapped row of a section description; consecutive rows form a
     /// single logical description block.
     Description(String),
-    /// A non-selectable URL rendered under a description (e.g. the Zen free
-    /// gateway's terms).
-    Link(&'static str),
     Category {
         item: usize,
     },
@@ -356,16 +478,13 @@ impl Line {
             Line::AddHook { event } => Some(SettingsRow::AddHook { event }),
             Line::McpServer { index } => Some(SettingsRow::McpServer(*index)),
             Line::AddMcpServer => Some(SettingsRow::AddMcpServer),
-            Line::Title | Line::Blank | Line::Description(_) | Line::Link(_) => None,
+            Line::Title
+            | Line::SectionBorder { .. }
+            | Line::Blank
+            | Line::Description(_) => None,
         }
     }
 }
-
-/// Description of the trailing MCP section. Servers are registered through
-/// the Add box (name + `command args...` or `http(s)://` endpoint); removal
-/// of a misconfigured entry is a setup.json edit, disabling covers runtime.
-const MCP_SECTION_DESCRIPTION: &str =
-    "Connect external MCP servers for extra model tools (stdio or HTTP)";
 
 /// Builds the vertical layout for a `width`-column terminal. Description
 /// lines wrap (word-aligned) into consecutive rows at that width, so content
@@ -373,6 +492,10 @@ const MCP_SECTION_DESCRIPTION: &str =
 /// blocks. Callers that only need the selection order pass `u16::MAX`, which
 /// keeps every description on a single row.
 fn build_layout(setup: &Setup, width: u16) -> Vec<LayoutLine> {
+    // Descriptions wrap inside the box's inner width, leaving room for the
+    // contour padding on both sides (the `u16::MAX` selection-order call
+    // keeps single rows either way).
+    let inner_width = width.saturating_sub(2 * BOX_PAD as u16) as usize;
     let mut lines = Vec::new();
     let mut y = 0u16;
     lines.push(LayoutLine {
@@ -380,66 +503,113 @@ fn build_layout(setup: &Setup, width: u16) -> Vec<LayoutLine> {
         line: Line::Title,
     });
     y += 1;
-    for item in 0..settings_items().len() {
-        for text in wrap_words(settings_items()[item].description, width as usize) {
-            lines.push(LayoutLine {
-                y,
-                line: Line::Description(text),
-            });
-            y += 1;
-        }
+    // `SettingsRow::Category` indices are the item's position in the flat
+    // display order — the same enumeration `all_items()` produces.
+    let mut item_index = 0usize;
+    let section_count = sections().len();
+    for (section_index, section) in sections().iter().enumerate() {
         lines.push(LayoutLine {
             y,
-            line: Line::Category { item },
+            line: Line::SectionBorder {
+                title: section.title,
+                top: true,
+            },
         });
         y += 1;
-        // Only hook categories own sub-lists; standalone switches (empty
-        // event) are a single toggle row.
-        let manages_hooks = !settings_items()[item].event.is_empty();
-        if settings_items()[item].id == "summarization_models" {
-            for index in 0..setup.routing.summarization_models.len() {
+        for (item_pos, item) in section.items.iter().enumerate() {
+            let index = item_index;
+            item_index += 1;
+            // Breathing room between siblings inside the box (not before
+            // the first, which sits right under the opening border).
+            if item_pos > 0 {
                 lines.push(LayoutLine {
                     y,
-                    line: Line::SummarizationModel(index),
+                    line: Line::Blank,
+                });
+                y += 1;
+            }
+            for text in wrap_words(item.description, inner_width) {
+                lines.push(LayoutLine {
+                    y,
+                    line: Line::Description(text),
                 });
                 y += 1;
             }
             lines.push(LayoutLine {
                 y,
-                line: Line::AddSummarizationModel,
+                line: Line::Category { item: index },
             });
             y += 1;
-        }
-        if manages_hooks && is_enabled(&settings_items()[item], setup) {
-            lines.push(LayoutLine {
-                y,
-                line: Line::Blank,
-            }); // breathing room
-            y += 1;
-            for hook in 0..hook_entries(setup, settings_items()[item].event).len() {
-                lines.push(LayoutLine {
-                    y,
-                    line: Line::Hook {
-                        event: settings_items()[item].event,
-                        hook,
-                    },
-                });
-                y += 1;
+            match item.kind {
+                SettingKind::ModelList => {
+                    for index in 0..setup.routing.summarization_models.len() {
+                        lines.push(LayoutLine {
+                            y,
+                            line: Line::SummarizationModel(index),
+                        });
+                        y += 1;
+                    }
+                    lines.push(LayoutLine {
+                        y,
+                        line: Line::AddSummarizationModel,
+                    });
+                    y += 1;
+                }
+                SettingKind::HookList(event) => {
+                    // The hook sub-list exists only while its category is
+                    // enabled.
+                    if is_enabled(item, setup) {
+                        lines.push(LayoutLine {
+                            y,
+                            line: Line::Blank,
+                        }); // breathing room
+                        y += 1;
+                        for hook in 0..hook_entries(setup, event).len() {
+                            lines.push(LayoutLine {
+                                y,
+                                line: Line::Hook { event, hook },
+                            });
+                            y += 1;
+                        }
+                        // The add action reads as the last entry of the hook list.
+                        lines.push(LayoutLine {
+                            y,
+                            line: Line::AddHook { event },
+                        });
+                        y += 1;
+                    }
+                }
+                // Always visible, like an enabled hook list: one toggle row
+                // per registered server plus the Add action.
+                SettingKind::ServerList => {
+                    for index in 0..setup.mcp.servers.len() {
+                        lines.push(LayoutLine {
+                            y,
+                            line: Line::McpServer { index },
+                        });
+                        y += 1;
+                    }
+                    lines.push(LayoutLine {
+                        y,
+                        line: Line::AddMcpServer,
+                    });
+                    y += 1;
+                }
+                // Switches and choices are a single toggle row.
+                _ => {}
             }
-            // The add action reads as the last entry of the hook list.
-            lines.push(LayoutLine {
-                y,
-                line: Line::AddHook {
-                    event: settings_items()[item].event,
-                },
-            });
-            y += 1;
         }
-        // Breathing room BELOW every section, so standalone switches (no
-        // hook sub-list) never sit glued to the next section's description.
-        // The last section needs no trailing blank: it would only inflate
-        // content_height and skew the vertical centering.
-        if item + 1 < settings_items().len() {
+        lines.push(LayoutLine {
+            y,
+            line: Line::SectionBorder {
+                title: section.title,
+                top: false,
+            },
+        });
+        y += 1;
+        // One blank between boxes; none after the last (it would only
+        // inflate content_height and skew the vertical centering).
+        if section_index + 1 < section_count {
             lines.push(LayoutLine {
                 y,
                 line: Line::Blank,
@@ -447,32 +617,6 @@ fn build_layout(setup: &Setup, width: u16) -> Vec<LayoutLine> {
             y += 1;
         }
     }
-    // Trailing MCP section (always visible, like an enabled hook list):
-    // one toggle row per registered server plus the Add action. Separated
-    // from the last category by the same breathing room sections enjoy.
-    lines.push(LayoutLine {
-        y,
-        line: Line::Blank,
-    });
-    y += 1;
-    for text in wrap_words(MCP_SECTION_DESCRIPTION, width as usize) {
-        lines.push(LayoutLine {
-            y,
-            line: Line::Description(text),
-        });
-        y += 1;
-    }
-    for index in 0..setup.mcp.servers.len() {
-        lines.push(LayoutLine {
-            y,
-            line: Line::McpServer { index },
-        });
-        y += 1;
-    }
-    lines.push(LayoutLine {
-        y,
-        line: Line::AddMcpServer,
-    });
     lines
 }
 
@@ -618,16 +762,51 @@ impl SettingsView {
         true
     }
 
+    /// Scroll offset keeping the selected row visible while framing whole
+    /// section blocks: the viewport pins the selected block's closing
+    /// border (`╰…╯`) at the bottom edge, so scrolling slides the entire
+    /// box up instead of cutting it in half. A block taller than the
+    /// viewport falls back to pinning the selected row itself — the only
+    /// way to keep it on screen.
     fn viewport_offset(&self, area: Rect, setup: &Setup) -> u16 {
+        let layout = build_layout(setup, area.width);
         let selected = selectable_rows(setup)
             .get(self.selection.selected_index)
             .copied();
-        build_layout(setup, area.width)
+        let Some(sel_line) = layout
             .iter()
             .find(|line| line.line.row() == selected && selected.is_some())
-            .map_or(0, |line| {
-                line.y.saturating_sub(area.height.saturating_sub(1))
-            })
+        else {
+            return 0;
+        };
+        // Rows the render can actually draw: content starts at `start_y`
+        // (vertical centering when everything fits) and runs to the bottom.
+        let start_y = content_start_y(area, setup);
+        let window = area.bottom().saturating_sub(start_y).max(1);
+        // The selected row's enclosing block: the last opening border at or
+        // above it and the first closing border at or below it (the layout
+        // always closes every box it opens).
+        let mut top_y = 0u16;
+        for line in &layout {
+            if line.y > sel_line.y {
+                break;
+            }
+            if let Line::SectionBorder { top: true, .. } = line.line {
+                top_y = line.y;
+            }
+        }
+        let bottom_y = layout
+            .iter()
+            .skip_while(|line| line.y < sel_line.y)
+            .find(|line| matches!(line.line, Line::SectionBorder { top: false, .. }))
+            .map_or(sel_line.y, |line| line.y);
+        if bottom_y.saturating_sub(top_y) + 1 <= window {
+            // Whole block fits: pin its closing border to the last visible
+            // row (0 while the content still fits without scrolling).
+            bottom_y.saturating_sub(window - 1)
+        } else {
+            sel_line.y.saturating_sub(window - 1)
+        }
     }
 
     pub fn activate_mouse(
@@ -640,7 +819,13 @@ impl SettingsView {
             selectable_rows(setup).get(self.selection.selected_index),
             Some(SettingsRow::SummarizationModel(_))
         ) {
-            let controls = area.right().saturating_sub(18).max(area.x);
+            // Same geometry the render uses: controls hug the box's right
+            // inner edge, so the hit zones stay under the drawn buttons.
+            let max_row_w = max_row_width(setup, area.width) as u16;
+            let row_x = area.x + (area.width.saturating_sub(max_row_w)) / 2 + BOX_PAD as u16;
+            let controls = (row_x + max_row_w)
+                .saturating_sub(2 * BOX_PAD as u16 + SUMMARIZER_CONTROLS.width() as u16)
+                .max(row_x);
             if mouse.x >= controls {
                 let operation = match mouse.x - controls {
                     0..=5 => "up",
@@ -687,58 +872,61 @@ impl SettingsView {
                 Some(SettingsAction::OpenSummarizationModel { index: None })
             }
             SettingsRow::Category(i) => {
-                let item = &settings_items()[*i];
-                if item.id == "summarization_models" {
-                    return Some(SettingsAction::OpenSummarizationModel { index: None });
-                }
-                // The editor setting is a free-form command, not a switch:
-                // open its own input box (the file explorer launches it).
-                if item.id == "editor" {
-                    return Some(SettingsAction::OpenEditorInput);
-                }
-                if item.id == "skill_dirs" {
-                    return Some(SettingsAction::OpenSkillsInput);
-                }
-                // Choice settings (cache TTL/retention) open a duration
-                // input box instead of toggling a switch — the value is a
-                // free-form user choice, not a hardcoded cycle.
-                //
-                // The termination checkup is NOT that: its "value" is the
-                // read-only resident checkpoint identity, so activation
-                // toggles the audit switch instead of opening an input.
-                #[cfg(feature = "onnx")]
-                if item.event.is_empty() && item.id == "checkup_termination" {
-                    setup.checkup.termination.enabled = !setup.checkup.termination.enabled;
-                    self.selection.clamp(selectable_rows(setup).len());
-                    return Some(SettingsAction::ToggleSaved);
-                }
-                if cache_choice_value(item.id, setup).is_some() {
-                    return Some(SettingsAction::OpenCacheInput { setting: item.id });
-                }
-                // Standalone switches (no hook sub-list) flip their own
-                // persisted field.
-                if item.event.is_empty() && item.id == "lsp" {
-                    setup.lsp = !setup.lsp;
-                    self.selection.clamp(selectable_rows(setup).len());
-                    return Some(SettingsAction::LspToggled);
-                }
-                // Telemetry consent: default-ON switch (opt-out, industry
-                // standard). The caller persists; the change takes effect
-                // on the next launch.
-                if item.event.is_empty() && item.id == "telemetry" {
-                    setup.telemetry = !setup.telemetry;
-                    self.selection.clamp(selectable_rows(setup).len());
-                    return Some(SettingsAction::TelemetryToggled);
-                }
-                // Each category flips only its own event's switch.
-                match item.event {
-                    PRE_TOOL_USE_EVENT => {
-                        setup.hooks.pre_tool_use_enabled = !setup.hooks.pre_tool_use_enabled;
+                let item = all_items()
+                    .find(|(index, _)| index == i)
+                    .map(|(_, item)| item)
+                    .expect("category index within the catalog");
+                match &item.kind {
+                    SettingKind::ModelList => {
+                        return Some(SettingsAction::OpenSummarizationModel { index: None });
                     }
-                    POST_TOOL_USE_EVENT => {
-                        setup.hooks.post_tool_use_enabled = !setup.hooks.post_tool_use_enabled;
+                    // Value rows open their own input box instead of
+                    // toggling a switch — the value is a free-form user
+                    // choice, not a hardcoded cycle.
+                    SettingKind::Choice(ChoiceInput::Cache(setting)) => {
+                        return Some(SettingsAction::OpenCacheInput { setting });
                     }
-                    _ => {}
+                    SettingKind::Choice(ChoiceInput::Editor) => {
+                        return Some(SettingsAction::OpenEditorInput);
+                    }
+                    SettingKind::Choice(ChoiceInput::Skills) => {
+                        return Some(SettingsAction::OpenSkillsInput);
+                    }
+                    SettingKind::Switch(SwitchAction::Lsp) => {
+                        setup.lsp = !setup.lsp;
+                        self.selection.clamp(selectable_rows(setup).len());
+                        return Some(SettingsAction::LspToggled);
+                    }
+                    // Telemetry consent: default-ON switch (opt-out,
+                    // industry standard). The caller persists; the change
+                    // takes effect on the next launch.
+                    SettingKind::Switch(SwitchAction::Telemetry) => {
+                        setup.telemetry = !setup.telemetry;
+                        self.selection.clamp(selectable_rows(setup).len());
+                        return Some(SettingsAction::TelemetryToggled);
+                    }
+                    SettingKind::Switch(SwitchAction::Persist) => {
+                        setup.checkup.termination.enabled = !setup.checkup.termination.enabled;
+                        self.selection.clamp(selectable_rows(setup).len());
+                        return Some(SettingsAction::ToggleSaved);
+                    }
+                    // Each hook category flips only its own event's switch.
+                    SettingKind::HookList(event) => match *event {
+                        PRE_TOOL_USE_EVENT => {
+                            setup.hooks.pre_tool_use_enabled =
+                                !setup.hooks.pre_tool_use_enabled;
+                        }
+                        POST_TOOL_USE_EVENT => {
+                            setup.hooks.post_tool_use_enabled =
+                                !setup.hooks.post_tool_use_enabled;
+                        }
+                        _ => {}
+                    },
+                    // The MCP category row itself just opens the wizard;
+                    // toggling belongs to the individual server rows.
+                    SettingKind::ServerList => {
+                        return Some(SettingsAction::OpenMcpForm);
+                    }
                 }
                 self.selection.clamp(selectable_rows(setup).len());
                 Some(SettingsAction::ToggleSaved)
@@ -790,10 +978,13 @@ impl SettingsView {
         if max_row_w == 0 {
             return None;
         }
-        let row_x = area.x + (area.width.saturating_sub(max_row_w as u16)) / 2;
+        // Same geometry the render uses: content rows start BOX_PAD columns
+        // inside the contour's left edge.
+        let box_x = area.x + (area.width.saturating_sub(max_row_w as u16)) / 2;
+        let row_x = box_x + BOX_PAD as u16;
         // Only option/sub rows are clickable — never titles or descriptions.
         let hit_x = mouse.x >= row_x
-            && mouse.x < area.right()
+            && mouse.x < box_x + max_row_w as u16
             && mouse.y >= area.y
             && mouse.y < area.bottom();
         if !hit_x {
@@ -820,7 +1011,10 @@ impl SettingsView {
         if max_w == 0 || area.width == 0 || area.height == 0 {
             return;
         }
-        let row_x = area.x + (area.width.saturating_sub(max_w as u16)) / 2;
+        // `box_x` is the contour's left edge; every content row starts
+        // `BOX_PAD` columns in, so nothing touches the drawn margins.
+        let box_x = area.x + (area.width.saturating_sub(max_w as u16)) / 2;
+        let row_x = box_x + BOX_PAD as u16;
 
         // Clamp selection and scroll before rendering.
         let rows = selectable_rows(setup);
@@ -830,7 +1024,14 @@ impl SettingsView {
         let selected_idx = self.selection.selected_index;
         let offset = self.viewport_offset(area, setup);
 
+        let mut inside_box = false;
         for line in &layout {
+            // Track which side of the contour we are on BEFORE the
+            // visibility checks: when scrolling hides a box's top border,
+            // its visible rows below must still get walls.
+            if let Line::SectionBorder { top, .. } = &line.line {
+                inside_box = *top;
+            }
             let Some(y) = (start_y + line.y).checked_sub(offset) else {
                 continue;
             };
@@ -840,19 +1041,33 @@ impl SettingsView {
             if y >= area.bottom() {
                 break;
             }
+            // Side walls complete the contour: every row strictly between
+            // the box's top and bottom borders extends the ╭/╰ and ╮/╯
+            // corners into `│` pillars. Drawn BEFORE the content so nothing
+            // can overwrite them (content starts BOX_PAD columns in, and
+            // early-`continue` arms still keep their walls).
+            if inside_box && !matches!(line.line, Line::SectionBorder { .. }) {
+                let wall = Style::default().fg(muted);
+                draw_text(buf, "│", box_x, y, area, wall);
+                draw_text(buf, "│", box_x + max_w as u16 - 1, y, area, wall);
+            }
             match &line.line {
                 Line::SummarizationModel(index) => {
                     let selected =
                         rows.get(selected_idx) == Some(&SettingsRow::SummarizationModel(*index));
                     let entry = &setup.routing.summarization_models[*index];
-                    let controls = area.right().saturating_sub(18).max(area.x);
+                    // Controls hug the box's right inner edge, inside the
+                    // contour — never outside it.
+                    let controls = (box_x + max_w as u16)
+                        .saturating_sub(SUMMARIZER_CONTROLS.width() as u16 + BOX_PAD as u16)
+                        .max(row_x);
                     let text = truncate(
                         &format!("  {}. {}/{}", index + 1, entry.provider, entry.model),
                         controls.saturating_sub(row_x) as usize,
                     );
                     let style = Style::default().fg(if selected { primary } else { fg });
                     draw_text(buf, &text, row_x, y, area, style);
-                    draw_text(buf, "[ ↑ ] [ ↓ ] [ × ]", controls, y, area, style);
+                    draw_text(buf, SUMMARIZER_CONTROLS, controls, y, area, style);
                 }
                 Line::AddSummarizationModel => {
                     let selected =
@@ -873,17 +1088,42 @@ impl SettingsView {
                 Line::Description(text) => {
                     draw_text(buf, text, row_x, y, area, Style::default().fg(muted));
                 }
-                Line::Link(text) => {
-                    // Same accent color the dialog uses for its terms link.
-                    draw_text(buf, text, row_x, y, area, Style::default().fg(primary));
+                Line::SectionBorder { title, top } => {
+                    // The contour spans the same centered width the rows
+                    // use, so the boxes and their content share margins.
+                    // Corners close on both ends: `╭─ Title ───… ─╮` and
+                    // `╰─────… ─╯`.
+                    if *top {
+                        let head = format!("╭─ {} ", title);
+                        let dashes =
+                            max_w.saturating_sub(head.width() + 1); // 1 = closing corner
+                        draw_text(
+                            buf,
+                            &format!("{head}{}╮", "─".repeat(dashes)),
+                            box_x,
+                            y,
+                            area,
+                            Style::default().fg(muted),
+                        );
+                        // The section title pops above the border glyph.
+                        draw_text(buf, title, box_x + 3, y, area, Style::default().fg(fg));
+                    } else {
+                        draw_text(
+                            buf,
+                            &format!("╰{}╯", "─".repeat(max_w.saturating_sub(2))),
+                            box_x,
+                            y,
+                            area,
+                            Style::default().fg(muted),
+                        );
+                    }
                 }
                 Line::Category { item } => {
                     let idx = rows
                         .iter()
                         .position(|r| matches!(r, SettingsRow::Category(ci) if ci == item));
                     let is_selected = idx == Some(selected_idx);
-                    let shown = true;
-                    let item = &settings_items()[*item];
+                    let item = item_at(*item);
 
                     // Choice rows render "label: value" instead of the
                     // ✔/✗ switch symbol.
@@ -895,7 +1135,7 @@ impl SettingsView {
                             row_x + 2,
                             y,
                             area,
-                            Style::default().fg(if is_selected && shown { primary } else { fg }),
+                            Style::default().fg(if is_selected { primary } else { fg }),
                         );
                         continue;
                     }
@@ -911,7 +1151,7 @@ impl SettingsView {
                         row_x + 2,
                         y,
                         area,
-                        Style::default().fg(if is_selected && shown { primary } else { fg }),
+                        Style::default().fg(if is_selected { primary } else { fg }),
                     );
                 }
                 Line::Hook { event, hook } => {
@@ -1025,49 +1265,57 @@ fn content_start_y(area: Rect, setup: &Setup) -> u16 {
 }
 
 fn max_row_width(setup: &Setup, width: u16) -> usize {
-    // Descriptions wrap to the terminal width, so their widest rendered row
-    // never exceeds it.
-    let width_cap = width as usize;
-    let mut width = settings_items()
-        .iter()
-        .map(|item| {
-            let mut len = item.description.len().max(2 + item.label.len()); // "✔ PreToolUse hooks"
+    // Descriptions wrap to the box's inner width, so their widest rendered
+    // row never exceeds it.
+    let width_cap = width.saturating_sub(2 * BOX_PAD as u16) as usize;
+    let mut width = all_items()
+        .map(|(_, item)| {
+            // Display width, not byte length: values can carry
+            // multi-byte glyphs (×, ›) that skew centering otherwise.
+            let mut len = item
+                .description
+                .width()
+                .max(2 + item.label.width()); // "✔ PreToolUse hooks"
             // Choice rows render "label: value" at the same indent.
             if let Some(v) = cache_choice_value(item.id, setup) {
-                len = len.max(2 + item.label.len() + 2 + v.len());
+                len = len.max(2 + item.label.width() + 2 + v.width());
             }
             len.min(width_cap)
         })
         .max()
         .unwrap_or(0);
-    for item in settings_items() {
-        if item.event.is_empty() || !setup.hooks.is_event_enabled(item.event) {
-            continue;
-        }
-        for entry in hook_entries(setup, item.event) {
-            // Full drawn line: indent + "• " + name [+ " — command…"].
-            let name = hook_display_name(entry);
-            let mut len = 4 + 2 + name.chars().count();
-            if !entry.name.is_empty() && !entry.command.is_empty() {
-                len += 3 + truncate(&entry.command, COMMAND_PREVIEW_LEN)
-                    .chars()
-                    .count();
+    for (_, item) in all_items() {
+        if let SettingKind::HookList(event) = item.kind {
+            if !setup.hooks.is_event_enabled(event) {
+                continue;
             }
-            width = width.max(len);
+            for entry in hook_entries(setup, event) {
+                // Full drawn line: indent + "• " + name [+ " — command…"].
+                // Capped like the descriptions, so a very long hook name
+                // cannot push the contour past a tiny terminal.
+                let name = hook_display_name(entry);
+                let mut len = 4 + 2 + name.chars().count();
+                if !entry.name.is_empty() && !entry.command.is_empty() {
+                    len += 3 + truncate(&entry.command, COMMAND_PREVIEW_LEN)
+                        .chars()
+                        .count();
+                }
+                width = width.max(len.min(width_cap));
+            }
+            width = width.max(4 + "+ Add hook".len());
         }
-        width = width.max(4 + "+ Add hook".len());
     }
-    // MCP section: description plus one toggle row per server and the Add
-    // action (indented like hook sub-rows).
-    width = width.max(MCP_SECTION_DESCRIPTION.len().min(width_cap));
+    // MCP server rows (indented like hook sub-rows).
     for entry in &setup.mcp.servers {
         // Full drawn line: indent + "✔ " + name + " — target…".
         let len =
             4 + 1 + entry.name.chars().count() + 3 + mcp_server_preview(entry).chars().count();
-        width = width.max(len);
+        width = width.max(len.min(width_cap));
     }
     width = width.max(4 + "+ Add server".len());
-    width
+    // The contour must enclose the padded content: plus the breathing room
+    // on each side, so `╭…╮` extends past the widest drawn row.
+    width + 2 * BOX_PAD
 }
 
 fn visible_rows(area: Rect) -> usize {
@@ -1156,6 +1404,16 @@ mod tests {
         )
     }
 
+    /// Flat catalog index of a setting id. Tests must not hardcode row
+    /// indices: the `onnx` feature adds the checkup mid-list and any
+    /// reordering would silently retarget the assertions.
+    fn catalog_index(id: &str) -> usize {
+        all_items()
+            .find(|(_, item)| item.id == id)
+            .map(|(index, _)| index)
+            .unwrap_or_else(|| panic!("setting {id} exists in the catalog"))
+    }
+
     fn setup_with_hooks(enabled: bool, pre: &[(&str, &str)]) -> Setup {
         let mut setup = Setup::default();
         setup.hooks.pre_tool_use_enabled = enabled;
@@ -1174,6 +1432,95 @@ mod tests {
                 });
         }
         setup
+    }
+
+    /// Scroll frames whole section blocks: when the selection sits in a
+    /// section that requires scrolling, the viewport pins that block's
+    /// closing border on the last visible row, so the box is never cut in
+    /// half at the bottom (the old behavior pinned the selected row and
+    /// clipped the block below it). A block taller than the viewport falls
+    /// back to pinning the selected row itself.
+    #[test]
+    fn scroll_frames_whole_section_blocks() {
+        let setup = Setup::default();
+        let area = Rect::new(3, 2, 90, 12);
+
+        // Selection in the LAST section (General): scrolling must be
+        // required and the whole General block must fit in the window.
+        let mut view = SettingsView::new();
+        let telemetry_row = selectable_rows(&setup)
+            .into_iter()
+            .find(|row| matches!(row, SettingsRow::Category(index) if item_at(*index).id == "telemetry"))
+            .unwrap();
+        view.selection.selected_index = selectable_rows(&setup)
+            .iter()
+            .position(|row| *row == telemetry_row)
+            .unwrap();
+        let mut buf = Buffer::empty(area);
+        view.render(&mut buf, area, &test_theme(), &setup);
+
+        let layout = build_layout(&setup, area.width);
+        let start_y = content_start_y(area, &setup);
+        let offset = view.viewport_offset(area, &setup);
+        // The selected row's block bounds in layout coordinates.
+        let sel_y = layout
+            .iter()
+            .find(|l| l.line.row() == Some(telemetry_row))
+            .unwrap()
+            .y;
+        let block_top = layout
+            .iter()
+            .take_while(|l| l.y <= sel_y)
+            .filter_map(|l| match l.line {
+                Line::SectionBorder { top: true, .. } => Some(l.y),
+                _ => None,
+            })
+            .last()
+            .unwrap();
+        let block_bottom = layout
+            .iter()
+            .filter(|l| l.y >= sel_y)
+            .find_map(|l| match l.line {
+                Line::SectionBorder { top: false, .. } => Some(l.y),
+                _ => None,
+            })
+            .unwrap();
+        // The block's closing border sits on the last visible row...
+        assert!(
+            line_text(&buf, area, area.bottom() - 1).starts_with('╰'),
+            "closing border must be pinned at the viewport bottom, got {:?}",
+            line_text(&buf, area, area.bottom() - 1)
+        );
+        // ...and the opening border is inside the window: the whole block
+        // is framed, nothing cut at the bottom edge.
+        let top_screen_y = (start_y + block_top).saturating_sub(offset);
+        assert!(
+            top_screen_y >= area.y && top_screen_y < area.bottom(),
+            "opening border must stay visible (top_screen_y = {top_screen_y})"
+        );
+        assert!(block_bottom >= sel_y, "layout closes every box");
+
+        // Fallback: a block taller than the viewport (30 summarization
+        // models inside the Automation box) pins the selected row instead —
+        // the row stays visible even though the block cannot be framed.
+        let mut setup = Setup::default();
+        setup.routing.summarization_models = (0..30)
+            .map(|index| crate::util::setup::FallbackEntry {
+                provider: "local".into(),
+                model: format!("model-{index}"),
+            })
+            .collect();
+        let mut view = SettingsView::new();
+        view.selection.selected_index = selectable_rows(&setup)
+            .iter()
+            .position(|row| *row == SettingsRow::SummarizationModel(29))
+            .unwrap();
+        let mut buf = Buffer::empty(area);
+        view.render(&mut buf, area, &test_theme(), &setup);
+        assert!(
+            line_text(&buf, area, area.bottom() - 1).contains("model-29"),
+            "oversized block falls back to pinning the selected row"
+        );
     }
 
     fn line_text(buf: &Buffer, area: Rect, y: u16) -> String {
@@ -1202,29 +1549,61 @@ mod tests {
 
     #[test]
     fn sub_lists_follow_enabled_state_per_event() {
+        // Expected rows are built from the catalog by id (never hardcoded
+        // indices): the `onnx` feature inserts the checkup item mid-list.
+        let cat = |id: &str| SettingsRow::Category(catalog_index(id));
+        let cfg_rows = |mut rows: Vec<SettingsRow>| {
+            #[cfg(feature = "onnx")]
+            // Termination checkup sits right after the PostToolUse item's
+            // whole sub-list (catalog order: summarization, pre, post,
+            // checkup). With hooks enabled the AddHook sub-row follows the
+            // toggle, so anchor on it; otherwise anchor on the toggle
+            // itself. The position is looked up, never hardcoded.
+            {
+                let after_post = rows
+                    .iter()
+                    .position(|r| matches!(r, SettingsRow::AddHook { event: POST_TOOL_USE_EVENT }))
+                    .or_else(|| {
+                        rows.iter().position(
+                            |r| matches!(r, SettingsRow::Category(x) if *x == catalog_index("post_tool_use_hooks")),
+                        )
+                    })
+                    .expect("post-tool row exists")
+                    + 1;
+                rows.insert(after_post, cat("checkup_termination"));
+            }
+            rows
+        };
+
+        // Flat catalog order: summarization (+ Add action), hooks, then the
+        // cache/environment/integrations/general items. MCP's Add action
+        // sits inside its Integrations box, BEFORE the General items.
         let disabled = setup_with_hooks(false, &[("a", "cmd a")]);
         assert_eq!(
             selectable_rows(&disabled),
-            vec![
-                SettingsRow::Category(0),
-                SettingsRow::Category(1),
-                SettingsRow::Category(2),
-                SettingsRow::Category(3),
-                SettingsRow::Category(4),
-                SettingsRow::Category(5),
+            cfg_rows(vec![
+                cat("summarization_models"),
                 SettingsRow::AddSummarizationModel,
-                SettingsRow::Category(6),
-                SettingsRow::Category(7),
-                SettingsRow::Category(8),
+                cat("hooks"),
+                cat("post_tool_use_hooks"),
+                cat("anthropic_cache_ttl"),
+                cat("openai_cache_retention"),
+                cat("editor"),
+                cat("skill_dirs"),
+                cat("lsp"),
+                cat("mcp"),
                 SettingsRow::AddMcpServer,
-            ]
+                cat("telemetry"),
+            ])
         );
 
         let enabled = setup_with_hooks(true, &[("a", "cmd a"), ("b", "cmd b")]);
         assert_eq!(
             selectable_rows(&enabled),
-            vec![
-                SettingsRow::Category(0),
+            cfg_rows(vec![
+                cat("summarization_models"),
+                SettingsRow::AddSummarizationModel,
+                cat("hooks"),
                 SettingsRow::Hook {
                     event: PRE_TOOL_USE_EVENT,
                     index: 0
@@ -1236,20 +1615,19 @@ mod tests {
                 SettingsRow::AddHook {
                     event: PRE_TOOL_USE_EVENT
                 },
-                SettingsRow::Category(1),
+                cat("post_tool_use_hooks"),
                 SettingsRow::AddHook {
                     event: POST_TOOL_USE_EVENT
                 },
-                SettingsRow::Category(2),
-                SettingsRow::Category(3),
-                SettingsRow::Category(4),
-                SettingsRow::Category(5),
-                SettingsRow::AddSummarizationModel,
-                SettingsRow::Category(6),
-                SettingsRow::Category(7),
-                SettingsRow::Category(8),
+                cat("anthropic_cache_ttl"),
+                cat("openai_cache_retention"),
+                cat("editor"),
+                cat("skill_dirs"),
+                cat("lsp"),
+                cat("mcp"),
                 SettingsRow::AddMcpServer,
-            ]
+                cat("telemetry"),
+            ])
         );
     }
 
@@ -1268,16 +1646,15 @@ mod tests {
         setup
     }
 
-    /// The MCP section appends server toggles plus the Add action after
-    /// every category; toggling flips only the server's own switch.
+    /// The MCP section appends server toggles plus the Add action inside
+    /// its Integrations box; toggling flips only the server's own switch.
     #[test]
     fn mcp_rows_toggle_and_open_the_wizard() {
         let setup = setup_with_mcp_server("docs", true);
-        assert_eq!(
-            selectable_rows(&setup).last(),
-            Some(&SettingsRow::AddMcpServer)
-        );
         assert!(selectable_rows(&setup).contains(&SettingsRow::McpServer(0)));
+        // The category row opens the wizard; the Add action is the last
+        // selectable row of the Integrations box.
+        assert!(selectable_rows(&setup).contains(&SettingsRow::AddMcpServer));
 
         let mut setup = setup;
         let mut view = SettingsView::new();
@@ -1315,7 +1692,7 @@ mod tests {
         let mut view = SettingsView::new();
         view.selection.selected_index = selectable_rows(&setup)
             .iter()
-            .position(|r| matches!(r, SettingsRow::Category(2)))
+            .position(|r| matches!(r, SettingsRow::Category(x) if *x == catalog_index("anthropic_cache_ttl")))
             .unwrap();
         assert_eq!(
             view.activate_selected(&mut setup),
@@ -1328,7 +1705,7 @@ mod tests {
 
         view.selection.selected_index = selectable_rows(&setup)
             .iter()
-            .position(|r| matches!(r, SettingsRow::Category(3)))
+            .position(|r| matches!(r, SettingsRow::Category(x) if *x == catalog_index("openai_cache_retention")))
             .unwrap();
         assert_eq!(
             view.activate_selected(&mut setup),
@@ -1373,7 +1750,7 @@ mod tests {
         let lsp_row = |setup: &Setup| {
             selectable_rows(setup)
                 .iter()
-                .position(|r| matches!(r, SettingsRow::Category(4)))
+                .position(|r| matches!(r, SettingsRow::Category(x) if *x == catalog_index("lsp")))
                 .expect("lsp category row exists")
         };
 
@@ -1383,7 +1760,7 @@ mod tests {
             Some(SettingsAction::LspToggled)
         );
         assert!(!setup.lsp);
-        assert!(!is_enabled(&settings_items()[4], &setup));
+        assert!(!is_enabled(item_at(catalog_index("lsp")), &setup));
 
         view.selection.selected_index = lsp_row(&setup);
         assert_eq!(
@@ -1391,18 +1768,32 @@ mod tests {
             Some(SettingsAction::LspToggled)
         );
         assert!(setup.lsp);
-        assert!(is_enabled(&settings_items()[4], &setup));
+        assert!(is_enabled(item_at(catalog_index("lsp")), &setup));
     }
 
     #[test]
     fn toggling_off_clamps_selection() {
         let mut setup = setup_with_hooks(true, &[("a", "cmd a")]);
         let mut view = SettingsView::new();
-        view.selection.selected_index = 3; // Add hook (pre)
-        // User navigates up to the Hooks toggle and activates it.
-        for _ in 0..3 {
+        // Start on the pre-tool Add-hook row and walk up to the hook
+        // toggle (row identity, not a fixed step count — the layout above
+        // the Automation items may change without retargeting this test).
+        view.selection.selected_index = selectable_rows(&setup)
+            .iter()
+            .position(|r| matches!(r, SettingsRow::AddHook { event: PRE_TOOL_USE_EVENT }))
+            .expect("pre-tool Add-hook row exists");
+        let hook_toggle = SettingsRow::Category(catalog_index("hooks"));
+        for _ in 0..10 {
+            if selectable_rows(&setup).get(view.selection.selected_index) == Some(&hook_toggle) {
+                break;
+            }
             view.select_prev(20, &setup);
         }
+        assert_eq!(
+            selectable_rows(&setup).get(view.selection.selected_index),
+            Some(&hook_toggle),
+            "navigation must land on the hook toggle"
+        );
 
         assert_eq!(
             view.activate_selected(&mut setup),
@@ -1424,7 +1815,7 @@ mod tests {
         // Blank configured command: the row shows the fallback hint.
         view.selection.selected_index = selectable_rows(&setup)
             .iter()
-            .position(|r| matches!(r, SettingsRow::Category(6)))
+            .position(|r| matches!(r, SettingsRow::Category(x) if *x == catalog_index("editor")))
             .expect("editor category row exists");
         assert_eq!(
             view.activate_selected(&mut setup),
@@ -1469,7 +1860,7 @@ mod tests {
 
         view.selection.selected_index = selectable_rows(&setup)
             .iter()
-            .position(|r| matches!(r, SettingsRow::Category(7)))
+            .position(|r| matches!(r, SettingsRow::Category(x) if *x == catalog_index("skill_dirs")))
             .expect("skill_dirs category row exists");
         assert_eq!(
             view.activate_selected(&mut setup),
@@ -1510,8 +1901,12 @@ mod tests {
     fn activating_hook_rows_requests_the_registration_box() {
         let mut setup = setup_with_hooks(true, &[("block rm", "exit 2")]);
         let mut view = SettingsView::new();
+        let rows = |setup: &Setup| selectable_rows(setup);
 
-        view.selection.selected_index = 1; // Pre-tool hook
+        view.selection.selected_index = rows(&setup)
+            .iter()
+            .position(|r| matches!(r, SettingsRow::Hook { event: PRE_TOOL_USE_EVENT, index: 0 }))
+            .expect("pre-tool hook row exists"); // Pre-tool hook
         assert_eq!(
             view.activate_selected(&mut setup),
             Some(SettingsAction::OpenHookForm {
@@ -1520,7 +1915,10 @@ mod tests {
             })
         );
 
-        view.selection.selected_index = 2; // Add hook (pre)
+        view.selection.selected_index = rows(&setup)
+            .iter()
+            .position(|r| matches!(r, SettingsRow::AddHook { event: PRE_TOOL_USE_EVENT }))
+            .expect("pre-tool Add-hook row exists"); // Add hook (pre)
         assert_eq!(
             view.activate_selected(&mut setup),
             Some(SettingsAction::OpenHookForm {
@@ -1588,27 +1986,41 @@ mod tests {
                 );
             }
 
-            // A section always STARTS with its description, so every
-            // Description (except the first, which follows the title) must
-            // be preceded by exactly one blank line — this holds regardless
-            // of whether the previous section ended in a toggle, a hook row
+            // Every item's description is either the FIRST content of its
+            // box (preceded by the opening border) or a later sibling
+            // (preceded by exactly one blank line). This holds regardless
+            // of whether the previous item ended in a toggle, a hook row
             // or an "+ Add hook" entry.
-            let mut first_description = true;
+            let mut saw_a_description = false;
             for line in &layout {
                 if matches!(line.line, Line::Description(_)) {
-                    if first_description {
-                        first_description = false;
-                        continue;
-                    }
+                    saw_a_description = true;
                     // Predecessor check via the sequential-y invariant:
                     // layout[line.y - 1] is the row right above this one.
+                    let preceded_by = if line.y >= 1 {
+                        Some(&layout[(line.y - 1) as usize].line)
+                    } else {
+                        None
+                    };
                     assert!(
-                        line.y >= 1 && matches!(layout[(line.y - 1) as usize].line, Line::Blank),
-                        "description at y={} must follow a blank line",
+                        matches!(
+                            preceded_by,
+                            Some(Line::Blank) | Some(Line::SectionBorder { top: true, .. })
+                        ),
+                        "description at y={} must follow a blank line or an opening border",
                         line.y
                     );
+                } else if matches!(
+                    line.line,
+                    Line::SectionBorder {
+                        top: true,
+                        title: _
+                    }
+                ) {
+                    saw_a_description = false;
                 }
             }
+            assert!(saw_a_description, "layout has descriptions to check");
         }
     }
 
@@ -1670,9 +2082,13 @@ mod tests {
                 .saturating_sub(max_row_width(&setup, area.width) as u16))
                 / 2;
 
+        let hook_row = selectable_rows(&setup)
+            .iter()
+            .position(|r| matches!(r, SettingsRow::Hook { event: PRE_TOOL_USE_EVENT, index: 0 }))
+            .expect("pre-tool hook row exists");
         assert_eq!(
             view.handle_mouse(&mouse_at(row_x + 6, hook_y), area, &setup),
-            Some(1)
+            Some(hook_row)
         );
         // Description line is never clickable.
         assert_eq!(
@@ -1739,7 +2155,9 @@ mod tests {
     #[test]
     fn narrow_width_wraps_descriptions_instead_of_clipping() {
         let theme = test_theme();
-        let area = Rect::new(0, 0, 60, 40);
+        // Tall enough that even the last section (General) is on screen:
+        // the section contours add two border rows plus a blank per group.
+        let area = Rect::new(0, 0, 60, 64);
         let setup = Setup::default();
         let mut view = SettingsView::new();
         let mut buf = Buffer::empty(area);
@@ -1751,7 +2169,7 @@ mod tests {
             .map(|y| format!("{}\n", line_text(&buf, area, y)))
             .collect();
         assert!(all.contains("COSH_TELEMETRY=off"));
-        assert!(all.contains("Takes effect on the next launch"));
+        assert!(all.contains("Applies next launch"));
         // No drawn row overflows the terminal width.
         for y in area.y..area.bottom() {
             assert!(
@@ -1764,16 +2182,17 @@ mod tests {
         // Clicking the Language-servers toggle row (below its wrapped
         // description) still selects it: offset and start_y derive from the
         // same wrapped layout the render used.
+        let lsp_catalog = catalog_index("lsp");
         let lsp_index = selectable_rows(&setup)
             .iter()
-            .position(|r| matches!(r, SettingsRow::Category(4)))
+            .position(|r| matches!(r, SettingsRow::Category(x) if *x == lsp_catalog))
             .expect("lsp category row exists");
         view.selection.selected_index = lsp_index;
         let layout = build_layout(&setup, area.width);
         let row_y = content_start_y(area, &setup)
             + layout
                 .iter()
-                .find(|l| matches!(l.line, Line::Category { item: 4 }))
+                .find(|l| matches!(l.line, Line::Category { item } if item == lsp_catalog))
                 .expect("lsp layout row")
                 .y;
         let row_x = area.x
@@ -1785,5 +2204,80 @@ mod tests {
             view.handle_mouse(&mouse_at(row_x + 4, row_y), area, &setup),
             Some(lsp_index)
         );
+    }
+
+    /// The contour must be fully closed: every box's top border starts
+    /// with `╭` and ends with `╮`, the bottom border with `╰`/`╯`, and
+    /// every row between them carries `│` pillars on both frame columns
+    /// (walls exist even on blank and early-`continue` content rows).
+    #[test]
+    fn section_contours_are_fully_closed() {
+        let theme = test_theme();
+        let area = Rect::new(0, 0, 80, 64);
+        let setup = setup_with_hooks(true, &[("block rm", "exit 2")]);
+        let mut view = SettingsView::new();
+        let mut buf = Buffer::empty(area);
+        view.render(&mut buf, area, &theme, &setup);
+
+        let max_w = max_row_width(&setup, area.width);
+        let box_x = area.x + (area.width - max_w as u16) / 2;
+        let left = box_x;
+        let right = box_x + max_w as u16 - 1;
+        let start_y = content_start_y(area, &setup);
+        // Corners are read per-cell, not from the trimmed row text: the box
+        // is centered, so leading blanks are legitimate and a starts_with
+        // would misfire.
+        let cell = |x: u16, y: u16| {
+            buf.cell((x, y))
+                .map(|c| c.symbol().to_string())
+                .unwrap_or_default()
+        };
+
+        let mut inside = false;
+        let mut boxes_seen = 0usize;
+        for line in build_layout(&setup, area.width) {
+            let y = start_y + line.y;
+            match line.line {
+                Line::SectionBorder { top: true, .. } => {
+                    assert_eq!(cell(left, y), "╭", "open corner missing at y={y}");
+                    assert_eq!(cell(right, y), "╮", "open corner missing at y={y}");
+                    inside = true;
+                    boxes_seen += 1;
+                }
+                Line::SectionBorder { top: false, .. } => {
+                    assert_eq!(cell(left, y), "╰", "close corner missing at y={y}");
+                    assert_eq!(cell(right, y), "╯", "close corner missing at y={y}");
+                    inside = false;
+                }
+                _ if inside => {
+                    assert_eq!(cell(left, y), "│", "left wall missing at y={y}");
+                    assert_eq!(cell(right, y), "│", "right wall missing at y={y}");
+                }
+                _ => {}
+            }
+        }
+        // Every catalog section must have produced a closed box.
+        assert_eq!(boxes_seen, sections().len());
+    }
+
+    /// Visual dump of the rendered screen (run with --nocapture). Ignored
+    /// harness for eyeballing the section contours and padding — keep it
+    /// when tweaking BOX_PAD or the border geometry.
+    #[test]
+    #[ignore]
+    fn preview_screen() {
+        let theme = test_theme();
+        let mut setup = setup_with_hooks(true, &[("block rm", "exit 2"), ("b", "cmd b")]);
+        setup.routing.summarization_models = vec![crate::util::setup::FallbackEntry {
+            provider: "local".into(),
+            model: "qwen2.5-coder:7b".into(),
+        }];
+        let mut view = SettingsView::new();
+        let area = Rect::new(0, 0, 80, 46);
+        let mut buf = Buffer::empty(area);
+        view.render(&mut buf, area, &theme, &setup);
+        for y in area.y..area.bottom() {
+            println!("{:3}│{}│", y, line_text(&buf, area, y));
+        }
     }
 }
