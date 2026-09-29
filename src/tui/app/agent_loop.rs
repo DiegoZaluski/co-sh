@@ -512,13 +512,14 @@ impl App {
                         .with_skills(skills_config.to_skills())
                         .with_mcp_config(mcp_config);
 
-                    // The resident decision model: loaded exactly once per
-                    // harness assembly (never hot) and handed to the harness
-                    // as a ready `Arc<dyn Checkup>`. Load failure fails open
-                    // — the loop runs unaudited, exactly as without the
-                    // feature. The harness never chooses which model to
-                    // load; a future consumer of the engine receives the
-                    // same resident.
+                    // The decision-model audit seam (`harness::checkup`),
+                    // attached with the PROCESS-WIDE resident model: the
+                    // first turn loads it, later turns share the same `Arc`
+                    // (the harness is assembled per turn; the model's
+                    // lifetime is not). Load failure fails open — the loop
+                    // runs unaudited, exactly as without the feature. The
+                    // harness never chooses which model to load; a future
+                    // consumer of the engine receives the same resident.
                     #[cfg(feature = "onnx")]
                     if checkup_config.termination.enabled {
                         let kind = match &checkup_config.model {
