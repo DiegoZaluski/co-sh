@@ -792,12 +792,15 @@ impl App {
                     // End-cap color for the pending-queue strip: the current
                     // harness mode's hue (same one the prompt's mode
                     // indicator paints with).
-                    let cap_color = Self::mode_cap_color(
+                    let cap_color = crate::component::prompt::agent_mode_color(
                         &self.theme,
                         &agent_colors,
                         &unique_agents,
                         self.state.mode,
                     );
+                    if let Some(spinner) = &mut self.agent_spinner_bass {
+                        spinner.set_mode_color(cap_color);
+                    }
                     self.session_view.render(
                         buf,
                         session_area,
@@ -1045,8 +1048,12 @@ impl App {
         }
         let unique_agents = self.state.unique_agents();
         let agent_colors = crate::types::AgentColors::from_theme(&self.theme);
-        let cap_color =
-            Self::mode_cap_color(&self.theme, &agent_colors, &unique_agents, self.state.mode);
+        let cap_color = crate::component::prompt::agent_mode_color(
+            &self.theme,
+            &agent_colors,
+            &unique_agents,
+            self.state.mode,
+        );
         Self::draw_pending_queue_rows(
             buf,
             area,
@@ -1067,24 +1074,6 @@ impl App {
         let (r, g, b, _) = color.to_ints();
         let up = |c: u8| -> u8 { (f32::from(c) * (1.0 - T) + 255.0 * T).round() as u8 };
         RGBA::from_ints(up(r), up(g), up(b), 255)
-    }
-
-    /// End-cap color for the pending-queue strip: the current harness mode's
-    /// hue — exactly the colors the prompt's mode indicator paints with
-    /// (Build → the agent palette entry for "build", Ask/Yolo/Command →
-    /// their dedicated theme colors).
-    fn mode_cap_color(
-        theme: &Theme,
-        agent_colors: &crate::types::AgentColors,
-        unique_agents: &[String],
-        mode: cosh::harness::Mode,
-    ) -> RGBA {
-        match mode {
-            cosh::harness::Mode::Build => agent_colors.get("build", unique_agents),
-            cosh::harness::Mode::Ask => theme.info,
-            cosh::harness::Mode::Yolo => theme.warning,
-            cosh::harness::Mode::Command => theme.success,
-        }
     }
 
     /// Queue label carried by a message's end cap: queue 1 ("next request",

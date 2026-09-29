@@ -60,6 +60,24 @@ const fn prompt_border_chars() -> BorderCharacters {
     }
 }
 
+/// Resolve the color used by the active mode indicator.
+///
+/// Keep this as the single source of truth for mode colors: the prompt,
+/// pending-queue caps, and agent spinners all use the same value.
+pub(crate) fn agent_mode_color(
+    theme: &Theme,
+    agent_colors: &AgentColors,
+    unique_agents: &[String],
+    mode: cosh::harness::Mode,
+) -> RGBA {
+    match mode {
+        cosh::harness::Mode::Build => agent_colors.get("build", unique_agents),
+        cosh::harness::Mode::Ask => theme.info,
+        cosh::harness::Mode::Yolo => theme.warning,
+        cosh::harness::Mode::Command => theme.success,
+    }
+}
+
 fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
     let right = x + max_w;
     for (i, ch) in text.chars().enumerate() {
@@ -1010,14 +1028,7 @@ impl PromptView {
             cosh::harness::Mode::Command => "command",
         };
 
-        let agent_color = match state.mode {
-            cosh::harness::Mode::Build => agent_colors.get("build", unique_agents),
-            cosh::harness::Mode::Ask => theme.info,
-            cosh::harness::Mode::Yolo => theme.warning,
-            // Command mode turns the TUI into a plain terminal: a distinct,
-            // calm green signals "no model attached, input goes to the shell".
-            cosh::harness::Mode::Command => theme.success,
-        };
+        let agent_color = agent_mode_color(theme, agent_colors, unique_agents, state.mode);
 
         let mut border_box = BoxRenderable::new();
         border_box.set_border_color(Some(agent_color.into()));

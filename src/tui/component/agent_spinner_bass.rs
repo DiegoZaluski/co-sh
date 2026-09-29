@@ -253,9 +253,9 @@ pub struct AgentSpinnerBass {
     seed: u64,
     /// Number of equalizer bars.
     bar_count: usize,
-    /// The single base colour for every bar (theme primary). Bars differ
-    /// only in shade — lighter near the floor, darker at the top — never
-    /// in hue.
+    /// The single base colour for every bar (the active prompt mode). Bars
+    /// differ only in shade — lighter near the floor, darker at the top —
+    /// never in hue.
     bar_color_base: RGBA,
     /// Frame at which each bar is born during the birth animation.
     birth_steps: Vec<u32>,
@@ -277,8 +277,8 @@ pub struct AgentSpinnerBass {
 }
 
 impl AgentSpinnerBass {
-    /// Create a new spinner with the given label, sourcing the bar colour
-    /// from `theme.primary` and the label colour from `theme.text_muted`.
+    /// Create a new spinner with the given label. The app replaces the
+    /// initial bar colour with the active prompt mode colour before rendering.
     pub fn new(label: &str, theme: &Theme) -> Self {
         let bar_count = NUM_BARS;
         let label_width = label.chars().count();
@@ -364,12 +364,19 @@ impl AgentSpinnerBass {
         }
     }
 
-    /// Update the theme colours (bar colour and label colour) without
-    /// resetting the animation state. This allows the spinner to
-    /// immediately reflect theme changes while a loop is active.
+    /// Update the theme colours without resetting the animation state. This
+    /// allows the spinner to immediately reflect theme changes while a loop
+    /// is active.
     pub fn update_theme(&mut self, theme: &Theme) {
         self.label_color = theme.text_muted;
         self.bar_color_base = theme.primary;
+    }
+
+    /// Update the bar colour for the active prompt mode without resetting the
+    /// animation state. The caller resolves the mode colour through the
+    /// prompt's shared mode-colour mapping.
+    pub fn set_mode_color(&mut self, color: RGBA) {
+        self.bar_color_base = color;
     }
 
     /// Total width in terminal cells (bars + gap + label + status glyph).
