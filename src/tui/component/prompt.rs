@@ -171,21 +171,6 @@ fn truncate_with_ellipsis(text: &str, max: usize) -> String {
     clipped
 }
 
-/// Style for the reasoning-level badge: bold and color-coded by effort
-/// intensity — green for low, amber for medium, red for high. Anything
-/// unknown falls back to the theme's info color.
-fn reason_level_style(level: &str, theme: &Theme) -> Style {
-    let color = match level {
-        "low" | "minimal" => theme.success,
-        "medium" => theme.warning,
-        "high" | "xhigh" => theme.error,
-        _ => theme.info,
-    };
-    Style::default()
-        .fg(rgba_color(color))
-        .add_modifier(Modifier::BOLD)
-}
-
 pub struct PromptView {
     pub input: String,
     pub cursor_pos: usize,
@@ -1173,7 +1158,7 @@ impl PromptView {
             }
         }
 
-        // Paint the label row (`Build … provider model . high`) with the box
+        // Paint the label row (`Build … provider model high`) with the box
         // fill before drawing its text: the row sits inside the input box, so
         // its cells must carry the exact `background_element` color — stale
         // glyphs left by input lines that previously occupied this row would
@@ -1281,25 +1266,23 @@ impl PromptView {
 
         // Provider + model + reasoning level on the agent-label row — the
         // same line as Build/Ask/Yolo, inside the input box, right-aligned.
-        // Layout is `provider model . level`, e.g.
-        // ` openrouter deepseek-v4-flash . high`. The provider is the
+        // Layout is `provider model level`, e.g.
+        // ` openrouter deepseek-v4-flash high`. The provider is the
         // gateway/API actually being accessed (from `LlmConfig.provider`,
         // unrelated to the model id's lab prefix) and stays muted so it reads
         // as a qualifier next to the bright model name, which uses the
         // theme's adaptive text color (a white tone on dark themes,
         // near-black on light ones such as sakura). The reasoning level is
-        // bold and color-coded by effort intensity; the ` . ` separator is
-        // muted too. Segments are truncated so the row always respects the
-        // box interior and never overlaps the agent label on the left.
+        // bold and uses the same fixed muted color as the provider. Segments
+        // are truncated so the row always respects the box interior and never
+        // overlaps the agent label on the left.
         if !model_name.is_empty() {
             // Bare model name, without the lab/org prefix (display only).
             let model_name = short_model_name(model_name);
             let reason = reasoning.filter(|r| !r.is_empty() && *r != "default");
-            let sep = if reason.is_some() { " . " } else { "" };
+            let sep = if reason.is_some() { " " } else { "" };
             let model_style = row_bg.fg(rgba_color(theme.text));
-            let reason_style = reason
-                .map(|r| row_bg.patch(reason_level_style(r, theme)))
-                .unwrap_or(row_muted_style);
+            let reason_style = row_muted_style.add_modifier(Modifier::BOLD);
 
             // Gateway provider prefix, muted, followed by one spacer column.
             let prov_seg = if provider.is_empty() {

@@ -4,7 +4,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 
-use crate::theme::{Theme, blend, rgba_color};
+use crate::theme::{Theme, rgba_color};
 
 /// Maximum number of command rows the menu shows at once. More commands than
 /// this scroll inside the window ([`SlashMenu::visible_window`]).
@@ -34,11 +34,6 @@ fn draw_bg_line(buf: &mut Buffer, x: u16, y: u16, width: u16, color: Color) {
         }
     }
 }
-
-/// How much of the menu panel color shows through the row fill. Kept below
-/// 1.0 so the band reads as a translucent layer over the background instead
-/// of an opaque "text highlight" stroke.
-const MENU_FILL_OPACITY: f32 = 0.5;
 
 fn selected_foreground_color(bg: RGBA, fallback: RGBA) -> Color {
     let (r, g, b, a) = bg.to_ints();
@@ -77,15 +72,15 @@ impl SlashMenu {
         let commands = vec![
             SlashCommand {
                 name: "models".into(),
-                desc: "Manage AI models".into(),
+                desc: "Manage models".into(),
             },
             SlashCommand {
                 name: "themes".into(),
-                desc: "Change color theme".into(),
+                desc: "Change theme".into(),
             },
             SlashCommand {
                 name: "background".into(),
-                desc: "Toggle terminal-default background".into(),
+                desc: "Toggle terminal background".into(),
             },
             SlashCommand {
                 name: "bell".into(),
@@ -93,19 +88,19 @@ impl SlashMenu {
             },
             SlashCommand {
                 name: "anim".into(),
-                desc: "Toggle animated chat logo".into(),
+                desc: "Toggle chat animation".into(),
             },
             SlashCommand {
                 name: "toolcall".into(),
-                desc: "Tool call mode: native | inline".into(),
+                desc: "Set tool call mode".into(),
             },
             SlashCommand {
                 name: "compact".into(),
-                desc: "Compact the session context now".into(),
+                desc: "Compact context now".into(),
             },
             SlashCommand {
                 name: "export".into(),
-                desc: "Export the agent-visible transcript to Markdown".into(),
+                desc: "Export transcript to Markdown".into(),
             },
             SlashCommand {
                 name: "new".into(),
@@ -113,11 +108,11 @@ impl SlashMenu {
             },
             SlashCommand {
                 name: "rename".into(),
-                desc: "Rename the current session".into(),
+                desc: "Rename session".into(),
             },
             SlashCommand {
                 name: "undo".into(),
-                desc: "Roll back to a pre-revert snapshot".into(),
+                desc: "Undo last revert".into(),
             },
         ];
 
@@ -258,18 +253,14 @@ impl SlashMenu {
         // Render just above the prompt input area
         let menu_y_start = prompt_area.y.saturating_sub(max_rows as u16);
         let menu_width = prompt_area.width;
-        // Row fill: the menu panel color blended over the theme's base
-        // background. Simulates the panel's translucency so the band reads
-        // as a soft layered surface instead of an opaque "text highlight"
-        // (which broke the semi-transparent look under the `/background`
-        // toggle). The blend uses the base background's RGB, which the
-        // `/background` toggle preserves exactly for this kind of derivation.
-        let row_fill = rgba_color(blend(
-            theme.background,
-            theme.background_menu,
-            MENU_FILL_OPACITY,
-        ));
+        // Keep the menu's normal rows on the same fill as the prompt box.
+        let row_fill = rgba_color(theme.background_element);
         let border_fg = rgba_color(theme.secondary);
+        let command_column_width = idxs
+            .iter()
+            .map(|&i| format!("/{}", self.commands[i].name).chars().count())
+            .max()
+            .unwrap_or(0);
 
         // Draw each command option or no-results placeholder
         for row in 0..max_rows {
@@ -339,13 +330,13 @@ impl SlashMenu {
                 draw_text_line(buf, &desc_text, text_x, row_y, text_width, desc_style);
             } else {
                 draw_text_line(buf, &cmd_text, text_x, row_y, text_width, cmd_style);
-                let desc_x = text_x + cmd_text.len() as u16;
+                let desc_x = text_x + command_column_width as u16;
                 draw_text_line(
                     buf,
                     &desc_text,
                     desc_x,
                     row_y,
-                    text_width.saturating_sub(cmd_text.len() as u16),
+                    text_width.saturating_sub(command_column_width as u16),
                     desc_style,
                 );
             }
