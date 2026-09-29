@@ -5164,7 +5164,7 @@ fn test_streaming_growth_is_incremental() {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// ask_questions Q&A markdown summary
+// ask_questions Q&A summary
 // ────────────────────────────────────────────────────────────────────────────
 
 /// A completed `ask_questions` tool part whose output carries the questions
@@ -5208,34 +5208,35 @@ fn question_tool_part(status: ToolStatus) -> ToolPart {
 }
 
 #[test]
-fn completed_question_produces_markdown_summary() {
-    use super::tool_render::question_markdown;
+fn completed_question_produces_summary() {
+    use super::tool_render::question_summary;
 
-    let md = question_markdown(&question_tool_part(ToolStatus::Completed))
-        .expect("completed part with output must produce markdown");
+    let summary = question_summary(&question_tool_part(ToolStatus::Completed))
+        .expect("completed part with output must produce a summary");
     assert!(
-        md.contains("# Which database should we use?"),
-        "question heading missing: {md}"
+        summary.contains("?  Which database should we use?"),
+        "question marker missing: {summary}"
     );
-    assert!(md.contains("***PostgreSQL***"), "selection missing: {md}");
-    // The text answer is trimmed: a trailing space would break the emphasis
-    // delimiters and leak raw asterisks on screen.
+    assert!(
+        summary.contains("└─ PostgreSQL"),
+        "selection missing: {summary}"
+    );
     assert_eq!(
-        md.split('\n').find(|l| l.contains("Yes")),
-        Some("***Yes***"),
-        "answer must be trimmed: {md}"
+        summary.split('\n').find(|line| line.contains("Yes")),
+        Some("└─ Yes"),
+        "answer must be trimmed: {summary}"
     );
 }
 
 #[test]
-fn running_question_has_no_markdown_summary() {
-    use super::tool_render::question_markdown;
+fn running_question_has_no_summary() {
+    use super::tool_render::question_summary;
 
-    assert!(question_markdown(&question_tool_part(ToolStatus::Running)).is_none());
+    assert!(question_summary(&question_tool_part(ToolStatus::Running)).is_none());
     // No output yet → no summary either.
     let mut failed = question_tool_part(ToolStatus::Failed("dismissed".into()));
     failed.output = None;
-    assert!(question_markdown(&failed).is_none());
+    assert!(question_summary(&failed).is_none());
 }
 
 #[test]
@@ -5252,7 +5253,7 @@ fn completed_question_renders_answers_on_screen() {
     {
         let mut ctx = ToolRenderCtx {
             buf: &mut buf,
-            x: 0,
+            x: 1,
             y: 0,
             line_h: &mut line_h,
             max_w: 80,
@@ -5281,8 +5282,24 @@ fn completed_question_renders_answers_on_screen() {
         screen.contains("PostgreSQL"),
         "answer text not rendered:\n{screen}"
     );
-    // Emphasis must be parsed, never leaked as literal asterisks.
-    assert!(!screen.contains("***"), "raw emphasis leaked:\n{screen}");
+    assert!(screen.contains("? "), "question marker missing:\n{screen}");
+    assert!(
+        screen.contains("└─ "),
+        "answer connector missing:\n{screen}"
+    );
+
+    let marker_before = buf.cell((0, 0)).expect("question marker leading cell");
+    assert_eq!(marker_before.bg, crate::theme::rgba_color(theme.primary));
+    let marker = buf.cell((1, 0)).expect("question marker cell");
+    assert_eq!(marker.bg, crate::theme::rgba_color(theme.primary));
+    assert_eq!(marker.fg, ratatui::style::Color::White);
+    let marker_after = buf.cell((2, 0)).expect("question marker trailing cell");
+    assert_eq!(marker_after.bg, crate::theme::rgba_color(theme.primary));
+    let question = buf.cell((4, 0)).expect("question text cell");
+    assert_eq!(question.fg, crate::theme::rgba_color(theme.text_muted));
+    let answer = buf.cell((4, 1)).expect("answer text cell");
+    assert_eq!(answer.fg, crate::theme::rgba_color(theme.text));
+    assert!(answer.modifier.contains(ratatui::style::Modifier::BOLD));
 
     // Height estimate must agree with what the renderer drew.
     let est = SessionView::estimate_part_height(
@@ -5331,12 +5348,12 @@ fn running_question_still_renders_inline_label() {
 
 #[test]
 fn question_copy_text_matches_screen() {
-    use super::tool_render::{question_markdown, tool_copy_text};
+    use super::tool_render::{question_summary, tool_copy_text};
 
     let part = question_tool_part(ToolStatus::Completed);
     assert_eq!(
         tool_copy_text(&part).as_deref(),
-        question_markdown(&part).as_deref()
+        question_summary(&part).as_deref()
     );
 }
 
@@ -5434,12 +5451,12 @@ fn tool_inline_texts_have_no_trailing_ellipsis() {
 
 #[test]
 fn completed_question_label_is_not_copyable() {
-    use super::tool_render::{question_markdown, tool_inline_text};
+    use super::tool_render::{question_summary, tool_inline_text};
 
     // When the summary is drawn, the inline label is NOT on screen anymore —
     // so it must never leak into a selection either.
     let part = question_tool_part(ToolStatus::Completed);
-    assert!(question_markdown(&part).is_some());
+    assert!(question_summary(&part).is_some());
     assert_eq!(tool_inline_text(&part), "Asking questions");
 }
 

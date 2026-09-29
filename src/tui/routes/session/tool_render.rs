@@ -9,11 +9,11 @@ use cosh_sdk::hashline::format::{HL_FILE_PREFIX, HL_LINE_BODY_SEP};
 use cosh_sdk::tree_sitter::highlight::{HighlightCategory, highlight};
 use cosh_tools::question::types::QuestionOutput;
 use cosh_tui::core::lib::border::{BorderCharacters, BorderSidesConfig};
-use cosh_tui::core::lib::rgba::{ColorInput, RGBA};
+use cosh_tui::core::lib::rgba::RGBA;
+use cosh_tui::core::lib::unicode_util::word_wrap;
 use cosh_tui::core::renderable::Renderable;
 use cosh_tui::core::renderables::r#box::BoxRenderable;
 use cosh_tui::core::renderables::diff::{DiffRenderable, DiffViewMode};
-use cosh_tui::core::renderables::markdown::{MarkdownRenderable, estimate_height};
 
 use crate::component::spinner_highlight::HighlightSpinner;
 use crate::routes::session::right_panel::types::{subagent_display_output, subagent_visible_body};
@@ -1646,19 +1646,50 @@ pub fn render_task(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
     render_inline_tool(ctx.buf, ctx.x, ctx.y, ctx.max_w, &content, fg, spinner);
 }
 
-/// Markdown summary of a completed `ask_questions` call: one heading per
-/// question with the user's answer emphasized below it. This is what the chat
+/// Compact summary of a completed ask_questions call. This is what the chat
 /// renders in place of the old one-line "Asking questions" label, so the
-/// user can re-read what was asked and answered. `None` while the tool is
-/// running/failed or when the output isn't parseable `QuestionOutput` JSON.
-pub fn question_markdown(part: &ToolPart) -> Option<String> {
+/// user can re-read what was asked and answered. It returns None while the
+/// tool is running/failed or when the output isn't parseable QuestionOutput JSON.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct QuestionAnswer {
+    question: String,
+    answer: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QuestionLineKind {
+    Question,
+    QuestionContinuation,
+    Answer,
+    AnswerContinuation,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct QuestionLine {
+    kind: QuestionLineKind,
+    text: String,
+}
+
+impl QuestionLine {
+    fn display_text(&self) -> String {
+        let prefix = match self.kind {
+            QuestionLineKind::Question => "?  ",
+            QuestionLineKind::QuestionContinuation => "   ",
+            QuestionLineKind::Answer => "└─ ",
+            QuestionLineKind::AnswerContinuation => "   ",
+        };
+        format!("{prefix}{}", self.text)
+    }
+}
+
+fn question_answers(part: &ToolPart) -> Option<Vec<QuestionAnswer>> {
     if !matches!(part.status, ToolStatus::Completed) {
         return None;
     }
     let output = part.output.as_deref()?;
     let parsed = serde_json::from_str::<QuestionOutput>(output).ok()?;
 
-    let mut md = String::new();
+    let mut answers = Vec::with_capacity(parsed.questions.len());
     for (qi, q) in parsed.questions.iter().enumerate() {
         // Correlate the answer to its question by id; fall back to position.
         let answer = parsed
@@ -1672,31 +1703,148 @@ pub fn question_markdown(part: &ToolPart) -> Option<String> {
                     .or_else(|| a.selected.as_ref().map(|s| s.join(", ")))
             })
             .unwrap_or_else(|| "no answer".to_string());
-        if !md.is_empty() {
-            md.push_str("\n\n");
-        }
-        // Trim the answer: a trailing space would break the emphasis
-        // delimiters (pulldown_cmark's flanking rules) and leak the raw
-        // asterisks onto the screen.
-        md.push_str(&format!(
-            "# {}\n\n***{}***",
-            q.question.trim(),
-            answer.trim()
-        ));
+        answers.push(QuestionAnswer {
+            question: q.question.trim().to_string(),
+            answer: answer.trim().to_string(),
+        });
     }
-    (!md.is_empty()).then_some(md)
+    (!answers.is_empty()).then_some(answers)
+}
+
+fn question_lines(answers: &[QuestionAnswer], max_w: u16) -> Vec<QuestionLine> {
+    let question_w = max_w.saturating_sub(3).max(1);
+    let answer_w = max_w.saturating_sub(3).max(1);
+    let mut lines = Vec::new();
+
+    for pair in answers {
+        for (i, text) in word_wrap(&pair.question, question_w)
+            .into_iter()
+            .enumerate()
+        {
+            lines.push(QuestionLine {
+                kind: if i == 0 {
+                    QuestionLineKind::Question
+                } else {
+                    QuestionLineKind::QuestionContinuation
+                },
+                text,
+            });
+        }
+        for (i, text) in word_wrap(&pair.answer, answer_w).into_iter().enumerate() {
+            lines.push(QuestionLine {
+                kind: if i == 0 {
+                    QuestionLineKind::Answer
+                } else {
+                    QuestionLineKind::AnswerContinuation
+                },
+                text,
+            });
+        }
+    }
+    lines
+}
+
+pub fn question_summary(part: &ToolPart) -> Option<String> {
+    let answers = question_answers(part)?;
+    let mut summary = String::new();
+    for (i, pair) in answers.iter().enumerate() {
+        if i > 0 {
+            summary.push('\n');
+        }
+        summary.push_str("?  ");
+        summary.push_str(&pair.question);
+        summary.push('\n');
+        summary.push_str("└─ ");
+        summary.push_str(&pair.answer);
+    }
+    (!summary.is_empty()).then_some(summary)
+}
+
+pub(crate) fn question_display_lines(part: &ToolPart, max_w: u16) -> Option<Vec<String>> {
+    let answers = question_answers(part)?;
+    Some(
+        question_lines(&answers, max_w)
+            .iter()
+            .map(QuestionLine::display_text)
+            .collect(),
+    )
+}
+
+pub(crate) fn question_height(part: &ToolPart, max_w: u16) -> Option<u16> {
+    let answers = question_answers(part)?;
+    Some(question_lines(&answers, max_w).len().max(1) as u16)
 }
 
 pub fn render_question_tool(ctx: &mut ToolRenderCtx, part: &ToolPart) {
-    // Completed: render the Q&A summary as plain markdown on the chat
-    // background — visually identical to an assistant text part, no box.
-    if let Some(md_text) = question_markdown(part) {
-        let body_h = estimate_height(&md_text, ctx.max_w).max(1);
-        *ctx.line_h = body_h;
-        let mut md = MarkdownRenderable::new(Some(md_text));
-        md.set_fg(Some(ColorInput::RGBA(ctx.theme.text)));
-        md.set_bg(Some(ColorInput::RGBA(ctx.theme.background)));
-        md.render_self(ctx.buf, Rect::new(ctx.x, ctx.y, ctx.max_w, body_h));
+    if let Some(answers) = question_answers(part) {
+        let lines = question_lines(&answers, ctx.max_w);
+        *ctx.line_h = lines.len().max(1) as u16;
+
+        let base_style = Style::default().bg(rgba_color(ctx.theme.background));
+        let question_style = base_style.fg(rgba_color(ctx.theme.text_muted));
+        let marker_style = base_style
+            .fg(Color::White)
+            .bg(rgba_color(ctx.theme.primary))
+            .add_modifier(Modifier::BOLD);
+        let connector_style = base_style.fg(rgba_color(ctx.theme.secondary));
+        let answer_style = base_style
+            .fg(rgba_color(ctx.theme.text))
+            .add_modifier(Modifier::BOLD);
+
+        for (i, line) in lines.iter().enumerate() {
+            let y = ctx.y + i as u16;
+            for x in ctx.x..ctx.x.saturating_add(ctx.max_w) {
+                if let Some(cell) = ctx.buf.cell_mut((x, y)) {
+                    cell.set_char(' ');
+                    cell.set_style(base_style);
+                }
+            }
+
+            match line.kind {
+                QuestionLineKind::Question => {
+                    if ctx.x > 0 {
+                        draw_text_line(ctx.buf, " ", ctx.x - 1, y, 1, marker_style);
+                    }
+                    draw_text_line(ctx.buf, "?", ctx.x, y, 1, marker_style);
+                    draw_text_line(ctx.buf, " ", ctx.x.saturating_add(1), y, 1, marker_style);
+                    draw_text_line(
+                        ctx.buf,
+                        &line.text,
+                        ctx.x.saturating_add(3),
+                        y,
+                        ctx.max_w.saturating_sub(3),
+                        question_style,
+                    );
+                }
+                QuestionLineKind::QuestionContinuation => draw_text_line(
+                    ctx.buf,
+                    &line.text,
+                    ctx.x.saturating_add(3),
+                    y,
+                    ctx.max_w.saturating_sub(3),
+                    question_style,
+                ),
+                QuestionLineKind::Answer => {
+                    draw_text_line(ctx.buf, "└─", ctx.x, y, 2, connector_style);
+                    draw_text_line(
+                        ctx.buf,
+                        &line.text,
+                        ctx.x.saturating_add(3),
+                        y,
+                        ctx.max_w.saturating_sub(3),
+                        answer_style,
+                    );
+                }
+                QuestionLineKind::AnswerContinuation => draw_text_line(
+                    ctx.buf,
+                    &line.text,
+                    ctx.x.saturating_add(3),
+                    y,
+                    ctx.max_w.saturating_sub(3),
+                    answer_style,
+                ),
+            }
+        }
         return;
     }
 
@@ -1720,8 +1868,8 @@ pub fn tool_copy_text(part: &ToolPart) -> Option<String> {
     let output = part.output.as_deref().unwrap_or("").trim();
     match tool_display(&part.tool) {
         "todo" => (!output.is_empty()).then(|| format_todo_output(output).join("\n")),
-        // The Q&A markdown summary is exactly what's rendered on screen.
-        "question" => question_markdown(part),
+        // The Q&A summary is exactly what's rendered on screen.
+        "question" => question_summary(part),
         "edit" => {
             if output.is_empty() || !matches!(part.status, ToolStatus::Completed) {
                 return None;
