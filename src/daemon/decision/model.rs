@@ -139,47 +139,22 @@ impl Registry {
     }
 }
 
-/// The exported graph for a NAMED kind at the platform-standard location —
-/// the contract the cosh-onnx exporter documents (`paths.py`): one graph
-/// per kind under `<data>/cosh/models/laya/<kind>/laya.onnx`, with
-/// `COSH_ONNX_MODELS_DIR` overriding the root on both sides.
-///
-/// The loader itself resolves named kinds against the process CWD and the
-/// hub snapshot — neither carries a locally exported graph (the snapshot
-/// ships safetensors only), so without this the load fails with "ONNX
-/// model not found" even though the exporter installed it.
-fn exported_graph(kind_name: &str) -> Option<String> {
-    let root = match std::env::var("COSH_ONNX_MODELS_DIR") {
-        Ok(dir) if !dir.trim().is_empty() => std::path::PathBuf::from(dir.trim()),
-        _ => directories::ProjectDirs::from("", "", "cosh")
-            ?.data_dir()
-            .join("models"),
-    };
-    let path = root.join("laya").join(kind_name).join("laya.onnx");
-    path.is_file().then(|| path.display().to_string())
-}
-
 /// Load `kind`; the ONNX graph resolves by the checkpoint's origin:
 ///
 /// - a `Custom` kind pointing at a LOCAL DIRECTORY resolves the graph
 ///   against that directory (`{repo}/laya.onnx`) — the contract the
 ///   harness adapter implemented before the daemon;
-/// - a NAMED kind resolves the EXPORTED graph at the platform-standard
-///   path (see [`exported_graph`]) when present, falling back to the
-///   loader's own resolution (hub snapshot — fails there when the graph
-///   was never exported, with the exporter's message).
+/// - a NAMED kind (and a `Custom` hub repo id / bundled pair) resolves
+///   EVERY artifact — weights, config, tokenizer, and the exported graph
+///   — from the checkpoint's snapshot in the hf-hub cache, the single
+///   rule the cosh-onnx exporter installs into (no override, no second
+///   lookup root on this side).
 pub(crate) fn load_model(kind: &Kind) -> Result<Arc<dyn DecisionModel>, cosh_onnx::Error> {
     let mut options = LoadOptions::default();
-    match kind {
-        Kind::Custom { repo, .. } if std::path::Path::new(repo).is_dir() => {
-            options.onnx_path = Some(format!("{repo}/laya.onnx"));
-        }
-        Kind::English | Kind::Multilingual | Kind::TypedDecisions => {
-            options.onnx_path = exported_graph(&kind.name());
-        }
-        // A Custom kind that is NOT a local dir: a hub repo id or a
-        // bundled (repo, subfolder) — the loader resolves it itself.
-        Kind::Custom { .. } => {}
+    if let Kind::Custom { repo, .. } = kind
+        && std::path::Path::new(repo).is_dir()
+    {
+        options.onnx_path = Some(format!("{repo}/laya.onnx"));
     }
     let model_kind = match kind {
         Kind::English => ModelKind::English,
