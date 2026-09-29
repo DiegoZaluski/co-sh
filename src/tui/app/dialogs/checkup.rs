@@ -11,7 +11,7 @@ const CHECKUP_MODEL_OPTIONS: [&str; 3] = ["english", "multilingual", "typed-deci
 impl App {
     /// Open the checkup-model picker (Settings → Checkup model).
     pub(in crate::app) fn open_checkup_model_dialog(&mut self) {
-        let current = self.setup.checkup.model.kind_name().to_string();
+        let current = self.setup.decision.model.kind_name().to_string();
         self.dialog.show(DialogType::CheckupModelList {
             current: current.clone(),
         });
@@ -58,10 +58,10 @@ impl App {
                     .current()
                     .map_or(0, |d| d.selected.min(CHECKUP_MODEL_OPTIONS.len() - 1));
                 if let Some(kind) = CHECKUP_MODEL_OPTIONS.get(selected) {
-                    self.setup.checkup.model = match *kind {
-                        "multilingual" => crate::util::setup::CheckupModel::Multilingual,
-                        "typed-decisions" => crate::util::setup::CheckupModel::TypedDecisions,
-                        _ => crate::util::setup::CheckupModel::English,
+                    self.setup.decision.model = match *kind {
+                        "multilingual" => crate::util::setup::DecisionModel::Multilingual,
+                        "typed-decisions" => crate::util::setup::DecisionModel::TypedDecisions,
+                        _ => crate::util::setup::DecisionModel::English,
                     };
                     self.setup.save();
                 }
@@ -79,7 +79,7 @@ impl App {
     /// Open the checkup min-confidence input box (Settings → Checkup min
     /// confidence), prefilled with the configured floor (blank = default).
     pub(in crate::app) fn open_checkup_min_confidence_input(&mut self) {
-        let floor = self.setup.checkup.termination.min_confidence;
+        let floor = self.setup.decision.termination.min_confidence;
         let input = if (floor - 0.6).abs() < f64::EPSILON {
             String::new()
         } else {

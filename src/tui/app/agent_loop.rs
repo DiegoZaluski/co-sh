@@ -322,7 +322,7 @@ impl App {
         // harness assembly time (never hot), inside the thread, exactly
         // once per assembly — fail-open disables the audit on load error.
         #[cfg(feature = "onnx")]
-        let checkup_config = self.setup.checkup.clone();
+        let checkup_config = self.setup.decision.clone();
 
         // RAG recall context
         // 1) Description suffix (what the model sees in the tool doc)

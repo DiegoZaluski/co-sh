@@ -623,7 +623,7 @@ pub struct Harness {
     checkup: Option<Arc<dyn super::checkup::Checkup>>,
     /// The consumer floor for the termination audit: a `NotTerminated`
     /// verdict only continues the loop when its confidence reaches this
-    /// threshold (from `setup.checkup.termination.min_confidence`).
+    /// threshold (from `setup.model_decision.termination.min_confidence`).
     checkup_min_confidence: f64,
     summarization_models: Vec<(String, String)>,
     summarization_connector: Option<Connector>,
@@ -840,7 +840,7 @@ impl Harness {
     }
 
     /// The consumer floor for the termination audit (from
-    /// `setup.checkup.termination.min_confidence`): a `NotTerminated`
+    /// `setup.model_decision.termination.min_confidence`): a `NotTerminated`
     /// verdict only vetoes a natural completion when its calibrated
     /// confidence reaches this threshold.
     ///

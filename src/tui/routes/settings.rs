@@ -89,11 +89,11 @@ enum ChoiceInput {
     Editor,
     /// Skill-directories input (`setup.skills.dirs`).
     Skills,
-    /// Checkup model picker (`setup.checkup.model`: english | multilingual
+    /// Checkup model picker (`setup.decision.model`: english | multilingual
     /// | typed-decisions — custom checkpoints stay in setup.json).
     #[cfg(feature = "onnx")]
     CheckupModel,
-    /// Checkup min-confidence input (`setup.checkup.termination
+    /// Checkup min-confidence input (`setup.decision.termination
     /// .min_confidence`), a 0–1 float.
     #[cfg(feature = "onnx")]
     CheckupMinConfidence,
@@ -277,29 +277,24 @@ fn cache_choice_value(id: &str, setup: &Setup) -> Option<String> {
         }),
         // The MCP category row renders as a count, never a ✔/✗ switch:
         // toggling belongs to the individual server rows below it.
-        "mcp" => Some(format!(
-            "{} configured",
-            setup.mcp.servers.len()
-        )),
+        "mcp" => Some(format!("{} configured", setup.mcp.servers.len())),
         #[cfg(feature = "onnx")]
         // The row renders "label: value" instead of the ✔/✗ switch, so the
         // value carries BOTH the audit state and the checkpoint identity.
-        "checkup_termination" => Some(if !setup.checkup.termination.enabled {
+        "checkup_termination" => Some(if !setup.decision.termination.enabled {
             "off".into()
         } else {
             format!(
                 "on · {}",
-                truncate(setup.checkup.model.kind_name(), COMMAND_PREVIEW_LEN)
+                truncate(setup.decision.model.kind_name(), COMMAND_PREVIEW_LEN)
             )
         }),
         #[cfg(feature = "onnx")]
-        "checkup_model" => Some(
-            setup.checkup.model.kind_name().to_string(),
-        ),
+        "checkup_model" => Some(setup.decision.model.kind_name().to_string()),
         #[cfg(feature = "onnx")]
         "checkup_min_confidence" => Some(format!(
             "{:.0}%",
-            setup.checkup.termination.min_confidence * 100.0
+            setup.decision.termination.min_confidence * 100.0
         )),
         _ => None,
     }
@@ -315,7 +310,7 @@ fn is_enabled(item: &SettingsItem, setup: &Setup) -> bool {
         #[cfg(feature = "onnx")]
         // The checkup renders as a choice ("off" / "on · checkpoint") but
         // its ON/OFF state is the switch itself.
-        SettingKind::Switch(SwitchAction::Persist) => setup.checkup.termination.enabled,
+        SettingKind::Switch(SwitchAction::Persist) => setup.decision.termination.enabled,
         _ => false,
     }
 }
@@ -510,10 +505,7 @@ impl Line {
             Line::AddHook { event } => Some(SettingsRow::AddHook { event }),
             Line::McpServer { index } => Some(SettingsRow::McpServer(*index)),
             Line::AddMcpServer => Some(SettingsRow::AddMcpServer),
-            Line::Title
-            | Line::SectionBorder { .. }
-            | Line::Blank
-            | Line::Description(_) => None,
+            Line::Title | Line::SectionBorder { .. } | Line::Blank | Line::Description(_) => None,
         }
     }
 }
@@ -954,19 +946,17 @@ impl SettingsView {
                         return Some(SettingsAction::TelemetryToggled);
                     }
                     SettingKind::Switch(SwitchAction::Persist) => {
-                        setup.checkup.termination.enabled = !setup.checkup.termination.enabled;
+                        setup.decision.termination.enabled = !setup.decision.termination.enabled;
                         self.selection.clamp(selectable_rows(setup).len());
                         return Some(SettingsAction::ToggleSaved);
                     }
                     // Each hook category flips only its own event's switch.
                     SettingKind::HookList(event) => match *event {
                         PRE_TOOL_USE_EVENT => {
-                            setup.hooks.pre_tool_use_enabled =
-                                !setup.hooks.pre_tool_use_enabled;
+                            setup.hooks.pre_tool_use_enabled = !setup.hooks.pre_tool_use_enabled;
                         }
                         POST_TOOL_USE_EVENT => {
-                            setup.hooks.post_tool_use_enabled =
-                                !setup.hooks.post_tool_use_enabled;
+                            setup.hooks.post_tool_use_enabled = !setup.hooks.post_tool_use_enabled;
                         }
                         _ => {}
                     },
@@ -1143,8 +1133,7 @@ impl SettingsView {
                     // `╰─────… ─╯`.
                     if *top {
                         let head = format!("╭─ {} ", title);
-                        let dashes =
-                            max_w.saturating_sub(head.width() + 1); // 1 = closing corner
+                        let dashes = max_w.saturating_sub(head.width() + 1); // 1 = closing corner
                         draw_text(
                             buf,
                             &format!("{head}{}╮", "─".repeat(dashes)),
@@ -1320,10 +1309,7 @@ fn max_row_width(setup: &Setup, width: u16) -> usize {
         .map(|(_, item)| {
             // Display width, not byte length: values can carry
             // multi-byte glyphs (×, ›) that skew centering otherwise.
-            let mut len = item
-                .description
-                .width()
-                .max(2 + item.label.width()); // "✔ PreToolUse hooks"
+            let mut len = item.description.width().max(2 + item.label.width()); // "✔ PreToolUse hooks"
             // Choice rows render "label: value" at the same indent.
             if let Some(v) = cache_choice_value(item.id, setup) {
                 len = len.max(2 + item.label.width() + 2 + v.width());
@@ -1600,7 +1586,7 @@ mod tests {
         // Expected rows are built from the catalog by id (never hardcoded
         // indices): the `onnx` feature inserts the checkup item mid-list.
         let cat = |id: &str| SettingsRow::Category(catalog_index(id));
-        let cfg_rows = |mut rows: Vec<SettingsRow>| {
+        let cfg_rows = |rows: Vec<SettingsRow>| {
             #[cfg(feature = "onnx")]
             // The checkup trio sits right after the PostToolUse item's
             // whole sub-list (catalog order: summarization, pre, post,
@@ -1831,7 +1817,14 @@ mod tests {
         // the Automation items may change without retargeting this test).
         view.selection.selected_index = selectable_rows(&setup)
             .iter()
-            .position(|r| matches!(r, SettingsRow::AddHook { event: PRE_TOOL_USE_EVENT }))
+            .position(|r| {
+                matches!(
+                    r,
+                    SettingsRow::AddHook {
+                        event: PRE_TOOL_USE_EVENT
+                    }
+                )
+            })
             .expect("pre-tool Add-hook row exists");
         let hook_toggle = SettingsRow::Category(catalog_index("hooks"));
         for _ in 0..10 {
@@ -1925,8 +1918,8 @@ mod tests {
         );
         assert!(
             matches!(
-                setup.checkup.model,
-                crate::util::setup::CheckupModel::English
+                setup.decision.model,
+                crate::util::setup::DecisionModel::English
             ),
             "activation never mutates the setting"
         );
@@ -1947,8 +1940,8 @@ mod tests {
         );
 
         // The values track the persisted config.
-        setup.checkup.model = crate::util::setup::CheckupModel::Multilingual;
-        setup.checkup.termination.min_confidence = 0.75;
+        setup.decision.model = crate::util::setup::DecisionModel::Multilingual;
+        setup.decision.termination.min_confidence = 0.75;
         assert_eq!(
             cache_choice_value("checkup_model", &setup),
             Some("multilingual".to_string())
@@ -1970,7 +1963,9 @@ mod tests {
 
         view.selection.selected_index = selectable_rows(&setup)
             .iter()
-            .position(|r| matches!(r, SettingsRow::Category(x) if *x == catalog_index("skill_dirs")))
+            .position(
+                |r| matches!(r, SettingsRow::Category(x) if *x == catalog_index("skill_dirs")),
+            )
             .expect("skill_dirs category row exists");
         assert_eq!(
             view.activate_selected(&mut setup),
@@ -2015,7 +2010,15 @@ mod tests {
 
         view.selection.selected_index = rows(&setup)
             .iter()
-            .position(|r| matches!(r, SettingsRow::Hook { event: PRE_TOOL_USE_EVENT, index: 0 }))
+            .position(|r| {
+                matches!(
+                    r,
+                    SettingsRow::Hook {
+                        event: PRE_TOOL_USE_EVENT,
+                        index: 0
+                    }
+                )
+            })
             .expect("pre-tool hook row exists"); // Pre-tool hook
         assert_eq!(
             view.activate_selected(&mut setup),
@@ -2027,7 +2030,14 @@ mod tests {
 
         view.selection.selected_index = rows(&setup)
             .iter()
-            .position(|r| matches!(r, SettingsRow::AddHook { event: PRE_TOOL_USE_EVENT }))
+            .position(|r| {
+                matches!(
+                    r,
+                    SettingsRow::AddHook {
+                        event: PRE_TOOL_USE_EVENT
+                    }
+                )
+            })
             .expect("pre-tool Add-hook row exists"); // Add hook (pre)
         assert_eq!(
             view.activate_selected(&mut setup),
@@ -2194,7 +2204,15 @@ mod tests {
 
         let hook_row = selectable_rows(&setup)
             .iter()
-            .position(|r| matches!(r, SettingsRow::Hook { event: PRE_TOOL_USE_EVENT, index: 0 }))
+            .position(|r| {
+                matches!(
+                    r,
+                    SettingsRow::Hook {
+                        event: PRE_TOOL_USE_EVENT,
+                        index: 0
+                    }
+                )
+            })
             .expect("pre-tool hook row exists");
         assert_eq!(
             view.handle_mouse(&mouse_at(row_x + 6, hook_y), area, &setup),

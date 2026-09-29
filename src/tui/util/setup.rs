@@ -30,11 +30,15 @@ pub struct Setup {
     pub cache: Cache,
     /// Skill-discovery configuration (Settings screen).
     pub skills: SkillsConfig,
-    /// Decision-model checkup configuration (Settings screen). The section
-    /// names the DOMAIN, not the technology: the ONNX runtime is gated by
-    /// the build feature (`onnx`), while this schema stays backend-agnostic
-    /// and grows with new audited decisions as siblings of `termination`.
-    pub checkup: CheckupConfig,
+    /// Decision-model configuration (Settings screen; `setup.json` →
+    /// `model_decision`). The section names what it configures — the
+    /// resident decision model and its audited decisions — explicitly, for
+    /// the user reading the file; the ONNX runtime is gated by the build
+    /// feature (`onnx`), while this schema stays backend-agnostic and grows
+    /// with new audited decisions as siblings of `termination`. Legacy
+    /// aliases still deserialize: "checkup" (the pre-daemon section name).
+    #[serde(rename = "model_decision", alias = "checkup")]
+    pub decision: DecisionConfig,
     /// Master switch for the LSP engine (kept flat: it has no sub-options).
     pub lsp: bool,
     /// Registered MCP servers (empty when the user never added one, so
@@ -63,7 +67,7 @@ impl Default for Setup {
             mode: Mode::default(),
             cache: Cache::default(),
             skills: SkillsConfig::default(),
-            checkup: CheckupConfig::default(),
+            decision: DecisionConfig::default(),
             lsp: true,
             mcp: McpConfig::default(),
             editor: String::new(),
@@ -278,9 +282,11 @@ pub fn format_cache_duration(min: u32) -> String {
     }
 }
 
-// Checkup
+// Decision
 
-/// Decision-model checkup configuration (`setup.json` → `checkup`).
+/// Decision-model configuration (`setup.json` → `model_decision`; the
+/// legacy section name "checkup" still deserializes via the alias on
+/// `Setup`).
 ///
 /// The section names the DOMAIN, not the technology: the ONNX runtime is
 /// gated by the build feature (`onnx`), while this schema stays
@@ -291,14 +297,14 @@ pub fn format_cache_duration(min: u32) -> String {
 /// `termination`, never a rename of existing config.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
-pub struct CheckupConfig {
+pub struct DecisionConfig {
     /// The resident decision model: one checkpoint identity shared by the
     /// whole app. Its `kind` strings are exactly the names
     /// `ModelKind::name()` publishes (`english` / `multilingual` /
     /// `typed-decisions`) plus `custom` — no translation map.
-    pub model: CheckupModel,
+    pub model: DecisionModel,
     /// The agent-loop termination audit (the current audited decision).
-    pub termination: TerminationCheckup,
+    pub termination: TerminationDecision,
 }
 
 /// The resident model's checkpoint identity — a kind-discriminated schema
@@ -306,7 +312,7 @@ pub struct CheckupConfig {
 /// new model family becomes a new `kind` without a config migration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum CheckupModel {
+pub enum DecisionModel {
     /// The English root checkpoint (`ModelKind::English`).
     #[default]
     English,
@@ -324,7 +330,7 @@ pub enum CheckupModel {
     },
 }
 
-impl CheckupModel {
+impl DecisionModel {
     /// The kind name `ModelKind::name()` publishes for the named variants;
     /// a `Custom` checkpoint renders as its repo id. The Settings rows
     /// (toggle value and model picker) display exactly this.
@@ -343,7 +349,7 @@ impl CheckupModel {
 /// be before it vetoes the loop's end.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct TerminationCheckup {
+pub struct TerminationDecision {
     /// Default-ON (opt-out): the audit runs unless explicitly disabled —
     /// flipping `enabled` back to `false` (or deleting the section from
     /// setup.json) restores the unaudited loop.
@@ -357,7 +363,7 @@ pub struct TerminationCheckup {
     pub min_confidence: f64,
 }
 
-impl Default for TerminationCheckup {
+impl Default for TerminationDecision {
     fn default() -> Self {
         Self {
             enabled: true,
@@ -1028,36 +1034,43 @@ mod tests {
         assert_eq!(legacy.persisted_model(), None);
     }
 
-    /// The checkup section: legacy files without it load as "on with the
+    /// The decision section: files without it load as "on with the
     /// measured default floor" (opt-out), the kind-discriminated model
     /// round-trips 1:1 against `ModelKind` shapes (named variants +
-    /// `Custom` with repo/subfolder), and the termination audit keeps its
-    /// own enable flag and confidence floor.
+    /// `Custom` with repo/subfolder), the termination audit keeps its
+    /// own enable flag and confidence floor, and both section names
+    /// deserialize — `model_decision` (current) and `checkup` (legacy).
     #[test]
-    fn checkup_section_defaults_and_kind_roundtrip() {
+    fn decision_section_defaults_and_kind_roundtrip() {
         // Legacy file without the section → audit on (default-ON), default floor.
         let legacy: Setup = serde_json::from_str("{}").unwrap();
-        assert!(legacy.checkup.termination.enabled);
-        assert!((legacy.checkup.termination.min_confidence - 0.6).abs() < f64::EPSILON);
-        assert!(matches!(legacy.checkup.model, super::CheckupModel::English));
+        assert!(legacy.decision.termination.enabled);
+        assert!((legacy.decision.termination.min_confidence - 0.6).abs() < f64::EPSILON);
+        assert!(matches!(legacy.decision.model, super::DecisionModel::English));
 
-        // Round-trip of a named kind + enabled audit.
+        // Round-trip of a named kind + enabled audit: serializes as
+        // `model_decision`, the section name a reader of setup.json sees.
         let mut setup = Setup::default();
-        setup.checkup.model = super::CheckupModel::Multilingual;
-        setup.checkup.termination.enabled = true;
-        setup.checkup.termination.min_confidence = 0.8;
+        setup.decision.model = super::DecisionModel::Multilingual;
+        setup.decision.termination.enabled = true;
+        setup.decision.termination.min_confidence = 0.8;
         let json = serde_json::to_string_pretty(&setup).unwrap();
+        assert!(
+            json.contains(r#""model_decision""#),
+            "the section persists under its explicit name, got: {json}"
+        );
         let loaded: Setup = serde_json::from_str(&json).unwrap();
         assert!(matches!(
-            loaded.checkup.model,
-            super::CheckupModel::Multilingual
+            loaded.decision.model,
+            super::DecisionModel::Multilingual
         ));
-        assert!(loaded.checkup.termination.enabled);
-        assert!((loaded.checkup.termination.min_confidence - 0.8).abs() < f64::EPSILON);
+        assert!(loaded.decision.termination.enabled);
+        assert!((loaded.decision.termination.min_confidence - 0.8).abs() < f64::EPSILON);
 
-        // The `custom` kind round-trips its repo/subfolder payload.
+        // The `custom` kind round-trips its repo/subfolder payload under
+        // the CURRENT section name...
         let custom_json = serde_json::json!({
-            "checkup": {
+            "model_decision": {
                 "model": {
                     "kind": "custom",
                     "repo": "/tmp/laya-eval/english",
@@ -1067,14 +1080,22 @@ mod tests {
             }
         });
         let parsed: Setup = serde_json::from_value(custom_json).unwrap();
-        match parsed.checkup.model {
-            super::CheckupModel::Custom { repo, subfolder } => {
+        match parsed.decision.model {
+            super::DecisionModel::Custom { repo, subfolder } => {
                 assert_eq!(repo, "/tmp/laya-eval/english");
                 assert_eq!(subfolder, None);
             }
             other => panic!("expected Custom, got {other:?}"),
         }
-        assert!(parsed.checkup.termination.enabled);
-        assert!((parsed.checkup.termination.min_confidence - 0.7).abs() < f64::EPSILON);
+        assert!(parsed.decision.termination.enabled);
+        assert!((parsed.decision.termination.min_confidence - 0.7).abs() < f64::EPSILON);
+
+        // ...and under the LEGACY alias, so files written before the
+        // rename keep loading unchanged.
+        let legacy_section: Setup = serde_json::from_str(
+            r#"{"checkup": {"termination": {"enabled": false}}}"#,
+        )
+        .unwrap();
+        assert!(!legacy_section.decision.termination.enabled);
     }
 }

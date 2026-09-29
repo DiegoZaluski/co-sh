@@ -927,7 +927,7 @@ impl App {
                 };
                 match parsed {
                     Ok(value) => {
-                        self.setup.checkup.termination.min_confidence = value.clamp(0.0, 1.0);
+                        self.setup.decision.termination.min_confidence = value.clamp(0.0, 1.0);
                         self.setup.save();
                         true
                     }
