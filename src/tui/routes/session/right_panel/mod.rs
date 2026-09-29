@@ -7,7 +7,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 
-use crate::theme::{Theme, rgba_color};
+use crate::theme::{Theme, blend, rgba_color};
 use crate::util::text_region::{TextRegion, text_from_cell_row};
 
 pub mod todo;
@@ -35,17 +35,6 @@ fn contrast_fg(bg: RGBA) -> RGBA {
     } else {
         RGBA::from_ints(255, 255, 255, 255)
     }
-}
-
-/// Linear blend of two colors: `t = 0` returns `base`, `t = 1` returns
-/// `accent`. Used to tint a subagent window's background with its review
-/// verdict color while staying close enough to the theme to keep text
-/// readable.
-fn blend(base: RGBA, accent: RGBA, t: f32) -> RGBA {
-    let mix = |a: u8, b: u8| -> u8 { (f32::from(a) * (1.0 - t) + f32::from(b) * t).round() as u8 };
-    let (ar, ag, ab, _) = base.to_ints();
-    let (br, bg_, bb, _) = accent.to_ints();
-    RGBA::from_ints(mix(ar, br), mix(ag, bg_), mix(ab, bb), 255)
 }
 
 /// Opacity of the severity background tint: how much of the verdict color
@@ -274,12 +263,13 @@ fn build_header_buttons(
 /// a glance which button is active; the resting labels share the dim band
 /// color.
 ///
-/// The resting color is NOT the raw box background: as a 1-cell glyph on the
-/// panel background it would be invisible (#0E0E11 on #000000 in the default
-/// theme), so [`header_band_color`] lifts it toward the text color while
-/// keeping the recessed feel.
+/// The resting color is the theme's muted-text slot: NOT the raw box
+/// background (a 1-cell glyph on the panel background would be invisible,
+/// #0E0E11 on #000000 in the default theme), but the same lifted blend the
+/// slot itself is derived from — the resting labels, the delimiters and the
+/// header's "← esc" back link are one family of dim chrome by construction.
 fn header_band_color(theme: &Theme) -> RGBA {
-    blend(theme.background_element, theme.text, 0.25)
+    theme.text_muted
 }
 
 fn draw_header_row(
