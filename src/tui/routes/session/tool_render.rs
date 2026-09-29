@@ -1674,7 +1674,7 @@ impl QuestionLine {
     fn display_text(&self) -> String {
         let prefix = match self.kind {
             QuestionLineKind::Question => "?  ",
-            QuestionLineKind::QuestionContinuation => "   ",
+            QuestionLineKind::QuestionContinuation => "│  ",
             QuestionLineKind::Answer => "└─ ",
             QuestionLineKind::AnswerContinuation => "   ",
         };
@@ -1816,14 +1816,17 @@ pub fn render_question_tool(ctx: &mut ToolRenderCtx, part: &ToolPart) {
                         question_style,
                     );
                 }
-                QuestionLineKind::QuestionContinuation => draw_text_line(
-                    ctx.buf,
-                    &line.text,
-                    ctx.x.saturating_add(3),
-                    y,
-                    ctx.max_w.saturating_sub(3),
-                    question_style,
-                ),
+                QuestionLineKind::QuestionContinuation => {
+                    draw_text_line(ctx.buf, "│", ctx.x, y, 1, connector_style);
+                    draw_text_line(
+                        ctx.buf,
+                        &line.text,
+                        ctx.x.saturating_add(3),
+                        y,
+                        ctx.max_w.saturating_sub(3),
+                        question_style,
+                    );
+                }
                 QuestionLineKind::Answer => {
                     draw_text_line(ctx.buf, "└─", ctx.x, y, 2, connector_style);
                     draw_text_line(

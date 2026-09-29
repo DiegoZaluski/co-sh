@@ -5313,6 +5313,48 @@ fn completed_question_renders_answers_on_screen() {
 }
 
 #[test]
+fn long_question_keeps_connector_to_answer() {
+    use super::tool_render::{ToolRenderCtx, ToolRenderState, render_question_tool};
+
+    let theme = test_theme();
+    let mut part = question_tool_part(ToolStatus::Completed);
+    let mut output: serde_json::Value =
+        serde_json::from_str(part.output.as_deref().expect("question output")).unwrap();
+    output["questions"][0]["question"] =
+        serde_json::json!("Which database should we use for the production deployment?");
+    part.output = Some(output.to_string());
+
+    let area = Rect::new(0, 0, 32, 40);
+    let mut buf = Buffer::empty(area);
+    let mut line_h = 0u16;
+    let mut state = ToolRenderState::new();
+    {
+        let mut ctx = ToolRenderCtx {
+            buf: &mut buf,
+            x: 1,
+            y: 0,
+            line_h: &mut line_h,
+            max_w: 30,
+            state: &mut state,
+            theme: &theme,
+        };
+        render_question_tool(&mut ctx, &part);
+    }
+
+    let answer_row = (0..line_h)
+        .find(|&y| buf.cell((1, y)).is_some_and(|cell| cell.symbol() == "└"))
+        .expect("answer connector");
+    assert!(answer_row > 1, "question should wrap before the answer");
+    for y in 1..answer_row {
+        assert_eq!(
+            buf.cell((1, y)).map(|cell| cell.symbol()),
+            Some("│"),
+            "missing connector at row {y}"
+        );
+    }
+}
+
+#[test]
 fn running_question_still_renders_inline_label() {
     use super::tool_render::{ToolRenderCtx, ToolRenderState, render_question_tool};
 
