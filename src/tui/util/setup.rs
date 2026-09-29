@@ -324,14 +324,29 @@ pub enum CheckupModel {
     },
 }
 
+impl CheckupModel {
+    /// The kind name `ModelKind::name()` publishes for the named variants;
+    /// a `Custom` checkpoint renders as its repo id. The Settings rows
+    /// (toggle value and model picker) display exactly this.
+    pub fn kind_name(&self) -> &str {
+        match self {
+            Self::English => "english",
+            Self::Multilingual => "multilingual",
+            Self::TypedDecisions => "typed-decisions",
+            Self::Custom { repo, .. } => repo,
+        }
+    }
+}
+
 /// The agent-loop termination audit config: whether the decision model
 /// reviews ambiguous stops, and how confident a "not finished" verdict must
 /// be before it vetoes the loop's end.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TerminationCheckup {
-    /// Opt-in per decision: the audit only runs when explicitly enabled
-    /// (default false — the loop behaves exactly as it always did).
+    /// Default-ON (opt-out): the audit runs unless explicitly disabled —
+    /// flipping `enabled` back to `false` (or deleting the section from
+    /// setup.json) restores the unaudited loop.
     pub enabled: bool,
     /// Consumer floor for the calibrated `answer_confidence`: a
     /// `NotTerminated` verdict only continues the loop at or above it.
@@ -345,7 +360,7 @@ pub struct TerminationCheckup {
 impl Default for TerminationCheckup {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             min_confidence: 0.6,
         }
     }
@@ -1010,16 +1025,16 @@ mod tests {
         assert_eq!(legacy.persisted_model(), None);
     }
 
-    /// The checkup section: legacy files without it load as "off with the
-    /// placeholder floor", the kind-discriminated model round-trips 1:1
-    /// against `ModelKind` shapes (named variants + `Custom` with repo/
-    /// subfolder), and the termination audit keeps its own enable flag and
-    /// confidence floor.
+    /// The checkup section: legacy files without it load as "on with the
+    /// measured default floor" (opt-out), the kind-discriminated model
+    /// round-trips 1:1 against `ModelKind` shapes (named variants +
+    /// `Custom` with repo/subfolder), and the termination audit keeps its
+    /// own enable flag and confidence floor.
     #[test]
     fn checkup_section_defaults_and_kind_roundtrip() {
-        // Legacy file without the section → audit off, default floor.
+        // Legacy file without the section → audit on (default-ON), default floor.
         let legacy: Setup = serde_json::from_str("{}").unwrap();
-        assert!(!legacy.checkup.termination.enabled);
+        assert!(legacy.checkup.termination.enabled);
         assert!((legacy.checkup.termination.min_confidence - 0.6).abs() < f64::EPSILON);
         assert!(matches!(
             legacy.checkup.model,

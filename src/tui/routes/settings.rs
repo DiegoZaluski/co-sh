@@ -89,6 +89,14 @@ enum ChoiceInput {
     Editor,
     /// Skill-directories input (`setup.skills.dirs`).
     Skills,
+    /// Checkup model picker (`setup.checkup.model`: english | multilingual
+    /// | typed-decisions — custom checkpoints stay in setup.json).
+    #[cfg(feature = "onnx")]
+    CheckupModel,
+    /// Checkup min-confidence input (`setup.checkup.termination
+    /// .min_confidence`), a 0–1 float.
+    #[cfg(feature = "onnx")]
+    CheckupMinConfidence,
 }
 
 /// A bordered group of related settings. Sections order from most-touched
@@ -128,6 +136,24 @@ const AUTOMATION: SettingsSection = SettingsSection {
             label: "Termination checkup",
             description: "A local model reviews ambiguous loop stops and may resume the agent (local inference per turn)",
             kind: SettingKind::Switch(SwitchAction::Persist),
+        },
+        // The audit's resident model: which checkpoint the loader picks at
+        // harness assembly. Custom checkpoints stay in setup.json.
+        #[cfg(feature = "onnx")]
+        SettingsItem {
+            id: "checkup_model",
+            label: "Checkup model",
+            description: "Checkpoint used by the decision models (english | multilingual | typed-decisions)",
+            kind: SettingKind::Choice(ChoiceInput::CheckupModel),
+        },
+        // The confidence floor: how sure a "not finished" verdict must be
+        // before it can veto the loop's end.
+        #[cfg(feature = "onnx")]
+        SettingsItem {
+            id: "checkup_min_confidence",
+            label: "Checkup min confidence",
+            description: "Confidence floor for a veto: 0 always continues, 1 never does (default 60%)",
+            kind: SettingKind::Choice(ChoiceInput::CheckupMinConfidence),
         },
     ],
 };
@@ -261,14 +287,20 @@ fn cache_choice_value(id: &str, setup: &Setup) -> Option<String> {
         "checkup_termination" => Some(if !setup.checkup.termination.enabled {
             "off".into()
         } else {
-            let checkpoint = match &setup.checkup.model {
-                crate::util::setup::CheckupModel::English => "english",
-                crate::util::setup::CheckupModel::Multilingual => "multilingual",
-                crate::util::setup::CheckupModel::TypedDecisions => "typed-decisions",
-                crate::util::setup::CheckupModel::Custom { repo, .. } => repo,
-            };
-            format!("on · {}", truncate(checkpoint, COMMAND_PREVIEW_LEN))
+            format!(
+                "on · {}",
+                truncate(setup.checkup.model.kind_name(), COMMAND_PREVIEW_LEN)
+            )
         }),
+        #[cfg(feature = "onnx")]
+        "checkup_model" => Some(
+            setup.checkup.model.kind_name().to_string(),
+        ),
+        #[cfg(feature = "onnx")]
+        "checkup_min_confidence" => Some(format!(
+            "{:.0}%",
+            setup.checkup.termination.min_confidence * 100.0
+        )),
         _ => None,
     }
 }
@@ -684,6 +716,14 @@ pub enum SettingsAction {
     /// Open the skill-directories input box (Settings → Skill directories;
     /// setup.json `skills.dirs`). Blank = the `~/.skills` default.
     OpenSkillsInput,
+    /// Open the checkup-model picker (`english` / `multilingual` /
+    /// `typed-decisions`). Custom checkpoints stay setup.json-only.
+    #[cfg(feature = "onnx")]
+    OpenCheckupModelDialog,
+    /// Open the checkup min-confidence input (a 0–1 float; the persisted
+    /// value is clamped to that range).
+    #[cfg(feature = "onnx")]
+    OpenCheckupMinConfidenceInput,
 }
 
 /// Last-typed content of the MCP registration box
@@ -891,6 +931,14 @@ impl SettingsView {
                     }
                     SettingKind::Choice(ChoiceInput::Skills) => {
                         return Some(SettingsAction::OpenSkillsInput);
+                    }
+                    #[cfg(feature = "onnx")]
+                    SettingKind::Choice(ChoiceInput::CheckupModel) => {
+                        return Some(SettingsAction::OpenCheckupModelDialog);
+                    }
+                    #[cfg(feature = "onnx")]
+                    SettingKind::Choice(ChoiceInput::CheckupMinConfidence) => {
+                        return Some(SettingsAction::OpenCheckupMinConfidenceInput);
                     }
                     SettingKind::Switch(SwitchAction::Lsp) => {
                         setup.lsp = !setup.lsp;
@@ -1554,11 +1602,12 @@ mod tests {
         let cat = |id: &str| SettingsRow::Category(catalog_index(id));
         let cfg_rows = |mut rows: Vec<SettingsRow>| {
             #[cfg(feature = "onnx")]
-            // Termination checkup sits right after the PostToolUse item's
+            // The checkup trio sits right after the PostToolUse item's
             // whole sub-list (catalog order: summarization, pre, post,
-            // checkup). With hooks enabled the AddHook sub-row follows the
-            // toggle, so anchor on it; otherwise anchor on the toggle
-            // itself. The position is looked up, never hardcoded.
+            // termination, model, min-confidence). With hooks enabled the
+            // AddHook sub-row follows the toggle, so anchor on it;
+            // otherwise anchor on the toggle itself. The position is
+            // looked up, never hardcoded.
             {
                 let after_post = rows
                     .iter()
@@ -1570,6 +1619,8 @@ mod tests {
                     })
                     .expect("post-tool row exists")
                     + 1;
+                rows.insert(after_post, cat("checkup_min_confidence"));
+                rows.insert(after_post, cat("checkup_model"));
                 rows.insert(after_post, cat("checkup_termination"));
             }
             rows
@@ -1846,6 +1897,65 @@ mod tests {
         assert_eq!(
             cache_choice_value("editor", &setup),
             Some("vim -u NONE".to_string())
+        );
+    }
+
+    /// The two checkup config rows exposed alongside the termination
+    /// switch: the model row opens the kind picker (never mutates), the
+    /// min-confidence row opens the floor input, and both rows render
+    /// their current value (`kind_name` / percentage).
+    #[cfg(feature = "onnx")]
+    #[test]
+    fn checkup_config_rows_open_their_pickers_and_render_values() {
+        let mut setup = Setup::default();
+        let mut view = SettingsView::new();
+
+        let row = |id: &str, view: &mut SettingsView, setup: &Setup| {
+            view.selection.selected_index = selectable_rows(setup)
+                .iter()
+                .position(|r| matches!(r, SettingsRow::Category(x) if *x == catalog_index(id)))
+                .unwrap_or_else(|| panic!("{id} category row exists"));
+        };
+
+        // Model row: activation opens the picker, never the switch flip.
+        row("checkup_model", &mut view, &setup);
+        assert_eq!(
+            view.activate_selected(&mut setup),
+            Some(SettingsAction::OpenCheckupModelDialog)
+        );
+        assert!(
+            matches!(
+                setup.checkup.model,
+                crate::util::setup::CheckupModel::English
+            ),
+            "activation never mutates the setting"
+        );
+        assert_eq!(
+            cache_choice_value("checkup_model", &setup),
+            Some("english".to_string())
+        );
+
+        // Min-confidence row: activation opens the floor input.
+        row("checkup_min_confidence", &mut view, &setup);
+        assert_eq!(
+            view.activate_selected(&mut setup),
+            Some(SettingsAction::OpenCheckupMinConfidenceInput)
+        );
+        assert_eq!(
+            cache_choice_value("checkup_min_confidence", &setup),
+            Some("60%".to_string())
+        );
+
+        // The values track the persisted config.
+        setup.checkup.model = crate::util::setup::CheckupModel::Multilingual;
+        setup.checkup.termination.min_confidence = 0.75;
+        assert_eq!(
+            cache_choice_value("checkup_model", &setup),
+            Some("multilingual".to_string())
+        );
+        assert_eq!(
+            cache_choice_value("checkup_min_confidence", &setup),
+            Some("75%".to_string())
         );
     }
 

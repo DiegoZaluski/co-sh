@@ -251,6 +251,14 @@ impl App {
                 return Ok(false);
             }
 
+            // Check the checkup-model picker (standalone, like tool-call)
+            #[cfg(feature = "onnx")]
+            if self.is_checkup_model_dialog_visible()
+                && self.handle_checkup_model_dialog_key(key.code)
+            {
+                return Ok(false);
+            }
+
             // Check the per-message actions dialog
             if self.is_message_actions_dialog_visible()
                 && self.handle_message_actions_dialog_key(key.code)
@@ -750,6 +758,18 @@ impl App {
                             }
                             Some(crate::routes::settings::SettingsAction::OpenSkillsInput) => {
                                 self.open_skills_input();
+                            }
+                            #[cfg(feature = "onnx")]
+                            Some(
+                                crate::routes::settings::SettingsAction::OpenCheckupModelDialog,
+                            ) => {
+                                self.open_checkup_model_dialog();
+                            }
+                            #[cfg(feature = "onnx")]
+                            Some(
+                                crate::routes::settings::SettingsAction::OpenCheckupMinConfidenceInput,
+                            ) => {
+                                self.open_checkup_min_confidence_input();
                             }
                             Some(crate::routes::settings::SettingsAction::McpToggled) => {
                                 self.setup.save();

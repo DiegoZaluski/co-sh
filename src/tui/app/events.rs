@@ -218,6 +218,9 @@ impl App {
                         | DialogType::CacheTtlInput {
                             input, cursor_pos, ..
                         }
+                        | DialogType::CheckupMinConfidenceInput {
+                            input, cursor_pos, ..
+                        }
                         | DialogType::RenameSession {
                             input, cursor_pos, ..
                         } = &mut d.dialog_type

@@ -384,6 +384,22 @@ pub enum DialogType {
     ToolCallList {
         current: String,
     },
+    /// Compact three-option picker for the checkup resident model
+    /// (Settings → Checkup model): `english` / `multilingual` /
+    /// `typed-decisions`. Custom checkpoints stay setup.json-only and are
+    /// never selectable here — `current` then matches no option and no
+    /// row carries the indicator.
+    CheckupModelList {
+        current: String,
+    },
+    /// Checkup min-confidence entry (Settings → Checkup min confidence).
+    /// The user types a 0–1 float; empty or "default" restores 0.6.
+    /// Values are clamped to [0, 1] on save (same clamp the harness
+    /// applies when consuming the floor).
+    CheckupMinConfidenceInput {
+        input: String,
+        cursor_pos: usize,
+    },
     ApiKeyInput {
         provider: String,
         env_var: String,
@@ -568,6 +584,15 @@ impl std::fmt::Debug for DialogType {
             Self::ToolCallList { current } => f
                 .debug_struct("ToolCallList")
                 .field("current", current)
+                .finish(),
+            Self::CheckupModelList { current } => f
+                .debug_struct("CheckupModelList")
+                .field("current", current)
+                .finish(),
+            Self::CheckupMinConfidenceInput { input, cursor_pos } => f
+                .debug_struct("CheckupMinConfidenceInput")
+                .field("input", input)
+                .field("cursor_pos", cursor_pos)
                 .finish(),
             Self::ApiKeyInput {
                 provider,
@@ -1112,6 +1137,47 @@ impl DialogState {
 
                 DialogAction::Consumed
             }
+            DialogType::CheckupModelList { current: _ } => {
+                // Same compact geometry as ToolCallList but sized to three
+                // options: click on a row confirms that kind.
+                let max_w = 60u16.min(area.width.saturating_sub(4));
+                let dialog_w = max_w.max(28).min(area.width.saturating_sub(2));
+                let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
+
+                let max_visible = 3usize;
+                let dialog_h = (max_visible + 4) as u16;
+                let dialog_y = area
+                    .y
+                    .saturating_add((area.height.saturating_sub(dialog_h)) / 2);
+
+                if x < dialog_x
+                    || x >= dialog_x + dialog_w
+                    || y_click < dialog_y
+                    || y_click >= dialog_y + dialog_h
+                {
+                    return DialogAction::Dismissed;
+                }
+
+                let header_pad = 4;
+                let header_x = dialog_x + header_pad;
+                let header_w = dialog_w.saturating_sub(header_pad * 2);
+                let esc_label = "esc";
+                let esc_x = header_x + header_w.saturating_sub(esc_label.len() as u16);
+                if y_click == dialog_y && x >= esc_x && x < esc_x + esc_label.len() as u16 {
+                    return DialogAction::Dismissed;
+                }
+
+                let list_top = dialog_y + 3;
+                if y_click >= list_top {
+                    let row = (y_click - list_top) as usize;
+                    if row < max_visible {
+                        instance.selected = row;
+                        return DialogAction::Confirmed;
+                    }
+                }
+
+                DialogAction::Consumed
+            }
             DialogType::ToolCallList { current: _ } => {
                 // Two-option list with long descriptions: wide enough for
                 // "inline  —  JSON written in the text, parsed locally".
@@ -1158,7 +1224,8 @@ impl DialogState {
             | DialogType::LocalUrlInput { .. }
             | DialogType::CacheTtlInput { .. }
             | DialogType::EditorInput { .. }
-            | DialogType::SkillsInput { .. } => {
+            | DialogType::SkillsInput { .. }
+            | DialogType::CheckupMinConfidenceInput { .. } => {
                 // Click outside the dialog box → dismiss
                 let dialog_w = 50u16.min(area.width.saturating_sub(8)).max(30);
                 let dialog_h = 7;
@@ -2127,6 +2194,20 @@ impl DialogState {
                     &instance.cursor,
                     "Skill directories",
                     "colon-separated paths (~ = $HOME) — empty: ~/.skills",
+                    false,
+                    input,
+                    *cursor_pos,
+                );
+            }
+            DialogType::CheckupMinConfidenceInput { input, cursor_pos } => {
+                render_text_input_dialog(
+                    buf,
+                    area,
+                    theme,
+                    now,
+                    &instance.cursor,
+                    "Checkup min confidence",
+                    "0–1 (e.g. 0.6) — empty or \"default\" resets to 0.6",
                     false,
                     input,
                     *cursor_pos,
@@ -3152,6 +3233,164 @@ impl DialogState {
                                 .bg(bg_color),
                         );
                     }
+                }
+            }
+            DialogType::CheckupModelList { current } => {
+                // Three-option list, same compact geometry as ToolCallList:
+                // wide enough for "multilingual  —  Multilingual checkpoint".
+                let max_w = 60u16.min(area.width.saturating_sub(4));
+                let dialog_w = max_w.max(28).min(area.width.saturating_sub(2));
+                let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
+
+                let max_visible = 3usize;
+                let dialog_h = (max_visible + 4) as u16;
+                let dialog_y = area
+                    .y
+                    .saturating_add((area.height.saturating_sub(dialog_h)) / 2);
+                let dialog_area = Rect::new(dialog_x, dialog_y, dialog_w, dialog_h);
+
+                let bg_color = rgba_color(theme.background_element);
+                for y in dialog_area.y..dialog_area.bottom() {
+                    for x in dialog_area.x..dialog_area.right() {
+                        if let Some(cell) = buf.cell_mut((x, y)) {
+                            cell.set_char(' ');
+                            cell.set_style(
+                                Style::default()
+                                    .bg(bg_color)
+                                    .remove_modifier(Modifier::all()),
+                            );
+                            cell.set_diff_option(CellDiffOption::None);
+                        }
+                    }
+                }
+
+                let header_pad = 4;
+                let header_x = dialog_x + header_pad;
+                let header_w = dialog_w.saturating_sub(header_pad * 2);
+
+                let title_style = Style::default()
+                    .fg(rgba_color(theme.text))
+                    .add_modifier(Modifier::BOLD);
+                draw_text_line(
+                    buf,
+                    "Checkup model",
+                    header_x,
+                    dialog_y,
+                    header_w,
+                    title_style,
+                );
+                let esc_label = "esc";
+                let esc_x = header_x + header_w.saturating_sub(esc_label.len() as u16);
+                draw_text_line(
+                    buf,
+                    esc_label,
+                    esc_x,
+                    dialog_y,
+                    header_w,
+                    Style::default().fg(rgba_color(theme.text_muted)),
+                );
+
+                // Line 1: explanation (muted).
+                draw_text_line(
+                    buf,
+                    "Resident decision-model checkpoint",
+                    header_x,
+                    dialog_y + 1,
+                    header_w,
+                    Style::default().fg(rgba_color(theme.text_muted)),
+                );
+
+                let list_top = dialog_y + 3;
+                let list_pad = 1;
+                let list_x = dialog_x + list_pad;
+                let list_w = dialog_w.saturating_sub(list_pad * 2);
+                let bg_element = rgba_color(theme.background_element);
+                let options = [
+                    ("english", "English-only checkpoint"),
+                    ("multilingual", "Multilingual checkpoint"),
+                    ("typed-decisions", "Typed-decisions checkpoint"),
+                ];
+
+                for (idx, (name, desc)) in options.iter().enumerate() {
+                    let y = list_top + idx as u16;
+                    let is_selected = idx == instance.selected;
+                    let is_current = *name == current;
+                    let sel_bg = rgba_color(theme.primary);
+
+                    for cx in list_x..list_x + list_w {
+                        if let Some(cell) = buf.cell_mut((cx, y)) {
+                            cell.set_char(' ');
+                            cell.set_style(Style::default().bg(if is_selected {
+                                sel_bg
+                            } else {
+                                bg_element
+                            }));
+                        }
+                    }
+
+                    let (indicator_fg, indicator_ch) = if is_current {
+                        if is_selected {
+                            let (pr, pg, pb, _) = theme.primary.to_ints();
+                            let lum = (0.299 * f32::from(pr)
+                                + 0.587 * f32::from(pg)
+                                + 0.114 * f32::from(pb))
+                                / 255.0;
+                            (
+                                if lum > 0.5 {
+                                    Color::Rgb(0, 0, 0)
+                                } else {
+                                    Color::Rgb(255, 255, 255)
+                                },
+                                "\u{25cf}",
+                            )
+                        } else {
+                            (rgba_color(theme.accent), "\u{25cf}")
+                        }
+                    } else {
+                        (Color::Reset, " ")
+                    };
+                    if let Some(cell) = buf.cell_mut((list_x, y)) {
+                        cell.set_char(indicator_ch.chars().next().unwrap_or(' '));
+                        cell.set_style(Style::default().fg(indicator_fg).bg(if is_selected {
+                            sel_bg
+                        } else {
+                            bg_element
+                        }));
+                    }
+                    if let Some(cell) = buf.cell_mut((list_x + 1, y)) {
+                        cell.set_char(' ');
+                        cell.set_style(Style::default().bg(if is_selected {
+                            sel_bg
+                        } else {
+                            bg_element
+                        }));
+                    }
+
+                    let (name_fg, name_bg) = if is_selected {
+                        let (pr, pg, pb, _) = theme.primary.to_ints();
+                        let lum =
+                            (0.299 * f32::from(pr) + 0.587 * f32::from(pg) + 0.114 * f32::from(pb))
+                                / 255.0;
+                        (
+                            if lum > 0.5 {
+                                Color::Rgb(0, 0, 0)
+                            } else {
+                                Color::Rgb(255, 255, 255)
+                            },
+                            sel_bg,
+                        )
+                    } else {
+                        (rgba_color(theme.text), bg_element)
+                    };
+                    let label = format!("{name}  —  {desc}");
+                    draw_text_line(
+                        buf,
+                        &label,
+                        list_x + 2,
+                        y,
+                        list_w.saturating_sub(2),
+                        Style::default().fg(name_fg).bg(name_bg),
+                    );
                 }
             }
             DialogType::ToolCallList { current } => {

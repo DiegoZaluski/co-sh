@@ -1,3 +1,4 @@
+mod checkup;
 mod confirm;
 mod message_actions;
 mod model;

@@ -17,6 +17,7 @@ impl App {
                         | DialogType::CacheTtlInput { .. }
                         | DialogType::EditorInput { .. }
                         | DialogType::SkillsInput { .. }
+                        | DialogType::CheckupMinConfidenceInput { .. }
                         | DialogType::RenameSession { .. },
                 )
             )
@@ -48,6 +49,7 @@ impl App {
                     | DialogType::CacheTtlInput { cursor_pos, .. }
                     | DialogType::EditorInput { cursor_pos, .. }
                     | DialogType::SkillsInput { cursor_pos, .. }
+                    | DialogType::CheckupMinConfidenceInput { cursor_pos, .. }
                     | DialogType::RenameSession { cursor_pos, .. } = &mut d.dialog_type
                     && *cursor_pos > 0
                 {
@@ -68,6 +70,9 @@ impl App {
                     }
                     | DialogType::EditorInput { input, cursor_pos }
                     | DialogType::SkillsInput { input, cursor_pos }
+                    | DialogType::CheckupMinConfidenceInput {
+                        input, cursor_pos, ..
+                    }
                     | DialogType::RenameSession {
                         input, cursor_pos, ..
                     } = &mut d.dialog_type
@@ -103,6 +108,9 @@ impl App {
                     }
                     | DialogType::EditorInput { input, cursor_pos }
                     | DialogType::SkillsInput { input, cursor_pos }
+                    | DialogType::CheckupMinConfidenceInput {
+                        input, cursor_pos, ..
+                    }
                     | DialogType::RenameSession {
                         input, cursor_pos, ..
                     } = &mut d.dialog_type
@@ -124,6 +132,9 @@ impl App {
                     }
                     | DialogType::EditorInput { input, cursor_pos }
                     | DialogType::SkillsInput { input, cursor_pos }
+                    | DialogType::CheckupMinConfidenceInput {
+                        input, cursor_pos, ..
+                    }
                     | DialogType::RenameSession {
                         input, cursor_pos, ..
                     } = &mut d.dialog_type
@@ -147,6 +158,9 @@ impl App {
                     }
                     | DialogType::EditorInput { input, cursor_pos }
                     | DialogType::SkillsInput { input, cursor_pos }
+                    | DialogType::CheckupMinConfidenceInput {
+                        input, cursor_pos, ..
+                    }
                     | DialogType::RenameSession {
                         input, cursor_pos, ..
                     } = &mut d.dialog_type
@@ -171,6 +185,9 @@ impl App {
                     }
                     | DialogType::EditorInput { input, cursor_pos }
                     | DialogType::SkillsInput { input, cursor_pos }
+                    | DialogType::CheckupMinConfidenceInput {
+                        input, cursor_pos, ..
+                    }
                     | DialogType::RenameSession {
                         input, cursor_pos, ..
                     } = &mut d.dialog_type
@@ -893,6 +910,38 @@ impl App {
                     .collect();
                 self.setup.save();
                 true
+            }
+            DialogType::CheckupMinConfidenceInput { input, .. } => {
+                // A 0–1 float; empty or "default" restores the measured
+                // 0.6 floor. Out-of-range values are clamped (same clamp
+                // the harness applies when consuming the floor) — any
+                // other garbage keeps the dialog open with an error toast,
+                // exactly like the cache-duration input.
+                let trimmed = input.trim();
+                let parsed = if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("default") {
+                    Ok(0.6)
+                } else {
+                    trimmed.parse::<f64>().map_err(|_| {
+                        "Enter a number between 0 and 1 (e.g. 0.6), or \"default\"".to_string()
+                    })
+                };
+                match parsed {
+                    Ok(value) => {
+                        self.setup.checkup.termination.min_confidence = value.clamp(0.0, 1.0);
+                        self.setup.save();
+                        true
+                    }
+                    Err(message) => {
+                        use crate::ui::toast::{ToastOptions, ToastVariant};
+                        self.toast_state.show(ToastOptions {
+                            title: Some("Confidence not saved".into()),
+                            message,
+                            variant: ToastVariant::Error,
+                            duration_ms: 6000,
+                        });
+                        false
+                    }
+                }
             }
             DialogType::HookInput { .. } => self.save_hook_input_dialog(),
             DialogType::McpForm { .. } => self.save_mcp_form_dialog(),

@@ -513,6 +513,9 @@ impl App {
                             DialogType::ToolCallList { .. } => {
                                 self.handle_tool_call_dialog_key(KeyCode::Up);
                             }
+                            DialogType::CheckupModelList { .. } => {
+                                self.handle_checkup_model_dialog_key(KeyCode::Up);
+                            }
                             DialogType::MessageActions { .. } => {
                                 self.handle_message_actions_dialog_key(KeyCode::Up);
                             }
@@ -599,6 +602,9 @@ impl App {
                             }
                             DialogType::ToolCallList { .. } => {
                                 self.handle_tool_call_dialog_key(KeyCode::Down);
+                            }
+                            DialogType::CheckupModelList { .. } => {
+                                self.handle_checkup_model_dialog_key(KeyCode::Down);
                             }
                             DialogType::MessageActions { .. } => {
                                 self.handle_message_actions_dialog_key(KeyCode::Down);
@@ -854,6 +860,10 @@ impl App {
                             }
                             DialogType::ToolCallList { .. } => {
                                 self.handle_tool_call_dialog_key(KeyCode::Enter);
+                                return Ok(true);
+                            }
+                            DialogType::CheckupModelList { .. } => {
+                                self.handle_checkup_model_dialog_key(KeyCode::Enter);
                                 return Ok(true);
                             }
                             DialogType::MessageActions {
@@ -1393,6 +1403,16 @@ impl App {
                     }
                     Some(crate::routes::settings::SettingsAction::OpenSkillsInput) => {
                         self.open_skills_input();
+                    }
+                    #[cfg(feature = "onnx")]
+                    Some(crate::routes::settings::SettingsAction::OpenCheckupModelDialog) => {
+                        self.open_checkup_model_dialog();
+                    }
+                    #[cfg(feature = "onnx")]
+                    Some(
+                        crate::routes::settings::SettingsAction::OpenCheckupMinConfidenceInput,
+                    ) => {
+                        self.open_checkup_min_confidence_input();
                     }
                     Some(crate::routes::settings::SettingsAction::McpToggled) => {
                         self.setup.save();
