@@ -4,7 +4,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 
-use crate::theme::{Theme, rgba_color};
+use crate::theme::{Theme, blend, rgba_color};
 
 /// Maximum number of command rows the menu shows at once. More commands than
 /// this scroll inside the window ([`SlashMenu::visible_window`]).
@@ -33,17 +33,6 @@ fn draw_bg_line(buf: &mut Buffer, x: u16, y: u16, width: u16, color: Color) {
             cell.set_style(Style::default().bg(color));
         }
     }
-}
-
-/// Linear blend of two colors: `t = 0` returns `base`, `t = 1` returns
-/// `overlay` (same semantics as the right panel's `blend`). ratatui has no
-/// real alpha, so translucency is simulated by pre-blending the fill over
-/// the background it sits on.
-fn blend(base: RGBA, overlay: RGBA, t: f32) -> RGBA {
-    let mix = |a: u8, b: u8| -> u8 { (f32::from(a) * (1.0 - t) + f32::from(b) * t).round() as u8 };
-    let (ar, ag, ab, _) = base.to_ints();
-    let (br, bg_, bb, _) = overlay.to_ints();
-    RGBA::from_ints(mix(ar, br), mix(ag, bg_), mix(ab, bb), 255)
 }
 
 /// How much of the menu panel color shows through the row fill. Kept below

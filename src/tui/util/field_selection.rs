@@ -65,6 +65,16 @@ impl<F: Copy + PartialEq> DragSelection<F> {
         self.range_for(field, line.len())
             .map(|(s, e)| line[s..e].to_string())
     }
+
+    /// The text covered by the range owned by `field` in `line`, where the
+    /// range offsets are CHAR indices (not bytes) — the addressing surfaces
+    /// with char-based cursors/inputs use. `None` for another field's
+    /// selection or an empty range. Purely additive: byte-addressed
+    /// surfaces keep using [`Self::slice_of`].
+    pub fn slice_char_range_of(&self, field: F, text: &str) -> Option<String> {
+        let (s, e) = self.range_for(field, text.chars().count())?;
+        Some(text.chars().skip(s).take(e - s).collect())
+    }
 }
 
 #[cfg(test)]
@@ -95,6 +105,30 @@ mod tests {
         sel.extend(4);
         assert_eq!(sel.range_for(1, 10), None);
         assert_eq!(sel.slice_of(1, "hello"), None);
+    }
+
+    /// The char-wise slice mirrors `slice_of` but addresses CHAR offsets,
+    /// so multi-byte text is sliced on characters, never inside a code
+    /// point.
+    #[test]
+    fn char_slice_addresses_chars_not_bytes() {
+        let mut sel = DragSelection::anchor(0usize, 2);
+        sel.extend(4);
+        // "çéab" — byte slicing would cut inside `ç`/`é`; char slicing
+        // yields the two chars in between.
+        assert_eq!(
+            sel.slice_char_range_of(0, "çéab"),
+            Some("ab".into()),
+            "chars 2..4 = `ab`"
+        );
+        // Backwards drag normalises exactly like the byte path (anchor is
+        // `anchor(field, byte)`; a fresh anchor covers nothing).
+        let mut back = DragSelection::anchor(0usize, 3);
+        assert_eq!(back.slice_char_range_of(0, "çéab"), None, "empty range");
+        back.extend(1);
+        assert_eq!(back.slice_char_range_of(0, "çéab"), Some("éa".into()));
+        // Another field's selection slices nothing.
+        assert_eq!(back.slice_char_range_of(1, "çéab"), None);
     }
 
     #[test]

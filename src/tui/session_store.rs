@@ -2839,7 +2839,10 @@ mod tests {
         // stay idempotent, and release frees it for the next process.
         drop(foreign);
         assert!(store.try_lock_session(&session.id));
-        assert!(store.try_lock_session(&session.id), "re-claim is idempotent");
+        assert!(
+            store.try_lock_session(&session.id),
+            "re-claim is idempotent"
+        );
         store.release_session_lock(&session.id);
         let next_process = try_lock_session_file(&sessions_dir, &session.id).unwrap();
         drop(next_process);

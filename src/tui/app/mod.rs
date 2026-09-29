@@ -914,9 +914,11 @@ impl App {
             // `.map(|_| ())`: `draw` returns a `CompletedFrame` that borrows
             // the terminal — dropping it before the `EndSynchronizedUpdate`
             // write keeps the borrow checker (and the frame alive) happy.
-            let draw_result = terminal.draw(|frame| {
-                self.render(frame, delta_secs);
-            }).map(|_| ());
+            let draw_result = terminal
+                .draw(|frame| {
+                    self.render(frame, delta_secs);
+                })
+                .map(|_| ());
             let _ = terminal.backend_mut().write_all(b"\x1b[?2026l");
             let _ = terminal.backend_mut().flush();
             pacer.record_draw(draw_started.elapsed());
@@ -1043,11 +1045,7 @@ impl App {
         };
         // Runs on the render hot path (header, every frame): iterate by
         // reference instead of cloning the session's records into a Vec.
-        Self::sum_cost_iter(
-            self.usage_records
-                .iter()
-                .filter(|r| r.session_id == sid),
-        )
+        Self::sum_cost_iter(self.usage_records.iter().filter(|r| r.session_id == sid))
     }
 
     /// Sum the resolved costs of an iterator of records; `None` when none

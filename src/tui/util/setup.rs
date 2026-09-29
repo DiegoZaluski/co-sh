@@ -850,7 +850,10 @@ mod tests {
 
         let restored: Setup =
             serde_json::from_str(&serde_json::to_string(&setup).unwrap()).unwrap();
-        assert_eq!(restored.persisted_mode(), Some(cosh::harness::Mode::Command));
+        assert_eq!(
+            restored.persisted_mode(),
+            Some(cosh::harness::Mode::Command)
+        );
 
         // An old config without the `mode` category loads with no selection.
         let legacy: Setup = serde_json::from_str(r#"{"appearance": {}}"#).unwrap();
@@ -1036,10 +1039,7 @@ mod tests {
         let legacy: Setup = serde_json::from_str("{}").unwrap();
         assert!(legacy.checkup.termination.enabled);
         assert!((legacy.checkup.termination.min_confidence - 0.6).abs() < f64::EPSILON);
-        assert!(matches!(
-            legacy.checkup.model,
-            super::CheckupModel::English
-        ));
+        assert!(matches!(legacy.checkup.model, super::CheckupModel::English));
 
         // Round-trip of a named kind + enabled audit.
         let mut setup = Setup::default();
@@ -1048,7 +1048,10 @@ mod tests {
         setup.checkup.termination.min_confidence = 0.8;
         let json = serde_json::to_string_pretty(&setup).unwrap();
         let loaded: Setup = serde_json::from_str(&json).unwrap();
-        assert!(matches!(loaded.checkup.model, super::CheckupModel::Multilingual));
+        assert!(matches!(
+            loaded.checkup.model,
+            super::CheckupModel::Multilingual
+        ));
         assert!(loaded.checkup.termination.enabled);
         assert!((loaded.checkup.termination.min_confidence - 0.8).abs() < f64::EPSILON);
 

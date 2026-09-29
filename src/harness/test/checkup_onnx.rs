@@ -28,9 +28,10 @@ use crate::harness::checkup::TerminationDecision;
 /// `convaiinnovations/laya` — the `PINNED_REVISIONS` head).
 fn checkpoint_kind() -> Option<cosh_onnx::ModelKind> {
     match std::env::var("CHECKUP_MODEL_DIR") {
-        Ok(dir) if !dir.is_empty() => {
-            Some(cosh_onnx::ModelKind::Custom { repo: dir, subfolder: None })
-        }
+        Ok(dir) if !dir.is_empty() => Some(cosh_onnx::ModelKind::Custom {
+            repo: dir,
+            subfolder: None,
+        }),
         _ => Some(cosh_onnx::ModelKind::English),
     }
 }

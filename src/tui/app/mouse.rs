@@ -147,6 +147,22 @@ impl App {
                     }
                 }
 
+                // Press inside the question dialog's copyable regions
+                // (question text, Text answer, custom draft) anchors a mouse
+                // copy selection, mirroring the chat prompt's press-and-drag.
+                // Option labels, gaps, tab bar and footer fall through to the
+                // dialog's ordinary click dispatch on release — they never
+                // anchor one; a press there just drops a lingering selection.
+                if matches!(self.mode(), AppMode::Session) && self.question_dialog.visible {
+                    let qa = self.question_dialog_area();
+                    if let Some((region, pos)) = self.question_dialog.selection_target_at(x, y, qa)
+                    {
+                        self.question_dialog.begin_selection(region, pos);
+                        return Ok(true);
+                    }
+                    self.question_dialog.clear_selection();
+                }
+
                 // Click inside a create-db field (RAG) starts a drag selection,
                 // mirroring the chat prompt's press-and-drag text selection.
                 #[cfg(feature = "embed")]
@@ -263,6 +279,22 @@ impl App {
                 // it (same contract as the create-db fields).
                 if self.is_registration_form_open() && self.extend_form_selection_at(x, y) {
                     return Ok(true);
+                }
+                // Drag with a question-dialog selection active extends it —
+                // but only while the pointer stays over the SAME copyable
+                // region the press anchored on (the dialog's extend ignores
+                // foreign regions; option rows yield None and keep the
+                // anchor intact).
+                if matches!(self.mode(), AppMode::Session)
+                    && self.question_dialog.visible
+                    && self.question_dialog.has_selection_anchor()
+                {
+                    let qa = self.question_dialog_area();
+                    if let Some((region, pos)) = self.question_dialog.selection_target_at(x, y, qa)
+                    {
+                        self.question_dialog.extend_selection(region, pos);
+                        return Ok(true);
+                    }
                 }
                 if self.state.right_panel.has_selection() {
                     self.state.right_panel.update_drag_selection(x, y);
@@ -384,6 +416,24 @@ impl App {
                     // release. A plain click (no range) falls through to
                     // the dialog click dispatch below (focus/dismiss).
                     if self.copy_form_selection_on_release() {
+                        return Ok(true);
+                    }
+
+                    // Auto-copy a question-dialog drag selection on release
+                    // (question text / Text answer / custom draft). The bare
+                    // anchor — a drag that never re-entered a copyable region
+                    // — also consumes the release: it started inside the
+                    // dialog and must not act as a click on whatever row the
+                    // pointer is over now.
+                    if matches!(self.mode(), AppMode::Session)
+                        && self.question_dialog.visible
+                        && self.question_dialog.has_selection_anchor()
+                    {
+                        if self.question_dialog.has_selection() {
+                            let text = self.question_dialog.selected_text();
+                            selection::copy_selection(&text, &mut self.toast_state);
+                        }
+                        self.question_dialog.clear_selection();
                         return Ok(true);
                     }
 
@@ -737,13 +787,11 @@ impl App {
                                         // owner too). Hovering any row of a
                                         // message highlights its whole band.
                                         let row = (y - area.y) as usize;
-                                        self.state
-                                            .current_pending_queues()
-                                            .and_then(|q| {
-                                                App::pending_queue_layout(q, area.width)
-                                                    .get(row)
-                                                    .map(|entry| entry.owner())
-                                            })
+                                        self.state.current_pending_queues().and_then(|q| {
+                                            App::pending_queue_layout(q, area.width)
+                                                .get(row)
+                                                .map(|entry| entry.owner())
+                                        })
                                     }
                                     _ => None,
                                 }
@@ -1155,12 +1203,10 @@ impl App {
                 // using the same layout the renderer draws — including each
                 // message's own padding rows, which resolve to their owner.
                 let row = (y - pending_area.y) as usize;
-                let Some((queue_idx, msg_idx)) = App::pending_queue_layout(
-                    queues,
-                    pending_area.width,
-                )
-                .get(row)
-                .map(|entry| entry.owner())
+                let Some((queue_idx, msg_idx)) =
+                    App::pending_queue_layout(queues, pending_area.width)
+                        .get(row)
+                        .map(|entry| entry.owner())
                 else {
                     return Ok(true);
                 };

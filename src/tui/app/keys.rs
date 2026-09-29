@@ -6,13 +6,13 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use super::{App, AppMode, PendingSessionDelete};
 use crate::component::prompt::PromptView;
-use crate::component::prompt_history::{RedoOutcome, UndoOutcome};
 use crate::fallback;
 use crate::left_panel::sessions::SessionsAction;
 use crate::left_panel::{MIN_WIDTH_FOR_LEFT_PANEL, Mode};
 use crate::routes::home::HomeAction;
 use crate::routes::router::FocusTarget;
 use crate::ui::dialogs::DialogType;
+use crate::util::edit_history::{RedoOutcome, UndoOutcome};
 use crate::util::selection;
 
 impl App {
@@ -63,6 +63,17 @@ impl App {
             // while it is open nothing else may react to the keyboard.
             if self.is_provider_key_choice_visible() {
                 self.handle_provider_key_choice_key(key.code);
+                return Ok(false);
+            }
+
+            // ESC clears a question-dialog copy selection BEFORE the loop
+            // interrupt and the dialog dispatch: the question dialog's own
+            // Esc is a semantic REJECT of the pending tool call (it dismisses
+            // the dialog and stops the agent loop), so a mere selection-clear
+            // must consume the key instead. A second Esc then reaches the
+            // dialog and keeps its reject meaning.
+            if key.code == KeyCode::Esc && self.question_dialog.has_selection() {
+                self.question_dialog.clear_selection();
                 return Ok(false);
             }
 
@@ -169,6 +180,26 @@ impl App {
                     self.rag_view.clear_field_selection();
                     return Ok(false);
                 }
+                // While the question dialog is open (it hides the prompt) a
+                // drag selection on its question text or answer fields copies
+                // through the same shared clipboard helper as every other
+                // copy path.
+                if matches!(self.mode(), AppMode::Session) && self.question_dialog.has_selection() {
+                    let text = self.question_dialog.selected_text();
+                    selection::copy_selection(&text, &mut self.toast_state);
+                    self.question_dialog.clear_selection();
+                    return Ok(false);
+                }
+                // Same gate, no selection: Ctrl+C wipes the focused answer
+                // field (readline-style kill, same as the prompt below). The
+                // clear is recorded as ONE atomic Replace step, so a single
+                // Ctrl+Z brings the field back exactly. The key is consumed
+                // while the dialog owns the keyboard either way — Esc is the
+                // dialog's dismissal, the quit-confirm stays out of reach.
+                if matches!(self.mode(), AppMode::Session) && self.question_dialog.visible {
+                    self.question_dialog.clear_focused_field();
+                    return Ok(false);
+                }
                 // If there is text selected in the prompt, copy it instead of quitting.
                 if matches!(self.mode(), AppMode::Session) && self.prompt_view.has_selection() {
                     let text = self.prompt_view.selected_text();
@@ -190,7 +221,7 @@ impl App {
                 // falls through to the quit-confirm below — that way a
                 // double Ctrl+C still leaves the app naturally: the first
                 // press wipes the draft, the second quits. The clear is
-                // recorded as ONE atomic Replace group, so a single Ctrl+Z
+                // recorded as ONE atomic Replace step, so a single Ctrl+Z
                 // brings the draft back exactly. Sits AFTER the selection
                 // gates on purpose: a live selection still copies
                 // (universal convention); the clear only fires with
@@ -1727,7 +1758,7 @@ impl App {
                                 // with NO Shift fallback needed. A Ctrl+Z right
                                 // after a prompt correction restores the
                                 // ORIGINAL pre-correction draft (the correction
-                                // is one atomic history group); the toast
+                                // is one atomic history step); the toast
                                 // reports that transition, Ctrl+Y reapplies.
                                 if key.modifiers.contains(KeyModifiers::CONTROL) {
                                     if ch == 'z' {
@@ -1794,7 +1825,7 @@ impl App {
         self.slash_menu.update(&self.prompt_view.input);
     }
 
-    /// Ctrl+Z on the chat prompt: step back one edit-history group (last
+    /// Ctrl+Z on the chat prompt: step back one edit-history step (last
     /// typing/deletion burst, paste, programmatic load, or a WHOLE prompt
     /// correction back to the original draft). The slash menu re-syncs
     /// because the draft text just changed under it.

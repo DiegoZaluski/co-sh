@@ -314,8 +314,7 @@ mod tests {
             view.select_next();
         }
         assert_eq!(
-            view.selection.scroll_offset,
-            0,
+            view.selection.scroll_offset, 0,
             "scroll must stay at 0 while everything fits"
         );
     }

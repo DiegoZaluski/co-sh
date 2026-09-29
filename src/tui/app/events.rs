@@ -80,7 +80,9 @@ impl App {
         // still change the visible state (its progress is not animated
         // frame-by-frame, so the expiry tick is the only deadline).
         if let Some(toast) = &self.toast_state.current {
-            return MIN.max(Duration::from_millis(toast.duration_ms.saturating_sub(self.toast_state.elapsed)));
+            return MIN.max(Duration::from_millis(
+                toast.duration_ms.saturating_sub(self.toast_state.elapsed),
+            ));
         }
 
         // Cursor blink: the prompt cursor is On for the first 500 ms after
@@ -92,11 +94,7 @@ impl App {
                 // Steady-on until the blink cycle starts.
                 return Some(Duration::from_millis(500 - idle_ms));
             }
-            let into_cycle = now
-                .duration_since(cursor.blink_start)
-                .ok()?
-                .as_millis() as u64
-                % 1000;
+            let into_cycle = now.duration_since(cursor.blink_start).ok()?.as_millis() as u64 % 1000;
             Some(Duration::from_millis(1000 - into_cycle))
         };
         if matches!(self.mode(), AppMode::Session)
@@ -788,8 +786,7 @@ impl App {
                     // Record-everywhere, toast-on-disagreement: the verdict
                     // is on the terminal event for observability, but a
                     // guard stop the model AGREES with needs no toast.
-                    if let Some(verdict) =
-                        checkup_verdict.filter(|v| v.contains("not-terminated"))
+                    if let Some(verdict) = checkup_verdict.filter(|v| v.contains("not-terminated"))
                     {
                         self.toast_state.show(crate::ui::toast::ToastOptions {
                             title: Some("Termination checkup".into()),
@@ -1157,8 +1154,7 @@ impl App {
                     // Record-everywhere, toast-on-disagreement: the verdict
                     // is on the terminal event for observability, but a
                     // guard stop the model AGREES with needs no toast.
-                    if let Some(verdict) =
-                        checkup_verdict.filter(|v| v.contains("not-terminated"))
+                    if let Some(verdict) = checkup_verdict.filter(|v| v.contains("not-terminated"))
                     {
                         self.toast_state.show(crate::ui::toast::ToastOptions {
                             title: Some("Termination checkup".into()),

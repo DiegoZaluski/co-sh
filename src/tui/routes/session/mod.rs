@@ -2725,8 +2725,7 @@ impl SessionView {
                 let dst_base = dst_row as usize * stride;
                 let src_base = dy as usize * tc_w;
                 sc.cells[dst_base + 1..dst_base + stride].fill(bg_cell.clone());
-                sc.cells
-                    [dst_base + x_off as usize..dst_base + x_off as usize + tc_w]
+                sc.cells[dst_base + x_off as usize..dst_base + x_off as usize + tc_w]
                     .clone_from_slice(&tc_cells[src_base..src_base + tc_w]);
             }
             sc.height = msg_h;
@@ -3908,11 +3907,9 @@ impl SessionView {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let dt = delta_time.max(0.0) as f32;
         if !active && self.pill_progress > 0.0 {
-            self.pill_progress =
-                (self.pill_progress - dt / Self::PILL_FADE_OUT_SECS).max(0.0);
+            self.pill_progress = (self.pill_progress - dt / Self::PILL_FADE_OUT_SECS).max(0.0);
         } else if active && self.pill_progress < 1.0 {
-            self.pill_progress =
-                (self.pill_progress + dt / Self::PILL_POP_IN_SECS).min(1.0);
+            self.pill_progress = (self.pill_progress + dt / Self::PILL_POP_IN_SECS).min(1.0);
         }
         let t = self.pill_progress;
         if t <= 0.0 {
@@ -4530,8 +4527,7 @@ impl SessionView {
                                 let buf_x = inner_area.x as usize;
                                 let mut cells = Vec::with_capacity(w * ah as usize);
                                 for dy in 0..ah {
-                                    let base =
-                                        (visible_top + dy) as usize * buf_w + buf_x;
+                                    let base = (visible_top + dy) as usize * buf_w + buf_x;
                                     cells.extend_from_slice(&buf.content[base..base + w]);
                                 }
                                 // Region text is content-only (x1 = inner_area.x + 3):
@@ -4726,9 +4722,7 @@ impl SessionView {
                                         let mut cells = Vec::with_capacity(w * ah as usize);
                                         for dy in 0..ah {
                                             let base = dy as usize * total_stride;
-                                            cells.extend_from_slice(
-                                                &temp_cells[base..base + w],
-                                            );
+                                            cells.extend_from_slice(&temp_cells[base..base + w]);
                                         }
                                         // Region text is content-only (x1 = inner_area.x
                                         // + 3): the border/margin columns are stripped

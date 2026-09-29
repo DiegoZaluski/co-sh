@@ -1809,12 +1809,10 @@ impl StubCheckup {
 impl Checkup for StubCheckup {
     fn review_termination(&self, _final_text: &str) -> TerminationVerdict {
         let mut queue = self.verdicts.lock().unwrap();
-        queue
-            .pop_front()
-            .unwrap_or(TerminationVerdict {
-                decision: TerminationDecision::Terminated,
-                confidence: 0.0,
-            })
+        queue.pop_front().unwrap_or(TerminationVerdict {
+            decision: TerminationDecision::Terminated,
+            confidence: 0.0,
+        })
     }
 }
 
@@ -1976,7 +1974,9 @@ async fn checkup_records_the_verdict_on_a_guard_stop() {
     let verdicts: Vec<&String> = events
         .iter()
         .filter_map(|e| match e {
-            HarnessEvent::Done { checkup_verdict, .. } => checkup_verdict.as_ref(),
+            HarnessEvent::Done {
+                checkup_verdict, ..
+            } => checkup_verdict.as_ref(),
             _ => None,
         })
         .collect();
@@ -2002,8 +2002,9 @@ async fn checkup_veto_is_bounded_by_max_iterations() {
     let streams: Vec<Result<Vec<&str>, &str>> = (0..MAX_ITERATIONS)
         .map(|_| Ok(vec!["Still", " working"]))
         .collect();
-    let verdicts: Vec<TerminationVerdict> =
-        (0..MAX_ITERATIONS - 1).map(|_| not_terminated(0.9)).collect();
+    let verdicts: Vec<TerminationVerdict> = (0..MAX_ITERATIONS - 1)
+        .map(|_| not_terminated(0.9))
+        .collect();
     let mut h = Harness::new_test()
         .with_mock_streams(streams)
         .with_mock_finish_reason(Some("stop"))

@@ -5,8 +5,8 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 
 use super::types::{
-    TodoItem, wrap_chars, TODO_STRIKE_HOLD_FRAMES, TODO_STRIKE_REVEAL_FRAMES,
-    TODO_STRIKE_TOTAL_FRAMES,
+    TODO_STRIKE_HOLD_FRAMES, TODO_STRIKE_REVEAL_FRAMES, TODO_STRIKE_TOTAL_FRAMES, TodoItem,
+    wrap_chars,
 };
 use crate::theme::Theme;
 use crate::theme::rgba_color;
