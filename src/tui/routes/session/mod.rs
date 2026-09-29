@@ -1774,13 +1774,12 @@ impl SessionView {
                 {
                     return 0;
                 }
-                // Completed ask_questions renders its Q&A summary as plain
-                // markdown on the chat background (like an assistant text
-                // part) — use the same markdown height estimator.
+                // Completed ask_questions renders compact question/answer
+                // rows directly on the chat background.
                 if tool_render::tool_display(&t.tool) == "question"
-                    && let Some(body) = tool_render::question_markdown(t)
+                    && let Some(height) = tool_render::question_height(t, max_w)
                 {
-                    return estimate_height(&body, max_w).max(1);
+                    return height;
                 }
                 // Only tools that render block-style output (shell, write, edit, read, todo, glob)
                 // should allocate height for the full output block. All other tool
@@ -3517,17 +3516,17 @@ impl SessionView {
                                 // so copying it unconditionally leaked hidden
                                 // text into the selection. Same for a
                                 // completed ask_questions: it draws its Q&A
-                                // markdown summary instead of the label.
+                                // summary instead of the label.
                                 let tool_display_name = self::tool_render::tool_display(&t.tool);
                                 let question_summary = tool_display_name == "question"
-                                    && self::tool_render::question_markdown(t).is_some();
+                                    && self::tool_render::question_summary(t).is_some();
                                 // Geometry mirror of render_parts + the block
                                 // renderers: block tools take a 1-row top margin
                                 // before the box, whose first row is padding — the
                                 // title lands at +2. The body starts at +3 (todo's
                                 // box has no internal padding: body at +2; a
-                                // completed question summary renders as plain
-                                // markdown at +0). Inline tools draw the label at
+                                // completed question summary renders at +0).
+                                // Inline tools draw the label at
                                 // +0 and have no body (the p_bottom clamp below
                                 // drops it). Hardcoding +1 here desynced every
                                 // block-tool copy by two rows — shifted text, last
@@ -3607,14 +3606,21 @@ impl SessionView {
                                     }
                                 } else {
                                     let display_name = self::tool_render::tool_display(&t.tool);
-                                    self::tool_render::tool_copy_text(t).map(|body| {
-                                        match display_name {
-                                            // Read blocks collapse on screen exactly like this.
-                                            "read" => collapsed_body(body, "read"),
-                                            _ if config.show_tool_details || !is_completed => body,
-                                            _ => collapsed_body(body, "shell"),
-                                        }
-                                    })
+                                    if question_summary {
+                                        self::tool_render::question_display_lines(t, max_w)
+                                            .map(|lines| lines.join("\n"))
+                                    } else {
+                                        self::tool_render::tool_copy_text(t).map(|body| {
+                                            match display_name {
+                                                // Read blocks collapse on screen exactly like this.
+                                                "read" => collapsed_body(body, "read"),
+                                                _ if config.show_tool_details || !is_completed => {
+                                                    body
+                                                }
+                                                _ => collapsed_body(body, "shell"),
+                                            }
+                                        })
+                                    }
                                 };
                                 if let Some(display) = display.filter(|d| !d.is_empty()) {
                                     // Body line 0 sits at p_top + body_off on screen;

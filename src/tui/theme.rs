@@ -354,6 +354,7 @@ fn cosh() -> Theme {
     );
     // Vivid markdown accents: pink headings/bullets, violet links and bars,
     // amber emphasis, teal enumeration — a livelier take on the indigo base.
+    t.markdown_horizontal_rule = RGBA::from_hex("#1A1A1A");
     t.markdown_table_border = RGBA::from_hex("#8A7BD6");
     t.markdown_table_header = RGBA::from_hex("#FF9DE6");
     t.markdown_code_block = RGBA::from_hex("#F2EAFF");

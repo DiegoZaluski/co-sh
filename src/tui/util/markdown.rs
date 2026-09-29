@@ -45,7 +45,7 @@ pub fn syntax_colors(theme: &Theme) -> SyntaxColors {
 pub fn apply_theme(md: &mut MarkdownRenderable, theme: &Theme) {
     md.set_accent_colors(Some(accent_colors(theme)));
     md.set_syntax_colors(Some(syntax_colors(theme)));
-    md.set_table_border_color(Some(ColorInput::RGBA(theme.markdown_table_border)));
+    md.set_table_border_color(Some(ColorInput::RGBA(theme.text_muted)));
 }
 
 #[allow(clippy::too_many_arguments)]
