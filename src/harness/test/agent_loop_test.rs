@@ -1778,6 +1778,155 @@ async fn test_stream_chat_with_messages_stop_yields_interrupted_marker() {
     assert_eq!(result.unwrap_err(), INTERRUPTED_MARKER);
 }
 
+// ── Interrupted-run amnesia ────────────────────────────────────────────────
+//
+// The user starts a session, sends a message, the agent begins working, the
+// user interrupts the run, then asks the model something about what just
+// happened. The model must remember the exchange: the original prompt and
+// whatever output was produced before the stop both stay in the context.
+//
+// REGRESSION (interrupted-run amnesia): the partial assistant text streamed
+// before a mid-stream stop was never recorded — the `add_assistant` call
+// only runs on the stream-success path — and the follow-up input then
+// landed directly on top of the bare user turn, so the abandoned-input
+// sweep hid the FIRST message as well. The model saw an almost-empty
+// history: neither its own work nor the user's original question survived.
+// A turn that produced ANY output is a real exchange, never an abandoned
+// prompt.
+#[tokio::test]
+async fn interrupted_run_keeps_the_first_message_and_the_partial_output() {
+    // Ten tokens streamed with a per-token pause; the stop lands right after
+    // the first token event, so the recorded output must be a NON-EMPTY
+    // STRICT PREFIX of the full text. The strictness makes the test
+    // self-invalidating: if the stop ever landed after the stream completed
+    // (a scheduling stall longer than the whole stream), the full text would
+    // be recorded and the prefix assertion fails loudly instead of letting a
+    // raced run pass silently.
+    const FULL_TEXT: &str = "P1 P2 P3 P4 P5 P6 P7 P8 P9 P10 ";
+    let tokens: [&str; 10] = [
+        "P1 ", "P2 ", "P3 ", "P4 ", "P5 ", "P6 ", "P7 ", "P8 ", "P9 ", "P10 ",
+    ];
+
+    let mut h = Harness::new_test()
+        .with_mock_stream(Ok(tokens.to_vec()))
+        .with_mock_stream_delay_ms(50);
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stop_signal = Arc::new(AtomicBool::new(false));
+
+    let stop_for_loop = stop_signal.clone();
+    let handle = tokio::spawn(async move {
+        h.run_agent_loop("first user message", tx, answer_rx, perm_rx, stop_for_loop)
+            .await;
+    });
+
+    // Deterministic interruption point: wait for the FIRST streamed token,
+    // then press ESC. The mock stream checks the signal before dispatching
+    // each next token, so at least one token has already streamed when the
+    // stop takes effect.
+    let mut saw_token = false;
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(tokio::time::Duration::from_millis(100), rx.recv()).await {
+            Ok(Some(HarnessEvent::Token { .. })) => {
+                saw_token = true;
+                break;
+            }
+            Ok(Some(_)) => continue,
+            Ok(None) | Err(_) => break,
+        }
+    }
+    assert!(
+        saw_token,
+        "the stream must emit its first token before the stop"
+    );
+    stop_signal.store(true, Ordering::Relaxed);
+
+    // Collect until the terminal Stopped event (bounded so a regression that
+    // keeps the loop running fails instead of hanging the suite).
+    let mut stopped: Option<ContextManagerState> = None;
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(tokio::time::Duration::from_millis(100), rx.recv()).await {
+            Ok(Some(HarnessEvent::Stopped { context })) => {
+                stopped = Some(context);
+                break;
+            }
+            Ok(Some(_)) => continue,
+            Ok(None) => break,
+            Err(_) => continue,
+        }
+    }
+    handle.abort();
+    let stopped = stopped.expect("the interrupted loop must report Stopped");
+
+    // THE BUG UNDER TEST (recording half): the stopped state must carry the
+    // exchange — the user's first message AND the partial output streamed
+    // before the stop.
+    let mut cm = crate::harness::context::ContextManager::new(100_000);
+    cm.restore_state(&stopped);
+    let msgs = cm.build_messages("");
+    let texts: Vec<&str> = msgs.iter().filter_map(|m| m.content.as_deref()).collect();
+    assert!(
+        texts.contains(&"first user message"),
+        "the interrupted turn's input must stay in the model context; texts={texts:?}"
+    );
+    let partial = texts
+        .iter()
+        .copied()
+        .find(|t| FULL_TEXT.starts_with(*t) && !t.is_empty())
+        .unwrap_or_else(|| {
+            panic!(
+                "the partial output streamed before the stop must be recorded \
+                 as a strict non-empty prefix of {FULL_TEXT:?}; texts={texts:?}"
+            )
+        });
+    assert!(
+        partial.len() < FULL_TEXT.len(),
+        "the stop landed after the stream completed — the run raced and this \
+         test's interruption point is invalid; recorded={partial:?}"
+    );
+
+    // Second leg: the user asks about what just happened. The TUI restores
+    // the stopped state exactly like this (Stopped { context } →
+    // restore_state) and starts a fresh loop, so this proves the FOLLOW-UP
+    // turn's request carries the interrupted exchange.
+    let mut h2 = Harness::new_test().with_mock_stream(Ok(vec!["answering from memory"]));
+    h2.context_manager.restore_state(&stopped);
+
+    let (tx2, _rx2) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx2, answer_rx2) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx2, perm_rx2) = tokio::sync::mpsc::unbounded_channel();
+    h2.run_agent_loop(
+        "what did you just do?",
+        tx2,
+        answer_rx2,
+        perm_rx2,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await;
+
+    let msgs2 = h2.build_messages_for_test("");
+    let texts2: Vec<&str> = msgs2.iter().filter_map(|m| m.content.as_deref()).collect();
+    assert!(
+        texts2.contains(&"first user message"),
+        "the follow-up turn must still see the FIRST message — the \
+         abandoned-input sweep must never treat an interrupted-but-active \
+         turn as debris; texts={texts2:?}"
+    );
+    assert!(
+        texts2.contains(&partial),
+        "the follow-up turn must still see the partial output streamed \
+         before the stop; texts={texts2:?}"
+    );
+    assert!(
+        texts2.contains(&"what did you just do?"),
+        "the follow-up input itself must be present; texts={texts2:?}"
+    );
+}
+
 // ── Termination checkup (decision-model audit) ────────────────────────────
 //
 // The harness audit seam: a stub `Checkup` (no ONNX runtime needed) covers
