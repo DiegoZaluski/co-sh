@@ -253,6 +253,18 @@ impl PromptView {
         self.is_focused = false;
     }
 
+    /// Whether the chat logo was rendered in the last frame (it only appears
+    /// on the empty-session landing screen).
+    pub const fn logo_visible(&self) -> bool {
+        self.was_visible
+    }
+
+    /// Forward a click to the chat-logo mini game. Returns `true` when the
+    /// click landed exactly on a glyph cell and dealt damage.
+    pub fn click_logo(&mut self, x: u16, y: u16) -> bool {
+        self.logo.click_logo(x, y)
+    }
+
     pub fn send_message(&mut self) -> String {
         // The draft context ends here: the edit history is dropped with it
         // (sent text stays reachable through the ↑/↓ message history).
@@ -1377,8 +1389,13 @@ impl PromptView {
                 logo_area,
                 cursor_x,
                 cursor_y,
-                rgba_color(theme.primary),
-                rgba_color(theme.background),
+                crate::logo::LogoColors {
+                    primary: rgba_color(theme.primary),
+                    background: rgba_color(theme.background),
+                    muted: rgba_color(theme.text_muted),
+                    info: rgba_color(theme.info),
+                    success: rgba_color(theme.success),
+                },
             );
             self.was_visible = true;
         } else if self.was_visible {

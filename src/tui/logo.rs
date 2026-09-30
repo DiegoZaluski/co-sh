@@ -28,6 +28,85 @@ pub const O_GLYPH_H: usize = 4;
 /// The laser beam's character set, rippling along the beam as it shoots.
 const BEAM_CHARS: [char; 6] = ['@', '$', '#', ';', '.', ','];
 
+/// The logo's maximum (and starting) health.
+pub const MAX_HEALTH: u16 = 200;
+
+/// Health regained per tick after [`HEAL_DELAY_SECS`] without damage.
+const HEAL_AMOUNT: u16 = 10;
+/// Seconds without damage before a heal tick fires.
+const HEAL_DELAY_SECS: f64 = 10.0;
+/// Seconds between heal ticks (while still below [`MAX_HEALTH`]).
+const HEAL_INTERVAL_SECS: f64 = 1.0;
+/// Number of cells reserved for the sleep "zzZ" text next to the glyph.
+const ZZZ_SLOTS: usize = 3;
+/// Seconds each "zzZ" frame is shown before the shift advances.
+const ZZZ_FRAME_SECS: f64 = 0.9;
+
+/// A piece of floating text shown around the logo: a damage number like
+/// "-50" in red/orange, or a "+10" in light blue/green when the logo heals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloatKind {
+    Damage,
+    Heal,
+}
+
+/// Theme colors the chat-logo animation needs, resolved from the active
+/// theme by the caller.
+#[derive(Debug, Clone, Copy)]
+pub struct LogoColors {
+    /// The theme's primary color (glyph outline, fill blend base).
+    pub primary: ratatui::style::Color,
+    /// The theme's background (gradient/fade target).
+    pub background: ratatui::style::Color,
+    /// Muted text: the sleeping glyph and its "zzZ" indicator.
+    pub muted: ratatui::style::Color,
+    /// Light blue end of the heal-number palette.
+    pub info: ratatui::style::Color,
+    /// Green end of the heal-number palette.
+    pub success: ratatui::style::Color,
+}
+
+/// A floating damage/heal number with its own appearance clock. `t` runs
+/// from `0.0` (spawned) to `>= LIFETIME` (gone).
+struct FloatText {
+    /// The raw value, e.g. 50 for a -50 hit or 10 for a +10 heal.
+    amount: u16,
+    kind: FloatKind,
+    /// Signed drift from the O's left edge, in cells (may be negative).
+    dx: f64,
+    /// Age in seconds.
+    t: f64,
+}
+
+impl FloatText {
+    /// Seconds the text takes to fully materialize (color-strobing phase).
+    const APPEAR: f64 = 0.28;
+    /// Total lifetime in seconds, after which the text is dropped.
+    const LIFETIME: f64 = 1.25;
+
+    /// The characters currently visible (the text appears left-to-right).
+    fn visible_text(&self) -> String {
+        let sign = match self.kind {
+            FloatKind::Damage => '-',
+            FloatKind::Heal => '+',
+        };
+        let text = format!("{sign}{}", self.amount);
+        let n = text.len();
+        // First the sign pops in alone, then one digit every ~90ms.
+        let shown = ((self.t - 0.05) / 0.09 * n as f64).ceil() as usize;
+        text.chars().take(shown.min(n)).collect()
+    }
+
+    /// Rise/fall offset in cells: damage floats upward, heals sink gently.
+    fn dy(&self) -> f64 {
+        let v = self.t * 1.4;
+        match self.kind {
+            FloatKind::Damage => -1.0 - v,
+            FloatKind::Heal => v * 0.7,
+        }
+    }
+}
+
 /// A chat-logo animation built from the "O" glyph of the cosh logo.
 ///
 /// The O's center gradually turns red and then pulses between a strong and a
@@ -65,6 +144,23 @@ pub struct ChatLogo {
     /// derived from the reserved band so the glyph never drifts into the
     /// prompt below.
     bounds: Option<(f64, f64, f64, f64)>,
+    /// Current health (0..=MAX_HEALTH). At 0 the logo falls asleep.
+    health: u16,
+    /// Seconds since the last successful hit; drives the heal timer.
+    since_damage: f64,
+    /// Countdown to the next heal tick once [`HEAL_DELAY_SECS`] has elapsed.
+    heal_in: f64,
+    /// Floating damage/heal numbers currently shown around the logo.
+    floats: Vec<FloatText>,
+    /// Hit-flash timer in seconds (the glyph flares white-orange on impact).
+    hit_flash: f64,
+    /// Total clicks registered, used to jitter float positions deterministically.
+    click_count: u32,
+    /// Rotation counter of the sleep "zzZ" text: the uppercase `Z` sits at
+    /// index `zzz_phase % ZZZ_SLOTS` and shifts left each frame.
+    zzz_phase: usize,
+    /// Accumulated seconds toward the next "zzZ" shift.
+    zzz_clock: f64,
 }
 
 impl ChatLogo {
@@ -84,10 +180,19 @@ impl ChatLogo {
             moving: false,
             positioned: false,
             bounds: None,
+            health: MAX_HEALTH,
+            since_damage: 0.0,
+            heal_in: HEAL_INTERVAL_SECS,
+            floats: Vec::new(),
+            hit_flash: 0.0,
+            click_count: 0,
+            zzz_phase: 0,
+            zzz_clock: 0.0,
         }
     }
 
-    /// Reset the animation to its idle state (no red fill, no beam).
+    /// Reset the animation to its idle state (no red fill, no beam) and the
+    /// mini game to a fresh round: full health, awake, no floating numbers.
     pub fn reset(&mut self) {
         self.fill = 0.0;
         self.fired = false;
@@ -97,6 +202,88 @@ impl ChatLogo {
         self.moving = false;
         self.positioned = false;
         self.bounds = None;
+        self.health = MAX_HEALTH;
+        self.since_damage = 0.0;
+        self.heal_in = HEAL_INTERVAL_SECS;
+        self.floats.clear();
+        self.hit_flash = 0.0;
+        self.zzz_phase = 0;
+        self.zzz_clock = 0.0;
+    }
+
+    /// The logo's current health (0..=[`MAX_HEALTH`]).
+    pub const fn health(&self) -> u16 {
+        self.health
+    }
+
+    /// Whether the logo is asleep (health reached zero).
+    pub const fn is_asleep(&self) -> bool {
+        self.health == 0
+    }
+
+    /// Precise glyph hit test: does screen cell `(x, y)` land on a drawn,
+    /// non-space character of the O glyph? Clicks on the glyph's interior
+    /// spaces or anywhere outside it do not count.
+    fn glyph_hit(&self, x: u16, y: u16) -> Option<(usize, usize)> {
+        // Must mirror render(): while asleep the bob is frozen to zero, so
+        // the hit region always matches the visible glyph position.
+        let bob = if self.is_asleep() {
+            0.0
+        } else {
+            self.bob_offset()
+        };
+        let ox = self.pos_x.round() as i64;
+        let oy = (self.pos_y + bob).round() as i64;
+        let gx = i64::from(x) - ox;
+        let gy = i64::from(y) - oy;
+        if gx < 0 || gy < 0 {
+            return None;
+        }
+        let (gc, gr) = (gx as usize, gy as usize);
+        let row = O_GLYPH.get(gr)?;
+        let ch = row.chars().nth(gc)?;
+        if ch == ' ' {
+            return None;
+        }
+        Some((gc, gr))
+    }
+
+    /// Register a click at screen cell `(x, y)`. Returns `true` when the
+    /// click hit an actual glyph cell and dealt damage.
+    ///
+    /// Damage scales with the vertical position of the hit: the top row of
+    /// the glyph deals the most (50), the bottom row the least (10), with
+    /// the intermediate rows proportionally in between. When the logo is
+    /// already asleep, clicks still spawn a floating number but deal nothing.
+    pub fn click_logo(&mut self, x: u16, y: u16) -> bool {
+        let Some((_gc, gr)) = self.glyph_hit(x, y) else {
+            return false;
+        };
+        self.click_count += 1;
+        // Linear ramp: row 0 → 50, row O_GLYPH_H-1 → 10.
+        let max_dmg = 50.0_f64;
+        let min_dmg = 10.0_f64;
+        let frac = gr as f64 / (O_GLYPH_H as f64 - 1.0).max(1.0);
+        let amount = (max_dmg - (max_dmg - min_dmg) * frac).round() as u16;
+        if self.health > 0 {
+            self.health = self.health.saturating_sub(amount);
+            self.since_damage = 0.0;
+            self.heal_in = HEAL_INTERVAL_SECS;
+            self.hit_flash = 0.18;
+        }
+        // Alternating left/right jitter keeps consecutive numbers readable.
+        let dx = if self.click_count.is_multiple_of(2) {
+            8.0
+        } else {
+            -4.0
+        };
+        self.floats.push(FloatText {
+            amount,
+            kind: FloatKind::Damage,
+            dx,
+            t: 0.0,
+        });
+        true
     }
 
     /// Notify the logo that the user typed at the given prompt position.
@@ -132,6 +319,54 @@ impl ChatLogo {
     pub fn advance(&mut self, dt: f64, target_x: f64, target_y: f64) {
         self.target_x = target_x;
         self.target_y = target_y;
+
+        // ── Mini game: floating numbers, hit flash, heal, sleep ────────────
+        // These run before the animation branches below because they apply
+        // even while the logo is asleep (floats keep drifting, the heal timer
+        // keeps ticking) or still in its fill phase.
+        self.since_damage += dt;
+        self.hit_flash = (self.hit_flash - dt).max(0.0);
+        for f in &mut self.floats {
+            f.t += dt;
+        }
+        self.floats.retain(|f| f.t < FloatText::LIFETIME);
+
+        // Recovery: after HEAL_DELAY_SECS without damage, +10 health per
+        // HEAL_INTERVAL_SECS, never above MAX_HEALTH. Healing wakes a
+        // sleeping logo back up.
+        if self.health < MAX_HEALTH && self.since_damage >= HEAL_DELAY_SECS {
+            self.heal_in -= dt;
+            // Catch up on missed ticks after a frame hitch, but spawn a
+            // single aggregated float so a long stall doesn't stack a pile
+            // of "+10"s on top of each other.
+            let mut healed = 0u16;
+            while self.heal_in <= 0.0 {
+                self.heal_in += HEAL_INTERVAL_SECS;
+                let before = self.health;
+                self.health = (self.health + HEAL_AMOUNT).min(MAX_HEALTH);
+                healed += self.health - before;
+            }
+            if healed > 0 {
+                self.floats.push(FloatText {
+                    amount: healed,
+                    kind: FloatKind::Heal,
+                    dx: 8.0,
+                    t: 0.0,
+                });
+            }
+        }
+
+        // ── Sleeping state ─────────────────────────────────────────────────
+        // At zero health the O freezes exactly where it is: no motion, no
+        // laser, no eye pulse — only the "zzZ" shift keeps cycling.
+        if self.health == 0 {
+            self.zzz_clock += dt;
+            while self.zzz_clock >= ZZZ_FRAME_SECS {
+                self.zzz_clock -= ZZZ_FRAME_SECS;
+                self.zzz_phase += 1;
+            }
+            return;
+        }
 
         // Fill phase: the O's center gradually turns red.
         if !self.fired {
@@ -212,20 +447,34 @@ impl ChatLogo {
         area: ratatui::layout::Rect,
         cursor_x: u16,
         cursor_y: u16,
-        primary: ratatui::style::Color,
-        bg: ratatui::style::Color,
+        colors: LogoColors,
     ) {
+        let LogoColors {
+            primary,
+            background: bg,
+            muted,
+            info,
+            success,
+        } = colors;
         let max_x = area.right().saturating_sub(O_GLYPH_W as u16);
         let max_y = area.bottom().saturating_sub(O_GLYPH_H as u16);
         if max_x <= area.x || max_y <= area.y {
             return;
         }
 
-        let bob = self.bob_offset();
+        let bob = if self.is_asleep() {
+            0.0
+        } else {
+            self.bob_offset()
+        };
         let o_x = self.pos_x.clamp(area.x as f64, max_x as f64);
         let o_y = (self.pos_y + bob).clamp(area.y as f64, max_y as f64);
         let ox = o_x.round() as u16;
         let oy = o_y.round() as u16;
+        let asleep = self.is_asleep();
+        // Impact flash: for ~0.18s after a hit the whole glyph flares toward
+        // a hot white, decaying smoothly back to its normal colors.
+        let flash = (self.hit_flash / 0.18).clamp(0.0, 1.0);
 
         // Fill levels: interior cells (rows 1-2, cols 2-4 of the glyph) fill
         // bottom-up with red as `self.fill` grows.
@@ -249,7 +498,12 @@ impl ChatLogo {
                         }
                         let pulse = 0.5 + 0.5 * self.pulse_phase.sin(); // 0.0..=1.0
                         let eye = blend_color(red_color(), medium_red(), pulse);
-                        let col = blend_color(eye, primary, f);
+                        let mut col = blend_color(eye, primary, f);
+                        if asleep {
+                            col = muted;
+                        } else if flash > 0.0 {
+                            col = blend_color(flash_color(), col, flash);
+                        }
                         cell.set_char(ch);
                         cell.set_style(ratatui::style::Style::default().fg(col));
                     } else if !is_space {
@@ -258,10 +512,17 @@ impl ChatLogo {
                         let dist_edge =
                             ((gc as f64 - 3.0).powi(2) + (gr as f64 - 1.5).powi(2)).sqrt();
                         let bri = 0.55 + (1.0 - dist_edge / 4.0).clamp(0.0, 1.0) * 0.45;
+                        let mut col = blend_color(primary, bg, bri);
+                        if asleep {
+                            // Sleeping: the whole glyph rests in the muted
+                            // text color, with the same edge gradient so the
+                            // rounded shading is preserved.
+                            col = blend_color(muted, bg, bri);
+                        } else if flash > 0.0 {
+                            col = blend_color(flash_color(), col, flash);
+                        }
                         cell.set_char(ch);
-                        cell.set_style(
-                            ratatui::style::Style::default().fg(blend_color(primary, bg, bri)),
-                        );
+                        cell.set_style(ratatui::style::Style::default().fg(col));
                     }
                     // Outer spaces of the glyph: leave the background alone.
                 }
@@ -269,7 +530,7 @@ impl ChatLogo {
         }
 
         // ── The laser beam ─────────────────────────────────────────────────
-        if self.fired && self.beam_len > 0.5 {
+        if !asleep && self.fired && self.beam_len > 0.5 {
             // The beam starts at the edge of the O glyph (the bottom edge when
             // the target is below), so it never crosses the red center.
             let (bx, by) = (o_x + O_GLYPH_W as f64 / 2.0, o_y + O_GLYPH_H as f64 / 2.0);
@@ -329,6 +590,69 @@ impl ChatLogo {
                 }
             }
         }
+
+        // ── Sleep indicator: the "zzZ" shift ───────────────────────────────
+        // Three slots next to the glyph. Exactly one is an uppercase `Z`,
+        // the others lowercase `z`; each frame the `Z` shifts one slot,
+        // wrapping from the last slot back to the first — so the sequence is
+        // `zzZ` → `Zzz` → `zZz` → `zzZ` → …
+        if asleep {
+            let zx = ox.saturating_add(O_GLYPH_W as u16 + 1);
+            let zy = oy;
+            // Phase 0 starts with the `Z` at the last index ("zzZ"); each
+            // frame moves it one slot right with wraparound.
+            let z_slot = (ZZZ_SLOTS - 1 + self.zzz_phase) % ZZZ_SLOTS;
+            for i in 0..ZZZ_SLOTS {
+                let ch = if i == z_slot { 'Z' } else { 'z' };
+                if let Some(cell) = buf.cell_mut((zx + i as u16, zy)) {
+                    cell.set_char(ch);
+                    cell.set_style(
+                        ratatui::style::Style::default()
+                            .fg(muted)
+                            .add_modifier(ratatui::style::Modifier::BOLD),
+                    );
+                }
+            }
+        }
+
+        // ── Floating damage / heal numbers ─────────────────────────────────
+        // 90s fighting-game style: bold digits that materialize left-to-right
+        // while strobing through a hot palette, then drift away and dissolve
+        // toward the background at the end of their life.
+        for f in &self.floats {
+            let text = f.visible_text();
+            if text.is_empty() {
+                continue;
+            }
+            let base = f.dx + if f.dx < 0.0 { -(text.len() as f64) } else { 0.0 };
+            let fx = (o_x + base).round() as i64;
+            let fy = (o_y + f.dy()).round() as i64;
+            // Fade in over the first 120ms; dissolve over the last 350ms.
+            let fade_in = (f.t / 0.12).clamp(0.0, 1.0);
+            let fade_out = ((FloatText::LIFETIME - f.t) / 0.35).clamp(0.0, 1.0);
+            let fade = fade_in * fade_out;
+            for (i, ch) in text.chars().enumerate() {
+                let x = fx + i as i64;
+                if x < 0 || fy < 0 || fy > i64::from(u16::MAX) {
+                    continue;
+                }
+                let (x, y) = (x as u16, fy as u16);
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    let col = float_color(f, i, info, success, bg);
+                    let col = if fade >= 1.0 {
+                        col
+                    } else {
+                        blend_color(col, bg, fade)
+                    };
+                    cell.set_char(ch);
+                    cell.set_style(
+                        ratatui::style::Style::default()
+                            .fg(col)
+                            .add_modifier(ratatui::style::Modifier::BOLD),
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -339,6 +663,47 @@ fn red_color() -> ratatui::style::Color {
 /// The medium red the eye dims to at the trough of each pulse.
 fn medium_red() -> ratatui::style::Color {
     ratatui::style::Color::Rgb(110, 18, 28)
+}
+
+/// The hot white the glyph flares toward for a fraction of a second on impact.
+fn flash_color() -> ratatui::style::Color {
+    ratatui::style::Color::Rgb(255, 240, 200)
+}
+
+/// Color of one character of a floating damage/heal number.
+///
+/// Damage numbers strobe through a fighting-game palette (yellow → orange →
+/// red) while materializing, then settle into a steady hot orange-red; heal
+/// numbers do the same between the theme's light blue (`info`) and green
+/// (`success`). Characters that appeared earlier in the reveal are already a
+/// step further along the palette.
+fn float_color(
+    f: &FloatText,
+    char_idx: usize,
+    info: ratatui::style::Color,
+    success: ratatui::style::Color,
+    bg: ratatui::style::Color,
+) -> ratatui::style::Color {
+    // Age of this specific character since it became visible.
+    let age = f.t - 0.05 - char_idx as f64 * 0.09;
+    let settle = (age / FloatText::APPEAR).clamp(0.0, 1.0);
+    match f.kind {
+        FloatKind::Damage => {
+            let hot = ratatui::style::Color::Rgb(255, 230, 90); // yellow
+            let mid = ratatui::style::Color::Rgb(255, 140, 40); // orange
+            let base = ratatui::style::Color::Rgb(255, 70, 40); // red-orange
+            let strobe = if settle < 0.5 {
+                blend_color(mid, hot, settle * 2.0)
+            } else {
+                blend_color(base, mid, (settle - 0.5) * 2.0)
+            };
+            blend_color(base, strobe, 1.0 - settle * 0.85)
+        }
+        FloatKind::Heal => {
+            let strobe = blend_color(success, info, settle);
+            blend_color(strobe, bg, 0.15 * (1.0 - settle))
+        }
+    }
 }
 
 fn blend_color(
@@ -364,6 +729,16 @@ fn blend_color(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_colors() -> LogoColors {
+        LogoColors {
+            primary: ratatui::style::Color::Rgb(120, 120, 255),
+            background: ratatui::style::Color::Rgb(7, 7, 10),
+            muted: ratatui::style::Color::Rgb(90, 90, 110),
+            info: ratatui::style::Color::Rgb(95, 212, 203),
+            success: ratatui::style::Color::Rgb(92, 184, 122),
+        }
+    }
 
     fn non_space_cells(buf: &ratatui::buffer::Buffer) -> Vec<(u16, u16, char)> {
         let mut out = Vec::new();
@@ -446,8 +821,7 @@ mod tests {
             area,
             16,
             9,
-            ratatui::style::Color::Rgb(120, 120, 255),
-            ratatui::style::Color::Rgb(7, 7, 10),
+            test_colors(),
         );
 
         // The real logo glyph cells are drawn.
@@ -508,7 +882,10 @@ mod tests {
         bg: ratatui::style::Color,
     ) -> String {
         let mut buf = ratatui::buffer::Buffer::empty(area);
-        logo.render(&mut buf, area, cursor.0, cursor.1, primary, bg);
+        let mut colors = test_colors();
+        colors.primary = primary;
+        colors.background = bg;
+        logo.render(&mut buf, area, cursor.0, cursor.1, colors);
         let mut out = String::new();
         for y in 0..area.height {
             for x in 0..area.width {
@@ -553,8 +930,7 @@ mod tests {
             area,
             12,
             25,
-            ratatui::style::Color::Rgb(120, 120, 255),
-            ratatui::style::Color::Rgb(7, 7, 10),
+            test_colors(),
         );
         let glyph_bottom_limit = area.bottom();
         for (_, y, ch) in non_space_cells(&buf) {
@@ -598,5 +974,198 @@ mod tests {
         }
         assert!(f2.contains('*') || f3.contains('*'), "red center missing");
         assert!(f3.contains('.'), "beam missing");
+    }
+
+    /// The O's top-left once anchored: area center horizontally, row +1.
+    fn anchored_origin(logo: &ChatLogo) -> (u16, u16) {
+        (logo.pos_x.round() as u16, logo.pos_y.round() as u16)
+    }
+
+    /// A known non-space glyph cell per row of the O glyph, used to drive
+    /// clicks: (glyph_col for each row 0..=3).
+    fn solid_cols() -> [usize; O_GLYPH_H] {
+        let mut out = [0; O_GLYPH_H];
+        for (gr, row) in O_GLYPH.iter().enumerate() {
+            out[gr] = row
+                .chars()
+                .position(|c| c != ' ')
+                .expect("each glyph row has a solid cell");
+        }
+        out
+    }
+
+    #[test]
+    fn click_deals_damage_by_row() {
+        let mut logo = ChatLogo::new();
+        let area = ratatui::layout::Rect::new(0, 0, 30, 10);
+        logo.anchor(area);
+        let (ox, oy) = anchored_origin(&logo);
+        let cols = solid_cols();
+
+        // Top row: 50 damage.
+        assert!(logo.click_logo(ox + cols[0] as u16, oy));
+        assert_eq!(logo.health(), MAX_HEALTH - 50);
+
+        // Bottom row: 10 damage.
+        assert!(logo.click_logo(ox + cols[3] as u16, oy + 3));
+        assert_eq!(logo.health(), MAX_HEALTH - 60);
+
+        // Middle rows are proportional, strictly between the extremes.
+        let before = logo.health();
+        assert!(logo.click_logo(ox + cols[1] as u16, oy + 1));
+        let mid_top = before - logo.health();
+        assert!(mid_top > 10 && mid_top < 50, "row 1 damage: {mid_top}");
+        let before = logo.health();
+        assert!(logo.click_logo(ox + cols[2] as u16, oy + 2));
+        let mid_bottom = before - logo.health();
+        assert!(mid_bottom > 10 && mid_bottom < 50, "row 2 damage: {mid_bottom}");
+        assert!(mid_top > mid_bottom, "higher rows must hurt more");
+    }
+
+    #[test]
+    fn click_misses_spaces_and_surroundings() {
+        let mut logo = ChatLogo::new();
+        let area = ratatui::layout::Rect::new(0, 0, 30, 10);
+        logo.anchor(area);
+        let (ox, oy) = anchored_origin(&logo);
+
+        // The interior hole of the O (row 1, col 2 is a space) does not count.
+        assert!(!logo.click_logo(ox + 2, oy + 1));
+        // One cell above and one cell to the left of the glyph do not count.
+        assert!(!logo.click_logo(ox + 3, oy - 1));
+        assert!(!logo.click_logo(ox - 1, oy + 1));
+        assert_eq!(logo.health(), MAX_HEALTH);
+    }
+
+    #[test]
+    fn logo_heals_after_ten_seconds_and_never_above_max() {
+        let mut logo = ChatLogo::new();
+        let area = ratatui::layout::Rect::new(0, 0, 30, 10);
+        logo.anchor(area);
+        let (ox, oy) = anchored_origin(&logo);
+        assert!(logo.click_logo(ox + 1, oy)); // top-row hit: -50
+
+        // 9.9s without damage: no heal yet.
+        logo.advance(9.9, 10.0, 9.0);
+        assert_eq!(logo.health(), MAX_HEALTH - 50);
+
+        // Past the delay: the first +10 tick fires, with a heal float.
+        logo.advance(1.1, 10.0, 9.0);
+        assert_eq!(logo.health(), MAX_HEALTH - 40);
+        assert!(logo.floats.iter().any(|f| f.kind == FloatKind::Heal));
+
+        // One tick per second while recovering.
+        logo.advance(1.0, 10.0, 9.0);
+        assert_eq!(logo.health(), MAX_HEALTH - 30);
+
+        // Health is capped at MAX_HEALTH even after a long idle stretch.
+        logo.advance(30.0, 10.0, 9.0);
+        assert_eq!(logo.health(), MAX_HEALTH);
+    }
+
+    #[test]
+    fn logo_falls_asleep_at_zero_and_zzz_shifts() {
+        let mut logo = ChatLogo::new();
+        let area = ratatui::layout::Rect::new(0, 0, 40, 10);
+        logo.anchor(area);
+        logo.advance(10.0, 10.0, 9.0); // fired
+        let (ox, oy) = anchored_origin(&logo);
+
+        // Four top-row hits (50 each) empty the 200 health.
+        for _ in 0..4 {
+            assert!(logo.click_logo(ox + 1, oy));
+        }
+        assert_eq!(logo.health(), 0);
+        assert!(logo.is_asleep());
+
+        // The position freezes: advancing no longer moves the glyph (kept
+        // below ZZZ_FRAME_SECS so the zzZ phase is still in its first frame).
+        let (fx, fy) = (logo.pos_x, logo.pos_y);
+        logo.advance(0.5, 30.0, 9.0);
+        assert_eq!((logo.pos_x, logo.pos_y), (fx, fy));
+
+        // zzZ: phase 0 renders "zzZ" right of the glyph, in bold.
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        let muted = ratatui::style::Color::Rgb(90, 90, 110);
+        logo.render(
+            &mut buf,
+            area,
+            10,
+            9,
+            test_colors(),
+        );
+        let zx = ox + O_GLYPH_W as u16 + 1;
+        let text: String = (0..3)
+            .map(|i| buf[(zx + i, oy)].symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert_eq!(text, "zzZ");
+        assert!(buf[(zx + 2, oy)].modifier.contains(ratatui::style::Modifier::BOLD));
+        assert_eq!(buf[(zx + 2, oy)].fg, muted);
+
+        // While asleep the glyph renders in the muted color (interior cells
+        // get exactly `muted`; outline cells blend it with the background).
+        assert_eq!(buf[(ox + 3, oy + 1)].fg, muted);
+
+        // After one frame the uppercase Z wraps to the first slot: "Zzz".
+        logo.advance(ZZZ_FRAME_SECS + 0.01, 10.0, 9.0);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        logo.render(
+            &mut buf,
+            area,
+            10,
+            9,
+            test_colors(),
+        );
+        let text: String = (0..3)
+            .map(|i| buf[(zx + i, oy)].symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert_eq!(text, "Zzz");
+
+        // And again: "zZz".
+        logo.advance(ZZZ_FRAME_SECS + 0.01, 10.0, 9.0);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        logo.render(
+            &mut buf,
+            area,
+            10,
+            9,
+            test_colors(),
+        );
+        let text: String = (0..3)
+            .map(|i| buf[(zx + i, oy)].symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert_eq!(text, "zZz");
+    }
+
+    #[test]
+    fn damage_float_appears_bold_and_fades_out() {
+        let mut logo = ChatLogo::new();
+        let area = ratatui::layout::Rect::new(0, 0, 40, 12);
+        logo.anchor(area);
+        let (ox, oy) = anchored_origin(&logo);
+        assert!(logo.click_logo(ox + 1, oy)); // top-row hit → "-50"
+
+        // Shortly after the click the number is materializing.
+        logo.advance(0.15, 10.0, 11.0);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        logo.render(
+            &mut buf,
+            area,
+            10,
+            11,
+            test_colors(),
+        );
+        let has_bold_digit = (0..area.width).any(|x| {
+            (0..area.height).any(|y| {
+                let c = &buf[(x, y)];
+                matches!(c.symbol(), "-" | "5" | "0")
+                    && c.modifier.contains(ratatui::style::Modifier::BOLD)
+            })
+        });
+        assert!(has_bold_digit, "expected a bold damage number on screen");
+
+        // After the lifetime elapses the number is gone.
+        logo.advance(FloatText::LIFETIME + 0.5, 10.0, 11.0);
+        assert!(logo.floats.is_empty());
     }
 }

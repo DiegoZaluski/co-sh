@@ -126,6 +126,28 @@ impl App {
                     self.scroll_pill_pressed = true;
                     return Ok(true);
                 }
+                // Chat-logo mini game: while the landing-screen logo is
+                // visible, a click that lands exactly on one of its glyph
+                // cells deals damage (top hits hurt the most). It consumes
+                // the press so the click never starts a text selection.
+                if matches!(self.mode(), AppMode::Session)
+                    && !self.dialog.visible()
+                    && !self.slash_menu.visible
+                    // Inline dialogs replace the prompt: a click there belongs
+                    // to them, never to the logo behind them (same guards as
+                    // the scroll-pill branch above).
+                    && !self.question_dialog.visible
+                    && !self.permission_dialog.visible
+                    && !self.queue_choice_dialog.visible
+                    && !self.free_gateway_dialog.visible
+                    && self.prompt_view.logo_visible()
+                    && self.prompt_view.click_logo(x, y)
+                {
+                    self.prompt_view.focus();
+                    self.prompt_view.note_activity();
+                    self.state.right_panel.panel_focus = None;
+                    return Ok(true);
+                }
                 self.mouse_down_pos = Some((x, y));
                 self.press_started_in_sidebar = x < LEFT_PANEL_WIDTH;
                 self.release_was_drag = false;
