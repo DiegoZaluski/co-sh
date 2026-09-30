@@ -794,8 +794,13 @@ impl App {
                         self.hovered_queue_row = None;
                     } else {
                         let session_area = self.session_viewport_area();
-                        self.session_view
-                            .update_hover(y, session_area, &self.state, &self.config);
+                        self.session_view.update_hover(
+                            x,
+                            y,
+                            session_area,
+                            &self.state,
+                            &self.config,
+                        );
                         // Hover tracking for the pending queued rows above the prompt.
                         self.hovered_queue_row =
                             if self.state.status == crate::types::SessionStatus::Idle {

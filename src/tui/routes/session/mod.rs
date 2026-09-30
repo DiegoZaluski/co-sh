@@ -2307,6 +2307,7 @@ impl SessionView {
     /// Returns `true` when the hover target changed so the caller redraws.
     pub fn update_hover(
         &mut self,
+        x: u16,
         y: u16,
         area: Rect,
         state: &AppState,
@@ -2328,6 +2329,11 @@ impl SessionView {
             area.width.saturating_sub(margin * 2),
             area.height,
         );
+        // The renderer leaves a two-column margin around the session boxes.
+        // Hovering that margin must not make a user message look actionable.
+        if x < inner_area.x || x >= inner_area.right() {
+            return self.clear_hover();
+        }
         let max_w = inner_area.width.saturating_sub(6).max(2);
         self.ensure_height_caches_fresh(session, max_w, config, None);
 
@@ -2418,6 +2424,14 @@ impl SessionView {
         let vp_bottom = i32::from(inner_area.bottom());
         let click_x = i32::from(mouse.x);
         let click_y = i32::from(mouse.y);
+
+        // Message hit-testing below is based on vertical layout. Keep it
+        // bounded by the same horizontal area that render() uses for the
+        // message boxes; otherwise a click in the side margin on the same row
+        // is incorrectly treated as a click on the user message.
+        if click_x < i32::from(inner_area.x) || click_x >= i32::from(inner_area.right()) {
+            return false;
+        }
 
         self.ensure_height_caches_fresh(session, max_w, config, None);
 
