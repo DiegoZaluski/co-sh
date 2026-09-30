@@ -578,8 +578,7 @@ impl App {
                                     // installer filled.
                                     Ok(explanation) => {
                                         weights_explanation = explanation;
-                                        harness =
-                                            attach_kind(target.to_kind(), harness);
+                                        harness = attach_kind(target.to_kind(), harness);
                                     }
                                     // Download failed: fail-open — toast
                                     // (the Failed event already toasted)

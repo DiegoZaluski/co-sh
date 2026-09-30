@@ -785,12 +785,9 @@ impl App {
                     // The running install line: the last message whose parts
                     // end in a running Part::Install (created on demand).
                     fn running_install(session: &mut crate::types::Session) -> Option<usize> {
-                        session
-                            .messages
-                            .iter()
-                            .rposition(|m| {
-                                matches!(&m.parts[..], [Part::Install(c)] if c.is_running())
-                            })
+                        session.messages.iter().rposition(
+                            |m| matches!(&m.parts[..], [Part::Install(c)] if c.is_running()),
+                        )
                     }
                     // The Text event's explanation message (assistant,
                     // non-synthetic, install-pair id): removed when the
@@ -798,14 +795,10 @@ impl App {
                     // about an install that did not happen — the agent
                     // context never received it either.
                     fn remove_install_explanation(session: &mut crate::types::Session) {
-                        if let Some(pos) = session
-                            .messages
-                            .iter()
-                            .rposition(|m| {
-                                m.id.starts_with("msg-install-")
-                                    && matches!(&m.parts[..], [Part::Text(t)] if !t.synthetic)
-                            })
-                        {
+                        if let Some(pos) = session.messages.iter().rposition(|m| {
+                            m.id.starts_with("msg-install-")
+                                && matches!(&m.parts[..], [Part::Text(t)] if !t.synthetic)
+                        }) {
                             session.messages.remove(pos);
                         }
                     }
@@ -823,7 +816,7 @@ impl App {
                                 part.failed = Some(true);
                             }
                         }
-                        cosh::harness::events::WeightsInstallEvent::Text(text) => {
+                        cosh::harness::events::WeightsInstallEvent::TextBegin(first) => {
                             // A running install line at this point is an
                             // ORPHAN (a crash mid-install persisted it; the
                             // restored session re-read it): freeze it so a
@@ -837,16 +830,17 @@ impl App {
                                     Some(crate::types::now_ms().saturating_sub(part.started_at));
                                 part.failed = Some(true);
                             }
-                            // The hardcoded explanation, streamed as a REAL
-                            // assistant message: `synthetic: false` puts it
-                            // in the agent context (the harness records the
-                            // same text there), and the session log persists
-                            // it like any assistant turn.
+                            // The streamed explanation opens as a REAL
+                            // assistant message with its FIRST chunk:
+                            // `synthetic: false` puts it in the agent
+                            // context (the harness records the same text
+                            // there), and the session log persists it like
+                            // any assistant turn. TextDelta appends to it.
                             session.messages.push(Message {
                                 id: format!("msg-install-{}", crate::types::now_ms()),
                                 role: MessageRole::Assistant,
                                 parts: vec![Part::Text(TextPart {
-                                    text,
+                                    text: first,
                                     synthetic: false,
                                 })],
                                 created_at: std::time::SystemTime::now()
@@ -857,7 +851,22 @@ impl App {
                                 model: None,
                             });
                         }
+                        cosh::harness::events::WeightsInstallEvent::TextDelta(delta) => {
+                            // Append to the message the TextBegin opened:
+                            // the sender guarantees delta chunks only ever
+                            // follow one, and the pieces concatenate back
+                            // into EXACTLY the text the agent context gets.
+                            if let Some(pos) = session.messages.iter().rposition(|m| {
+                                m.id.starts_with("msg-install-")
+                                    && matches!(&m.parts[..], [Part::Text(t)] if !t.synthetic)
+                            }) && let Some(Part::Text(t)) =
+                                session.messages[pos].parts.last_mut()
+                            {
+                                t.text.push_str(&delta);
+                            }
+                        }
                         cosh::harness::events::WeightsInstallEvent::Progress {
+                            model,
                             bytes_done,
                             bytes_total,
                         } => {
@@ -867,11 +876,15 @@ impl App {
                                     session.messages.push(Message {
                                         id: format!("msg-install-{}", crate::types::now_ms()),
                                         role: MessageRole::Assistant,
-                                        parts: vec![Part::Install(InstallPart::running())],
+                                        parts: vec![Part::Install(InstallPart {
+                                            model: model.clone(),
+                                            ..InstallPart::running()
+                                        })],
                                         created_at: std::time::SystemTime::now()
                                             .duration_since(std::time::UNIX_EPOCH)
                                             .unwrap_or_default()
-                                            .as_millis() as u64,
+                                            .as_millis()
+                                            as u64,
                                         agent: None,
                                         model: None,
                                     });
@@ -881,6 +894,9 @@ impl App {
                             if let Some(Part::Install(part)) =
                                 session.messages[idx].parts.last_mut()
                             {
+                                if part.model.is_empty() {
+                                    part.model = model;
+                                }
                                 part.bytes_done = bytes_done;
                                 part.bytes_total = bytes_total;
                             }

@@ -404,6 +404,20 @@ impl DecisionModel {
             Self::Custom { repo, .. } => repo,
         }
     }
+
+    /// The model's display name for user-facing copy: the upstream model
+    /// family and checkpoint (`Laya`, `Laya-Multilingual`,
+    /// `Laya-Typed-Decisions`), or the repo id for a custom checkpoint.
+    /// The weights install copy addresses the model by THIS name —
+    /// "decision model" says the role, not the model.
+    pub fn display_name(&self) -> &str {
+        match self {
+            Self::English => "Laya",
+            Self::Multilingual => "Laya-Multilingual",
+            Self::TypedDecisions => "Laya-Typed-Decisions",
+            Self::Custom { repo, .. } => repo,
+        }
+    }
 }
 
 /// The agent-loop termination audit config: whether the decision model
@@ -1108,7 +1122,10 @@ mod tests {
         let legacy: Setup = serde_json::from_str("{}").unwrap();
         assert!(legacy.decision.termination.enabled);
         assert!((legacy.decision.termination.min_confidence - 0.6).abs() < f64::EPSILON);
-        assert!(matches!(legacy.decision.model, super::DecisionModel::English));
+        assert!(matches!(
+            legacy.decision.model,
+            super::DecisionModel::English
+        ));
 
         // Round-trip of a named kind + enabled audit: serializes as
         // `model_decision`, the section name a reader of setup.json sees.
@@ -1154,10 +1171,8 @@ mod tests {
 
         // ...and under the LEGACY alias, so files written before the
         // rename keep loading unchanged.
-        let legacy_section: Setup = serde_json::from_str(
-            r#"{"checkup": {"termination": {"enabled": false}}}"#,
-        )
-        .unwrap();
+        let legacy_section: Setup =
+            serde_json::from_str(r#"{"checkup": {"termination": {"enabled": false}}}"#).unwrap();
         assert!(!legacy_section.decision.termination.enabled);
     }
 }

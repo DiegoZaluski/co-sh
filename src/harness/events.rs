@@ -268,14 +268,23 @@ pub enum HarnessEvent {
 /// A stage of the weights installer ([`HarnessEvent::WeightsInstall`]).
 #[derive(Debug, Clone)]
 pub enum WeightsInstallEvent {
-    /// The hardcoded explanation of what is being installed and why. The
-    /// TUI renders it as an assistant message — a real one: the harness
-    /// adds the same text to the agent context right after restoring it,
-    /// so the model can explain/translate it to the user.
-    Text(String),
+    /// The OPENING chunk of the streamed explanation. The TUI opens a real
+    /// assistant message with it (`synthetic: false`): the harness adds
+    /// the FULL text to the agent context once the install succeeds, so
+    /// the model can explain/translate it to the user.
+    TextBegin(String),
+    /// A follow-up chunk of the streamed explanation: the TUI appends it
+    /// to the message [`WeightsInstallEvent::TextBegin`] opened. The
+    /// token-like pacing happens upstream — the sender sleeps between
+    /// chunks, so the text appears the way an LLM streams.
+    TextDelta(String),
     /// Download progress: bytes received and bytes known so far (the total
-    /// grows as further files are announced). Throttled upstream.
+    /// grows as further files are announced). Throttled upstream. Carries
+    /// the model's display name — the progress line addresses the model
+    /// by it ("installing Laya ▓▓▓…").
     Progress {
+        /// The model's user-facing name (`Laya`, `Laya-Multilingual`, …).
+        model: String,
         /// Bytes received across every file of this install.
         bytes_done: u64,
         /// Total bytes announced so far.

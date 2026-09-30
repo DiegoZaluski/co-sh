@@ -284,6 +284,13 @@ fn compaction_line(part: &CompactionPart, now: u64) -> String {
 /// component. While the download runs the elapsed time ticks live; the
 /// terminal event freezes the line.
 fn install_line(part: &InstallPart, now: u64) -> String {
+    // The model's name ("installing Laya ▓▓▓…"); an empty field (sessions
+    // persisted before the name existed) falls back to the generic label.
+    let subject = if part.model.is_empty() {
+        "decision model"
+    } else {
+        &part.model
+    };
     // 0% until the first file announces its size; the mirror's big graph
     // dominates the total, so the bar fills in one visible sweep.
     let pct = if part.bytes_total == 0 {
@@ -297,17 +304,17 @@ fn install_line(part: &InstallPart, now: u64) -> String {
         let elapsed = now.saturating_sub(part.started_at);
         let secs = elapsed as f64 / 1000.0;
         let bar = crate::app::render::render_budget_bar(pct);
-        format!("installing decision model {bar} {pct:>3}% · {mb_done}/{mb_total} MB · {secs:.1}s")
+        format!("installing {subject} {bar} {pct:>3}% · {mb_done}/{mb_total} MB · {secs:.1}s")
     } else if part.failed == Some(true) {
         let bar = crate::app::render::render_budget_bar(pct);
-        format!("installing decision model {bar} failed")
+        format!("installing {subject} {bar} failed")
     } else {
         // The frozen byte counts can LAG the Finished event (the last
         // Progress update is throttled), so the completion branch forces
         // the bar to full instead of trusting them — the label reads 100%,
         // the bar must match.
         let bar = crate::app::render::render_budget_bar(100);
-        format!("installed decision model {bar} 100%")
+        format!("installed {subject} {bar} 100%")
     }
 }
 

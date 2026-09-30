@@ -202,6 +202,11 @@ pub enum CompactionPhase {
 /// replays the line (finished bars stay visible in the transcript).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstallPart {
+    /// The model's user-facing name (`Laya`, `Laya-Multilingual`, …) —
+    /// the line addresses the model by it ("installing Laya ▓▓▓…").
+    /// `default` keeps sessions persisted before this field loadable.
+    #[serde(default)]
+    pub model: String,
     /// Bytes received across every file of the install.
     pub bytes_done: u64,
     /// Total bytes announced so far (grows as further files start).
@@ -222,6 +227,7 @@ impl InstallPart {
     /// A fresh running install line.
     pub fn running() -> Self {
         Self {
+            model: String::new(),
             bytes_done: 0,
             bytes_total: 0,
             elapsed_ms: None,

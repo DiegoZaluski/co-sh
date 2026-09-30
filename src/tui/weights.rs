@@ -15,25 +15,38 @@
 
 use std::sync::{Arc, Mutex};
 
-use cosh::harness::events::{HarnessEvent, WeightsInstallEvent};
 #[cfg(feature = "onnx")]
 use crate::util::setup::{DecisionHub, DecisionModel};
+use cosh::harness::events::{HarnessEvent, WeightsInstallEvent};
 
 /// The graph candidates, quantized first (the mirror may not ship the
 /// int8 twin yet — the installer falls back to fp32).
 const GRAPHS: &[&str] = &["laya.int8.onnx", "laya.onnx"];
 
-/// The hardcoded explanation streamed into the chat BEFORE the download
-/// starts. It enters the agent context as a real assistant message, so the
-/// model can explain or translate it to the user. One constant: the
-/// wording is product copy, not code-generated text.
-pub(crate) const EXPLANATION: &str = "I'm setting up the decision model for this session.\n\n\
-Alongside the main agent, cosh runs a small ONNX classifier — the harness's decision model. \
-It reviews the agent loop's stopping decisions: when the loop is about to end on an ambiguous \
-signal, the model reads the final message and vetoes a premature stop it isn't confident about. \
-It works locally and never takes part in this conversation.\n\n\
-The model ships as a quantized ONNX graph from the weights mirror and is downloaded once; \
-the progress bar below tracks it. Afterwards the audit runs silently on every turn.";
+/// The explanation streamed into the chat BEFORE the download starts,
+/// built around the model's display name. It enters the agent context as a
+/// real assistant message, so the model can explain or translate it to the
+/// user. Written as prose (not code-generated text): the model is
+/// introduced as a general-purpose local classifier — the termination
+/// audit is the capability shipping TODAY, not the model's definition —
+/// because the same weights may classify preferences or other signals
+/// tomorrow.
+pub(crate) fn explanation(display_name: &str) -> String {
+    format!(
+        "I'm fetching {name} — a small classifier that runs entirely on your machine.\
+\n\n\
+cosh ships a family of local models for judgment calls the main agent \
+shouldn't spend tokens on: classifying user preferences, scoring options, \
+reading intent from a message. Right now I'm wiring it up as a second \
+opinion on my own decisions — when I'm about to end a turn on an \
+ambiguous signal, it reviews that call and pushes back if it isn't \
+confident. It never takes part in this conversation itself.\
+\n\n\
+{name} ships as a quantized ONNX graph and downloads once; the progress \
+bar below tracks it. After that it works silently on every turn.",
+        name = display_name
+    )
+}
 
 /// One install target resolved from the setup config: which repo, which
 /// checkpoint inside it, which revision pin.
@@ -47,6 +60,10 @@ pub(crate) struct WeightsTarget {
     /// the mirror's current revision on the first install — the snapshot
     /// stays cached, so later sessions reuse it without re-resolving.
     pub revision: Option<String>,
+    /// The model's user-facing name (upstream family + checkpoint, or the
+    /// repo id) for the install copy: the streamed explanation and the
+    /// progress line both address the model by it.
+    pub display_name: String,
 }
 
 impl WeightsTarget {
@@ -78,6 +95,7 @@ pub(crate) fn resolve_target(model: &DecisionModel, hub: &DecisionHub) -> Option
     // The pin is repo-scoped (DecisionHub::pin_for): it applies only when
     // the target's repo is the one the SHA was resolved from.
     let mirror_pin = hub.pin_for(&repo);
+    let display_name = model.display_name().to_string();
     match model {
         // The named kinds map onto the mirror's per-kind subfolders. The
         // mirror nests every kind (including `english/`, unlike the
@@ -86,18 +104,24 @@ pub(crate) fn resolve_target(model: &DecisionModel, hub: &DecisionHub) -> Option
             repo: repo.clone(),
             subfolder: Some("english".to_string()),
             revision: mirror_pin,
+            display_name,
         }),
         DecisionModel::Multilingual => Some(WeightsTarget {
             repo: repo.clone(),
             subfolder: Some("multilingual".to_string()),
             revision: mirror_pin,
+            display_name,
         }),
         DecisionModel::TypedDecisions => Some(WeightsTarget {
             repo: repo.clone(),
             subfolder: Some("typed-decisions".to_string()),
             revision: mirror_pin,
+            display_name,
         }),
-        DecisionModel::Custom { repo: custom, subfolder } => {
+        DecisionModel::Custom {
+            repo: custom,
+            subfolder,
+        } => {
             if std::path::Path::new(custom).is_dir() {
                 // Local checkpoint: the loader resolves it directly.
                 return None;
@@ -109,6 +133,7 @@ pub(crate) fn resolve_target(model: &DecisionModel, hub: &DecisionHub) -> Option
                 repo: custom.clone(),
                 subfolder: subfolder.clone(),
                 revision,
+                display_name,
             })
         }
     }
@@ -161,16 +186,32 @@ pub(crate) async fn ensure_installed(
         return Ok(None);
     }
 
-    send(WeightsInstallEvent::Text(EXPLANATION.to_string()));
+    // Stream the explanation the way an LLM emits tokens: one event per
+    // word (with its trailing space), a few milliseconds between them —
+    // `split_inclusive` keeps the pieces concatenating back into EXACTLY
+    // the context text, and the event channel + TUI redraw absorb the
+    // pacing. Runs only on the cold path: a cache hit never streams.
+    let text = explanation(&target.display_name);
+    let mut opened = false;
+    for word in text.split_inclusive(char::is_whitespace) {
+        let event = if opened {
+            WeightsInstallEvent::TextDelta(word.to_string())
+        } else {
+            opened = true;
+            WeightsInstallEvent::TextBegin(word.to_string())
+        };
+        send(event);
+        tokio::time::sleep(std::time::Duration::from_millis(12)).await;
+    }
 
     // Shared progress state. hf-hub calls `init(size, filename)` per file
     // (again on resume/retry — the receiver resets, not accumulates) and
     // `update(delta)` while bytes stream in. `update` carries no filename,
     // so the CURRENT file is tracked explicitly (the one init'd most
     // recently; downloads are strictly sequential here).
+    let model_name = target.display_name.clone();
     let files: Arc<Mutex<Files>> = Arc::new(Mutex::new(Files::default()));
-    let throttle: Arc<Mutex<Throttle>> =
-        Arc::new(Mutex::new(Throttle::new()));
+    let throttle: Arc<Mutex<Throttle>> = Arc::new(Mutex::new(Throttle::new()));
     let tx = event_tx.clone();
 
     let progress = {
@@ -207,6 +248,7 @@ pub(crate) async fn ensure_installed(
                     last.at = std::time::Instant::now();
                     let _ = tx.send(HarnessEvent::WeightsInstall {
                         event: WeightsInstallEvent::Progress {
+                            model: model_name.clone(),
                             bytes_done: done,
                             bytes_total: total,
                         },
@@ -243,7 +285,7 @@ pub(crate) async fn ensure_installed(
                 repo: target.repo.clone(),
                 revision: installed.revision.clone(),
             });
-            Ok(Some(EXPLANATION.to_string()))
+            Ok(Some(text))
         }
         Err(e) => {
             let reason = e.message().to_string();
@@ -386,7 +428,10 @@ mod tests {
         assert_eq!(h.pin_for("other/mirror").as_deref(), Some("abc123"));
 
         let t = resolve_target(&DecisionModel::English, &h).unwrap();
-        assert!(t.revision.is_none(), "foreign pin does not reach the target");
+        assert!(
+            t.revision.is_none(),
+            "foreign pin does not reach the target"
+        );
 
         // A custom repo (even equal to the mirror) carries the pin only
         // when the pin belongs to that repo.
@@ -406,6 +451,31 @@ mod tests {
     fn target_maps_to_a_custom_wire_kind() {
         let t = resolve_target(&DecisionModel::English, &hub()).unwrap();
         assert_eq!(t.to_kind().name(), "Zaluski/laya-onnx/english");
+    }
+
+    #[test]
+    fn explanation_names_the_model_and_streams_back_intact() {
+        // Each named kind is addressed by its full model name.
+        for (model, name) in [
+            (DecisionModel::English, "Laya"),
+            (DecisionModel::Multilingual, "Laya-Multilingual"),
+            (DecisionModel::TypedDecisions, "Laya-Typed-Decisions"),
+        ] {
+            let t = resolve_target(&model, &hub()).unwrap();
+            assert_eq!(t.display_name, name);
+            let text = explanation(&t.display_name);
+            assert!(text.contains(name), "{name} missing from the copy");
+        }
+
+        // The word-streaming split must concatenate back into EXACTLY the
+        // context text: the TUI appends every delta chunk, and the agent
+        // context gets the unsplit original.
+        let text = explanation("Laya");
+        let joined: String = text.split_inclusive(char::is_whitespace).collect();
+        assert_eq!(joined, text);
+        // The first chunk is never empty (the TUI opens the message with it).
+        let mut chunks = text.split_inclusive(char::is_whitespace);
+        assert!(!chunks.next().unwrap().trim().is_empty());
     }
 
     #[test]
