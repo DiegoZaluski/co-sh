@@ -777,6 +777,165 @@ impl App {
                     }
                 }
 
+                HarnessEvent::WeightsInstall { event } => {
+                    use crate::types::InstallPart;
+                    let Some(session) = self.state.current_session_mut() else {
+                        continue;
+                    };
+                    // The running install line: the last message whose parts
+                    // end in a running Part::Install (created on demand).
+                    fn running_install(session: &mut crate::types::Session) -> Option<usize> {
+                        session
+                            .messages
+                            .iter()
+                            .rposition(|m| {
+                                matches!(&m.parts[..], [Part::Install(c)] if c.is_running())
+                            })
+                    }
+                    // The Text event's explanation message (assistant,
+                    // non-synthetic, install-pair id): removed when the
+                    // download fails, so the transcript never keeps prose
+                    // about an install that did not happen — the agent
+                    // context never received it either.
+                    fn remove_install_explanation(session: &mut crate::types::Session) {
+                        if let Some(pos) = session
+                            .messages
+                            .iter()
+                            .rposition(|m| {
+                                m.id.starts_with("msg-install-")
+                                    && matches!(&m.parts[..], [Part::Text(t)] if !t.synthetic)
+                            })
+                        {
+                            session.messages.remove(pos);
+                        }
+                    }
+                    match event {
+                        cosh::harness::events::WeightsInstallEvent::Cached => {
+                            // Cache hit: no download ran. Freeze any orphaned
+                            // running install line (a crash mid-install
+                            // persisted one) — nothing else will.
+                            if let Some(idx) = running_install(session)
+                                && let Some(Part::Install(part)) =
+                                    session.messages[idx].parts.last_mut()
+                            {
+                                part.elapsed_ms =
+                                    Some(crate::types::now_ms().saturating_sub(part.started_at));
+                                part.failed = Some(true);
+                            }
+                        }
+                        cosh::harness::events::WeightsInstallEvent::Text(text) => {
+                            // A running install line at this point is an
+                            // ORPHAN (a crash mid-install persisted it; the
+                            // restored session re-read it): freeze it so a
+                            // fresh install's progress never attaches to the
+                            // stale line's clock.
+                            if let Some(idx) = running_install(session)
+                                && let Some(Part::Install(part)) =
+                                    session.messages[idx].parts.last_mut()
+                            {
+                                part.elapsed_ms =
+                                    Some(crate::types::now_ms().saturating_sub(part.started_at));
+                                part.failed = Some(true);
+                            }
+                            // The hardcoded explanation, streamed as a REAL
+                            // assistant message: `synthetic: false` puts it
+                            // in the agent context (the harness records the
+                            // same text there), and the session log persists
+                            // it like any assistant turn.
+                            session.messages.push(Message {
+                                id: format!("msg-install-{}", crate::types::now_ms()),
+                                role: MessageRole::Assistant,
+                                parts: vec![Part::Text(TextPart {
+                                    text,
+                                    synthetic: false,
+                                })],
+                                created_at: std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis() as u64,
+                                agent: None,
+                                model: None,
+                            });
+                        }
+                        cosh::harness::events::WeightsInstallEvent::Progress {
+                            bytes_done,
+                            bytes_total,
+                        } => {
+                            let idx = match running_install(session) {
+                                Some(idx) => idx,
+                                None => {
+                                    session.messages.push(Message {
+                                        id: format!("msg-install-{}", crate::types::now_ms()),
+                                        role: MessageRole::Assistant,
+                                        parts: vec![Part::Install(InstallPart::running())],
+                                        created_at: std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .as_millis() as u64,
+                                        agent: None,
+                                        model: None,
+                                    });
+                                    session.messages.len() - 1
+                                }
+                            };
+                            if let Some(Part::Install(part)) =
+                                session.messages[idx].parts.last_mut()
+                            {
+                                part.bytes_done = bytes_done;
+                                part.bytes_total = bytes_total;
+                            }
+                        }
+                        cosh::harness::events::WeightsInstallEvent::Finished { repo, revision } => {
+                            // Terminal (success): freeze the line at 100%
+                            // and record the resolved SHA as the mirror pin
+                            // — one revision per checkpoint, every later
+                            // load cache-probes exactly this snapshot. The
+                            // pin is scoped to the MIRROR: only an install
+                            // of the effective mirror repo writes it (a
+                            // custom repo's SHA must not poison the mirror,
+                            // nor the reverse).
+                            if let Some(idx) = running_install(session)
+                                && let Some(Part::Install(part)) =
+                                    session.messages[idx].parts.last_mut()
+                            {
+                                part.elapsed_ms =
+                                    Some(crate::types::now_ms().saturating_sub(part.started_at));
+                                part.failed = Some(false);
+                            }
+                            if repo == self.setup.decision.hub.effective_repo() {
+                                self.setup.decision.hub.pinned_repo = repo;
+                                self.setup.decision.hub.pinned_revision = revision;
+                                self.setup.save();
+                            }
+                        }
+                        cosh::harness::events::WeightsInstallEvent::Failed(reason) => {
+                            // Terminal (failure): freeze the line as failed
+                            // and toast the reason — the bar itself stays
+                            // one line.
+                            if let Some(idx) = running_install(session)
+                                && let Some(Part::Install(part)) =
+                                    session.messages[idx].parts.last_mut()
+                            {
+                                part.elapsed_ms =
+                                    Some(crate::types::now_ms().saturating_sub(part.started_at));
+                                part.failed = Some(true);
+                            }
+                            // The explanation promised an install that did
+                            // not happen: pull it back out of the
+                            // transcript (the agent context never received
+                            // it — `weights_explanation` is only recorded
+                            // on success).
+                            remove_install_explanation(session);
+                            self.toast_state.show(crate::ui::toast::ToastOptions {
+                                title: Some("Decision model install".into()),
+                                message: reason,
+                                variant: crate::ui::toast::ToastVariant::Warning,
+                                duration_ms: 8000,
+                            });
+                        }
+                    }
+                }
+
                 HarnessEvent::Done {
                     context,
                     checkup_verdict,

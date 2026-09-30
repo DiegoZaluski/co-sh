@@ -305,6 +305,68 @@ pub struct DecisionConfig {
     pub model: DecisionModel,
     /// The agent-loop termination audit (the current audited decision).
     pub termination: TerminationDecision,
+    /// The hub mirror the weights installer downloads from. THE single
+    /// application-level default for the mirror repo id: the `cosh-onnx`
+    /// crate carries no repo default — every install resolves this value
+    /// (env override `COSH_ONNX_HUB_REPO` wins over the config).
+    pub hub: DecisionHub,
+}
+
+/// The weights mirror configuration (`setup.json` → `model_decision.hub`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DecisionHub {
+    /// The mirror repo id (`Zaluski/laya-onnx` by default). The ONLY place
+    /// in the app this value lives as a default — never in the library.
+    pub repo: String,
+    /// The repo id the recorded pin belongs to. A pin is meaningful ONLY
+    /// against the repo it resolved from — a mirror-A SHA applied to a
+    /// mirror-B request 404s and silently disables the audit. Empty means
+    /// no pin (or a pre-repo-scoping pin, which [`Self::pin_for`] then
+    /// ignores, forcing one fresh verified install under the current
+    /// mirror).
+    pub pinned_repo: String,
+    /// The commit SHA the mirror resolved to on its first install. Empty
+    /// (the default) resolves the mirror's current revision on the first
+    /// install and pins THAT; a non-empty value forces the pin — but only
+    /// when [`Self::pinned_repo`] matches the effective repo.
+    pub pinned_revision: String,
+}
+
+impl Default for DecisionHub {
+    fn default() -> Self {
+        Self {
+            // The application-level default mirror. Overridable per config
+            // (an org mirror) and per environment (`COSH_ONNX_HUB_REPO`).
+            repo: "Zaluski/laya-onnx".to_string(),
+            pinned_repo: String::new(),
+            pinned_revision: String::new(),
+        }
+    }
+}
+
+impl DecisionHub {
+    /// The effective repo id: the env override wins over the config value,
+    /// mirroring how the other env-backed knobs behave.
+    pub fn effective_repo(&self) -> String {
+        match std::env::var("COSH_ONNX_HUB_REPO") {
+            Ok(repo) if !repo.trim().is_empty() => repo.trim().to_string(),
+            _ => self.repo.clone(),
+        }
+    }
+
+    /// The revision pin valid for `repo`: the recorded SHA only when it was
+    /// resolved FROM that same repo. A pin from another mirror never
+    /// applies — and a legacy config (pin recorded before
+    /// `pinned_repo` existed) is treated as unpinned, so the next install
+    /// re-resolves and re-records a properly scoped pin.
+    pub fn pin_for(&self, repo: &str) -> Option<String> {
+        let pinned = self.pinned_revision.trim();
+        if pinned.is_empty() || self.pinned_repo != repo {
+            return None;
+        }
+        Some(pinned.to_string())
+    }
 }
 
 /// The resident model's checkpoint identity — a kind-discriminated schema

@@ -34,7 +34,7 @@ use crate::config::TuiConfig;
 use crate::state::AppState;
 use crate::theme::{Theme, rgba_color};
 use crate::types::{
-    AgentColors, CompactionPart, FilePart, Message, MessageRole, Part, ReasoningPart,
+    AgentColors, CompactionPart, FilePart, InstallPart, Message, MessageRole, Part, ReasoningPart,
     SessionStatus, ToolPart, ToolStatus,
 };
 use std::time::Instant;
@@ -238,6 +238,23 @@ fn hash_parts(msg: &Message) -> u64 {
                     None => hasher.write(&[0]),
                 }
             }
+            Part::Install(p) => {
+                // Same rule as Compaction: hash the full state so progress
+                // deltas re-render the line and the terminal event renders
+                // exactly once more.
+                hasher.write(&[2u8]);
+                hasher.write(&p.bytes_done.to_le_bytes());
+                hasher.write(&p.bytes_total.to_le_bytes());
+                hasher.write(&p.started_at.to_le_bytes());
+                match (p.elapsed_ms, p.failed) {
+                    (Some(ms), failed) => {
+                        hasher.write(&[1]);
+                        hasher.write(&ms.to_le_bytes());
+                        hasher.write(&[failed.unwrap_or(false) as u8]);
+                    }
+                    (None, _) => hasher.write(&[0]),
+                }
+            }
         }
     }
     hasher.finish()
@@ -259,6 +276,39 @@ fn compaction_line(part: &CompactionPart, now: u64) -> String {
     // Millisecond precision — the second counter flips visibly.
     let secs = elapsed as f64 / 1000.0;
     format!("llm compaction · {secs:.3}")
+}
+
+/// The chat line for a [`Part::Install`] (the decision-model weights
+/// install). Rendered with the SAME bar component as the header budget bar
+/// (`render_budget_bar` from `app/render.rs`) so the two read as one
+/// component. While the download runs the elapsed time ticks live; the
+/// terminal event freezes the line.
+fn install_line(part: &InstallPart, now: u64) -> String {
+    // 0% until the first file announces its size; the mirror's big graph
+    // dominates the total, so the bar fills in one visible sweep.
+    let pct = if part.bytes_total == 0 {
+        0
+    } else {
+        ((part.bytes_done.min(part.bytes_total) * 100) / part.bytes_total) as u8
+    };
+    let mb_done = part.bytes_done / (1024 * 1024);
+    let mb_total = part.bytes_total / (1024 * 1024);
+    if part.is_running() {
+        let elapsed = now.saturating_sub(part.started_at);
+        let secs = elapsed as f64 / 1000.0;
+        let bar = crate::app::render::render_budget_bar(pct);
+        format!("installing decision model {bar} {pct:>3}% · {mb_done}/{mb_total} MB · {secs:.1}s")
+    } else if part.failed == Some(true) {
+        let bar = crate::app::render::render_budget_bar(pct);
+        format!("installing decision model {bar} failed")
+    } else {
+        // The frozen byte counts can LAG the Finished event (the last
+        // Progress update is throttled), so the completion branch forces
+        // the bar to full instead of trusting them — the label reads 100%,
+        // the bar must match.
+        let bar = crate::app::render::render_budget_bar(100);
+        format!("installed decision model {bar} 100%")
+    }
 }
 
 /// Max body lines of the COLLAPSED "Summarizing" box. When the streamed
@@ -345,6 +395,16 @@ fn msg_has_running_compaction(msg: &Message) -> bool {
         .any(|p| matches!(p, Part::Compaction(c) if c.is_running()))
 }
 
+/// True when the message contains a still-running install line — same
+/// contract as the compaction stopwatch: the part data does not change
+/// while running, only the rendered elapsed time does, so the per-message
+/// cell cache must be bypassed for the counter to tick every frame.
+fn msg_has_running_install(msg: &Message) -> bool {
+    msg.parts
+        .iter()
+        .any(|p| matches!(p, Part::Install(c) if c.is_running()))
+}
+
 /// Indices of messages that can still change in place, so their change token
 /// genuinely needs re-checking: those holding a `Running` tool (its output
 /// grows / its status transitions) or a `Running` compaction (it finalizes
@@ -360,6 +420,7 @@ fn mutable_msg_indices(session: &crate::types::Session) -> Vec<usize> {
             m.parts.iter().any(|p| {
                 matches!(p, Part::Tool(t) if matches!(t.status, ToolStatus::Running))
                     || matches!(p, Part::Compaction(c) if c.is_running())
+                    || matches!(p, Part::Install(c) if c.is_running())
             })
         })
         .map(|(i, _)| i)
@@ -1626,6 +1687,24 @@ impl SessionView {
                     Self::render_file_badge(buf, x, y, max_w, theme, f);
                     y += 1;
                 }
+                Part::Install(p) => {
+                    // One-line status rendered with the SAME bar component
+                    // as the context budget bar (`render_budget_bar`): the
+                    // download progress mirrors it in the chat flow. While
+                    // running the elapsed time ticks (the activity signal);
+                    // the terminal event freezes the line at 100%/failed.
+                    let text = install_line(p, crate::types::now_ms());
+                    let color = if p.failed == Some(true) {
+                        theme.error
+                    } else if p.is_running() {
+                        theme.text_muted
+                    } else {
+                        theme.success
+                    };
+                    let style = Style::default().fg(rgba_color(color));
+                    draw_text_line(buf, &text, x, y, max_w, style);
+                    y += 1;
+                }
                 Part::Compaction(c) => {
                     if !c.text.is_empty() {
                         let expanded = tool_state.is_expanded(&summarizing_id(c));
@@ -1759,6 +1838,7 @@ impl SessionView {
                 let lines = cosh_tui::core::lib::unicode_util::word_wrap(&t.text, max_w);
                 lines.len().max(1) as u16
             }
+            Part::Install(_) => 1,
             Part::Tool(t) => {
                 if !config.show_tool_details && matches!(t.status, ToolStatus::Completed) {
                     return 1;
@@ -4240,6 +4320,7 @@ impl SessionView {
                     let cache_hit = !is_streaming_msg
                         && !has_active_spinner
                         && !msg_has_running_compaction(msg)
+                        && !msg_has_running_install(msg)
                         && token == self.msg_cache_tokens[idx]
                         && self.msg_cache_w[idx] == inner_area.width
                         && self.msg_cache_h[idx] > 0
@@ -4461,6 +4542,7 @@ impl SessionView {
                         let token = msg_content_token(msg, config_tok, max_w, &self.tool_state);
                         let cache_hit = !is_streaming_msg
                             && !msg_has_running_compaction(msg)
+                            && !msg_has_running_install(msg)
                             && token == self.msg_cache_tokens[idx]
                             && self.msg_cache_w[idx] == inner_area.width
                             && self.msg_cache_h[idx] > 0
@@ -4611,6 +4693,7 @@ impl SessionView {
                                     msg_content_token(msg, config_tok, max_w, &self.tool_state);
                                 let cache_hit = !is_streaming_msg
                                     && !msg_has_running_compaction(msg)
+                                    && !msg_has_running_install(msg)
                                     && token == self.msg_cache_tokens[idx]
                                     && self.msg_cache_w[idx] == inner_area.width
                                     && self.msg_cache_h[idx] > 0

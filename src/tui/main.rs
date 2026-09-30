@@ -21,6 +21,11 @@ mod ui;
 mod update;
 mod usage;
 mod util;
+/// The weights installer's application side (config → install → events).
+/// Only meaningful with the ONNX engine: without the feature the decision
+/// model cannot load, so the module compiles empty.
+#[cfg(feature = "onnx")]
+mod weights;
 
 #[cfg(test)]
 #[path = "test/rag_abort.rs"]

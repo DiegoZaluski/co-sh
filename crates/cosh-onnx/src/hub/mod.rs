@@ -118,12 +118,13 @@ pub fn verify_digests(
                 Err(_) => {
                     return Err(Error::Value(
                         "LAYA_SHA256_DIGESTS must be a JSON object of artifact->sha256".to_string(),
-                    ))
+                    ));
                 }
                 Ok(_) => {
                     return Err(Error::Value(
-                        "expected_sha256 must be a mapping of artifact paths to digests".to_string(),
-                    ))
+                        "expected_sha256 must be a mapping of artifact paths to digests"
+                            .to_string(),
+                    ));
                 }
             };
             parsed
@@ -135,7 +136,10 @@ pub fn verify_digests(
         let path: PathBuf = match (rel.as_str(), onnx_path) {
             ("onnx" | "onnx_path", Some(onnx)) => onnx.to_path_buf(),
             _ => {
-                if raw_rel.starts_with('/') || Path::new(&raw_rel).is_absolute() || ntpath_isabs(rel) {
+                if raw_rel.starts_with('/')
+                    || Path::new(&raw_rel).is_absolute()
+                    || ntpath_isabs(rel)
+                {
                     return Err(Error::Value(format!(
                         "cosh-onnx: unsafe absolute path in expected digests: {}",
                         py_repr(rel)
@@ -191,7 +195,11 @@ fn file_sha256(path: &Path) -> Result<String> {
     let mut buf = vec![0u8; 1 << 20];
     loop {
         let n = file.read(&mut buf).map_err(|e| {
-            Error::Runtime(format!("cosh-onnx: could not read {}: {}", path.display(), e))
+            Error::Runtime(format!(
+                "cosh-onnx: could not read {}: {}",
+                path.display(),
+                e
+            ))
         })?;
         if n == 0 {
             break;
@@ -210,6 +218,12 @@ pub(crate) fn sha256_of(data: &[u8]) -> String {
     hasher.update(data);
     hex::encode(hasher.finalize())
 }
+
+pub mod install;
+
+pub use install::{
+    InstallRequest, InstalledCheckpoint, ProgressCallbacks, cache_status, install, parse_sha256sums,
+};
 
 #[cfg(test)]
 mod tests;

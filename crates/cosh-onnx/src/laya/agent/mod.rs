@@ -29,24 +29,24 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::decision::confidence::{
-    answer_confidence, clamp_temperature_default, confidence_from_probs, temp_bucket, TEMP_MAX,
-    TEMP_MIN,
+    TEMP_MAX, TEMP_MIN, answer_confidence, clamp_temperature_default, confidence_from_probs,
+    temp_bucket,
 };
 use crate::decision::question::{
     check_question, qtype_code, render_options, serialize_state, to_internal,
 };
-use crate::decision::sequence::{build_sequence_with_options, BuildOptions};
+use crate::decision::sequence::{BuildOptions, build_sequence_with_options};
 use crate::error::{Error, Result};
-use crate::hub::{resolve_revision, snapshot_revision, verify_digests};
+use crate::hub::verify_digests;
 use crate::pycompat::{py_float, py_g, py_repr_str, py_repr_value, round4};
-use crate::runtime::batch::{collate_items, CollateItem};
 #[cfg(test)]
 use crate::runtime::batch::CollatedBatch;
-use crate::runtime::session::{ort_error, OrtSession, SessionOutput, SessionRunner};
-use crate::runtime::tokenizer::{fix_tokenizer_config, HfTokenizer, Tokenizer};
+use crate::runtime::batch::{CollateItem, collate_items};
+use crate::runtime::session::{OrtSession, SessionOutput, SessionRunner, ort_error};
+use crate::runtime::tokenizer::{HfTokenizer, Tokenizer, fix_tokenizer_config};
 
 /// Per-language temperature overrides, built exactly as the PyTorch Agent does
 /// so a caller can hand the same `lang_temperatures` to either backend and
@@ -84,6 +84,44 @@ pub struct OnnxAgent {
     pub hooks_lock: Option<std::sync::Mutex<()>>,
 }
 
+/// Convert a digest map into CHECKPOINT-RELATIVE keys for the loader's
+/// post-install re-verify.
+///
+/// The installer's snapshot-root verification hands back repo-relative
+/// keys (its `normalize_caller_map` accepts both spellings); this verify
+/// runs after the subfolder join, so keys carrying the subfolder prefix
+/// are stripped back to checkpoint-relative. Insertion runs in TWO passes
+/// with the installer's precedence so collisions are deterministic — an
+/// explicit repo-relative key wins over a bare checkpoint-relative key
+/// that strips/prefixes to the same path; HashMap iteration order must
+/// never decide which digest applies. The `onnx`/`onnx_path` aliases pass
+/// through untouched: `verify_digests` resolves them to the same graph
+/// path it is handed.
+fn checkpoint_relative_keys(
+    map: &HashMap<String, String>,
+    prefix: &str,
+) -> HashMap<String, String> {
+    let mut out: HashMap<String, String> = HashMap::new();
+    // Pass 1: bare checkpoint-relative keys.
+    for (k, v) in map {
+        if !prefix.is_empty() && k.starts_with(prefix) {
+            continue;
+        }
+        out.insert(k.clone(), v.clone());
+    }
+    // Pass 2: prefixed keys, stripped — explicit repo-relative wins.
+    if !prefix.is_empty() {
+        for (k, v) in map {
+            if let Some(stripped) = k.strip_prefix(prefix)
+                && !stripped.is_empty()
+            {
+                out.insert(stripped.to_string(), v.clone());
+            }
+        }
+    }
+    out
+}
+
 /// The loader core: resolve `model_id_or_path` to a checkpoint directory
 /// (local path or Hub snapshot with `allow_patterns` restricted to the
 /// config, `tokenizer/` and `encoder/`), verify opt-in digests, patch the
@@ -119,6 +157,14 @@ pub(crate) fn load_agent(
     intra_op_threads: Option<usize>,
 ) -> Result<OnnxAgent> {
     let mut resolved_revision: Option<String> = None;
+    // The checkpoint's subfolder as a repo-relative prefix, hoisted so the
+    // digest-map normalization below can use it (the installer applies the
+    // identical rule via `normalize_caller_map`).
+    let prefix = subfolder.map(|s| format!("{}/", s)).unwrap_or_default();
+    // The graph file the Hub snapshot carries (resolved by the installer
+    // when the checkpoint is not local): `None` keeps the caller's
+    // `onnx_path` (the local-checkpoint contract).
+    let mut hub_graph: Option<String> = None;
     let model_dir: PathBuf = if Path::new(model_id_or_path).exists() {
         model_id_or_path.into()
     } else {
@@ -132,94 +178,63 @@ pub(crate) fn load_agent(
                 py_repr_str(model_id_or_path)
             )));
         }
-        // snapshot_download restricted to the files the runtime reads.
-        // Cache-first: hf-hub 0.5 has no offline switch, so a fully cached
-        // repo is served straight from the cache directory — the same
-        // no-network behaviour upstream gets from HF_HUB_OFFLINE=1.
-        let resolved = resolve_revision(model_id_or_path, revision);
-        let repo = match &resolved {
-            Some(r) => hf_hub::Repo::with_revision(
-                model_id_or_path.to_string(),
-                hf_hub::RepoType::Model,
-                r.clone(),
-            ),
-            None => hf_hub::Repo::new(model_id_or_path.to_string(), hf_hub::RepoType::Model),
-        };
-        let prefix = subfolder.map(|s| format!("{}/", s)).unwrap_or_default();
-        let config_rel = format!("{}rl_agent_config.json", prefix);
-        let cache_repo = hf_hub::Cache::from_env().repo(repo.clone());
-        let cached_cfg = cache_repo.get(&config_rel);
-        let cached_tok = cache_repo.get(&format!("{}tokenizer/tokenizer.json", prefix));
-        let cached_onnx = cache_repo.get(&format!("{}laya.onnx", prefix));
-        if let (Some(cfg_file), Some(_), Some(_)) = (cached_cfg, cached_tok, cached_onnx) {
-            // The snapshot root: the config sits at
-            // <cache>/models--*/snapshots/<sha>[/<sub>]/rl_agent_config.json.
-            let mut dir = cfg_file.parent().unwrap_or(Path::new(".")).to_path_buf();
-            if !prefix.is_empty() {
-                dir = dir.parent().unwrap_or(Path::new(".")).to_path_buf();
-            }
-            resolved_revision = snapshot_revision(&dir).or_else(|| resolved.clone());
-            dir
+        // snapshot_download restricted to the files the runtime reads, via
+        // the shared installer (`hub::install`): cache-first (the same
+        // no-network behaviour as before — hf-hub 0.5 has no offline
+        // switch, so a fully cached repo is served straight from the cache
+        // directory), downloads with the built-in progress bar DISABLED
+        // (silent callbacks here: a loader must not own a progress UI) and
+        // the repo's published `sha256sums.txt` verified before the
+        // install succeeds. Graph candidates prefer the quantized twin
+        // when the repo ships one (`laya.int8.onnx`), falling back to the
+        // fp32 graph — the explicit `onnx_path` wins over both.
+        let graph_candidates: Vec<&str> = if onnx_path == "laya.onnx" {
+            vec!["laya.int8.onnx", "laya.onnx"]
         } else {
-            // Network path. hf-hub reads the token from the cache token file
-            // only; layer the HF_TOKEN environment variable over it the way
-            // huggingface_hub does, for gated repositories.
-            let mut builder = hf_hub::api::sync::ApiBuilder::from_env();
-            if let Ok(token) = std::env::var("HF_TOKEN")
-                && !token.is_empty()
-            {
-                builder = builder.with_token(Some(token));
+            vec![onnx_path]
+        };
+        let (dir, graph_rel) = match crate::hub::cache_status(
+            model_id_or_path,
+            subfolder,
+            &graph_candidates,
+            revision,
+        ) {
+            Some((dir, rev, graph)) => {
+                resolved_revision = Some(rev);
+                (dir, graph)
             }
-            let api = builder
-                .build()
-                .map_err(|e| Error::Runtime(format!("cosh-onnx: hub client failed: {}", e)))?;
-            let repo_api = api.repo(repo);
-            let info = repo_api
-                .info()
-                .map_err(|e| Error::Runtime(format!("cosh-onnx: could not resolve {}: {}", model_id_or_path, e)))?;
-            // Pin every download to the revision the listing came from, so a
-            // stale `refs/main` pointer cannot mix files from two revisions.
-            let pinned = api.repo(hf_hub::Repo::with_revision(
-                model_id_or_path.to_string(),
-                hf_hub::RepoType::Model,
-                info.sha.clone(),
-            ));
-            let wanted = |name: &str| -> bool {
-                let Some(stripped) = name.strip_prefix(&prefix) else {
-                    return false;
-                };
-                stripped == "rl_agent_config.json"
-                    || stripped == "laya.onnx"
-                    || stripped.starts_with("tokenizer/")
-                    || stripped.starts_with("encoder/")
-            };
-            let mut cfg_file: Option<PathBuf> = None;
-            for sib in &info.siblings {
-                if !wanted(&sib.rfilename) {
-                    continue;
-                }
-                let path = pinned
-                    .get(&sib.rfilename)
-                    .map_err(|e| Error::Runtime(format!("cosh-onnx: could not download {}: {}", sib.rfilename, e)))?;
-                if sib.rfilename == config_rel {
-                    cfg_file = Some(path);
-                }
+            None => {
+                let installed = crate::hub::install(crate::hub::InstallRequest {
+                    repo: model_id_or_path,
+                    subfolder,
+                    revision,
+                    graphs: &graph_candidates,
+                    // The caller's explicit digest map REPLACES the mirror's
+                    // sums manifest for this install (the installer normalizes
+                    // the loader's `onnx`/`onnx_path` keys to the resolved
+                    // graph path and requires the graph to be covered). Keys
+                    // stay checkpoint-dir-relative — the loader re-verifies
+                    // them after the subfolder join below, the same rule as
+                    // the local-checkpoint path.
+                    expected_sha256: expected_sha256,
+                    progress: crate::hub::ProgressCallbacks::silent(),
+                })?;
+                resolved_revision = Some(installed.revision.clone());
+                (installed.snapshot, installed.graph)
             }
-            let cfg_file = cfg_file.ok_or_else(|| {
-                Error::Runtime(format!(
-                    "Incompatible model: {} does not contain 'rl_agent_config.json'.",
-                    py_repr_str(model_id_or_path)
-                ))
-            })?;
-            // The snapshot root: the config sits at
-            // <cache>/models--*/snapshots/<sha>[/<sub>]/rl_agent_config.json.
-            let mut dir = cfg_file.parent().unwrap_or(Path::new(".")).to_path_buf();
-            if !prefix.is_empty() {
-                dir = dir.parent().unwrap_or(Path::new(".")).to_path_buf();
-            }
-            resolved_revision = Some(info.sha);
-            dir
-        }
+        };
+        // The graph name relative to the checkpoint dir: the loader joins
+        // the subfolder itself below, so the subfolder prefix comes off.
+        let graph_name = if prefix.is_empty() {
+            graph_rel.clone()
+        } else {
+            graph_rel
+                .strip_prefix(&prefix)
+                .unwrap_or(&graph_rel)
+                .to_string()
+        };
+        hub_graph = Some(graph_name);
+        dir
     };
 
     let mut model_dir = model_dir;
@@ -236,25 +251,38 @@ pub(crate) fn load_agent(
     }
 
     // The graph path is resolved relative to the process CWD, which only
-    // works for local checkpoints. A hub-downloaded snapshot keeps
-    // laya.onnx inside the snapshot dir, so fall back to the model dir
-    // when the CWD does not have the file (an explicit user path that
-    // exists still wins).
-    let onnx_path: String = if Path::new(onnx_path).exists() {
-        onnx_path.to_string()
+    // works for local checkpoints. A hub-downloaded snapshot keeps the
+    // graph inside the snapshot dir, so fall back to the model dir when
+    // the CWD does not have the file (an explicit user path that exists
+    // still wins). The hub path names the graph the repo actually carries
+    // (`hub_graph` — possibly the int8 twin), the local path keeps the
+    // caller's `onnx_path`.
+    let requested_graph: &str = hub_graph.as_deref().unwrap_or(onnx_path);
+    let onnx_path: String = if Path::new(requested_graph).exists() {
+        requested_graph.to_string()
     } else {
-        let in_model_dir = model_dir.join(onnx_path);
+        let in_model_dir = model_dir.join(requested_graph);
         if in_model_dir.exists() {
             in_model_dir.to_string_lossy().into_owned()
         } else {
             // Keep the original: the exists() check below reports it.
-            onnx_path.to_string()
+            requested_graph.to_string()
         }
     };
     let onnx_path: &str = &onnx_path;
 
     // Verify integrity before any file in the checkpoint is parsed or executed.
-    verify_digests(&model_dir, expected_sha256, Some(Path::new(onnx_path)))?;
+    //
+    // The caller's map keys are CHECKPOINT-relative (the loader's own
+    // semantics — this verify runs after the subfolder join). The INSTALLER
+    // may have handed back a map whose keys it already prefixed into
+    // repo-relative paths (its snapshot-root verification accepts both
+    // spellings), so strip the subfolder prefix back off here; keys without
+    // the prefix keep their checkpoint-relative spelling. Without this, a
+    // prefixed key would resolve to `snapshot/<sub>/<sub>/...` and fail
+    // closed despite a valid digest map.
+    let verify_map = expected_sha256.map(|map| checkpoint_relative_keys(map, &prefix));
+    verify_digests(&model_dir, verify_map.as_ref(), Some(Path::new(onnx_path)))?;
 
     let cfg_path = model_dir.join("rl_agent_config.json");
     if !cfg_path.exists() {
@@ -264,13 +292,22 @@ pub(crate) fn load_agent(
         )));
     }
     let cfg: Value = serde_json::from_str(&std::fs::read_to_string(&cfg_path).map_err(|e| {
-        Error::Runtime(format!("cosh-onnx: could not read {}: {}", cfg_path.display(), e))
+        Error::Runtime(format!(
+            "cosh-onnx: could not read {}: {}",
+            cfg_path.display(),
+            e
+        ))
     })?)
-    .map_err(|e| Error::Runtime(format!("cosh-onnx: {} is not valid JSON: {}", cfg_path.display(), e)))?;
-    let cfg = cfg
-        .as_object()
-        .cloned()
-        .ok_or_else(|| Error::Runtime("cosh-onnx: rl_agent_config.json must be a JSON object".to_string()))?;
+    .map_err(|e| {
+        Error::Runtime(format!(
+            "cosh-onnx: {} is not valid JSON: {}",
+            cfg_path.display(),
+            e
+        ))
+    })?;
+    let cfg = cfg.as_object().cloned().ok_or_else(|| {
+        Error::Runtime("cosh-onnx: rl_agent_config.json must be a JSON object".to_string())
+    })?;
 
     if !Path::new(onnx_path).exists() {
         return Err(Error::Runtime(format!(
@@ -302,9 +339,7 @@ pub(crate) fn load_agent(
         .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)
         .map_err(ort_error)?;
     if let Some(threads) = intra_op_threads {
-        builder = builder
-            .with_intra_threads(threads)
-            .map_err(ort_error)?;
+        builder = builder.with_intra_threads(threads).map_err(ort_error)?;
     }
     let session = builder
         .with_execution_providers([ort::ep::CPU::default().build()])
@@ -423,10 +458,7 @@ impl OnnxAgent {
                 (
                     k.clone(),
                     v.clone(),
-                    self.temperature_by_options
-                        .get(k)
-                        .copied()
-                        .unwrap_or(1.0),
+                    self.temperature_by_options.get(k).copied().unwrap_or(1.0),
                 )
             })
             .collect();
@@ -446,7 +478,12 @@ impl OnnxAgent {
                 // checkpoint from loading.
                 _ => {}
             }
-            rejected.push(format!("{}={} -> {}", name, py_repr_value(&raw), py_g(applied)));
+            rejected.push(format!(
+                "{}={} -> {}",
+                name,
+                py_repr_value(&raw),
+                py_g(applied)
+            ));
         }
         if rejected.is_empty() {
             return None;
@@ -531,12 +568,14 @@ impl OnnxAgent {
             // values that survive the hook are inferred. The per-call
             // overrides it may have set on the context win over the call
             // arguments.
-            let hook_state = ctx
-                .states
-                .first()
-                .cloned()
-                .unwrap_or_else(|| state.clone());
-            match self.infer(&hook_state, &ctx.questions, lang, ctx.max_len, ctx.head_max_len) {
+            let hook_state = ctx.states.first().cloned().unwrap_or_else(|| state.clone());
+            match self.infer(
+                &hook_state,
+                &ctx.questions,
+                lang,
+                ctx.max_len,
+                ctx.head_max_len,
+            ) {
                 Ok(result) => ctx.results = Some(vec![result]),
                 Err(exc) => error = Some(exc),
             }
@@ -554,7 +593,11 @@ impl OnnxAgent {
             ) {
                 // A failing on_error hook must not hide the failure that
                 // triggered it (Python chains it as __context__).
-                log::warn!("cosh-onnx: hook on_error failed while handling {}: {}", exc, hook_exc);
+                log::warn!(
+                    "cosh-onnx: hook on_error failed while handling {}: {}",
+                    exc,
+                    hook_exc
+                );
             }
         }
 
@@ -605,7 +648,12 @@ impl OnnxAgent {
     /// value, else the upstream default (512 / 192).
     fn token_budgets(&self, max_len: Option<usize>, head_max_len: Option<usize>) -> (usize, usize) {
         let max_len = max_len
-            .or_else(|| self.cfg.get("max_len").and_then(Value::as_u64).map(|v| v as usize))
+            .or_else(|| {
+                self.cfg
+                    .get("max_len")
+                    .and_then(Value::as_u64)
+                    .map(|v| v as usize)
+            })
             .unwrap_or(512);
         let head_max_len = head_max_len
             .or_else(|| {
@@ -676,10 +724,7 @@ impl OnnxAgent {
                     head_max_len
                 )));
             }
-            let qt = qtype_code(
-                q_value["t"].as_str().unwrap_or_default(),
-            )
-            .unwrap_or_else(|| {
+            let qt = qtype_code(q_value["t"].as_str().unwrap_or_default()).unwrap_or_else(|| {
                 // Unreachable after `check_question`; a wrong-but-plausible
                 // default would misroute temperatures, so fail loudly in
                 // debug builds instead.
@@ -712,14 +757,18 @@ impl OnnxAgent {
         let (max_len, head_max_len) = self.token_budgets(max_len, head_max_len);
         let (items, internals) = self.build_rows(state, questions, max_len, head_max_len)?;
         let pad_id = self.tok.pad_token_id();
-        let batch = collate_items(&[items], pad_id)
-            .ok_or_else(|| Error::Value("collate_items returned nothing for a non-empty batch".to_string()))?;
+        let batch = collate_items(&[items], pad_id).ok_or_else(|| {
+            Error::Value("collate_items returned nothing for a non-empty batch".to_string())
+        })?;
         let outputs = self.session.run(&batch)?;
         let ids: Vec<String> = questions.keys().cloned().collect();
         let mut answers = Map::new();
         for (r, qid) in ids.iter().enumerate() {
             let k = batch.row_markers(r);
-            answers.insert(qid.clone(), self.decode_row(&internals[r], &outputs[r], k, lang));
+            answers.insert(
+                qid.clone(),
+                self.decode_row(&internals[r], &outputs[r], k, lang),
+            );
         }
         let n_tokens: u32 = (0..batch.n_rows).map(|r| batch.row_tokens(r)).sum();
         Ok(json!({
@@ -769,8 +818,9 @@ impl OnnxAgent {
         let mut results = Vec::with_capacity(states.len());
         for (base, chunk_rows) in rows.chunks(chunk).enumerate() {
             let flat: Vec<CollateItem> = chunk_rows.iter().flatten().cloned().collect();
-            let batch = collate_items(&[flat], pad_id)
-                .ok_or_else(|| Error::Value("collate_items returned nothing for a non-empty batch".to_string()))?;
+            let batch = collate_items(&[flat], pad_id).ok_or_else(|| {
+                Error::Value("collate_items returned nothing for a non-empty batch".to_string())
+            })?;
             let outputs = self.session.run(&batch)?;
             let mut offset = 0usize;
             for (s, items) in chunk_rows.iter().enumerate() {
@@ -779,10 +829,14 @@ impl OnnxAgent {
                     let row = offset + r;
                     let k = batch.row_markers(row);
                     let internal = &internals[base * chunk + s][r];
-                    answers.insert(qid.clone(), self.decode_row(internal, &outputs[row], k, lang));
+                    answers.insert(
+                        qid.clone(),
+                        self.decode_row(internal, &outputs[row], k, lang),
+                    );
                 }
-                let n_tokens: u32 =
-                    (offset..offset + items.len()).map(|row| batch.row_tokens(row)).sum();
+                let n_tokens: u32 = (offset..offset + items.len())
+                    .map(|row| batch.row_tokens(row))
+                    .sum();
                 offset += items.len();
                 results.push(json!({
                     "model": "laya-rl-agent-onnx",
@@ -816,7 +870,12 @@ impl OnnxAgent {
                     .unwrap_or(l_cfg.temperature[qt as usize]);
             }
         }
-        let z: Vec<f64> = output.logits.iter().take(k).map(|v| *v as f64 / t_scale).collect();
+        let z: Vec<f64> = output
+            .logits
+            .iter()
+            .take(k)
+            .map(|v| *v as f64 / t_scale)
+            .collect();
         let p = softmax(&z);
 
         let conf_score = round4(confidence_from_probs(&p, k));
@@ -824,14 +883,25 @@ impl OnnxAgent {
         // on every question type so a caller can gate across types on one
         // number.
         let ans_conf = round4(answer_confidence(&p, k));
-        let act = softmax(&output.act_logits.iter().map(|v| *v as f64).collect::<Vec<_>>());
+        let act = softmax(
+            &output
+                .act_logits
+                .iter()
+                .map(|v| *v as f64)
+                .collect::<Vec<_>>(),
+        );
         let mut ext = Map::new();
-        ext.insert("act_probability".into(), json!(round4(act.first().copied().unwrap_or(0.0))));
+        ext.insert(
+            "act_probability".into(),
+            json!(round4(act.first().copied().unwrap_or(0.0))),
+        );
 
         match q["t"].as_str().unwrap_or_default() {
             "choice" => {
-                let keys: Vec<String> =
-                    q["crit"].as_object().map(|m| m.keys().cloned().collect()).unwrap_or_default();
+                let keys: Vec<String> = q["crit"]
+                    .as_object()
+                    .map(|m| m.keys().cloned().collect())
+                    .unwrap_or_default();
                 let mut probabilities = Map::new();
                 for (kk, v) in keys.iter().zip(&p) {
                     probabilities.insert(kk.clone(), json!(round4(*v)));
@@ -1019,14 +1089,7 @@ impl crate::decision::model::AgentLike for OnnxAgent {
         head_max_len: Option<usize>,
     ) -> Result<Vec<Value>> {
         if crate::hooks::no_hooks_active(&self.hooks, &crate::hooks::PerCall::default()) {
-            return self.infer_batch(
-                states,
-                questions,
-                lang,
-                max_len,
-                head_max_len,
-                batch_size,
-            );
+            return self.infer_batch(states, questions, lang, max_len, head_max_len, batch_size);
         }
         states
             .iter()

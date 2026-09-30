@@ -323,6 +323,12 @@ impl App {
         // once per assembly — fail-open disables the audit on load error.
         #[cfg(feature = "onnx")]
         let checkup_config = self.setup.decision.clone();
+        // The explanation streamed during a lazy weights install (only when
+        // a download actually ran this turn). Added to the agent context
+        // right after the state restore below — the TUI already rendered it
+        // as an assistant message, so both sides agree.
+        #[cfg(feature = "onnx")]
+        let mut weights_explanation: Option<String> = None;
 
         // RAG recall context
         // 1) Description suffix (what the model sees in the tool doc)
@@ -529,37 +535,71 @@ impl App {
                         use cosh::daemon::decision::{IpcCheckup, Kind};
                         use cosh::harness::events::{HarnessEvent, ToastVariant};
 
-                        // The setup kind converts to the wire kind by
-                        // serde alone — both schemas are tagged by `kind`
-                        // in snake case, so there is no translation map to
-                        // keep in sync.
-                        let wire_kind: Option<Kind> = serde_json::to_value(&checkup_config.model)
-                            .ok()
-                            .and_then(|v| serde_json::from_value(v).ok());
-                        match wire_kind {
-                            // Assembly never loads anything: the daemon
-                            // loads the model on the first decide,
-                            // throttled by its own retry window. A broken
-                            // setup surfaces as per-review fail-opens, not
-                            // as a missing checkup.
-                            Some(kind) => {
-                                let checkup = IpcCheckup::new(kind);
-                                harness = harness
-                                    .with_checkup(std::sync::Arc::new(checkup))
-                                    .with_checkup_min_confidence(
-                                        checkup_config.termination.min_confidence,
-                                    );
-                            }
+                        // The audit's kind resolves through the WEIGHTS
+                        // MIRROR: the installer fills the shared hf-hub
+                        // cache (cache-first, lazy — only when this turn's
+                        // checkup is enabled and the checkpoint is not
+                        // cached yet), and the daemon's loader probes that
+                        // snapshot. The daemon kind is `Custom` over the
+                        // mirror checkpoint, NOT the configured kind — the
+                        // named kinds name the MIRROR's subfolders now.
+                        let attach_kind = |kind: Kind, harness: Harness| -> Harness {
+                            let checkup = IpcCheckup::new(kind);
+                            harness
+                                .with_checkup(std::sync::Arc::new(checkup))
+                                .with_checkup_min_confidence(
+                                    checkup_config.termination.min_confidence,
+                                )
+                        };
+                        let invalid_setup = || {
                             // Invalid config is a broken SETUP, not a turn
                             // failure: toast and assemble WITHOUT the
                             // audit (fail-open) — never abort the turn.
+                            let _ = event_tx.send(HarnessEvent::Toast {
+                                message: "Termination checkup enabled but the model config \
+                                          is invalid; the audit is disabled."
+                                    .to_string(),
+                                variant: ToastVariant::Warning,
+                            });
+                        };
+                        match crate::weights::resolve_target(
+                            &checkup_config.model,
+                            &checkup_config.hub,
+                        ) {
+                            Some(target) => {
+                                match crate::weights::ensure_installed(
+                                    target.clone(),
+                                    event_tx.clone(),
+                                )
+                                .await
+                                {
+                                    // Installed (or already cached): the
+                                    // daemon loads the mirror snapshot the
+                                    // installer filled.
+                                    Ok(explanation) => {
+                                        weights_explanation = explanation;
+                                        harness =
+                                            attach_kind(target.to_kind(), harness);
+                                    }
+                                    // Download failed: fail-open — toast
+                                    // (the Failed event already toasted)
+                                    // and assemble WITHOUT the audit.
+                                    Err(_) => {}
+                                }
+                            }
+                            // No mirror target (a local checkpoint, or a
+                            // config the resolver can't turn into one):
+                            // keep the plain serde conversion so a local
+                            // Custom kind still reaches the daemon.
                             None => {
-                                let _ = event_tx.send(HarnessEvent::Toast {
-                                    message: "Termination checkup enabled but the model config \
-                                              is invalid; the audit is disabled."
-                                        .to_string(),
-                                    variant: ToastVariant::Warning,
-                                });
+                                let wire_kind: Option<Kind> =
+                                    serde_json::to_value(&checkup_config.model)
+                                        .ok()
+                                        .and_then(|v| serde_json::from_value(v).ok());
+                                match wire_kind {
+                                    Some(kind) => harness = attach_kind(kind, harness),
+                                    None => invalid_setup(),
+                                }
                             }
                         }
                     }
@@ -611,6 +651,15 @@ impl App {
                     // display transcript is never fed to the model.
                     if let Some(ref state) = ctx_state {
                         harness.context_manager.restore_state(state);
+                    }
+                    // The weights installer's explanation: the TUI already
+                    // rendered it as a real assistant message — record the
+                    // SAME text here so the model's history agrees with the
+                    // transcript. NOT closable: it is context, not a turn
+                    // that may close the loop.
+                    #[cfg(feature = "onnx")]
+                    if let Some(explanation) = weights_explanation.as_deref() {
+                        harness.context_manager.add_assistant(explanation, false);
                     }
                     #[cfg(feature = "embed")]
                     harness.set_recall_context(recall_suffix);

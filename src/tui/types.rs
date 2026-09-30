@@ -120,6 +120,11 @@ pub enum Part {
     /// A context-compaction status line: the "Summarizing" box for the LLM
     /// compaction, carrying a live stopwatch while it runs.
     Compaction(CompactionPart),
+    /// A weights-install progress line in the chat: the decision-model
+    /// mirror download the agent loop runs on first use. Rendered with the
+    /// same bar component as the context budget; stays in the transcript
+    /// after it finishes and scrolls up with the chat like any message.
+    Install(InstallPart),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -189,6 +194,45 @@ pub struct CompactionPart {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CompactionPhase {
     Llm,
+}
+
+/// A weights-install progress line in the chat ([`Part::Install`]): the
+/// decision-model mirror download the agent loop runs on first use.
+/// Persisted with the session like any other part, so a restored session
+/// replays the line (finished bars stay visible in the transcript).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstallPart {
+    /// Bytes received across every file of the install.
+    pub bytes_done: u64,
+    /// Total bytes announced so far (grows as further files start).
+    pub bytes_total: u64,
+    /// `Some(elapsed_ms)` when the install reached a terminal state —
+    /// finished (verified) or failed; `None` while running. Mirrors
+    /// [`CompactionPart::elapsed_ms`]: the terminal event freezes the line.
+    pub elapsed_ms: Option<u64>,
+    /// How the install ended. `None` while running; set together with
+    /// `elapsed_ms` by the terminal event.
+    pub failed: Option<bool>,
+    /// Wall-clock unix millis when the line opened (persisted so a restored
+    /// session still renders a coherent elapsed time).
+    pub started_at: u64,
+}
+
+impl InstallPart {
+    /// A fresh running install line.
+    pub fn running() -> Self {
+        Self {
+            bytes_done: 0,
+            bytes_total: 0,
+            elapsed_ms: None,
+            failed: None,
+            started_at: now_ms(),
+        }
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.elapsed_ms.is_none()
+    }
 }
 
 impl CompactionPart {

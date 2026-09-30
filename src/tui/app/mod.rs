@@ -57,7 +57,7 @@ mod paste_burst;
 mod prompt_correction;
 mod providers;
 mod rag;
-mod render;
+pub(crate) mod render;
 mod terminal;
 
 #[cfg(test)]

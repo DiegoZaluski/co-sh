@@ -20,7 +20,11 @@ use crate::theme::{Theme, rgba_color};
 use cosh_tui::core::lib::unicode_util::graphemes_with_width;
 
 /// Render a 10-character budget bar like `▓▓▓▓▓░░░░░` from a 0-100 percentage.
-pub(super) fn render_budget_bar(pct: u8) -> String {
+///
+/// `pub(crate)`: shared with the session route's `Part::Install` renderer —
+/// the weights-install chat line mirrors THIS component (one bar component,
+/// two consumers).
+pub(crate) fn render_budget_bar(pct: u8) -> String {
     const FILLED: char = '▓';
     const EMPTY: char = '░';
     const BAR_LEN: usize = 10;
