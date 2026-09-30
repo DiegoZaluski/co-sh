@@ -57,9 +57,17 @@ impl FooterView {
         }
 
         let muted = Style::default().fg(rgba_color(theme.text_muted));
-        let success = Style::default().fg(rgba_color(theme.success));
-        let warning = Style::default().fg(rgba_color(theme.warning));
         let accent = Style::default().fg(rgba_color(theme.accent));
+
+        let version = concat!("v", env!("CARGO_PKG_VERSION"));
+        draw_text_line(
+            buf,
+            version,
+            area.x.saturating_add(1),
+            area.y,
+            area.width.saturating_sub(2),
+            muted,
+        );
 
         if state.current_session().is_some() {
             let dir = &state.working_directory;
@@ -84,16 +92,6 @@ impl FooterView {
                 draw_text_line(buf, &branch_str, rx, area.y, disp_w(&branch_str), accent);
             }
 
-            let conn_indicator = if state.connected {
-                "\u{25cf}"
-            } else {
-                "\u{25cb}"
-            };
-            let conn_str = format!(" {conn_indicator}");
-            rx = rx.saturating_sub(disp_w(&conn_str));
-            let conn_style = if state.connected { success } else { warning };
-            draw_text_line(buf, &conn_str, rx, area.y, disp_w(&conn_str), conn_style);
-
             if state.permission_count > 0 {
                 let s = format!("  perm {}", state.permission_count);
                 rx = rx.saturating_sub(disp_w(&s));
@@ -116,5 +114,46 @@ impl FooterView {
                 draw_text_line(buf, &s, rx, area.y, disp_w(&s), muted);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FooterView;
+    use crate::state::AppState;
+    use crate::theme::ThemeRegistry;
+    use crate::types::Session;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    #[test]
+    fn renders_version_without_connection_indicator() {
+        let mut state = AppState::new();
+        state.add_session(Session {
+            id: "test-session".into(),
+            title: "Test".into(),
+            created_at: 0,
+            title_generated: false,
+            provider: None,
+            model: None,
+            reasoning: None,
+            ctx_ids: Default::default(),
+            messages: vec![],
+        });
+        state.current_session_id = Some("test-session".into());
+        state.working_directory = "~/project".into();
+
+        let theme = ThemeRegistry::new().default_theme().clone();
+        let area = Rect::new(0, 0, 80, 1);
+        let mut buf = Buffer::empty(area);
+
+        FooterView::render_with_mode(&mut buf, area, &state, &theme, false);
+
+        let line: String = (area.x..area.right())
+            .filter_map(|x| buf.cell((x, area.y)).map(|cell| cell.symbol()))
+            .collect();
+        assert!(line.contains(concat!("v", env!("CARGO_PKG_VERSION"))));
+        assert!(!line.contains('●'));
+        assert!(!line.contains('○'));
     }
 }
