@@ -644,6 +644,14 @@ const KNOWN_CONTEXT_WINDOWS: &[KnownContextWindow] = &[
         window: 1_048_576,
         aliases: &["glm-5.2"],
     },
+    // GLM-5.3 line: the vendor (zai/zhipuai) lists 1M. Resolving here keeps
+    // the model OFF the catalog path entirely — the same bare id is published
+    // by dozens of gateway providers with windows from 200k to 1,048,576, and
+    // a catalog miss-pick once collapsed the budget to ~52k.
+    KnownContextWindow {
+        window: 1_000_000,
+        aliases: &["glm-5.3", "glm-5.3-flash"],
+    },
     KnownContextWindow {
         window: 204_800,
         aliases: &[
@@ -1002,6 +1010,13 @@ const KNOWN_REASONING: &[KnownReasoning] = &[
         efforts: Some(&["high", "max"]),
         aliases: &["glm-5.2"],
     },
+    // GLM-5.3 line — mirrors the window entry: the vendor catalog lists
+    // reasoning with low/high/max efforts.
+    KnownReasoning {
+        supported: true,
+        efforts: Some(&["low", "high", "max"]),
+        aliases: &["glm-5.3", "glm-5.3-flash"],
+    },
     KnownReasoning {
         supported: true,
         efforts: None,
@@ -1082,15 +1097,58 @@ fn static_known_reasoning(model: &str) -> Option<ModelReasoning> {
 /// share casing.
 fn find_window_in_models(needle: &str, models: &[OpenRouterModel]) -> Option<usize> {
     let needle_lower = needle.to_lowercase();
-    models.iter().find_map(|m| {
+    // Same deterministic policy as `find_window_in_models_dev` (exact full-id
+    // match first, then the largest advertised window): gateways list the
+    // same model under multiple slugs with divergent windows, and picking the
+    // first occurrence instead of the best would be a silent lottery.
+    //
+    // The exact tier here is `id == needle || canonical_slug == needle` —
+    // there is deliberately NO `id == needle_bare` clause: OpenRouter ids are
+    // always vendor-prefixed (`vendor/model`), so a bare needle has no exact
+    // full-id counterpart in this catalog (models.dev keys both ways and
+    // therefore does). The matching SET is unchanged from the previous
+    // find_map; only the resolution among matches is now deterministic.
+    let mut best = (false, 0);
+    for m in models {
+        // A 0-token window is a degenerate entry, never a usable resolution —
+        // skip it like a missing one.
+        let Some(window) = m.context_length.filter(|w| *w > 0) else {
+            continue;
+        };
         let id = m.id.to_lowercase();
-        let matches = id == needle_lower
+        let exact = id == needle_lower
+            || m.canonical_slug
+                .as_deref()
+                .is_some_and(|c| c.to_lowercase() == needle_lower);
+        let matches = exact
             || id.rsplit('/').next() == Some(needle_lower.as_str())
             || m.canonical_slug.as_deref().is_some_and(|c| {
                 c.to_lowercase().rsplit('/').next() == Some(needle_lower.as_str())
             });
-        m.context_length.filter(|_| matches)
-    })
+        if matches && better_window_match((exact, window), best) {
+            best = (exact, window);
+        }
+    }
+    (best.1 > 0).then_some(best.1)
+}
+
+/// Deterministic tie-break order for catalog entries that publish the same
+/// model id under different providers: (1) EXACT full-id matches beat
+/// bare-suffix matches — `zhipuai/glm-5.3-flash` is authoritative over a
+/// reseller's `zai-org/GLM-5.3-Flash` mirror; (2) within a tier, the LARGEST
+/// advertised window wins — a provider listing a model with a truncated
+/// window (quantized deployments, quota-capped gateways) is the outlier, not
+/// the vendor spec. First-occurrence `find_map` over a `HashMap` iteration is
+/// NOT a policy: the iteration order is randomized per process, so the same
+/// model resolved to 1M in one launch and 200k in the next — the 200k draw
+/// shrank the effective budget to ~52k (the reported degradation).
+fn better_window_match(candidate: (bool, usize), incumbent: (bool, usize)) -> bool {
+    let (candidate_exact, candidate_window) = candidate;
+    let (incumbent_exact, incumbent_window) = incumbent;
+    if candidate_exact != incumbent_exact {
+        return candidate_exact;
+    }
+    candidate_window > incumbent_window
 }
 
 /// Flexible match against the models.dev catalog.
@@ -1100,24 +1158,36 @@ fn find_window_in_models(needle: &str, models: &[OpenRouterModel]) -> Option<usi
 /// spelling too, so the needle matches when it equals the key or when their
 /// bare suffixes (parts after the last `/`) match. Comparisons are
 /// case-insensitive.
+///
+/// When SEVERAL providers publish the same id (dozens of gateways mirror
+/// popular models, often with divergent `limit.context` values), the result
+/// is DETERMINISTIC — exact-id matches first, then the largest window —
+/// never the accident of `HashMap` iteration order.
 fn find_window_in_models_dev(
     needle: &str,
     providers: &HashMap<String, ModelsDevProvider>,
 ) -> Option<usize> {
     let needle_lower = needle.to_lowercase();
     let needle_bare = needle_lower.rsplit('/').next().unwrap_or(&needle_lower);
-    providers
-        .values()
-        .flat_map(|p| p.models.iter())
-        .find_map(|(id, m)| {
+    // Sentinel: no exact tier, window 0 — every real match beats it. Entries
+    // with a degenerate 0-token window are skipped below, so the sentinel can
+    // never be "beaten" by a zero.
+    let mut best: (bool, usize) = (false, 0);
+    for p in providers.values() {
+        for (id, m) in &p.models {
+            let Some(window) = m.limit.context.filter(|w| *w > 0) else {
+                continue;
+            };
             let id_lower = id.to_lowercase();
             let id_bare = id_lower.rsplit('/').next().unwrap_or(&id_lower);
-            let matches = id_lower == needle_lower
-                || id_bare == needle_lower
-                || id_lower == needle_bare
-                || id_bare == needle_bare;
-            if matches { m.limit.context } else { None }
-        })
+            let exact = id_lower == needle_lower || id_lower == needle_bare;
+            let matches = exact || id_bare == needle_lower || id_bare == needle_bare;
+            if matches && better_window_match((exact, window), best) {
+                best = (exact, window);
+            }
+        }
+    }
+    (best.1 > 0).then_some(best.1)
 }
 
 /// Re-download the models.dev catalog and rewrite the on-disk cache.
@@ -1742,6 +1812,115 @@ mod tests {
         );
         // Unknown models never match.
         assert_eq!(find_window_in_models_dev("gpt-3.5", &providers), None);
+    }
+
+    /// REGRESSION (1M budget collapsed to ~50k): dozens of gateway providers
+    /// publish the same bare model id with DIVERGENT `limit.context` values —
+    /// the cached models.dev catalog listed `glm-5.3-flash` 68 times, from
+    /// 200,000 to 1,048,576. The old first-occurrence `find_map` picked
+    /// whichever entry `HashMap` iteration happened to yield (randomized per
+    /// process): one launch budgeted the model at 200k effective, the next at
+    /// 209,715. With the unlucky 200k draw the effective-window floor shrank
+    /// the budget to ~52k. The resolution must be DETERMINISTIC: exact-id
+    /// matches beat bare-suffix matches, and the largest window wins in a
+    /// tier — independent of map iteration order.
+    #[test]
+    fn models_dev_ambiguous_ids_resolve_deterministically() {
+        // Two bare-suffix providers disagree; the LARGEST window must win
+        // regardless of which order the providers are iterated in.
+        let providers = HashMap::from([
+            (
+                "gonka24".to_string(),
+                md_provider(&[("glm-5.3-flash", Some(200_000))]),
+            ),
+            (
+                "zhipuai".to_string(),
+                md_provider(&[("glm-5.3-flash", Some(1_000_000))]),
+            ),
+        ]);
+        for _ in 0..50 {
+            assert_eq!(
+                find_window_in_models_dev("glm-5.3-flash", &providers),
+                Some(1_000_000),
+                "the resolution must never depend on HashMap iteration order"
+            );
+        }
+
+        // An EXACT id match (the entry's id equals the needle verbatim) must
+        // beat a LARGER mirror that only matches through the bare suffix —
+        // models.dev keys per provider, so the authoritative entry shares the
+        // needle's full spelling while resellers publish their own prefix.
+        let providers = HashMap::from([
+            (
+                "reseller".to_string(),
+                md_provider(&[("mirror/model-x", Some(2_000_000))]),
+            ),
+            (
+                "vendor".to_string(),
+                md_provider(&[("vendor/model-x", Some(500_000))]),
+            ),
+        ]);
+        assert_eq!(
+            find_window_in_models_dev("vendor/model-x", &providers),
+            Some(500_000),
+            "exact full-id match wins over a bigger bare-suffix mirror"
+        );
+
+        // Entries without a recorded window must not shadow resolvable ones
+        // (the old find_map skipped them implicitly; keep that).
+        let providers = HashMap::from([
+            ("broke".to_string(), md_provider(&[("glm-5.3-flash", None)])),
+            (
+                "real".to_string(),
+                md_provider(&[("glm-5.3-flash", Some(1_048_576))]),
+            ),
+        ]);
+        assert_eq!(
+            find_window_in_models_dev("glm-5.3-flash", &providers),
+            Some(1_048_576)
+        );
+    }
+
+    #[test]
+    fn openrouter_ambiguous_slugs_resolve_deterministically() {
+        // Same id under two slugs with divergent windows: the largest wins,
+        // iteration order is irrelevant.
+        let models = vec![
+            model("z-ai/glm-5.3-flash", None, Some(200_000)),
+            model("zhipuai/glm-5.3-flash", None, Some(1_048_576)),
+        ];
+        for _ in 0..50 {
+            assert_eq!(
+                find_window_in_models("glm-5.3-flash", &models),
+                Some(1_048_576)
+            );
+        }
+    }
+
+    /// The GLM-5.3 line must resolve OFF the catalog path entirely: the
+    /// vendor lists 1M, but gateways publish the same bare id with windows
+    /// from 200k up, so a catalog hit was a lottery (see the ambiguous-id
+    /// regression above).
+    #[test]
+    fn glm_5_3_line_resolves_statically_to_one_million() {
+        for spelling in [
+            "glm-5.3",
+            "glm-5.3-flash",
+            "zai/glm-5.3-flash",
+            "GLM-5.3-Flash",
+            "zhipuai/glm-5.3",
+        ] {
+            assert_eq!(
+                static_known_window(spelling),
+                Some(1_000_000),
+                "{spelling} must resolve statically"
+            );
+        }
+        // Distinct from the older 204_800 GLM line and the 1_048_576 DeepSeek
+        // line: no alias bleed in either direction.
+        assert_eq!(static_known_window("glm-5.1"), Some(204_800));
+        assert_eq!(static_known_window("glm-5.2"), Some(1_048_576));
+        assert_eq!(static_known_window("deepseek-v4-flash"), Some(1_048_576));
     }
 
     #[test]
