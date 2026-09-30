@@ -134,6 +134,56 @@ fn test_render_small_message() {
 }
 
 #[test]
+fn user_message_actions_only_hit_inside_the_rendered_box() {
+    use cosh_tui::core::types::{MouseButton, MouseEvent, MouseEventType, MouseModifiers};
+
+    let msg = Message {
+        id: "msg-user-actions-hitbox".into(),
+        role: MessageRole::User,
+        parts: vec![Part::Text(TextPart {
+            text: "sent prompt".into(),
+            synthetic: false,
+        })],
+        created_at: 0,
+        agent: None,
+        model: None,
+    };
+    let state = test_state(msg);
+    let theme = test_theme();
+    let config = test_config();
+    let area = Rect::new(10, 0, 50, 10);
+    let mut view = SessionView::new();
+    let mut buf = Buffer::empty(area);
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+    // The session renderer reserves two columns of horizontal margin before
+    // the message box. A click there shares the message's row, but is not on
+    // the box and must not open Message Actions.
+    let outside = MouseEvent::new(
+        MouseEventType::Up,
+        MouseButton::Left,
+        area.x + 1,
+        area.y + 1,
+        MouseModifiers::none(),
+    );
+    assert!(!view.handle_mouse(&outside, area, &state, &config));
+    assert!(view.pending_message_action.is_none());
+
+    let inside = MouseEvent::new(
+        MouseEventType::Up,
+        MouseButton::Left,
+        area.x + 2,
+        area.y + 1,
+        MouseModifiers::none(),
+    );
+    assert!(view.handle_mouse(&inside, area, &state, &config));
+    assert_eq!(
+        view.pending_message_action.as_deref(),
+        Some("msg-user-actions-hitbox")
+    );
+}
+
+#[test]
 fn test_render_large_message() {
     let msg = build_streaming_message(5000);
     let state = test_state(msg);
