@@ -827,13 +827,15 @@ fn from_window_creates_a_valid_context_manager() {
 }
 
 /// Regression band for the 1M-class budget: a healthy 1M discovery must land
-/// in 200k–209,715 (the 20% effective floor over the 1M–1,048,576 raw range).
-/// A report that lands BELOW the band means a non-token number (e.g. a 413
-/// body's byte payload) leaked into the window pipeline.
+/// in 200k–209,800 (the 20% effective floor over the raw 1M-class range —
+/// the catalog's 1M variants go up to 1,049,000, whose effective value is
+/// 209,800). A report that lands BELOW the band means a non-token number
+/// (e.g. a 413 body's byte payload) or a truncated gateway mirror leaked
+/// into the window pipeline.
 fn assert_one_million_budget(max_tokens: usize) {
     assert!(
-        (200_000..=209_715).contains(&max_tokens),
-        "1M model budget must be 200k–209,715, got {max_tokens}"
+        (200_000..=209_800).contains(&max_tokens),
+        "1M model budget must be 200k–209,800, got {max_tokens}"
     );
 }
 
@@ -859,6 +861,55 @@ fn provider_window_report_of_a_1m_model_lands_in_the_200k_band() {
     let mut c = cm(MAX_CONTEXT_TOKENS);
     c.record_provider_window(Some("gemini-3-pro"), 1_048_576);
     assert_one_million_budget(c.display_info().max_tokens);
+}
+
+/// REGRESSION (1M budget degraded to ~50k): pins the EXACT arithmetic of the
+/// failure mode, so the degradation is reproducible on demand and any future
+/// change that re-opens it fails loudly.
+///
+/// The incident: the cached models.dev catalog published the same bare id
+/// (`glm-5.3-flash`) under dozens of gateway providers with divergent
+/// `limit.context` values (200,000 … 1,048,576). A first-occurrence
+/// `find_map` over a randomized `HashMap` iteration could hand back the 200k
+/// outlier, and `effective_context_window` then collapsed it to its 20%
+/// floor — 52,729, the observed ~50k budget. The SDK now resolves the model
+/// statically to 1M (and deterministically otherwise); this test pins both
+/// the DISEASED value (as the documented signature) and the HEALTHY value
+/// the fixed pipeline must produce.
+#[test]
+fn one_million_pipeline_band_is_pinned_with_the_degradation_signature() {
+    // The disease: a 200k catalog draw collapses to the 20% floor — exactly
+    // the ~52k budget the incident reported. If this value ever becomes the
+    // steady-state resolution for a 1M model, the band assertions below will
+    // catch it.
+    assert_eq!(
+        effective_context_window(200_000),
+        52_729,
+        "documented degradation signature: 20% floor over a 200k outlier draw"
+    );
+    // The health contract: a real 1M discovery must stay in the 200k band.
+    assert_one_million_budget(
+        ContextManager::from_window(Some(1_000_000))
+            .display_info()
+            .max_tokens,
+    );
+    assert_one_million_budget(
+        ContextManager::from_window(Some(1_048_576))
+            .display_info()
+            .max_tokens,
+    );
+    // A deterministic catalog hit of 1,048,576 (largest-window policy over
+    // the gateway mirrors) must also land in the band.
+    assert_one_million_budget(
+        ContextManager::from_window(Some(1_048_575))
+            .display_info()
+            .max_tokens,
+    );
+    assert_one_million_budget(
+        ContextManager::from_window(Some(1_049_000))
+            .display_info()
+            .max_tokens,
+    );
 }
 
 #[tokio::test]

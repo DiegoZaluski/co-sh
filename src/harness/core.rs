@@ -3916,6 +3916,27 @@ impl Harness {
                 log::debug!("run_agent_loop PHASE1_ERR={e}");
 
                 if e == INTERRUPTED_MARKER {
+                    // Record the PARTIAL output the model had streamed before
+                    // the stop: the user watched it render, and the next turn
+                    // ("what did you just do?") must see it. Dropping it here
+                    // left the timeline with the bare user turn, so the next
+                    // loop's abandoned-input sweep hid the FIRST message too
+                    // — total amnesia about the interrupted exchange. Marked
+                    // non-closable: a truncated turn is not a final answer
+                    // and must never be promoted to a Closure.
+                    if !assistant_response.is_empty() {
+                        self.context_manager
+                            .add_assistant(&assistant_response, false);
+                    }
+                    // The stop can land mid-stream or during connect; the
+                    // `is_empty()` guard above covers the no-output case.
+                    // Any calls still queued belong to a response that never
+                    // completed. A queued call has NO context item yet
+                    // (items are recorded at dispatch), so dropping it
+                    // leaves no orphan behind — but leaving it in
+                    // `tool_issuer` would replay it on the NEXT turn,
+                    // running tools the user just cancelled.
+                    self.tool_issuer.clear();
                     self.context_manager.close_loop();
                     let _ = tx.send(HarnessEvent::Stopped {
                         context: self.context_manager.save_state(),

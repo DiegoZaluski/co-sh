@@ -5853,7 +5853,7 @@ fn edit_diff_unified_view_indents_line_numbers_inside_leaf() {
     use super::tool_render::{ToolRenderCtx, ToolRenderState, dispatch_tool};
 
     let theme = test_theme();
-    let config = test_config();
+    let _config = test_config();
     // < 100 keeps render_edit on the unified view.
     let max_w: u16 = 80;
 
@@ -5948,7 +5948,7 @@ fn edit_diff_split_view_indents_line_numbers_inside_leaves() {
     use super::tool_render::{ToolRenderCtx, ToolRenderState, dispatch_tool};
 
     let theme = test_theme();
-    let config = test_config();
+    let _config = test_config();
     // >= 100 turns on DiffViewMode::Split in render_edit.
     let max_w: u16 = 120;
 
