@@ -749,6 +749,39 @@ impl WidthCacheSnapshot {
     }
 }
 
+/// Push one sampled scratch row as a content-only [`TextRegion`].
+///
+/// Box renderers pad their content with leading blank columns (box margin,
+/// internal padding, gutters), so a row sampled straight from the painted
+/// cells starts with spaces before its first glyph. The content-only contract
+/// requires `text` char 0 to map to screen column `x1`, so the leading blank
+/// run is trimmed and the region is labeled `x1 = x_off + indent` — interior
+/// indentation is untouched, and the copy equals exactly the visible glyphs.
+/// Whitespace-only rows contribute no region.
+fn push_sampled_row(
+    text_regions: &mut Vec<TextRegion>,
+    cy: i32,
+    x_off: u16,
+    max_w: u16,
+    raw: &str,
+) {
+    let trimmed = raw.trim_end();
+    if trimmed.is_empty() {
+        return;
+    }
+    // Leading whitespace is blank paint (box margin, padding, gutter): strip it
+    // from the text and advance x1 by the same CHAR count so text char 0 keeps
+    // mapping to screen column x1. Counted in chars (not bytes) so multi-byte
+    // whitespace would still advance the label by the right number of columns.
+    // Interior indentation is untouched.
+    let indent = trimmed.chars().take_while(|c| c.is_whitespace()).count();
+    let x1 = x_off
+        .saturating_add(indent as u16)
+        .min(x_off.saturating_add(max_w));
+    let content: String = trimmed.chars().skip(indent).collect();
+    text_regions.push(TextRegion::one_row(cy, x1, x_off.saturating_add(max_w), content));
+}
+
 fn text_regions_generation(
     session: &crate::types::Session,
     config: &TuiConfig,
@@ -3334,6 +3367,19 @@ impl SessionView {
         let scratch = &mut self.scratch;
         text_regions.clear();
 
+        // Tool render state for the region scratch renders: expansion maps
+        // cloned from the live state (so collapsed/expanded boxes sample the
+        // same rows the screen shows) but a FRESH spinner map — `dispatch_tool`
+        // creates/advances spinners as a side effect, and the real ones must
+        // not be touched by a copy-region build (the build also runs for
+        // content rows that are currently off-screen).
+        let mut region_tool_state = ToolRenderState {
+            expanded: self.tool_state.expanded.clone(),
+            error_expanded: self.tool_state.error_expanded.clone(),
+            tool_spinners: std::collections::HashMap::new(),
+            version: self.tool_state.version,
+        };
+
         let mut y = walk_start;
 
         for (idx, msg) in session.messages.iter().enumerate().skip(first_vis) {
@@ -3613,144 +3659,100 @@ impl SessionView {
                                     part_y += part_h;
                                     continue;
                                 }
-                                // Add inline tool label — but only when the
-                                // renderer actually draws it. render_todo, for
-                                // example, shows its label row only on failure
-                                // (on success it renders just the list box),
-                                // so copying it unconditionally leaked hidden
-                                // text into the selection. Same for a
-                                // completed ask_questions: it draws its Q&A
-                                // summary instead of the label.
-                                let tool_display_name = self::tool_render::tool_display(&t.tool);
-                                let question_summary = tool_display_name == "question"
-                                    && self::tool_render::question_summary(t).is_some();
-                                // Geometry mirror of render_parts + the block
-                                // renderers: block tools take a 1-row top margin
-                                // before the box, whose first row is padding — the
-                                // title lands at +2. The body starts at +3 (todo's
-                                // box has no internal padding: body at +2; a
-                                // completed question summary renders at +0).
-                                // Inline tools draw the label at
-                                // +0 and have no body (the p_bottom clamp below
-                                // drops it). Hardcoding +1 here desynced every
-                                // block-tool copy by two rows — shifted text, last
-                                // two output lines unreachable — whenever the
-                                // cells cache was cold.
+                                // ── Sample the cells the REAL renderer paints ──
+                                // The old builder re-derived box geometry by hand
+                                // (hardcoded label/body offsets) and synthesized the
+                                // copy text with `tool_copy_text`, which drifted from
+                                // the renderers: the diff/read line-number gutters and
+                                // +/- signs sit several columns right of where the
+                                // regions claimed content started (copies shifted or
+                                // empty), long lines truncate instead of wrapping, the
+                                // split diff view pairs two source lines per row, and
+                                // single-line generic labels were followed by
+                                // whole-output regions that collided with the NEXT
+                                // part's rows — copying text the user never selected.
+                                // Rendering the part through the same `dispatch_tool`
+                                // the screen uses and sampling the painted cells keeps
+                                // copy, highlight and screen in sync for every
+                                // renderer, with no per-tool geometry to maintain.
                                 let is_block = Self::tool_is_block(t);
-                                // The edit box has NO title row (the diff's
-                                // own `--- a/` / `+++ b/` headers show the
-                                // path) — its body starts one row higher than
-                                // the other block tools and no label region
-                                // may be emitted.
-                                let edit_block = is_block && tool_display_name == "edit";
-                                let label_off = if is_block { 2 } else { 0 };
-                                let body_off = if question_summary {
-                                    0
-                                } else if tool_display_name == "todo" {
-                                    2
-                                } else if edit_block {
-                                    2
-                                } else if is_block {
-                                    3
-                                } else {
-                                    1
-                                };
-                                // A failed todo with output draws its box (not the
-                                // inline label) — only the empty-output failure
-                                // keeps the label row. The edit box never draws
-                                // a title row (the diff's own headers show the
-                                // path), so no label region for it either.
-                                let draws_label = !question_summary
-                                    && !edit_block
-                                    && (tool_display_name != "todo"
-                                        || (matches!(
-                                            t.status,
-                                            crate::types::ToolStatus::Failed(_)
-                                        ) && t
-                                            .output
-                                            .as_deref()
-                                            .unwrap_or("")
-                                            .trim()
-                                            .is_empty()));
-                                let label_screen = p_top + label_off;
-                                if draws_label && label_screen >= vp_top && label_screen < vp_bottom
-                                {
-                                    let label = self::tool_render::tool_inline_text(t);
-                                    text_regions.push(TextRegion::one_row(
-                                        label_screen - vp_top + scroll,
-                                        x_off,
-                                        x_off + max_w,
-                                        label,
-                                    ));
+                                // The scratch mirrors the message's inner content area:
+                                // the box paints at x=3 (screen x_off) and the widest
+                                // box spans max_w + 3 columns from there.
+                                let scan_area =
+                                    Rect::new(0, 0, max_w.saturating_add(6), part_h.max(1) as u16);
+                                let temp = scratch.get_or_insert_with(|| {
+                                    ratatui::buffer::Buffer::empty(scan_area)
+                                });
+                                if *temp.area() != scan_area {
+                                    temp.resize(scan_area);
                                 }
-                                // Add visible output lines after the label.
-                                // The body mirrors what each tool's renderer
-                                // draws (formatted TODO list, extracted diff,
-                                // code preview) — never raw JSON schemas.
-                                let is_completed =
-                                    matches!(t.status, crate::types::ToolStatus::Completed);
-                                let is_glob = self::tool_render::tool_display(&t.tool) == "glob";
-                                let collapsed_body = |body: String, fallback_id: &str| {
-                                    let id = t.tool_call_id.as_deref().unwrap_or(fallback_id);
-                                    let collapsed =
-                                        crate::util::scroll::collapse_tool_output(&body, 10, 800);
-                                    if self.tool_state.is_expanded(id) || !collapsed.overflow {
-                                        body
+                                temp.reset();
+                                // Block boxes start one row below the part top — the
+                                // external top margin render_parts adds — so mirror it
+                                // here and the sampled rows line up with the screen.
+                                let mut y_cur = u16::from(is_block);
+                                let mut line_h = 0u16;
+                                self::tool_render::dispatch_tool(
+                                    &mut self::tool_render::ToolRenderCtx {
+                                        buf: temp,
+                                        x: 3,
+                                        y: y_cur,
+                                        line_h: &mut line_h,
+                                        max_w,
+                                        state: &mut region_tool_state,
+                                        theme,
+                                    },
+                                    t,
+                                    pi as u16,
+                                );
+                                y_cur = y_cur.saturating_add(line_h);
+                                // Bottom margin, then the passive LSP findings — the
+                                // same geometry render_parts paints below the box.
+                                if is_block && y_cur.saturating_add(1) < scan_area.height {
+                                    y_cur += 1;
+                                }
+                                if let Some(notes) = &t.lsp_notes
+                                    && matches!(t.status, crate::types::ToolStatus::Completed)
+                                    && Self::lsp_notes_count(notes) > 0
+                                {
+                                    let expanded = region_tool_state.is_expanded_or(
+                                        &Self::lsp_notes_id(t),
+                                        config.diagnostics_mode,
+                                    );
+                                    let header = if expanded {
+                                        "- Diagnostics"
                                     } else {
-                                        collapsed.output
+                                        "+ Diagnostics"
+                                    };
+                                    let header_style = Style::default().fg(rgba_color(theme.error));
+                                    draw_text_line(temp, header, 3, y_cur, max_w, header_style);
+                                    if expanded {
+                                        Self::render_lsp_notes(
+                                            temp,
+                                            3,
+                                            y_cur + 1,
+                                            max_w,
+                                            theme,
+                                            notes,
+                                        );
                                     }
-                                };
-                                let display: Option<String> = if is_glob {
-                                    let body =
-                                        self::tool_render::glob_block_text(t).unwrap_or_default();
-                                    if !body.is_empty() && is_completed {
-                                        Some(collapsed_body(body, "glob"))
-                                    } else {
-                                        Some(body)
-                                    }
-                                } else {
-                                    let display_name = self::tool_render::tool_display(&t.tool);
-                                    if question_summary {
-                                        self::tool_render::question_display_lines(t, max_w)
-                                            .map(|lines| lines.join("\n"))
-                                    } else {
-                                        self::tool_render::tool_copy_text(t).map(|body| {
-                                            match display_name {
-                                                // Read blocks collapse on screen exactly like this.
-                                                "read" => collapsed_body(body, "read"),
-                                                _ if config.show_tool_details || !is_completed => {
-                                                    body
-                                                }
-                                                _ => collapsed_body(body, "shell"),
-                                            }
-                                        })
-                                    }
-                                };
-                                if let Some(display) = display.filter(|d| !d.is_empty()) {
-                                    // Body line 0 sits at p_top + body_off on screen;
-                                    // lines scrolled off ABOVE the viewport are skipped
-                                    // (pairing from the part top re-mapped the head of
-                                    // the body and cut the tail off the copy).
-                                    let body_top = p_top + body_off;
-                                    let first_i = (vp_top - body_top).max(0);
-                                    let screen_end = p_bottom.min(vp_bottom);
-                                    let mut out_screen_y = body_top.max(vp_top);
-                                    for (li, display_line) in display.lines().enumerate() {
-                                        if (li as i32) < first_i {
-                                            continue;
-                                        }
-                                        if out_screen_y >= screen_end {
-                                            break;
-                                        }
-                                        let cy = out_screen_y - vp_top + scroll;
-                                        text_regions.push(TextRegion::one_row(
-                                            cy,
-                                            x_off,
-                                            x_off + max_w,
-                                            display_line.to_string(),
-                                        ));
-                                        out_screen_y += 1;
-                                    }
+                                }
+                                let temp_cells = temp.content();
+                                let stride = scan_area.width as usize;
+                                for k in 0..scan_area.height as usize {
+                                    // Strip the 3 left columns (message margin): the
+                                    // sampled text starts at screen column x_off.
+                                    let base = k * stride + 3;
+                                    let trimmed =
+                                        text_from_cell_row(&temp_cells[base..], max_w as usize);
+                                    push_sampled_row(
+                                        text_regions,
+                                        content_offset + k as i32,
+                                        x_off,
+                                        max_w,
+                                        &trimmed,
+                                    );
                                 }
                             }
                             crate::types::Part::Reasoning(r) => {
@@ -3827,66 +3829,53 @@ impl SessionView {
                             }
                             crate::types::Part::Compaction(c) => {
                                 if !c.text.is_empty() {
-                                    // The "Summarizing" box: title row + the
-                                    // visible body rows (tail when collapsed,
-                                    // full text when expanded). The rows come
-                                    // from the RENDERED markdown (laid out into
-                                    // the shared scratch buffer and scanned),
-                                    // so copy/selection text matches what is
-                                    // on screen — never raw md syntax.
-                                    let expanded = self.tool_state.is_expanded(&summarizing_id(c));
-                                    let mut cy = content_offset;
-                                    let mut title = if expanded { "- " } else { "" }.to_string();
-                                    title.push_str("Summarizing");
-                                    if p_top >= vp_top {
-                                        text_regions.push(TextRegion::one_row(
-                                            cy,
-                                            x_off,
-                                            x_off + max_w,
-                                            title,
-                                        ));
-                                    }
-                                    cy += 1;
-                                    let wrap_w = max_w.saturating_sub(3).max(1);
-                                    let body_h = estimate_height(&c.text, wrap_w).max(1);
-                                    let (src_start, rows) =
-                                        if expanded || body_h <= SUMMARIZING_COLLAPSED_LINES {
-                                            (0, body_h)
-                                        } else {
-                                            (
-                                                body_h - SUMMARIZING_COLLAPSED_LINES,
-                                                SUMMARIZING_COLLAPSED_LINES,
-                                            )
-                                        };
-                                    let scan_area = Rect::new(0, 0, wrap_w, body_h);
+                                    // The "Summarizing" box: sample the cells the real
+                                    // renderer paints (title, wrapped body rows, collapse
+                                    // hint) so copy text matches the screen. The old
+                                    // hand-mirrored layout labeled rows one column off
+                                    // (body paints at x+3, regions claimed x+2) and
+                                    // re-derived the collapsed-tail row window instead of
+                                    // reusing the renderer's own.
+                                    let expanded =
+                                        self.tool_state.is_expanded(&summarizing_id(c));
+                                    // The box paints at the part top with no external
+                                    // margin (render_parts advances straight past it),
+                                    // and its width is max_w + 3 inside the message's
+                                    // max_w + 6 content area — mirror that exactly.
+                                    let scan_area =
+                                        Rect::new(0, 0, max_w.saturating_add(6), part_h as u16);
                                     let temp = scratch.get_or_insert_with(|| {
                                         ratatui::buffer::Buffer::empty(scan_area)
                                     });
                                     if *temp.area() != scan_area {
                                         temp.resize(scan_area);
                                     }
-                                    let content = sanitize_text(&c.text);
-                                    let mut md =
-                                        cosh_tui::core::renderables::markdown::MarkdownRenderable::new(
-                                            Some(content),
+                                    temp.reset();
+                                    Self::render_summarizing_box(
+                                        temp, 3, 0, max_w, c, expanded, theme,
+                                    );
+                                    let temp_cells = temp.content();
+                                    let stride = scan_area.width as usize;
+                                    // Clamp to the visible band like the other arms:
+                                    // rows the viewport cannot show are not
+                                    // selectable, so they get no region (and no scan).
+                                    let first_k = (vp_top - p_top).max(0) as usize;
+                                    let last_k = (p_bottom.min(vp_bottom) - p_top).max(0) as usize;
+                                    for k in first_k..last_k.min(part_h as usize) {
+                                        // Strip the 3 box-margin columns so the sampled
+                                        // text starts at screen column x_off.
+                                        let base = k * stride + 3;
+                                        let trimmed = text_from_cell_row(
+                                            &temp_cells[base..],
+                                            max_w as usize,
                                         );
-                                    md.set_fg(Some(ColorInput::RGBA(theme.text)));
-                                    md.set_bg(Some(ColorInput::RGBA(theme.background_panel)));
-                                    crate::util::markdown::apply_theme(&mut md, theme);
-                                    md.render_self(temp, scan_area);
-                                    for k in 0..rows {
-                                        let src_y = src_start + k;
-                                        let temp_cells = temp.content();
-                                        let row = src_y as usize * wrap_w as usize;
-                                        let trimmed =
-                                            text_from_cell_row(&temp_cells[row..], wrap_w as usize);
-                                        text_regions.push(TextRegion::one_row(
-                                            cy,
-                                            x_off + 2,
-                                            x_off + max_w,
-                                            trimmed,
-                                        ));
-                                        cy += 1;
+                                        push_sampled_row(
+                                            text_regions,
+                                            content_offset + k as i32,
+                                            x_off,
+                                            max_w,
+                                            &trimmed,
+                                        );
                                     }
                                 } else if p_top >= vp_top {
                                     let text = compaction_line(c, crate::types::now_ms());
