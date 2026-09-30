@@ -19,12 +19,39 @@
 use log::{Level, Log, Metadata, Record};
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 const MAX_LOG_BYTES: u64 = 16 * 1024 * 1024;
 
+/// The dedicated decision-model log (`laya.log`), next to `stdout.log`.
+///
+/// The decision model is otherwise a black box: the checkup runs in a
+/// separate daemon process, every failure is fail-open (the loop behaves
+/// as if the model were not there), and the shared `stdout.log` mixes the
+/// whole app's chatter. Entries whose log target is routed to the decision
+/// model (see [`mirrors_laya`]) are ALSO appended here, so a session with
+/// "the model does nothing / stops wrongly" symptoms can be diagnosed from
+/// one dedicated file: reviews, verdicts with confidences, failed loads,
+/// daemon lifecycle.
+pub fn laya_log_path() -> PathBuf {
+    crate::harness::truncate::scratch_log_dir()
+        .join("log")
+        .join("laya.log")
+}
+
+/// Whether a log record's target is mirrored into `laya.log`.
+///
+/// Covers the two producers of decision-model activity: explicit
+/// `target: "laya"` call sites (the checkup and the harness review paths)
+/// and the daemon's own modules (`cosh::daemon::decision::*`).
+fn mirrors_laya(target: &str) -> bool {
+    target.starts_with("laya") || target.starts_with("cosh::daemon::decision")
+}
+
 struct FileLogger {
     file: Mutex<std::fs::File>,
+    laya: Mutex<Option<std::fs::File>>,
 }
 
 impl Log for FileLogger {
@@ -41,6 +68,13 @@ impl Log for FileLogger {
         if !self.enabled(record.metadata()) {
             return;
         }
+        let line = format!(
+            "[{}] [{}] [{}] {}",
+            chrono::Local::now().format("%H:%M:%S%.3f"),
+            record.level(),
+            record.target(),
+            record.args()
+        );
         if let Ok(mut f) = self.file.lock() {
             // The shared debug log can otherwise grow for the entire lifetime
             // of an interactive session. Truncation also reclaims an oversized
@@ -48,19 +82,26 @@ impl Log for FileLogger {
             if f.metadata().is_ok_and(|m| m.len() >= MAX_LOG_BYTES) {
                 let _ = f.set_len(0);
             }
-            let _ = writeln!(
-                f,
-                "[{}] [{}] {}",
-                chrono::Local::now().format("%H:%M:%S%.3f"),
-                record.level(),
-                record.args()
-            );
+            let _ = writeln!(f, "{line}");
+        }
+        // Mirror decision-model activity into the dedicated `laya.log` (best
+        // effort: a logging failure never reaches the caller).
+        if mirrors_laya(record.target())
+            && let Ok(mut f) = self.laya.lock()
+            && let Some(file) = f.as_mut()
+        {
+            let _ = writeln!(file, "{line}");
         }
     }
 
     fn flush(&self) {
         if let Ok(mut f) = self.file.lock() {
             let _ = f.flush();
+        }
+        if let Ok(mut f) = self.laya.lock()
+            && let Some(file) = f.as_mut()
+        {
+            let _ = file.flush();
         }
     }
 }
@@ -107,9 +148,17 @@ pub fn try_init(scope: &str) -> Result<(), String> {
         .append(true)
         .open(&log_path)
         .map_err(|e| format!("cannot open {}: {e}", log_path.display()))?;
+    // The dedicated decision-model mirror opens best-effort: a failure to
+    // create it degrades to mirroring-off, never blocks the logger itself.
+    let laya = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(laya_log_path())
+        .ok();
 
     let logger = FileLogger {
         file: Mutex::new(file),
+        laya: Mutex::new(laya),
     };
 
     log::set_boxed_logger(Box::new(logger))
@@ -146,6 +195,7 @@ mod tests {
                     .open(&path)
                     .unwrap(),
             ),
+            laya: Mutex::new(None),
         };
         let own = Metadata::builder()
             .level(Level::Debug)
@@ -173,6 +223,7 @@ mod tests {
         file.set_len(MAX_LOG_BYTES).unwrap();
         let logger = FileLogger {
             file: Mutex::new(file),
+            laya: Mutex::new(None),
         };
         let record = Record::builder()
             .args(format_args!("bounded"))

@@ -19,11 +19,9 @@ use serde_json::json;
 use crate::daemon::client::DaemonClient;
 use crate::daemon::ipc_error::Ipc;
 
-use super::protocol::{self, code, method, DecideParams, DecideResult, Kind};
+use super::protocol::{self, DecideParams, DecideResult, Kind, code, method};
 
-use crate::harness::checkup::{
-    Checkup, TerminationDecision, TerminationVerdict,
-};
+use crate::harness::checkup::{Checkup, TerminationDecision, TerminationVerdict};
 
 /// The question id inside the schema — the same id the loop-termination
 /// evaluation scores, carried over from the in-process adapter unchanged.
@@ -77,23 +75,31 @@ impl IpcCheckup {
     }
 
     /// One decide round trip; any failure is `None` (fail open).
+    ///
+    /// Every outcome is logged under `target: "laya"` (mirrored into the
+    /// dedicated `laya.log`): the review that is about to run, the verdict
+    /// that came back, and the fail-open reason when it did not. The model
+    /// is otherwise invisible — a silent fail-open is indistinguishable
+    /// from a working model, which is exactly how improper stops go
+    /// undiagnosed.
     fn decide(&self, state: &serde_json::Value) -> Option<serde_json::Value> {
-        let result = self
-            .client
-            .call_with_budget(
-                method::DECIDE,
-                decide_params(&self.kind, state)?,
-                DECIDE_BUDGET,
-            );
+        log::info!(target: "laya", "checkup: decide request (kind={})", self.kind.name());
+        let result = self.client.call_with_budget(
+            method::DECIDE,
+            decide_params(&self.kind, state)?,
+            DECIDE_BUDGET,
+        );
         match result {
             Ok(result) => {
                 let decided: DecideResult = ipc_from_value(result)?;
+                log::info!(target: "laya", "checkup: decide ok");
                 Some(decided.result)
             }
             Err(e) => {
                 // BUSY gets one short-backoff retry (the approved policy);
                 // everything else fails open immediately.
                 if Self::remote_code(&e) == Some(code::BUSY) {
+                    log::warn!(target: "laya", "checkup: daemon BUSY, one backoff retry");
                     std::thread::sleep(std::time::Duration::from_millis(250));
                     match self.client.call_with_budget(
                         method::DECIDE,
@@ -102,14 +108,17 @@ impl IpcCheckup {
                     ) {
                         Ok(result) => {
                             let decided: DecideResult = ipc_from_value(result)?;
+                            log::info!(target: "laya", "checkup: decide ok (after retry)");
                             Some(decided.result)
                         }
                         Err(e) => {
+                            log::warn!(target: "laya", "checkup: failed-open after retry: {e}");
                             log::warn!("decision daemon failed-open: {e}");
                             None
                         }
                     }
                 } else {
+                    log::warn!(target: "laya", "checkup: failed-open: {e}");
                     log::warn!("decision daemon failed-open: {e}");
                     None
                 }
@@ -125,6 +134,7 @@ impl IpcCheckup {
 impl Checkup for IpcCheckup {
     fn review_termination(&self, final_text: &str) -> TerminationVerdict {
         let Some(result) = self.decide(&json!({ "message": final_text })) else {
+            log::warn!(target: "laya", "checkup: verdict FAIL-OPEN (no daemon answer)");
             return TerminationVerdict::fallback();
         };
         // The interpretation the in-process adapter performed on
@@ -136,11 +146,13 @@ impl Checkup for IpcCheckup {
             .and_then(|answers| answers.get(QID))
             .cloned();
         let Some(answer) = answers else {
+            log::warn!(target: "laya", "checkup: verdict FAIL-OPEN: no choice answer for {QID}");
             log::warn!("decision daemon failed-open: no choice answer for {QID}");
             return TerminationVerdict::fallback();
         };
         let choice = answer.get("choice").and_then(serde_json::Value::as_str);
         let Some(choice) = choice else {
+            log::warn!(target: "laya", "checkup: verdict FAIL-OPEN: no choice answer for {QID}");
             log::warn!("decision daemon failed-open: no choice answer for {QID}");
             return TerminationVerdict::fallback();
         };
@@ -149,14 +161,32 @@ impl Checkup for IpcCheckup {
         } else {
             TerminationDecision::NotTerminated
         };
+        let confidence = answer
+            .get("answer_confidence")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0);
+        log::info!(
+            target: "laya",
+            "checkup: verdict {decision:?} (confidence {confidence:.2}) — text: {:?}",
+            truncate_for_log(final_text)
+        );
         TerminationVerdict {
             decision,
-            confidence: answer
-                .get("answer_confidence")
-                .and_then(serde_json::Value::as_f64)
-                .unwrap_or(0.0),
+            confidence,
         }
     }
+}
+
+/// A bounded preview of the reviewed text for the log: the first line,
+/// capped, so `laya.log` shows WHAT the model judged without dumping the
+/// whole response.
+fn truncate_for_log(text: &str) -> String {
+    let first = text.lines().next().unwrap_or_default();
+    let mut preview: String = first.chars().take(120).collect();
+    if first.chars().count() > 120 {
+        preview.push('…');
+    }
+    preview
 }
 
 /// Typed params → wire value (`InvalidParams` cannot happen on serialize;

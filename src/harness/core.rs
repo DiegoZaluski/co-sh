@@ -1072,8 +1072,10 @@ impl Harness {
         // A guard firing while the model believes the task is NOT done is a
         // suspicious stop — surface it instead of only recording it.
         if verdict.decision == TerminationDecision::NotTerminated {
+            log::warn!(target: "laya", "{summary}");
             log::warn!("{summary}");
         } else {
+            log::debug!(target: "laya", "{summary}");
             log::debug!("{summary}");
         }
         Some(summary)
@@ -4941,6 +4943,18 @@ impl Harness {
                     && !assistant_response.is_empty()
                 {
                     let verdict = checkup.review_termination(&assistant_response);
+                    // Observability: every natural-stop review lands in
+                    // `laya.log`, including the ones that do NOT veto —
+                    // a low-confidence `NotTerminated` (or a `Terminated`)
+                    // verdict otherwise leaves NO trace, and "why did it
+                    // stop?" becomes unanswerable.
+                    log::info!(
+                        target: "laya",
+                        "checkup: natural-stop review → {decision:?} (confidence {confidence:.2}, floor {floor:.2}, iteration {iteration})",
+                        decision = verdict.decision,
+                        confidence = verdict.confidence,
+                        floor = self.checkup_min_confidence,
+                    );
                     if verdict.decision == super::checkup::TerminationDecision::NotTerminated
                         && verdict.confidence >= self.checkup_min_confidence
                         // Bound the veto like every other continuation: this
@@ -4950,6 +4964,12 @@ impl Harness {
                         // disagreement on text-only turns would never stop.
                         && iteration < MAX_ITERATIONS
                     {
+                        log::info!(
+                            target: "laya",
+                            "checkup: VETOED the natural stop (confidence {:.2}, floor {:.2}) — continuing",
+                            verdict.confidence,
+                            self.checkup_min_confidence
+                        );
                         log::debug!(
                             "run_agent_loop checkup vetoed natural completion \
                              (confidence {:.2}) — continuing",

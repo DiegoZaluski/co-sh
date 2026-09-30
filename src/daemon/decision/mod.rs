@@ -33,6 +33,14 @@ pub use protocol::Kind;
 /// SUCCESS outcome — the spawning process that lost the race exits 0, the
 /// winner serves. Only a real bind failure is an error.
 pub fn run() -> i32 {
+    // Daemon-side logging FIRST: the daemon is a separate PROCESS (spawned
+    // on demand by whichever client lost the activation race) — without
+    // this, every `log::` call in the daemon modules went nowhere, and the
+    // decision model's failures (load errors, failed-open reviews) were a
+    // black box. `try_init` (never `init`): losing a logger race or a
+    // read-only temp dir must never stop the daemon from serving.
+    let _ = crate::util::logger::try_init("decisiond");
+
     // The activation lock first (M1 fix): a live daemon HOLDS this flock
     // for its lifetime, so contending here means one already owns the
     // socket path — this spawner lost the activation race and exits 0
