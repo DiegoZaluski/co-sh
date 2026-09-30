@@ -10,6 +10,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
 use crate::component::cursor::{Cursor, CursorState};
+use crate::component::wall;
 use crate::logo::ChatLogo;
 use crate::lsp_colors;
 use crate::state::AppState;
@@ -1030,29 +1031,7 @@ impl PromptView {
 
         let agent_color = agent_mode_color(theme, agent_colors, unique_agents, state.mode);
 
-        let mut border_box = BoxRenderable::new();
-        border_box.set_border_color(Some(agent_color.into()));
-        border_box.set_border_sides(BorderSidesConfig {
-            left: true,
-            top: false,
-            right: true,
-            bottom: false,
-        });
-        border_box.set_custom_border_chars(prompt_border_chars());
-        border_box.render_self(buf, input_area);
-
-        let mut bg_box = BoxRenderable::new();
-        bg_box.set_background_color(Some(theme.background_element.into()));
-        // The band stops one column short of the right edge so the right `┃`
-        // sits on the terminal background, mirroring the left border (this
-        // also matches the slash menu's content band exactly).
-        let bg_area = Rect::new(
-            input_area.x + 1,
-            input_area.y,
-            input_area.width.saturating_sub(2),
-            input_area.height,
-        );
-        bg_box.render_self(buf, bg_area);
+        wall::render(buf, input_area, agent_color, theme.background_element);
 
         let x_off = input_area.x + 3;
         let text_start = input_area.y + 1;

@@ -2,30 +2,12 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 
-use cosh_tui::core::lib::border::{BorderCharacters, BorderSidesConfig};
-use cosh_tui::core::renderable::Renderable;
-use cosh_tui::core::renderables::r#box::BoxRenderable;
 use cosh_tui::core::types::MouseEvent;
 
+use crate::component::wall;
 use crate::theme::{Theme, rgba_color};
 
 const OPTIONS: [&str; 3] = ["Allow", "Allow Once", "Deny"];
-
-const fn left_border_chars() -> BorderCharacters {
-    BorderCharacters {
-        top_left: ' ',
-        top_right: ' ',
-        bottom_left: ' ',
-        bottom_right: ' ',
-        horizontal: ' ',
-        vertical: '\u{2503}',
-        top_t: ' ',
-        bottom_t: ' ',
-        left_t: '\u{2503}',
-        right_t: ' ',
-        cross: ' ',
-    }
-}
 
 /// Estimate how many lines a text wraps to at a given width.
 fn wrap_lines(text: &str, width: u16) -> u16 {
@@ -137,18 +119,7 @@ impl PermissionDialog {
         let theme_error = rgba_color(theme.error);
         let theme_bg_element = rgba_color(theme.background_element);
 
-        // Left-border bar with panel background (matches question dialog style)
-        let mut border_box = BoxRenderable::new();
-        border_box.set_background_color(Some(theme.background_panel.into()));
-        border_box.set_border_color(Some(theme.accent.into()));
-        border_box.set_border_sides(BorderSidesConfig {
-            left: true,
-            top: false,
-            right: true,
-            bottom: false,
-        });
-        border_box.set_custom_border_chars(left_border_chars());
-        border_box.render_self(buf, area);
+        wall::render(buf, area, theme.accent, theme.background_panel);
 
         if let Some(request) = &self.request {
             let pad = 3u16;

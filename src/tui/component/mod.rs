@@ -7,3 +7,4 @@ pub mod search_bar;
 pub mod sparkle;
 pub mod spinner;
 pub mod spinner_highlight;
+pub mod wall;

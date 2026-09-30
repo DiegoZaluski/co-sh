@@ -3,12 +3,10 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 
-use cosh_tui::core::lib::border::{BorderCharacters, BorderSidesConfig};
-use cosh_tui::core::renderable::Renderable;
-use cosh_tui::core::renderables::r#box::BoxRenderable;
 use cosh_tui::core::types::MouseEvent;
 
 use super::super::super::theme::Theme;
+use crate::component::wall;
 use crate::theme::rgba_color;
 
 /// Which pending queue a message typed during a running agent loop joins.
@@ -34,22 +32,6 @@ fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, styl
             cell.set_char(ch);
             cell.set_style(style);
         }
-    }
-}
-
-const fn left_border_chars() -> BorderCharacters {
-    BorderCharacters {
-        top_left: ' ',
-        top_right: ' ',
-        bottom_left: ' ',
-        bottom_right: ' ',
-        horizontal: ' ',
-        vertical: '┃',
-        top_t: ' ',
-        bottom_t: ' ',
-        left_t: '┃',
-        right_t: ' ',
-        cross: ' ',
     }
 }
 
@@ -214,18 +196,7 @@ impl QueueChoiceDialog {
         let inner_area = Rect::new(area.x, area.y, area.width, height);
         let footer_y = inner_area.bottom().saturating_sub(2);
 
-        // Left border + background (same style as the question dialog).
-        let mut border_box = BoxRenderable::new();
-        border_box.set_background_color(Some(theme.background_panel.into()));
-        border_box.set_border_color(Some(theme.accent.into()));
-        border_box.set_border_sides(BorderSidesConfig {
-            left: true,
-            top: false,
-            right: false,
-            bottom: false,
-        });
-        border_box.set_custom_border_chars(left_border_chars());
-        border_box.render_self(buf, inner_area);
+        wall::render(buf, inner_area, theme.accent, theme.background_panel);
 
         let pad = 3u16;
         let inner_x = area.x + pad;

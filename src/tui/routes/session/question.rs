@@ -6,14 +6,12 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 
 use cosh_tools::question::types::{AnswerItem, QuestionItem, QuestionType};
-use cosh_tui::core::lib::border::{BorderCharacters, BorderSidesConfig};
 use cosh_tui::core::lib::rgba::RGBA;
-use cosh_tui::core::renderable::Renderable;
-use cosh_tui::core::renderables::r#box::BoxRenderable;
 use cosh_tui::core::types::MouseEvent;
 
 use super::super::super::component::cursor::{Cursor, CursorState};
 use super::super::super::theme::Theme;
+use crate::component::wall;
 use crate::theme::rgba_color;
 use crate::util::edit_history::{EditHistory, EditKind, RedoOutcome, UndoOutcome};
 use crate::util::field_selection::DragSelection;
@@ -47,22 +45,6 @@ const CUSTOM_PLACEHOLDER: &str = "Type your custom answer...";
 
 /// Suffix rendered after the recommended `SingleChoice` option.
 const RECOMMENDED_SUFFIX: &str = " (Recommended)";
-
-const fn left_border_chars() -> BorderCharacters {
-    BorderCharacters {
-        top_left: ' ',
-        top_right: ' ',
-        bottom_left: ' ',
-        bottom_right: ' ',
-        horizontal: ' ',
-        vertical: '┃',
-        top_t: ' ',
-        bottom_t: ' ',
-        left_t: '┃',
-        right_t: ' ',
-        cross: ' ',
-    }
-}
 
 /// Precomputed styles used while rendering the review screen.
 struct ReviewStyles {
@@ -2260,18 +2242,7 @@ impl QuestionDialog {
         // is laid out so content never overlaps it.
         let footer_y = inner_area.bottom().saturating_sub(2);
 
-        // Left border + background (matches OpenCode QuestionPrompt style)
-        let mut border_box = BoxRenderable::new();
-        border_box.set_background_color(Some(theme.background_panel.into()));
-        border_box.set_border_color(Some(theme.accent.into()));
-        border_box.set_border_sides(BorderSidesConfig {
-            left: true,
-            top: false,
-            right: true,
-            bottom: false,
-        });
-        border_box.set_custom_border_chars(left_border_chars());
-        border_box.render_self(buf, inner_area);
+        wall::render(buf, inner_area, theme.accent, theme.background_panel);
 
         let pad = 3u16;
         let inner_x = area.x + pad;

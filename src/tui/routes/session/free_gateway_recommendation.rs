@@ -5,12 +5,11 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 
-use cosh_tui::core::lib::border::{BorderCharacters, BorderSidesConfig};
 use cosh_tui::core::renderable::Renderable;
-use cosh_tui::core::renderables::r#box::BoxRenderable;
 use cosh_tui::core::renderables::markdown::estimate_height;
 use cosh_tui::core::types::MouseEvent;
 
+use crate::component::wall;
 use crate::theme::{Theme, rgba_color};
 
 // Content definitions
@@ -44,24 +43,6 @@ pub const PLACEHOLDER: GatewayRecommendationContent = GatewayRecommendationConte
     title: "",
     stream_text: "",
 };
-
-// Layout constants
-
-const fn left_border_chars() -> BorderCharacters {
-    BorderCharacters {
-        top_left: ' ',
-        top_right: ' ',
-        bottom_left: ' ',
-        bottom_right: ' ',
-        horizontal: ' ',
-        vertical: '\u{2503}',
-        top_t: ' ',
-        bottom_t: ' ',
-        left_t: '\u{2503}',
-        right_t: ' ',
-        cross: ' ',
-    }
-}
 
 /// Characters revealed per second during the fake streaming phase.
 const CHARS_PER_SECOND: f64 = 120.0;
@@ -342,18 +323,7 @@ impl FreeGatewayRecommendationDialog {
         let height = self.required_height(area.width).min(area.height);
         let inner_area = Rect::new(area.x, area.y, area.width, height);
 
-        // Left-border bar with panel background (same as permission.rs)
-        let mut border_box = BoxRenderable::new();
-        border_box.set_background_color(Some(theme.background_panel.into()));
-        border_box.set_border_color(Some(theme.accent.into()));
-        border_box.set_border_sides(BorderSidesConfig {
-            left: true,
-            top: false,
-            right: true,
-            bottom: false,
-        });
-        border_box.set_custom_border_chars(left_border_chars());
-        border_box.render_self(buf, inner_area);
+        wall::render(buf, inner_area, theme.accent, theme.background_panel);
 
         let pad = 3u16;
         let inner_x = area.x + pad;
