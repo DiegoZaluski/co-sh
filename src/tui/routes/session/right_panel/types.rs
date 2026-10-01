@@ -267,12 +267,75 @@ pub(crate) fn subagent_visible_body(body: &str) -> &str {
 /// `SubAgentCallOutput` JSON envelope. Rehydration must remove that envelope
 /// so a restart renders the same body as the original live session.
 ///
+/// The THREE render paths for `subagent_call` output (live PTY stream,
+/// completed PTY window, chat + rehydration) MUST agree on how to interpret
+/// a tool result — the leak bugs happened exactly when one path lacked the
+/// unwrapping the others had. This classifier is the single source of that
+/// interpretation; never inline a `serde_json::from_str::<SubAgentCallOutput>`
+/// at a render site.
+pub(crate) enum SubagentOutputShape {
+    /// A background spawn receipt (`stop_reason: "spawned"`): the report
+    /// does not exist yet. The payload is the human-readable pending line.
+    Spawned(String),
+    /// A finished report, unwrapped from its `SubAgentCallOutput` envelope
+    /// or stripped of its push-notification wrapper.
+    Report(String),
+    /// Plain text (bash output, older internal-subagent reports): no
+    /// wrapping to remove.
+    Plain,
+}
+
+fn classify_subagent_output(chunk: &str) -> SubagentOutputShape {
+    // Push-notification body: the wrapper sentence is transport framing,
+    // the report body is the payload.
+    if let Some((_, body)) = chunk
+        .strip_prefix("[automated notification]")
+        .and_then(|rest| rest.split_once("Final report:\n"))
+    {
+        return SubagentOutputShape::Report(body.to_string());
+    }
+    // Tool-result envelope (`SubAgentCallOutput`).
+    if let Ok(env) =
+        serde_json::from_str::<cosh_tools::subagent::SubAgentCallOutput>(chunk)
+    {
+        if env.stop_reason == "spawned" {
+            return SubagentOutputShape::Spawned(format!("⏳ {}", env.output));
+        }
+        return SubagentOutputShape::Report(env.output);
+    }
+    SubagentOutputShape::Plain
+}
+
+/// Unwrap a `subagent_call` tool result for display: the chat's tool part
+/// gets only the streamed text, while the transcript stores the final
+/// `SubAgentCallOutput` JSON envelope. Rehydration must remove that envelope
+/// so a restart renders the same body as the original live session.
+///
 /// Internal subagents and older persisted entries store their report as plain
 /// text, which deliberately passes through unchanged.
 pub(crate) fn subagent_display_output(output: String) -> String {
-    serde_json::from_str::<cosh_tools::subagent::SubAgentCallOutput>(&output)
-        .map(|result| result.output)
-        .unwrap_or(output)
+    match classify_subagent_output(&output) {
+        SubagentOutputShape::Spawned(line) => line,
+        SubagentOutputShape::Report(body) => body,
+        SubagentOutputShape::Plain => {
+            // Defense in depth: a bare spawn receipt (`{"task_id": ...}`, the
+            // pre-envelope shape that older persisted sessions still carry)
+            // would otherwise render as raw JSON in the panel — replace it
+            // with the same human-readable line the current receipts envelop.
+            if let Ok(receipt) = serde_json::from_str::<serde_json::Value>(&output)
+                && receipt.get("task_id").is_some()
+                && receipt.get("output").is_none()
+            {
+                let task_id = receipt["task_id"].as_str().unwrap_or("?");
+                let agent = receipt["agent"].as_str().unwrap_or("sub-agent");
+                return format!(
+                    "Background {agent} spawned (task_id: {task_id}). Waiting for its \
+                     final report (push notification or subagent_status)."
+                );
+            }
+            output
+        }
+    }
 }
 
 /// Parse a plan tool's JSON result into the flat todo list shown in the
@@ -2333,6 +2396,20 @@ impl RightPanelState {
     }
 
     /// Append output for the last running PTY session.
+    /// Live-path unwrapping for subagent sessions: chunks and finished
+    /// outputs arrive through `update_last_pty` BEFORE `complete_last_pty`
+    /// gets them, so the same JSON-envelope/notification unwrapping the
+    /// other paths do must happen here too — otherwise the raw envelope
+    /// lands in the running window (the reported leak). Bash sessions pass
+    /// through untouched.
+    fn subagent_live_chunk(chunk: &str) -> String {
+        match classify_subagent_output(chunk) {
+            SubagentOutputShape::Spawned(line) => line,
+            SubagentOutputShape::Report(body) => body,
+            SubagentOutputShape::Plain => chunk.to_string(),
+        }
+    }
+
     pub fn update_last_pty(&mut self, output: String) {
         let mut found_kind = None;
         if let Some(session) = self
@@ -2346,7 +2423,11 @@ impl RightPanelState {
             } else {
                 Some(SectionKind::Bash)
             };
-            session.output.push_str(&output);
+            if session.command.starts_with("subagent:") {
+                session.output.push_str(&Self::subagent_live_chunk(&output));
+            } else {
+                session.output.push_str(&output);
+            }
             Self::truncate_output(&mut session.output);
             self.pty_gen = self.pty_gen.wrapping_add(1);
         }
@@ -2357,26 +2438,50 @@ impl RightPanelState {
 
     /// Mark the last running PTY session as completed.
     pub fn complete_last_pty(&mut self, final_output: String) {
-        // The severity header sits at the START of the report, but
-        // `truncate_output` keeps only the TAIL — extract BEFORE trimming,
-        // otherwise a large report loses its header.
-        let (severity, _) = cosh_tools::subagent::severity::extract_severity(&final_output);
         let mut final_output = final_output;
-        Self::truncate_output(&mut final_output);
         if let Some(session) = self
             .pty_sessions
             .iter_mut()
             .rev()
             .find(|s| matches!(s.status, PtyStatus::Running))
         {
-            // Review reports declare their outcome in a leading
-            // `<!-- severity: ... -->` header; consume it here (the render
-            // strips the header itself in 3b.2) so the box can tint green/
-            // orange/red. Bash sessions never carry one — the parse returns
-            // None and the box color is untouched.
             if session.is_subagent() {
+                // The tool result of a `subagent_call` arrives JSON-wrapped
+                // (`SubAgentCallOutput`) — classification happens through the
+                // SHARED `classify_subagent_output` (the single source of
+                // envelope/notification interpretation; the leak bugs came
+                // from render paths disagreeing). Two special shapes:
+                //
+                // - A background SPAWN RECEIPT (`stop_reason: "spawned"`):
+                //   the sub-agent's report does not exist yet, so the window
+                //   must NOT complete here. It stays Running (the live
+                //   SubagentEvent mini-chat keeps flowing) — `update_last_pty`
+                //   already appended the readable `⏳` pending line for this
+                //   event — and the later completion notification
+                //   (`subagent_status` ToolOutput) finishes it with the
+                //   actual report.
+                // - A plain report: unwrap, then consume the leading
+                //   severity header (below).
+                match classify_subagent_output(&final_output) {
+                    SubagentOutputShape::Spawned(_) => {
+                        self.pty_gen = self.pty_gen.wrapping_add(1);
+                        self.mark_activity(SectionKind::Subagent);
+                        return;
+                    }
+                    SubagentOutputShape::Report(body) => final_output = body,
+                    SubagentOutputShape::Plain => {}
+                }
+                // Review reports declare their outcome in a leading
+                // `<!-- severity: ... -->` header; consume it here (the render
+                // strips the header itself in 3b.2) so the box can tint
+                // green/orange/red. Extracted from the UNWRAPPED report and
+                // BEFORE the tail-only truncation below, or a large report
+                // would lose its header.
+                let (severity, _) =
+                    cosh_tools::subagent::severity::extract_severity(&final_output);
                 session.severity = severity;
             }
+            Self::truncate_output(&mut final_output);
             session.output = final_output;
             session.status = PtyStatus::Completed;
             session.subagent_activity = SubagentActivity::default();
@@ -2844,6 +2949,57 @@ mod tests {
             state.pty_sessions[0].output, "hello world",
             "expected append, got: {:?}",
             state.pty_sessions[0].output,
+        );
+    }
+
+    /// REGRESSION (leaked spawn envelope): a background `subagent_call`
+    /// receipt arriving through the live ToolOutput path must render as the
+    /// readable ⏳ pending line — never as raw JSON — and must NOT complete
+    /// the window (the report does not exist yet; the completion
+    /// notification finishes it later).
+    #[test]
+    fn update_last_pty_unwraps_subagent_spawn_receipt() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: internal".to_string(), None);
+
+        let receipt = serde_json::json!({
+            "output": "Background sub-agent spawned (task_id: bg-5, agent: internal). \
+                       Its final report will arrive automatically.",
+            "stop_reason": "spawned",
+        })
+        .to_string();
+        state.update_last_pty(receipt);
+        assert_eq!(
+            state.pty_sessions[0].output,
+            "⏳ Background sub-agent spawned (task_id: bg-5, agent: internal). \
+             Its final report will arrive automatically.",
+            "envelope must unwrap to the readable pending line"
+        );
+        assert!(matches!(state.pty_sessions[0].status, PtyStatus::Running));
+    }
+
+    /// The completion notification finishing a still-Running background
+    /// window completes it with the REPORT body only — the
+    /// `[automated notification]` wrapper and the readable receipt line are
+    /// not part of the panel's final output.
+    #[test]
+    fn complete_last_pty_notification_completes_running_background_window() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: internal".to_string(), None);
+        let receipt = serde_json::json!({
+            "output": "Background sub-agent spawned (task_id: bg-5).",
+            "stop_reason": "spawned",
+        })
+        .to_string();
+        state.update_last_pty(receipt);
+
+        let note = "[automated notification] Background sub-agent bg-5 \
+                    (agent=internal) completed.\nFinal report:\n<!-- severity: green -->\nAll done.";
+        state.complete_last_pty(note.to_string());
+        assert!(matches!(state.pty_sessions[0].status, PtyStatus::Completed));
+        assert_eq!(
+            state.pty_sessions[0].output, "<!-- severity: green -->\nAll done.",
+            "wrapper and receipt line must not leak into the panel"
         );
     }
 
