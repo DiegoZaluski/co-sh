@@ -106,7 +106,13 @@ impl PinnedRoot {
         // refers to; a concurrent swap makes the two observations disagree.
         let st_path = std::fs::metadata(&canonical)
             .map_err(|e| inaccessible(canonical.display().to_string(), e))?;
-        if st_fd.st_dev != st_path.dev() || st_fd.st_ino != st_path.ino() {
+        // dev_t is u64 on Linux, i32 on macOS: a plain `as u64` cast compiles
+        // on both. The allows are per-platform by construction —
+        // `cast_sign_loss` only fires on macOS (i32 -> u64),
+        // `unnecessary_cast` only on Linux (u64 -> u64) — so neither can
+        // hide a real narrowing bug on the platform it doesn't apply to.
+        #[allow(clippy::cast_sign_loss, clippy::unnecessary_cast)]
+        if st_fd.st_dev as u64 != st_path.dev() || st_fd.st_ino != st_path.ino() {
             return Err(acp_error(format!(
                 "session workspace '{}' changed while being pinned; retrying",
                 root.display()

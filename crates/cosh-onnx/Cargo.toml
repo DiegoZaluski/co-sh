@@ -2,6 +2,12 @@
 name = "cosh-onnx"
 version = "0.1.0"
 edition = "2024"
+description = "ONNX decision-engine crate for cosh - coding agent for the terminal"
+license = "Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/DiegoZaluski/cosh"
+keywords = ["ai", "coding", "terminal", "agent"]
+categories = ["development-tools"]
 
 [dependencies]
 # Same ort build fastembed 7 selects (features ndarray, std, api-24), so the

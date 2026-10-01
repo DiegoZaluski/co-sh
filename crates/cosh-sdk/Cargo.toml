@@ -6,7 +6,7 @@ keywords = ["terminal", "cli"]
 license = "Apache-2.0"
 name = "cosh-sdk"
 readme = "README.md"
-repository = "https://github.com/DiegoZaluski/cosh"
+repository = "https://github.com/DiegoZaluski/co-sh"
 version = "0.1.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -40,7 +40,12 @@ tree-sitter-python = "0.25"
 tree-sitter-rust = "0.24"
 tree-sitter-swift = "0.7"
 tree-sitter-zig = "1.1"
-tree-sitter-kotlin = "0.4"
+# The upstream `tree-sitter-kotlin` crate is stale on crates.io (0.3.8 predates
+# the `LANGUAGE` const API from tree-sitter 0.23). The fwcd fork declares 0.4.0
+# but was never published, and git deps can't carry a `version` requirement —
+# which `cargo package` mandates. So we ship the maintained WillBooster fork
+# from the registry instead (same pattern as tree-sitter-astro/-svelte/-dockerfile).
+tree-sitter-kotlin = { version = "1.6", package = "willbooster-tree-sitter-kotlin" }
 
 # ast::* — ast-grep structural matching (vendored from oh-my-pi pi-ast/pi-natives).
 # Versions mirror the upstream workspace. `tree-sitter` is unified on the

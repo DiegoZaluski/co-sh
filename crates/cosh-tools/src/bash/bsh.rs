@@ -813,8 +813,10 @@ pub(crate) fn spawn_bash(
 /// from the async timeout handler without requiring a separate monitor
 /// thread:
 ///
-/// 1. A [`libc::pipe2`] is created before [`tokio::task::spawn_blocking`]
-///    is called, giving one fd for each side of the pipe.
+/// 1. A pipe is created before [`tokio::task::spawn_blocking`]
+///    is called, giving one fd for each side of the pipe (via
+///    [`libc::pipe2`]; on macOS, which has no `pipe2`, via
+///    [`libc::pipe`] + `fcntl(F_SETFD, FD_CLOEXEC)`).
 /// 2. The read end (`pipe_rx`) is moved into the blocking task; the write
 ///    end (`pipe_tx`) stays on the async side.
 /// 3. In the blocking task, [`libc::poll`] watches **both** the PTY master
@@ -829,7 +831,7 @@ pub(crate) fn spawn_bash(
 ///
 /// | Location | Call | Invariant |
 /// |---|---|---|
-/// | Stream setup | `pipe2` | `pipe_fds` is a valid pointer to 2 `i32`s |
+/// | Stream setup | `pipe2` (macOS: `pipe` + `fcntl`) | `pipe_fds` is a valid pointer to 2 `i32`s |
 /// | Timeout handler | `write` + `close` on `pipe_tx` | `pipe_tx` is a valid fd, not used after |
 /// | Blocking task | `poll`, `read`, `close` on `pipe_rx` and `pty_fd` | Both fds are valid and open for the lifetime of `poll_fds`; `pipe_rx` is closed once after use |
 /// | Watchdog check | `mem::zeroed` + `tcgetattr` on `pty_fd` | `termios` is a fully-owned stack out-buffer, zeroed before the call; `pty_fd` is valid and open for the loop's lifetime (POSIX: `tcgetattr` on a PTY master reads the attached slave's line discipline) |
@@ -869,9 +871,27 @@ pub(crate) fn spawn_bash_pty(
         // Create a self-pipe before spawn_blocking so the write end
         // (pipe_tx) is accessible from the async timeout handler.
         let mut pipe_fds: [libc::c_int; 2] = [0; 2];
-        // SAFETY: pipe2 is safe per POSIX; fds provides a valid array pointer.
+        // SAFETY: pipe/pipe2 are safe per POSIX; fds provides a valid array
+        // pointer. macOS has no pipe2, so there the CLOEXEC flag is set
+        // after the fact via fcntl(F_SETFD) — before any child exists, so
+        // nothing can inherit the fds in practice (the only theoretical
+        // window is a concurrent exec elsewhere in the process, which this
+        // single-threaded setup point doesn't have).
         let pipe_result = unsafe {
-            libc::pipe2(pipe_fds.as_mut_ptr(), libc::O_CLOEXEC)
+            #[cfg(not(target_os = "macos"))]
+            {
+                libc::pipe2(pipe_fds.as_mut_ptr(), libc::O_CLOEXEC)
+            }
+            #[cfg(target_os = "macos")]
+            {
+                let rc = libc::pipe(pipe_fds.as_mut_ptr());
+                if rc == 0 {
+                    for fd in pipe_fds {
+                        libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+                    }
+                }
+                rc
+            }
         };
         if pipe_result != 0_i32 {
             yield Err(Error::other("failed to create self-pipe for timeout"));

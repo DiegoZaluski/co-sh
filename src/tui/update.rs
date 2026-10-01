@@ -32,7 +32,7 @@ fn mock_release() -> LatestRelease {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// GitHub repo the releases are published under (matches `download.sh`).
-pub const REPO: &str = "DiegoZaluski/cosh";
+pub const REPO: &str = "DiegoZaluski/co-sh";
 
 /// Defense-in-depth for values that come from the GitHub API response and
 /// end up on a shell command line or in a URL: accept only plain release

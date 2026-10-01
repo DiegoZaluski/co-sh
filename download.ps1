@@ -6,26 +6,27 @@
 # Supported Architectures: x86_64 (x64)
 #
 # Usage:
-#   iwr -Uri "https://raw.githubusercontent.com/DiegoZaluski/cosh/main/download.ps1" -OutFile download.ps1; .\download.ps1
+#   iwr -Uri "https://raw.githubusercontent.com/DiegoZaluski/co-sh/main/download.ps1" -OutFile download.ps1; .\download.ps1
 #
 # Environment variables:
 #   $env:COSH_BIN_DIR  - Installation directory (default: $env:USERPROFILE\cosh)
 #   $env:COSH_VERSION  - Specific version to install (e.g., "v0.1.0" or "0.1.0")
-#   $env:COSH_VARIANT  - Package variant: "base" (default) or "embed" (includes fastembed/embed support)
+#   $env:COSH_VARIANT  - Package variant: "slim" (default, no RAG, no Home) or
+#                        "slim-embed" (local RAG via fastembed, no Home)
 #
 # Release artifacts are produced by .github/workflows/release.yml on tag push
-# (v*) and published at github.com/DiegoZaluski/cosh/releases.
+# (v*) and published at github.com/DiegoZaluski/co-sh/releases.
 
 $ErrorActionPreference = "Stop"
 
-$REPO = "DiegoZaluski/cosh"
+$REPO = "DiegoZaluski/co-sh"
 $OUT_FILE = "cosh.exe"
 
 if (-not $env:COSH_BIN_DIR) {
     $env:COSH_BIN_DIR = Join-Path $env:USERPROFILE "cosh"
 }
 
-$COSH_VARIANT = if ($env:COSH_VARIANT) { $env:COSH_VARIANT.ToLowerInvariant() } else { "base" }
+$COSH_VARIANT = if ($env:COSH_VARIANT) { $env:COSH_VARIANT.ToLowerInvariant() } else { "slim" }
 
 # Determine release tag
 if ($env:COSH_VERSION) {
@@ -57,16 +58,17 @@ if ($ARCH -eq "AMD64") {
     exit 1
 }
 
-# Variant note: "embed" builds with the workspace `embed` feature
-# (cosh-tools/embed + fastembed) and is produced by the release workflow
-# alongside the "base" variant.
-if ($COSH_VARIANT -ne "base" -and $COSH_VARIANT -ne "embed") {
-    Write-Error "Unsupported COSH_VARIANT '$COSH_VARIANT'. Expected 'base' or 'embed'."
+# Variant note: both variants are built without the Home screen
+# (--no-default-features). "slim-embed" additionally enables the workspace
+# `embed` feature (cosh-tools/embed + fastembed) for local RAG. Both are
+# produced by the release workflow.
+if ($COSH_VARIANT -ne "slim" -and $COSH_VARIANT -ne "slim-embed") {
+    Write-Error "Unsupported COSH_VARIANT '$COSH_VARIANT'. Expected 'slim' or 'slim-embed'."
     exit 1
 }
 
 $VERSION = $RELEASE_TAG.TrimStart("v")
-$SUFFIX = if ($COSH_VARIANT -eq "embed") { "-embed" } else { "" }
+$SUFFIX = "-$COSH_VARIANT"
 $FILE = "cosh-v${VERSION}-win32-${ARCH}${SUFFIX}.zip"
 $DOWNLOAD_URL = "https://github.com/$REPO/releases/download/$RELEASE_TAG/$FILE"
 
@@ -78,7 +80,7 @@ try {
     Write-Error "Failed to download $DOWNLOAD_URL"
     Write-Host ""
     Write-Host "If you requested a variant, make sure it exists for this release." -ForegroundColor Yellow
-    Write-Host "Try setting `$env:COSH_VARIANT = 'base' or removing the environment variable." -ForegroundColor Yellow
+    Write-Host "Try setting `$env:COSH_VARIANT = 'slim' or removing the environment variable." -ForegroundColor Yellow
     exit 1
 }
 
