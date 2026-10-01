@@ -1,9 +1,9 @@
 //! `router_questions`: preset questions for intelligent model routing.
 
-use serde_json::{json, Map};
+use serde_json::{Map, json};
 
-use super::q;
 use super::Questions;
+use super::q;
 
 pub fn router_questions() -> Questions {
     let mut out = Map::new();

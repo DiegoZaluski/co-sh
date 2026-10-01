@@ -21,11 +21,7 @@ use serde_json::{Map, Value};
 /// The public questions dict shape: question id -> definition.
 pub type Questions = Map<String, Value>;
 
-pub(crate) fn q(
-    qtype: &str,
-    instructions: &str,
-    criteria: Option<Value>,
-) -> Value {
+pub(crate) fn q(qtype: &str, instructions: &str, criteria: Option<Value>) -> Value {
     let mut def = Map::new();
     def.insert("type".to_string(), Value::String(qtype.to_string()));
     def.insert(

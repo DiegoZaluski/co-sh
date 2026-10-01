@@ -71,10 +71,7 @@ pub fn answer_confidence(p: &[f64], k: usize) -> f64 {
         return 1.0;
     }
     let n = k.min(p.len());
-    let max = p[..n]
-        .iter()
-        .cloned()
-        .fold(f64::NEG_INFINITY, f64::max);
+    let max = p[..n].iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     max.clamp(0.0, 1.0)
 }
 

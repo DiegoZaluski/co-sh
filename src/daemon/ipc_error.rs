@@ -73,8 +73,5 @@ pub(crate) enum Lifecycle {
     },
     /// The socket did not appear within the activation window.
     #[error("the {name} daemon never became reachable at {path}")]
-    Timeout {
-        name: &'static str,
-        path: String,
-    },
+    Timeout { name: &'static str, path: String },
 }

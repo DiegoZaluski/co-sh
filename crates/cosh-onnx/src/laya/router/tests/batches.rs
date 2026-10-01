@@ -4,7 +4,6 @@
 
 use super::*;
 
-
 /// One recorded agent call: `(checkpoint, states, questions, batch_size)`
 /// upstream, plus the forwarded `lang` the lang-recording suite reads.
 #[derive(Clone)]
@@ -33,12 +32,15 @@ impl AgentLike for FakeBatchAgent {
         _max_len: Option<usize>,
         _head_max_len: Option<usize>,
     ) -> Result<Vec<Value>> {
-        self.calls.lock().unwrap_or_else(|e| e.into_inner()).push(BatchCall {
-            checkpoint: self.checkpoint.clone(),
-            states: states.to_vec(),
-            questions: questions.clone(),
-            batch_size,
-        });
+        self.calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(BatchCall {
+                checkpoint: self.checkpoint.clone(),
+                states: states.to_vec(),
+                questions: questions.clone(),
+                batch_size,
+            });
         if states.iter().any(|s| s == &json!("raise")) {
             return Err(Error::Runtime("inference failed".to_string()));
         }
@@ -57,7 +59,14 @@ impl AgentLike for FakeBatchAgent {
         head_max_len: Option<usize>,
     ) -> Result<Value> {
         Ok(self
-            .predict_batch(std::slice::from_ref(state), questions, None, lang, max_len, head_max_len)?
+            .predict_batch(
+                std::slice::from_ref(state),
+                questions,
+                None,
+                lang,
+                max_len,
+                head_max_len,
+            )?
             .remove(0))
     }
 }
@@ -76,9 +85,8 @@ impl BatchFixture {
         let calls: Arc<Mutex<Vec<BatchCall>>> = Arc::new(Mutex::new(Vec::new()));
         let recorded_built = Arc::clone(&built);
         let recorded_calls = Arc::clone(&calls);
-        let router = Router::configure(opts)
-            .expect("router")
-            .with_agent_factory(move |_repo, subfolder, _revision| {
+        let router = Router::configure(opts).expect("router").with_agent_factory(
+            move |_repo, subfolder, _revision| {
                 let checkpoint = subfolder.unwrap_or("english").to_string();
                 recorded_built
                     .lock()
@@ -88,8 +96,13 @@ impl BatchFixture {
                     checkpoint,
                     calls: Arc::clone(&recorded_calls),
                 }) as Box<dyn AgentLike>)
-            });
-        Self { router, built, calls }
+            },
+        );
+        Self {
+            router,
+            built,
+            calls,
+        }
     }
 
     fn builds(&self) -> Vec<String> {
@@ -141,7 +154,10 @@ fn mixed_groups_keep_order_and_lru() {
         ];
         let decisions = fx.router.route_batch(&items).expect("route_batch");
         assert!(fx.router.loaded().is_empty(), "route_batch loads nothing");
-        let results = fx.router.predict_batch(&items, None, None).expect("predict_batch");
+        let results = fx
+            .router
+            .predict_batch(&items, None, None)
+            .expect("predict_batch");
         for (result, item) in results.iter().zip(&items) {
             assert_eq!(result["answers"]["seen"], item["state"], "seen {capacity}");
         }
@@ -160,19 +176,32 @@ fn mixed_groups_keep_order_and_lru() {
             vec![
                 (
                     "english".to_string(),
-                    vec![json!("English text one"), json!("English text two"), json!("forced english")]
+                    vec![
+                        json!("English text one"),
+                        json!("English text two"),
+                        json!("forced english")
+                    ]
                 ),
-                ("multilingual".to_string(), vec![json!("مرحبا"), json!("forced")]),
+                (
+                    "multilingual".to_string(),
+                    vec![json!("مرحبا"), json!("forced")]
+                ),
                 ("typed-decisions".to_string(), vec![json!("decision")]),
                 ("typed-decisions".to_string(), vec![json!("explicit task")]),
             ],
             "calls {capacity}"
         );
         assert!(
-            fx.router.predict_batch(&[], None, None).expect("empty").is_empty(),
+            fx.router
+                .predict_batch(&[], None, None)
+                .expect("empty")
+                .is_empty(),
             "predict_many([])"
         );
-        assert!(fx.router.route_batch(&[]).expect("empty").is_empty(), "route_batch(())");
+        assert!(
+            fx.router.route_batch(&[]).expect("empty").is_empty(),
+            "route_batch(())"
+        );
     }
 }
 
@@ -196,7 +225,10 @@ fn invalid_batches_fail_before_loading() {
             "request 1 'questions'",
         ),
         (
-            json!([request("x"), request_with("y", &[("model", json!("invalid"))])]),
+            json!([
+                request("x"),
+                request_with("y", &[("model", json!("invalid"))])
+            ]),
             "unknown model",
         ),
     ];
@@ -204,23 +236,38 @@ fn invalid_batches_fail_before_loading() {
         let items: Vec<Value> = items.as_array().expect("array").clone();
         let fx = BatchFixture::new(RouterOptions::default());
         let err = fx.router.predict_batch(&items, None, None).unwrap_err();
-        assert!(matches!(err, Error::Value(_)), "error kind for {fragment}: {err:?}");
-        assert!(err.to_string().contains(fragment), "message for {fragment}: {err}");
+        assert!(
+            matches!(err, Error::Value(_)),
+            "error kind for {fragment}: {err:?}"
+        );
+        assert!(
+            err.to_string().contains(fragment),
+            "message for {fragment}: {err}"
+        );
         assert!(fx.builds().is_empty(), "nothing built for {fragment}");
-        assert!(fx.router.loaded().is_empty(), "nothing loaded for {fragment}");
+        assert!(
+            fx.router.loaded().is_empty(),
+            "nothing loaded for {fragment}"
+        );
     }
 }
 
 #[test]
 fn inference_exception_propagates_and_cache_remains_consistent() {
-    let fx = BatchFixture::new(RouterOptions { max_loaded: Some(1), ..Default::default() });
+    let fx = BatchFixture::new(RouterOptions {
+        max_loaded: Some(1),
+        ..Default::default()
+    });
     let items = vec![
         request("first"),
         request_with("raise", &[("lang", json!("ar"))]),
         request_with("unreached", &[("lang", json!("ar"))]),
     ];
     let err = fx.router.predict_batch(&items, None, None).unwrap_err();
-    assert!(err.to_string().contains("inference failed"), "propagates: {err:?}");
+    assert!(
+        err.to_string().contains("inference failed"),
+        "propagates: {err:?}"
+    );
     assert_eq!(fx.builds(), strings(&["english", "multilingual"]));
     let observed: Vec<(String, Vec<Value>)> = fx
         .calls_snapshot()
@@ -231,7 +278,10 @@ fn inference_exception_propagates_and_cache_remains_consistent() {
         observed,
         vec![
             ("english".to_string(), vec![json!("first")]),
-            ("multilingual".to_string(), vec![json!("raise"), json!("unreached")]),
+            (
+                "multilingual".to_string(),
+                vec![json!("raise"), json!("unreached")]
+            ),
         ]
     );
     assert_eq!(fx.router.loaded(), strings(&["multilingual"]));
@@ -250,7 +300,10 @@ fn inference_exception_propagates_and_cache_remains_consistent() {
         .predict(
             &json!("after failure"),
             &q_batch(),
-            &PredictOptions { lang: Some("ar"), ..Default::default() },
+            &PredictOptions {
+                lang: Some("ar"),
+                ..Default::default()
+            },
         )
         .expect("predict after failure");
     assert_eq!(out["answers"]["seen"], json!("after failure"));
@@ -258,7 +311,10 @@ fn inference_exception_propagates_and_cache_remains_consistent() {
 
 #[test]
 fn warm_cache_and_repeated_batches() {
-    let fx = BatchFixture::new(RouterOptions { max_loaded: Some(2), ..Default::default() });
+    let fx = BatchFixture::new(RouterOptions {
+        max_loaded: Some(2),
+        ..Default::default()
+    });
     fx.router.load("multilingual").expect("load");
     let result = fx
         .router
@@ -272,7 +328,10 @@ fn warm_cache_and_repeated_batches() {
             None,
         )
         .expect("predict_batch");
-    let seen: Vec<Value> = result.iter().map(|r| r["answers"]["seen"].clone()).collect();
+    let seen: Vec<Value> = result
+        .iter()
+        .map(|r| r["answers"]["seen"].clone())
+        .collect();
     assert_eq!(seen, vec![json!("en"), json!("ar"), json!("en again")]);
     assert_eq!(fx.builds(), strings(&["multilingual", "english"]));
     assert_eq!(fx.router.loaded(), strings(&["english", "multilingual"]));
@@ -291,26 +350,41 @@ fn warm_cache_and_repeated_batches() {
 
 #[test]
 fn same_checkpoint_same_questions_uses_one_agent_batch() {
-    let fx = BatchFixture::new(RouterOptions { max_loaded: Some(2), ..Default::default() });
+    let fx = BatchFixture::new(RouterOptions {
+        max_loaded: Some(2),
+        ..Default::default()
+    });
     let items = vec![
         request_with("one", &[("model", json!("english"))]),
         request_with("two", &[("model", json!("english"))]),
         request_with("three", &[("model", json!("english"))]),
     ];
-    let results = fx.router.predict_batch(&items, Some(2), None).expect("predict_batch");
-    let seen: Vec<Value> = results.iter().map(|r| r["answers"]["seen"].clone()).collect();
+    let results = fx
+        .router
+        .predict_batch(&items, Some(2), None)
+        .expect("predict_batch");
+    let seen: Vec<Value> = results
+        .iter()
+        .map(|r| r["answers"]["seen"].clone())
+        .collect();
     assert_eq!(seen, vec![json!("one"), json!("two"), json!("three")]);
     let calls = fx.calls_snapshot();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].checkpoint, "english");
-    assert_eq!(calls[0].states, vec![json!("one"), json!("two"), json!("three")]);
+    assert_eq!(
+        calls[0].states,
+        vec![json!("one"), json!("two"), json!("three")]
+    );
     assert_eq!(calls[0].questions, q_batch());
     assert_eq!(calls[0].batch_size, Some(2));
 }
 
 #[test]
 fn same_checkpoint_different_questions_split_agent_batches() {
-    let fx = BatchFixture::new(RouterOptions { max_loaded: Some(2), ..Default::default() });
+    let fx = BatchFixture::new(RouterOptions {
+        max_loaded: Some(2),
+        ..Default::default()
+    });
     let q2 = json!({"risk": {"type": "noul", "instructions": "Risky?"}})
         .as_object()
         .unwrap()
@@ -320,8 +394,14 @@ fn same_checkpoint_different_questions_split_agent_batches() {
         json!({"state": "two", "questions": Value::Object(q2.clone()), "model": "english"}),
         json!({"state": "three", "questions": Value::Object(q_batch()), "model": "english"}),
     ];
-    let results = fx.router.predict_batch(&items, None, None).expect("predict_batch");
-    let seen: Vec<Value> = results.iter().map(|r| r["answers"]["seen"].clone()).collect();
+    let results = fx
+        .router
+        .predict_batch(&items, None, None)
+        .expect("predict_batch");
+    let seen: Vec<Value> = results
+        .iter()
+        .map(|r| r["answers"]["seen"].clone())
+        .collect();
     assert_eq!(seen, vec![json!("one"), json!("two"), json!("three")]);
     let calls = fx.calls_snapshot();
     assert_eq!(calls.len(), 2);
@@ -348,7 +428,10 @@ fn predict_batch_honours_hooks_timeout() {
         on_predict_start: Some(Arc::clone(&slow_hook)),
         ..Default::default()
     });
-    let err = fx.router.predict_batch(&[request("one")], None, None).unwrap_err();
+    let err = fx
+        .router
+        .predict_batch(&[request("one")], None, None)
+        .unwrap_err();
     assert!(
         matches!(err, Error::Timeout(_)),
         "a slow on_predict_start times out: {err:?}"
@@ -360,7 +443,10 @@ fn predict_batch_honours_hooks_timeout() {
         on_predict_start: Some(slow_hook),
         ..Default::default()
     });
-    let results = fx.router.predict_batch(&[request("one")], None, Some(5.0)).expect("override");
+    let results = fx
+        .router
+        .predict_batch(&[request("one")], None, Some(5.0))
+        .expect("override");
     assert_eq!(results.len(), 1);
 }
 
@@ -399,7 +485,10 @@ fn equal_questions_with_different_option_order_score_separately() {
         json!({"state": "one", "questions": ordered}),
         json!({"state": "two", "questions": reordered}),
     ];
-    let results = fx.router.predict_batch(&requests, None, None).expect("predict_batch");
+    let results = fx
+        .router
+        .predict_batch(&requests, None, None)
+        .expect("predict_batch");
     assert_eq!(results.len(), 2);
     // separate agent calls, each carrying its own caller's option order
     let orders: Vec<Vec<String>> = fx
@@ -414,7 +503,10 @@ fn equal_questions_with_different_option_order_score_separately() {
                 .collect()
         })
         .collect();
-    assert_eq!(orders, [vec!["zulu", "alpha"], vec!["alpha", "zulu"]].map(strings2));
+    assert_eq!(
+        orders,
+        [vec!["zulu", "alpha"], vec!["alpha", "zulu"]].map(strings2)
+    );
 }
 
 fn strings2(values: Vec<&str>) -> Vec<String> {
@@ -568,13 +660,24 @@ fn predict_and_predict_batch_pass_the_same_lang() {
         .predict(
             &json!("a"),
             &q_batch(),
-            &PredictOptions { model: Some("english"), lang: Some("de"), ..Default::default() },
+            &PredictOptions {
+                model: Some("english"),
+                lang: Some("de"),
+                ..Default::default()
+            },
         )
         .expect("predict");
     let via_predict = fx.snapshot().last().expect("call").1.clone();
     fx.calls.lock().unwrap_or_else(|e| e.into_inner()).clear();
     fx.router
-        .predict_batch(&[request_with("a", &[("model", json!("english")), ("lang", json!("de"))])], None, None)
+        .predict_batch(
+            &[request_with(
+                "a",
+                &[("model", json!("english")), ("lang", json!("de"))],
+            )],
+            None,
+            None,
+        )
         .expect("predict_batch");
     let via_batch = fx.snapshot().last().expect("call").1.clone();
     assert_eq!(via_batch, via_predict, "predict and predict_batch agree");
@@ -588,19 +691,22 @@ fn concurrent_batch_load_deduplicates() {
     // 10 ms construction sleep widens the check-then-build window.
     let built: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let recorded = Arc::clone(&built);
-    let router = Router::configure(RouterOptions { max_loaded: Some(2), ..Default::default() })
-        .expect("router")
-        .with_agent_factory(move |_repo, subfolder, _revision| {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-            recorded
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push(subfolder.unwrap_or("english").to_string());
-            Ok(Box::new(FakeBatchAgent {
-                checkpoint: subfolder.unwrap_or("english").to_string(),
-                calls: Arc::new(Mutex::new(Vec::new())),
-            }) as Box<dyn AgentLike>)
-        });
+    let router = Router::configure(RouterOptions {
+        max_loaded: Some(2),
+        ..Default::default()
+    })
+    .expect("router")
+    .with_agent_factory(move |_repo, subfolder, _revision| {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        recorded
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(subfolder.unwrap_or("english").to_string());
+        Ok(Box::new(FakeBatchAgent {
+            checkpoint: subfolder.unwrap_or("english").to_string(),
+            calls: Arc::new(Mutex::new(Vec::new())),
+        }) as Box<dyn AgentLike>)
+    });
     let start = std::sync::Barrier::new(8);
     let results: std::sync::Mutex<Vec<Vec<Value>>> = std::sync::Mutex::new(Vec::new());
     std::thread::scope(|scope| {

@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use cosh_onnx::decision::model::{DecisionModel, LoadOptions, ModelKind};
 use cosh_onnx::error::{Error, Result};
@@ -40,10 +40,7 @@ impl DecisionModel for ExternalModel {
             .push(questions.clone());
         let mut answers = Map::new();
         for qid in questions.keys() {
-            answers.insert(
-                qid.clone(),
-                json!({"type": "choice", "choice": "external"}),
-            );
+            answers.insert(qid.clone(), json!({"type": "choice", "choice": "external"}));
         }
         Ok(json!({"model": "external", "answers": answers}))
     }
@@ -52,11 +49,14 @@ impl DecisionModel for ExternalModel {
 #[test]
 fn a_second_backend_can_implement_the_trait() {
     let model: Arc<dyn DecisionModel> = Arc::new(ExternalModel::default());
-    let questions = json!({"dept": {"type": "choice", "instructions": "Which?", "criteria": {"a": null}}})
-        .as_object()
-        .unwrap()
-        .clone();
-    let out = model.decide(&json!("state"), &questions, None, None, None).unwrap();
+    let questions =
+        json!({"dept": {"type": "choice", "instructions": "Which?", "criteria": {"a": null}}})
+            .as_object()
+            .unwrap()
+            .clone();
+    let out = model
+        .decide(&json!("state"), &questions, None, None, None)
+        .unwrap();
     assert_eq!(out["answers"]["dept"]["choice"], json!("external"));
     assert_eq!(model.model_id(), "external/test-model");
     assert_eq!(model.revision(), None);
@@ -65,10 +65,11 @@ fn a_second_backend_can_implement_the_trait() {
 #[test]
 fn the_default_predict_batch_keeps_input_order() {
     let model: Arc<dyn DecisionModel> = Arc::new(ExternalModel::default());
-    let questions = json!({"dept": {"type": "choice", "instructions": "Which?", "criteria": {"a": null}}})
-        .as_object()
-        .unwrap()
-        .clone();
+    let questions =
+        json!({"dept": {"type": "choice", "instructions": "Which?", "criteria": {"a": null}}})
+            .as_object()
+            .unwrap()
+            .clone();
     let states = vec![json!("one"), json!("two"), json!("three")];
     let results = model
         .predict_batch(&states, &questions, None, None, None, None)
@@ -134,10 +135,13 @@ fn model_kind_name_and_hash_map_options_stay_backend_agnostic() {
         subfolder: Some("multilingual".to_string()),
     };
     assert_eq!(kind.name(), None);
-    assert_eq!(kind, ModelKind::Custom {
-        repo: "./checkpoints/laya".to_string(),
-        subfolder: Some("multilingual".to_string()),
-    });
+    assert_eq!(
+        kind,
+        ModelKind::Custom {
+            repo: "./checkpoints/laya".to_string(),
+            subfolder: Some("multilingual".to_string()),
+        }
+    );
     let mut digests = HashMap::new();
     digests.insert("laya.onnx".to_string(), "deadbeef".to_string());
     let options = LoadOptions {

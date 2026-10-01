@@ -24,22 +24,38 @@ fn typed_decision_workflow_signatures() {
     );
 
     let td: &[(&str, &[&str])] = &[
-        ("agent_trace_observability", &["action", "needs_review", "outcome", "risk", "urgency"]),
-        ("customer_service", &["action", "category", "churn_risk", "needs_human", "urgency"]),
+        (
+            "agent_trace_observability",
+            &["action", "needs_review", "outcome", "risk", "urgency"],
+        ),
+        (
+            "customer_service",
+            &["action", "category", "churn_risk", "needs_human", "urgency"],
+        ),
         (
             "invoice_processing",
-            &["discrepancy_severity", "disposition", "duplicate", "matches_order", "urgency"],
+            &[
+                "discrepancy_severity",
+                "disposition",
+                "duplicate",
+                "matches_order",
+                "urgency",
+            ],
         ),
         (
             "security_incidents",
-            &["credential_compromise", "disposition", "severity", "true_positive", "urgency"],
+            &[
+                "credential_compromise",
+                "disposition",
+                "severity",
+                "true_positive",
+                "urgency",
+            ],
         ),
     ];
     for (wf, ids) in td {
-        let questions: Map<String, Value> = ids
-            .iter()
-            .map(|id| (id.to_string(), json!({})))
-            .collect();
+        let questions: Map<String, Value> =
+            ids.iter().map(|id| (id.to_string(), json!({}))).collect();
         assert_eq!(
             match_typed_decisions_workflow(&questions),
             Some(*wf),
@@ -47,7 +63,12 @@ fn typed_decision_workflow_signatures() {
         );
     }
     assert_eq!(
-        match_typed_decisions_workflow(&json!({"urgency": {}, "category": {}}).as_object().unwrap().clone()),
+        match_typed_decisions_workflow(
+            &json!({"urgency": {}, "category": {}})
+                .as_object()
+                .unwrap()
+                .clone()
+        ),
         None,
         "workflow/partial overlap"
     );
@@ -96,19 +117,24 @@ fn name_normalisation_and_aliases() {
     );
 }
 
-
 // ------------------------------------------------- bundle vs standalone
 #[test]
 fn bundle_and_standalone_model_maps() {
     let defaults = super::default_models();
     let standalone = super::standalone_models();
     assert_eq!(
-        defaults.iter().find(|(k, _)| *k == "english").map(|(_, v)| v.clone()),
+        defaults
+            .iter()
+            .find(|(k, _)| *k == "english")
+            .map(|(_, v)| v.clone()),
         Some(super::ModelSpec::Repo(super::BUNDLE_REPO.to_string())),
         "bundle/english is repo root"
     );
     assert_eq!(
-        defaults.iter().find(|(k, _)| *k == "multilingual").map(|(_, v)| v.clone()),
+        defaults
+            .iter()
+            .find(|(k, _)| *k == "multilingual")
+            .map(|(_, v)| v.clone()),
         Some(super::ModelSpec::Bundled(
             super::BUNDLE_REPO.to_string(),
             "multilingual".to_string()
@@ -116,7 +142,10 @@ fn bundle_and_standalone_model_maps() {
         "bundle/multilingual subfolder"
     );
     assert_eq!(
-        defaults.iter().find(|(k, _)| *k == "typed-decisions").map(|(_, v)| v.clone()),
+        defaults
+            .iter()
+            .find(|(k, _)| *k == "typed-decisions")
+            .map(|(_, v)| v.clone()),
         Some(super::ModelSpec::Bundled(
             super::BUNDLE_REPO.to_string(),
             "typed-decisions".to_string()
@@ -146,17 +175,21 @@ fn bundle_and_standalone_model_maps() {
     let mut standalone_names: Vec<&str> = standalone.iter().map(|(k, _)| *k).collect();
     default_names.sort();
     standalone_names.sort();
-    assert_eq!(
-        standalone_names, default_names,
-        "standalone map complete"
-    );
+    assert_eq!(standalone_names, default_names, "standalone map complete");
 
     let r_bundle = Router::new().expect("router");
-    let r_alone = Router::configure(RouterOptions { standalone_repos: true, ..Default::default() })
-        .expect("router");
+    let r_alone = Router::configure(RouterOptions {
+        standalone_repos: true,
+        ..Default::default()
+    })
+    .expect("router");
     assert_eq!(
         r_bundle
-            .route(&json!({"m": "मुझसे दो बार"}), Some(&q_generic()), &RouteOptions::default())
+            .route(
+                &json!({"m": "मुझसे दो बार"}),
+                Some(&q_generic()),
+                &RouteOptions::default()
+            )
             .expect("route")
             .repo,
         "convaiinnovations/laya/multilingual",
@@ -164,7 +197,11 @@ fn bundle_and_standalone_model_maps() {
     );
     assert_eq!(
         r_alone
-            .route(&json!({"m": "मुझसे दो बार"}), Some(&q_generic()), &RouteOptions::default())
+            .route(
+                &json!({"m": "मुझसे दो बार"}),
+                Some(&q_generic()),
+                &RouteOptions::default()
+            )
             .expect("route")
             .repo,
         "convaiinnovations/laya-multilingual",
@@ -185,19 +222,28 @@ fn bundle_and_standalone_model_maps() {
     // a local-path override must still work (the Space and tests rely on it)
     let r_local = Router::configure(RouterOptions {
         models: vec![
-            ("english".to_string(), super::ModelSpec::Repo("/tmp/en".to_string())),
-            ("multilingual".to_string(), super::ModelSpec::Repo("/tmp/ml".to_string())),
+            (
+                "english".to_string(),
+                super::ModelSpec::Repo("/tmp/en".to_string()),
+            ),
+            (
+                "multilingual".to_string(),
+                super::ModelSpec::Repo("/tmp/ml".to_string()),
+            ),
         ],
         ..Default::default()
     })
     .expect("router");
     assert_eq!(
         r_local
-            .route(&json!({"m": "मुझसे दो बार"}), Some(&q_generic()), &RouteOptions::default())
+            .route(
+                &json!({"m": "मुझसे दो बार"}),
+                Some(&q_generic()),
+                &RouteOptions::default()
+            )
             .expect("route")
             .repo,
         "/tmp/ml",
         "override/local path kept"
     );
 }
-

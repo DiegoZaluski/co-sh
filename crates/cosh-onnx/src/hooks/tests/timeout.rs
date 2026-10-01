@@ -31,9 +31,14 @@ fn an_overrunning_hook_raises_timeout_error() {
     let err = agent
         .system_one(&json!("s0"), &questions(), None, None, None, &per_call)
         .unwrap_err();
-    assert!(matches!(err, Error::Timeout(ref m) if m.contains("exceeded")), "{}", err);
     assert!(
-        err.to_string().contains("cosh-onnx: hook slow_hook exceeded 0.05s"),
+        matches!(err, Error::Timeout(ref m) if m.contains("exceeded")),
+        "{}",
+        err
+    );
+    assert!(
+        err.to_string()
+            .contains("cosh-onnx: hook slow_hook exceeded 0.05s"),
         "{}",
         err
     );
@@ -159,14 +164,16 @@ fn validate_timeout_rejects_non_positive_values() {
     assert!(err.to_string().contains("hooks_timeout must be a positive"));
 }
 
-
 // ------------------------------------------------- timeout edge cases (review R1)
 #[test]
 fn validate_timeout_accepts_infinity_as_no_limit() {
     let _registry = registry_isolation();
     // Upstream accepts any positive float; an infinite wait is what None
     // means (and avoids the Duration conversion panic).
-    assert_eq!(crate::hooks::validate_timeout(Some(f64::INFINITY)).unwrap(), None);
+    assert_eq!(
+        crate::hooks::validate_timeout(Some(f64::INFINITY)).unwrap(),
+        None
+    );
     // A huge finite timeout is also just "no limit" for our purposes.
     assert_eq!(crate::hooks::validate_timeout(Some(1.0e300)).unwrap(), None);
     // NaN is rejected with the same validation error, rendered like repr().
@@ -242,7 +249,14 @@ fn a_timeout_while_another_thread_holds_the_lock_times_out_cleanly() {
     let holder: SharedHook = Arc::clone(&slow);
     let holder = std::thread::spawn(move || {
         let mut ctx = PredictContext::new(vec![], Map::new(), None, None, None);
-        dispatch(&[holder], HookEvent::PredictStart, &mut ctx, true, Some(&holder_lock), None)
+        dispatch(
+            &[holder],
+            HookEvent::PredictStart,
+            &mut ctx,
+            true,
+            Some(&holder_lock),
+            None,
+        )
     });
     std::thread::sleep(Duration::from_millis(50));
     let mut ctx = PredictContext::new(vec![], Map::new(), None, None, None);
@@ -263,7 +277,13 @@ fn a_timeout_while_another_thread_holds_the_lock_times_out_cleanly() {
     holder.join().unwrap().unwrap();
     // The lock is still usable after the timeout window.
     let mut ctx = PredictContext::new(vec![], Map::new(), None, None, None);
-    dispatch(&[Arc::clone(&slow)], HookEvent::PredictStart, &mut ctx, true, Some(&lock), None)
-        .unwrap();
+    dispatch(
+        &[Arc::clone(&slow)],
+        HookEvent::PredictStart,
+        &mut ctx,
+        true,
+        Some(&lock),
+        None,
+    )
+    .unwrap();
 }
-

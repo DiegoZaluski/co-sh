@@ -14,7 +14,11 @@ fn prediction_agent(
         cfg.as_object().unwrap().clone(),
         Box::new(FakeTok),
         Box::new(StubSession {
-            logits: vec![vec![0.0, 1.0, -1e4], vec![0.0, 1.0, 2.0], vec![0.0, 1.0, -1e4]],
+            logits: vec![
+                vec![0.0, 1.0, -1e4],
+                vec![0.0, 1.0, 2.0],
+                vec![0.0, 1.0, -1e4],
+            ],
             act_logits: vec![vec![0.0, 0.0], vec![0.0, 0.0], vec![0.0, 0.0]],
         }),
         temperature,
@@ -32,7 +36,9 @@ fn assert_predictions(agent: &mut OnnxAgent, choice: f64, score: f64, noul: f64)
     .as_object()
     .unwrap()
     .clone();
-    let out = agent.infer(&json!("hello"), &questions, None, None, None).unwrap();
+    let out = agent
+        .infer(&json!("hello"), &questions, None, None, None)
+        .unwrap();
     let answers = &out["answers"];
     // softmax(arange(k) / temperature): the choice (k=2) and noul (k=2) read
     // the same row shape, the score (k=3) the wider one.

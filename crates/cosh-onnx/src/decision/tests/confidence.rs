@@ -4,8 +4,8 @@
 use serde_json::json;
 
 use crate::decision::confidence::{
-    answer_confidence, clamp_temperature_default, confidence_from_probs, ece_score, temp_bucket,
-    TEMP_MAX, TEMP_MIN,
+    TEMP_MAX, TEMP_MIN, answer_confidence, clamp_temperature_default, confidence_from_probs,
+    ece_score, temp_bucket,
 };
 
 // --------------------------------------------------------------- calibration boundaries
@@ -50,7 +50,11 @@ fn answer_confidence_is_max_of_first_k() {
         vec![1.0, 0.0, 0.0],
     ] {
         let want = probs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        assert!((answer_confidence(&probs, probs.len()) - want).abs() <= 1e-9, "{:?}", probs);
+        assert!(
+            (answer_confidence(&probs, probs.len()) - want).abs() <= 1e-9,
+            "{:?}",
+            probs
+        );
     }
 
     // only the first k entries count
@@ -156,7 +160,11 @@ fn entropy_formula() {
             })
             .sum();
         let want = (1.0 - entropy / (k as f64).ln()).clamp(0.0, 1.0);
-        assert!((confidence_from_probs(&probs, k) - want).abs() <= 1e-9, "k={}", k);
+        assert!(
+            (confidence_from_probs(&probs, k) - want).abs() <= 1e-9,
+            "k={}",
+            k
+        );
     }
 }
 
@@ -171,7 +179,9 @@ struct NumpyRng {
 
 impl NumpyRng {
     fn new(seed: u64) -> Self {
-        Self { state: seed ^ 0x9E3779B97F4A7C15 }
+        Self {
+            state: seed ^ 0x9E3779B97F4A7C15,
+        }
     }
 
     fn random(&mut self) -> f64 {

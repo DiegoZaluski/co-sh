@@ -5,11 +5,9 @@
 //! all `pub`, and this prelude is a convenience, not a boundary.
 
 pub use crate::decision::confidence::{answer_confidence, confidence_from_probs, ece_score};
-pub use crate::decision::model::{
-    DecisionModel, LoadOptions, ModelKind, Prediction, AgentLike,
-};
+pub use crate::decision::model::{AgentLike, DecisionModel, LoadOptions, ModelKind, Prediction};
 pub use crate::decision::question::{QTYPES, render_options, to_internal};
-pub use crate::decision::schema::{decide, DecisionResult};
+pub use crate::decision::schema::{DecisionResult, decide};
 pub use crate::error::{Error, Result};
 pub use crate::hooks::{Hook, PredictContext, PredictHook};
 pub use crate::lang::{analyse as detect_language, detect_script, is_english};
@@ -19,4 +17,4 @@ pub use crate::laya::presets::{
     email_questions, guard_questions, moderation_questions, router_questions, triage_questions,
 };
 pub use crate::laya::router::{ModelSpec, RouteDecision, RouteOptions, Router, RouterOptions};
-pub use crate::shortlist::{cached_embed_fn, predict_shortlist, shortlist_choice, EmbedFn};
+pub use crate::shortlist::{EmbedFn, cached_embed_fn, predict_shortlist, shortlist_choice};

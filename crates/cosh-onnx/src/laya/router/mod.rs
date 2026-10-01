@@ -69,7 +69,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::decision::question::json_type_name;
 use crate::error::{Error, Result};
@@ -77,10 +77,8 @@ use crate::pycompat::{py_repr_str, py_repr_value};
 
 pub use crate::decision::model::AgentLike;
 use crate::decision::model::SharedAgent;
-use crate::hooks::{
-    self, compose_hooks, dispatch, HookEvent, PerCall, PredictContext, SharedHook,
-};
-use crate::lang::{analyse, Analysis};
+use crate::hooks::{self, HookEvent, PerCall, PredictContext, SharedHook, compose_hooks, dispatch};
+use crate::lang::{Analysis, analyse};
 
 /// The hub repo bundles all three checkpoints; only the requested subfolder
 /// is downloaded.
@@ -106,7 +104,10 @@ pub fn default_models() -> Vec<(&'static str, ModelSpec)> {
 /// prefers them (`STANDALONE_MODELS`).
 pub fn standalone_models() -> Vec<(&'static str, ModelSpec)> {
     vec![
-        ("english", ModelSpec::Repo("convaiinnovations/laya".to_string())),
+        (
+            "english",
+            ModelSpec::Repo("convaiinnovations/laya".to_string()),
+        ),
         (
             "multilingual",
             ModelSpec::Repo("convaiinnovations/laya-multilingual".to_string()),
@@ -172,8 +173,16 @@ const KNOWN_SORTED: [&str; 3] = ["english", "multilingual", "typed-decisions"];
 
 /// `sorted(_ALIASES)` — for the unknown-model message.
 const ALIASES_SORTED: [&str; 10] = [
-    "decisions", "default", "en", "laya", "laya-multilingual", "laya-typed-decisions", "ml",
-    "multi", "typed", "typed_decisions",
+    "decisions",
+    "default",
+    "en",
+    "laya",
+    "laya-multilingual",
+    "laya-typed-decisions",
+    "ml",
+    "multi",
+    "typed",
+    "typed_decisions",
 ];
 
 /// `normalise_name`: strip, lower, resolve aliases, require a known name.
@@ -210,11 +219,23 @@ const TYPED_DECISION_WORKFLOWS: [(&str, &[&str]); 4] = [
     ),
     (
         "invoice_processing",
-        &["discrepancy_severity", "disposition", "duplicate", "matches_order", "urgency"],
+        &[
+            "discrepancy_severity",
+            "disposition",
+            "duplicate",
+            "matches_order",
+            "urgency",
+        ],
     ),
     (
         "security_incidents",
-        &["credential_compromise", "disposition", "severity", "true_positive", "urgency"],
+        &[
+            "credential_compromise",
+            "disposition",
+            "severity",
+            "true_positive",
+            "urgency",
+        ],
     ),
 ];
 
@@ -403,8 +424,7 @@ fn detection_value(det: &Analysis) -> Value {
     );
     map.insert(
         "non_latin_fraction".to_string(),
-        serde_json::Number::from_f64(det.non_latin_fraction)
-            .map_or(Value::Null, Value::Number),
+        serde_json::Number::from_f64(det.non_latin_fraction).map_or(Value::Null, Value::Number),
     );
     map.insert(
         "mixed_segment".to_string(),
@@ -452,7 +472,6 @@ pub struct RouterOptions {
     pub hooks_concurrent: Option<bool>,
     pub hooks_timeout: Option<f64>,
 }
-
 
 /// Builds the agent for one checkpoint: `(repo_or_path, subfolder,
 /// resolved_revision)`. Swappable so tests can stand a stub in for
@@ -579,11 +598,14 @@ impl Router {
         let hooks_raise = opts.hooks_raise.unwrap_or(true);
         let hooks_concurrent = opts.hooks_concurrent.unwrap_or(true);
         let hooks_timeout = hooks::validate_timeout(opts.hooks_timeout)?;
-        let mut models: Vec<(String, ModelSpec)> =
-            if opts.standalone_repos { standalone_models() } else { default_models() }
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), v))
-                .collect();
+        let mut models: Vec<(String, ModelSpec)> = if opts.standalone_repos {
+            standalone_models()
+        } else {
+            default_models()
+        }
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
         for (k, v) in opts.models {
             let key = normalise_name(&k)?;
             match models.iter_mut().find(|(name, _)| name == key) {
@@ -626,9 +648,9 @@ impl Router {
     pub fn with_agent_factory(
         mut self,
         factory: impl Fn(&str, Option<&str>, Option<&str>) -> Result<Box<dyn AgentLike>>
-            + Send
-            + Sync
-            + 'static,
+        + Send
+        + Sync
+        + 'static,
     ) -> Self {
         self.factory = Arc::new(factory);
         self
@@ -703,7 +725,8 @@ impl Router {
         // Lifecycle hooks fire after the lock is released, so a hook can
         // safely call the Router.
         self.dispatch_lifecycle(HookEvent::Evict, &evicted)?;
-        let mut ctx = PredictContext::new(Vec::new(), Map::new(), Some(key.to_string()), None, None);
+        let mut ctx =
+            PredictContext::new(Vec::new(), Map::new(), Some(key.to_string()), None, None);
         dispatch(
             &compose_hooks(&self.hooks, &PerCall::default()),
             HookEvent::Load,
@@ -812,7 +835,10 @@ impl Router {
                 .iter()
                 .map(|(k, _)| normalise_name(k))
                 .collect::<Result<_>>()?,
-            Some(names) => names.iter().map(|n| normalise_name(n)).collect::<Result<_>>()?,
+            Some(names) => names
+                .iter()
+                .map(|n| normalise_name(n))
+                .collect::<Result<_>>()?,
         };
         {
             let lc = self.lock_lifecycle();
@@ -852,7 +878,11 @@ impl Router {
                     if let Some(pos) = lc.order.iter().position(|k| k == key) {
                         lc.order.remove(pos);
                     }
-                    if existed { vec![key.to_string()] } else { Vec::new() }
+                    if existed {
+                        vec![key.to_string()]
+                    } else {
+                        Vec::new()
+                    }
                 }
             }
         };
@@ -1062,7 +1092,10 @@ impl Router {
         let (key, reason) = if det.script == "unknown" {
             (
                 self.default,
-                format!("no letters detected in state; using default ({})", self.default),
+                format!(
+                    "no letters detected in state; using default ({})",
+                    self.default
+                ),
             )
         } else if det.script != "latin" {
             (
@@ -1496,7 +1529,7 @@ impl Router {
                     }
                 }
 
-                                // One agent-level batch per group: `Agent.predict_batch`
+                // One agent-level batch per group: `Agent.predict_batch`
                 // upstream evaluates one shared question schema and token
                 // budget over many states in a single call and returns one
                 // result per state, in order. The ONNX backend's trait
@@ -1579,19 +1612,30 @@ impl Router {
             // error is what rises out of `predict_batch`; the end-hook failure
             // never masks it.
             if group_error.is_none() {
-                self.end_contexts(&active, &mut started.iter_mut().map(|(_, c)| c).collect::<Vec<_>>(), raise_errors, timeout)?;
-            } else if let (Some(exc), Err(hook_exc)) =
-                (group_error.as_ref(), self.end_contexts(
+                self.end_contexts(
                     &active,
                     &mut started.iter_mut().map(|(_, c)| c).collect::<Vec<_>>(),
                     raise_errors,
                     timeout,
-                ))
-            {
-                log::warn!("cosh-onnx: on_predict_end failed while handling the batch error {exc}: {hook_exc}");
+                )?;
+            } else if let (Some(exc), Err(hook_exc)) = (
+                group_error.as_ref(),
+                self.end_contexts(
+                    &active,
+                    &mut started.iter_mut().map(|(_, c)| c).collect::<Vec<_>>(),
+                    raise_errors,
+                    timeout,
+                ),
+            ) {
+                log::warn!(
+                    "cosh-onnx: on_predict_end failed while handling the batch error {exc}: {hook_exc}"
+                );
             }
             for (i, ctx) in started {
-                if let Some(mut result) = ctx.results.and_then(|mut r| (!r.is_empty()).then(|| r.remove(0))) {
+                if let Some(mut result) = ctx
+                    .results
+                    .and_then(|mut r| (!r.is_empty()).then(|| r.remove(0)))
+                {
                     results[i] = Some(std::mem::take(&mut result));
                 }
             }

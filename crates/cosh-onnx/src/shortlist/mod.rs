@@ -37,10 +37,10 @@ use std::sync::Mutex;
 
 use serde_json::{Map, Value};
 
+use crate::decision::model::PredictRunner;
 use crate::decision::question::{json_type_name, render_options, serialize_state};
 use crate::error::{Error, Result};
 use crate::pycompat::{py_repr_str, py_repr_value, py_str};
-use crate::decision::model::PredictRunner;
 
 /// `DEFAULT_SHORTLIST_K`.
 pub const DEFAULT_SHORTLIST_K: usize = 20;
@@ -109,7 +109,8 @@ pub fn predict_shortlist(
     let mut reduced: Map<String, Value> = Map::new();
     let mut meta: Map<String, Value> = Map::new();
     for (qid, qdef) in questions {
-        let is_choice = qdef.is_object() && qdef.get("type").and_then(Value::as_str) == Some("choice");
+        let is_choice =
+            qdef.is_object() && qdef.get("type").and_then(Value::as_str) == Some("choice");
         if !is_choice {
             reduced.insert(qid.clone(), qdef.clone());
             continue;
@@ -173,10 +174,7 @@ pub fn predict_shortlist(
 /// reads and writes, never the embedding call. `cache_info()` reports
 /// `size`, `maxsize`, `hits` and `misses`; `cache_clear()` empties it. Clear
 /// the cache if the model or weights behind `embed_fn` change.
-pub fn cached_embed_fn(
-    embed_fn: impl EmbedFn + 'static,
-    maxsize: usize,
-) -> Result<CachedEmbedFn> {
+pub fn cached_embed_fn(embed_fn: impl EmbedFn + 'static, maxsize: usize) -> Result<CachedEmbedFn> {
     if maxsize < 1 {
         // Upstream `if isinstance(maxsize, bool) or not isinstance(maxsize,
         // int) or maxsize < 1: raise ValueError("maxsize must be a positive
@@ -357,7 +355,7 @@ fn criteria_items(criteria: &Value) -> Result<Vec<(Value, Option<&Value>)>> {
             return Err(Error::Value(format!(
                 "choice criteria must be a dict or list, got {}",
                 json_type_name(other)
-            )))
+            )));
         }
     };
     if items.is_empty() {
@@ -426,7 +424,10 @@ fn subset_criteria(criteria: &Value, labels: &[Value]) -> Result<Value> {
             let mut out = Map::new();
             for label in labels {
                 let key = label.as_str().expect("dict criteria keys are strings");
-                out.insert(key.to_string(), map.get(key).cloned().unwrap_or(Value::Null));
+                out.insert(
+                    key.to_string(),
+                    map.get(key).cloned().unwrap_or(Value::Null),
+                );
             }
             Ok(Value::Object(out))
         }
@@ -452,7 +453,11 @@ fn embeddings(embed_fn: &dyn EmbedFn, texts: &[String]) -> Result<Vec<Vec<f64>>>
     // `np.nan_to_num(..., nan=0.0, posinf=0.0, neginf=0.0)`.
     Ok(raw
         .into_iter()
-        .map(|row| row.into_iter().map(|v| if v.is_finite() { v } else { 0.0 }).collect())
+        .map(|row| {
+            row.into_iter()
+                .map(|v| if v.is_finite() { v } else { 0.0 })
+                .collect()
+        })
         .collect())
 }
 

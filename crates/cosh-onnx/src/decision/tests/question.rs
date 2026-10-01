@@ -2,7 +2,7 @@
 //! and `tests/test_criteria_normalization.py` from the laya repository, with
 //! the same cases and the same expected values.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::decision::question::{
     check_question, render_criterion, render_options, resolve_noul_labels, to_internal,
@@ -12,12 +12,18 @@ use crate::pycompat::py_str;
 // --------------------------------------------------------------- render_criterion
 #[test]
 fn criterion_str_passes_through() {
-    assert_eq!(render_criterion(&json!("phishing or scam")), "phishing or scam");
+    assert_eq!(
+        render_criterion(&json!("phishing or scam")),
+        "phishing or scam"
+    );
 }
 
 #[test]
 fn criterion_dict_to_json() {
-    assert_eq!(render_criterion(&json!({"desc": "phishing"})), r#"{"desc": "phishing"}"#);
+    assert_eq!(
+        render_criterion(&json!({"desc": "phishing"})),
+        r#"{"desc": "phishing"}"#
+    );
 }
 
 #[test]
@@ -37,7 +43,10 @@ fn criterion_bool_to_json() {
 
 #[test]
 fn criterion_non_ascii_kept() {
-    assert_eq!(render_criterion(&json!({"d": "münchen"})), r#"{"d": "münchen"}"#);
+    assert_eq!(
+        render_criterion(&json!({"d": "münchen"})),
+        r#"{"d": "münchen"}"#
+    );
 }
 
 // --------------------------------------------------------------- the reported crash
@@ -98,8 +107,8 @@ fn noul_default_texts() {
 
 #[test]
 fn noul_explicit_null_labels_use_defaults() {
-    let out = render_options(&json!({"t": "noul", "ins": "x", "crit": null, "labels": null}))
-        .unwrap();
+    let out =
+        render_options(&json!({"t": "noul", "ins": "x", "crit": null, "labels": null})).unwrap();
     assert_eq!(
         out,
         vec![
@@ -147,7 +156,10 @@ fn noul_invalid_labels() {
     let cases: Vec<(&str, serde_json::Value)> = vec![
         ("not a dict", json!(["negative", "positive"])),
         ("missing true", json!({"false": "negative"})),
-        ("extra key", json!({"false": "negative", "true": "positive", "other": "x"})),
+        (
+            "extra key",
+            json!({"false": "negative", "true": "positive", "other": "x"}),
+        ),
         ("blank value", json!({"false": " ", "true": "positive"})),
         ("duplicate values", json!({"false": "same", "true": "same"})),
         ("non-string value", json!({"false": 0, "true": "positive"})),
@@ -159,17 +171,16 @@ fn noul_invalid_labels() {
     }
     // the resolver agrees with the renderer
     assert_eq!(
-        resolve_noul_labels(Some(&json!(["negative", "positive"]))).unwrap_err().to_string(),
+        resolve_noul_labels(Some(&json!(["negative", "positive"])))
+            .unwrap_err()
+            .to_string(),
         label_error
     );
 }
 
 #[test]
 fn choice_and_score_reject_labels() {
-    for crit in [
-        json!({"a": null, "b": null}),
-        json!(["low", "high"]),
-    ] {
+    for crit in [json!({"a": null, "b": null}), json!(["low", "high"])] {
         let q = json!({
             "t": if crit.is_object() { "choice" } else { "score" },
             "ins": "x", "crit": crit,
@@ -183,8 +194,9 @@ fn choice_and_score_reject_labels() {
 // --------------------------------------------------------------- unchanged choice and score behaviour
 #[test]
 fn choice_string_criteria_still_work() {
-    let out = render_options(&json!({"t": "choice", "ins": "x", "crit": {"a": "first", "b": null}}))
-        .unwrap();
+    let out =
+        render_options(&json!({"t": "choice", "ins": "x", "crit": {"a": "first", "b": null}}))
+            .unwrap();
     assert_eq!(out, vec!["a: first", "b"]);
 }
 
@@ -207,13 +219,34 @@ fn score_string_criteria_still_work() {
 #[test]
 fn all_options_are_str() {
     let cases = [
-        ("choice/objects", json!({"t": "choice", "ins": "x", "crit": {"a": {"n": 1}, "b": [1, 2], "c": 3.5}})),
-        ("score/objects", json!({"t": "score", "ins": "x", "crit": [{"a": 1}, [2], null]})),
-        ("noul/objects", json!({"t": "noul", "ins": "x", "crit": {"true": [1], "false": {"z": 0}}})),
-        ("choice/int labels, no description", json!({"t": "choice", "ins": "x", "crit": {"1": null, "2": null, "3": null}})),
-        ("choice/float labels, no description", json!({"t": "choice", "ins": "x", "crit": {"1.5": null}})),
-        ("choice/bool labels, no description", json!({"t": "choice", "ins": "x", "crit": {"true": null, "false": null}})),
-        ("choice/int labels with descriptions", json!({"t": "choice", "ins": "x", "crit": {"1": "one", "2": "two"}})),
+        (
+            "choice/objects",
+            json!({"t": "choice", "ins": "x", "crit": {"a": {"n": 1}, "b": [1, 2], "c": 3.5}}),
+        ),
+        (
+            "score/objects",
+            json!({"t": "score", "ins": "x", "crit": [{"a": 1}, [2], null]}),
+        ),
+        (
+            "noul/objects",
+            json!({"t": "noul", "ins": "x", "crit": {"true": [1], "false": {"z": 0}}}),
+        ),
+        (
+            "choice/int labels, no description",
+            json!({"t": "choice", "ins": "x", "crit": {"1": null, "2": null, "3": null}}),
+        ),
+        (
+            "choice/float labels, no description",
+            json!({"t": "choice", "ins": "x", "crit": {"1.5": null}}),
+        ),
+        (
+            "choice/bool labels, no description",
+            json!({"t": "choice", "ins": "x", "crit": {"true": null, "false": null}}),
+        ),
+        (
+            "choice/int labels with descriptions",
+            json!({"t": "choice", "ins": "x", "crit": {"1": "one", "2": "two"}}),
+        ),
     ];
     for (label, q) in cases {
         let out = render_options(&q).unwrap();
@@ -306,29 +339,86 @@ fn choice_criteria_list_expansion() {
 #[test]
 fn rejected_malformed_question_shapes() {
     let cases: Vec<(&str, Value)> = vec![
-        ("choice without criteria", json!({"type": "choice", "instructions": "Which team?"})),
-        ("choice with criteria None", json!({"type": "choice", "instructions": "Which team?", "criteria": null})),
-        ("choice with empty criteria", json!({"type": "choice", "instructions": "Which team?", "criteria": {}})),
+        (
+            "choice without criteria",
+            json!({"type": "choice", "instructions": "Which team?"}),
+        ),
+        (
+            "choice with criteria None",
+            json!({"type": "choice", "instructions": "Which team?", "criteria": null}),
+        ),
+        (
+            "choice with empty criteria",
+            json!({"type": "choice", "instructions": "Which team?", "criteria": {}}),
+        ),
         // ("choice with a tuple of labels") — upstream passes a Python tuple,
         // which `isinstance(crit, (dict, list))` rejects; a tuple serialises
         // as a JSON array, which is a valid choice criteria list, so that
         // exact case cannot exist on the shared surface.
-        ("score without criteria", json!({"type": "score", "instructions": "How urgent?"})),
-        ("score with an empty list", json!({"type": "score", "instructions": "How urgent?", "criteria": []})),
-        ("score with a dict of levels", json!({"type": "score", "instructions": "How urgent?", "criteria": {"low": "no pressure", "high": "blocking"}})),
-        ("score with a null level", json!({"type": "score", "instructions": "How urgent?", "criteria": ["low", null, "high"]})),
-        ("choice with labels", json!({"type": "choice", "instructions": "Which team?", "criteria": ["billing", "tech"], "labels": {"false": "B", "true": "A"}})),
-        ("score with labels", json!({"type": "score", "instructions": "How urgent?", "criteria": ["low", "high"], "labels": {"false": "B", "true": "A"}})),
-        ("noul with list criteria", json!({"type": "noul", "instructions": "Is it spam?", "criteria": ["a", "b"]})),
-        ("noul with string criteria", json!({"type": "noul", "instructions": "Is it spam?", "criteria": "spam?"})),
-        ("noul with incomplete labels", json!({"type": "noul", "instructions": "Is it spam?", "labels": {"true": "A"}})),
-        ("noul with duplicate labels", json!({"type": "noul", "instructions": "Is it spam?", "labels": {"false": "A", "true": "A"}})),
-        ("noul with yes/no criteria", json!({"type": "noul", "instructions": "Is it spam?", "criteria": {"yes": "it is spam", "no": "it is not"}})),
-        ("noul with neutral keys", json!({"type": "noul", "instructions": "Is it spam?", "criteria": {"spam": "it is spam", "ham": "it is not"}})),
-        ("noul with alpha/beta criteria", json!({"type": "noul", "instructions": "Is it spam?", "criteria": {"alpha": "yes", "beta": "no"}})),
-        ("noul with a typo'd key", json!({"type": "noul", "instructions": "Is it spam?", "criteria": {"ture": "yes", "false": "no"}})),
-        ("noul with an extra key", json!({"type": "noul", "instructions": "Is it spam?", "criteria": {"true": "y", "false": "n", "maybe": "?"}})),
-        ("unknown type", json!({"type": "bool", "instructions": "Is it spam?"})),
+        (
+            "score without criteria",
+            json!({"type": "score", "instructions": "How urgent?"}),
+        ),
+        (
+            "score with an empty list",
+            json!({"type": "score", "instructions": "How urgent?", "criteria": []}),
+        ),
+        (
+            "score with a dict of levels",
+            json!({"type": "score", "instructions": "How urgent?", "criteria": {"low": "no pressure", "high": "blocking"}}),
+        ),
+        (
+            "score with a null level",
+            json!({"type": "score", "instructions": "How urgent?", "criteria": ["low", null, "high"]}),
+        ),
+        (
+            "choice with labels",
+            json!({"type": "choice", "instructions": "Which team?", "criteria": ["billing", "tech"], "labels": {"false": "B", "true": "A"}}),
+        ),
+        (
+            "score with labels",
+            json!({"type": "score", "instructions": "How urgent?", "criteria": ["low", "high"], "labels": {"false": "B", "true": "A"}}),
+        ),
+        (
+            "noul with list criteria",
+            json!({"type": "noul", "instructions": "Is it spam?", "criteria": ["a", "b"]}),
+        ),
+        (
+            "noul with string criteria",
+            json!({"type": "noul", "instructions": "Is it spam?", "criteria": "spam?"}),
+        ),
+        (
+            "noul with incomplete labels",
+            json!({"type": "noul", "instructions": "Is it spam?", "labels": {"true": "A"}}),
+        ),
+        (
+            "noul with duplicate labels",
+            json!({"type": "noul", "instructions": "Is it spam?", "labels": {"false": "A", "true": "A"}}),
+        ),
+        (
+            "noul with yes/no criteria",
+            json!({"type": "noul", "instructions": "Is it spam?", "criteria": {"yes": "it is spam", "no": "it is not"}}),
+        ),
+        (
+            "noul with neutral keys",
+            json!({"type": "noul", "instructions": "Is it spam?", "criteria": {"spam": "it is spam", "ham": "it is not"}}),
+        ),
+        (
+            "noul with alpha/beta criteria",
+            json!({"type": "noul", "instructions": "Is it spam?", "criteria": {"alpha": "yes", "beta": "no"}}),
+        ),
+        (
+            "noul with a typo'd key",
+            json!({"type": "noul", "instructions": "Is it spam?", "criteria": {"ture": "yes", "false": "no"}}),
+        ),
+        (
+            "noul with an extra key",
+            json!({"type": "noul", "instructions": "Is it spam?", "criteria": {"true": "y", "false": "n", "maybe": "?"}}),
+        ),
+        (
+            "unknown type",
+            json!({"type": "bool", "instructions": "Is it spam?"}),
+        ),
         ("missing type", json!({"instructions": "Is it spam?"})),
         ("no instructions", json!({"type": "noul"})),
     ];
@@ -363,14 +453,36 @@ const _DEFAULT_TRUE_TEXT: &str = "true: yes, the statement holds";
 #[test]
 fn noul_criteria_key_rules() {
     let cases: Vec<(&str, Option<Value>, Vec<&str>)> = vec![
-        ("both keys given", Some(json!({"true": "yes", "false": "no"})), vec!["false: no", "true: yes"]),
-        ("only true given", Some(json!({"true": "the review is positive"})), vec![_DEFAULT_FALSE_TEXT, "true: the review is positive"]),
-        ("only false given", Some(json!({"false": "the review is negative"})), vec!["false: the review is negative", _DEFAULT_TRUE_TEXT]),
-        ("an empty dict falls back to both defaults", Some(json!({})), vec![_DEFAULT_FALSE_TEXT, _DEFAULT_TRUE_TEXT]),
-        ("omitting criteria falls back to both defaults", None, vec![_DEFAULT_FALSE_TEXT, _DEFAULT_TRUE_TEXT]),
+        (
+            "both keys given",
+            Some(json!({"true": "yes", "false": "no"})),
+            vec!["false: no", "true: yes"],
+        ),
+        (
+            "only true given",
+            Some(json!({"true": "the review is positive"})),
+            vec![_DEFAULT_FALSE_TEXT, "true: the review is positive"],
+        ),
+        (
+            "only false given",
+            Some(json!({"false": "the review is negative"})),
+            vec!["false: the review is negative", _DEFAULT_TRUE_TEXT],
+        ),
+        (
+            "an empty dict falls back to both defaults",
+            Some(json!({})),
+            vec![_DEFAULT_FALSE_TEXT, _DEFAULT_TRUE_TEXT],
+        ),
+        (
+            "omitting criteria falls back to both defaults",
+            None,
+            vec![_DEFAULT_FALSE_TEXT, _DEFAULT_TRUE_TEXT],
+        ),
         (
             "a description equal to the default wording still counts as given",
-            Some(json!({"true": "yes, the statement holds", "false": "no, the statement does not hold"})),
+            Some(
+                json!({"true": "yes, the statement holds", "false": "no, the statement does not hold"}),
+            ),
             vec![_DEFAULT_FALSE_TEXT, _DEFAULT_TRUE_TEXT],
         ),
     ];
@@ -401,10 +513,16 @@ fn labels_change_only_the_prefix() {
     let out = render_options(&mixed_value).unwrap();
     assert_eq!(
         out,
-        vec!["negative: the review is negative", "positive: the review is positive"]
+        vec![
+            "negative: the review is negative",
+            "positive: the review is positive"
+        ]
     );
     // labels are carried through
-    assert_eq!(mixed["labels"], json!({"true": "positive", "false": "negative"}));
+    assert_eq!(
+        mixed["labels"],
+        json!({"true": "positive", "false": "negative"})
+    );
     // labels keep the false/true slot order
     assert!(out[0].starts_with("negative:"));
     // the criteria descriptions are all `labels` changes
@@ -418,7 +536,10 @@ fn labels_change_only_the_prefix() {
             .map(|o| o.split_once(": ").unwrap().1.to_string())
             .collect()
     };
-    assert_eq!(strip(out), strip(render_options(&Value::Object(plain)).unwrap()));
+    assert_eq!(
+        strip(out),
+        strip(render_options(&Value::Object(plain)).unwrap())
+    );
 }
 
 // --------------------------------------------------------------- instructions serialisation
@@ -488,7 +609,10 @@ fn public_labels_reach_the_renderer_without_changing_caller_data() {
     // forwarded labels reach renderer
     assert_eq!(
         render_options(&Value::Object(internal)).unwrap(),
-        vec!["B: no, the statement does not hold", "A: yes, the statement holds"]
+        vec![
+            "B: no, the statement does not hold",
+            "A: yes, the statement holds"
+        ]
     );
     // leaves public question unchanged
     assert_eq!(
@@ -509,12 +633,18 @@ fn custom_labels_keep_boolean_criteria_normalization() {
     });
     let boolean_internal = to_internal(&boolean_question).unwrap();
     // custom labels keep boolean criteria normalization
-    assert_eq!(boolean_internal["crit"], json!({"true": "yes", "false": "no"}));
+    assert_eq!(
+        boolean_internal["crit"],
+        json!({"true": "yes", "false": "no"})
+    );
     // boolean criteria render with custom labels
     assert_eq!(
         render_options(&Value::Object(boolean_internal)).unwrap(),
         vec!["B: no", "A: yes"]
     );
     // leaves boolean criteria unchanged
-    assert_eq!(boolean_question["criteria"], json!({"TRUE": "yes", "FALSE": "no"}));
+    assert_eq!(
+        boolean_question["criteria"],
+        json!({"TRUE": "yes", "FALSE": "no"})
+    );
 }

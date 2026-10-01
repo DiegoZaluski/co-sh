@@ -6,7 +6,7 @@
 //! "one definition behind both module paths" checks reduce to the re-export
 //! plus the same-answers checks.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::{clean_email_body, email_state};
 use crate::laya::presets::email_questions;

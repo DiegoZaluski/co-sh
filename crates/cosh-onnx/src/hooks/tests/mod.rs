@@ -17,17 +17,17 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::error::{Error, Result};
-use crate::runtime::batch::CollatedBatch;
-use crate::runtime::tokenizer::Tokenizer;
 use crate::hooks::{
-    aggregate_usage, clear_default_hooks, compose_hooks, default_hooks, dispatch, Hook, HookEvent,
-    PerCall, PredictContext, SharedHook, HOOK_EVENTS,
+    HOOK_EVENTS, Hook, HookEvent, PerCall, PredictContext, SharedHook, aggregate_usage,
+    clear_default_hooks, compose_hooks, default_hooks, dispatch,
 };
-use crate::laya::agent::{bare_agent, FakeTok, OnnxAgent, StubSession};
+use crate::laya::agent::{FakeTok, OnnxAgent, StubSession, bare_agent};
+use crate::runtime::batch::CollatedBatch;
 use crate::runtime::session::{SessionOutput, SessionRunner};
+use crate::runtime::tokenizer::Tokenizer;
 
 use std::collections::HashMap;
 
@@ -60,9 +60,15 @@ fn questions() -> Map<String, Value> {
 
 fn agent() -> OnnxAgent {
     bare_agent(
-        json!({"max_len": 64, "head_max_len": 32}).as_object().unwrap().clone(),
+        json!({"max_len": 64, "head_max_len": 32})
+            .as_object()
+            .unwrap()
+            .clone(),
         Box::new(FakeTok),
-        Box::new(StubSession { logits: vec![], act_logits: vec![] }),
+        Box::new(StubSession {
+            logits: vec![],
+            act_logits: vec![],
+        }),
         [1.0, 1.0, 1.0],
         HashMap::new(),
         HashMap::new(),
@@ -92,7 +98,10 @@ impl Hook for Tag {
 }
 
 fn tag(log: &Arc<Mutex<Vec<String>>>, tag: &'static str) -> SharedHook {
-    Arc::new(Tag { log: Arc::clone(log), tag })
+    Arc::new(Tag {
+        log: Arc::clone(log),
+        tag,
+    })
 }
 
 /// A hook whose start event raises (`boom` upstream).
@@ -115,10 +124,12 @@ struct ErrHook {
 
 impl Hook for ErrHook {
     fn on_error(&self, ctx: &mut PredictContext) -> Result<()> {
-        self.errors
-            .lock()
-            .unwrap()
-            .push(ctx.error.as_ref().map(|e| e.to_string()).unwrap_or_default());
+        self.errors.lock().unwrap().push(
+            ctx.error
+                .as_ref()
+                .map(|e| e.to_string())
+                .unwrap_or_default(),
+        );
         Ok(())
     }
 

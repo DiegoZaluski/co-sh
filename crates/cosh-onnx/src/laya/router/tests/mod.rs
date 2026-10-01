@@ -28,12 +28,12 @@
 
 use std::sync::{Arc, Mutex};
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use super::{
-    default_models, english_from_code, match_typed_decisions_workflow, normalise_name, repo_str,
-    standalone_models, LangGuess, LangGuessFn, ModelSpec, PredictOptions, RouteDecision,
-    RouteOptions, Router, AgentLike, RouterOptions, SharedAgent, BUNDLE_REPO,
+    AgentLike, BUNDLE_REPO, LangGuess, LangGuessFn, ModelSpec, PredictOptions, RouteDecision,
+    RouteOptions, Router, RouterOptions, SharedAgent, default_models, english_from_code,
+    match_typed_decisions_workflow, normalise_name, repo_str, standalone_models,
 };
 use crate::decision::confidence::{TEMP_MAX, TEMP_MIN};
 use crate::error::{Error, Result};
@@ -52,16 +52,10 @@ fn q_generic() -> Map<String, Value> {
 
 /// `Q_TD`: the customer_service signature typed as `noul`.
 fn q_td() -> Map<String, Value> {
-    [
-        "action",
-        "category",
-        "churn_risk",
-        "needs_human",
-        "urgency",
-    ]
-    .iter()
-    .map(|id| (id.to_string(), json!({"type": "noul", "instructions": "x"})))
-    .collect()
+    ["action", "category", "churn_risk", "needs_human", "urgency"]
+        .iter()
+        .map(|id| (id.to_string(), json!({"type": "noul", "instructions": "x"})))
+        .collect()
 }
 
 fn empty_questions() -> Map<String, Value> {
@@ -69,7 +63,10 @@ fn empty_questions() -> Map<String, Value> {
 }
 
 fn route(state: &Value, questions: &Map<String, Value>, opts: &RouteOptions<'_>) -> RouteDecision {
-    Router::new().expect("router").route(state, Some(questions), opts).expect("route")
+    Router::new()
+        .expect("router")
+        .route(state, Some(questions), opts)
+        .expect("route")
 }
 
 fn default_route(state: &Value, questions: &Map<String, Value>) -> RouteDecision {
@@ -79,7 +76,6 @@ fn default_route(state: &Value, questions: &Map<String, Value>) -> RouteDecision
 fn route_text(text: &str) -> RouteDecision {
     default_route(&json!(text), &empty_questions())
 }
-
 
 // ------------------------------------------------------- LRU bookkeeping
 // `_Stub` and the stubbed loaders: upstream replaces `rr.load`; here the
@@ -101,13 +97,19 @@ impl RecordingRouter {
         let built: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let recorded = Arc::clone(&built);
         let preload = opts.preload;
-        let router = Router::configure(RouterOptions { preload: false, ..opts })
-            .expect("router")
-            .with_agent_factory(move |_repo, subfolder, _revision| {
-                let checkpoint = subfolder.unwrap_or("english").to_string();
-                recorded.lock().unwrap_or_else(|e| e.into_inner()).push(checkpoint);
-                Ok(Box::new(StubAgent::new()) as Box<dyn AgentLike>)
-            });
+        let router = Router::configure(RouterOptions {
+            preload: false,
+            ..opts
+        })
+        .expect("router")
+        .with_agent_factory(move |_repo, subfolder, _revision| {
+            let checkpoint = subfolder.unwrap_or("english").to_string();
+            recorded
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(checkpoint);
+            Ok(Box::new(StubAgent::new()) as Box<dyn AgentLike>)
+        });
         if preload {
             router.preload(None).expect("preload");
         }
@@ -127,7 +129,9 @@ struct StubAgent {
 
 impl StubAgent {
     fn new() -> Self {
-        Self { name: "fake".to_string() }
+        Self {
+            name: "fake".to_string(),
+        }
     }
 }
 
@@ -143,7 +147,6 @@ impl AgentLike for StubAgent {
         Ok(json!({"model": self.name, "answers": {}, "usage": {}}))
     }
 }
-
 
 /// `Q`, the batch suite's question schema.
 fn q_batch() -> Map<String, Value> {

@@ -22,10 +22,9 @@
 use std::sync::LazyLock;
 
 use fancy_regex::{Regex, RegexBuilder};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::laya::presets::q;
-
 
 pub fn email_questions(categories: Option<Map<String, Value>>) -> Questions {
     // `categories or {…}`: an empty map is falsy in Python, so it falls back
@@ -198,8 +197,7 @@ static DEVICE_FOOTER: LazyLock<Regex> = LazyLock::new(|| {
             r"^\s*((enviad[oa] (do|pelo|pela|via|desde|a partir do)( meu| minha| mi)?|sent from( my)?)",
             r#" ({})( ({}|para|for|no|na|\d+))*|(obter o|get) outlook (para|for) (ios|android))[\s.!]*$"#
         ),
-        DEVICE,
-        DEVICE,
+        DEVICE, DEVICE,
     ))
 });
 
@@ -369,7 +367,11 @@ pub fn clean_email_body(body: &str, max_chars: usize) -> String {
             break;
         }
         if m(&ATTRIBUTION_TAIL, line) && !lines.is_empty() {
-            if lines.last().map(|l| m(&ATTRIBUTION_HEAD, l)).unwrap_or(false) {
+            if lines
+                .last()
+                .map(|l| m(&ATTRIBUTION_HEAD, l))
+                .unwrap_or(false)
+            {
                 lines.pop();
             }
             break;

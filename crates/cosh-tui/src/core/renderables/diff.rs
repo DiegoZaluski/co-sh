@@ -510,8 +510,9 @@ impl DiffRenderable {
         // sign characters use — painted on the FONT, background untouched —
         // so they match the unified view's header coloring.
         let content_style = match line {
-            Some(li) if matches!(li.line_type, DiffLineType::FileHeader) => content_style
-                .fg(rgba_color(self.file_header_fg(&li.content))),
+            Some(li) if matches!(li.line_type, DiffLineType::FileHeader) => {
+                content_style.fg(rgba_color(self.file_header_fg(&li.content)))
+            }
             _ => content_style,
         };
         let ln_style = Style::default()
@@ -834,8 +835,7 @@ impl DiffRenderable {
                 break;
             }
 
-            let (sign_style, content_style, ln_style) =
-                self.line_styles(li.line_type, &li.content);
+            let (sign_style, content_style, ln_style) = self.line_styles(li.line_type, &li.content);
             let content_w = Self::content_part(&li.content, li.line_type);
             let line_num = match li.line_type {
                 DiffLineType::Add => li.new_ln,

@@ -16,7 +16,11 @@ fn topk_keeps_the_cosine_tie_in_input_order() {
         "topk/k=2 keeps the cosine tie in input order"
     );
     assert_eq!(embed.calls().len(), 1, "topk/one embed call");
-    assert_eq!(embed.calls()[0][0], "pay me", "topk/query is the first text");
+    assert_eq!(
+        embed.calls()[0][0],
+        "pay me",
+        "topk/query is the first text"
+    );
     assert_eq!(
         embed.calls()[0][1..],
         render_options(&json!({"t": "choice", "ins": "", "crit": criteria})).expect("render"),
@@ -71,4 +75,3 @@ fn topk_nan_vector_sorts_behind_a_finite_match() {
         "topk/nan vector sorts behind a finite match"
     );
 }
-

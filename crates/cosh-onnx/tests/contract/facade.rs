@@ -3,7 +3,7 @@
 
 use cosh_onnx::decision::model::{DecisionModel, LoadOptions, ModelKind};
 use cosh_onnx::error::Error;
-use cosh_onnx::{load, Router};
+use cosh_onnx::{Router, load};
 
 /// The load error for a missing local path carries the upstream text and
 /// names the path — the same message `agent.load` produces.

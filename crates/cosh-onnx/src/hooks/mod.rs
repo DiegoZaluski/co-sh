@@ -34,7 +34,7 @@ use std::cell::Cell;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::error::{Error, Result};
 use crate::pycompat::{py_g, py_repr_value};
@@ -214,7 +214,9 @@ fn default_hooks_cell() -> &'static Mutex<Vec<SharedHook>> {
 /// Lock the default-hook registry, tolerating a poisoned mutex (a panicking
 /// test/hook must not break the process-wide registry permanently).
 fn lock_registry() -> std::sync::MutexGuard<'static, Vec<SharedHook>> {
-    default_hooks_cell().lock().unwrap_or_else(|e| e.into_inner())
+    default_hooks_cell()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
 }
 
 thread_local! {
@@ -431,7 +433,9 @@ fn call_hook(
             // discarded.
             let _ = tx.send((outcome, timed_ctx));
         })
-        .map_err(|e| Error::Runtime(format!("cosh-onnx: could not start the hook thread: {}", e)))?;
+        .map_err(|e| {
+            Error::Runtime(format!("cosh-onnx: could not start the hook thread: {}", e))
+        })?;
     match rx.recv_timeout(std::time::Duration::from_secs_f64(timeout)) {
         Ok((outcome, timed_ctx)) => {
             *ctx = timed_ctx;

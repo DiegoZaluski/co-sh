@@ -43,10 +43,22 @@ use crate::pycompat::{py_round, round4};
 /// (name, inclusive ranges), verbatim from `lang.py`.
 static SCRIPT_RANGES: &[(&str, &[(u32, u32)])] = &[
     ("greek", &[(0x0370, 0x03FF), (0x1F00, 0x1FFF)]),
-    ("cyrillic", &[(0x0400, 0x052F), (0x2DE0, 0x2DFF), (0xA640, 0xA69F)]),
+    (
+        "cyrillic",
+        &[(0x0400, 0x052F), (0x2DE0, 0x2DFF), (0xA640, 0xA69F)],
+    ),
     ("armenian", &[(0x0530, 0x058F)]),
     ("hebrew", &[(0x0590, 0x05FF)]),
-    ("arabic", &[(0x0600, 0x06FF), (0x0750, 0x077F), (0x08A0, 0x08FF), (0xFB50, 0xFDFF), (0xFE70, 0xFEFF)]),
+    (
+        "arabic",
+        &[
+            (0x0600, 0x06FF),
+            (0x0750, 0x077F),
+            (0x08A0, 0x08FF),
+            (0xFB50, 0xFDFF),
+            (0xFE70, 0xFEFF),
+        ],
+    ),
     ("devanagari", &[(0x0900, 0x097F), (0xA8E0, 0xA8FF)]),
     ("bengali", &[(0x0980, 0x09FF)]),
     ("gurmukhi", &[(0x0A00, 0x0A7F)]),
@@ -64,28 +76,226 @@ static SCRIPT_RANGES: &[(&str, &[(u32, u32)])] = &[
     ("georgian", &[(0x10A0, 0x10FF)]),
     ("ethiopic", &[(0x1200, 0x137F)]),
     ("khmer", &[(0x1780, 0x17FF)]),
-    ("hangul", &[(0x1100, 0x11FF), (0x3130, 0x318F), (0xAC00, 0xD7AF)]),
-    ("kana", &[(0x3040, 0x309F), (0x30A0, 0x30FF), (0x31F0, 0x31FF)]),
-    ("han", &[(0x3400, 0x4DBF), (0x4E00, 0x9FFF), (0xF900, 0xFAFF)]),
+    (
+        "hangul",
+        &[(0x1100, 0x11FF), (0x3130, 0x318F), (0xAC00, 0xD7AF)],
+    ),
+    (
+        "kana",
+        &[(0x3040, 0x309F), (0x30A0, 0x30FF), (0x31F0, 0x31FF)],
+    ),
+    (
+        "han",
+        &[(0x3400, 0x4DBF), (0x4E00, 0x9FFF), (0xF900, 0xFAFF)],
+    ),
 ];
 
 /// `_STOP`: function words per language, verbatim from `lang.py`
 /// (same key order; the order decides the tie-break in `latin_profile`).
 static STOP_LANGUAGES: &[(&str, &[&str])] = &[
-    ("en", &["and", "are", "as", "at", "be", "but", "can", "for", "from", "has", "have", "i", "in", "is", "it", "not", "of", "on", "please", "that", "the", "their", "there", "this", "to", "was", "we", "were", "what", "which", "will", "with", "would", "you"]),
-    ("fr", &["alors", "au", "aux", "avec", "bien", "bonjour", "ce", "ces", "cette", "comment", "dans", "des", "deux", "dois", "doit", "donc", "du", "elle", "elles", "est", "et", "fait", "fois", "il", "ils", "je", "jour", "jours", "la", "le", "les", "ma", "mais", "merci", "mes", "mois", "mon", "nous", "ont", "ou", "pas", "peut", "peux", "plus", "pour", "pourquoi", "quand", "que", "qui", "sa", "ses", "sont", "sur", "ta", "tes", "ton", "tous", "tout", "toute", "trois", "très", "tu", "une", "veut", "veux", "vous", "être"]),
-    ("de", &["aber", "auch", "auf", "aus", "bei", "bitte", "das", "dem", "den", "der", "dich", "die", "diese", "diesen", "dieser", "dieses", "dir", "ein", "eine", "einem", "einen", "einer", "für", "gibt", "habe", "haben", "heute", "ich", "im", "in", "ist", "jetzt", "kann", "kannst", "mein", "meine", "meinem", "meinen", "meiner", "mich", "mir", "mit", "nach", "nicht", "noch", "oder", "sich", "sind", "und", "uns", "von", "wann", "was", "welche", "werden", "wie", "wir", "wird", "wo", "wurde", "zu", "zum", "zur"]),
-    ("es", &["al", "algo", "aquí", "aunque", "como", "con", "cuando", "del", "donde", "dos", "el", "entre", "es", "esa", "ese", "eso", "esta", "este", "esto", "está", "fue", "fueron", "gracias", "han", "hay", "hemos", "hoy", "la", "las", "le", "les", "lo", "los", "mi", "muy", "más", "nada", "necesito", "ni", "nos", "para", "pero", "por", "porque", "puede", "pueden", "que", "quiero", "se", "ser", "sobre", "son", "su", "sus", "también", "tengo", "tiene", "tienen", "todo", "tres", "tu", "un", "una", "y", "ya"]),
-    ("pt", &["agora", "ainda", "alguem", "alguém", "ali", "antes", "ao", "aos", "aqui", "as", "até", "boa", "cadê", "com", "como", "consigo", "da", "das", "depois", "deu", "do", "dois", "dos", "e", "em", "entao", "então", "era", "esta", "estamos", "estava", "este", "estou", "está", "eu", "ficou", "fiz", "foi", "gostaria", "hoje", "isso", "isto", "ja", "já", "mais", "mas", "meu", "meus", "minha", "minhas", "muito", "na", "nada", "nao", "nas", "nenhum", "nenhuma", "ninguem", "ninguém", "noite", "nos", "nossa", "nosso", "não", "o", "obrigada", "obrigado", "olá", "onde", "ontem", "os", "para", "pela", "pelo", "pode", "podem", "por", "porque", "pra", "preciso", "quando", "que", "quero", "sao", "se", "ser", "seu", "sou", "sua", "são", "tambem", "também", "tarde", "tem", "tenho", "três", "tudo", "tá", "um", "uma", "vc", "vcs", "voce", "voces", "você", "vocês", "é"]),
-    ("it", &["abbiamo", "adesso", "agli", "alla", "alle", "anche", "ancora", "avete", "che", "ci", "ciao", "col", "come", "con", "da", "dagli", "dal", "dalla", "dallo", "degli", "dei", "del", "della", "delle", "dello", "deve", "devo", "devono", "di", "dove", "e", "ed", "era", "fra", "già", "gli", "grazie", "ha", "hai", "hanno", "ho", "ieri", "il", "la", "le", "lo", "mai", "mi", "mia", "mio", "molto", "ne", "negli", "nel", "nell", "nella", "non", "o", "oggi", "per", "perche", "più", "poco", "quando", "questa", "questo", "scusa", "sempre", "si", "sono", "stata", "stato", "su", "sua", "sul", "sulla", "sulle", "tra", "tuo", "un", "una", "uno", "voglio", "vorrei", "è"]),
-    ("nl", &["aan", "dat", "deze", "door", "een", "het", "is", "maar", "met", "naar", "niet", "ook", "op", "te", "van", "voor", "worden", "wordt", "zijn"]),
-    ("ro", &["aceasta", "această", "acest", "acesta", "acum", "ale", "care", "dar", "din", "după", "este", "foarte", "fost", "fără", "lui", "mi", "nu", "pentru", "până", "sunt", "să", "trebuie", "vreau", "vă", "în", "și", "ți"]),
-    ("bn", &["abar", "ajke", "akhon", "amader", "amake", "amar", "ami", "amra", "apnake", "apnar", "apnara", "apni", "ar", "asbe", "bhai", "bhalo", "bolte", "bolun", "chai", "chaina", "dhonnobad", "dilam", "dite", "diye", "diyechi", "dorkar", "duibar", "ei", "eita", "ekbar", "ekhon", "ekhono", "ekta", "ferot", "geche", "gese", "hobe", "hocche", "hoise", "hoye", "hoyeche", "hoyni", "jabe", "jodi", "jonno", "kalke", "keno", "keu", "kharap", "khub", "ki", "kibhabe", "kichu", "kintu", "kivabe", "kobe", "kokhon", "korbo", "korchi", "kore", "koreche", "korechi", "koren", "korlam", "korsi", "korte", "korun", "kothay", "koto", "lagbe", "moddhe", "nai", "niye", "oi", "oita", "onek", "ota", "pabo", "paini", "parben", "parbo", "parchi", "parchina", "peyechi", "sathe", "shathe", "shob", "shomossa", "somossa", "tader", "tahole", "taka", "theke", "tomake", "tomar", "tomra", "tumi", "valo"]),
-    ("az", &["amma", "ancaq", "artiq", "artıq", "bir", "biz", "bu", "cox", "daha", "deyil", "də", "eger", "görə", "həm", "hər", "ile", "ilə", "isə", "kimi", "lakin", "mən", "nə", "olan", "olmasa", "olub", "onlar", "siz", "sonra", "sən", "ucun", "var", "ve", "və", "yalniz", "yalnız", "yox", "yoxdur", "çox", "üçün", "əgər"]),
+    (
+        "en",
+        &[
+            "and", "are", "as", "at", "be", "but", "can", "for", "from", "has", "have", "i", "in",
+            "is", "it", "not", "of", "on", "please", "that", "the", "their", "there", "this", "to",
+            "was", "we", "were", "what", "which", "will", "with", "would", "you",
+        ],
+    ),
+    (
+        "fr",
+        &[
+            "alors", "au", "aux", "avec", "bien", "bonjour", "ce", "ces", "cette", "comment",
+            "dans", "des", "deux", "dois", "doit", "donc", "du", "elle", "elles", "est", "et",
+            "fait", "fois", "il", "ils", "je", "jour", "jours", "la", "le", "les", "ma", "mais",
+            "merci", "mes", "mois", "mon", "nous", "ont", "ou", "pas", "peut", "peux", "plus",
+            "pour", "pourquoi", "quand", "que", "qui", "sa", "ses", "sont", "sur", "ta", "tes",
+            "ton", "tous", "tout", "toute", "trois", "très", "tu", "une", "veut", "veux", "vous",
+            "être",
+        ],
+    ),
+    (
+        "de",
+        &[
+            "aber", "auch", "auf", "aus", "bei", "bitte", "das", "dem", "den", "der", "dich",
+            "die", "diese", "diesen", "dieser", "dieses", "dir", "ein", "eine", "einem", "einen",
+            "einer", "für", "gibt", "habe", "haben", "heute", "ich", "im", "in", "ist", "jetzt",
+            "kann", "kannst", "mein", "meine", "meinem", "meinen", "meiner", "mich", "mir", "mit",
+            "nach", "nicht", "noch", "oder", "sich", "sind", "und", "uns", "von", "wann", "was",
+            "welche", "werden", "wie", "wir", "wird", "wo", "wurde", "zu", "zum", "zur",
+        ],
+    ),
+    (
+        "es",
+        &[
+            "al", "algo", "aquí", "aunque", "como", "con", "cuando", "del", "donde", "dos", "el",
+            "entre", "es", "esa", "ese", "eso", "esta", "este", "esto", "está", "fue", "fueron",
+            "gracias", "han", "hay", "hemos", "hoy", "la", "las", "le", "les", "lo", "los", "mi",
+            "muy", "más", "nada", "necesito", "ni", "nos", "para", "pero", "por", "porque",
+            "puede", "pueden", "que", "quiero", "se", "ser", "sobre", "son", "su", "sus",
+            "también", "tengo", "tiene", "tienen", "todo", "tres", "tu", "un", "una", "y", "ya",
+        ],
+    ),
+    (
+        "pt",
+        &[
+            "agora", "ainda", "alguem", "alguém", "ali", "antes", "ao", "aos", "aqui", "as", "até",
+            "boa", "cadê", "com", "como", "consigo", "da", "das", "depois", "deu", "do", "dois",
+            "dos", "e", "em", "entao", "então", "era", "esta", "estamos", "estava", "este",
+            "estou", "está", "eu", "ficou", "fiz", "foi", "gostaria", "hoje", "isso", "isto", "ja",
+            "já", "mais", "mas", "meu", "meus", "minha", "minhas", "muito", "na", "nada", "nao",
+            "nas", "nenhum", "nenhuma", "ninguem", "ninguém", "noite", "nos", "nossa", "nosso",
+            "não", "o", "obrigada", "obrigado", "olá", "onde", "ontem", "os", "para", "pela",
+            "pelo", "pode", "podem", "por", "porque", "pra", "preciso", "quando", "que", "quero",
+            "sao", "se", "ser", "seu", "sou", "sua", "são", "tambem", "também", "tarde", "tem",
+            "tenho", "três", "tudo", "tá", "um", "uma", "vc", "vcs", "voce", "voces", "você",
+            "vocês", "é",
+        ],
+    ),
+    (
+        "it",
+        &[
+            "abbiamo", "adesso", "agli", "alla", "alle", "anche", "ancora", "avete", "che", "ci",
+            "ciao", "col", "come", "con", "da", "dagli", "dal", "dalla", "dallo", "degli", "dei",
+            "del", "della", "delle", "dello", "deve", "devo", "devono", "di", "dove", "e", "ed",
+            "era", "fra", "già", "gli", "grazie", "ha", "hai", "hanno", "ho", "ieri", "il", "la",
+            "le", "lo", "mai", "mi", "mia", "mio", "molto", "ne", "negli", "nel", "nell", "nella",
+            "non", "o", "oggi", "per", "perche", "più", "poco", "quando", "questa", "questo",
+            "scusa", "sempre", "si", "sono", "stata", "stato", "su", "sua", "sul", "sulla",
+            "sulle", "tra", "tuo", "un", "una", "uno", "voglio", "vorrei", "è",
+        ],
+    ),
+    (
+        "nl",
+        &[
+            "aan", "dat", "deze", "door", "een", "het", "is", "maar", "met", "naar", "niet", "ook",
+            "op", "te", "van", "voor", "worden", "wordt", "zijn",
+        ],
+    ),
+    (
+        "ro",
+        &[
+            "aceasta", "această", "acest", "acesta", "acum", "ale", "care", "dar", "din", "după",
+            "este", "foarte", "fost", "fără", "lui", "mi", "nu", "pentru", "până", "sunt", "să",
+            "trebuie", "vreau", "vă", "în", "și", "ți",
+        ],
+    ),
+    (
+        "bn",
+        &[
+            "abar",
+            "ajke",
+            "akhon",
+            "amader",
+            "amake",
+            "amar",
+            "ami",
+            "amra",
+            "apnake",
+            "apnar",
+            "apnara",
+            "apni",
+            "ar",
+            "asbe",
+            "bhai",
+            "bhalo",
+            "bolte",
+            "bolun",
+            "chai",
+            "chaina",
+            "dhonnobad",
+            "dilam",
+            "dite",
+            "diye",
+            "diyechi",
+            "dorkar",
+            "duibar",
+            "ei",
+            "eita",
+            "ekbar",
+            "ekhon",
+            "ekhono",
+            "ekta",
+            "ferot",
+            "geche",
+            "gese",
+            "hobe",
+            "hocche",
+            "hoise",
+            "hoye",
+            "hoyeche",
+            "hoyni",
+            "jabe",
+            "jodi",
+            "jonno",
+            "kalke",
+            "keno",
+            "keu",
+            "kharap",
+            "khub",
+            "ki",
+            "kibhabe",
+            "kichu",
+            "kintu",
+            "kivabe",
+            "kobe",
+            "kokhon",
+            "korbo",
+            "korchi",
+            "kore",
+            "koreche",
+            "korechi",
+            "koren",
+            "korlam",
+            "korsi",
+            "korte",
+            "korun",
+            "kothay",
+            "koto",
+            "lagbe",
+            "moddhe",
+            "nai",
+            "niye",
+            "oi",
+            "oita",
+            "onek",
+            "ota",
+            "pabo",
+            "paini",
+            "parben",
+            "parbo",
+            "parchi",
+            "parchina",
+            "peyechi",
+            "sathe",
+            "shathe",
+            "shob",
+            "shomossa",
+            "somossa",
+            "tader",
+            "tahole",
+            "taka",
+            "theke",
+            "tomake",
+            "tomar",
+            "tomra",
+            "tumi",
+            "valo",
+        ],
+    ),
+    (
+        "az",
+        &[
+            "amma", "ancaq", "artiq", "artıq", "bir", "biz", "bu", "cox", "daha", "deyil", "də",
+            "eger", "görə", "həm", "hər", "ile", "ilə", "isə", "kimi", "lakin", "mən", "nə",
+            "olan", "olmasa", "olub", "onlar", "siz", "sonra", "sən", "ucun", "var", "ve", "və",
+            "yalniz", "yalnız", "yox", "yoxdur", "çox", "üçün", "əgər",
+        ],
+    ),
 ];
 
 /// `_NON_EN_DIACRITICS`: letters ordinary English does not use.
-static NON_EN_DIACRITICS: &str = "ßàáâãäåæçèéêëìíîïñòóôõöøùúûüýÿāăąćčďđēęěğģīıķļłńņňőœřśşšţťūůűźżžșțə";
+static NON_EN_DIACRITICS: &str =
+    "ßàáâãäåæçèéêëìíîïñòóôõöøùúûüýÿāăąćčďđēęěğģīıķļłńņňőœřśşšţťūůűźżžșțə";
 
 /// A diacritic rate above this is taken as evidence the text is not English,
 /// even when no stopword list matches it.
@@ -126,10 +336,8 @@ pub const NON_LATIN_MIN_LETTERS: usize = 10;
 // detection walks every character, and `_IDENTIFIER`'s complexity test pins
 // linear behaviour on 20 000-character runs.
 
-fn general_category() -> icu_properties::CodePointMapDataBorrowed<
-    'static,
-    icu_properties::props::GeneralCategory,
-> {
+fn general_category()
+-> icu_properties::CodePointMapDataBorrowed<'static, icu_properties::props::GeneralCategory> {
     static CELL: std::sync::OnceLock<
         icu_properties::CodePointMapDataBorrowed<'static, icu_properties::props::GeneralCategory>,
     > = std::sync::OnceLock::new();
@@ -627,7 +835,10 @@ pub fn latin_profile(text: &str) -> LatinProfile {
         let hits = words.iter().filter(|w| sw.contains(&w.as_str())).count();
         scores.push((lg, hits));
     }
-    let en = scores.iter().find(|(lg, _)| *lg == "en").map_or(0, |(_, h)| *h);
+    let en = scores
+        .iter()
+        .find(|(lg, _)| *lg == "en")
+        .map_or(0, |(_, h)| *h);
     let distinct: HashSet<&str> = words.iter().map(|w| w.as_str()).collect();
     // Only a language that matched at least one word no other list claims may
     // be named. Such a language is dropped from the running rather than
@@ -688,7 +899,12 @@ fn english_rescued_by_words(words: &[String], diac_rate: f64) -> bool {
         return false;
     }
     let distinct: HashSet<&str> = words.iter().map(|w| w.as_str()).collect();
-    if distinct.iter().filter(|w| en_only_words().contains(**w)).count() < 2 {
+    if distinct
+        .iter()
+        .filter(|w| en_only_words().contains(**w))
+        .count()
+        < 2
+    {
         return false;
     }
     distinct
@@ -771,15 +987,21 @@ fn analyse_text(text: &str) -> Analysis {
     let counts = script_counts(text);
     let prof = profile_from_counts(&counts);
     let mut script = script_from_counts(&counts).to_string();
-    let prof_latin = prof.iter().find(|(s, _)| s == "latin").map_or(0.0, |(_, v)| *v);
-    let non_latin = if prof.is_empty() { 0.0 } else { round4(1.0 - prof_latin) };
+    let prof_latin = prof
+        .iter()
+        .find(|(s, _)| s == "latin")
+        .map_or(0.0, |(_, v)| *v);
+    let non_latin = if prof.is_empty() {
+        0.0
+    } else {
+        round4(1.0 - prof_latin)
+    };
     let n_alpha = text.chars().filter(|ch| py_is_alpha(*ch)).count();
     let n_non_latin = py_round(non_latin * n_alpha as f64);
     if script == "latin"
         && !non_latin_words(text).is_empty()
         && (non_latin >= NON_LATIN_FRACTION
-            || (non_latin >= NON_LATIN_MIN_FRACTION
-                && n_non_latin >= NON_LATIN_MIN_LETTERS as f64))
+            || (non_latin >= NON_LATIN_MIN_FRACTION && n_non_latin >= NON_LATIN_MIN_LETTERS as f64))
     {
         // the strongest non-Latin script in the profile decides; Python's
         // `max(..., key=prof.get)` returns the first of equal values, and the
@@ -824,8 +1046,7 @@ fn analyse_text(text: &str) -> Analysis {
     // language we hold no stopwords for to the checkpoint that cannot read it,
     // silently.
     let undecided = lang.is_none();
-    let english = lang.as_deref() == Some("en")
-        || (undecided && !prof_lat.looks_non_english);
+    let english = lang.as_deref() == Some("en") || (undecided && !prof_lat.looks_non_english);
     Analysis {
         script: "latin".to_string(),
         script_profile: prof,
@@ -865,7 +1086,12 @@ fn named_prose_language(segment: &str) -> Option<String> {
     }
     let list = stop_list(&lang)?;
     let distinct: HashSet<String> = tokens.iter().map(|w| w.to_lowercase()).collect();
-    if distinct.iter().filter(|w| list.contains(&w.as_str())).count() < 2 {
+    if distinct
+        .iter()
+        .filter(|w| list.contains(&w.as_str()))
+        .count()
+        < 2
+    {
         return None;
     }
     Some(lang)

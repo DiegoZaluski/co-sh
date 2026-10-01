@@ -37,10 +37,7 @@ impl DecisionResult {
             Value::Object(self.probabilities.clone()),
         );
         m.insert("answers".into(), Value::Object(self.answers.clone()));
-        m.insert(
-            "usage".into(),
-            self.usage.clone().unwrap_or(Value::Null),
-        );
+        m.insert("usage".into(), self.usage.clone().unwrap_or(Value::Null));
         m.insert(
             "routing".into(),
             self.routing.clone().unwrap_or(Value::Null),
@@ -134,8 +131,7 @@ fn enum_field(
             (label, v.clone())
         })
         .collect();
-    let labels: std::collections::HashSet<&str> =
-        options.iter().map(|(l, _)| l.as_str()).collect();
+    let labels: std::collections::HashSet<&str> = options.iter().map(|(l, _)| l.as_str()).collect();
     if labels.len() != options.len() {
         return Err(field_err(format!(
             "{}: enum values produce duplicate choice labels",
@@ -248,7 +244,10 @@ fn field(path: &str, name: &str, prop: &Map<String, Value>) -> Result<Field> {
     // non-null branch (carrying the outer description) so `Optional[...]` maps
     // instead of raising. A union of two real types is genuinely ambiguous and
     // still rejected.
-    if !["const", "enum", "type"].iter().any(|k| prop.contains_key(*k)) {
+    if !["const", "enum", "type"]
+        .iter()
+        .any(|k| prop.contains_key(*k))
+    {
         let union = prop.get("anyOf").or_else(|| prop.get("oneOf"));
         if let Some(union) = union {
             let Some(branches) = union.as_array() else {
@@ -288,7 +287,10 @@ fn field(path: &str, name: &str, prop: &Map<String, Value>) -> Result<Field> {
     let mut jtype = prop.get("type").cloned();
     if let Some(Value::Array(types)) = &jtype {
         // nullable: ["string", "null"]
-        let non_null: Vec<&Value> = types.iter().filter(|t| t.as_str() != Some("null")).collect();
+        let non_null: Vec<&Value> = types
+            .iter()
+            .filter(|t| t.as_str() != Some("null"))
+            .collect();
         if non_null.len() > 1 {
             return Err(field_err(format!(
                 "{}: 'type' has multiple non-null types; unions are not supported",
@@ -333,8 +335,10 @@ pub fn plan_from_json_schema(schema: &Value) -> Result<Vec<Field>> {
             json_type_name(schema)
         )));
     };
-    if !matches!(map.get("type").and_then(Value::as_str), None | Some("object"))
-        || !map.contains_key("properties")
+    if !matches!(
+        map.get("type").and_then(Value::as_str),
+        None | Some("object")
+    ) || !map.contains_key("properties")
     {
         return Err(field_err(
             "the top level must be an object with 'properties'",
@@ -458,7 +462,12 @@ fn details(
     for (name, answer) in answers {
         confidence.insert(
             name.clone(),
-            Value::from(answer.get("confidence").and_then(Value::as_f64).unwrap_or(0.0)),
+            Value::from(
+                answer
+                    .get("confidence")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0),
+            ),
         );
         if answer.get("type").and_then(Value::as_str) == Some("noul") {
             let p = answer.get("noul").and_then(Value::as_f64).unwrap_or(0.0);
@@ -469,7 +478,10 @@ fn details(
         } else {
             probabilities.insert(
                 name.clone(),
-                answer.get("probabilities").cloned().unwrap_or(Value::Object(Map::new())),
+                answer
+                    .get("probabilities")
+                    .cloned()
+                    .unwrap_or(Value::Object(Map::new())),
             );
         }
     }
@@ -488,7 +500,6 @@ fn details(
 fn round4(x: f64) -> f64 {
     crate::pycompat::round4(x)
 }
-
 
 /// `decide`: answer `state` against a schema (or explicit questions) and
 /// return the decided values.

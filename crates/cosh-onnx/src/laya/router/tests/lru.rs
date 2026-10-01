@@ -12,22 +12,36 @@ use super::*;
 fn temperature_anchors_beside_the_lru_section() {
     use crate::decision::confidence::{clamp_temperature_default, temp_bucket};
     use crate::decision::question::qtype_code;
-    assert_eq!(clamp_temperature_default(&json!(0.1006)), 0.5, "clamp/pathological sharpening");
+    assert_eq!(
+        clamp_temperature_default(&json!(0.1006)),
+        0.5,
+        "clamp/pathological sharpening"
+    );
     assert_eq!(
         clamp_temperature_default(&json!(0.10058280825614929)),
         TEMP_MIN,
         "clamp/shipped choice:11+ is rejected"
     );
-    assert_eq!(clamp_temperature_default(&json!(1.0)), 1.0, "clamp/neutral untouched");
-    assert_eq!(clamp_temperature_default(&json!(9.0)), TEMP_MAX, "clamp/upper bound");
+    assert_eq!(
+        clamp_temperature_default(&json!(1.0)),
+        1.0,
+        "clamp/neutral untouched"
+    );
+    assert_eq!(
+        clamp_temperature_default(&json!(9.0)),
+        TEMP_MAX,
+        "clamp/upper bound"
+    );
     // 13 options is the bucket the reported skill-router landed in
     assert_eq!(temp_bucket(qtype_code("choice").unwrap(), 13), "choice:11+");
 }
 
-
 #[test]
 fn lru_bookkeeping() {
-    let rr = RecordingRouter::new(RouterOptions { max_loaded: Some(1), ..Default::default() });
+    let rr = RecordingRouter::new(RouterOptions {
+        max_loaded: Some(1),
+        ..Default::default()
+    });
     rr.router.load("english").expect("load");
     rr.router.load("multilingual").expect("load");
     assert_eq!(
@@ -49,7 +63,10 @@ fn lru_bookkeeping() {
     assert_eq!(sorted, ["multilingual"], "lru/cap 1 agents match order");
     assert_eq!(rr.builds(), ["english", "multilingual"]);
 
-    let rr = RecordingRouter::new(RouterOptions { max_loaded: Some(2), ..Default::default() });
+    let rr = RecordingRouter::new(RouterOptions {
+        max_loaded: Some(2),
+        ..Default::default()
+    });
     rr.router.load("english").expect("load");
     rr.router.load("multilingual").expect("load");
     rr.router.load("typed-decisions").expect("load");
@@ -59,7 +76,10 @@ fn lru_bookkeeping() {
         "lru/cap 2 evicts oldest"
     );
 
-    let rr = RecordingRouter::new(RouterOptions { max_loaded: Some(2), ..Default::default() });
+    let rr = RecordingRouter::new(RouterOptions {
+        max_loaded: Some(2),
+        ..Default::default()
+    });
     rr.router.load("english").expect("load");
     rr.router.load("multilingual").expect("load");
     rr.router.load("english").expect("load"); // touch english
@@ -84,14 +104,21 @@ fn lru_bookkeeping() {
 // `multilingual`, so the default holds both.
 #[test]
 fn the_default_cap_matches_the_alternating_workload() {
-    assert_eq!(Router::new().expect("router").max_loaded(), 2, "lru/default is two");
+    assert_eq!(
+        Router::new().expect("router").max_loaded(),
+        2,
+        "lru/default is two"
+    );
 
     let en = json!({"body": "I was charged twice for invoice 4411, please refund."});
     let ml = json!({"body": "Der Kunde wurde zweimal belastet und moechte eine Rueckerstattung"});
     let generic = q_generic();
 
     for (cap, want_built) in [(1usize, 20usize), (2usize, 2usize)] {
-        let cr = RecordingRouter::new(RouterOptions { max_loaded: Some(cap), ..Default::default() });
+        let cr = RecordingRouter::new(RouterOptions {
+            max_loaded: Some(cap),
+            ..Default::default()
+        });
         for _ in 0..10 {
             // the reported alternating workload
             cr.router
@@ -122,7 +149,6 @@ fn the_default_cap_matches_the_alternating_workload() {
     );
 }
 
-
 // ------------------------------------------------------------- memory test
 // `tests/test_router_memory.py`: attach two mock agents, unload one, unload
 // all.
@@ -142,16 +168,26 @@ fn evict_and_unload_memory_release() {
         }
     }
 
-    let r = Router::configure(RouterOptions { max_loaded: Some(1), ..Default::default() })
-        .expect("router");
+    let r = Router::configure(RouterOptions {
+        max_loaded: Some(1),
+        ..Default::default()
+    })
+    .expect("router");
     r.attach("english", Box::new(MockAgent)).expect("attach");
-    r.attach("multilingual", Box::new(MockAgent)).expect("attach");
+    r.attach("multilingual", Box::new(MockAgent))
+        .expect("attach");
     assert_eq!(r.loaded().len(), 2, "attach/both attached stay resident");
 
     // Trigger unload of specific model
     r.unload(Some("english")).expect("unload");
-    assert!(!r.loaded().contains(&"english".to_string()), "unload/english gone");
-    assert!(r.loaded().contains(&"multilingual".to_string()), "unload/multilingual kept");
+    assert!(
+        !r.loaded().contains(&"english".to_string()),
+        "unload/english gone"
+    );
+    assert!(
+        r.loaded().contains(&"multilingual".to_string()),
+        "unload/multilingual kept"
+    );
 
     // Trigger unload all
     r.unload(None).expect("unload");

@@ -7,7 +7,10 @@ fn load_temps(cfg: Value) -> (OnnxAgent, Option<String>) {
     let mut agent = bare_agent(
         cfg.as_object().cloned().unwrap_or_default(),
         Box::new(FakeTok),
-        Box::new(StubSession { logits: vec![], act_logits: vec![] }),
+        Box::new(StubSession {
+            logits: vec![],
+            act_logits: vec![],
+        }),
         [1.0, 1.0, 1.0],
         HashMap::new(),
         HashMap::new(),
@@ -19,7 +22,13 @@ fn load_temps(cfg: Value) -> (OnnxAgent, Option<String>) {
 
 #[test]
 fn invalid_type_entries_use_neutral_fallback_and_warn() {
-    for value in [json!(null), json!("invalid"), json!(""), json!([]), json!({})] {
+    for value in [
+        json!(null),
+        json!("invalid"),
+        json!(""),
+        json!([]),
+        json!({}),
+    ] {
         let (agent, warning) = load_temps(json!({"temperature": [value, 2.0, 3.0]}));
         assert_eq!(agent.temperature, [1.0, 2.0, 3.0], "value: {}", value);
         let msg = warning.expect("a warning was expected");
@@ -31,7 +40,13 @@ fn invalid_type_entries_use_neutral_fallback_and_warn() {
 
 #[test]
 fn invalid_bucket_entries_use_neutral_fallback_and_keep_precedence() {
-    for value in [json!(null), json!("invalid"), json!(""), json!([]), json!({})] {
+    for value in [
+        json!(null),
+        json!("invalid"),
+        json!(""),
+        json!([]),
+        json!({}),
+    ] {
         let (agent, warning) = load_temps(json!({
             "temperature": [2.0, 3.0, 4.0],
             "temperature_by_options": {"choice:2": value}
@@ -87,7 +102,13 @@ fn out_of_range_values_keep_existing_clamps() {
         Some(0.5)
     );
     let msg = warning.expect("a warning was expected");
-    for entry in ["temperature[0]", "temperature[1]", "temperature[2]", "choice:2", "score:3-5"] {
+    for entry in [
+        "temperature[0]",
+        "temperature[1]",
+        "temperature[2]",
+        "choice:2",
+        "score:3-5",
+    ] {
         assert!(msg.contains(entry), "{} -> {}", entry, msg);
     }
 }

@@ -16,7 +16,7 @@ fn mock_predict_sees_only_the_shortlist() {
     });
     let state = json!("I was charged twice");
     let result = predict_shortlist(
-         &agent,
+        &agent,
         &state,
         questions.as_object().expect("map"),
         &TableEmbed::from_pairs(&full_vectors()),
@@ -24,14 +24,22 @@ fn mock_predict_sees_only_the_shortlist() {
     )
     .expect("predict_shortlist");
 
-    assert_eq!(agent.calls.lock().unwrap_or_else(|e| e.into_inner()).len(), 1, "predict/called once");
+    assert_eq!(
+        agent.calls.lock().unwrap_or_else(|e| e.into_inner()).len(),
+        1,
+        "predict/called once"
+    );
     let (got_state, got_questions) = {
         let calls = agent.calls.lock().unwrap_or_else(|e| e.into_inner());
         (calls[0].0.clone(), calls[0].1.clone())
     };
     assert_eq!(got_state, state, "predict/state is the same value");
     let intent = &got_questions["intent"];
-    let kept: Vec<&String> = intent["criteria"].as_object().expect("map").keys().collect();
+    let kept: Vec<&String> = intent["criteria"]
+        .as_object()
+        .expect("map")
+        .keys()
+        .collect();
     assert_eq!(
         kept,
         ["tech", "sales"],
@@ -115,7 +123,9 @@ fn shortlist_key_is_on_the_copy() {
             Ok(json!({"model": "fake", "answers": {}}))
         }
     }
-    let runner = Holding { seen: std::sync::Mutex::new(None) };
+    let runner = Holding {
+        seen: std::sync::Mutex::new(None),
+    };
     let out = predict_shortlist(
         &runner,
         &json!("pay me"),
@@ -146,7 +156,7 @@ fn pass_through_reaches_predict_unchanged() {
     let original_q = json!({"type": "choice", "instructions": "Which desk?", "criteria": full});
     let agent = Recorder::new();
     let out = predict_shortlist(
-         &agent,
+        &agent,
         &json!("I was charged twice"),
         json!({"intent": original_q}).as_object().expect("map"),
         &BoomEmbed,
@@ -160,7 +170,7 @@ fn pass_through_reaches_predict_unchanged() {
     );
     let agent99 = Recorder::new();
     let out99 = predict_shortlist(
-         &agent99,
+        &agent99,
         &json!("x"),
         json!({"intent": {"type": "choice", "instructions": "Which desk?", "criteria": full}})
             .as_object()
@@ -190,7 +200,7 @@ fn list_criteria_reach_predict_in_rank_order() {
     });
     let agent = Recorder::new();
     predict_shortlist(
-         &agent,
+        &agent,
         &json!("hello"),
         list_questions.as_object().expect("map"),
         &list_q_embed,
@@ -221,4 +231,3 @@ fn list_criteria_reach_predict_in_rank_order() {
         "list/internal keys follow the shortlist"
     );
 }
-

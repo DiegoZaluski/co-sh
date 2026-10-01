@@ -42,9 +42,9 @@
 
 use std::collections::HashMap;
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
-use cosh_onnx::{load, LoadOptions, ModelKind};
+use cosh_onnx::{LoadOptions, ModelKind, load};
 
 /// One labelled example: the loop text, whether the loop ended, and the
 /// language tag used for slicing (`en`/`pt`).
@@ -327,7 +327,9 @@ fn loop_termination_eval() {
     };
     let min_accuracy: f64 = match std::env::var("LAYA_EVAL_MIN_ACCURACY") {
         Ok(v) if !v.is_empty() => v.parse().unwrap_or_else(|_| {
-            eprintln!("warning: LAYA_EVAL_MIN_ACCURACY={v:?} is not a number; using the 0.80 default");
+            eprintln!(
+                "warning: LAYA_EVAL_MIN_ACCURACY={v:?} is not a number; using the 0.80 default"
+            );
             0.80
         }),
         _ => 0.80,
@@ -359,13 +361,21 @@ fn loop_termination_eval() {
             (
                 &control_qs,
                 "intent",
-                if example.terminated { "refund" } else { "technical_help" },
+                if example.terminated {
+                    "refund"
+                } else {
+                    "technical_help"
+                },
             )
         } else {
             (
                 &loop_qs,
                 "loop_terminated",
-                if example.terminated { "terminated" } else { "running" },
+                if example.terminated {
+                    "terminated"
+                } else {
+                    "running"
+                },
             )
         };
         let result = model
@@ -394,10 +404,7 @@ fn loop_termination_eval() {
         if !correct && !example.control {
             misses.push(format!(
                 "  [{}] {:?} -> {:?} (expected {})",
-                example.language,
-                example.message,
-                answers[qid]["choice"],
-                expected,
+                example.language, example.message, answers[qid]["choice"], expected,
             ));
         }
     }
@@ -510,8 +517,7 @@ fn confidence_floor_sweep() {
             .decide(&state, &qs, None, None, None)
             .unwrap_or_else(|e| panic!("predict failed for {:?}: {e}", example.message));
         let answers = &result["answers"];
-        let said_running =
-            choice_correct(answers, "loop_terminated", "running").is_some_and(|c| c);
+        let said_running = choice_correct(answers, "loop_terminated", "running").is_some_and(|c| c);
         let confidence = answer_confidence(answers, "loop_terminated").unwrap_or(0.0);
         observations.push((example.terminated, said_running, confidence));
     }
@@ -538,10 +544,7 @@ fn confidence_floor_sweep() {
         let correct = observations.len() - missed_stops - false_continues;
         println!(
             "| {:.2} | {} | {} | {} |",
-            floor,
-            missed_stops,
-            false_continues,
-            correct
+            floor, missed_stops, false_continues, correct
         );
         // Tie-break towards the HIGHEST floor with identical results:
         // the bottom of an optimal plateau (e.g. 0.00) vetoes every

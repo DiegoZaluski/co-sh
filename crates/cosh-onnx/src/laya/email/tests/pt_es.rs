@@ -81,7 +81,9 @@ fn es_reply_keeps_only_the_request() {
 #[test]
 fn es_disclaimer_footer_is_dropped() {
     assert_eq!(
-        clean("Necesito la factura de marzo.\n\nSi usted ha recibido este mensaje por error, bórrelo."),
+        clean(
+            "Necesito la factura de marzo.\n\nSi usted ha recibido este mensaje por error, bórrelo."
+        ),
         "Necesito la factura de marzo.",
         "es/disclaimer footer is dropped"
     );
@@ -168,4 +170,3 @@ fn pt_de_without_an_address_is_body_text() {
         "pt/`De:` without an address is body text"
     );
 }
-

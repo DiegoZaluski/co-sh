@@ -11,7 +11,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::error::{Error, Result};
 
@@ -72,7 +72,9 @@ impl HfTokenizer {
         let token_str = |key: &str| -> Option<String> {
             match cfg.get(key) {
                 Some(Value::String(s)) => Some(s.clone()),
-                Some(Value::Object(m)) => m.get("content").and_then(Value::as_str).map(str::to_string),
+                Some(Value::Object(m)) => {
+                    m.get("content").and_then(Value::as_str).map(str::to_string)
+                }
                 _ => None,
             }
         };
@@ -136,7 +138,6 @@ impl Tokenizer for HfTokenizer {
     }
 }
 
-
 /// `Agent._fix_tokenizer_config`: ensure `tokenizer_config.json` can be loaded
 /// across tokenizer-library versions.
 ///
@@ -164,7 +165,9 @@ pub fn fix_tokenizer_config(path: &std::path::Path) {
     }
 }
 
-pub(crate) fn fix_tokenizer_config_inner(cfg_file: &std::path::Path) -> std::result::Result<(), String> {
+pub(crate) fn fix_tokenizer_config_inner(
+    cfg_file: &std::path::Path,
+) -> std::result::Result<(), String> {
     let raw = std::fs::read_to_string(cfg_file).map_err(|e| e.to_string())?;
     let mut tcfg: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
     let Value::Object(map) = &mut tcfg else {
@@ -177,7 +180,10 @@ pub(crate) fn fix_tokenizer_config_inner(cfg_file: &std::path::Path) -> std::res
         Some(_) => false,
     };
     if class_is_default {
-        map.insert("tokenizer_class".into(), Value::String("PreTrainedTokenizerFast".into()));
+        map.insert(
+            "tokenizer_class".into(),
+            Value::String("PreTrainedTokenizerFast".into()),
+        );
         map.remove("backend");
         map.remove("is_local");
         changed = true;
@@ -218,9 +224,11 @@ pub(crate) fn fix_tokenizer_config_inner(cfg_file: &std::path::Path) -> std::res
     {
         use std::os::unix::fs::PermissionsExt;
         if let Ok(meta) = std::fs::metadata(cfg_file) {
-            let _ = tmp.as_file().set_permissions(std::fs::Permissions::from_mode(
-                meta.permissions().mode() & 0o777,
-            ));
+            let _ = tmp
+                .as_file()
+                .set_permissions(std::fs::Permissions::from_mode(
+                    meta.permissions().mode() & 0o777,
+                ));
         }
     }
     // Dropping the PersistError removes the temporary file, leaving the

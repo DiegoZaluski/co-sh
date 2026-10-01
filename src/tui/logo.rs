@@ -624,7 +624,12 @@ impl ChatLogo {
             if text.is_empty() {
                 continue;
             }
-            let base = f.dx + if f.dx < 0.0 { -(text.len() as f64) } else { 0.0 };
+            let base = f.dx
+                + if f.dx < 0.0 {
+                    -(text.len() as f64)
+                } else {
+                    0.0
+                };
             let fx = (o_x + base).round() as i64;
             let fy = (o_y + f.dy()).round() as i64;
             // Fade in over the first 120ms; dissolve over the last 350ms.
@@ -816,13 +821,7 @@ mod tests {
         logo.advance(10.0, 16.0, 9.0); // fully filled and fired
         logo.advance(0.2, 16.0, 9.0); // let the beam grow
 
-        logo.render(
-            &mut buf,
-            area,
-            16,
-            9,
-            test_colors(),
-        );
+        logo.render(&mut buf, area, 16, 9, test_colors());
 
         // The real logo glyph cells are drawn.
         let cells = non_space_cells(&buf);
@@ -925,13 +924,7 @@ mod tests {
 
         // Render and verify no non-space glyph cell appears below the band.
         let mut buf = ratatui::buffer::Buffer::empty(area);
-        logo.render(
-            &mut buf,
-            area,
-            12,
-            25,
-            test_colors(),
-        );
+        logo.render(&mut buf, area, 12, 25, test_colors());
         let glyph_bottom_limit = area.bottom();
         for (_, y, ch) in non_space_cells(&buf) {
             // Beam cells may cross the boundary; glyph cells must not.
@@ -1018,7 +1011,10 @@ mod tests {
         let before = logo.health();
         assert!(logo.click_logo(ox + cols[2] as u16, oy + 2));
         let mid_bottom = before - logo.health();
-        assert!(mid_bottom > 10 && mid_bottom < 50, "row 2 damage: {mid_bottom}");
+        assert!(
+            mid_bottom > 10 && mid_bottom < 50,
+            "row 2 damage: {mid_bottom}"
+        );
         assert!(mid_top > mid_bottom, "higher rows must hurt more");
     }
 
@@ -1087,19 +1083,17 @@ mod tests {
         // zzZ: phase 0 renders "zzZ" right of the glyph, in bold.
         let mut buf = ratatui::buffer::Buffer::empty(area);
         let muted = ratatui::style::Color::Rgb(90, 90, 110);
-        logo.render(
-            &mut buf,
-            area,
-            10,
-            9,
-            test_colors(),
-        );
+        logo.render(&mut buf, area, 10, 9, test_colors());
         let zx = ox + O_GLYPH_W as u16 + 1;
         let text: String = (0..3)
             .map(|i| buf[(zx + i, oy)].symbol().chars().next().unwrap_or(' '))
             .collect();
         assert_eq!(text, "zzZ");
-        assert!(buf[(zx + 2, oy)].modifier.contains(ratatui::style::Modifier::BOLD));
+        assert!(
+            buf[(zx + 2, oy)]
+                .modifier
+                .contains(ratatui::style::Modifier::BOLD)
+        );
         assert_eq!(buf[(zx + 2, oy)].fg, muted);
 
         // While asleep the glyph renders in the muted color (interior cells
@@ -1109,13 +1103,7 @@ mod tests {
         // After one frame the uppercase Z wraps to the first slot: "Zzz".
         logo.advance(ZZZ_FRAME_SECS + 0.01, 10.0, 9.0);
         let mut buf = ratatui::buffer::Buffer::empty(area);
-        logo.render(
-            &mut buf,
-            area,
-            10,
-            9,
-            test_colors(),
-        );
+        logo.render(&mut buf, area, 10, 9, test_colors());
         let text: String = (0..3)
             .map(|i| buf[(zx + i, oy)].symbol().chars().next().unwrap_or(' '))
             .collect();
@@ -1124,13 +1112,7 @@ mod tests {
         // And again: "zZz".
         logo.advance(ZZZ_FRAME_SECS + 0.01, 10.0, 9.0);
         let mut buf = ratatui::buffer::Buffer::empty(area);
-        logo.render(
-            &mut buf,
-            area,
-            10,
-            9,
-            test_colors(),
-        );
+        logo.render(&mut buf, area, 10, 9, test_colors());
         let text: String = (0..3)
             .map(|i| buf[(zx + i, oy)].symbol().chars().next().unwrap_or(' '))
             .collect();
@@ -1148,13 +1130,7 @@ mod tests {
         // Shortly after the click the number is materializing.
         logo.advance(0.15, 10.0, 11.0);
         let mut buf = ratatui::buffer::Buffer::empty(area);
-        logo.render(
-            &mut buf,
-            area,
-            10,
-            11,
-            test_colors(),
-        );
+        logo.render(&mut buf, area, 10, 11, test_colors());
         let has_bold_digit = (0..area.width).any(|x| {
             (0..area.height).any(|y| {
                 let c = &buf[(x, y)];

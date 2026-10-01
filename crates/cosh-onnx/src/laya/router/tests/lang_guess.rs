@@ -13,8 +13,7 @@ use super::*;
 fn language_agnostic_codes_abstain() {
     let english_state = "Please refund the duplicate charge on invoice 4411";
     for code in [
-        "C", "POSIX", "C.UTF-8", "c.utf8", "c", "posix", "und", "zxx", "mul", "UND", "Zxx",
-        " und ",
+        "C", "POSIX", "C.UTF-8", "c.utf8", "c", "posix", "und", "zxx", "mul", "UND", "Zxx", " und ",
     ] {
         assert_eq!(
             english_from_code(Some(code)),
@@ -24,7 +23,10 @@ fn language_agnostic_codes_abstain() {
         let decision = route(
             &json!(english_state),
             &empty_questions(),
-            &RouteOptions { lang: Some(code), ..RouteOptions::default() },
+            &RouteOptions {
+                lang: Some(code),
+                ..RouteOptions::default()
+            },
         );
         assert_eq!(
             decision.model, "english",
@@ -38,9 +40,21 @@ fn language_agnostic_codes_abstain() {
 
     // An empty hint is the case this mirrors, so it must still behave the
     // same way.
-    assert_eq!(english_from_code(Some("")), None, "lang-code/empty string still abstains");
-    assert_eq!(english_from_code(None), None, "lang-code/None still abstains");
-    assert_eq!(english_from_code(Some("   ")), None, "lang-code/whitespace still abstains");
+    assert_eq!(
+        english_from_code(Some("")),
+        None,
+        "lang-code/empty string still abstains"
+    );
+    assert_eq!(
+        english_from_code(None),
+        None,
+        "lang-code/None still abstains"
+    );
+    assert_eq!(
+        english_from_code(Some("   ")),
+        None,
+        "lang-code/whitespace still abstains"
+    );
 
     // The change must not touch codes that do name a language: English still
     // routes now, and a non-English code still forces the multilingual
@@ -54,7 +68,10 @@ fn language_agnostic_codes_abstain() {
         let reason = route(
             &json!(english_state),
             &empty_questions(),
-            &RouteOptions { lang: Some(code), ..RouteOptions::default() },
+            &RouteOptions {
+                lang: Some(code),
+                ..RouteOptions::default()
+            },
         )
         .reason;
         assert_eq!(
@@ -73,7 +90,10 @@ fn language_agnostic_codes_abstain() {
             route(
                 &json!(english_state),
                 &empty_questions(),
-                &RouteOptions { lang: Some(code), ..RouteOptions::default() },
+                &RouteOptions {
+                    lang: Some(code),
+                    ..RouteOptions::default()
+                },
             )
             .model,
             "multilingual",
@@ -105,10 +125,11 @@ fn the_caller_supplied_language_hint() {
     // The state the maintainer used on #35: a short Romanian request the
     // heuristic cannot place.
     let romanian = "Care este ora in Tokyo?";
-    let generic = json!({"intent": {"type": "choice", "instructions": "x", "criteria": ["a", "b"]}})
-        .as_object()
-        .unwrap()
-        .clone();
+    let generic =
+        json!({"intent": {"type": "choice", "instructions": "x", "criteria": ["a", "b"]}})
+            .as_object()
+            .unwrap()
+            .clone();
     let r0 = Router::new().expect("router");
     let route_with = |lang_guess: Option<LangGuess>,
                       lang: Option<&'static str>,
@@ -153,7 +174,11 @@ fn the_caller_supplied_language_hint() {
         "multilingual",
         "code/Romanian routes multilingual"
     );
-    assert_eq!(route_with(code("en"), None, None, None).model, "english", "code/English routes english");
+    assert_eq!(
+        route_with(code("en"), None, None, None).model,
+        "english",
+        "code/English routes english"
+    );
     assert_eq!(
         route_with(code("en_US"), None, None, None).model,
         "english",
@@ -199,7 +224,13 @@ fn the_caller_supplied_language_hint() {
     // callables
     let callable = |f: LangGuessFn| Some(LangGuess::Callable(f));
     assert_eq!(
-        route_with(callable(Arc::new(|_| Some("ro".to_string()))), None, None, None).model,
+        route_with(
+            callable(Arc::new(|_| Some("ro".to_string()))),
+            None,
+            None,
+            None
+        )
+        .model,
         "multilingual",
         "callable/code is used"
     );
@@ -227,9 +258,14 @@ fn the_caller_supplied_language_hint() {
         "callable/None falls through to detection"
     );
     assert!(
-        route_with(callable(Arc::new(|_| Some(String::new()))), None, None, None)
-            .detection
-            .is_some(),
+        route_with(
+            callable(Arc::new(|_| Some(String::new()))),
+            None,
+            None,
+            None
+        )
+        .detection
+        .is_some(),
         "callable/empty string falls through"
     );
     assert_eq!(
@@ -245,7 +281,8 @@ fn the_caller_supplied_language_hint() {
     })
     .expect("router");
     assert_eq!(
-        r_inst.route(&json!(romanian), Some(&generic), &RouteOptions::default())
+        r_inst
+            .route(&json!(romanian), Some(&generic), &RouteOptions::default())
             .expect("route")
             .model,
         "multilingual",
@@ -256,7 +293,10 @@ fn the_caller_supplied_language_hint() {
             .route(
                 &json!(romanian),
                 Some(&generic),
-                &RouteOptions { lang_guess: code("en").as_ref(), ..RouteOptions::default() },
+                &RouteOptions {
+                    lang_guess: code("en").as_ref(),
+                    ..RouteOptions::default()
+                },
             )
             .expect("route")
             .model,
@@ -301,7 +341,10 @@ fn the_caller_supplied_language_hint() {
         "precedence/explicit task beats the hint"
     );
     let explicit = route_with(code("ro"), Some("en"), None, None);
-    assert_eq!(explicit.model, "english", "precedence/explicit lang beats the hint");
+    assert_eq!(
+        explicit.model, "english",
+        "precedence/explicit lang beats the hint"
+    );
     assert!(
         explicit.reason.contains("explicit lang"),
         "precedence/an explicit lang is still reported as explicit"
@@ -310,12 +353,18 @@ fn the_caller_supplied_language_hint() {
     // the decision payload
     let d = route_with(code("ro"), None, None, None);
     assert_eq!(d.model, "multilingual", "payload/model");
-    assert!(d.repo.contains("convaiinnovations/laya"), "payload/repo points at the bundle");
+    assert!(
+        d.repo.contains("convaiinnovations/laya"),
+        "payload/repo points at the bundle"
+    );
     assert!(
         d.reason.contains("lang_guess"),
         "payload/reason records the caller hint"
     );
-    assert!(d.detection.is_none(), "payload/detection is None when the hint decided it");
+    assert!(
+        d.detection.is_none(),
+        "payload/detection is None when the hint decided it"
+    );
     assert!(
         Router::configure(RouterOptions {
             lang_guess: Some(LangGuess::Code("ro".to_string())),
@@ -347,21 +396,28 @@ fn the_caller_supplied_language_hint() {
         .predict(&json!(romanian), &generic, &PredictOptions::default())
         .expect("predict");
     assert_eq!(
-        out["routing"]["model"], json!("multilingual"),
+        out["routing"]["model"],
+        json!("multilingual"),
         "predict/uses the hint"
     );
     assert_eq!(
-        r_p
-            .predict(
-                &json!(romanian),
-                &generic,
-                &PredictOptions { lang_guess: code("en").as_ref(), ..Default::default() },
-            )
-            .expect("predict")["routing"]["model"],
+        r_p.predict(
+            &json!(romanian),
+            &generic,
+            &PredictOptions {
+                lang_guess: code("en").as_ref(),
+                ..Default::default()
+            },
+        )
+        .expect("predict")["routing"]["model"],
         json!("english"),
         "predict/forwards a per-call hint"
     );
-    assert_eq!(calls.lock().unwrap_or_else(|e| e.into_inner()).len(), 2, "predict/reaches the model");
+    assert_eq!(
+        calls.lock().unwrap_or_else(|e| e.into_inner()).len(),
+        2,
+        "predict/reaches the model"
+    );
     assert_eq!(
         calls.lock().unwrap_or_else(|e| e.into_inner())[0],
         json!(romanian),
@@ -369,7 +425,10 @@ fn the_caller_supplied_language_hint() {
     );
     let routing = out["routing"].as_object().expect("routing object");
     for key in ["model", "repo", "reason", "detection", "workflow"] {
-        assert!(routing.contains_key(key), "predict/keeps the routing block: {key}");
+        assert!(
+            routing.contains_key(key),
+            "predict/keeps the routing block: {key}"
+        );
     }
 
     // the helper itself
@@ -378,8 +437,16 @@ fn the_caller_supplied_language_hint() {
     assert_eq!(english_from_code(Some("   ")), None, "helper/spaces");
     assert_eq!(english_from_code(Some("en")), Some(true), "helper/en");
     assert_eq!(english_from_code(Some("en_US")), Some(true), "helper/en_US");
-    assert_eq!(english_from_code(Some("zh_CN")), Some(false), "helper/zh_CN");
-    assert_eq!(english_from_code(Some("en.UTF-8")), Some(true), "helper/strips after the dot");
+    assert_eq!(
+        english_from_code(Some("zh_CN")),
+        Some(false),
+        "helper/zh_CN"
+    );
+    assert_eq!(
+        english_from_code(Some("en.UTF-8")),
+        Some(true),
+        "helper/strips after the dot"
+    );
     assert_eq!(english_from_code(Some(".")), None, "helper/only a dot");
 
     // the standalone-repo mapping is untouched
@@ -390,7 +457,8 @@ fn the_caller_supplied_language_hint() {
     })
     .expect("router");
     assert_eq!(
-        r_alone.route(&json!(romanian), Some(&generic), &RouteOptions::default())
+        r_alone
+            .route(&json!(romanian), Some(&generic), &RouteOptions::default())
             .expect("route")
             .repo,
         "convaiinnovations/laya-multilingual",
@@ -399,8 +467,16 @@ fn the_caller_supplied_language_hint() {
 
     // nothing without a hint moves
     for (label, state, want) in [
-        ("plain english", "I was charged twice and want a refund", "english"),
-        ("German with umlauts", "Mein Konto wurde zweimal belastet, bitte erstatten Sie", "multilingual"),
+        (
+            "plain english",
+            "I was charged twice and want a refund",
+            "english",
+        ),
+        (
+            "German with umlauts",
+            "Mein Konto wurde zweimal belastet, bitte erstatten Sie",
+            "multilingual",
+        ),
         ("Hindi", "यह एक हिंदी वाक्य है", "multilingual"),
         ("empty", "", "english"),
         ("digits", "12345", "english"),
@@ -431,7 +507,10 @@ impl AgentLike for RecordingAgent {
         _max_len: Option<usize>,
         _head_max_len: Option<usize>,
     ) -> Result<Value> {
-        self.calls.lock().unwrap_or_else(|e| e.into_inner()).push(state.clone());
+        self.calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(state.clone());
         Ok(json!({"answers": {}, "usage": {"input_tokens": 0, "output_tokens": 0}}))
     }
 
@@ -457,8 +536,15 @@ fn blank_lang_abstains_and_real_codes_still_win() {
     let generic = q_generic();
     let r = Router::new().expect("router");
     let route_with = |state: &Value, lang: Option<&'static str>| {
-        r.route(state, Some(&generic), &RouteOptions { lang, ..RouteOptions::default() })
-            .expect("route")
+        r.route(
+            state,
+            Some(&generic),
+            &RouteOptions {
+                lang,
+                ..RouteOptions::default()
+            },
+        )
+        .expect("route")
     };
 
     // baseline
@@ -468,7 +554,9 @@ fn blank_lang_abstains_and_real_codes_still_win() {
         "baseline/plain English state routes english"
     );
     assert!(
-        !route_with(&json!(english), None).reason.contains("explicit lang="),
+        !route_with(&json!(english), None)
+            .reason
+            .contains("explicit lang="),
         "baseline/no lang emits no explicit reason"
     );
 
@@ -476,12 +564,18 @@ fn blank_lang_abstains_and_real_codes_still_win() {
     let blank = route_with(&json!(english), Some(""));
     let ws = route_with(&json!(english), Some("   "));
     let none = route_with(&json!(english), None);
-    assert_eq!(blank.model, "english", "blank/empty lang falls through to detection (english)");
+    assert_eq!(
+        blank.model, "english",
+        "blank/empty lang falls through to detection (english)"
+    );
     assert_eq!(
         ws.model, "english",
         "blank/whitespace lang falls through to detection (english)"
     );
-    assert_eq!(none.model, "english", "blank/None lang keeps detected model");
+    assert_eq!(
+        none.model, "english",
+        "blank/None lang keeps detected model"
+    );
     assert!(
         !blank.reason.contains("explicit lang="),
         "blank/empty lang does not claim an explicit override"
@@ -492,22 +586,36 @@ fn blank_lang_abstains_and_real_codes_still_win() {
     );
     // fall-through means the detection block is present, not just an equal
     // model
-    assert!(blank.detection.is_some(), "blank/empty lang keeps the detection block");
-    assert!(ws.detection.is_some(), "blank/whitespace lang keeps the detection block");
+    assert!(
+        blank.detection.is_some(),
+        "blank/empty lang keeps the detection block"
+    );
+    assert!(
+        ws.detection.is_some(),
+        "blank/whitespace lang keeps the detection block"
+    );
 
     // real codes still win
-    assert_eq!(route_with(&json!(german), Some("en")).model, "english", "explicit/en forces english");
+    assert_eq!(
+        route_with(&json!(german), Some("en")).model,
+        "english",
+        "explicit/en forces english"
+    );
     assert_eq!(
         route_with(&json!(english), Some("de")).model,
         "multilingual",
         "explicit/de forces multilingual"
     );
     assert!(
-        route_with(&json!(german), Some("en")).reason.contains("explicit lang="),
+        route_with(&json!(german), Some("en"))
+            .reason
+            .contains("explicit lang="),
         "explicit/en keeps the explicit reason"
     );
     assert!(
-        route_with(&json!(english), Some("de")).reason.contains("explicit lang="),
+        route_with(&json!(english), Some("de"))
+            .reason
+            .contains("explicit lang="),
         "explicit/de keeps the explicit reason"
     );
 
@@ -538,7 +646,10 @@ fn blank_lang_abstains_and_real_codes_still_win() {
             .route(
                 &json!(german),
                 Some(&generic),
-                &RouteOptions { lang: Some(""), ..RouteOptions::default() },
+                &RouteOptions {
+                    lang: Some(""),
+                    ..RouteOptions::default()
+                },
             )
             .expect("route")
             .model,
@@ -546,11 +657,11 @@ fn blank_lang_abstains_and_real_codes_still_win() {
         "blank/does not mask an installed lang_guess"
     );
     assert_eq!(
-        r_hint.route(&json!(german), Some(&generic), &RouteOptions::default())
+        r_hint
+            .route(&json!(german), Some(&generic), &RouteOptions::default())
             .expect("route")
             .model,
         "multilingual",
         "blank/does not break plain detection with a hint installed"
     );
 }
-

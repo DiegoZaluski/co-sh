@@ -71,14 +71,8 @@ pub fn load(kind: ModelKind, options: &LoadOptions) -> Result<Arc<dyn DecisionMo
 fn resolve(kind: ModelKind) -> (String, Option<String>) {
     match kind {
         ModelKind::English => (BUNDLE_REPO.to_string(), None),
-        ModelKind::Multilingual => (
-            BUNDLE_REPO.to_string(),
-            Some("multilingual".to_string()),
-        ),
-        ModelKind::TypedDecisions => (
-            BUNDLE_REPO.to_string(),
-            Some("typed-decisions".to_string()),
-        ),
+        ModelKind::Multilingual => (BUNDLE_REPO.to_string(), Some("multilingual".to_string())),
+        ModelKind::TypedDecisions => (BUNDLE_REPO.to_string(), Some("typed-decisions".to_string())),
         ModelKind::Custom { repo, subfolder } => (repo, subfolder),
     }
 }

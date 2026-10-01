@@ -14,7 +14,9 @@ fn assert_value_error(name: &str, run: impl FnOnce() -> Result<Vec<Value>>) {
 fn k_zero_and_negative_raise() {
     let embed = TableEmbed::from_pairs(&option_texts_table());
     let criteria = criteria_value();
-    assert_value_error("err/k=0", || shortlist(&json!("pay me"), &criteria, &embed, 0));
+    assert_value_error("err/k=0", || {
+        shortlist(&json!("pay me"), &criteria, &embed, 0)
+    });
     // `k negative` and the bool/float/str branches are unrepresentable with a
     // typed usize (documented omission).
 }
@@ -22,8 +24,12 @@ fn k_zero_and_negative_raise() {
 #[test]
 fn empty_criteria_and_duplicates_raise() {
     let embed = TableEmbed::from_pairs(&option_texts_table());
-    assert_value_error("err/empty dict", || shortlist(&json!("pay me"), &json!({}), &embed, 1));
-    assert_value_error("err/empty list", || shortlist(&json!("pay me"), &json!([]), &embed, 1));
+    assert_value_error("err/empty dict", || {
+        shortlist(&json!("pay me"), &json!({}), &embed, 1)
+    });
+    assert_value_error("err/empty list", || {
+        shortlist(&json!("pay me"), &json!([]), &embed, 1)
+    });
     assert_value_error("err/duplicate label", || {
         shortlist(&json!("pay me"), &json!(["alpha", "alpha"]), &embed, 1)
     });
@@ -34,9 +40,11 @@ fn missing_criteria_raises() {
     let embed = TableEmbed::from_pairs(&option_texts_table());
     let agent = Recorder::new();
     let err = predict_shortlist(
-         &agent,
+        &agent,
         &json!("pay me"),
-        json!({"intent": {"type": "choice"}}).as_object().expect("map"),
+        json!({"intent": {"type": "choice"}})
+            .as_object()
+            .expect("map"),
         &embed,
         1,
     )
@@ -58,7 +66,7 @@ fn bad_embed_shape_raises_before_predict() {
     let (full, _sentinel) = full_criteria();
     let agent = Recorder::new();
     let err = predict_shortlist(
-         &agent,
+        &agent,
         &json!("pay me"),
         json!({"intent": {"type": "choice", "instructions": "Which desk?", "criteria": full}})
             .as_object()
@@ -69,7 +77,11 @@ fn bad_embed_shape_raises_before_predict() {
     .expect_err("bad embed shape");
     assert!(matches!(err, Error::Value(_)), "err/bad embed shape");
     assert!(
-        agent.calls.lock().unwrap_or_else(|e| e.into_inner()).is_empty(),
+        agent
+            .calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty(),
         "err/bad shape does not call predict"
     );
 }
@@ -84,7 +96,7 @@ fn predict_must_return_a_dict() {
     }
     let runner = NullRunner;
     let err = predict_shortlist(
-         &runner,
+        &runner,
         &json!("pay me"),
         json!({"intent": {"type": "choice", "criteria": criteria_value()}})
             .as_object()
@@ -98,4 +110,3 @@ fn predict_must_return_a_dict() {
         "err/non-dict predict return: {err:?}"
     );
 }
-

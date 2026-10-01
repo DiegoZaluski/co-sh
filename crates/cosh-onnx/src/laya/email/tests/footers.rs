@@ -4,7 +4,9 @@ use super::*;
 #[test]
 fn inline_footer_no_blank_line_keeps_the_request() {
     assert_eq!(
-        clean(&format!("My account is locked.\n{DISCLAIMER}\nPlease unlock it.")),
+        clean(&format!(
+            "My account is locked.\n{DISCLAIMER}\nPlease unlock it."
+        )),
         "My account is locked. Please unlock it.",
         "inline footer/no blank line keeps the request"
     );
@@ -13,7 +15,9 @@ fn inline_footer_no_blank_line_keeps_the_request() {
 #[test]
 fn inline_footer_unpunctuated_request_line_is_fully_recovered() {
     assert_eq!(
-        clean(&format!("My account is locked\n{DISCLAIMER}\nPlease unlock it.")),
+        clean(&format!(
+            "My account is locked\n{DISCLAIMER}\nPlease unlock it."
+        )),
         "My account is locked Please unlock it.",
         "inline footer/unpunctuated request line is fully recovered"
     );
@@ -31,7 +35,9 @@ fn inline_footer_fused_request_without_a_trailing_sentence() {
 #[test]
 fn inline_footer_fused_order_reference_is_fully_recovered() {
     assert_eq!(
-        clean(&format!("RMA 5521 is still pending\n{DISCLAIMER}\nPlease advise.")),
+        clean(&format!(
+            "RMA 5521 is still pending\n{DISCLAIMER}\nPlease advise."
+        )),
         "RMA 5521 is still pending Please advise.",
         "inline footer/fused order reference is fully recovered"
     );
@@ -75,12 +81,19 @@ fn inline_footer_body_is_never_emptied() {
         "inline footer/body is never emptied"
     );
     assert!(
-        !clean(&format!("My account is locked. {DISCLAIMER}")).trim().is_empty(),
+        !clean(&format!("My account is locked. {DISCLAIMER}"))
+            .trim()
+            .is_empty(),
         "inline footer/is not empty"
     );
     assert_eq!(
-        email_state("Locked out", &format!("My account is locked. {DISCLAIMER}"), None, true, &[])
-            ["body"],
+        email_state(
+            "Locked out",
+            &format!("My account is locked. {DISCLAIMER}"),
+            None,
+            true,
+            &[]
+        )["body"],
         json!("My account is locked."),
         "email_state/body keeps the request"
     );
@@ -111,9 +124,10 @@ fn wrapped_standalone_footer_is_still_dropped() {
 #[test]
 fn received_in_error_footer_is_still_dropped() {
     assert_eq!(
-        clean("Please reopen ticket 4411.\n\nIf you have received this message in error, delete it."),
+        clean(
+            "Please reopen ticket 4411.\n\nIf you have received this message in error, delete it."
+        ),
         "Please reopen ticket 4411.",
         "received-in-error footer is still dropped"
     );
 }
-

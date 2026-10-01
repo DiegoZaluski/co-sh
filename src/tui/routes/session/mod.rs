@@ -779,7 +779,12 @@ fn push_sampled_row(
         .saturating_add(indent as u16)
         .min(x_off.saturating_add(max_w));
     let content: String = trimmed.chars().skip(indent).collect();
-    text_regions.push(TextRegion::one_row(cy, x1, x_off.saturating_add(max_w), content));
+    text_regions.push(TextRegion::one_row(
+        cy,
+        x1,
+        x_off.saturating_add(max_w),
+        content,
+    ));
 }
 
 fn text_regions_generation(
@@ -3836,8 +3841,7 @@ impl SessionView {
                                     // (body paints at x+3, regions claimed x+2) and
                                     // re-derived the collapsed-tail row window instead of
                                     // reusing the renderer's own.
-                                    let expanded =
-                                        self.tool_state.is_expanded(&summarizing_id(c));
+                                    let expanded = self.tool_state.is_expanded(&summarizing_id(c));
                                     // The box paints at the part top with no external
                                     // margin (render_parts advances straight past it),
                                     // and its width is max_w + 3 inside the message's
@@ -3865,10 +3869,8 @@ impl SessionView {
                                         // Strip the 3 box-margin columns so the sampled
                                         // text starts at screen column x_off.
                                         let base = k * stride + 3;
-                                        let trimmed = text_from_cell_row(
-                                            &temp_cells[base..],
-                                            max_w as usize,
-                                        );
+                                        let trimmed =
+                                            text_from_cell_row(&temp_cells[base..], max_w as usize);
                                         push_sampled_row(
                                             text_regions,
                                             content_offset + k as i32,

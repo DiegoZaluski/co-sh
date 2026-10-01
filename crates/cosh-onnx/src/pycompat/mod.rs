@@ -67,7 +67,11 @@ pub fn py_g(x: f64) -> String {
         };
     }
     if x == 0.0 {
-        return if x.is_sign_negative() { "-0".to_string() } else { "0".to_string() };
+        return if x.is_sign_negative() {
+            "-0".to_string()
+        } else {
+            "0".to_string()
+        };
     }
     // Exponential form: mantissa with (precision-1) decimals, trailing zeros
     // stripped, exponent signed and at least two digits.
@@ -76,7 +80,12 @@ pub fn py_g(x: f64) -> String {
         let (mantissa, exponent) = raw.split_once('e').unwrap_or((raw.as_str(), "0"));
         let mantissa = mantissa.trim_end_matches('0').trim_end_matches('.');
         let e: i32 = exponent.parse().unwrap_or(0);
-        format!("{}e{}{:02}", mantissa, if e < 0 { '-' } else { '+' }, e.abs())
+        format!(
+            "{}e{}{:02}",
+            mantissa,
+            if e < 0 { '-' } else { '+' },
+            e.abs()
+        )
     };
     // The decimal exponent of the leading digit. `{:e}` gives the exact
     // rounded exponent, so a value sitting just below a power of ten

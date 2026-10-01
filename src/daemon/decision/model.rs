@@ -127,7 +127,12 @@ impl Registry {
 
     /// A load succeeded for `kind` at some point (used by `health`).
     pub(crate) fn active_kind(&self) -> Option<String> {
-        self.guard.lock().ok()?.resident.as_ref().map(|r| r.name.clone())
+        self.guard
+            .lock()
+            .ok()?
+            .resident
+            .as_ref()
+            .map(|r| r.name.clone())
     }
 
     /// The `health` counters.
@@ -177,7 +182,8 @@ mod tests {
     /// path — retry window, counters — without any model artifacts.
     fn broken_kind() -> Kind {
         Kind::Custom {
-            repo: std::env::temp_dir().join("cosh-registry-test-empty")
+            repo: std::env::temp_dir()
+                .join("cosh-registry-test-empty")
                 .display()
                 .to_string(),
             subfolder: None,

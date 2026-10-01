@@ -1,9 +1,9 @@
 //! `moderation_questions`: preset questions for content safety and moderation.
 
-use serde_json::{json, Map};
+use serde_json::{Map, json};
 
-use super::q;
 use super::Questions;
+use super::q;
 
 pub fn moderation_questions() -> Questions {
     let mut out = Map::new();
@@ -17,7 +17,11 @@ pub fn moderation_questions() -> Questions {
     );
     out.insert(
         "harassment".to_string(),
-        q("noul", "Does `post` target or harass a specific person?", None),
+        q(
+            "noul",
+            "Does `post` target or harass a specific person?",
+            None,
+        ),
     );
     out.insert(
         "threat".to_string(),
@@ -46,4 +50,3 @@ pub fn moderation_questions() -> Questions {
     );
     out
 }
-

@@ -34,7 +34,6 @@ fn class_defaults_match_the_upstream_hook_defaults() {
     assert!(agent.hooks_lock.is_none());
 }
 
-
 // ------------------------------------------------- BaseHook no-op (upstream ~963-982)
 #[test]
 fn a_no_op_hook_is_harmless() {
@@ -55,7 +54,6 @@ fn a_no_op_hook_is_harmless() {
         .unwrap();
     assert_eq!(out["model"], json!("laya-rl-agent-onnx"));
 }
-
 
 // ------------------------------------------------- predict alias (test_hooks_api.py)
 #[test]
@@ -85,4 +83,3 @@ fn predict_is_an_alias_of_system_one() {
         .unwrap();
     assert_eq!(via_system_one, via_predict);
 }
-

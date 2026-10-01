@@ -15,7 +15,13 @@ fn options_over_budget_raise_and_name_the_question() {
               "criteria": ["a", "b", "c", "d", "e"]}
     });
     let err = agent
-        .infer(&json!("hello"), many.as_object().unwrap(), None, Some(16), Some(3))
+        .infer(
+            &json!("hello"),
+            many.as_object().unwrap(),
+            None,
+            Some(16),
+            Some(3),
+        )
         .unwrap_err();
     match &err {
         Error::Value(msg) => {
@@ -35,7 +41,13 @@ fn options_over_budget_raise_and_name_the_question() {
               "criteria": {"department": null, "billing": null}}
     });
     let got = agent
-        .infer(&json!("hello"), fits.as_object().unwrap(), None, Some(16), Some(3))
+        .infer(
+            &json!("hello"),
+            fits.as_object().unwrap(),
+            None,
+            Some(16),
+            Some(3),
+        )
         .unwrap();
     assert!(got["answers"]["q"]["choice"].is_string());
 }

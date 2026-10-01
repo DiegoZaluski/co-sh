@@ -104,7 +104,7 @@ const TEXTS: &[&str] = &[
     "abc ᚠᚢᚦ", // an unlisted script lands under "other"
     "ab αβ",   // latin/greek tie
     "αβ аб",   // greek/cyrillic tie
-    "ᚠᚢᚦabc", // other/latin tie
+    "ᚠᚢᚦabc",  // other/latin tie
     "Hallo, meine Bestellung ist zweimal abgebucht worden.",
     "مرحبا كيف حالك",
     "İstanbul",
@@ -113,7 +113,11 @@ const TEXTS: &[&str] = &[
 #[test]
 fn detect_script_matches_the_reference_implementation() {
     for text in TEXTS {
-        assert_eq!(detect_script(text), ref_detect(text), "detect_script({text:?})");
+        assert_eq!(
+            detect_script(text),
+            ref_detect(text),
+            "detect_script({text:?})"
+        );
     }
 }
 
@@ -236,7 +240,10 @@ const IDENTIFIER_PARITY: &[(&str, &str)] = &[
         "Contact support@acme.com or github.com/acme for v2.10.1 details.",
         "Contact   or  /acme for   details.",
     ),
-    ("No identifiers here at all just words", "No identifiers here at all just words"),
+    (
+        "No identifiers here at all just words",
+        "No identifiers here at all just words",
+    ),
 ];
 
 #[test]
@@ -247,10 +254,19 @@ fn identifier_stripping_matches_the_python_pattern() {
     // A local part at RFC 5321's 64-character limit, and a run past any
     // plausible bound: a length-bounded pattern strips only part of these and
     // leaves the rest as a word.
-    assert_eq!(strip_identifiers(&format!("{}@example.com", "a".repeat(64))), " ");
-    assert_eq!(strip_identifiers(&format!("{}.example.com", "a".repeat(200))), " ");
     assert_eq!(
-        strip_identifiers(&format!("grazie mille per {}wzqxk.example.com", "wzqxk".repeat(15))),
+        strip_identifiers(&format!("{}@example.com", "a".repeat(64))),
+        " "
+    );
+    assert_eq!(
+        strip_identifiers(&format!("{}.example.com", "a".repeat(200))),
+        " "
+    );
+    assert_eq!(
+        strip_identifiers(&format!(
+            "grazie mille per {}wzqxk.example.com",
+            "wzqxk".repeat(15)
+        )),
         "grazie mille per  "
     );
 }
@@ -310,7 +326,10 @@ fn one_long_token_costs_about_what_prose_costs() {
 #[test]
 fn the_is_english_table() {
     let check = |text: &str, want: bool| assert_eq!(is_english(&json!(text)), want, "{text:?}");
-    check("Please refund the duplicate charge on invoice 4411 today.", true);
+    check(
+        "Please refund the duplicate charge on invoice 4411 today.",
+        true,
+    );
     check("Հայերեն", false);
     check(
         "Sifarisim gelmedi ve pulum geri qaytarilmadi, zehmet olmasa yoxlayin",
@@ -338,14 +357,26 @@ fn the_is_english_table() {
     // #35, where Romanian states were handed to the English checkpoint (0.330
     // accuracy, 0.658 ECE on `ro`). An unidentified language must never be
     // assumed English.
-    check("Gătește-mi o rețetă de sarmale de post pentru mâine.", false);
+    check(
+        "Gătește-mi o rețetă de sarmale de post pentru mâine.",
+        false,
+    );
     check(
         "Am fost taxat de două ori pentru factura din luna martie și vreau banii",
         false,
     );
-    check("Klient został obciążony dwukrotnie i chce zwrot pieniędzy za fakturę", false);
-    check("Zákazníkovi byla částka účtována dvakrát a žádá o vrácení peněz", false);
-    check("Müşteriden iki kez ücret alındı ve para iadesi istiyor lütfen yardım", false);
+    check(
+        "Klient został obciążony dwukrotnie i chce zwrot pieniędzy za fakturę",
+        false,
+    );
+    check(
+        "Zákazníkovi byla částka účtována dvakrát a žádá o vrácení peněz",
+        false,
+    );
+    check(
+        "Müşteriden iki kez ücret alındı ve para iadesi istiyor lütfen yardım",
+        false,
+    );
     check(
         "Khách hàng đã bị thu phí hai lần và muốn được hoàn tiền ngay",
         false,
@@ -370,7 +401,10 @@ fn undecided_is_reported_as_undecided() {
         !analyse(&json!("Please refund the duplicate charge on the invoice")).language_undecided
     );
     assert!(analyse(&json!("Gătește-mi o rețetă de sarmale")).diacritic_rate > 0.02);
-    assert_eq!(analyse(&json!("Please refund the duplicate charge today")).diacritic_rate, 0.0);
+    assert_eq!(
+        analyse(&json!("Please refund the duplicate charge today")).diacritic_rate,
+        0.0
+    );
 }
 
 #[test]
@@ -392,7 +426,10 @@ fn the_latin_lang_table() {
     let check = |text: &str, want: Option<&str>| {
         assert_eq!(guess_latin_language(text).as_deref(), want, "{text:?}")
     };
-    check("The customer was charged twice and wants a refund for this invoice", Some("en"));
+    check(
+        "The customer was charged twice and wants a refund for this invoice",
+        Some("en"),
+    );
     check(
         "Le client a ete facture deux fois et il demande un remboursement pour la facture",
         Some("fr"),
@@ -405,10 +442,19 @@ fn the_latin_lang_table() {
         "El cliente fue cobrado dos veces y quiere que le devuelvan el dinero por la factura",
         Some("es"),
     );
-    check("Zəhmət olmasa, sifarişim üçün pulu geri qaytarın, çünki məhsul gəlmədi", Some("az"));
+    check(
+        "Zəhmət olmasa, sifarişim üçün pulu geri qaytarın, çünki məhsul gəlmədi",
+        Some("az"),
+    );
     // one shared function word is not enough to name a language
-    check("Müştəridən iki dəfə pul alınıb və o, geri qaytarılmasını istəyir", None);
-    check("MÜŞTƏRİ İLƏ ƏLAQƏ SAXLAYIN VƏ PULU GERİ QAYTARIN", Some("az"));
+    check(
+        "Müştəridən iki dəfə pul alınıb və o, geri qaytarılmasını istəyir",
+        None,
+    );
+    check(
+        "MÜŞTƏRİ İLƏ ƏLAQƏ SAXLAYIN VƏ PULU GERİ QAYTARIN",
+        Some("az"),
+    );
     check("refund", None);
     check(
         "Please refund the duplicate charge on invoice 4411 today because we have \
@@ -434,7 +480,9 @@ fn dotted_tokens_are_identifiers_not_prose() {
     // versions, decimals and dotted abbreviations are identifiers too, and
     // were never prose
     assert!(is_english(&json!("build 1.2.3 on 12.30 with ratio 0.5")));
-    assert!(is_english(&json!("Report by Smith et al., e.g. the U.S.A. office")));
+    assert!(is_english(&json!(
+        "Report by Smith et al., e.g. the U.S.A. office"
+    )));
     // masking identifiers must not cost the prose around them its language,
     // and a full stop ends a sentence rather than joining an identifier: the
     // word before it keeps its letters
@@ -454,17 +502,14 @@ fn dotted_tokens_are_identifiers_not_prose() {
 
 #[test]
 fn state_flattening() {
-    assert!(
-        state_text(&json!({"body": "charged twice", "n": 3}), 4000).contains("charged twice")
-    );
+    assert!(state_text(&json!({"body": "charged twice", "n": 3}), 4000).contains("charged twice"));
     assert!(state_text(&json!({"a": {"b": ["deep"]}}), 4000).contains("deep"));
     assert!(state_text(&json!(["x", {"y": "z"}]), 4000).contains("x"));
     assert_eq!(state_text(&Value::Null, 4000), "");
     // keys must not drive detection: English keys around Hindi content stay
     // non-English
     assert!(
-        !analyse(&json!({"subject": "नमस्ते", "body": "ग्राहक से दो बार शुल्क लिया गया"}))
-            .is_english
+        !analyse(&json!({"subject": "नमस्ते", "body": "ग्राहक से दो बार शुल्क लिया गया"})).is_english
     );
 }
 
@@ -494,7 +539,10 @@ const TRACE: &str = "O sistema caiu de novo hoje de manhã, segue o log:\n\
 #[test]
 fn mixed_states_find_the_foreign_line() {
     for (state, segment) in [
-        (json!(TRACE), "O sistema caiu de novo hoje de manhã, segue o log:"),
+        (
+            json!(TRACE),
+            "O sistema caiu de novo hoje de manhã, segue o log:",
+        ),
         (
             json!({"descricao": "O pagamento não foi processado",
                    "error": {"code": "card_declined",
@@ -515,16 +563,20 @@ fn mixed_states_find_the_foreign_line() {
         // the rule runs both ways: an English ticket that pastes a foreign
         // log goes to multilingual too
         (
-            json!("Our Brazilian branch cannot issue invoices since this morning. The system \
+            json!(
+                "Our Brazilian branch cannot issue invoices since this morning. The system \
                    shows this message:\nERRO: Não foi possível emitir a nota fiscal, o \
-                   certificado digital está vencido\nCan you help us before the end of the day?"),
+                   certificado digital está vencido\nCan you help us before the end of the day?"
+            ),
             "ERRO: Não foi possível emitir a nota fiscal, o certificado digital está vencido",
         ),
         (
-            json!("The nightly sync to the Munich server keeps failing and we lose the whole \
+            json!(
+                "The nightly sync to the Munich server keeps failing and we lose the whole \
                    batch.\nFehler: Die Verbindung zum Server wurde unterbrochen, bitte \
                    versuchen Sie es spaeter noch einmal\nPlease check the firewall rules on \
-                   your side."),
+                   your side."
+            ),
             "Fehler: Die Verbindung zum Server wurde unterbrochen, bitte versuchen Sie es \
              spaeter noch einmal",
         ),
@@ -541,10 +593,12 @@ fn mixed_states_find_the_foreign_line() {
         // acronyms are dropped only from mixed-case text: a line written all
         // in capitals keeps its words
         (
-            json!("This is the fourth email I have sent about the same order and nobody has \
+            json!(
+                "This is the fourth email I have sent about the same order and nobody has \
                    answered any of them.\nThe customer wrote this in the chat and then closed \
                    the window:\nQUERO MEU DINHEIRO DE VOLTA AGORA\nCould someone from the \
-                   billing team look at order 5512 today?"),
+                   billing team look at order 5512 today?"
+            ),
             "QUERO MEU DINHEIRO DE VOLTA AGORA",
         ),
     ] {
@@ -565,9 +619,15 @@ fn english_states_stay_english() {
     for state in [
         json!("Hi team,\nThe export failed again last night.\nCan you check the logs?\nThanks"),
         json!("Please resend the invoice for March, the amount is wrong.\nAtenciosamente, Joao"),
-        json!("The build broke after the refactor.\nREPO = os.path.dirname(os.path.dirname(__file__))\nPlease take a look at the import paths when you can."),
-        json!("The latency script crashes on large runs.\nmix[key] = {\"total_s\": round(el, 2)}\nCan you check why the stream is empty?"),
-        json!("The summary is wrong for empty suites.\nif na: non[m] = round(float(np.mean(na)), 4)\nPlease guard the empty case."),
+        json!(
+            "The build broke after the refactor.\nREPO = os.path.dirname(os.path.dirname(__file__))\nPlease take a look at the import paths when you can."
+        ),
+        json!(
+            "The latency script crashes on large runs.\nmix[key] = {\"total_s\": round(el, 2)}\nCan you check why the stream is empty?"
+        ),
+        json!(
+            "The summary is wrong for empty suites.\nif na: non[m] = round(float(np.mean(na)), 4)\nPlease guard the empty case."
+        ),
         json!({"status": "open", "priority": "high",
                "message": "The customer was charged twice and wants a refund"}),
         // a line carries far less text than a state, so its evidence must be
@@ -575,10 +635,18 @@ fn english_states_stay_english() {
         // ham-radio listing on 20 Newsgroups went to multilingual on
         // `COM ... COM` alone; hockey picks on the team codes, OS/2 on `os`
         // and `dos`.
-        json!("I'm looking for good deals on the following (used or new):\nAviation Headsets (with mic).\nHandheld Nav/Com tranciever (may consider COM only).\nPortable GPS or Loran Navigator."),
-        json!("Round two predictions for the pool, as promised.\nQUE  vs MON:  MON  in 7.\nPIT  vs NYI:  PIT  in 5."),
-        json!("I need a converter for these image formats.\nDOS, OS/2 or platform independent programs if possible.\nThanks in advance."),
-        json!("My modem stopped answering after the upgrade.\nC:\\DOS\\mode COM1:9600,n,8,1,p\nIs that the right line for a 9600 baud connection?"),
+        json!(
+            "I'm looking for good deals on the following (used or new):\nAviation Headsets (with mic).\nHandheld Nav/Com tranciever (may consider COM only).\nPortable GPS or Loran Navigator."
+        ),
+        json!(
+            "Round two predictions for the pool, as promised.\nQUE  vs MON:  MON  in 7.\nPIT  vs NYI:  PIT  in 5."
+        ),
+        json!(
+            "I need a converter for these image formats.\nDOS, OS/2 or platform independent programs if possible.\nThanks in advance."
+        ),
+        json!(
+            "My modem stopped answering after the upgrade.\nC:\\DOS\\mode COM1:9600,n,8,1,p\nIs that the right line for a 9600 baud connection?"
+        ),
     ] {
         assert!(is_english(&state), "mixed/english stays english");
         assert_eq!(analyse(&state).mixed_segment, None, "mixed/no segment");
@@ -595,7 +663,10 @@ fn the_segment_check_reads_at_most_the_cap() {
         "subject": "The export failed again last night for the whole region",
         "body": "a".repeat(200_000)
     }));
-    assert!(started.elapsed().as_secs_f64() < 5.0, "long single-line field stays fast");
+    assert!(
+        started.elapsed().as_secs_f64() < 5.0,
+        "long single-line field stays fast"
+    );
     // a value the segment scan did not reach is still read on its own
     // afterwards (#384): the long log fills the cap, the body is next
     assert_eq!(

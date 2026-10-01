@@ -56,7 +56,6 @@ fn onnx_skip_short_circuits_inference() {
     assert_eq!(out, json!({"model": "cached"}));
 }
 
-
 // ------------------------------------------------- mutation (upstream ~127-149)
 #[test]
 fn start_hook_rewrite_is_what_gets_encoded() {
@@ -99,7 +98,6 @@ fn end_hook_rewrite_is_returned() {
         .unwrap();
     assert_eq!(out, json!({"model": "replaced"}));
 }
-
 
 // ------------------------------------------------- context semantics (upstream ~65-125)
 #[test]
@@ -159,4 +157,3 @@ fn end_context_sees_usage_and_elapsed_ms() {
     assert_eq!(usage["output_tokens"], json!(0));
     assert!((*elapsed.lock().unwrap()).is_some());
 }
-

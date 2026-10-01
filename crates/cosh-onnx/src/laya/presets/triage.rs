@@ -1,9 +1,9 @@
 //! `triage_questions`: preset questions for general support-ticket triage.
 
-use serde_json::{json, Map};
+use serde_json::{Map, json};
 
-use super::q;
 use super::Questions;
+use super::q;
 
 pub fn triage_questions() -> Questions {
     let mut out = Map::new();
@@ -24,7 +24,11 @@ pub fn triage_questions() -> Questions {
     );
     out.insert(
         "is_urgent".to_string(),
-        q("noul", "Does `message` communicate time pressure or a deadline?", None),
+        q(
+            "noul",
+            "Does `message` communicate time pressure or a deadline?",
+            None,
+        ),
     );
     out.insert(
         "frustration".to_string(),
@@ -53,4 +57,3 @@ pub fn triage_questions() -> Questions {
     );
     out
 }
-

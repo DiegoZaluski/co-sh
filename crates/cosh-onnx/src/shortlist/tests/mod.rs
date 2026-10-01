@@ -27,10 +27,10 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use super::{
-    cached_embed_fn, cosine, predict_shortlist, shortlist_choice, EmbedFn, DEFAULT_SHORTLIST_K,
+    DEFAULT_SHORTLIST_K, EmbedFn, cached_embed_fn, cosine, predict_shortlist, shortlist_choice,
 };
 use crate::decision::model::PredictRunner;
 use crate::decision::question::{render_options, serialize_state, to_internal};
@@ -87,11 +87,19 @@ struct TableEmbed {
 
 impl TableEmbed {
     fn new(vectors: HashMap<String, Vec<f64>>) -> Self {
-        Self { vectors, calls: Mutex::new(Vec::new()) }
+        Self {
+            vectors,
+            calls: Mutex::new(Vec::new()),
+        }
     }
 
     fn from_pairs(pairs: &[(&'static str, Vec<f64>)]) -> Self {
-        Self::new(pairs.iter().map(|(k, v)| ((*k).to_string(), v.clone())).collect())
+        Self::new(
+            pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), v.clone()))
+                .collect(),
+        )
     }
 
     fn calls(&self) -> Vec<Vec<String>> {
@@ -105,7 +113,10 @@ impl EmbedFn for TableEmbed {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(texts.to_vec());
-        let missing: Vec<&String> = texts.iter().filter(|t| !self.vectors.contains_key(*t)).collect();
+        let missing: Vec<&String> = texts
+            .iter()
+            .filter(|t| !self.vectors.contains_key(*t))
+            .collect();
         if !missing.is_empty() {
             panic!("unexpected texts {missing:?}");
         }
@@ -129,14 +140,17 @@ struct Recorder {
 
 impl Recorder {
     fn new() -> Self {
-        Self { calls: Mutex::new(Vec::new()) }
+        Self {
+            calls: Mutex::new(Vec::new()),
+        }
     }
 }
 
 fn answers(questions: &Map<String, Value>) -> Value {
     let mut out = Map::new();
     for (qid, qdef) in questions {
-        let is_choice = qdef.is_object() && qdef.get("type").and_then(Value::as_str) == Some("choice");
+        let is_choice =
+            qdef.is_object() && qdef.get("type").and_then(Value::as_str) == Some("choice");
         if !is_choice {
             continue;
         }
@@ -145,10 +159,7 @@ fn answers(questions: &Map<String, Value>) -> Value {
             Some(Value::Array(list)) => list.clone(),
             _ => continue,
         };
-        out.insert(
-            qid.clone(),
-            json!({"type": "choice", "choice": keys[0]}),
-        );
+        out.insert(qid.clone(), json!({"type": "choice", "choice": keys[0]}));
     }
     json!({ "model": "fake", "answers": out })
 }
@@ -163,15 +174,9 @@ impl PredictRunner for Recorder {
     }
 }
 
-fn shortlist(
-    state: &Value,
-    criteria: &Value,
-    embed: &dyn EmbedFn,
-    k: usize,
-) -> Result<Vec<Value>> {
+fn shortlist(state: &Value, criteria: &Value, embed: &dyn EmbedFn, k: usize) -> Result<Vec<Value>> {
     shortlist_choice(state, criteria, embed, k, None)
 }
-
 
 fn full_criteria() -> (Value, Value) {
     // sentinel: the value object identity is preserved through the subset

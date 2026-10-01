@@ -36,11 +36,15 @@ fn mixed_states_route_multilingual() {
         ),
         (
             "english ticket + portuguese error log",
-            json!("Our Brazilian branch cannot issue invoices since this morning. The system shows this message:\nERRO: Não foi possível emitir a nota fiscal, o certificado digital está vencido\nCan you help us before the end of the day?"),
+            json!(
+                "Our Brazilian branch cannot issue invoices since this morning. The system shows this message:\nERRO: Não foi possível emitir a nota fiscal, o certificado digital está vencido\nCan you help us before the end of the day?"
+            ),
         ),
         (
             "english ticket + german error log",
-            json!("The nightly sync to the Munich server keeps failing and we lose the whole batch.\nFehler: Die Verbindung zum Server wurde unterbrochen, bitte versuchen Sie es spaeter noch einmal\nPlease check the firewall rules on your side."),
+            json!(
+                "The nightly sync to the Munich server keeps failing and we lose the whole batch.\nFehler: Die Verbindung zum Server wurde unterbrochen, bitte versuchen Sie es spaeter noch einmal\nPlease check the firewall rules on your side."
+            ),
         ),
         (
             "english ticket + spanish error payload",
@@ -53,7 +57,9 @@ fn mixed_states_route_multilingual() {
         // in capitals keeps its words
         (
             "all-caps portuguese line",
-            json!("This is the fourth email I have sent about the same order and nobody has answered any of them.\nThe customer wrote this in the chat and then closed the window:\nQUERO MEU DINHEIRO DE VOLTA AGORA\nCould someone from the billing team look at order 5512 today?"),
+            json!(
+                "This is the fourth email I have sent about the same order and nobody has answered any of them.\nThe customer wrote this in the chat and then closed the window:\nQUERO MEU DINHEIRO DE VOLTA AGORA\nCould someone from the billing team look at order 5512 today?"
+            ),
         ),
     ] {
         assert_eq!(
@@ -65,10 +71,14 @@ fn mixed_states_route_multilingual() {
         );
     }
     assert!(
-        r.route(&json!(TRACE), Some(&empty_questions()), &RouteOptions::default())
-            .expect("route")
-            .reason
-            .contains("a line or field reads as 'pt'"),
+        r.route(
+            &json!(TRACE),
+            Some(&empty_questions()),
+            &RouteOptions::default()
+        )
+        .expect("route")
+        .reason
+        .contains("a line or field reads as 'pt'"),
         "mixed/reason names the segment"
     );
 }
@@ -82,23 +92,55 @@ fn mixed_states_route_multilingual() {
 fn plain_ascii_romance_routes_multilingual() {
     let r = Router::new().expect("router");
     for (lang, text) in [
-        ("es", "El pedido llego roto y nadie responde cuando escribo al soporte"),
+        (
+            "es",
+            "El pedido llego roto y nadie responde cuando escribo al soporte",
+        ),
         ("es", "Quiero cancelar mi plan y pedir un reembolso"),
         ("es", "La factura tiene un error en el importe total"),
-        ("es", "Necesito que me devuelvan el dinero de la compra duplicada"),
-        ("it", "Il cliente e stato addebitato due volte e vuole un rimborso"),
-        ("it", "Voglio cancellare il mio abbonamento e chiedere un rimborso"),
+        (
+            "es",
+            "Necesito que me devuelvan el dinero de la compra duplicada",
+        ),
+        (
+            "it",
+            "Il cliente e stato addebitato due volte e vuole un rimborso",
+        ),
+        (
+            "it",
+            "Voglio cancellare il mio abbonamento e chiedere un rimborso",
+        ),
         ("it", "La fattura contiene un errore nell importo totale"),
-        ("pt", "O cliente foi cobrado duas vezes e quer o dinheiro de volta"),
-        ("fr", "Le client a ete facture deux fois et demande un remboursement"),
-        ("fr", "Je ne peux pas acceder a mon compte et j ai besoin d aide"),
+        (
+            "pt",
+            "O cliente foi cobrado duas vezes e quer o dinheiro de volta",
+        ),
+        (
+            "fr",
+            "Le client a ete facture deux fois et demande un remboursement",
+        ),
+        (
+            "fr",
+            "Je ne peux pas acceder a mon compte et j ai besoin d aide",
+        ),
     ] {
-        assert_eq!(guess_latin_language(text).as_deref(), Some(lang), "latin_lang/plain ascii");
-        assert!(!is_english(&json!(text)), "is_english/plain ascii {lang} {text:?}");
         assert_eq!(
-            r.route(&json!(text), Some(&empty_questions()), &RouteOptions::default())
-                .expect("route")
-                .model,
+            guess_latin_language(text).as_deref(),
+            Some(lang),
+            "latin_lang/plain ascii"
+        );
+        assert!(
+            !is_english(&json!(text)),
+            "is_english/plain ascii {lang} {text:?}"
+        );
+        assert_eq!(
+            r.route(
+                &json!(text),
+                Some(&empty_questions()),
+                &RouteOptions::default()
+            )
+            .expect("route")
+            .model,
             "multilingual",
             "route/plain ascii {lang} {text:?}"
         );
@@ -106,14 +148,27 @@ fn plain_ascii_romance_routes_multilingual() {
     // the accented spellings must keep working: those route on the diacritic
     // rate
     for (lang, text) in [
-        ("es", "La facturación tiene un error y necesito una corrección urgente"),
-        ("it", "La fattura è sbagliata, devo avere un rimborso per il pagamento"),
-        ("fr", "La commande est arrivée cassée et personne ne répond au support"),
+        (
+            "es",
+            "La facturación tiene un error y necesito una corrección urgente",
+        ),
+        (
+            "it",
+            "La fattura è sbagliata, devo avere un rimborso per il pagamento",
+        ),
+        (
+            "fr",
+            "La commande est arrivée cassée et personne ne répond au support",
+        ),
     ] {
         assert_eq!(
-            r.route(&json!(text), Some(&empty_questions()), &RouteOptions::default())
-                .expect("route")
-                .model,
+            r.route(
+                &json!(text),
+                Some(&empty_questions()),
+                &RouteOptions::default()
+            )
+            .expect("route")
+            .model,
             "multilingual",
             "route/accented {lang}"
         );
@@ -129,11 +184,18 @@ fn plain_ascii_romance_routes_multilingual() {
         "no refund no reply",
         "The son of the director filed a complaint about the duplicate invoice",
     ] {
-        assert!(is_english(&json!(text)), "is_english/romance control {text:?}");
+        assert!(
+            is_english(&json!(text)),
+            "is_english/romance control {text:?}"
+        );
         assert_eq!(
-            r.route(&json!(text), Some(&empty_questions()), &RouteOptions::default())
-                .expect("route")
-                .model,
+            r.route(
+                &json!(text),
+                Some(&empty_questions()),
+                &RouteOptions::default()
+            )
+            .expect("route")
+            .model,
             "english",
             "route/romance control {text:?}"
         );
@@ -147,9 +209,13 @@ fn plain_ascii_romance_routes_multilingual() {
         "latin_lang/shared words alone name nothing"
     );
     assert_eq!(
-        r.route(&json!("Cât e ora acum la Tokyo"), Some(&empty_questions()), &RouteOptions::default())
-            .expect("route")
-            .model,
+        r.route(
+            &json!("Cât e ora acum la Tokyo"),
+            Some(&empty_questions()),
+            &RouteOptions::default()
+        )
+        .expect("route")
+        .model,
         "multilingual",
         "route/shared words still multilingual"
     );
@@ -192,11 +258,19 @@ fn brazilian_support_text_routes_multilingual() {
         "Estava tudo certo ate a migracao",
         "Entao o sistema travou de novo",
     ] {
-        assert_eq!(guess_latin_language(text).as_deref(), Some("pt"), "latin_lang/pt-br");
         assert_eq!(
-            r.route(&json!(text), Some(&empty_questions()), &RouteOptions::default())
-                .expect("route")
-                .model,
+            guess_latin_language(text).as_deref(),
+            Some("pt"),
+            "latin_lang/pt-br"
+        );
+        assert_eq!(
+            r.route(
+                &json!(text),
+                Some(&empty_questions()),
+                &RouteOptions::default()
+            )
+            .expect("route")
+            .model,
             "multilingual",
             "route/pt-br {text:?}"
         );
@@ -211,9 +285,13 @@ fn brazilian_support_text_routes_multilingual() {
         "The pra team will review the claim tomorrow",
     ] {
         assert_eq!(
-            r.route(&json!(text), Some(&empty_questions()), &RouteOptions::default())
-                .expect("route")
-                .model,
+            r.route(
+                &json!(text),
+                Some(&empty_questions()),
+                &RouteOptions::default()
+            )
+            .expect("route")
+            .model,
             "english",
             "route/pt-br control {text:?}"
         );
@@ -237,12 +315,20 @@ fn romanized_bangla_routes_multilingual() {
         "taka ekhono ferot paini, kobe pabo?",
         "order ta kobe asbe bolte parben?",
     ] {
-        assert_eq!(guess_latin_language(text).as_deref(), Some("bn"), "latin_lang/banglish");
+        assert_eq!(
+            guess_latin_language(text).as_deref(),
+            Some("bn"),
+            "latin_lang/banglish"
+        );
         assert!(!is_english(&json!(text)), "is_english/banglish {text:?}");
         assert_eq!(
-            r.route(&json!(text), Some(&empty_questions()), &RouteOptions::default())
-                .expect("route")
-                .model,
+            r.route(
+                &json!(text),
+                Some(&empty_questions()),
+                &RouteOptions::default()
+            )
+            .expect("route")
+            .model,
             "multilingual",
             "route/banglish {text:?}"
         );
@@ -268,11 +354,18 @@ fn romanized_bangla_routes_multilingual() {
         "Our AR and VR demo in Oi Bahia went well, the client wants a quote",
         "Take the age of the account into account before you refund",
     ] {
-        assert!(is_english(&json!(text)), "is_english/banglish control {text:?}");
+        assert!(
+            is_english(&json!(text)),
+            "is_english/banglish control {text:?}"
+        );
         assert_eq!(
-            r.route(&json!(text), Some(&empty_questions()), &RouteOptions::default())
-                .expect("route")
-                .model,
+            r.route(
+                &json!(text),
+                Some(&empty_questions()),
+                &RouteOptions::default()
+            )
+            .expect("route")
+            .model,
             "english",
             "route/banglish control {text:?}"
         );
@@ -314,11 +407,19 @@ fn plain_ascii_german_routes_multilingual() {
         "schalte das licht im wohnzimmer aus",
         "was ist die aktuelle zeit",
     ] {
-        assert_eq!(guess_latin_language(text).as_deref(), Some("de"), "latin_lang/ascii german");
         assert_eq!(
-            r.route(&json!(text), Some(&empty_questions()), &RouteOptions::default())
-                .expect("route")
-                .model,
+            guess_latin_language(text).as_deref(),
+            Some("de"),
+            "latin_lang/ascii german"
+        );
+        assert_eq!(
+            r.route(
+                &json!(text),
+                Some(&empty_questions()),
+                &RouteOptions::default()
+            )
+            .expect("route")
+            .model,
             "multilingual",
             "route/ascii german {text:?}"
         );
@@ -338,11 +439,18 @@ fn plain_ascii_german_routes_multilingual() {
     // `den` leave the first, a real en-US MASSIVE utterance, one German hit
     // short of flipping; the chat line carries `im` and flips if any one of
     // the English words `am`, `an` or `so` joins the German list.
-    for text in ["turn off smart lamp in den", "im so sorry, am an hour late, stuck in traffic"] {
+    for text in [
+        "turn off smart lamp in den",
+        "im so sorry, am an hour late, stuck in traffic",
+    ] {
         assert_eq!(
-            r.route(&json!(text), Some(&empty_questions()), &RouteOptions::default())
-                .expect("route")
-                .model,
+            r.route(
+                &json!(text),
+                Some(&empty_questions()),
+                &RouteOptions::default()
+            )
+            .expect("route")
+            .model,
             "english",
             "route/english sharing german words {text:?}"
         );
@@ -382,9 +490,13 @@ fn accented_loanwords_stay_english() {
             "latin_lang/loanword english stays english {text:?}"
         );
         assert_eq!(
-            r.route(&json!(text), Some(&empty_questions()), &RouteOptions::default())
-                .expect("route")
-                .model,
+            r.route(
+                &json!(text),
+                Some(&empty_questions()),
+                &RouteOptions::default()
+            )
+            .expect("route")
+            .model,
             "english",
             "route/loanword english stays english {text:?}"
         );
@@ -417,11 +529,18 @@ fn accented_loanwords_stay_english() {
         "stäng av ljuset i sovrummet",
         "jag vill ha en återbetalning för den dubbla avgiften",
     ] {
-        assert!(!is_english(&json!(text)), "latin_lang/nordic accented stays non-english");
+        assert!(
+            !is_english(&json!(text)),
+            "latin_lang/nordic accented stays non-english"
+        );
         assert_eq!(
-            r.route(&json!(text), Some(&empty_questions()), &RouteOptions::default())
-                .expect("route")
-                .model,
+            r.route(
+                &json!(text),
+                Some(&empty_questions()),
+                &RouteOptions::default()
+            )
+            .expect("route")
+            .model,
             "multilingual",
             "route/nordic accented stays multilingual {text:?}"
         );
@@ -434,4 +553,3 @@ fn accented_loanwords_stay_english() {
         "latin_lang/two diacritic words are not one loanword"
     );
 }
-

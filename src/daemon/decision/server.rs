@@ -25,8 +25,8 @@ use crate::daemon::ipc_error::Ipc;
 
 use super::model::Registry;
 use super::protocol::{
-    self, code, method, DecideParams, DecideResult, HelloParams, HelloResult, HealthResult,
-    ShutdownResult,
+    self, DecideParams, DecideResult, HealthResult, HelloParams, HelloResult, ShutdownResult, code,
+    method,
 };
 
 /// How long a `decide` waits for a free inference slot before BUSY.
@@ -72,7 +72,11 @@ impl Server {
     /// Serve until the listener errors, the idle budget is exceeded, or a
     /// `shutdown` request drains the server. Returns when the daemon
     /// should exit; `main` then removes the socket file.
-    pub(crate) fn serve(self: Arc<Self>, listener: std::os::unix::net::UnixListener, idle_timeout: Duration) {
+    pub(crate) fn serve(
+        self: Arc<Self>,
+        listener: std::os::unix::net::UnixListener,
+        idle_timeout: Duration,
+    ) {
         listener
             .set_nonblocking(true)
             .expect("listener nonblocking");
@@ -89,13 +93,13 @@ impl Server {
                         // Read timeouts bound every request; a stuck client
                         // or a wedged inference fails the call instead of
                         // pinning the thread forever.
-                        stream
-                            .set_read_timeout(Some(ipc::CALL_TIMEOUT))
-                            .ok();
+                        stream.set_read_timeout(Some(ipc::CALL_TIMEOUT)).ok();
                         let mut state = ConnState { handshaken: false };
-                        if let Err(e) = ipc::serve_connection(stream, &mut state, |state, request| {
-                            server.handle(request, &mut state.handshaken)
-                        }) {
+                        if let Err(e) =
+                            ipc::serve_connection(stream, &mut state, |state, request| {
+                                server.handle(request, &mut state.handshaken)
+                            })
+                        {
                             log::debug!("decision daemon: connection ended: {e}");
                         }
                     }));
@@ -155,7 +159,8 @@ impl Server {
         if last_request_millis == 0 {
             last_accept.elapsed()
         } else {
-            let since_request = Instant::now() - self.started - Duration::from_millis(last_request_millis);
+            let since_request =
+                Instant::now() - self.started - Duration::from_millis(last_request_millis);
             // A request served after the last accept wins; a request before
             // it loses. `elapsed` of the max of the two stamps:
             since_request.min(last_accept.elapsed())
@@ -209,7 +214,10 @@ impl Server {
             method::SHUTDOWN => self.shutdown(id),
             _ => Message::err(
                 id,
-                RpcError::new(RpcError::METHOD_NOT_FOUND, format!("unknown method: {method}")),
+                RpcError::new(
+                    RpcError::METHOD_NOT_FOUND,
+                    format!("unknown method: {method}"),
+                ),
             ),
         };
         // The handshake variant must mark the connection as greeted.
@@ -236,7 +244,8 @@ impl Server {
                     code::HANDSHAKE,
                     format!(
                         "protocol {} newer than daemon {}",
-                        params.protocol, protocol::PROTOCOL
+                        params.protocol,
+                        protocol::PROTOCOL
                     ),
                 ),
             );
@@ -286,10 +295,7 @@ impl Server {
         match model.decide(&params.state, &params.questions, None, None, None) {
             Ok(result) => Message::ok(
                 id,
-                ipc::to_value(&DecideResult {
-                    result,
-                })
-                .unwrap_or(Value::Null),
+                ipc::to_value(&DecideResult { result }).unwrap_or(Value::Null),
             ),
             Err(e) => Message::err(
                 id,
@@ -339,10 +345,7 @@ impl Message {
 /// Poll for the inference slot. A std `Mutex` has no timed lock, so the
 /// queue is a `try_lock` loop — the poll interval is noise next to the
 /// seconds-long inference it is waiting for.
-fn acquire_slot(
-    slot: &Mutex<()>,
-    window: Duration,
-) -> Result<std::sync::MutexGuard<'_, ()>, Ipc> {
+fn acquire_slot(slot: &Mutex<()>, window: Duration) -> Result<std::sync::MutexGuard<'_, ()>, Ipc> {
     let deadline = Instant::now() + window;
     loop {
         match slot.try_lock() {

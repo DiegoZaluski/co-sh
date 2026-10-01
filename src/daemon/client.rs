@@ -54,13 +54,9 @@ impl DaemonClient {
                 )));
             }
         };
-        let mut connection = ClientConnection::with_budget(
-            stream,
-            self.name,
-            self.protocol_version,
-            budget,
-        )
-        .map_err(Ipc::Io)?;
+        let mut connection =
+            ClientConnection::with_budget(stream, self.name, self.protocol_version, budget)
+                .map_err(Ipc::Io)?;
         connection.call(method, params)
     }
 

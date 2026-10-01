@@ -458,13 +458,8 @@ impl Fs {
             if result.dry_run == Some(true) {
                 continue;
             }
-            result.lsp_notes = Self::passive_notes(
-                lsp,
-                &self.root,
-                &result.path,
-                include_warnings,
-            )
-            .await;
+            result.lsp_notes =
+                Self::passive_notes(lsp, &self.root, &result.path, include_warnings).await;
         }
     }
 

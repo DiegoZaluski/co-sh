@@ -5,7 +5,7 @@
 //! assert the blob survives, the snapshot is swapped in atomically, and no
 //! temporary file is left behind.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::runtime::tokenizer::{fix_tokenizer_config, fix_tokenizer_config_inner};
 
@@ -17,7 +17,11 @@ const TOKENIZER_CACHE_ORIGINAL: &str =
 #[cfg(unix)]
 fn build_snapshot_layout(root: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
     let blob_dir = root.join("models--x").join("blobs");
-    let snap_dir = root.join("models--x").join("snapshots").join("rev1").join("tokenizer");
+    let snap_dir = root
+        .join("models--x")
+        .join("snapshots")
+        .join("rev1")
+        .join("tokenizer");
     std::fs::create_dir_all(&blob_dir).unwrap();
     std::fs::create_dir_all(&snap_dir).unwrap();
     let blob = blob_dir.join("deadbeef");
@@ -46,21 +50,36 @@ fn tokenizer_config_patch_keeps_the_shared_blob_intact() {
     fix_tokenizer_config(&snap_parent(&link));
 
     // blob/is untouched
-    assert_eq!(std::fs::read_to_string(&blob).unwrap(), TOKENIZER_CACHE_ORIGINAL);
+    assert_eq!(
+        std::fs::read_to_string(&blob).unwrap(),
+        TOKENIZER_CACHE_ORIGINAL
+    );
     // snapshot/is now a regular file
     assert!(!link.symlink_metadata().unwrap().file_type().is_symlink());
     // snapshot/carries the patch
     let patched = std::fs::read_to_string(&link).unwrap();
-    assert!(patched.contains("\"PreTrainedTokenizerFast\""), "{}", patched);
+    assert!(
+        patched.contains("\"PreTrainedTokenizerFast\""),
+        "{}",
+        patched
+    );
     // snapshot/drops backend+is_local as intended
     assert!(!patched.contains("\"backend\": \"x\""), "{}", patched);
     // snapshot/no temporary file left behind
     let leftovers: Vec<_> = std::fs::read_dir(link.parent().unwrap())
         .unwrap()
         .filter_map(Result::ok)
-        .filter(|e| e.file_name().to_string_lossy().starts_with(".tokenizer_config."))
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with(".tokenizer_config.")
+        })
         .collect();
-    assert!(leftovers.is_empty(), "{:?}", leftovers.iter().map(|e| e.file_name()).collect::<Vec<_>>());
+    assert!(
+        leftovers.is_empty(),
+        "{:?}",
+        leftovers.iter().map(|e| e.file_name()).collect::<Vec<_>>()
+    );
     // snapshot/preserves the file mode
     #[cfg(unix)]
     {
@@ -73,7 +92,10 @@ fn tokenizer_config_patch_keeps_the_shared_blob_intact() {
     // a second call is a no-op and must not disturb anything either
     fix_tokenizer_config(&snap_parent(&link));
     // idempotent/blob still untouched
-    assert_eq!(std::fs::read_to_string(&blob).unwrap(), TOKENIZER_CACHE_ORIGINAL);
+    assert_eq!(
+        std::fs::read_to_string(&blob).unwrap(),
+        TOKENIZER_CACHE_ORIGINAL
+    );
 
     std::fs::remove_dir_all(&root).ok();
 }
@@ -137,13 +159,30 @@ fn tokenizer_config_replace_failure_cleans_up() {
     let leftovers: Vec<_> = std::fs::read_dir(&fail_dir)
         .unwrap()
         .filter_map(Result::ok)
-        .filter(|e| e.file_name().to_string_lossy().starts_with(".tokenizer_config."))
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with(".tokenizer_config.")
+        })
         .collect();
-    assert!(leftovers.is_empty(), "{:?}", leftovers.iter().map(|e| e.file_name()).collect::<Vec<_>>());
+    assert!(
+        leftovers.is_empty(),
+        "{:?}",
+        leftovers.iter().map(|e| e.file_name()).collect::<Vec<_>>()
+    );
     // replace-failure/original symlink intact
-    assert!(fail_link.symlink_metadata().unwrap().file_type().is_symlink());
+    assert!(
+        fail_link
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
     // replace-failure/blob untouched
-    assert_eq!(std::fs::read_to_string(&blob).unwrap(), TOKENIZER_CACHE_ORIGINAL);
+    assert_eq!(
+        std::fs::read_to_string(&blob).unwrap(),
+        TOKENIZER_CACHE_ORIGINAL
+    );
 
     std::fs::remove_dir_all(&root).ok();
 }

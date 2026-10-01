@@ -10,9 +10,21 @@ fn email_state_strips_the_subject_and_drops_none_extras() {
         false,
         &[("ticket", json!(4411)), ("empty", Value::Null)],
     );
-    assert_eq!(state["subject"], json!("Locked out"), "state/subject is stripped");
-    assert_eq!(state["body"], json!("body text"), "state/unclean body passes through");
-    assert_eq!(state["from"], json!("alice@example.com"), "state/from is set");
+    assert_eq!(
+        state["subject"],
+        json!("Locked out"),
+        "state/subject is stripped"
+    );
+    assert_eq!(
+        state["body"],
+        json!("body text"),
+        "state/unclean body passes through"
+    );
+    assert_eq!(
+        state["from"],
+        json!("alice@example.com"),
+        "state/from is set"
+    );
     assert_eq!(state["ticket"], json!(4411), "state/extra is inserted");
     assert!(state.get("empty").is_none(), "state/None extra is dropped");
 }

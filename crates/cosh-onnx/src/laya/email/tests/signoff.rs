@@ -4,7 +4,11 @@ use super::*;
 #[test]
 fn signoff_word_short_mail_keeps_the_request() {
     let short = "Hi,\n\nThanks for the quick reply.\nCould you refund invoice 4411 as well?";
-    assert_eq!(clean(short), short, "signoff word/short mail keeps the request");
+    assert_eq!(
+        clean(short),
+        short,
+        "signoff word/short mail keeps the request"
+    );
     assert_eq!(
         clean(
             "Hello,\n\nWe were billed twice in March.\nThanks for looking into it.\n\
@@ -30,7 +34,8 @@ fn signoff_word_short_mail_keeps_the_request() {
     );
 }
 
-const SHORT_BODY: &str = "Hi,\n\nThanks for the quick reply.\nCould you refund invoice 4411 as well?";
+const SHORT_BODY: &str =
+    "Hi,\n\nThanks for the quick reply.\nCould you refund invoice 4411 as well?";
 
 // ------------------------------------------- real sign-offs are still cut (positive controls)
 #[test]
@@ -85,8 +90,14 @@ fn signoff_kept_wider_closings_inside_a_sentence() {
     // ...and the wider closing must not swallow a sentence that merely
     // starts the same way
     for (label, body) in [
-        ("and + sentence", "Hi,\n\nPlease refund 4411.\nThanks and the team will confirm it today."),
-        ("warmest + sentence", "Hi,\n\nThe room is cold.\nWarmest setting still reads 18 degrees."),
+        (
+            "and + sentence",
+            "Hi,\n\nPlease refund 4411.\nThanks and the team will confirm it today.",
+        ),
+        (
+            "warmest + sentence",
+            "Hi,\n\nThe room is cold.\nWarmest setting still reads 18 degrees.",
+        ),
     ] {
         assert_eq!(clean(body), body, "signoff kept/{label}");
     }
@@ -101,12 +112,27 @@ fn word_only_requests_are_kept() {
     for (label, body) in [
         ("a question about the word", "Is this confidential?"),
         ("a policy question", "What is your confidentiality policy?"),
-        ("a request containing the word", "Please keep this confidential but process my refund."),
-        ("a request about handling", "Please treat this as confidential."),
-        ("a question with a dash", "This is confidential - can you help?"),
-        ("a question about an attachment", "Is the attached document confidential?"),
+        (
+            "a request containing the word",
+            "Please keep this confidential but process my refund.",
+        ),
+        (
+            "a request about handling",
+            "Please treat this as confidential.",
+        ),
+        (
+            "a question with a dash",
+            "This is confidential - can you help?",
+        ),
+        (
+            "a question about an attachment",
+            "Is the attached document confidential?",
+        ),
         ("a label prefix", "Confidential: I need a refund."),
-        ("a question about information", "What is the information policy for contractors?"),
+        (
+            "a question about information",
+            "What is the information policy for contractors?",
+        ),
     ] {
         assert_eq!(clean(body), body, "word only/kept: {label}");
     }
@@ -125,13 +151,23 @@ fn word_only_requests_are_kept() {
 fn word_only_real_footers_still_dropped() {
     // ...while the real footers those branches exist for are still dropped
     for (label, body) in [
-        ("named addressee", "This email is confidential and intended solely for the named addressee."),
-        ("the individual addressed",
-         "This message is confidential and intended solely for the use of the individual to whom it is addressed."),
-        ("may be privileged", "The information in this email is confidential and may be privileged."),
-        ("wrapped across lines",
-         "This email and any files transmitted with it are\n\
-          confidential and intended solely for the named addressee."),
+        (
+            "named addressee",
+            "This email is confidential and intended solely for the named addressee.",
+        ),
+        (
+            "the individual addressed",
+            "This message is confidential and intended solely for the use of the individual to whom it is addressed.",
+        ),
+        (
+            "may be privileged",
+            "The information in this email is confidential and may be privileged.",
+        ),
+        (
+            "wrapped across lines",
+            "This email and any files transmitted with it are\n\
+          confidential and intended solely for the named addressee.",
+        ),
     ] {
         assert!(
             clean(body).trim().is_empty(),
@@ -165,4 +201,3 @@ fn word_only_request_inside_one_sentence_survives() {
         "word only/request inside one sentence survives"
     );
 }
-

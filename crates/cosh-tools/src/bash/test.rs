@@ -1,16 +1,16 @@
+#[cfg(any(unix, windows))]
+#[allow(unused_imports)]
+use super::bsh::auto_fix_command;
 #[allow(unused_imports)]
 use super::bsh::spawn_bash;
 #[cfg(any(unix, windows))]
 #[allow(unused_imports)]
 use super::bsh::spawn_bash_pty;
-#[cfg(any(unix, windows))]
-#[allow(unused_imports)]
-use super::bsh::auto_fix_command;
-#[allow(unused_imports)]
-use tokio_stream::StreamExt;
 #[cfg(unix)]
 #[allow(unused_imports)]
 use std::time::{Duration, Instant};
+#[allow(unused_imports)]
+use tokio_stream::StreamExt;
 #[allow(dead_code)]
 const BUFFER_SIZE: usize = 4096;
 
@@ -644,8 +644,13 @@ where
 }
 
 fn joined_stdout(items: &[crate::bash::SpawnOutput]) -> String {
-    String::from_utf8_lossy(&items.iter().flat_map(|i| i.stdout.clone()).collect::<Vec<u8>>())
-        .to_string()
+    String::from_utf8_lossy(
+        &items
+            .iter()
+            .flat_map(|i| i.stdout.clone())
+            .collect::<Vec<u8>>(),
+    )
+    .to_string()
 }
 
 #[tokio::test]
@@ -653,7 +658,12 @@ async fn test_spawn_bash_injects_pager_defaults() {
     // If PAGER/GIT_PAGER/MANPAGER were unset, `git log` inside a repo could
     // launch an interactive pager and hang until the timeout. The injected
     // defaults must be visible to the child on the piped path.
-    let mut stream = spawn_bash(None, ".", "env | grep -E '^(PAGER|GIT_PAGER|MANPAGER)='", None);
+    let mut stream = spawn_bash(
+        None,
+        ".",
+        "env | grep -E '^(PAGER|GIT_PAGER|MANPAGER)='",
+        None,
+    );
     let items = collect_all(&mut stream).await;
     let stdout = joined_stdout(&items);
 
@@ -667,7 +677,12 @@ async fn test_spawn_bash_injects_pager_defaults() {
 async fn test_spawn_bash_pty_injects_pager_defaults() {
     // Same guarantee on the PTY path — this is the path where `git log`
     // actually launched `less` and blocked until the 10-minute timeout.
-    let mut stream = spawn_bash_pty(None, ".", "env | grep -E '^(PAGER|GIT_PAGER|MANPAGER)='", None);
+    let mut stream = spawn_bash_pty(
+        None,
+        ".",
+        "env | grep -E '^(PAGER|GIT_PAGER|MANPAGER)='",
+        None,
+    );
     let items = collect_all(&mut stream).await;
     let stdout = joined_stdout(&items);
 
@@ -695,7 +710,10 @@ async fn test_spawn_bash_caller_env_overrides_pager_defaults() {
 #[tokio::test]
 async fn test_spawn_bash_pty_caller_env_overrides_pager_defaults() {
     let mut stream = spawn_bash_pty(
-        Some(vec![("GIT_PAGER".to_string(), "my-custom-pager".to_string())]),
+        Some(vec![(
+            "GIT_PAGER".to_string(),
+            "my-custom-pager".to_string(),
+        )]),
         ".",
         "echo \"$GIT_PAGER\"",
         None,
@@ -837,11 +855,7 @@ fn test_auto_fix_table() {
             "git --no-pager -c core.abbrev=8 log --oneline",
             true,
         ),
-        (
-            "FOO=bar git log",
-            "FOO=bar git --no-pager log",
-            true,
-        ),
+        ("FOO=bar git log", "FOO=bar git --no-pager log", true),
         ("seq 1 1000 | less", "seq 1 1000 | cat", true),
         ("git log | less", "git log | cat", true),
         ("cat big.txt | more", "cat big.txt | cat", true),
@@ -852,7 +866,11 @@ fn test_auto_fix_table() {
         // --- must NOT be rewritten (fallback: watchdog) ---
         // Regression (review R1): the pipeline rule must never cross a
         // newline — a second command or a heredoc body would be deleted.
-        ("echo hi | less\necho done", "echo hi | less\necho done", false),
+        (
+            "echo hi | less\necho done",
+            "echo hi | less\necho done",
+            false,
+        ),
         (
             "cat <<EOF | less\nline\nEOF",
             "cat <<EOF | less\nline\nEOF",
@@ -868,7 +886,11 @@ fn test_auto_fix_table() {
         ("git --paginate log", "git --paginate log", false),
         ("cat less", "cat less", false),
         ("grep less file.txt", "grep less file.txt", false),
-        ("git config core.pager less", "git config core.pager less", false),
+        (
+            "git config core.pager less",
+            "git config core.pager less",
+            false,
+        ),
         ("echo git log", "echo git log", false),
         ("echo \"git log\"", "echo \"git log\"", false),
         ("bash -c 'git log'", "bash -c 'git log'", false),
@@ -922,12 +944,21 @@ fn test_auto_fix_adversarial_matrix() {
     let must_not_rewrite: &[(&str, &str)] = &[
         // `less`/`most` as a substring of a longer word (word boundary).
         ("x | lessful", "word boundary: `lessful` is not `less`"),
-        ("x | guiless", "word boundary: suffix `less` is not the pager"),
+        (
+            "x | guiless",
+            "word boundary: suffix `less` is not the pager",
+        ),
         ("x | Less", "case-sensitive: `Less` is not the pager"),
-        ("x | less-X", "word boundary: `less-X` is a single token, not pager+flag"),
+        (
+            "x | less-X",
+            "word boundary: `less-X` is a single token, not pager+flag",
+        ),
         // Pager with a positional argument: less would IGNORE stdin, so
         // `| cat` is NOT semantically equivalent — must not rewrite.
-        ("x | less -S extra-arg", "positional arg: less would ignore stdin"),
+        (
+            "x | less -S extra-arg",
+            "positional arg: less would ignore stdin",
+        ),
         ("x | most -N 5", "positional numeric arg"),
         ("x | more --SOME-ARG 7", "positional arg after flags"),
         // Flag-looking token glued to the pager without whitespace.
@@ -942,9 +973,18 @@ fn test_auto_fix_adversarial_matrix() {
         ("bash -c 'git log'", "single-quoted literal"),
         ("x | less `foo`", "backtick command substitution"),
         // Env-prefix edge cases that must NOT shift the insertion point.
-        ("git --paginate log", "explicit pager opt-in wins (last-wins)"),
-        ("git -c key=a b.log", "value-consumed flag: `b.log` is not a subcommand"),
-        ("git --exec-path /path log", "value flag outside the enumerated list"),
+        (
+            "git --paginate log",
+            "explicit pager opt-in wins (last-wins)",
+        ),
+        (
+            "git -c key=a b.log",
+            "value-consumed flag: `b.log` is not a subcommand",
+        ),
+        (
+            "git --exec-path /path log",
+            "value flag outside the enumerated list",
+        ),
         ("man git log", "`git` is not the invoked command"),
         ("bash git log", "`git` is an argument"),
         ("gti log", "typo'd command is not git"),
@@ -963,13 +1003,22 @@ fn test_auto_fix_adversarial_matrix() {
     // Companion positives pinned right next to the negatives above so the
     // table stays honest about what SHOULD fire.
     let must_rewrite: &[(&str, &str)] = &[
-        ("git diff --cached --stat", "git --no-pager diff --cached --stat"),
+        (
+            "git diff --cached --stat",
+            "git --no-pager diff --cached --stat",
+        ),
         ("x | less --follow-name", "x | cat"),
         ("x | less -X -S", "x | cat"),
-        ("FOO=bar BAR=a.b git log", "FOO=bar BAR=a.b git --no-pager log"),
+        (
+            "FOO=bar BAR=a.b git log",
+            "FOO=bar BAR=a.b git --no-pager log",
+        ),
         ("git -c key=val log", "git --no-pager -c key=val log"),
         ("git -C /repo log", "git --no-pager -C /repo log"),
-        ("git --git-dir=x --work-tree=y log", "git --no-pager --git-dir=x --work-tree=y log"),
+        (
+            "git --git-dir=x --work-tree=y log",
+            "git --no-pager --git-dir=x --work-tree=y log",
+        ),
         ("git show $(seq 1 3)", "git --no-pager show $(seq 1 3)"),
     ];
 

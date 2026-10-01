@@ -164,7 +164,7 @@ pub fn render_options(q: &Value) -> Result<Vec<String>> {
                         "noul criteria must be an object with optional 'true'/'false' \
                          descriptions"
                             .to_string(),
-                    ))
+                    ));
                 }
             };
             let (false_label, true_label) = resolve_noul_labels(q.get("labels"))?;
@@ -228,10 +228,7 @@ pub fn check_question(qid: &str, qdef: &Value) -> Result<()> {
     let Some(def) = qdef.as_object() else {
         return Err(question_err(
             qid,
-            format!(
-                "definition must be a dict, got {}",
-                json_type_name(qdef)
-            ),
+            format!("definition must be a dict, got {}", json_type_name(qdef)),
         ));
     };
     let t_value = def.get("type").cloned().unwrap_or(Value::Null);
@@ -339,8 +336,7 @@ pub fn check_question(qid: &str, qdef: &Value) -> Result<()> {
         match &crit {
             Value::Null => {}
             Value::Object(m) => {
-                let mut keys: Vec<String> =
-                    m.keys().map(|k| k.to_lowercase()).collect();
+                let mut keys: Vec<String> = m.keys().map(|k| k.to_lowercase()).collect();
                 keys.sort();
                 if keys.iter().any(|k| k != "true" && k != "false") {
                     let rendered = keys
@@ -367,13 +363,16 @@ pub fn check_question(qid: &str, qdef: &Value) -> Result<()> {
                     qid,
                     "a noul question takes 'criteria' as a dict with optional \
                      'true'/'false' descriptions, or omits it",
-                ))
+                ));
             }
         }
     }
     if let Some(labels) = def.get("labels") {
         if t != "noul" {
-            return Err(question_err(qid, "'labels' is only supported for noul questions"));
+            return Err(question_err(
+                qid,
+                "'labels' is only supported for noul questions",
+            ));
         }
         if let Err(e) = resolve_noul_labels(Some(labels)) {
             return Err(question_err(qid, e));

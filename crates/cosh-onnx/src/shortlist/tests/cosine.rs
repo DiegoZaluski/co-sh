@@ -6,8 +6,14 @@ fn cosine_identical_vectors() {
     let v = [1.0, 2.0, 3.0];
     let docs = [vec![1.0, 2.0, 3.0], vec![-1.0, -2.0, -3.0]];
     let sims = cosine(&v, &docs);
-    assert!((sims[0] - 1.0).abs() < 1e-5, "test_cosine_identical_vectors +1");
-    assert!((sims[1] - (-1.0)).abs() < 1e-5, "test_cosine_identical_vectors -1");
+    assert!(
+        (sims[0] - 1.0).abs() < 1e-5,
+        "test_cosine_identical_vectors +1"
+    );
+    assert!(
+        (sims[1] - (-1.0)).abs() < 1e-5,
+        "test_cosine_identical_vectors -1"
+    );
 }
 
 #[test]

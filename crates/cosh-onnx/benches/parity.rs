@@ -22,9 +22,9 @@
 use std::io::{BufRead, Write};
 use std::time::Instant;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use cosh_onnx::{load, LoadOptions, ModelKind};
+use cosh_onnx::{LoadOptions, ModelKind, load};
 
 fn arg(flag: &str) -> Option<String> {
     let args: Vec<String> = std::env::args().collect();
@@ -42,8 +42,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         std::env::var("PARITY_MODEL_DIR").unwrap_or_else(|_| "/tmp/laya-eval/english".into());
     let onnx_path =
         std::env::var("PARITY_ONNX").unwrap_or_else(|_| format!("{model_dir}/laya.onnx"));
-    let dataset = std::env::var("PARITY_DATASET")
-        .unwrap_or_else(|_| "/tmp/cosh-bench/dataset.jsonl".into());
+    let dataset =
+        std::env::var("PARITY_DATASET").unwrap_or_else(|_| "/tmp/cosh-bench/dataset.jsonl".into());
     let out =
         std::env::var("PARITY_OUT").unwrap_or_else(|_| "/tmp/cosh-bench/results_rust.jsonl".into());
 
@@ -107,7 +107,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // I/O outside the clock: one append pass after the timed loop.
-    let mut fh = std::fs::OpenOptions::new().create(true).append(true).open(&out)?;
+    let mut fh = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&out)?;
     for record in &records {
         writeln!(fh, "{record}")?;
     }

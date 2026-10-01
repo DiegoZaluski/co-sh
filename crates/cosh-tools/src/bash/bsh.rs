@@ -98,8 +98,7 @@ const WATCHDOG_RAW_MODE_GRACE: Duration = Duration::from_secs(2);
 /// advice could be wrong for the unknown case; the model infers the fix
 /// itself for the retry.
 #[cfg(unix)]
-const WATCHDOG_MESSAGE: &str =
-    "input-wait watchdog: killed a process that entered raw (interactive) \
+const WATCHDOG_MESSAGE: &str = "input-wait watchdog: killed a process that entered raw (interactive) \
      terminal mode and waited for keyboard input the harness cannot provide \
      (interactive pager/editor/TUI).";
 
@@ -457,17 +456,15 @@ fn non_interactive_defaults(
 /// unmatched → no rewrite.
 #[cfg(any(unix, windows))]
 static AUTO_FIX_GIT_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        concat!(
-            r"^(?:\s*[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(git)",
-            r"(?:\s+(?:",
-            r"-[cC]\s+\S+",                                                   // -c <name>=<value> / -C <path>
-            r"|--(?:git-dir|work-tree|namespace|super-prefix)\s+\S+",         // --opt <value>
-            r"|-{1,2}[\w-]+\S*",                                              // valueless global flags
-            r"))*",
-            r"(?:\s+(log|diff|show|blame|shortlog|reflog|whatchanged)\b)",
-        ),
-    )
+    Regex::new(concat!(
+        r"^(?:\s*[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(git)",
+        r"(?:\s+(?:",
+        r"-[cC]\s+\S+", // -c <name>=<value> / -C <path>
+        r"|--(?:git-dir|work-tree|namespace|super-prefix)\s+\S+", // --opt <value>
+        r"|-{1,2}[\w-]+\S*", // valueless global flags
+        r"))*",
+        r"(?:\s+(log|diff|show|blame|shortlog|reflog|whatchanged)\b)",
+    ))
     .unwrap()
 });
 
@@ -477,9 +474,8 @@ static AUTO_FIX_GIT_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// would make the pager ignore stdin, and a `>`/`<` redirect must never be
 /// swallowed by the replacement.
 #[cfg(any(unix, windows))]
-static AUTO_FIX_PIPE_PAGER_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\|\s*(less|more|most)\b(?:\s+-{1,2}[\w][\w-]*)*\s*$").unwrap()
-});
+static AUTO_FIX_PIPE_PAGER_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\|\s*(less|more|most)\b(?:\s+-{1,2}[\w][\w-]*)*\s*$").unwrap());
 
 /// Regex: `less`/`more` invoked as the command itself with plain filename
 /// arguments (no flags — flags would be invalid for `cat`).
@@ -548,7 +544,9 @@ pub(crate) fn auto_fix_command(command: &str) -> (String, Option<String>) {
             fixed.push_str(&command[insert_at..]);
             return Some((
                 fixed,
-                format!("auto-fix: inserted `--no-pager` into `git {sub}` to prevent an interactive pager"),
+                format!(
+                    "auto-fix: inserted `--no-pager` into `git {sub}` to prevent an interactive pager"
+                ),
             ));
         }
 
@@ -561,7 +559,9 @@ pub(crate) fn auto_fix_command(command: &str) -> (String, Option<String>) {
                 let pager = cap.get(1)?.as_str();
                 return Some((
                     format!("cat {args}"),
-                    format!("auto-fix: replaced `{pager}` with `cat` to print the file(s) directly"),
+                    format!(
+                        "auto-fix: replaced `{pager}` with `cat` to print the file(s) directly"
+                    ),
                 ));
             }
             // `less -X file` etc. → not certain → no rewrite.

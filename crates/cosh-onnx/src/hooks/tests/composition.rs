@@ -54,8 +54,14 @@ fn per_call_hook_sequences_run_in_order() {
     let agent = agent();
     let per_call = PerCall {
         hooks: vec![
-            Arc::new(Counter { seq: Arc::clone(&seq), n: 1 }) as SharedHook,
-            Arc::new(Counter { seq: Arc::clone(&seq), n: 2 }) as SharedHook,
+            Arc::new(Counter {
+                seq: Arc::clone(&seq),
+                n: 1,
+            }) as SharedHook,
+            Arc::new(Counter {
+                seq: Arc::clone(&seq),
+                n: 2,
+            }) as SharedHook,
         ],
         ..PerCall::default()
     };
@@ -64,7 +70,6 @@ fn per_call_hook_sequences_run_in_order() {
         .unwrap();
     assert_eq!(*seq.lock().unwrap(), vec![1, 2]);
 }
-
 
 // ------------------------------------------------- dynamic registration (upstream ~349-390)
 #[test]
@@ -101,7 +106,10 @@ fn add_hook_fires_and_remove_hook_removes_by_identity() {
         .unwrap();
     assert!(log.lock().unwrap().is_empty());
 
-    let unknown: SharedHook = Arc::new(Tag { log: Arc::new(Mutex::new(Vec::new())), tag: "x" });
+    let unknown: SharedHook = Arc::new(Tag {
+        log: Arc::new(Mutex::new(Vec::new())),
+        tag: "x",
+    });
     assert!(!agent.remove_hook(&unknown));
 }
 
@@ -150,7 +158,6 @@ fn hooks_installed_scopes_hooks_to_the_closure() {
         ]
     );
 }
-
 
 // ------------------------------------------------- hooks.rs units
 #[test]
@@ -226,9 +233,11 @@ fn a_serialising_lock_runs_hooks_one_at_a_time() {
                 .active
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
                 + 1;
-            self.max_active.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
+            self.max_active
+                .fetch_max(now, std::sync::atomic::Ordering::SeqCst);
             std::thread::sleep(Duration::from_millis(20));
-            self.active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            self.active
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }
 
@@ -267,4 +276,3 @@ fn a_serialising_lock_runs_hooks_one_at_a_time() {
         "the lock must serialise hook executions"
     );
 }
-

@@ -14,22 +14,54 @@ fn the_scripts_table() {
     // consequences of these rows are covered by the is_english/routing
     // tables below, as upstream has them.
     for (label, text, script) in [
-        ("english", "The customer was charged twice and wants a refund.", "latin"),
+        (
+            "english",
+            "The customer was charged twice and wants a refund.",
+            "latin",
+        ),
         ("armenian", "Հայերեն", "armenian"),
         ("armenian uppercase", "ՀԱՅԵՐԵՆ", "armenian"),
         ("armenian punctuation only", "։֊", "unknown"),
         ("azerbaijani lone schwa", "ə", "latin"),
-        ("azerbaijani uppercase", "MÜŞTƏRİ İLƏ ƏLAQƏ SAXLAYIN", "latin"),
-        ("french", "Le client a été facturé deux fois et demande un remboursement.", "latin"),
-        ("hindi", "ग्राहक से दो बार शुल्क लिया गया और वह धनवापसी चाहता है।", "devanagari"),
-        ("japanese", "お客様は二重に請求されたため返金を希望しています。", "kana"),
+        (
+            "azerbaijani uppercase",
+            "MÜŞTƏRİ İLƏ ƏLAQƏ SAXLAYIN",
+            "latin",
+        ),
+        (
+            "french",
+            "Le client a été facturé deux fois et demande un remboursement.",
+            "latin",
+        ),
+        (
+            "hindi",
+            "ग्राहक से दो बार शुल्क लिया गया और वह धनवापसी चाहता है।",
+            "devanagari",
+        ),
+        (
+            "japanese",
+            "お客様は二重に請求されたため返金を希望しています。",
+            "kana",
+        ),
         ("chinese", "客户被重复扣款要求退款", "han"),
         ("korean", "고객이 두 번 청구되어 환불을 원합니다", "hangul"),
-        ("arabic", "تم خصم المبلغ مرتين من العميل ويريد استرداد الأموال", "arabic"),
+        (
+            "arabic",
+            "تم خصم المبلغ مرتين من العميل ويريد استرداد الأموال",
+            "arabic",
+        ),
         ("tamil", "வாடிக்கையாளரிடம் இருமுறை கட்டணம் வசூலிக்கப்பட்டது", "tamil"),
-        ("russian", "С клиента дважды сняли деньги и он хочет возврат", "cyrillic"),
+        (
+            "russian",
+            "С клиента дважды сняли деньги и он хочет возврат",
+            "cyrillic",
+        ),
         ("thai", "ลูกค้าถูกเรียกเก็บเงินสองครั้งและต้องการเงินคืน", "thai"),
-        ("greek", "Ο πελάτης χρεώθηκε δύο φορές και θέλει επιστροφή χρημάτων", "greek"),
+        (
+            "greek",
+            "Ο πελάτης χρεώθηκε δύο φορές και θέλει επιστροφή χρημάτων",
+            "greek",
+        ),
         ("hebrew", "הלקוח חויב פעמיים ורוצה החזר כספי", "hebrew"),
         ("empty", "", "unknown"),
         ("digits only", "12345 6789", "unknown"),
@@ -45,10 +77,19 @@ fn the_scripts_table() {
 #[test]
 fn routing_follows_the_english_detection() {
     for (text, want) in [
-        ("Please refund the duplicate charge on invoice 4411 today.", "english"),
+        (
+            "Please refund the duplicate charge on invoice 4411 today.",
+            "english",
+        ),
         ("Հայերեն", "multilingual"),
-        ("Sifarisim gelmedi ve pulum geri qaytarilmadi, zehmet olmasa yoxlayin", "multilingual"),
-        ("Mən sizin xidmətinizdən razı deyiləm və pulumu geri istəyirəm", "multilingual"),
+        (
+            "Sifarisim gelmedi ve pulum geri qaytarilmadi, zehmet olmasa yoxlayin",
+            "multilingual",
+        ),
+        (
+            "Mən sizin xidmətinizdən razı deyiləm və pulumu geri istəyirəm",
+            "multilingual",
+        ),
         ("refund me", "english"),
         ("ग्राहक से दो बार शुल्क लिया गया", "multilingual"),
         ("お客様は二重に請求されました", "multilingual"),
@@ -67,15 +108,30 @@ fn routing_follows_the_english_detection() {
         // in #35, where Romanian states were handed to the English checkpoint
         // (0.330 accuracy, 0.658 ECE on `ro`) instead of the multilingual one.
         // An unidentified language must never be assumed English.
-        ("Gătește-mi o rețetă de sarmale de post pentru mâine.", "multilingual"),
+        (
+            "Gătește-mi o rețetă de sarmale de post pentru mâine.",
+            "multilingual",
+        ),
         (
             "Am fost taxat de două ori pentru factura din luna martie și vreau banii",
             "multilingual",
         ),
-        ("Klient został obciążony dwukrotnie i chce zwrot pieniędzy za fakturę", "multilingual"),
-        ("Zákazníkovi byla částka účtována dvakrát a žádá o vrácení peněz", "multilingual"),
-        ("Müşteriden iki kez ücret alındı ve para iadesi istiyor lütfen yardım", "multilingual"),
-        ("Khách hàng đã bị thu phí hai lần và muốn được hoàn tiền ngay", "multilingual"),
+        (
+            "Klient został obciążony dwukrotnie i chce zwrot pieniędzy za fakturę",
+            "multilingual",
+        ),
+        (
+            "Zákazníkovi byla částka účtována dvakrát a žádá o vrácení peněz",
+            "multilingual",
+        ),
+        (
+            "Müşteriden iki kez ücret alındı ve para iadesi istiyor lütfen yardım",
+            "multilingual",
+        ),
+        (
+            "Khách hàng đã bị thu phí hai lần và muốn được hoàn tiền ngay",
+            "multilingual",
+        ),
         // English with the odd loanword must not tip over into the
         // multilingual checkpoint
         (
@@ -84,7 +140,11 @@ fn routing_follows_the_english_detection() {
             "english",
         ),
     ] {
-        assert_eq!(is_english(&json!(text)), want == "english", "is_english/{text:?}");
+        assert_eq!(
+            is_english(&json!(text)),
+            want == "english",
+            "is_english/{text:?}"
+        );
         assert_eq!(route_text(text).model, want, "route/{text:?}");
     }
 }
@@ -96,8 +156,7 @@ fn undecided_latin_is_flagged_and_routes_on_the_rules() {
     assert!(analysis.language_undecided, "latin/undecided is flagged");
     assert_eq!(analysis.language, None, "latin/undecided names no language");
     assert!(
-        !analyse(&json!("Please refund the duplicate charge on the invoice"))
-            .language_undecided,
+        !analyse(&json!("Please refund the duplicate charge on the invoice")).language_undecided,
         "latin/english is not undecided"
     );
     assert!(
@@ -152,10 +211,8 @@ fn dotted_tokens_are_identifiers_not_prose_at_the_router() {
         "latin_lang/portuguese prose with a link"
     );
     assert_eq!(
-        guess_latin_language(
-            "O cliente nao recebeu o produto, mas quer o dinheiro para a conta.",
-        )
-        .as_deref(),
+        guess_latin_language("O cliente nao recebeu o produto, mas quer o dinheiro para a conta.",)
+            .as_deref(),
         Some("pt"),
         "latin_lang/portuguese sentence with a full stop"
     );
@@ -180,7 +237,12 @@ fn dotted_tokens_are_identifiers_not_prose_at_the_router() {
 fn dict_state_routing_matches_string_state() {
     let de = "Mein Konto wurde zweimal belastet";
     let r = Router::new().expect("router");
-    let de_str = r.route(&json!(de), Some(&empty_questions()), &RouteOptions::default())
+    let de_str = r
+        .route(
+            &json!(de),
+            Some(&empty_questions()),
+            &RouteOptions::default(),
+        )
         .expect("route");
     let de_dict = r
         .route(
@@ -189,8 +251,14 @@ fn dict_state_routing_matches_string_state() {
             &RouteOptions::default(),
         )
         .expect("route");
-    assert_eq!(de_dict.model, de_str.model, "route/dict german matches string");
-    assert_eq!(de_dict.model, "multilingual", "route/dict german is multilingual");
+    assert_eq!(
+        de_dict.model, de_str.model,
+        "route/dict german matches string"
+    );
+    assert_eq!(
+        de_dict.model, "multilingual",
+        "route/dict german is multilingual"
+    );
     assert_eq!(
         de_dict.detection.as_ref().expect("detection")["language"],
         json!("de"),
@@ -216,17 +284,25 @@ fn dict_state_routing_matches_string_state() {
         "message": de,
     });
     assert_eq!(
-        r.route(&de_ticket, Some(&empty_questions()), &RouteOptions::default())
-            .expect("route")
-            .model,
+        r.route(
+            &de_ticket,
+            Some(&empty_questions()),
+            &RouteOptions::default()
+        )
+        .expect("route")
+        .model,
         "multilingual",
         "route/dict german beside english notes"
     );
     assert_eq!(
-        r.route(&de_ticket, Some(&empty_questions()), &RouteOptions::default())
-            .expect("route")
-            .detection
-            .expect("detection")["language_undecided"],
+        r.route(
+            &de_ticket,
+            Some(&empty_questions()),
+            &RouteOptions::default()
+        )
+        .expect("route")
+        .detection
+        .expect("detection")["language_undecided"],
         json!(false),
         "route/dict german beside english notes is not undecided"
     );
@@ -277,7 +353,6 @@ fn dict_state_routing_matches_string_state() {
     }
 }
 
-
 // ------------------------------------------------------- routing decisions
 // The 30-case table: (label, state, questions, overrides, want).
 // `model`/`task`/`lang` map to the `RouteOptions` fields of the same names.
@@ -285,46 +360,226 @@ fn dict_state_routing_matches_string_state() {
 fn the_routing_decisions_table() {
     let generic = q_generic();
     let td = q_td();
-    type Case<'a> = (&'a str, Value, &'a Map<String, Value>, RouteOptions<'a>, &'a str);
+    type Case<'a> = (
+        &'a str,
+        Value,
+        &'a Map<String, Value>,
+        RouteOptions<'a>,
+        &'a str,
+    );
     let cases: &[Case] = &[
-        ("english text", json!({"body": "I was charged twice, please refund."}), &generic, RouteOptions::default(), "english"),
-        ("armenian text", json!({"body": "Հայերեն"}), &generic, RouteOptions::default(), "multilingual"),
-        ("armenian explicit override", json!({"body": "Հայերեն"}), &generic, opts_model("english"), "english"),
-        ("azerbaijani no diacritics", json!({"body": "Sifarisim gelmedi ve pulum geri qaytarilmadi, zehmet olmasa yoxlayin"}), &generic, RouteOptions::default(), "multilingual"),
-        ("azerbaijani explicit override", json!({"body": "Müştəridən iki dəfə pul alınıb"}), &generic, opts_model("english"), "english"),
-        ("hindi text", json!({"body": "मुझसे दो बार शुल्क लिया गया"}), &generic, RouteOptions::default(), "multilingual"),
-        ("japanese text", json!({"body": "二重に請求されました"}), &generic, RouteOptions::default(), "multilingual"),
-        ("korean text", json!({"body": "두 번 청구되었습니다"}), &generic, RouteOptions::default(), "multilingual"),
-        ("arabic text", json!({"body": "تم خصم المبلغ مرتين"}), &generic, RouteOptions::default(), "multilingual"),
+        (
+            "english text",
+            json!({"body": "I was charged twice, please refund."}),
+            &generic,
+            RouteOptions::default(),
+            "english",
+        ),
+        (
+            "armenian text",
+            json!({"body": "Հայերեն"}),
+            &generic,
+            RouteOptions::default(),
+            "multilingual",
+        ),
+        (
+            "armenian explicit override",
+            json!({"body": "Հայերեն"}),
+            &generic,
+            opts_model("english"),
+            "english",
+        ),
+        (
+            "azerbaijani no diacritics",
+            json!({"body": "Sifarisim gelmedi ve pulum geri qaytarilmadi, zehmet olmasa yoxlayin"}),
+            &generic,
+            RouteOptions::default(),
+            "multilingual",
+        ),
+        (
+            "azerbaijani explicit override",
+            json!({"body": "Müştəridən iki dəfə pul alınıb"}),
+            &generic,
+            opts_model("english"),
+            "english",
+        ),
+        (
+            "hindi text",
+            json!({"body": "मुझसे दो बार शुल्क लिया गया"}),
+            &generic,
+            RouteOptions::default(),
+            "multilingual",
+        ),
+        (
+            "japanese text",
+            json!({"body": "二重に請求されました"}),
+            &generic,
+            RouteOptions::default(),
+            "multilingual",
+        ),
+        (
+            "korean text",
+            json!({"body": "두 번 청구되었습니다"}),
+            &generic,
+            RouteOptions::default(),
+            "multilingual",
+        ),
+        (
+            "arabic text",
+            json!({"body": "تم خصم المبلغ مرتين"}),
+            &generic,
+            RouteOptions::default(),
+            "multilingual",
+        ),
         // Latin brand names are the letter plurality here, but the request itself is CJK
-        ("chinese with a brand", json!({"body": "我的 iPhone 15 Pro Max 订单还没到"}), &generic, RouteOptions::default(), "multilingual"),
-        ("japanese with brands", json!({"body": "Amazonで買ったiPhoneが届かない"}), &generic, RouteOptions::default(), "multilingual"),
-        ("korean with a brand", json!({"body": "Samsung Galaxy 주문이 아직 안 왔어요"}), &generic, RouteOptions::default(), "multilingual"),
-        ("english with a han name", json!({"body": "My name is 王小明 and my order is late"}), &generic, RouteOptions::default(), "english"),
+        (
+            "chinese with a brand",
+            json!({"body": "我的 iPhone 15 Pro Max 订单还没到"}),
+            &generic,
+            RouteOptions::default(),
+            "multilingual",
+        ),
+        (
+            "japanese with brands",
+            json!({"body": "Amazonで買ったiPhoneが届かない"}),
+            &generic,
+            RouteOptions::default(),
+            "multilingual",
+        ),
+        (
+            "korean with a brand",
+            json!({"body": "Samsung Galaxy 주문이 아직 안 왔어요"}),
+            &generic,
+            RouteOptions::default(),
+            "multilingual",
+        ),
+        (
+            "english with a han name",
+            json!({"body": "My name is 王小明 and my order is late"}),
+            &generic,
+            RouteOptions::default(),
+            "english",
+        ),
         // an English wrapper dilutes the share, but the request is still CJK
-        ("chinese in a ticket", json!({"ticket_id": "TCK-88213", "channel": "web chat",
+        (
+            "chinese in a ticket",
+            json!({"ticket_id": "TCK-88213", "channel": "web chat",
              "agent_notes": "Customer asked about a delayed order. Please check shipping status.",
-             "message": "我的订单已经两个星期了还没有到"}), &generic, RouteOptions::default(), "multilingual"),
-        ("korean after english turns", json!([
+             "message": "我的订单已经两个星期了还没有到"}),
+            &generic,
+            RouteOptions::default(),
+            "multilingual",
+        ),
+        (
+            "korean after english turns",
+            json!([
             {"role": "agent", "text": "Hello! Thanks for contacting support."},
             {"role": "agent", "text": "Could you share your order number please?"},
-            {"role": "user", "text": "주문번호는 5521이고 아직 배송이 안 됐어요"}]), &generic, RouteOptions::default(), "multilingual"),
-        ("english with greek symbols", json!({"request": "Compute the mean μ and variance σ of X, then P(|X-μ| > 2σ)."}), &generic, RouteOptions::default(), "english"),
+            {"role": "user", "text": "주문번호는 5521이고 아직 배송이 안 됐어요"}]),
+            &generic,
+            RouteOptions::default(),
+            "multilingual",
+        ),
+        (
+            "english with greek symbols",
+            json!({"request": "Compute the mean μ and variance σ of X, then P(|X-μ| > 2σ)."}),
+            &generic,
+            RouteOptions::default(),
+            "english",
+        ),
         // English prose that names someone in their own script: the name is not the request, and a
         // capitalised run, a lone symbol and a pronunciation are all annotation rather than content.
-        ("english prose, russian name", json!({"body": "Anton Pavlovich Chekhov (Russian: Антон Павлович Чехов) was a playwright."}), &generic, RouteOptions::default(), "english"),
-        ("english prose, name with IPA", json!({"body": "Vladimir Nabokov (Russian: Влади́мир Набо́ков [vlɐˈdʲimʲɪr nɐˈbokəf]) wrote Lolita and taught literature at Cornell for more than a decade."}), &generic, RouteOptions::default(), "english"),
-        ("english prose, greek name", json!({"body": "Eleftherios Venizelos (Greek: Ελευθέριος Βενιζέλος) served as prime minister."}), &generic, RouteOptions::default(), "english"),
-        ("english prose, hebrew name", json!({"body": "Amos Oz (Hebrew: עמוס עוז), born Amos Klausner, was an Israeli writer and professor of literature at Ben-Gurion University of the Negev in Beersheba."}), &generic, RouteOptions::default(), "english"),
-        ("german text", json!({"body": "Der Kunde wurde zweimal belastet und moechte eine Rueckerstattung fuer die Rechnung die nicht korrekt ist"}), &generic, RouteOptions::default(), "multilingual"),
-        ("explicit model", json!({"body": "anything"}), &generic, opts_model("multilingual"), "multilingual"),
-        ("explicit model overrides script", json!({"body": "मुझसे दो बार"}), &generic, opts_model("english"), "english"),
-        ("explicit task", json!({"body": "x"}), &generic, opts_task("typed_decisions"), "typed-decisions"),
-        ("explicit lang en", json!({"body": "मुझसे दो बार"}), &generic, opts_lang("en"), "english"),
-        ("explicit lang de", json!({"body": "hello there"}), &generic, opts_lang("de"), "multilingual"),
-        ("td workflow, auto OFF", json!({"body": "I was charged twice"}), &td, RouteOptions::default(), "english"),
-        ("empty state", json!({}), &generic, RouteOptions::default(), "english"),
-        ("none state", Value::Null, &generic, RouteOptions::default(), "english"),
+        (
+            "english prose, russian name",
+            json!({"body": "Anton Pavlovich Chekhov (Russian: Антон Павлович Чехов) was a playwright."}),
+            &generic,
+            RouteOptions::default(),
+            "english",
+        ),
+        (
+            "english prose, name with IPA",
+            json!({"body": "Vladimir Nabokov (Russian: Влади́мир Набо́ков [vlɐˈdʲimʲɪr nɐˈbokəf]) wrote Lolita and taught literature at Cornell for more than a decade."}),
+            &generic,
+            RouteOptions::default(),
+            "english",
+        ),
+        (
+            "english prose, greek name",
+            json!({"body": "Eleftherios Venizelos (Greek: Ελευθέριος Βενιζέλος) served as prime minister."}),
+            &generic,
+            RouteOptions::default(),
+            "english",
+        ),
+        (
+            "english prose, hebrew name",
+            json!({"body": "Amos Oz (Hebrew: עמוס עוז), born Amos Klausner, was an Israeli writer and professor of literature at Ben-Gurion University of the Negev in Beersheba."}),
+            &generic,
+            RouteOptions::default(),
+            "english",
+        ),
+        (
+            "german text",
+            json!({"body": "Der Kunde wurde zweimal belastet und moechte eine Rueckerstattung fuer die Rechnung die nicht korrekt ist"}),
+            &generic,
+            RouteOptions::default(),
+            "multilingual",
+        ),
+        (
+            "explicit model",
+            json!({"body": "anything"}),
+            &generic,
+            opts_model("multilingual"),
+            "multilingual",
+        ),
+        (
+            "explicit model overrides script",
+            json!({"body": "मुझसे दो बार"}),
+            &generic,
+            opts_model("english"),
+            "english",
+        ),
+        (
+            "explicit task",
+            json!({"body": "x"}),
+            &generic,
+            opts_task("typed_decisions"),
+            "typed-decisions",
+        ),
+        (
+            "explicit lang en",
+            json!({"body": "मुझसे दो बार"}),
+            &generic,
+            opts_lang("en"),
+            "english",
+        ),
+        (
+            "explicit lang de",
+            json!({"body": "hello there"}),
+            &generic,
+            opts_lang("de"),
+            "multilingual",
+        ),
+        (
+            "td workflow, auto OFF",
+            json!({"body": "I was charged twice"}),
+            &td,
+            RouteOptions::default(),
+            "english",
+        ),
+        (
+            "empty state",
+            json!({}),
+            &generic,
+            RouteOptions::default(),
+            "english",
+        ),
+        (
+            "none state",
+            Value::Null,
+            &generic,
+            RouteOptions::default(),
+            "english",
+        ),
     ];
     for (label, state, questions, opts, want) in cases {
         let got = route(state, questions, opts);
@@ -333,25 +588,42 @@ fn the_routing_decisions_table() {
 }
 
 fn opts_model(model: &'static str) -> RouteOptions<'static> {
-    RouteOptions { model: Some(model), ..RouteOptions::default() }
+    RouteOptions {
+        model: Some(model),
+        ..RouteOptions::default()
+    }
 }
 
 fn opts_task(task: &'static str) -> RouteOptions<'static> {
-    RouteOptions { task: Some(task), ..RouteOptions::default() }
+    RouteOptions {
+        task: Some(task),
+        ..RouteOptions::default()
+    }
 }
 
 fn opts_lang(lang: &'static str) -> RouteOptions<'static> {
-    RouteOptions { lang: Some(lang), ..RouteOptions::default() }
+    RouteOptions {
+        lang: Some(lang),
+        ..RouteOptions::default()
+    }
 }
 
 #[test]
 fn auto_task_detection_is_opt_in() {
-    let opts = RouterOptions { auto_task_detection: true, ..RouterOptions::default() };
+    let opts = RouterOptions {
+        auto_task_detection: true,
+        ..RouterOptions::default()
+    };
     let r_auto = Router::configure(opts).expect("router");
     let td = q_td();
     let generic = q_generic();
     assert_eq!(
-        r_auto.route(&json!({"body": "I was charged twice"}), Some(&td), &RouteOptions::default())
+        r_auto
+            .route(
+                &json!({"body": "I was charged twice"}),
+                Some(&td),
+                &RouteOptions::default()
+            )
             .expect("route")
             .model,
         "typed-decisions",
@@ -359,7 +631,11 @@ fn auto_task_detection_is_opt_in() {
     );
     assert_eq!(
         r_auto
-            .route(&json!({"body": "I was charged twice"}), Some(&generic), &RouteOptions::default())
+            .route(
+                &json!({"body": "I was charged twice"}),
+                Some(&generic),
+                &RouteOptions::default()
+            )
             .expect("route")
             .model,
         "english",
@@ -367,7 +643,12 @@ fn auto_task_detection_is_opt_in() {
     );
     // explicit model still beats auto-detected workflow
     assert_eq!(
-        r_auto.route(&json!({"body": "x"}), Some(&td), &opts_model("multilingual"))
+        r_auto
+            .route(
+                &json!({"body": "x"}),
+                Some(&td),
+                &opts_model("multilingual")
+            )
             .expect("route")
             .model,
         "multilingual",
@@ -377,17 +658,32 @@ fn auto_task_detection_is_opt_in() {
     // back the raw (repo, subfolder) spec, which serialises to a JSON list instead of the
     // "repo/subfolder" string.
     assert_eq!(
-        r_auto.route(&json!({"body": "I was charged twice"}), Some(&td), &RouteOptions::default())
+        r_auto
+            .route(
+                &json!({"body": "I was charged twice"}),
+                Some(&td),
+                &RouteOptions::default()
+            )
             .expect("route")
             .repo,
         "convaiinnovations/laya/typed-decisions",
         "route/auto workflow repo is a string"
     );
     assert_eq!(
-        r_auto.route(&json!({"body": "I was charged twice"}), Some(&td), &RouteOptions::default())
+        r_auto
+            .route(
+                &json!({"body": "I was charged twice"}),
+                Some(&td),
+                &RouteOptions::default()
+            )
             .expect("route")
             .repo,
-        r_auto.route(&json!({"body": "I was charged twice"}), Some(&td), &opts_task("typed_decisions"))
+        r_auto
+            .route(
+                &json!({"body": "I was charged twice"}),
+                Some(&td),
+                &opts_task("typed_decisions")
+            )
             .expect("route")
             .repo,
         "route/auto workflow repo matches explicit task"
@@ -399,7 +695,8 @@ fn auto_task_detection_is_opt_in() {
     })
     .expect("router");
     assert_eq!(
-        alone.route(&json!({"body": "x"}), Some(&td), &RouteOptions::default())
+        alone
+            .route(&json!({"body": "x"}), Some(&td), &RouteOptions::default())
             .expect("route")
             .repo,
         "convaiinnovations/laya-typed-decisions",
@@ -418,7 +715,10 @@ fn the_decision_payload_shape() {
             &RouteOptions::default(),
         )
         .expect("route");
-    assert_eq!(d.repo, "convaiinnovations/laya/multilingual", "decision/has repo");
+    assert_eq!(
+        d.repo, "convaiinnovations/laya/multilingual",
+        "decision/has repo"
+    );
     assert!(!d.reason.is_empty(), "decision/has reason");
     assert_eq!(
         d.detection.as_ref().expect("detection")["script"],
@@ -432,7 +732,10 @@ fn the_decision_payload_shape() {
     let keys: Vec<&String> = as_value.as_object().expect("object").keys().collect();
     assert_eq!(
         keys,
-        ["model", "repo", "reason", "detection", "workflow"].map(String::from).iter().collect::<Vec<_>>(),
+        ["model", "repo", "reason", "detection", "workflow"]
+            .map(String::from)
+            .iter()
+            .collect::<Vec<_>>(),
         "decision/keys in upstream insertion order"
     );
 }
@@ -445,9 +748,13 @@ fn a_custom_default_override() {
     })
     .expect("router");
     assert_eq!(
-        r.route(&json!("12345"), Some(&empty_questions()), &RouteOptions::default())
-            .expect("route")
-            .model,
+        r.route(
+            &json!("12345"),
+            Some(&empty_questions()),
+            &RouteOptions::default()
+        )
+        .expect("route")
+        .model,
         "multilingual",
         "route/custom default"
     );
@@ -458,15 +765,31 @@ fn a_custom_default_override() {
 fn unknown_latin_routing() {
     let r = Router::new().expect("router");
     for (label, text) in [
-        ("romanian", "Gătește-mi o rețetă de sarmale de post pentru mâine."),
-        ("romanian agent request", "Exportă APK-ul pentru Android și pune-l pe Drive ca să-l instalez."),
-        ("polish", "Klient został obciążony dwukrotnie i chce zwrot pieniędzy za fakturę"),
-        ("turkish", "Müşteriden iki kez ücret alındı ve para iadesi istiyor lütfen yardım"),
+        (
+            "romanian",
+            "Gătește-mi o rețetă de sarmale de post pentru mâine.",
+        ),
+        (
+            "romanian agent request",
+            "Exportă APK-ul pentru Android și pune-l pe Drive ca să-l instalez.",
+        ),
+        (
+            "polish",
+            "Klient został obciążony dwukrotnie i chce zwrot pieniędzy za fakturę",
+        ),
+        (
+            "turkish",
+            "Müşteriden iki kez ücret alındı ve para iadesi istiyor lütfen yardım",
+        ),
     ] {
         assert_eq!(
-            r.route(&json!(text), Some(&empty_questions()), &RouteOptions::default())
-                .expect("route")
-                .model,
+            r.route(
+                &json!(text),
+                Some(&empty_questions()),
+                &RouteOptions::default()
+            )
+            .expect("route")
+            .model,
             "multilingual",
             "route/unknown latin {label}"
         );
@@ -509,9 +832,13 @@ fn unknown_latin_routing() {
         "route/english reason unchanged"
     );
     assert_eq!(
-        r.route(&json!("refund me"), Some(&empty_questions()), &RouteOptions::default())
-            .expect("route")
-            .model,
+        r.route(
+            &json!("refund me"),
+            Some(&empty_questions()),
+            &RouteOptions::default()
+        )
+        .expect("route")
+        .model,
         "english",
         "route/short english still english"
     );
@@ -538,14 +865,23 @@ fn undecided_follows_the_default() {
         "refund me",
     ] {
         assert_eq!(
-            r_ml.route(&json!(text), Some(&empty_questions()), &RouteOptions::default())
-                .expect("route")
-                .model,
+            r_ml.route(
+                &json!(text),
+                Some(&empty_questions()),
+                &RouteOptions::default()
+            )
+            .expect("route")
+            .model,
             "multilingual",
             "route/undecided follows default {text:?}"
         );
         assert_eq!(
-            r_lat.route(&json!(text), Some(&empty_questions()), &RouteOptions::default())
+            r_lat
+                .route(
+                    &json!(text),
+                    Some(&empty_questions()),
+                    &RouteOptions::default()
+                )
                 .expect("route")
                 .model,
             "english",
@@ -553,10 +889,14 @@ fn undecided_follows_the_default() {
         );
     }
     assert!(
-        r_ml.route(&json!("Esqueci minha senha"), Some(&empty_questions()), &RouteOptions::default())
-            .expect("route")
-            .reason
-            .contains("using default (multilingual)"),
+        r_ml.route(
+            &json!("Esqueci minha senha"),
+            Some(&empty_questions()),
+            &RouteOptions::default()
+        )
+        .expect("route")
+        .reason
+        .contains("using default (multilingual)"),
         "route/undecided reason names the default"
     );
     // identified English is not undecided, so a non-English default leaves it
@@ -566,9 +906,13 @@ fn undecided_follows_the_default() {
         "Please refund the duplicate charge on invoice 4411 today.",
     ] {
         assert_eq!(
-            r_ml.route(&json!(text), Some(&empty_questions()), &RouteOptions::default())
-                .expect("route")
-                .model,
+            r_ml.route(
+                &json!(text),
+                Some(&empty_questions()),
+                &RouteOptions::default()
+            )
+            .expect("route")
+            .model,
             "english",
             "route/identified english ignores default {text:?}"
         );
@@ -586,7 +930,6 @@ fn undecided_follows_the_default() {
         "route/english reason unchanged"
     );
 }
-
 
 // ------------------------------------------------------ unlisted scripts
 // `detect_script` counts an alphabetic character only when one of the
@@ -610,7 +953,10 @@ fn unlisted_scripts_route_multilingual() {
         ("Tifinagh", "ⵜⴰⵎⴰⵣⵉⵖⵜ"),
         ("Yi", "ꆈꌠ"),
     ] {
-        assert!(!analyse(&json!(text)).is_english, "unlisted/{label} is not called English");
+        assert!(
+            !analyse(&json!(text)).is_english,
+            "unlisted/{label} is not called English"
+        );
         assert_eq!(
             route_text(text).model,
             "multilingual",
@@ -618,18 +964,38 @@ fn unlisted_scripts_route_multilingual() {
         );
     }
     // Fullwidth Latin is Latin, not an unlisted script.
-    assert_eq!(detect_script("ＨＥＬＬＯ"), "latin", "unlisted/fullwidth latin is latin");
+    assert_eq!(
+        detect_script("ＨＥＬＬＯ"),
+        "latin",
+        "unlisted/fullwidth latin is latin"
+    );
 
     // A state with no letters at all must keep behaving exactly as before.
-    for (label, text) in [("empty", ""), ("digits only", "12345 67890"), ("emoji only", "😀😀😀")] {
-        assert_eq!(analyse(&json!(text)).script, "unknown", "unlisted/letterless {label}");
-        assert_eq!(route_text(text).model, "english", "unlisted/letterless {label} keeps the default");
+    for (label, text) in [
+        ("empty", ""),
+        ("digits only", "12345 67890"),
+        ("emoji only", "😀😀😀"),
+    ] {
+        assert_eq!(
+            analyse(&json!(text)).script,
+            "unknown",
+            "unlisted/letterless {label}"
+        );
+        assert_eq!(
+            route_text(text).model,
+            "english",
+            "unlisted/letterless {label} keeps the default"
+        );
     }
 
     // The scripts the table does name must be untouched.
     for (label, text, script) in [
         ("english", "please cancel my subscription", "latin"),
-        ("german", "Mein Konto wurde zweimal belastet, bitte erstatten Sie den Betrag", "latin"),
+        (
+            "german",
+            "Mein Konto wurde zweimal belastet, bitte erstatten Sie den Betrag",
+            "latin",
+        ),
         ("hindi", "यह एक हिंदी वाक्य है", "devanagari"),
         ("chinese", "请取消我的订阅", "han"),
         ("japanese", "ありがとう", "kana"),
@@ -639,7 +1005,10 @@ fn unlisted_scripts_route_multilingual() {
         ("greek", "Η χρέωση έγινε δύο φορές", "greek"),
         ("armenian", "Իմ հաշիվը գանձվել է երկու անգամ", "armenian"),
     ] {
-        assert_eq!(detect_script(text), script, "unlisted/regression {label} script");
+        assert_eq!(
+            detect_script(text),
+            script,
+            "unlisted/regression {label} script"
+        );
     }
 }
-

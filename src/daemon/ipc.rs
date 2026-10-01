@@ -88,16 +88,10 @@ impl Message {
     pub(crate) fn serialize(&self) -> Result<Vec<u8>, Ipc> {
         let (id, method, params, result, error) = match self {
             Self::Request {
-                id,
-                method,
-                params,
-                ..
+                id, method, params, ..
             } => (id, Some(method), params.as_ref(), None, None),
             Self::Response {
-                id,
-                result,
-                error,
-                ..
+                id, result, error, ..
             } => (id, None, None, result.as_ref(), error.as_ref()),
         };
         let mut object = serde_json::map::Map::new();
@@ -134,7 +128,11 @@ impl Message {
             .cloned()
             .filter(|id| !id.is_null())
             .ok_or(Ipc::InvalidRequest)?;
-        match (object.get("method"), object.get("result"), object.get("error")) {
+        match (
+            object.get("method"),
+            object.get("result"),
+            object.get("error"),
+        ) {
             (Some(Value::String(method)), None, None) => Ok(Self::Request {
                 id,
                 method: method.clone(),
@@ -369,7 +367,10 @@ impl ClientConnection {
             self.handshake()?;
         }
         let id = self.next_id();
-        write_frame(&mut self.stream, &Message::request(id.clone(), method, params))?;
+        write_frame(
+            &mut self.stream,
+            &Message::request(id.clone(), method, params),
+        )?;
         loop {
             let bytes = read_frame(&mut self.stream)?.ok_or(Ipc::Closed)?;
             match Message::parse(&bytes)? {

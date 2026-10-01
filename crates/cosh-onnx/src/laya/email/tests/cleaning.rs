@@ -23,4 +23,3 @@ fn signature_block_is_still_removed() {
 fn empty_body_stays_empty() {
     assert_eq!(clean(""), "", "empty body stays empty");
 }
-

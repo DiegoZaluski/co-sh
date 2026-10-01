@@ -237,8 +237,7 @@ fn description_edit_lines_teaches_the_hashline_shape() {
         "fs_edit_lines must not advertise other engines' arguments"
     );
     assert!(
-        props["ops"]
-            ["description"]
+        props["ops"]["description"]
             .as_str()
             .is_some_and(|t| t.contains("Example") && t.contains("replace")),
         "the ops DSL is taught by example"
@@ -259,8 +258,7 @@ fn description_ast_edit_teaches_the_pattern_shape() {
         "fs_ast_edit must not advertise other engines' arguments"
     );
     assert!(
-        props["ops"]["items"]["required"]
-            == json!(["pat", "out"]),
+        props["ops"]["items"]["required"] == json!(["pat", "out"]),
         "each AST op requires pat and out"
     );
 }

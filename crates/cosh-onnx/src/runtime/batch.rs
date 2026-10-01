@@ -10,7 +10,6 @@
 //! so the session can hand them to ORT as tensors without re-flattening; the
 //! row accessors below keep the per-row view the decode path reads.
 
-
 /// One encoded row handed to [`collate_items`]: token ids, marker positions
 /// and the question type code.
 #[derive(Debug, Clone)]

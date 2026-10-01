@@ -11,7 +11,10 @@ use super::{resolve_revision, snapshot_revision, verify_digests};
 use crate::error::Error;
 
 fn digest_map(entries: &[(&str, &str)]) -> HashMap<String, String> {
-    entries.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    entries
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
 }
 
 // --------------------------------------------------------------- resolve_revision
@@ -81,7 +84,10 @@ fn missing_file_raises() {
     let map = digest_map(&[("absent.bin", "0")]);
     match verify_digests(&dir, Some(&map), None) {
         Err(Error::Runtime(msg)) => assert!(msg.contains("no such file"), "{}", msg),
-        other => panic!("expected a FileNotFoundError-equivalent, got {:?}", other.map(|_| ())),
+        other => panic!(
+            "expected a FileNotFoundError-equivalent, got {:?}",
+            other.map(|_| ())
+        ),
     }
     fs::remove_dir_all(&dir).ok();
 }
@@ -92,13 +98,24 @@ fn escaping_paths_rejected() {
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("weights.bin"), b"weights").unwrap();
     let digest = crate::hub::sha256_of(b"weights");
-    for rel in ["../evil", "..", "a/../../evil", "\\..\\evil", "/absolute/evil", "C:\\absolute\\evil"] {
+    for rel in [
+        "../evil",
+        "..",
+        "a/../../evil",
+        "\\..\\evil",
+        "/absolute/evil",
+        "C:\\absolute\\evil",
+    ] {
         let map = digest_map(&[(rel, digest.as_str())]);
         match verify_digests(&dir, Some(&map), None) {
             Err(Error::Value(msg)) => {
                 assert!(msg.contains("unsafe"), "path {:?}: {}", rel, msg)
             }
-            other => panic!("path {:?}: expected a ValueError, got {:?}", rel, other.map(|_| ())),
+            other => panic!(
+                "path {:?}: expected a ValueError, got {:?}",
+                rel,
+                other.map(|_| ())
+            ),
         }
     }
     fs::remove_dir_all(&dir).ok();
@@ -151,7 +168,11 @@ fn external_onnx_digest_is_supported() {
 fn digest_mismatch_raises_before_weights_load() {
     let dir = std::env::temp_dir().join(format!("cosh-onnx-digest-w{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("rl_agent_config.json"), r#"{"act_costs": {"a": 0}}"#).unwrap();
+    fs::write(
+        dir.join("rl_agent_config.json"),
+        r#"{"act_costs": {"a": 0}}"#,
+    )
+    .unwrap();
     fs::write(dir.join("model.safetensors"), b"not the reviewed weights").unwrap();
     let map = digest_map(&[("model.safetensors", &"0".repeat(64))]);
     match verify_digests(&dir, Some(&map), None) {

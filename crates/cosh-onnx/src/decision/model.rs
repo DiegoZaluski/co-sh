@@ -270,8 +270,7 @@ impl Prediction {
 
     /// The `answers` map; empty when the result carries none.
     pub fn answers(&self) -> &Map<String, Value> {
-        static EMPTY: std::sync::LazyLock<Map<String, Value>> =
-            std::sync::LazyLock::new(Map::new);
+        static EMPTY: std::sync::LazyLock<Map<String, Value>> = std::sync::LazyLock::new(Map::new);
         self.0
             .get("answers")
             .and_then(Value::as_object)

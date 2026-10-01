@@ -104,17 +104,11 @@ pub(crate) fn ort_error<E: std::fmt::Display>(e: E) -> Error {
 }
 
 /// Extract a `[n, w]` f32 output as row-major vectors.
-fn extract_matrix(
-    outputs: &ort::session::SessionOutputs<'_>,
-    name: &str,
-) -> Result<Vec<Vec<f32>>> {
+fn extract_matrix(outputs: &ort::session::SessionOutputs<'_>, name: &str) -> Result<Vec<Vec<f32>>> {
     let value = outputs
         .get(name)
         .ok_or_else(|| Error::Runtime(format!("cosh-onnx: no output named {}", name)))?;
-    let (shape, data) = value
-        .try_extract_tensor::<f32>()
-        .map_err(ort_error)?;
+    let (shape, data) = value.try_extract_tensor::<f32>().map_err(ort_error)?;
     let width = *shape.last().unwrap_or(&0) as usize;
     Ok(data.chunks(width.max(1)).map(|row| row.to_vec()).collect())
 }
-

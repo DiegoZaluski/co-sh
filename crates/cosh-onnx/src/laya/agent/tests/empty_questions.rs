@@ -34,10 +34,13 @@ fn empty_responses_do_not_share_mutable_containers() {
         "answers": {},
         "usage": {"input_tokens": 0, "output_tokens": 0}
     });
-    let mut first = agent.infer(&json!("hello"), &Map::new(), None, None, None).unwrap();
+    let mut first = agent
+        .infer(&json!("hello"), &Map::new(), None, None, None)
+        .unwrap();
     first["answers"]["changed"] = json!(true);
     first["usage"]["input_tokens"] = json!(7);
-    let second = agent.infer(&json!("hello"), &Map::new(), None, None, None).unwrap();
+    let second = agent
+        .infer(&json!("hello"), &Map::new(), None, None, None)
+        .unwrap();
     assert_eq!(second, empty);
 }
-

@@ -12,7 +12,7 @@ fn pipe_reduced_choice_scores_inside_the_shortlist() {
     });
     let agent = Recorder::new();
     let piped = predict_shortlist(
-         &agent,
+        &agent,
         &json!("I was charged twice"),
         pipe_q.as_object().expect("map"),
         &TableEmbed::from_pairs(&full_vectors()),
@@ -61,7 +61,10 @@ fn cache_cold_call_embeds_every_text_once() {
     let first = wrapped.embed(&texts).expect("cold call");
     assert_eq!(
         table.calls(),
-        [CACHE_TEXTS.iter().map(|s| s.to_string()).collect::<Vec<_>>()],
+        [CACHE_TEXTS
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()],
         "cache/cold call embeds every text once"
     );
     assert_eq!(first.len(), 5, "cache/cold output shape");
@@ -77,7 +80,11 @@ fn cache_cold_call_embeds_every_text_once() {
     let direct = unwrapped.embed(&texts).expect("unwrapped");
     assert_eq!(first, direct, "cache/cold values match unwrapped");
     let second = wrapped.embed(&texts).expect("warm call");
-    assert_eq!(table.calls().len(), 1, "cache/warm call makes no embed call");
+    assert_eq!(
+        table.calls().len(),
+        1,
+        "cache/warm call makes no embed call"
+    );
     assert_eq!(first, second, "cache/warm returns identical values");
 }
 
@@ -88,17 +95,25 @@ fn cache_repeat_embeds_only_the_new_text() {
     let all: Vec<String> = CACHE_TEXTS.iter().map(|s| (*s).to_string()).collect();
     let _ = wrapped.embed(&all).expect("cold");
     let third = wrapped
-        .embed(&["refund please".to_string(), "alpha".to_string(), "beta".to_string()])
+        .embed(&[
+            "refund please".to_string(),
+            "alpha".to_string(),
+            "beta".to_string(),
+        ])
         .expect("third");
     let calls = table.calls();
-    assert_eq!(calls.last().expect("last call"), &["refund please".to_string()], "cache/repeat embeds only the new text");
+    assert_eq!(
+        calls.last().expect("last call"),
+        &["refund please".to_string()],
+        "cache/repeat embeds only the new text"
+    );
     assert_eq!(calls.len(), 2, "cache/underlying calls total");
     assert_eq!(
         third,
         [
-            vec![0.0, 1.0],   // refund please
-            vec![1.0, 0.0],   // alpha
-            vec![0.0, 1.0],   // beta
+            vec![0.0, 1.0], // refund please
+            vec![1.0, 0.0], // alpha
+            vec![0.0, 1.0], // beta
         ],
         "cache/partial rows keep request order"
     );
@@ -107,7 +122,8 @@ fn cache_repeat_embeds_only_the_new_text() {
 #[test]
 fn cache_duplicate_text_embedded_once_per_call() {
     let table = Arc::new(TableEmbed::new(cache_vectors()));
-    let dup_cached = cached_embed_fn(SharedEmbed(Arc::clone(&table)), 4096).expect("cached_embed_fn");
+    let dup_cached =
+        cached_embed_fn(SharedEmbed(Arc::clone(&table)), 4096).expect("cached_embed_fn");
     let dup = dup_cached
         .embed(&["alpha".to_string(), "beta".to_string(), "alpha".to_string()])
         .expect("dup");
@@ -138,7 +154,11 @@ fn cache_lru_eviction() {
     lru_cached
         .embed(&["alpha".to_string(), "gamma: mid".to_string()])
         .expect("4"); // both hits
-    assert_eq!(table.calls().len(), 2, "cache/lru survivors are both cached");
+    assert_eq!(
+        table.calls().len(),
+        2,
+        "cache/lru survivors are both cached"
+    );
     lru_cached.embed(&["beta".to_string()]).expect("5"); // beta was evicted
     assert_eq!(
         table.calls().last().expect("last"),
@@ -153,7 +173,11 @@ fn cache_lru_eviction() {
     lru_cached
         .embed(&["gamma: mid".to_string(), "beta".to_string()])
         .expect("6"); // both hits
-    assert_eq!(table.calls().len(), 3, "cache/lru most recent pair survives");
+    assert_eq!(
+        table.calls().len(),
+        3,
+        "cache/lru most recent pair survives"
+    );
     lru_cached.embed(&["alpha".to_string()]).expect("7"); // alpha was the oldest of the three
     assert_eq!(
         table.calls().last().expect("last"),
@@ -228,20 +252,33 @@ impl EmbedFn for FlakyEmbed {
 
 #[test]
 fn cache_embed_error_propagates_and_caches_nothing() {
-    let flaky = FlakyEmbed { calls: std::sync::atomic::AtomicUsize::new(0) };
+    let flaky = FlakyEmbed {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    };
     let flaky_cached = cached_embed_fn(flaky, 4096).expect("cached_embed_fn");
     let err = flaky_cached
         .embed(&["alpha".to_string()])
         .expect_err("first call fails");
-    assert!(matches!(err, Error::Runtime(_)), "cache/embed error propagates");
+    assert!(
+        matches!(err, Error::Runtime(_)),
+        "cache/embed error propagates"
+    );
     assert_eq!(
         flaky_cached.cache_info()["size"],
         json!(0),
         "cache/failed call caches nothing"
     );
     let retry = flaky_cached.embed(&["alpha".to_string()]).expect("retry");
-    assert_eq!(flaky_cached.cache_info()["size"], json!(1), "cache/retried row is cached");
-    assert_eq!(retry, [vec![1.0, 0.0]], "cache/retried row is the embedded one");
+    assert_eq!(
+        flaky_cached.cache_info()["size"],
+        json!(1),
+        "cache/retried row is cached"
+    );
+    assert_eq!(
+        retry,
+        [vec![1.0, 0.0]],
+        "cache/retried row is the embedded one"
+    );
 }
 
 struct BadShapeEmbed;
@@ -270,7 +307,8 @@ fn cache_bad_shape_raises_and_caches_nothing() {
 #[test]
 fn cache_empty_string_key_and_empty_input() {
     let none_table = Arc::new(TableEmbed::from_pairs(&[("", vec![1.0, 0.0])]));
-    let none_cached = cached_embed_fn(SharedEmbed(Arc::clone(&none_table)), 4096).expect("cached_embed_fn");
+    let none_cached =
+        cached_embed_fn(SharedEmbed(Arc::clone(&none_table)), 4096).expect("cached_embed_fn");
     none_cached.embed(&["".to_string()]).expect("empty string");
     assert_eq!(
         none_table.calls(),
@@ -278,7 +316,11 @@ fn cache_empty_string_key_and_empty_input() {
         "cache/empty string embeds once"
     );
     none_cached.embed(&["".to_string()]).expect("hit");
-    assert_eq!(none_table.calls().len(), 1, "cache/empty string hits the same entry");
+    assert_eq!(
+        none_table.calls().len(),
+        1,
+        "cache/empty string hits the same entry"
+    );
     assert_eq!(
         none_cached.embed(&[]).expect("empty input").len(),
         0,
@@ -323,12 +365,16 @@ fn cache_nan_row_stored_cleaned() {
 #[test]
 fn cache_end_to_end_with_shortlist() {
     let e2e_table = Arc::new(TableEmbed::new(cache_vectors()));
-    let e2e_cached = cached_embed_fn(SharedEmbed(Arc::clone(&e2e_table)), 4096).expect("cached_embed_fn");
+    let e2e_cached =
+        cached_embed_fn(SharedEmbed(Arc::clone(&e2e_table)), 4096).expect("cached_embed_fn");
     let run1 = shortlist(&json!("pay me"), &criteria_value(), &e2e_cached, 2).expect("run1");
     let run2 = shortlist(&json!("refund please"), &criteria_value(), &e2e_cached, 2).expect("run2");
     assert_eq!(
         e2e_table.calls()[0],
-        CACHE_TEXTS.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        CACHE_TEXTS
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>(),
         "cache/e2e first call embeds query and options"
     );
     assert_eq!(
@@ -337,8 +383,16 @@ fn cache_end_to_end_with_shortlist() {
         "cache/e2e repeat embeds only the new query"
     );
     assert_eq!(e2e_table.calls().len(), 2, "cache/e2e two calls total");
-    assert_eq!(run1, [json!("alpha"), json!("delta")], "cache/e2e labels match the uncached path");
-    assert_eq!(run2, [json!("beta"), json!("gamma")], "cache/e2e second query labels");
+    assert_eq!(
+        run1,
+        [json!("alpha"), json!("delta")],
+        "cache/e2e labels match the uncached path"
+    );
+    assert_eq!(
+        run2,
+        [json!("beta"), json!("gamma")],
+        "cache/e2e second query labels"
+    );
 }
 
 #[test]
@@ -347,13 +401,14 @@ fn cache_inside_predict_shortlist() {
     pipe_vectors.insert("category\npay me".to_string(), vec![1.0, 0.0]);
     pipe_vectors.insert("category\nrefund please".to_string(), vec![0.0, 1.0]);
     let pipe_table = Arc::new(TableEmbed::new(pipe_vectors));
-    let pipe_cached = cached_embed_fn(SharedEmbed(Arc::clone(&pipe_table)), 4096).expect("cached_embed_fn");
+    let pipe_cached =
+        cached_embed_fn(SharedEmbed(Arc::clone(&pipe_table)), 4096).expect("cached_embed_fn");
     let pipe_q = json!({
         "intent": {"type": "choice", "instructions": "category", "criteria": criteria_value()}
     });
     let agent = Recorder::new();
     predict_shortlist(
-         &agent,
+        &agent,
         &json!("pay me"),
         pipe_q.as_object().expect("map"),
         &pipe_cached,
@@ -361,7 +416,7 @@ fn cache_inside_predict_shortlist() {
     )
     .expect("first");
     let pipe_b = predict_shortlist(
-         &agent,
+        &agent,
         &json!("refund please"),
         pipe_q.as_object().expect("map"),
         &pipe_cached,
@@ -395,13 +450,20 @@ fn cache_concurrent_calls_return_correct_rows() {
     let mut handles = Vec::new();
     for i in 0..16 {
         let cached = Arc::clone(&mt_cached);
-        let texts = if i % 2 == 1 { texts_a.clone() } else { texts_b.clone() };
+        let texts = if i % 2 == 1 {
+            texts_a.clone()
+        } else {
+            texts_b.clone()
+        };
         handles.push(std::thread::spawn(move || {
             let rows = cached.embed(&texts).expect("embed");
             (texts.to_vec(), rows)
         }));
     }
-    let results: Vec<(Vec<String>, Vec<Vec<f64>>)> = handles.into_iter().map(|h| h.join().expect("join")).collect();
+    let results: Vec<(Vec<String>, Vec<Vec<f64>>)> = handles
+        .into_iter()
+        .map(|h| h.join().expect("join"))
+        .collect();
     let expected: HashMap<String, Vec<f64>> = cache_vectors();
     for (texts, rows) in &results {
         let want: Vec<Vec<f64>> = texts.iter().map(|t| expected[t].clone()).collect();
@@ -415,4 +477,3 @@ fn cache_concurrent_calls_return_correct_rows() {
     let total = info["hits"].as_u64().expect("hits") + info["misses"].as_u64().expect("misses");
     assert_eq!(total, 32, "cache/concurrent counters consistent");
 }
-

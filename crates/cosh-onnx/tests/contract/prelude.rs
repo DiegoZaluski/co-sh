@@ -1,7 +1,7 @@
 //! The prelude resolves every advertised name — `use cosh_onnx::prelude::*;`
 //! is the one-import surface.
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use cosh_onnx::prelude::*;
 

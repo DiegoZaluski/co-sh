@@ -23,7 +23,8 @@ fn list_instructions_change_the_query_and_the_winner() {
         "list/instructions change the query and the winner"
     );
     assert_eq!(
-        list_embed.calls()[0][0], "Classify\npay me",
+        list_embed.calls()[0][0],
+        "Classify\npay me",
         "list/query text includes instructions"
     );
     assert_eq!(
@@ -101,4 +102,3 @@ fn pass_through_returns_every_label_in_order() {
         "pass/k > n returns every label in order"
     );
 }
-

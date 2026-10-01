@@ -43,7 +43,9 @@ fn hooks_raise_false_continues_and_infers() {
 #[test]
 fn on_error_fires_once_and_sees_the_original_error() {
     let _registry = registry_isolation();
-    let rec = Arc::new(ErrHook { errors: Mutex::new(Vec::new()) });
+    let rec = Arc::new(ErrHook {
+        errors: Mutex::new(Vec::new()),
+    });
     let mut agent = agent();
     agent.session = Box::new(FailingSession);
     agent.hooks = vec![Arc::clone(&rec) as SharedHook];
@@ -91,10 +93,12 @@ fn end_hooks_run_on_the_failure_path_with_the_error_set() {
     let seen2 = Arc::clone(&seen);
     let per_call = PerCall {
         on_predict_end: Some(Arc::new(move |ctx: &mut PredictContext| {
-            seen2
-                .lock()
-                .unwrap()
-                .push(ctx.error.as_ref().map(|e| e.to_string()).unwrap_or_default());
+            seen2.lock().unwrap().push(
+                ctx.error
+                    .as_ref()
+                    .map(|e| e.to_string())
+                    .unwrap_or_default(),
+            );
             Ok(())
         })),
         ..PerCall::default()
@@ -105,7 +109,6 @@ fn end_hooks_run_on_the_failure_path_with_the_error_set() {
     assert_eq!(err.to_string(), "infer boom");
     assert_eq!(*seen.lock().unwrap(), vec!["infer boom".to_string()]);
 }
-
 
 // ------------------------------------------------- on_error with raise disabled (review Y6)
 #[test]
@@ -128,4 +131,3 @@ fn a_failing_on_error_hook_with_raise_disabled_warns_and_continues() {
     // hook only warns, per the accepted __context__ divergence).
     assert_eq!(err.to_string(), "infer boom");
 }
-

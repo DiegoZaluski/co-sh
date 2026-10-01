@@ -1,9 +1,9 @@
 //! `guard_questions`: preset questions for real-time LLM input guardrails.
 
-use serde_json::{json, Map};
+use serde_json::{Map, json};
 
-use super::q;
 use super::Questions;
+use super::q;
 
 pub fn guard_questions() -> Questions {
     let mut out = Map::new();
@@ -61,4 +61,3 @@ pub fn guard_questions() -> Questions {
     );
     out
 }
-

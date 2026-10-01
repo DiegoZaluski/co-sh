@@ -79,8 +79,7 @@ pub enum Kind {
     },
 }
 
-impl Kind {
-}
+impl Kind {}
 
 /// The untagged wire encoding (shapes 1 and 2).
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -89,9 +88,7 @@ enum KindWire {
     /// A named checkpoint, flat.
     Named(String),
     /// A custom checkpoint, discriminated by the `custom` key.
-    Custom {
-        custom: CustomShape,
-    },
+    Custom { custom: CustomShape },
     /// The config shape (shape 3), input-only.
     Tagged {
         kind: String,
@@ -158,9 +155,7 @@ impl<'de> serde::Deserialize<'de> for Kind {
                 "multilingual" => Self::Multilingual,
                 "typed-decisions" => Self::TypedDecisions,
                 "custom" => Self::Custom {
-                    repo: repo.ok_or_else(|| {
-                        serde::de::Error::missing_field("repo")
-                    })?,
+                    repo: repo.ok_or_else(|| serde::de::Error::missing_field("repo"))?,
                     subfolder,
                 },
                 other => {

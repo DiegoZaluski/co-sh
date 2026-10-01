@@ -3,7 +3,7 @@
 //! counterpart (Rust callers pass a JSON-schema `Value` directly) and is
 //! dropped; every other check is ported.
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::decision::schema::{
     answers_to_json, decide, plan_from_json_schema, questions_from_json_schema,
@@ -99,10 +99,8 @@ fn projection() {
     assert!(values["priority"].is_i64() || values["priority"].is_u64());
     // false noul
     let values = answers_to_json(
-        &serde_json::from_str::<Map<String, Value>>(
-            r#"{"x": {"type": "noul", "noul": 0.2}}"#,
-        )
-        .unwrap(),
+        &serde_json::from_str::<Map<String, Value>>(r#"{"x": {"type": "noul", "noul": 0.2}}"#)
+            .unwrap(),
         &json!({"type": "object", "properties": {"x": {"type": "boolean"}}}),
     )
     .unwrap();
@@ -134,14 +132,18 @@ fn rejections() {
     );
     check_raises_schema(
         "multiple non-null types",
-        &bad(json!({"type": "object", "properties": {"a": {"type": ["boolean", "integer"],
-                                                            "minimum": 0, "maximum": 2}}})),
+        &bad(
+            json!({"type": "object", "properties": {"a": {"type": ["boolean", "integer"],
+                                                            "minimum": 0, "maximum": 2}}}),
+        ),
         "properties.a: 'type' has multiple non-null types; unions are not supported",
     );
     check_raises_schema(
         "nullable union of multiple types",
-        &bad(json!({"type": "object", "properties": {"a": {"type": ["null", "integer", "boolean"],
-                                                            "minimum": 0, "maximum": 2}}})),
+        &bad(
+            json!({"type": "object", "properties": {"a": {"type": ["null", "integer", "boolean"],
+                                                            "minimum": 0, "maximum": 2}}}),
+        ),
         "properties.a: 'type' has multiple non-null types; unions are not supported",
     );
     check_raises_schema(
@@ -182,10 +184,16 @@ fn rejections() {
     let too_many_options: Vec<Value> = (0..33).map(|i| json!(format!("v{}", i))).collect();
     check_raises_schema(
         "too many options",
-        &bad(json!({"type": "object", "properties": {"a": {"type": "string", "enum": too_many_options}}})),
+        &bad(
+            json!({"type": "object", "properties": {"a": {"type": "string", "enum": too_many_options}}}),
+        ),
         "properties.a: 33 options exceeds MAX_OPTIONS=32",
     );
-    for colliding in [json!([1, "1"]), json!([null, "null"]), json!([true, "True"])] {
+    for colliding in [
+        json!([1, "1"]),
+        json!([null, "null"]),
+        json!([true, "True"]),
+    ] {
         check_raises_schema(
             &format!("colliding enum {}", colliding),
             &bad(json!({"type": "object", "properties": {"x": {"enum": colliding}}})),
@@ -198,7 +206,10 @@ fn rejections() {
     }))
     .unwrap_err()
     .to_string();
-    assert_eq!(err, "properties.x: enum values produce duplicate choice labels");
+    assert_eq!(
+        err,
+        "properties.x: enum values produce duplicate choice labels"
+    );
     check_raises_schema(
         "non-object root",
         &bad(json!({"type": "array"})),
@@ -219,7 +230,10 @@ struct FakeRunner {
 
 impl FakeRunner {
     fn new(answers: Map<String, Value>) -> Self {
-        Self { answers, calls: std::sync::Mutex::new(Vec::new()) }
+        Self {
+            answers,
+            calls: std::sync::Mutex::new(Vec::new()),
+        }
     }
 }
 
@@ -228,7 +242,10 @@ impl crate::decision::model::PredictRunner for FakeRunner {
         let mut call = Map::new();
         call.insert("state".into(), state.clone());
         call.insert("questions".into(), Value::Object(questions.clone()));
-        self.calls.lock().unwrap_or_else(|e| e.into_inner()).push(call);
+        self.calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(call);
         Ok(json!({
             "answers": Value::Object(self.answers.clone()),
             "usage": {"input_tokens": 1, "output_tokens": 0},
@@ -240,7 +257,7 @@ impl crate::decision::model::PredictRunner for FakeRunner {
 #[test]
 fn decide_schema_flow() {
     let runner = FakeRunner::new(answers_fixture());
-    let out = decide( &runner, &json!("some state"), Some(&schema()), None, false).unwrap();
+    let out = decide(&runner, &json!("some state"), Some(&schema()), None, false).unwrap();
     assert_eq!(out["department"], json!("billing"));
     // builds questions
     let calls = runner.calls.lock().unwrap_or_else(|e| e.into_inner());
@@ -252,14 +269,16 @@ fn decide_schema_flow() {
 #[test]
 fn decide_details() {
     let runner = FakeRunner::new(answers_fixture());
-    let details = decide( &runner, &json!("some state"), Some(&schema()), None, true)
-        .unwrap();
+    let details = decide(&runner, &json!("some state"), Some(&schema()), None, true).unwrap();
     assert_eq!(details["confidence"]["department"], json!(0.9));
     assert_eq!(
         details["probabilities"]["needs_human"],
         json!({"false": 0.2, "true": 0.8})
     );
-    assert_eq!(details["usage"], json!({"input_tokens": 1, "output_tokens": 0}));
+    assert_eq!(
+        details["usage"],
+        json!({"input_tokens": 1, "output_tokens": 0})
+    );
     assert_eq!(details["routing"], json!({"model": "english"}));
 }
 
@@ -272,7 +291,7 @@ fn decide_questions_pass_through_returns_answers() {
         .unwrap(),
     );
     let out = decide(
-         &runner,
+        &runner,
         &json!("s"),
         None,
         Some(
@@ -284,16 +303,25 @@ fn decide_questions_pass_through_returns_answers() {
         false,
     )
     .unwrap();
-    assert_eq!(out, json!({"a": {"type": "noul", "noul": 0.9, "confidence": 0.9}}));
+    assert_eq!(
+        out,
+        json!({"a": {"type": "noul", "noul": 0.9, "confidence": 0.9}})
+    );
 }
 
 #[test]
 fn decide_requires_exactly_one_of_schema_or_questions() {
     let runner = FakeRunner::new(answers_fixture());
-    let err = decide( &runner, &json!("s"), None, None, false).unwrap_err();
+    let err = decide(&runner, &json!("s"), None, None, false).unwrap_err();
     assert_eq!(err.to_string(), "pass exactly one of schema= or questions=");
-    let err = decide( &runner, &json!("s"), Some(&schema()), Some(&Map::new()), false)
-        .unwrap_err();
+    let err = decide(
+        &runner,
+        &json!("s"),
+        Some(&schema()),
+        Some(&Map::new()),
+        false,
+    )
+    .unwrap_err();
     assert_eq!(err.to_string(), "pass exactly one of schema= or questions=");
 }
 

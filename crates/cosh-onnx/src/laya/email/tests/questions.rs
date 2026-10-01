@@ -29,4 +29,3 @@ fn email_questions_one_definition_behind_both_paths() {
         "email_questions/a caller override reaches both paths"
     );
 }
-

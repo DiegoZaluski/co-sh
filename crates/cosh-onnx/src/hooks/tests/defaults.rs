@@ -66,7 +66,6 @@ fn add_default_hook_appends_in_order_and_clear_empties() {
     assert!(default_hooks().is_empty());
 }
 
-
 // ------------------------------------------------- defaults set after construction (review Y6)
 #[test]
 fn defaults_set_after_construction_still_apply() {
@@ -89,8 +88,5 @@ fn defaults_set_after_construction_still_apply() {
         )
         .unwrap();
     clear_default_hooks();
-    assert_eq!(
-        *log.lock().unwrap(),
-        vec!["late:start", "late:end"]
-    );
+    assert_eq!(*log.lock().unwrap(), vec!["late:start", "late:end"]);
 }

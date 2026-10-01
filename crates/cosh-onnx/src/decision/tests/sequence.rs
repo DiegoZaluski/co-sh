@@ -2,9 +2,9 @@
 //! `tests/test_truncation_direction.py` and `tests/test_training.py` from the
 //! laya repository, with the same cases and the same expected values.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use crate::decision::sequence::{build_sequence, BuildOptions};
+use crate::decision::sequence::{BuildOptions, build_sequence};
 use crate::runtime::tokenizer::Tokenizer;
 
 // --------------------------------------------------------------- build_sequence left truncation
@@ -20,7 +20,9 @@ struct SeqTok {
 
 impl SeqTok {
     fn new() -> Self {
-        Self { vocab: std::sync::Mutex::new(std::collections::HashMap::new()) }
+        Self {
+            vocab: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
     }
 }
 
@@ -60,17 +62,31 @@ fn truncate_left_keeps_the_tail() {
     let tok = SeqTok::new();
     let q = json!({"t": "noul", "ins": "Is it urgent?", "crit": null});
     // prompt + closing [SEP], no state
-    let full = build_sequence(&tok, &json!(""), &q, &BuildOptions { max_len: 1_000_000, ..default_opts() })
-        .unwrap()
-        .0
-        .len();
-    for (room, kept) in [(0usize, Vec::new()), (2, vec!["two", "three"]), (10, vec!["one", "two", "three"])] {
+    let full = build_sequence(
+        &tok,
+        &json!(""),
+        &q,
+        &BuildOptions {
+            max_len: 1_000_000,
+            ..default_opts()
+        },
+    )
+    .unwrap()
+    .0
+    .len();
+    for (room, kept) in [
+        (0usize, Vec::new()),
+        (2, vec!["two", "three"]),
+        (10, vec!["one", "two", "three"]),
+    ] {
         let opts = BuildOptions {
             max_len: full + room,
             truncate_left: true,
             ..default_opts()
         };
-        let ids = build_sequence(&tok, &json!("one two three"), &q, &opts).unwrap().0;
+        let ids = build_sequence(&tok, &json!("one two three"), &q, &opts)
+            .unwrap()
+            .0;
         let mut want: Vec<u32> = kept
             .iter()
             .map(|w| *tok.vocab.lock().unwrap().get(*w).unwrap())
@@ -145,7 +161,11 @@ fn string_state_preserves_head() {
     let tail_id = state_ids[state_ids.len() - 1];
     assert!(head_id != tail_id, "head and tail must have different ids");
 
-    let opts = BuildOptions { max_len: 30, head_max_len: 12, ..default_opts() };
+    let opts = BuildOptions {
+        max_len: 30,
+        head_max_len: 12,
+        ..default_opts()
+    };
     let (seq, _) = build_sequence(&tok, &json!(state), &truncation_question(), &opts).unwrap();
     // prefix = the prompt length (reference build with an empty state, minus
     // its closing [SEP])
@@ -153,7 +173,11 @@ fn string_state_preserves_head() {
         &tok,
         &json!(""),
         &truncation_question(),
-        &BuildOptions { max_len: 30, head_max_len: 12, ..default_opts() },
+        &BuildOptions {
+            max_len: 30,
+            head_max_len: 12,
+            ..default_opts()
+        },
     )
     .unwrap()
     .0
@@ -161,8 +185,14 @@ fn string_state_preserves_head() {
     let prefix = reference - 1;
     let kept = &seq[prefix..seq.len() - 1];
 
-    assert!(kept.contains(&head_id), "string state must preserve the head (default mode)");
-    assert!(!kept.contains(&tail_id), "string state must drop the tail (default mode)");
+    assert!(
+        kept.contains(&head_id),
+        "string state must preserve the head (default mode)"
+    );
+    assert!(
+        !kept.contains(&tail_id),
+        "string state must drop the tail (default mode)"
+    );
 }
 
 #[test]
@@ -170,16 +200,25 @@ fn build_sequence_default_unchanged() {
     // build_sequence's default behavior is unchanged for non-list callers.
     let tok = FakeTok;
     let state = format!("OLDFRONT {} NEWBACK", "filler ".repeat(20));
-    let default_build = BuildOptions { max_len: 30, head_max_len: 12, ..default_opts() };
+    let default_build = BuildOptions {
+        max_len: 30,
+        head_max_len: 12,
+        ..default_opts()
+    };
     let explicit_opts = BuildOptions {
         max_len: 30,
         head_max_len: 12,
         truncate_left: false,
         ..default_opts()
     };
-    let (seq_default, _) = build_sequence(&tok, &json!(state), &truncation_question(), &default_build).unwrap();
-    let (seq_explicit, _) = build_sequence(&tok, &json!(state), &truncation_question(), &explicit_opts).unwrap();
-    assert_eq!(seq_default, seq_explicit, "default must remain truncate_left=false");
+    let (seq_default, _) =
+        build_sequence(&tok, &json!(state), &truncation_question(), &default_build).unwrap();
+    let (seq_explicit, _) =
+        build_sequence(&tok, &json!(state), &truncation_question(), &explicit_opts).unwrap();
+    assert_eq!(
+        seq_default, seq_explicit,
+        "default must remain truncate_left=false"
+    );
 }
 
 // --------------------------------------------------------------- build_sequence basics
@@ -230,7 +269,11 @@ fn build_sequence_shape_checks() {
         &tok,
         &json!("some state text"),
         &training_question(),
-        &BuildOptions { max_len: 128, head_max_len: 64, ..default_opts() },
+        &BuildOptions {
+            max_len: 128,
+            head_max_len: 64,
+            ..default_opts()
+        },
     )
     .unwrap();
     assert_eq!(markers.len(), 3, "build_sequence/one marker per option");
@@ -239,7 +282,11 @@ fn build_sequence_shape_checks() {
         "build_sequence/markers point inside the sequence"
     );
     assert_eq!(seq[0], tok.cls_token_id(), "build_sequence/starts with CLS");
-    assert_eq!(seq[seq.len() - 1], tok.sep_token_id(), "build_sequence/ends with SEP");
+    assert_eq!(
+        seq[seq.len() - 1],
+        tok.sep_token_id(),
+        "build_sequence/ends with SEP"
+    );
     assert!(seq.len() <= 128, "build_sequence/respects max_len");
 }
 
@@ -250,7 +297,11 @@ fn build_sequence_truncates_long_state_to_max_len() {
         &tok,
         &json!("x".repeat(5000)),
         &training_question(),
-        &BuildOptions { max_len: 64, head_max_len: 32, ..default_opts() },
+        &BuildOptions {
+            max_len: 64,
+            head_max_len: 32,
+            ..default_opts()
+        },
     )
     .unwrap();
     assert!(
@@ -267,10 +318,18 @@ fn build_sequence_noul_always_offers_two_options() {
         &tok,
         &json!("state"),
         &json!({"t": "noul", "ins": "Is it?", "crit": null}),
-        &BuildOptions { max_len: 128, head_max_len: 64, ..default_opts() },
+        &BuildOptions {
+            max_len: 128,
+            head_max_len: 64,
+            ..default_opts()
+        },
     )
     .unwrap();
-    assert_eq!(noul_markers.len(), 2, "build_sequence/noul always offers two options");
+    assert_eq!(
+        noul_markers.len(),
+        2,
+        "build_sequence/noul always offers two options"
+    );
     assert!(noul_seq.len() <= 128);
 }
 
@@ -281,9 +340,17 @@ fn build_sequence_score_has_one_marker_per_level() {
         &tok,
         &json!("state"),
         &json!({"t": "score", "ins": "How bad?", "crit": ["low", "mid", "high"]}),
-        &BuildOptions { max_len: 128, head_max_len: 64, ..default_opts() },
+        &BuildOptions {
+            max_len: 128,
+            head_max_len: 64,
+            ..default_opts()
+        },
     )
     .unwrap();
-    assert_eq!(score_markers.len(), 3, "build_sequence/score has one marker per level");
+    assert_eq!(
+        score_markers.len(),
+        3,
+        "build_sequence/score has one marker per level"
+    );
     assert!(score_seq.len() <= 128);
 }
