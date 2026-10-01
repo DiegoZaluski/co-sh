@@ -95,8 +95,11 @@ fi
 
 # Variant note: both variants are built without the Home screen
 # (--no-default-features). "slim-embed" additionally enables the workspace
-# `embed` feature (cosh-tools/embed + fastembed) for local RAG. Both are
-# produced by the release workflow.
+# `embed` feature (cosh-tools/embed + fastembed) for local RAG. slim-embed is
+# produced for linux-x64 and win32-x64; macOS (both x64 and arm64) ships slim
+# only — ort-sys has no prebuilt ONNX Runtime for x86_64-apple-darwin, and
+# the aarch64-apple-darwin distribution (CoreML build) fails to static-link
+# on the CI runner.
 case "$COSH_VARIANT" in
   slim|slim-embed) ;;
   *) echo "Error: Unsupported COSH_VARIANT '$COSH_VARIANT'. Expected 'slim' or 'slim-embed'."; exit 1 ;;

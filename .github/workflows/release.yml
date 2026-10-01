@@ -57,8 +57,28 @@ jobs:
         #                 (no RAG, no Home)
         #   slim-embed -> cosh-v<VERSION>-<OS>-<ARCH>-slim-embed.tar.gz|.zip
         #                 (workspace `embed` feature = local RAG, no Home)
+        # `os` must be a real matrix key (not include-only): include entries
+        # whose keys don't overlap the matrix get merged into EVERY existing
+        # combination instead of creating new ones, so the last entry (win32)
+        # used to overwrite the others and only Windows builds were produced.
+        # ort-sys (the `embed` feature's ONNX Runtime) is unreliable to ship
+        # on macOS: x86_64-apple-darwin has NO prebuilt binaries at all, and
+        # the only aarch64-apple-darwin distribution is built with CoreML,
+        # whose static-link stage (CoreML framework +
+        # onnxruntime_providers_coreml) fails on the runner — macOS therefore
+        # ships the slim variant only (the excludes below), while linux and
+        # windows keep both variants.
+        os: [ubuntu-latest, macos-15-intel, macos-latest, windows-latest]
         variant: [slim, slim-embed]
 
+        exclude:
+          - os: macos-15-intel
+            variant: slim-embed
+          - os: macos-latest
+            variant: slim-embed
+
+        # Each include entry references the `os` matrix key, so it merges
+        # into the matching combinations (both variants of that platform).
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
@@ -89,10 +109,17 @@ jobs:
         if: matrix.platform == 'linux'
         run: |
           sudo apt-get update
+          # libxkbcommon-dev: linked by the xkbcommon crate (cosh-tools ->
+          # xa11y -> xa11y-linux), which declares the symbols via plain
+          # `extern "C"` — no pkg-config discovery — so the dev package
+          # (headers not needed, just the .so for the linker) must be
+          # present or the release link fails with
+          # `unable to find library -lxkbcommon`.
           sudo apt-get install -y \
             build-essential \
             pkg-config \
             libssl-dev \
+            libxkbcommon-dev \
             protobuf-compiler
 
       # `protoc` is required by the `lance-encoding` build script (via

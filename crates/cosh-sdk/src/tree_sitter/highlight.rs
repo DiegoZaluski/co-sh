@@ -177,14 +177,50 @@ fn query_for_language(lang: &str) -> Option<&'static str> {
              (function_declaration name: (identifier) @function)
              (call_expression function: (identifier) @function)"
         }
-        "c#" | "csharp" | "cs" | "go" | "java" | "scala" | "groovy" | "haskell" | "hs" | "lhs"
-        | "swift" | "zig" | "zon" | "kotlin" | "kt" | "kts" | "c" | "h" | "cpp" | "c++" | "cxx"
-        | "hpp" | "objectivec" | "objc" | "m" | "mm" => {
+        // C-family grammars with (comment)/(type_identifier)/(integer_literal)
+        // node types. Kotlin is NOT in this group: its grammar (the maintained
+        // WillBooster fork we ship) names these nodes differently.
+        "c#"
+            | "csharp"
+            | "cs"
+            | "go"
+            | "java"
+            | "scala"
+            | "groovy"
+            | "haskell"
+            | "hs"
+            | "lhs"
+            | "swift"
+            | "zig"
+            | "zon"
+            | "c"
+            | "h"
+            | "cpp"
+            | "c++"
+            | "cxx"
+            | "hpp"
+            | "objectivec"
+            | "objc"
+            | "m"
+            | "mm" => {
             "(string_literal) @string
              (comment) @comment
              (type_identifier) @type
              (integer_literal) @number
              (float_literal) @number"
+        }
+        // Kotlin (willbooster-tree-sitter-kotlin): no `comment`,
+        // `type_identifier` or `integer_literal` nodes — using the shared
+        // C-family pattern above fails Query compilation, which
+        // `compiled_highlighter` swallows and caches, silently disabling
+        // Kotlin highlighting entirely.
+        "kotlin" | "kt" | "kts" => {
+            "(string_literal) @string
+             (line_comment) @comment
+             (block_comment) @comment
+             (identifier) @type
+             (float_literal) @number
+             (number_literal) @number"
         }
         _ => return None,
     })
@@ -374,6 +410,58 @@ mod tests {
         let spans = result.unwrap();
         println!("JS spans: {:?}", spans);
         assert!(!spans.is_empty(), "should have at least one span");
+    }
+
+    /// Regression guard for the Kotlin grammar swap (willbooster-tree-sitter-
+    /// kotlin): its node names differ from the shared C-family pattern
+    /// (`line_comment`/`block_comment` instead of `comment`, `identifier`
+    /// instead of `type_identifier`). A pattern referencing a nonexistent
+    /// node fails `Query` compilation, which `compiled_highlighter` swallows
+    /// and caches — so a bad pattern silently disables Kotlin highlighting
+    /// entirely. This test fails loudly if the grammar/pattern drift again.
+    #[test]
+    fn test_highlight_kotlin() {
+        let source = "\
+// a comment
+fun main() {
+    val greeting: String = \"hello\"
+    val count = 42
+    println(greeting)
+}
+";
+        let result = highlight(source, "kotlin");
+        assert!(
+            result.is_some(),
+            "highlight should return Some for kotlin (query must compile)"
+        );
+        let spans = result.unwrap();
+        assert!(!spans.is_empty(), "should have at least one span");
+
+        // Comments use the (line_comment) node in the WillBooster grammar.
+        let comments: Vec<_> = spans
+            .iter()
+            .filter(|s| s.category == HighlightCategory::Comment)
+            .collect();
+        assert!(
+            !comments.is_empty(),
+            "should have a comment span (line_comment pattern compiles)"
+        );
+
+        // Strings and numbers must also resolve through the Kotlin pattern.
+        let strings: Vec<_> = spans
+            .iter()
+            .filter(|s| s.category == HighlightCategory::String)
+            .collect();
+        assert!(!strings.is_empty(), "should have a string span");
+
+        let numbers: Vec<_> = spans
+            .iter()
+            .filter(|s| s.category == HighlightCategory::Number)
+            .collect();
+        assert!(
+            !numbers.is_empty(),
+            "should have a number span (number_literal pattern compiles)"
+        );
     }
 
     #[test]

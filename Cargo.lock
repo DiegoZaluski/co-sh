@@ -1621,7 +1621,6 @@ dependencies = [
  "tree-sitter-json",
  "tree-sitter-julia",
  "tree-sitter-just",
- "tree-sitter-kotlin",
  "tree-sitter-lua",
  "tree-sitter-make",
  "tree-sitter-md",
@@ -1652,6 +1651,7 @@ dependencies = [
  "tree-sitter-yaml",
  "tree-sitter-zig",
  "url",
+ "willbooster-tree-sitter-kotlin",
  "xxhash-rust",
  "zeroize",
 ]
@@ -9166,15 +9166,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tree-sitter-kotlin"
-version = "0.4.0"
-source = "git+https://github.com/fwcd/tree-sitter-kotlin?rev=c8ac3d2627240160b999a2c100de3babbdb8f419#c8ac3d2627240160b999a2c100de3babbdb8f419"
-dependencies = [
- "cc",
- "tree-sitter-language",
-]
-
-[[package]]
 name = "tree-sitter-language"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10051,6 +10042,16 @@ dependencies = [
  "home",
  "once_cell",
  "rustix 0.38.44",
+]
+
+[[package]]
+name = "willbooster-tree-sitter-kotlin"
+version = "1.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b119cfdcc38a58638db2075fa0ee6964a519d709fd164a62e6e24fff2aefa2bb"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
 ]
 
 [[package]]
