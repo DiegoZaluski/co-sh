@@ -1,5 +1,6 @@
 #[cfg(not(test))]
 use super::context::error_catalog_window;
+use super::background;
 use super::context::{ContextManager, MAX_CONTEXT_TOKENS, MapRequest, RunOutcome};
 use super::correction_memory::CorrectionMemory;
 use super::tools::{CoshTools, Tools, is_tool_disabled};
@@ -512,6 +513,31 @@ fn default_harness_tools() -> Vec<HarnessTool> {
                 "properties": {}
             }),
         },
+        // Polling half of the background sub-agent feature: reads the
+        // process-wide registry spawned tasks report through (`push` is the
+        // automated completion notification the loop injects). Cheap,
+        // read-only, and available to nested agents too.
+        HarnessTool {
+            name: "subagent_status".into(),
+            description: "Check the status of background sub-agent tasks (spawned with \
+                subagent_call using run_in_background: true). Pass task_id to query one task \
+                (status + final report when completed); omit it to list ALL background tasks \
+                with their ids, agents, and statuses. A completed task's report is included \
+                in the result; completed tasks are ALSO pushed to you automatically as an \
+                [automated notification] in a later turn, so polling is only needed when you \
+                want a progress update before the notification arrives."
+                .into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "The background task to query (e.g. \"bg-1\"). Optional: omit to list all background tasks.",
+                    },
+                },
+                "required": [],
+            }),
+        },
     ]
 }
 
@@ -557,6 +583,13 @@ pub struct Harness {
     /// To stop the agent loop.
     pub(crate) stop: bool,
     tool_issuer: VecDeque<ToolCallData>,
+    /// True when this harness is an INTERNAL SUB-AGENT (a nested harness
+    /// built by [`Self::run_internal_subagent`]). Gates the two behaviors a
+    /// nested loop must not have (Claude Code non-interactive nesting rules):
+    /// background sub-agent spawns are rejected, and completion
+    /// notifications are never drained — a sub-agent must not swallow a
+    /// notification meant for the top-level agent's context.
+    nested: bool,
     /// PreToolUse hooks runner (empty when no hooks are configured).
     hook_runner: Option<super::hooks::HookRunner>,
 
@@ -753,6 +786,7 @@ impl Harness {
             pending_thinking_blocks: Vec::new(),
             stop: false,
             tool_issuer: VecDeque::new(),
+            nested: false,
             tool_call_synthetic: 0,
             context_manager: ContextManager::new(MAX_CONTEXT_TOKENS),
             disabled_tools,
@@ -989,6 +1023,20 @@ impl Harness {
     #[must_use]
     pub const fn with_instructions(mut self, instructions: &'static str) -> Self {
         self.instructions = Some(instructions);
+        self
+    }
+
+    /// Mark this harness as an INTERNAL SUB-AGENT (a nested harness).
+    ///
+    /// Set by [`Self::run_internal_subagent`] on the nested harness. A
+    /// nested loop (a) rejects background `subagent_call` spawns — matching
+    /// Claude Code's non-interactive nesting rule, where a headless sub-agent
+    /// cannot outlive its parent to deliver a notification — and (b) never
+    /// drains background completion notifications, so a notification meant
+    /// for the top-level agent's context is never swallowed by a sub-agent.
+    #[must_use]
+    pub const fn as_nested(mut self) -> Self {
+        self.nested = true;
         self
     }
 
@@ -1347,6 +1395,9 @@ impl Harness {
                 })
                 .to_string(),
             }),
+            "subagent_status" => Some(background::status_report(
+                tc.arguments.get("task_id").and_then(|v| v.as_str()),
+            )),
             _ => Some(String::new()),
         }
     }
@@ -3848,6 +3899,47 @@ impl Harness {
                 current_input.clear();
             }
 
+            // Background sub-agent completions (push half of the feature):
+            // drain the process-wide registry ONCE per iteration, at the top
+            // of the turn-building phase, so a task that finished since the
+            // last request reaches the model as an explicitly-marked
+            // automated turn — never mistaken for user input. Nested agents
+            // never drain: a notification belongs to the top-level agent's
+            // context (see `as_nested`).
+            //
+            // Single-main-loop assumption: the registry is process-wide and
+            // every non-nested loop drains it. cosh runs one top-level agent
+            // loop per process, so ownership is unambiguous; if two
+            // top-level loops ever run concurrently, a notification can land
+            // in the other session's context — revisit then (e.g. an
+            // owner-session tag on each task).
+            let background_notes = if self.nested {
+                Vec::new()
+            } else {
+                background::take_ready_notifications()
+            };
+            if !background_notes.is_empty() {
+                for note in background_notes {
+                    // The notification rides the EXISTING event variant the
+                    // TUI already renders as a chat line (its match is
+                    // exhaustive over the enum, so a new variant would
+                    // break the TUI build) — the model-facing injection is
+                    // the `add_user` below, marked `[automated
+                    // notification]` Claude-Code-style.
+                    let _ = tx.send(HarnessEvent::ToolOutput {
+                        tool: "subagent_status".to_string(),
+                        output: note.clone(),
+                        finished: true,
+                    });
+                    self.context_manager.add_user(&note);
+                }
+                // An injected completion is new instruction material: the
+                // next request must carry it even when the per-iteration
+                // steering message is empty (same contract as the queued
+                // user messages above).
+                current_input.clear();
+            }
+
             // Phase 1: stream the LLM response using native tool-call format.
             // The messages are rebuilt on EVERY attempt: when a context-window
             // overflow drains tool chains below, the retry must not re-send
@@ -4989,6 +5081,47 @@ impl Harness {
                     }
                 }
                 // log::debug!("run_agent_loop DONE (no tools)");
+                // Background tasks still outstanding: the turn does NOT end
+                // while work it spawned is running (Claude Code's nesting
+                // rule — an interactive loop waits for its background
+                // sub-agents before finishing). Wait for the completions,
+                // inject the notifications, and CONTINUE the loop so the
+                // model responds to them; Esc interrupts the wait and ends
+                // the turn normally (undelivered notifications survive in
+                // the registry and drain on the next turn).
+                if !self.nested && background::has_running_tasks() {
+                    log::debug!(
+                        "run_agent_loop WAITING for background sub-agent tasks before Done"
+                    );
+                    while background::has_running_tasks()
+                        && !stop_signal.load(Ordering::Relaxed)
+                    {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    // Esc during the wait ends the turn normally: no
+                    // injection, fall through to the standard Done path
+                    // below (never break without emitting Done — the TUI
+                    // would stay in a "running" state).
+                    let notes = if stop_signal.load(Ordering::Relaxed) {
+                        Vec::new()
+                    } else {
+                        background::take_ready_notifications()
+                    };
+                    if !notes.is_empty() {
+                        for note in notes {
+                            let _ = tx.send(HarnessEvent::ToolOutput {
+                                tool: "subagent_status".to_string(),
+                                output: note.clone(),
+                                finished: true,
+                            });
+                            self.context_manager.add_user(&note);
+                        }
+                        // The injected completions are the new input; the
+                        // stale steering text must not shadow them.
+                        current_input.clear();
+                        continue;
+                    }
+                }
                 self.context_manager.close_loop();
                 // Final LSP snapshot: this break skips the per-cycle emission
                 // below, so send the freshest state here.
@@ -5131,6 +5264,25 @@ impl Harness {
         // answer). The internal path needs this harness's connector and stop
         // signal, so it is routed here, at harness level, before Tier 1.
         if tool_name == "subagent_call" {
+            // Nested harnesses run FOREGROUND-ONLY (Claude Code's
+            // non-interactive nesting rule): a background task spawned
+            // inside a sub-agent could outlive the nested loop that
+            // requested it, and its completion notification has nowhere
+            // coherent to land. Rejected for BOTH dispatch paths before
+            // any parsing, so the model gets one consistent refusal.
+            let run_in_background = args_map
+                .get("run_in_background")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if run_in_background && self.nested {
+                self.tool_issuer.pop_front();
+                return Err(
+                    "run_in_background is not available inside a sub-agent: background \
+                     spawns are disabled for nested agents — run the task in the \
+                     foreground (omit run_in_background) instead."
+                        .to_string(),
+                );
+            }
             let agent_empty = args_map
                 .get("agent")
                 .and_then(|v| v.as_str())
@@ -5164,7 +5316,17 @@ impl Harness {
                     &call_input,
                     input.code_review,
                 );
-                return self.run_internal_subagent(call_input, is_review).await;
+                // Background mode (opt-in): register the task BEFORE the
+                // spawn so `subagent_status` already reports it as
+                // `running` when the acknowledgment below reaches the
+                // model, then return the spawn receipt immediately. The
+                // foreground path is untouched (task_id = None).
+                let task_id = input
+                    .run_in_background
+                    .then(|| background::register("internal", &call_input));
+                return self
+                    .run_internal_subagent(call_input, is_review, task_id)
+                    .await;
             }
         }
 
@@ -5335,6 +5497,7 @@ impl Harness {
         &mut self,
         input: String,
         is_review: bool,
+        task_id: Option<String>,
     ) -> Result<String, String> {
         // The sub-agent cannot ask the user questions, capture the live
         // terminal, or stop the loop on its own (it must end with a written
@@ -5366,6 +5529,10 @@ impl Harness {
         let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
 
+        // Clone used only inside the completion-recording thread: the
+        // original stays owned by the caller for the spawn receipt below.
+        let bg_task_id = task_id.clone();
+
         std::thread::spawn(move || {
             use std::panic::AssertUnwindSafe;
 
@@ -5375,7 +5542,17 @@ impl Harness {
             {
                 Ok(rt) => rt,
                 Err(e) => {
-                    let _ = result_tx.send(Err(format!("internal sub-agent runtime: {e}")));
+                    // Zombie-Running guard: a background task whose runtime
+                    // failed to build must be marked failed HERE — the
+                    // thread returns before the normal completion path
+                    // runs, and a task left Running never notifies, is
+                    // never pruned, and (busy guard) blocks later
+                    // same-agent spawns.
+                    let error = format!("internal sub-agent runtime: {e}");
+                    if let Some(id) = bg_task_id.as_ref() {
+                        background::complete(id, None, Some(error.clone()));
+                    }
+                    let _ = result_tx.send(Err(error));
                     return;
                 }
             };
@@ -5386,6 +5563,13 @@ impl Harness {
                     let mut nested = Harness::new(connector, &cwd, disabled)
                         .with_mode(Mode::Yolo)
                         .with_instructions(INSTRUCTIONS_SUBAGENT)
+                        // A nested harness runs FOREGROUND-ONLY: background
+                        // sub-agent spawns are rejected (the nested loop
+                        // cannot outlive its parent to deliver a
+                        // notification) and completion notifications are
+                        // never drained into its context — they belong to
+                        // the top-level agent (see `as_nested`).
+                        .as_nested()
                         .with_fallbacks(fallbacks)
                         .with_summarization_models(summarization_models)
                         .with_local_base_urls(local_base_urls)
@@ -5543,6 +5727,23 @@ impl Harness {
                     }
                 })
             }));
+            // Background mode: the sub-agent's OWN thread records the
+            // outcome in the process-wide registry — never a watcher on the
+            // spawning runtime, which may be gone by the time the task
+            // finishes (the TUI builds a fresh runtime per turn). The
+            // completion notification is delivered by the TOP-LEVEL loop's
+            // next drain (a nested loop never drains). Captured BEFORE the
+            // send below: the panic payload is partially moved into the
+            // message construction.
+            let completion = bg_task_id.as_ref().map(|task_id| match &outcome {
+                Ok(Ok(report)) => (task_id.clone(), Some(report.clone()), None),
+                Ok(Err(error)) => (task_id.clone(), None, Some(error.clone())),
+                Err(_) => (
+                    task_id.clone(),
+                    None,
+                    Some("internal sub-agent thread ended without a result".to_string()),
+                ),
+            });
             let _ = result_tx.send(match outcome {
                 Ok(report) => report,
                 Err(panic) => {
@@ -5554,7 +5755,30 @@ impl Harness {
                     Err(format!("internal sub-agent panicked: {msg}"))
                 }
             });
+            if let Some((task_id, output, error)) = completion {
+                background::complete(&task_id, output, error);
+            }
         });
+
+        // Background mode: return the spawn receipt IMMEDIATELY — the
+        // caller keeps working and the report arrives later as an automated
+        // completion notification (push) or via `subagent_status` (poll).
+        // The receipt is enveloped as a `SubAgentCallOutput` (the shape the
+        // TUI unwraps for the sub-agent box) with a HUMAN-READABLE summary:
+        // a bare `{"task_id": ...}` object would leak as raw JSON in the
+        // panel (the TUI's parser falls back to the raw string on unknown
+        // shapes). The task_id is kept verbatim in the text for the model.
+        if let Some(task_id) = task_id {
+            let receipt = cosh_tools::subagent::types::SubAgentCallOutput {
+                output: format!(
+                    "Background sub-agent spawned (task_id: {task_id}, agent: internal). \
+                     Its final report will arrive automatically as an [automated \
+                     notification]; poll subagent_status for progress in the meantime."
+                ),
+                stop_reason: "spawned".to_string(),
+            };
+            return serde_json::to_string(&receipt).map_err(|e| e.to_string());
+        }
 
         let report = result_rx
             .await
@@ -5590,6 +5814,7 @@ impl Harness {
             pending_thinking_blocks: Vec::new(),
             stop: false,
             tool_issuer: VecDeque::new(),
+            nested: false,
             tool_call_synthetic: 0,
             context_manager: ContextManager::new(MAX_CONTEXT_TOKENS),
             disabled_tools: HashSet::new(),
