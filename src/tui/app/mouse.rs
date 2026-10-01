@@ -169,6 +169,7 @@ impl App {
                 // prompt row (which sits below the session viewport and would cause
                 // a spurious full-width highlight bar at the bottom of the session area).
                 if matches!(self.mode(), AppMode::Session)
+                    && !self.dialog.visible()
                     && let Some(prompt_area) = self.compute_prompt_area()
                     && x >= prompt_area.x
                     && x < prompt_area.right()
@@ -655,7 +656,8 @@ impl App {
                         self.question_dialog.handle_wheel(y, area, false);
                     } else if matches!(self.mode(), AppMode::Session) {
                         self.session_view.scroll_by(-1.0);
-                    } else if matches!(self.mode(), AppMode::Home) {
+                    } else if self.is_home_mode() {
+                        #[cfg(feature = "home")]
                         self.home_view.select_prev();
                     } else if matches!(self.mode(), AppMode::InternalTools) {
                         self.internal_tools_view.select_prev();
@@ -743,7 +745,8 @@ impl App {
                         self.question_dialog.handle_wheel(y, area, true);
                     } else if matches!(self.mode(), AppMode::Session) {
                         self.session_view.scroll_by(1.0);
-                    } else if matches!(self.mode(), AppMode::Home) {
+                    } else if self.is_home_mode() {
+                        #[cfg(feature = "home")]
                         self.home_view.select_next();
                     } else if matches!(self.mode(), AppMode::InternalTools) {
                         self.internal_tools_view.select_next();
@@ -1264,6 +1267,7 @@ impl App {
         }
 
         // 8. Home view (same area computation as render: skip header row + footer)
+        #[cfg(feature = "home")]
         if matches!(self.mode(), AppMode::Home) && !self.dialog.visible() {
             let area = self.terminal_size();
             let sidebar_w = if self.sidebar.open && area.width >= MIN_WIDTH_FOR_LEFT_PANEL {

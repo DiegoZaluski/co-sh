@@ -41,6 +41,7 @@ impl App {
 
     /// Handle a click (or Enter/`u` key press) on the home banner's update
     /// announcement: run the update pipeline or open the changelog page.
+    #[cfg(feature = "home")]
     pub(super) fn handle_banner_action(&mut self, action: crate::routes::home::BannerAction) {
         use crate::routes::home::BannerAction;
 
@@ -78,17 +79,19 @@ impl App {
     /// Drain update-related events from the background release check (drives
     /// the banner content). Called once per frame.
     pub(super) fn pump_update_events(&mut self) {
-        use crate::routes::home::{BannerContent, UpdateStatus};
-
         while let Ok(event) = self.update_event_rx.try_recv() {
             match event {
                 crate::update::UpdateEvent::CheckFinished(Some(release)) => {
                     self.update_changelog_url = Some(release.url.clone());
-                    self.home_view.banner.content = Some(BannerContent::ReleaseUpdate {
-                        version: release.version.clone(),
-                        tag: release.tag.clone(),
-                    });
-                    self.home_view.banner.status = UpdateStatus::Idle;
+                    #[cfg(feature = "home")]
+                    {
+                        use crate::routes::home::{BannerContent, UpdateStatus};
+                        self.home_view.banner.content = Some(BannerContent::ReleaseUpdate {
+                            version: release.version.clone(),
+                            tag: release.tag.clone(),
+                        });
+                        self.home_view.banner.status = UpdateStatus::Idle;
+                    }
                 }
                 crate::update::UpdateEvent::CheckFinished(None) => {
                     // Up to date or check failed: banner stays hidden.
@@ -159,7 +162,7 @@ impl App {
     /// Create a fresh empty session and select it — the shared path behind
     /// Home's "New session" (keyboard + mouse) and the `/new` slash command.
     /// Selecting the session flips the app into Session mode.
-    pub(super) fn start_new_session(&mut self) {
+    pub(crate) fn start_new_session(&mut self) {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -230,6 +233,22 @@ impl App {
             self.open_theme_dialog();
         } else if cmd.name == "models" {
             self.open_model_dialog();
+        } else if cmd.name == "router" {
+            // Same refresh the Home menu performs before opening the router:
+            // fallbacks from the prefs cache; models come from the model
+            // cache when the view renders.
+            let saved = crate::fallback::load_fallbacks(&self.setup);
+            self.router_view.set_fallbacks(saved);
+            let saved = crate::fallback::load_prompt_corrector_fallbacks(&self.setup);
+            self.router_view.set_prompt_corrector_fallbacks(saved);
+            self.show_router = true;
+        } else if cmd.name == "providers" {
+            self.show_add_provider = true;
+        } else if cmd.name == "settings" {
+            self.telemetry_feature(cosh::telemetry::schema::Feature::Settings);
+            self.show_settings = true;
+        } else if cmd.name == "tools" {
+            self.show_internal_tools = true;
         } else if cmd.name == "toolcall" {
             self.open_tool_call_dialog();
         } else if cmd.name == "compact" {

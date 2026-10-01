@@ -82,6 +82,22 @@ impl SlashMenu {
                 desc: "Manage models".into(),
             },
             SlashCommand {
+                name: "router".into(),
+                desc: "Open the fallback router".into(),
+            },
+            SlashCommand {
+                name: "providers".into(),
+                desc: "Add an API provider".into(),
+            },
+            SlashCommand {
+                name: "settings".into(),
+                desc: "Open settings".into(),
+            },
+            SlashCommand {
+                name: "tools".into(),
+                desc: "Open internal tools".into(),
+            },
+            SlashCommand {
                 name: "themes".into(),
                 desc: "Change theme".into(),
             },

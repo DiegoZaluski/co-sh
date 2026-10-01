@@ -12,6 +12,7 @@ use super::{
 };
 use crate::left_panel::{MIN_WIDTH_FOR_LEFT_PANEL, Mode};
 use crate::logo::LOGO_CHAT;
+#[cfg(feature = "home")]
 use crate::routes::home::footer::HomeFooterView;
 use crate::routes::session::footer::FooterView;
 use crate::routes::session::right_panel::render_right_panel;
@@ -140,7 +141,10 @@ impl App {
         live = live || self.session_view.pill_animating();
         // Keep the lightweight landing and empty-session logo animations
         // moving even when there is no input or agent activity.
-        live = live || (matches!(self.mode(), AppMode::Home) && self.home_view.anim_active);
+        #[cfg(feature = "home")]
+        {
+            live = live || (self.is_home_mode() && self.home_view.anim_active);
+        }
         live = live
             || (matches!(self.mode(), AppMode::Session)
                 && self.anim_enabled
@@ -342,8 +346,7 @@ impl App {
             // screen. Clicking it opens the GitHub issues page in the default
             // browser. Other routers reuse this space, so it's hidden there.
             let bug_right_x = main_area.right().saturating_sub(bug_w + 1);
-            let bug_link_area = if matches!(self.mode(), AppMode::Home) && bug_right_x >= area.x + 9
-            {
+            let bug_link_area = if self.is_home_mode() && bug_right_x >= area.x + 9 {
                 // Hover feedback: at rest the link sits in the muted color;
                 // when the mouse cursor sits exactly on it, it lights up in
                 // the theme's default text color to signal it's clickable.
@@ -684,6 +687,7 @@ impl App {
                 self.session_view.clear_pill();
             }
             match self.mode() {
+                #[cfg(feature = "home")]
                 AppMode::Home => {
                     self.prompt_view.blur();
                     self.home_view
@@ -927,6 +931,7 @@ impl App {
 
             let footer_area = Rect::new(main_area.x, footer_y, main_area.width, 1);
             match self.mode() {
+                #[cfg(feature = "home")]
                 AppMode::Home => {
                     HomeFooterView::render(buf, footer_area, &self.theme);
                 }

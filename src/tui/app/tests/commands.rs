@@ -258,7 +258,6 @@ async fn slash_new_creates_and_selects_a_fresh_session() {
     let _guard = HOME_LOCK.lock();
     isolate_home();
     let mut app = App::new("/tmp".to_string());
-    assert!(app.state.current_session_id.is_none());
     let cmd = crate::ui::slash_menu::SlashCommand {
         name: "new".into(),
         desc: String::new(),
@@ -273,9 +272,18 @@ async fn slash_new_creates_and_selects_a_fresh_session() {
         "the app flips into Session mode"
     );
     assert!(!app.slash_menu.visible);
+    // The selected session is FRESH: empty transcript. (Without the `home`
+    // feature the app boots into a live session, and `/new` ids are
+    // millisecond timestamps — a same-millisecond collision replaces the
+    // boot session in the LRU instead of growing it, so the count itself is
+    // not a portable invariant; the freshness of the selected session is.)
+    let selected = app
+        .state
+        .current_session()
+        .expect("the selected session exists");
     assert!(
-        app.state.session_cache.len() == 1,
-        "exactly one new session exists"
+        selected.messages.is_empty(),
+        "the selected session is a fresh one"
     );
 }
 
@@ -349,12 +357,25 @@ async fn slash_new_refuses_while_agent_is_working() {
     isolate_home();
     let mut app = App::new("/tmp".to_string());
     app.state.status = crate::types::SessionStatus::Working;
+    // Without the `home` feature the app boots into a live session; the
+    // invariant under test is that the refusal keeps the CURRENT session —
+    // no new one is created or selected either way.
+    let session_count_before = app.state.session_cache.len();
+    let previous_id = app.state.current_session_id.clone();
     let cmd = crate::ui::slash_menu::SlashCommand {
         name: "new".into(),
         desc: String::new(),
     };
     app.run_slash_command(&cmd);
-    assert!(app.state.current_session_id.is_none(), "no session created");
+    assert_eq!(
+        app.state.current_session_id, previous_id,
+        "the refusal keeps the current session selected"
+    );
+    assert_eq!(
+        app.state.session_cache.len(),
+        session_count_before,
+        "no session was created"
+    );
     assert!(
         app.toast_state
             .current
@@ -539,10 +560,19 @@ async fn slash_compact_refuses_without_a_session_context() {
     };
     app.run_slash_command(&cmd);
     assert!(!app.manual_compaction_active);
-    assert!(app.state.current_session_id.is_none());
+    // With `home` the app boots modeless, so the refusal is "No active
+    // session."; without it the boot session is live but has no persisted
+    // context, so the refusal is "Nothing to compact yet.". Either way the
+    // command must refuse through a toast, never start a compaction.
+    let message = app
+        .toast_state
+        .current
+        .as_ref()
+        .map(|t| t.message.clone())
+        .unwrap_or_default();
     assert!(
-        app.toast_state.current.is_some(),
-        "the refusal surfaces as a toast"
+        message.contains("No active session") || message.contains("Nothing to compact yet"),
+        "the refusal surfaces as a toast naming the guard that fired: {message:?}"
     );
 }
 

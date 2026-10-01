@@ -1,4 +1,5 @@
 pub mod add_provider;
+#[cfg(feature = "home")]
 pub mod home;
 #[cfg(feature = "embed")]
 pub mod rag;

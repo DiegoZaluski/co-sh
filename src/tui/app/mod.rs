@@ -27,6 +27,7 @@ use crate::left_panel::sessions::SessionsView;
 use crate::left_panel::{LEFT_PANEL_WIDTH, MIN_WIDTH_FOR_LEFT_PANEL, Mode};
 use crate::logo::LOGO_CHAT;
 use crate::routes::add_provider::AddProviderView;
+#[cfg(feature = "home")]
 use crate::routes::home::HomeView;
 use crate::routes::router::RouterView;
 use crate::routes::session::SessionView;
@@ -143,6 +144,7 @@ const EMPTY_SESSION_PROMPT_RATIO: f64 = 0.4;
 const MIN_PROMPT_RESERVE_ROWS: u16 = 4;
 
 enum AppMode {
+    #[cfg(feature = "home")]
     Home,
     Session,
     InternalTools,
@@ -241,6 +243,7 @@ pub struct App {
     pub question_dialog: QuestionDialog,
     pub queue_choice_dialog: QueueChoiceDialog,
     pub free_gateway_dialog: FreeGatewayRecommendationDialog,
+    #[cfg(feature = "home")]
     pub home_view: HomeView,
     pub internal_tools_view: InternalToolsView,
     pub show_internal_tools: bool,
@@ -629,7 +632,11 @@ impl App {
         let usage_records = usage_store.load();
         let usage_next_id = usage_records.len() as u64;
 
-        Self {
+        // `mut` is only needed without the `home` feature, where the
+        // constructor boots straight into a live session (see the tail of
+        // this function); with `home` the literal is returned as-is.
+        #[cfg_attr(feature = "home", allow(unused_mut))]
+        let mut app = Self {
             hypercredit_balance: None,
             state,
             theme_registry,
@@ -637,6 +644,7 @@ impl App {
             transparent_background,
             session_view: SessionView::new(),
             sparkle: SparkleState::new(),
+            #[cfg(feature = "home")]
             home_view: HomeView::new(),
             internal_tools_view: {
                 let mut v = InternalToolsView::new();
@@ -753,7 +761,14 @@ impl App {
             anim_enabled: saved_anim,
             #[cfg(test)]
             test_size_override: None,
-        }
+        };
+        // Without the `home` feature there is no landing screen, so the app
+        // must never be modeless: boot straight into a live session (tests
+        // construct `App::new` directly, so the invariant lives here rather
+        // than in `main`).
+        #[cfg(not(feature = "home"))]
+        app.start_new_session();
+        app
     }
 
     /// Welcome toast, shown only the first time the TUI runs: a marker
@@ -816,6 +831,20 @@ impl App {
     }
 
     // RAG helper methods (cfg-gated at method level, always compiles)
+    /// Whether the Home landing screen is built in AND currently shown.
+    /// Always `false` without the `home` feature, so Home branches fold away.
+    #[allow(unused_variables)]
+    fn is_home_mode(&self) -> bool {
+        #[cfg(feature = "home")]
+        {
+            matches!(self.mode(), AppMode::Home)
+        }
+        #[cfg(not(feature = "home"))]
+        {
+            false
+        }
+    }
+
     fn mode(&self) -> AppMode {
         #[cfg(feature = "embed")]
         if self.show_rag {
@@ -832,7 +861,14 @@ impl App {
         } else if self.state.current_session().is_some() {
             AppMode::Session
         } else {
-            AppMode::Home
+            #[cfg(feature = "home")]
+            {
+                AppMode::Home
+            }
+            #[cfg(not(feature = "home"))]
+            {
+                AppMode::Session
+            }
         }
     }
 

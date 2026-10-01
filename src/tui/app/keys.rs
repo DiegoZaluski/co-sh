@@ -9,6 +9,7 @@ use crate::component::prompt::PromptView;
 use crate::fallback;
 use crate::left_panel::sessions::SessionsAction;
 use crate::left_panel::{MIN_WIDTH_FOR_LEFT_PANEL, Mode};
+#[cfg(feature = "home")]
 use crate::routes::home::HomeAction;
 use crate::routes::router::FocusTarget;
 use crate::ui::dialogs::DialogType;
@@ -627,6 +628,7 @@ impl App {
             });
 
             // Home mode: navigation keys (skip when dialog is visible)
+            #[cfg(feature = "home")]
             if matches!(self.mode(), AppMode::Home) && !self.dialog.visible() {
                 match key.code {
                     KeyCode::Up => {
@@ -1421,19 +1423,34 @@ impl App {
                         return Ok(false);
                     }
                     if matches!(self.mode(), AppMode::Session) {
-                        self.state.current_session_id = None;
-                        // Back to Home: the header widget is gone, so its
-                        // state must not survive into the next session.
-                        self.hypercredit_balance = None;
-                        self.state.right_panel =
-                            crate::routes::session::right_panel::types::RightPanelState::new();
+                        #[cfg(feature = "home")]
+                        {
+                            self.state.current_session_id = None;
+                            // Back to Home: the header widget is gone, so its
+                            // state must not survive into the next session.
+                            self.hypercredit_balance = None;
+                            self.state.right_panel =
+                                crate::routes::session::right_panel::types::RightPanelState::new();
+                        }
+                        #[cfg(not(feature = "home"))]
+                        {
+                            // No Home screen to return to: Esc suggests
+                            // quitting the app instead.
+                            self.pending_delete = None;
+                            self.dialog.show(DialogType::Confirm {
+                                message: "Quit cosh?".into(),
+                            });
+                            if let Some(d) = self.dialog.current_mut() {
+                                d.selected = 1;
+                            }
+                        }
                     } else if matches!(self.mode(), AppMode::AddProvider) {
                         self.show_add_provider = false;
                     } else if matches!(self.mode(), AppMode::Settings) {
                         self.show_settings = false;
                     } else if self.is_rag_mode() {
                         self.handle_rag_cancel_action();
-                    } else if matches!(self.mode(), AppMode::Home) {
+                    } else if self.is_home_mode() {
                         self.pending_delete = None;
                         self.dialog.show(DialogType::Confirm {
                             message: "Quit cosh?".into(),

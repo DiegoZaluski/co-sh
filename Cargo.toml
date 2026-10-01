@@ -7,7 +7,11 @@ members = ["crates/cosh-onnx",
 ]
 
 [features]
-default = []
+# The Home landing screen (logo + main menu). Without it the app boots
+# straight into a session and the routes are reached through the slash menu.
+# ON by default; the slim build is `--no-default-features`.
+default = ["home"]
+home = []
 embed = ["cosh-tools/embed", "fastembed"]
 lancedb = ["cosh-recall/lancedb"]
 fastembed = ["cosh-recall/fastembed", "dep:fastembed"]
