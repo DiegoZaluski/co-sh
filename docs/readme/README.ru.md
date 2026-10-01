@@ -14,12 +14,12 @@ Cosh — универсальный coding agent для терминала с и
 
 ## Установка
 
-Протестировано на Linux и Windows. macOS пока не тестировалась — если что-то не сработает, [создайте issue](https://github.com/DiegoZaluski/cosh/issues) с максимально подробным описанием.
+Протестировано на Linux и Windows. macOS пока не тестировалась — если что-то не сработает, [создайте issue](https://github.com/DiegoZaluski/co-sh/issues) с максимально подробным описанием.
 
 **Linux, macOS, Windows (Git Bash / WSL):**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/DiegoZaluski/cosh/main/download.sh | bash
+curl -fsSL https://raw.githubusercontent.com/DiegoZaluski/co-sh/main/download.sh | bash
 ```
 
 Необязательные переменные: `COSH_BIN_DIR` (каталог установки), `COSH_VERSION` (конкретная версия) и `COSH_VARIANT` (`slim` — по умолчанию, или `slim-embed` — с локальным RAG через fastembed).
@@ -31,7 +31,7 @@ curl -fsSL https://raw.githubusercontent.com/DiegoZaluski/cosh/main/download.sh 
 | Крейт | Описание |
 |---|---|
 | [`cosh-tools`](../../crates/cosh-tools) | Инструменты разработки и computer tools |
-| [`cosh-tui`](../../crates/cosh-tui) | Терминальный интерфейс (Ratatui) |
+| [`cosh-tui`](../../crates/cosh-tui/README.md) | Библиотека TUI-виджетов (рендеринг markdown/diff, layout) — компоненты, на которых построен терминальный интерфейс приложения |
 | [`cosh-sdk`](../../crates/cosh-sdk) | SDK для создания агентов на базе cosh |
 | [`cosh-recall`](../../crates/cosh-recall) | Память и восстановление контекста |
 

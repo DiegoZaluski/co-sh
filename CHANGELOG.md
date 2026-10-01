@@ -26,5 +26,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and vector storage (`lancedb`).
 - `cosh-tui` — reusable TUI toolkit on top of ratatui.
 
-[Unreleased]: https://github.com/DiegoZaluski/cosh/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/DiegoZaluski/cosh/releases/tag/v0.1.0
+[Unreleased]: https://github.com/DiegoZaluski/co-sh/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/DiegoZaluski/co-sh/releases/tag/v0.1.0

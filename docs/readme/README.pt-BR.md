@@ -14,12 +14,12 @@ Destaques:
 
 ## Instalação
 
-Testado em Linux e Windows. macOS não foi testado ainda — se algo falhar, [abra uma issue](https://github.com/DiegoZaluski/cosh/issues) com o máximo de detalhes.
+Testado em Linux e Windows. macOS não foi testado ainda — se algo falhar, [abra uma issue](https://github.com/DiegoZaluski/co-sh/issues) com o máximo de detalhes.
 
 **Linux, macOS, Windows (Git Bash / WSL):**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/DiegoZaluski/cosh/main/download.sh | bash
+curl -fsSL https://raw.githubusercontent.com/DiegoZaluski/co-sh/main/download.sh | bash
 ```
 
 Variáveis opcionais: `COSH_BIN_DIR` (diretório de instalação), `COSH_VERSION` (versão específica) e `COSH_VARIANT` (`slim`, padrão, ou `slim-embed`, com RAG local via fastembed).
@@ -31,7 +31,7 @@ Depois de instalar, rode `cosh` no terminal. Se o diretório de instalação nã
 | Crate | Descrição |
 |---|---|
 | [`cosh-tools`](../../crates/cosh-tools) | Ferramentas de desenvolvimento e computer tools |
-| [`cosh-tui`](../../crates/cosh-tui) | Interface de terminal (Ratatui) |
+| [`cosh-tui`](../../crates/cosh-tui/README.md) | Biblioteca de widgets de TUI (renderização de markdown/diff, layout) — os componentes sobre os quais a interface de terminal do app é construída |
 | [`cosh-sdk`](../../crates/cosh-sdk) | SDK para construir agentes sobre o cosh |
 | [`cosh-recall`](../../crates/cosh-recall) | Memória e recall de contexto |
 

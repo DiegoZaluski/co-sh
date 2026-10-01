@@ -14,12 +14,12 @@ Cosh 是一个运行在终端中的通用编码智能体（coding agent），除
 
 ## 安装
 
-已在 Linux 和 Windows 上测试。macOS 尚未测试 — 如果遇到问题，请[提交 issue](https://github.com/DiegoZaluski/cosh/issues)，并尽可能详细描述。
+已在 Linux 和 Windows 上测试。macOS 尚未测试 — 如果遇到问题，请[提交 issue](https://github.com/DiegoZaluski/co-sh/issues)，并尽可能详细描述。
 
 **Linux、macOS、Windows（Git Bash / WSL）：**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/DiegoZaluski/cosh/main/download.sh | bash
+curl -fsSL https://raw.githubusercontent.com/DiegoZaluski/co-sh/main/download.sh | bash
 ```
 
 可选变量：`COSH_BIN_DIR`（安装目录）、`COSH_VERSION`（指定版本）和 `COSH_VARIANT`（`slim` 为默认，或 `slim-embed`，含基于 fastembed 的本地 RAG）。
@@ -31,7 +31,7 @@ curl -fsSL https://raw.githubusercontent.com/DiegoZaluski/cosh/main/download.sh 
 | Crate | 描述 |
 |---|---|
 | [`cosh-tools`](../../crates/cosh-tools) | 开发工具与 computer tools |
-| [`cosh-tui`](../../crates/cosh-tui) | 终端界面（Ratatui） |
+| [`cosh-tui`](../../crates/cosh-tui/README.md) | TUI 组件库（markdown/diff 渲染、布局）— 应用终端界面所基于的组件层 |
 | [`cosh-sdk`](../../crates/cosh-sdk) | 用于在 cosh 之上构建智能体的 SDK |
 | [`cosh-recall`](../../crates/cosh-recall) | 记忆与上下文召回 |
 

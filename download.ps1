@@ -6,7 +6,7 @@
 # Supported Architectures: x86_64 (x64)
 #
 # Usage:
-#   iwr -Uri "https://raw.githubusercontent.com/DiegoZaluski/cosh/main/download.ps1" -OutFile download.ps1; .\download.ps1
+#   iwr -Uri "https://raw.githubusercontent.com/DiegoZaluski/co-sh/main/download.ps1" -OutFile download.ps1; .\download.ps1
 #
 # Environment variables:
 #   $env:COSH_BIN_DIR  - Installation directory (default: $env:USERPROFILE\cosh)
@@ -15,11 +15,11 @@
 #                        "slim-embed" (local RAG via fastembed, no Home)
 #
 # Release artifacts are produced by .github/workflows/release.yml on tag push
-# (v*) and published at github.com/DiegoZaluski/cosh/releases.
+# (v*) and published at github.com/DiegoZaluski/co-sh/releases.
 
 $ErrorActionPreference = "Stop"
 
-$REPO = "DiegoZaluski/cosh"
+$REPO = "DiegoZaluski/co-sh"
 $OUT_FILE = "cosh.exe"
 
 if (-not $env:COSH_BIN_DIR) {

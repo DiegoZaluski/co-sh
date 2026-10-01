@@ -10,7 +10,7 @@ set -eu
 #   Note: Windows only supports x64
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/DiegoZaluski/cosh/main/download.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/DiegoZaluski/co-sh/main/download.sh | bash
 #
 # Environment variables:
 #   COSH_BIN_DIR  - Installation directory (default: $HOME/.local/bin, Windows: %USERPROFILE%/cosh)
@@ -20,9 +20,9 @@ set -eu
 #   INSTALL_OS    - Override OS detection: "linux", "darwin", or "win32"
 #
 # Release artifacts are produced by .github/workflows/release.yml on tag push
-# (v*) and published at github.com/DiegoZaluski/cosh/releases.
+# (v*) and published at github.com/DiegoZaluski/co-sh/releases.
 
-REPO="DiegoZaluski/cosh"
+REPO="DiegoZaluski/co-sh"
 OUT_FILE="cosh"
 
 if [[ "${WINDIR:-}" ]] || [[ "${windir:-}" ]] || [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "cygwin" ]]; then

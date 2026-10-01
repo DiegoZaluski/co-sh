@@ -192,7 +192,7 @@ jobs:
           VERSION="${GITHUB_REF_NAME}"
           gh release create "${VERSION}" \
             --title "${VERSION}" \
-            --notes "See the [changelog](https://github.com/DiegoZaluski/cosh/blob/main/CHANGELOG.md) for details." \
+            --notes "See the [changelog](https://github.com/DiegoZaluski/co-sh/blob/main/CHANGELOG.md) for details." \
             --verify-tag
 
       - name: Upload assets

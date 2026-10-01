@@ -1,4 +1,4 @@
-# cosh
+# co-sh
 
 **English** | [Português](./docs/readme/README.pt-BR.md) | [Español](./docs/readme/README.es.md) | [Русский](./docs/readme/README.ru.md) | [中文](./docs/readme/README.zh-CN.md) | [日本語](./docs/readme/README.ja.md)
 
@@ -14,12 +14,12 @@ Highlights:
 
 ## Installation
 
-Tested on Linux and Windows. macOS hasn't been tested yet — if anything fails, [open an issue](https://github.com/DiegoZaluski/cosh/issues) with as much detail as possible.
+Tested on Linux and Windows. macOS hasn't been tested yet — if anything fails, [open an issue](https://github.com/DiegoZaluski/co-sh/issues) with as much detail as possible.
 
 **Linux, macOS, Windows (Git Bash / WSL):**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/DiegoZaluski/cosh/main/download.sh | bash
+curl -fsSL https://raw.githubusercontent.com/DiegoZaluski/co-sh/main/download.sh | bash
 ```
 
 Optional variables: `COSH_BIN_DIR` (install directory), `COSH_VERSION` (specific version) and `COSH_VARIANT` (`slim`, the default, or `slim-embed`, with local RAG via fastembed).
@@ -30,10 +30,11 @@ After installing, run `cosh` in your terminal. If the install directory isn't on
 
 | Crate | Description |
 |---|---|
-| [`cosh-tools`](./crates/cosh-tools) | Development tools and computer tools |
-| [`cosh-tui`](./crates/cosh-tui) | Terminal interface (Ratatui) |
-| [`cosh-sdk`](./crates/cosh-sdk) | SDK for building agents on top of cosh |
-| [`cosh-recall`](./crates/cosh-recall) | Memory and context recall |
+| [`cosh-tools`](./crates/cosh-tools/README.md) | Development tools and computer tools |
+| [`cosh-tui`](./crates/cosh-tui/README.md) | TUI widget library (markdown/diff rendering, layout) — the components the app's terminal interface is built on |
+| [`cosh-sdk`](./crates/cosh-sdk/README.md) | SDK for building agents on top of cosh |
+| [`cosh-recall`](./crates/cosh-recall/README.md) | Memory and context recall |
+| [`cosh-onnx`](./crates/cosh-onnx/README.md) | ONNX decision engine (behind the `onnx` feature) |
 
 ## Roadmap
 
