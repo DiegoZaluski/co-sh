@@ -125,11 +125,7 @@ fn shortcuts_layout(area: Rect) -> ShortcutsLayout {
         .min(area.width.saturating_sub(6))
         .max(10);
 
-    let entries = SHORTCUTS.len();
-    let max_visible = (area.height.saturating_sub(4) as usize)
-        .min(entries)
-        .max(1)
-        .clamp(1, 20);
+    let max_visible = shortcuts_max_visible(area);
     let list_h = max_visible as u16;
     // Title row + gap row + list rows + padding top/bottom (no border).
     let dialog_h = 1 + 1 + list_h + 2;
@@ -143,6 +139,25 @@ fn shortcuts_layout(area: Rect) -> ShortcutsLayout {
         max_visible,
         key_col,
     }
+}
+
+/// Visible list rows of the Shortcuts overlay for the given frame size —
+/// the single definition used by both the layout and the scroll bounds.
+fn shortcuts_max_visible(area: Rect) -> usize {
+    (area.height.saturating_sub(4) as usize)
+        .min(SHORTCUTS.len())
+        .max(1)
+        .clamp(1, 20)
+}
+
+/// Upper scroll bound for the Shortcuts overlay: how many list rows exist
+/// beyond what fits on screen. Key handlers must clamp against this — the
+/// render clamps only its own local view (it receives the dialog by shared
+/// reference and cannot write the value back), so an unbounded scroll keeps
+/// climbing past it and the subsequent scroll-up sits "dead" on screen
+/// until the raw value crawls back under this ceiling.
+pub fn shortcuts_max_scroll(area: Rect) -> usize {
+    SHORTCUTS.len().saturating_sub(shortcuts_max_visible(area))
 }
 
 fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {

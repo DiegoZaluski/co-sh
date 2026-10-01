@@ -405,15 +405,25 @@ impl App {
                         if let Some(d) = self.dialog.current_mut()
                             && let DialogType::Shortcuts { scroll } = &mut d.dialog_type
                         {
+                            // Clamp to the top: an unbounded decrement is
+                            // harmless visually, but the DOWN arm below
+                            // would then need just as many presses to
+                            // crawl back under the ceiling before the
+                            // list visibly moves again.
                             *scroll = scroll.saturating_sub(1);
                         }
                         return Ok(false);
                     }
                     KeyCode::Down => {
+                        // The bound is read BEFORE the mutable dialog
+                        // borrow: terminal_size() takes &self, which would
+                        // conflict with current_mut() held across the call.
+                        let max_scroll =
+                            crate::ui::dialogs::shortcuts_max_scroll(self.terminal_size());
                         if let Some(d) = self.dialog.current_mut()
                             && let DialogType::Shortcuts { scroll } = &mut d.dialog_type
                         {
-                            *scroll = scroll.saturating_add(1);
+                            *scroll = (*scroll + 1).min(max_scroll);
                         }
                         return Ok(false);
                     }
@@ -431,10 +441,12 @@ impl App {
                         }
                     }
                     KeyCode::Char('j') => {
+                        let max_scroll =
+                            crate::ui::dialogs::shortcuts_max_scroll(self.terminal_size());
                         if let Some(d) = self.dialog.current_mut()
                             && let DialogType::Shortcuts { scroll } = &mut d.dialog_type
                         {
-                            *scroll = scroll.saturating_add(1);
+                            *scroll = (*scroll + 1).min(max_scroll);
                         }
                         return Ok(false);
                     }
