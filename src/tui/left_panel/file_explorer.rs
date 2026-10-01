@@ -24,6 +24,7 @@ use ratatui::style::{Modifier, Style};
 
 use super::explorer_status::{EntryStatus, GitFileStatus, LspFileStatus, StatusIndex};
 use crate::theme::{Theme, rgba_color};
+use crate::util::draw::draw_text_line;
 use crate::util::list_selection::ListSelection;
 
 /// Safety cap on the flattened row list: a pathological tree (deeply
@@ -323,7 +324,7 @@ impl FileExplorerView {
         } else {
             ""
         };
-        Self::draw_text_line(
+        draw_text_line(
             buf,
             &format!(" Explorer{scroll_hint}"),
             area.x + 1,
@@ -507,29 +508,6 @@ impl FileExplorerView {
                 cell.set_style(guide);
             }
             x += 1;
-        }
-    }
-
-    /// Same cell-writer the sessions list uses (control chars skipped, so
-    /// ratatui's buffer diff never panics on odd file names).
-    fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
-        let Some(right) = x.checked_add(max_w) else {
-            return;
-        };
-        for (i, ch) in text.chars().enumerate() {
-            if ch.is_control() {
-                continue;
-            }
-            let Some(cx) = x.checked_add(i as u16) else {
-                break;
-            };
-            if cx >= right {
-                break;
-            }
-            if let Some(cell) = buf.cell_mut((cx, y)) {
-                cell.set_char(ch);
-                cell.set_style(style);
-            }
         }
     }
 }

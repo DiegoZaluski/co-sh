@@ -12,6 +12,7 @@ use ratatui::style::{Color, Style};
 
 use crate::component::cursor::{Cursor, CursorState};
 use crate::theme::{Theme, rgba_color};
+use crate::util::draw::draw_text_line;
 use crate::util::markdown::render_markdown;
 
 use super::models::{CreateDbFocus, RagMode};
@@ -82,20 +83,6 @@ pub(crate) const DESC_POPUP_MIN_W: u16 = 30;
 pub(crate) const DESC_POPUP_MIN_H: u16 = 5;
 
 // Helpers
-
-fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
-    let right = x + max_w;
-    for (i, ch) in text.chars().enumerate() {
-        let cx = x + i as u16;
-        if cx >= right {
-            break;
-        }
-        if let Some(cell) = buf.cell_mut((cx, y)) {
-            cell.set_char(ch);
-            cell.set_style(style);
-        }
-    }
-}
 
 fn fill_rect(buf: &mut Buffer, x: u16, y: u16, w: u16, h: u16, style: Style) {
     for dy in 0..h {

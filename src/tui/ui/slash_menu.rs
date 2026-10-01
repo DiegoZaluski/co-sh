@@ -5,24 +5,11 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 
 use crate::theme::{Theme, rgba_color};
+use crate::util::draw::draw_text_line_compact;
 
 /// Maximum number of command rows the menu shows at once. More commands than
 /// this scroll inside the window ([`SlashMenu::visible_window`]).
 const MAX_ROWS: usize = 6;
-
-fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
-    let right = x + max_w;
-    for (i, ch) in text.chars().filter(|c| !c.is_control()).enumerate() {
-        let cx = x + i as u16;
-        if cx >= right {
-            break;
-        }
-        if let Some(cell) = buf.cell_mut((cx, y)) {
-            cell.set_char(ch);
-            cell.set_style(style);
-        }
-    }
-}
 
 fn draw_bg_line(buf: &mut Buffer, x: u16, y: u16, width: u16, color: Color) {
     for cx in x..(x + width) {
@@ -375,11 +362,11 @@ impl SlashMenu {
             let text_x = content_x + 1; // internal padding like OpenCode's paddingLeft
             let text_width = content_width.saturating_sub(2);
             if idxs.is_empty() {
-                draw_text_line(buf, &desc_text, text_x, row_y, text_width, desc_style);
+                draw_text_line_compact(buf, &desc_text, text_x, row_y, text_width, desc_style);
             } else {
-                draw_text_line(buf, &cmd_text, text_x, row_y, text_width, cmd_style);
+                draw_text_line_compact(buf, &cmd_text, text_x, row_y, text_width, cmd_style);
                 let desc_x = text_x + command_column_width as u16;
-                draw_text_line(
+                draw_text_line_compact(
                     buf,
                     &desc_text,
                     desc_x,

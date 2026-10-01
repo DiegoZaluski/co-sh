@@ -54,7 +54,7 @@ pub mod code {
 /// 1. **Flat string** (the approved schema's `decide` shape): `"english"`,
 ///    `"multilingual"`, `"typed-decisions"`.
 /// 2. **Custom object**: `{"custom": {"repo": "...", "subfolder": null}}`.
-/// 3. **The config shape** (`tui::util::setup::DecisionModel`, tagged by
+/// 3. **The config shape** (`cosh::setup::DecisionModel`, tagged by
 ///    `kind`, snake case): `{"kind": "custom", "repo": ..., "subfolder":
 ///    ...}` — accepted on input so the harness converts config → wire by
 ///    serde alone, with no translation map and no TUI dependency.

@@ -4,7 +4,7 @@ use std::time::Instant;
 use cosh_tui::core::lib::rgba::RGBA;
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 
 use super::{
     App, AppMode, BACK_LINK_TEXT, BUG_REPORT_TEXT, EMPTY_SESSION_PROMPT_MIN_WIDTH,
@@ -1116,7 +1116,7 @@ impl App {
         }
         // The hovered row swaps its queue color for pure WHITE so the focus
         // clearly stands out against every theme surface (and against the
-        // prompt box, which shares the element/panel colors). `contrast_on`
+        // prompt box, which shares the element/panel colors). `contrast_color`
         // flips the row text to black for readability.
         let hover_bg = RGBA::from_hex("#FFFFFF");
         // Both queue bands derive their background from the current mode's
@@ -1176,7 +1176,7 @@ impl App {
             if let Some(cap_w) = cap_w {
                 let cap_right = area.x + area.width - 1;
                 let cap_x = cap_right - cap_w;
-                let cap_fg = Self::contrast_on(cap_color);
+                let cap_fg = crate::theme::contrast_color(cap_color);
                 let fill_style = Style::default().bg(rgba_color(cap_color));
                 for cx in cap_x..cap_right {
                     if let Some(cell) = buf.cell_mut((cx, y)) {
@@ -1226,7 +1226,7 @@ impl App {
         if width < 6 {
             return;
         }
-        let fg = Self::contrast_on(bg);
+        let fg = crate::theme::contrast_color(bg);
         let bg_color = rgba_color(bg);
         // Side rails (┃) in the mode color on the neutral panel background —
         // the same hue the prompt box's own side borders use, so the queue
@@ -1289,18 +1289,6 @@ impl App {
                 }
             }
             cx += w;
-        }
-    }
-
-    /// Black or white depending on the background luminance (for readable
-    /// text on the colored pending-queue rows).
-    fn contrast_on(bg: RGBA) -> Color {
-        let (r, g, b, _) = bg.to_ints();
-        let lum = 0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b);
-        if lum > 128.0 {
-            Color::Rgb(0, 0, 0)
-        } else {
-            Color::Rgb(255, 255, 255)
         }
     }
 }

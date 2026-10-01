@@ -16,6 +16,7 @@ use crate::lsp_colors;
 use crate::state::AppState;
 use crate::theme::{Theme, rgba_color};
 use crate::types::{AgentColors, MessageRole, Part, Session};
+use crate::util::draw::draw_text_line;
 use crate::util::edit_history::{EditHistory, EditKind, RedoOutcome, UndoOutcome};
 
 const BASE_H: u16 = 2;
@@ -79,31 +80,7 @@ pub(crate) fn agent_mode_color(
     }
 }
 
-fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
-    let right = x + max_w;
-    for (i, ch) in text.chars().enumerate() {
-        let cx = x + i as u16;
-        if cx >= right {
-            break;
-        }
-        if let Some(cell) = buf.cell_mut((cx, y)) {
-            cell.set_char(ch);
-            cell.set_style(style);
-        }
-    }
-}
-
-/// Black or white depending on the background luminance, for readable text on
-/// the colored language tags (mirrors the pending-queue row helper).
-fn contrast_on(bg: RGBA) -> Color {
-    let (r, g, b, _) = bg.to_ints();
-    let lum = 0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b);
-    if lum > 128.0 {
-        Color::Rgb(0, 0, 0)
-    } else {
-        Color::Rgb(255, 255, 255)
-    }
-}
+use crate::theme::contrast_color;
 
 /// Draw the inline LSP status segment on the prompt footer: an `LSP` label
 /// followed by one colored tag per active server, or `disabled` when LSP is
@@ -149,7 +126,7 @@ fn draw_lsp_segment(
             Some((lbl, color)) => (lbl, color),
             None => (server.as_str(), theme.primary),
         };
-        let fg = contrast_on(bg);
+        let fg = contrast_color(bg);
         let bg_color = rgba_color(bg);
         let tag = format!(" {label} ");
         for (i, ch) in tag.chars().enumerate() {
@@ -1146,7 +1123,7 @@ impl PromptView {
                                 // unmistakably different selection intended
                                 // for correction. The prompt's normal copy
                                 // selection remains the familiar inversion.
-                                cell.set_fg(contrast_on(theme.accent));
+                                cell.set_fg(contrast_color(theme.accent));
                                 cell.set_bg(rgba_color(theme.accent));
                             } else {
                                 let fg = cell.fg;

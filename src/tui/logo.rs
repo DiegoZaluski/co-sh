@@ -1,3 +1,5 @@
+use crate::theme::blend_color;
+
 pub const LOGO_WIDTH: usize = 28;
 
 pub const LOGO: &[&str] = &[
@@ -709,26 +711,6 @@ fn float_color(
             blend_color(strobe, bg, 0.15 * (1.0 - settle))
         }
     }
-}
-
-fn blend_color(
-    fg: ratatui::style::Color,
-    bg: ratatui::style::Color,
-    amount: f64,
-) -> ratatui::style::Color {
-    let (r1, g1, b1) = match fg {
-        ratatui::style::Color::Rgb(r, g, b) => (r, g, b),
-        _ => (0, 0, 0),
-    };
-    let (r2, g2, b2) = match bg {
-        ratatui::style::Color::Rgb(r, g, b) => (r, g, b),
-        _ => (0, 0, 0),
-    };
-    ratatui::style::Color::Rgb(
-        (r1 as f64 * amount + r2 as f64 * (1.0 - amount)) as u8,
-        (g1 as f64 * amount + g2 as f64 * (1.0 - amount)) as u8,
-        (b1 as f64 * amount + b2 as f64 * (1.0 - amount)) as u8,
-    )
 }
 
 #[cfg(test)]

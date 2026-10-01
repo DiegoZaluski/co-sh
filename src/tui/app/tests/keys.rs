@@ -20,7 +20,7 @@ async fn toggled_mode_persists_and_restores_for_new_sessions() {
         .unwrap();
     assert_eq!(app.state.mode, Mode::Ask);
     assert_eq!(
-        crate::util::setup::Setup::load().persisted_mode(),
+        cosh::setup::Setup::load().persisted_mode(),
         Some(Mode::Ask),
         "the cycled-to mode must be saved as the preference"
     );

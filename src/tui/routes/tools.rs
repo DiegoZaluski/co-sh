@@ -9,11 +9,11 @@ use cosh_tui::core::types::MouseEvent;
 use crate::theme::{Theme, rgba_color};
 use crate::util::list_selection::ListSelection;
 
-pub fn load_disabled_tools(setup: &crate::util::setup::Setup) -> HashSet<String> {
+pub fn load_disabled_tools(setup: &cosh::setup::Setup) -> HashSet<String> {
     setup.tools.disabled.iter().cloned().collect()
 }
 
-pub fn save_disabled_tools(setup: &mut crate::util::setup::Setup, disabled: &HashSet<String>) {
+pub fn save_disabled_tools(setup: &mut cosh::setup::Setup, disabled: &HashSet<String>) {
     setup.tools.disabled = disabled.iter().cloned().collect();
     setup.save();
 }
@@ -21,7 +21,7 @@ pub fn save_disabled_tools(setup: &mut crate::util::setup::Setup, disabled: &Has
 /// Load the persisted tool-call mode. Unknown/missing values fall back to
 /// `Native` (the default contract).
 #[must_use]
-pub fn load_tool_call_mode(setup: &crate::util::setup::Setup) -> cosh_sdk::connector::ToolCallMode {
+pub fn load_tool_call_mode(setup: &cosh::setup::Setup) -> cosh_sdk::connector::ToolCallMode {
     match setup.tools.tool_call_mode.as_str() {
         "inline" => cosh_sdk::connector::ToolCallMode::Inline,
         _ => cosh_sdk::connector::ToolCallMode::Native,
@@ -29,7 +29,7 @@ pub fn load_tool_call_mode(setup: &crate::util::setup::Setup) -> cosh_sdk::conne
 }
 
 pub fn save_tool_call_mode(
-    setup: &mut crate::util::setup::Setup,
+    setup: &mut cosh::setup::Setup,
     mode: cosh_sdk::connector::ToolCallMode,
 ) {
     setup.tools.tool_call_mode = match mode {

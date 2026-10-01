@@ -1,6 +1,7 @@
 pub mod daemon;
 pub mod harness;
 pub mod mcp;
+pub mod setup;
 pub mod telemetry;
 pub mod uninstall;
 pub mod util;

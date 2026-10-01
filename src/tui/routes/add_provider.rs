@@ -10,7 +10,7 @@ use cosh_tui::core::types::MouseEvent;
 use crate::component::search_bar::SearchBar;
 use crate::theme::{Theme, rgba_color};
 use crate::util::list_selection::ListSelection;
-use crate::util::setup::Setup;
+use cosh::setup::Setup;
 
 /// A provider entry shown in the ADD Provider list. Local providers
 /// (ollama, llamacpp, …) are configured with a base URL; cloud providers with

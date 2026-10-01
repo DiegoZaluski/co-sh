@@ -28,6 +28,59 @@ pub fn blend(base: RGBA, accent: RGBA, t: f32) -> RGBA {
     RGBA::from_ints(mix(ar, br), mix(ag, bg_), mix(ab, bb), 255)
 }
 
+/// Perceived luminance (Rec. 601 weights) of an RGB triple on the 0–255
+/// scale. The single source of truth for every black-or-white contrast
+/// decision in the TUI (language tags, pending-queue rows, dialog
+/// indicators, question tabs).
+pub fn luminance(r: u8, g: u8, b: u8) -> f32 {
+    0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b)
+}
+
+/// Luminance pivot above which a background counts as "light" and takes
+/// black text instead of white.
+pub const CONTRAST_LUMINANCE_PIVOT: f32 = 128.0;
+
+/// Black or white [`Color`] with readable contrast on `bg`, for text drawn
+/// directly over a theme color (colored tags, indicators, rows).
+pub fn contrast_color(bg: RGBA) -> Color {
+    let (r, g, b, _) = bg.to_ints();
+    if luminance(r, g, b) > CONTRAST_LUMINANCE_PIVOT {
+        Color::Rgb(0, 0, 0)
+    } else {
+        Color::Rgb(255, 255, 255)
+    }
+}
+
+/// [`contrast_color`] for code paths that style through [`rgba_color`]
+/// afterwards: same decision, fully-opaque theme [`RGBA`] result.
+pub fn contrast_fg(bg: RGBA) -> RGBA {
+    let (r, g, b, _) = bg.to_ints();
+    if luminance(r, g, b) > CONTRAST_LUMINANCE_PIVOT {
+        RGBA::from_ints(0, 0, 0, 255)
+    } else {
+        RGBA::from_ints(255, 255, 255, 255)
+    }
+}
+
+/// [`blend`] for the ratatui [`Color`] API: RGB-only (non-RGB inputs fall
+/// back to black), `amount` = weight of `fg`. Used by logo float effects
+/// and home-screen decorations that work in raw `Color`s.
+pub fn blend_color(fg: Color, bg: Color, amount: f64) -> Color {
+    let (r1, g1, b1) = match fg {
+        Color::Rgb(r, g, b) => (r, g, b),
+        _ => (0, 0, 0),
+    };
+    let (r2, g2, b2) = match bg {
+        Color::Rgb(r, g, b) => (r, g, b),
+        _ => (0, 0, 0),
+    };
+    Color::Rgb(
+        (r1 as f64 * amount + r2 as f64 * (1.0 - amount)) as u8,
+        (g1 as f64 * amount + g2 as f64 * (1.0 - amount)) as u8,
+        (b1 as f64 * amount + b2 as f64 * (1.0 - amount)) as u8,
+    )
+}
+
 /// How far the muted-text slot lifts off the element background toward the
 /// text color. The right panel's header buttons and their delimiters rest
 /// on exactly this blend (`blend(background_element, text, MUTED_LIFT)`),

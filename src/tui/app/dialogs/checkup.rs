@@ -59,9 +59,9 @@ impl App {
                     .map_or(0, |d| d.selected.min(CHECKUP_MODEL_OPTIONS.len() - 1));
                 if let Some(kind) = CHECKUP_MODEL_OPTIONS.get(selected) {
                     self.setup.decision.model = match *kind {
-                        "multilingual" => crate::util::setup::DecisionModel::Multilingual,
-                        "typed-decisions" => crate::util::setup::DecisionModel::TypedDecisions,
-                        _ => crate::util::setup::DecisionModel::English,
+                        "multilingual" => cosh::setup::DecisionModel::Multilingual,
+                        "typed-decisions" => cosh::setup::DecisionModel::TypedDecisions,
+                        _ => cosh::setup::DecisionModel::English,
                     };
                     self.setup.save();
                 }

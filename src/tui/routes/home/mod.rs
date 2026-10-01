@@ -1,4 +1,5 @@
 use crate::logo::{LOGO, LOGO_WIDTH};
+use crate::util::draw::draw_text_line;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
@@ -9,37 +10,7 @@ pub use banner::{BannerAction, BannerContent, BannerView, UpdateStatus};
 
 use cosh_tui::core::types::MouseEvent;
 
-use crate::theme::{Theme, rgba_color};
-
-fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
-    let right = x + max_w;
-    for (i, ch) in text.chars().enumerate() {
-        let cx = x + i as u16;
-        if cx >= right {
-            break;
-        }
-        if let Some(cell) = buf.cell_mut((cx, y)) {
-            cell.set_char(ch);
-            cell.set_style(style);
-        }
-    }
-}
-
-fn blend_color(fg: Color, bg: Color, amount: f64) -> Color {
-    let (r1, g1, b1) = match fg {
-        Color::Rgb(r, g, b) => (r, g, b),
-        _ => (0, 0, 0),
-    };
-    let (r2, g2, b2) = match bg {
-        Color::Rgb(r, g, b) => (r, g, b),
-        _ => (0, 0, 0),
-    };
-    Color::Rgb(
-        (r1 as f64 * amount + r2 as f64 * (1.0 - amount)) as u8,
-        (g1 as f64 * amount + g2 as f64 * (1.0 - amount)) as u8,
-        (b1 as f64 * amount + b2 as f64 * (1.0 - amount)) as u8,
-    )
-}
+use crate::theme::{Theme, blend_color, rgba_color};
 
 fn render_logo(
     buf: &mut Buffer,
@@ -160,8 +131,11 @@ impl HomeView {
         };
     }
 
-    pub const fn selected_action(&self) -> HomeAction {
-        match self.selected_index {
+    /// Single source of truth for the menu's index → action mapping: the
+    /// keyboard selection and the mouse row hit-test must agree on which
+    /// row opens what (feature-gated entries included).
+    pub const fn action_for_index(index: usize) -> HomeAction {
+        match index {
             0 => HomeAction::NewSession,
             #[cfg(feature = "embed")]
             1 => HomeAction::OpenRag,
@@ -183,6 +157,10 @@ impl HomeView {
             4 => HomeAction::OpenSettings,
             _ => HomeAction::OpenAddProvider,
         }
+    }
+
+    pub const fn selected_action(&self) -> HomeAction {
+        Self::action_for_index(self.selected_index)
     }
 
     pub fn handle_mouse(&self, mouse: &MouseEvent, area: Rect) -> Option<HomeAction> {
@@ -209,28 +187,7 @@ impl HomeView {
         for (i, _item) in MENU_ITEMS.iter().enumerate() {
             let item_y = menu_y + i as u16;
             if my == item_y && mx >= menu_left && mx < menu_left + max_entry_len as u16 {
-                return Some(match i {
-                    0 => HomeAction::NewSession,
-                    #[cfg(feature = "embed")]
-                    1 => HomeAction::OpenRag,
-                    #[cfg(feature = "embed")]
-                    2 => HomeAction::OpenModelRouter,
-                    #[cfg(feature = "embed")]
-                    3 => HomeAction::OpenInternalTools,
-                    #[cfg(feature = "embed")]
-                    4 => HomeAction::OpenAddProvider,
-                    #[cfg(feature = "embed")]
-                    5 => HomeAction::OpenSettings,
-                    #[cfg(not(feature = "embed"))]
-                    1 => HomeAction::OpenModelRouter,
-                    #[cfg(not(feature = "embed"))]
-                    2 => HomeAction::OpenInternalTools,
-                    #[cfg(not(feature = "embed"))]
-                    3 => HomeAction::OpenAddProvider,
-                    #[cfg(not(feature = "embed"))]
-                    4 => HomeAction::OpenSettings,
-                    _ => HomeAction::OpenAddProvider,
-                });
+                return Some(Self::action_for_index(i));
             }
         }
 

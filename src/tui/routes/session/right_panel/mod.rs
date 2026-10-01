@@ -7,7 +7,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 
-use crate::theme::{Theme, blend, rgba_color};
+use crate::theme::{Theme, blend, contrast_fg, rgba_color};
 use crate::util::text_region::{TextRegion, text_from_cell_row};
 
 pub mod todo;
@@ -25,17 +25,6 @@ use std::collections::HashMap;
 use cosh_tools::subagent::events::{PlanEntryStatus, ToolCallStatus};
 
 use crate::component::spinner_highlight::HighlightSpinner;
-
-/// Black-or-white text color with readable contrast on `bg`.
-fn contrast_fg(bg: RGBA) -> RGBA {
-    let (r, g, b, _) = bg.to_ints();
-    let lum = 0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b);
-    if lum > 128.0 {
-        RGBA::from_ints(0, 0, 0, 255)
-    } else {
-        RGBA::from_ints(255, 255, 255, 255)
-    }
-}
 
 /// Opacity of the severity background tint: how much of the verdict color
 /// mixes into the window's background. Raised from the original 0.18: the

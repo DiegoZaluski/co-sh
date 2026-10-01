@@ -56,10 +56,7 @@ async fn summarizer_selection_and_cancel_never_change_the_agent_model() {
     assert_eq!(app.llm_config.reasoning.as_deref(), Some("high"));
     assert_eq!(serde_json::to_value(&app.setup.model).unwrap(), original);
     assert_eq!(
-        crate::util::setup::Setup::load()
-            .routing
-            .summarization_models[0]
-            .model,
+        cosh::setup::Setup::load().routing.summarization_models[0].model,
         "summary-model"
     );
 }
@@ -182,7 +179,7 @@ async fn manual_compaction_resolves_only_explicit_summary_models_or_the_auto_cha
     let mut app = App::new("/tmp".into());
     app.llm_config.model = Some("explicit-agent".into());
     assert!(app.manual_summarization_models().is_empty());
-    app.router_view.fallbacks = vec![crate::util::setup::FallbackEntry {
+    app.router_view.fallbacks = vec![cosh::setup::FallbackEntry {
         provider: "local".into(),
         model: "auto-choice".into(),
     }];
@@ -191,7 +188,7 @@ async fn manual_compaction_resolves_only_explicit_summary_models_or_the_auto_cha
         app.manual_summarization_models(),
         vec![("local".into(), "auto-choice".into())]
     );
-    app.setup.routing.summarization_models = vec![crate::util::setup::FallbackEntry {
+    app.setup.routing.summarization_models = vec![cosh::setup::FallbackEntry {
         provider: "chosen".into(),
         model: "summary".into(),
     }];

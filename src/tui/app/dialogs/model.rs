@@ -305,7 +305,7 @@ impl App {
             if model == "auto" || model.trim().is_empty() || provider.trim().is_empty() {
                 return;
             }
-            let entry = crate::util::setup::FallbackEntry {
+            let entry = cosh::setup::FallbackEntry {
                 provider: provider.to_string(),
                 model: model.to_string(),
             };

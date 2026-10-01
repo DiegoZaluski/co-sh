@@ -14,6 +14,7 @@ use cosh_tui::core::types::MouseEvent;
 use crate::component::cursor::{Cursor, CursorState};
 use crate::component::spinner::SpinnerState;
 use crate::theme::{Theme, rgba_color};
+use crate::util::draw::draw_text_line_compact;
 use crate::util::field_selection::DragSelection;
 
 /// Hint drawn next to the spinner while the ModelList waits on the
@@ -25,6 +26,60 @@ const MODEL_LIST_LOADING_HINT: &str = "Loading models";
 enum VisualItem {
     Header(String),
     Model(ModelEntry),
+}
+
+/// Paint the dialog surface: fill the rect with spaces on `bg`, strip every
+/// modifier (a dialog is a clean slate — no lingering bold/underline from
+/// whatever was underneath) and opt every cell out of the diff pipeline so
+/// the frame is redrawn as a unit.
+fn clear_dialog_surface(buf: &mut Buffer, area: Rect, bg: Color) {
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_char(' ');
+                cell.set_style(Style::default().bg(bg).remove_modifier(Modifier::all()));
+                cell.set_diff_option(CellDiffOption::None);
+            }
+        }
+    }
+}
+
+/// Rounded dialog frame: `─` top/bottom edges, `│` side edges and `╭ ╮ ╰ ╯`
+/// corners in `border_color`. Everything one cell inside `area`.
+fn draw_rounded_border(buf: &mut Buffer, area: Rect, border_color: Color) {
+    let max_x = area.x + area.width - 1;
+    let max_y = area.y + area.height - 1;
+
+    for x in (area.x + 1)..max_x {
+        for y in [area.y, max_y] {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_char('\u{2500}');
+                cell.set_style(Style::default().fg(border_color));
+            }
+        }
+    }
+
+    for y in (area.y + 1)..max_y {
+        for x in [area.x, max_x] {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_char('\u{2502}');
+                cell.set_style(Style::default().fg(border_color));
+            }
+        }
+    }
+
+    let corners = [
+        (area.x, area.y, '\u{256D}'),
+        (max_x, area.y, '\u{256E}'),
+        (area.x, max_y, '\u{2570}'),
+        (max_x, max_y, '\u{256F}'),
+    ];
+    for (cx, cy, ch) in corners {
+        if let Some(cell) = buf.cell_mut((cx, cy)) {
+            cell.set_char(ch);
+            cell.set_style(Style::default().fg(border_color));
+        }
+    }
 }
 
 /// Whether a model entry matches the `/models` search filter: the filter
@@ -144,19 +199,6 @@ fn shortcuts_layout(area: Rect) -> ShortcutsLayout {
     }
 }
 
-fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
-    let right = x + max_w;
-    for (i, ch) in text.chars().filter(|c| !c.is_control()).enumerate() {
-        let cx = x + i as u16;
-        if cx >= right {
-            break;
-        }
-        if let Some(cell) = buf.cell_mut((cx, y)) {
-            cell.set_char(ch);
-            cell.set_style(style);
-        }
-    }
-}
 /// Message and option row of the [`DialogType::ProviderKeyChoice`] box,
 /// drawn inside the border the caller already painted (message at +2,
 /// "Forget key" / "Overwrite key" side by side at +4 — the selected option
@@ -176,7 +218,7 @@ fn draw_provider_key_choice_content(
     gap: u16,
 ) {
     let msg_x = dialog_x + (dialog_w.saturating_sub(message.len() as u16)) / 2;
-    draw_text_line(
+    draw_text_line_compact(
         buf,
         message,
         msg_x,
@@ -195,7 +237,7 @@ fn draw_provider_key_choice_content(
     } else {
         Style::default().fg(rgba_color(theme.text_muted))
     };
-    draw_text_line(
+    draw_text_line_compact(
         buf,
         opt_forget,
         opts_x,
@@ -211,7 +253,7 @@ fn draw_provider_key_choice_content(
     } else {
         Style::default().fg(rgba_color(theme.text_muted))
     };
-    draw_text_line(
+    draw_text_line_compact(
         buf,
         opt_overwrite,
         opts_x + opt_forget.len() as u16 + gap,
@@ -241,26 +283,18 @@ fn render_rename_session_dialog(
     // Solid background panel — the same color as the history sidebar, a bare
     // floating surface with no border characters.
     let bg_color = rgba_color(theme.background_panel);
-    for y in dialog_y..dialog_y + dialog_h {
-        for x in dialog_x..dialog_x + dialog_w {
-            if let Some(cell) = buf.cell_mut((x, y)) {
-                cell.set_char(' ');
-                cell.set_style(
-                    Style::default()
-                        .bg(bg_color)
-                        .remove_modifier(Modifier::all()),
-                );
-                cell.set_diff_option(CellDiffOption::None);
-            }
-        }
-    }
+    clear_dialog_surface(
+        buf,
+        Rect::new(dialog_x, dialog_y, dialog_w, dialog_h),
+        bg_color,
+    );
 
     let content_x = dialog_x + 2;
     let content_w = dialog_w.saturating_sub(4);
 
     // Header row (below the top padding): bold title left, muted "esc" right.
     let header_y = dialog_y + 1;
-    draw_text_line(
+    draw_text_line_compact(
         buf,
         "Rename Session",
         content_x,
@@ -271,7 +305,7 @@ fn render_rename_session_dialog(
             .add_modifier(Modifier::BOLD),
     );
     let esc_hint = "esc";
-    draw_text_line(
+    draw_text_line_compact(
         buf,
         esc_hint,
         dialog_x + dialog_w - 2 - esc_hint.len() as u16,
@@ -315,7 +349,7 @@ fn render_rename_session_dialog(
     // padding row above the panel's bottom edge.
     let submit_y = dialog_y + dialog_h - 2;
     let enter_hint = "enter";
-    draw_text_line(
+    draw_text_line_compact(
         buf,
         enter_hint,
         content_x,
@@ -323,7 +357,7 @@ fn render_rename_session_dialog(
         content_w,
         Style::default().fg(rgba_color(theme.text)),
     );
-    draw_text_line(
+    draw_text_line_compact(
         buf,
         " submit",
         content_x + enter_hint.len() as u16,
@@ -1471,7 +1505,7 @@ impl DialogState {
                 bg.set_border_color(Some(theme.border_active.into()));
                 bg.render_self(buf, dialog_area);
 
-                draw_text_line(
+                draw_text_line_compact(
                     buf,
                     message,
                     dialog_x + 2,
@@ -1483,7 +1517,7 @@ impl DialogState {
                 let ok_text = "[ OK ]";
                 let ok_x = dialog_x + dialog_w.saturating_sub(ok_text.len() as u16) / 2;
                 let ok_style = Style::default().fg(rgba_color(theme.primary));
-                draw_text_line(
+                draw_text_line_compact(
                     buf,
                     ok_text,
                     ok_x,
@@ -1503,66 +1537,17 @@ impl DialogState {
 
                 // Fill interior with theme background
                 let bg_color = rgba_color(theme.background);
-                for y in dialog_y..dialog_y + dialog_h {
-                    for x in dialog_x..dialog_x + dialog_w {
-                        if let Some(cell) = buf.cell_mut((x, y)) {
-                            cell.set_char(' ');
-                            cell.set_style(
-                                Style::default()
-                                    .bg(bg_color)
-                                    .remove_modifier(Modifier::all()),
-                            );
-                            cell.set_diff_option(CellDiffOption::None);
-                        }
-                    }
-                }
+                clear_dialog_surface(
+                    buf,
+                    Rect::new(dialog_x, dialog_y, dialog_w, dialog_h),
+                    bg_color,
+                );
 
-                // Draw border using theme color
-                let border_color = rgba_color(theme.border_active);
-                let max_x = dialog_x + dialog_w - 1;
-                let max_y = dialog_y + dialog_h - 1;
-
-                // Top & bottom horizontal lines
-                for x in (dialog_x + 1)..max_x {
-                    if let Some(cell) = buf.cell_mut((x, dialog_y)) {
-                        cell.set_char('\u{2500}');
-                        cell.set_style(Style::default().fg(border_color));
-                    }
-                    if let Some(cell) = buf.cell_mut((x, max_y)) {
-                        cell.set_char('\u{2500}');
-                        cell.set_style(Style::default().fg(border_color));
-                    }
-                }
-
-                // Left & right vertical lines
-                for y in (dialog_y + 1)..max_y {
-                    if let Some(cell) = buf.cell_mut((dialog_x, y)) {
-                        cell.set_char('\u{2502}');
-                        cell.set_style(Style::default().fg(border_color));
-                    }
-                    if let Some(cell) = buf.cell_mut((max_x, y)) {
-                        cell.set_char('\u{2502}');
-                        cell.set_style(Style::default().fg(border_color));
-                    }
-                }
-
-                // Corners (rounded)
-                if let Some(cell) = buf.cell_mut((dialog_x, dialog_y)) {
-                    cell.set_char('\u{256D}');
-                    cell.set_style(Style::default().fg(border_color));
-                }
-                if let Some(cell) = buf.cell_mut((max_x, dialog_y)) {
-                    cell.set_char('\u{256E}');
-                    cell.set_style(Style::default().fg(border_color));
-                }
-                if let Some(cell) = buf.cell_mut((dialog_x, max_y)) {
-                    cell.set_char('\u{2570}');
-                    cell.set_style(Style::default().fg(border_color));
-                }
-                if let Some(cell) = buf.cell_mut((max_x, max_y)) {
-                    cell.set_char('\u{256F}');
-                    cell.set_style(Style::default().fg(border_color));
-                }
+                draw_rounded_border(
+                    buf,
+                    Rect::new(dialog_x, dialog_y, dialog_w, dialog_h),
+                    rgba_color(theme.border_active),
+                );
 
                 // Content is INSIDE the border (1 row padding top/bottom)
                 // Center each message line at rows dialog_y + 2.. — a `\n`
@@ -1572,7 +1557,7 @@ impl DialogState {
                 for (i, line) in lines.iter().enumerate() {
                     let line_w = line.chars().count() as u16;
                     let msg_x = dialog_x + (dialog_w.saturating_sub(line_w)) / 2;
-                    draw_text_line(
+                    draw_text_line_compact(
                         buf,
                         line,
                         msg_x,
@@ -1597,7 +1582,7 @@ impl DialogState {
                 } else {
                     Style::default().fg(rgba_color(theme.text_muted))
                 };
-                draw_text_line(
+                draw_text_line_compact(
                     buf,
                     opt_yes,
                     opts_x,
@@ -1613,7 +1598,7 @@ impl DialogState {
                 } else {
                     Style::default().fg(rgba_color(theme.text_muted))
                 };
-                draw_text_line(
+                draw_text_line_compact(
                     buf,
                     opt_no,
                     opts_x + opt_yes.len() as u16 + gap,
@@ -1645,66 +1630,17 @@ impl DialogState {
 
                 // Fill interior with theme background
                 let bg_color = rgba_color(theme.background);
-                for y in dialog_y..dialog_y + dialog_h {
-                    for x in dialog_x..dialog_x + dialog_w {
-                        if let Some(cell) = buf.cell_mut((x, y)) {
-                            cell.set_char(' ');
-                            cell.set_style(
-                                Style::default()
-                                    .bg(bg_color)
-                                    .remove_modifier(Modifier::all()),
-                            );
-                            cell.set_diff_option(CellDiffOption::None);
-                        }
-                    }
-                }
+                clear_dialog_surface(
+                    buf,
+                    Rect::new(dialog_x, dialog_y, dialog_w, dialog_h),
+                    bg_color,
+                );
 
-                // Draw border using theme color
-                let border_color = rgba_color(theme.border_active);
-                let max_x = dialog_x + dialog_w - 1;
-                let max_y = dialog_y + dialog_h - 1;
-
-                // Top & bottom horizontal lines
-                for x in (dialog_x + 1)..max_x {
-                    if let Some(cell) = buf.cell_mut((x, dialog_y)) {
-                        cell.set_char('\u{2500}');
-                        cell.set_style(Style::default().fg(border_color));
-                    }
-                    if let Some(cell) = buf.cell_mut((x, max_y)) {
-                        cell.set_char('\u{2500}');
-                        cell.set_style(Style::default().fg(border_color));
-                    }
-                }
-
-                // Left & right vertical lines
-                for y in (dialog_y + 1)..max_y {
-                    if let Some(cell) = buf.cell_mut((dialog_x, y)) {
-                        cell.set_char('\u{2502}');
-                        cell.set_style(Style::default().fg(border_color));
-                    }
-                    if let Some(cell) = buf.cell_mut((max_x, y)) {
-                        cell.set_char('\u{2502}');
-                        cell.set_style(Style::default().fg(border_color));
-                    }
-                }
-
-                // Corners (rounded)
-                if let Some(cell) = buf.cell_mut((dialog_x, dialog_y)) {
-                    cell.set_char('\u{256D}');
-                    cell.set_style(Style::default().fg(border_color));
-                }
-                if let Some(cell) = buf.cell_mut((max_x, dialog_y)) {
-                    cell.set_char('\u{256E}');
-                    cell.set_style(Style::default().fg(border_color));
-                }
-                if let Some(cell) = buf.cell_mut((dialog_x, max_y)) {
-                    cell.set_char('\u{2570}');
-                    cell.set_style(Style::default().fg(border_color));
-                }
-                if let Some(cell) = buf.cell_mut((max_x, max_y)) {
-                    cell.set_char('\u{256F}');
-                    cell.set_style(Style::default().fg(border_color));
-                }
+                draw_rounded_border(
+                    buf,
+                    Rect::new(dialog_x, dialog_y, dialog_w, dialog_h),
+                    rgba_color(theme.border_active),
+                );
 
                 draw_provider_key_choice_content(
                     buf,
@@ -1761,19 +1697,7 @@ impl DialogState {
 
                 // Fill background (NO border - original DialogSelect has no border)
                 let bg_color = rgba_color(theme.background_element);
-                for y in dialog_area.y..dialog_area.bottom() {
-                    for x in dialog_area.x..dialog_area.right() {
-                        if let Some(cell) = buf.cell_mut((x, y)) {
-                            cell.set_char(' ');
-                            cell.set_style(
-                                Style::default()
-                                    .bg(bg_color)
-                                    .remove_modifier(Modifier::all()),
-                            );
-                            cell.set_diff_option(CellDiffOption::None);
-                        }
-                    }
-                }
+                clear_dialog_surface(buf, dialog_area, bg_color);
 
                 // Header area (paddingLeft=4, paddingRight=4 like original)
                 let header_pad = 4;
@@ -1784,10 +1708,10 @@ impl DialogState {
                 let title_style = Style::default()
                     .fg(rgba_color(theme.text))
                     .add_modifier(Modifier::BOLD);
-                draw_text_line(buf, "Themes", header_x, dialog_y, header_w, title_style);
+                draw_text_line_compact(buf, "Themes", header_x, dialog_y, header_w, title_style);
                 let esc_label = "esc";
                 let esc_x = header_x + header_w.saturating_sub(esc_label.len() as u16);
-                draw_text_line(
+                draw_text_line_compact(
                     buf,
                     esc_label,
                     esc_x,
@@ -1811,7 +1735,7 @@ impl DialogState {
                 // Show "Search" when empty, otherwise show filter text + cursor
                 let has_filter = !filter.is_empty();
                 if has_filter {
-                    draw_text_line(
+                    draw_text_line_compact(
                         buf,
                         filter.as_str(),
                         header_x,
@@ -1847,7 +1771,7 @@ impl DialogState {
                 } else {
                     // Show "Search" label when filter is empty
                     let search_label = "Search";
-                    draw_text_line(
+                    draw_text_line_compact(
                         buf,
                         search_label,
                         header_x,
@@ -1891,7 +1815,7 @@ impl DialogState {
                 let list_w = dialog_w.saturating_sub(list_pad * 2);
 
                 if filtered.is_empty() {
-                    draw_text_line(
+                    draw_text_line_compact(
                         buf,
                         "No matching themes",
                         list_x,
@@ -2000,7 +1924,7 @@ impl DialogState {
                         } else {
                             (rgba_color(theme.text), bg_element)
                         };
-                        draw_text_line(
+                        draw_text_line_compact(
                             buf,
                             theme_name,
                             list_x + 2,
@@ -2028,26 +1952,18 @@ impl DialogState {
                 // Fill background with the same panel color as the left
                 // sidebar, so the dialog matches the app's left panel.
                 let bg_color = rgba_color(theme.background_panel);
-                for y in dialog_y..dialog_y + dialog_h {
-                    for x in dialog_x..dialog_x + dialog_w {
-                        if let Some(cell) = buf.cell_mut((x, y)) {
-                            cell.set_char(' ');
-                            cell.set_style(
-                                Style::default()
-                                    .bg(bg_color)
-                                    .remove_modifier(Modifier::all()),
-                            );
-                            cell.set_diff_option(CellDiffOption::None);
-                        }
-                    }
-                }
+                clear_dialog_surface(
+                    buf,
+                    Rect::new(dialog_x, dialog_y, dialog_w, dialog_h),
+                    bg_color,
+                );
 
                 // Title line — main title of the box, wearing the theme's
                 // primary as a background so it gets its own color band.
                 let title_text = " Keyboard Shortcuts ";
                 let title_fg = hook_marker_fg(theme);
                 let title_bg = rgba_color(theme.primary);
-                draw_text_line(
+                draw_text_line_compact(
                     buf,
                     title_text,
                     dialog_x + 2,
@@ -2079,7 +1995,7 @@ impl DialogState {
                             // Scope title, full width, same color as the dialog title
                             let head_x = dialog_x + 2;
                             let head_w = dialog_w.saturating_sub(4);
-                            draw_text_line(
+                            draw_text_line_compact(
                                 buf,
                                 title,
                                 head_x,
@@ -2093,7 +2009,7 @@ impl DialogState {
                             // the longest binding)
                             let key_x = dialog_x + 2;
                             let key_w = key_col;
-                            draw_text_line(
+                            draw_text_line_compact(
                                 buf,
                                 key_str,
                                 key_x,
@@ -2106,7 +2022,7 @@ impl DialogState {
                             let desc_x = key_x + key_w + 1;
                             let desc_w =
                                 dialog_w.saturating_sub(2).saturating_sub(desc_x - dialog_x);
-                            draw_text_line(
+                            draw_text_line_compact(
                                 buf,
                                 desc,
                                 desc_x,
@@ -2348,19 +2264,7 @@ impl DialogState {
 
                 // Fill background (NO border - original DialogSelect has no border)
                 let bg_color = rgba_color(theme.background_element);
-                for y in dialog_area.y..dialog_area.bottom() {
-                    for x in dialog_area.x..dialog_area.right() {
-                        if let Some(cell) = buf.cell_mut((x, y)) {
-                            cell.set_char(' ');
-                            cell.set_style(
-                                Style::default()
-                                    .bg(bg_color)
-                                    .remove_modifier(Modifier::all()),
-                            );
-                            cell.set_diff_option(CellDiffOption::None);
-                        }
-                    }
-                }
+                clear_dialog_surface(buf, dialog_area, bg_color);
 
                 // Header area (paddingLeft=4, paddingRight=4 like original)
                 let header_pad = 4;
@@ -2371,10 +2275,10 @@ impl DialogState {
                 let title_style = Style::default()
                     .fg(rgba_color(theme.text))
                     .add_modifier(Modifier::BOLD);
-                draw_text_line(buf, "Models", header_x, dialog_y, header_w, title_style);
+                draw_text_line_compact(buf, "Models", header_x, dialog_y, header_w, title_style);
                 let esc_label = "esc";
                 let esc_x = header_x + header_w.saturating_sub(esc_label.len() as u16);
-                draw_text_line(
+                draw_text_line_compact(
                     buf,
                     esc_label,
                     esc_x,
@@ -2398,7 +2302,7 @@ impl DialogState {
                 // Show "Search" when empty, otherwise show filter text + cursor
                 let has_filter = !filter.is_empty();
                 if has_filter {
-                    draw_text_line(
+                    draw_text_line_compact(
                         buf,
                         filter.as_str(),
                         header_x,
@@ -2434,7 +2338,7 @@ impl DialogState {
                 } else {
                     // Show "Search" label when filter is empty
                     let search_label = "Search";
-                    draw_text_line(
+                    draw_text_line_compact(
                         buf,
                         search_label,
                         header_x,
@@ -2488,7 +2392,7 @@ impl DialogState {
                         cell.set_char(instance.spinner.current_char());
                         cell.set_style(Style::default().fg(rgba_color(theme.primary)));
                     }
-                    draw_text_line(
+                    draw_text_line_compact(
                         buf,
                         MODEL_LIST_LOADING_HINT,
                         list_x + 2,
@@ -2497,7 +2401,7 @@ impl DialogState {
                         Style::default().fg(rgba_color(theme.text_muted)),
                     );
                 } else if flat_entries.is_empty() {
-                    draw_text_line(
+                    draw_text_line_compact(
                         buf,
                         "No matching models",
                         list_x,
@@ -2562,7 +2466,7 @@ impl DialogState {
                                     let header_style = Style::default()
                                         .fg(rgba_color(theme.text_muted))
                                         .add_modifier(Modifier::BOLD);
-                                    draw_text_line(
+                                    draw_text_line_compact(
                                         buf,
                                         provider,
                                         list_x,
@@ -2669,7 +2573,7 @@ impl DialogState {
                                     } else {
                                         (rgba_color(theme.text), bg_element)
                                     };
-                                    draw_text_line(
+                                    draw_text_line_compact(
                                         buf,
                                         display_name,
                                         list_x + 2,
@@ -2714,19 +2618,7 @@ impl DialogState {
 
                 // Fill background (same borderless style as the other lists).
                 let bg_color = rgba_color(theme.background_element);
-                for y in dialog_area.y..dialog_area.bottom() {
-                    for x in dialog_area.x..dialog_area.right() {
-                        if let Some(cell) = buf.cell_mut((x, y)) {
-                            cell.set_char(' ');
-                            cell.set_style(
-                                Style::default()
-                                    .bg(bg_color)
-                                    .remove_modifier(Modifier::all()),
-                            );
-                            cell.set_diff_option(CellDiffOption::None);
-                        }
-                    }
-                }
+                clear_dialog_surface(buf, dialog_area, bg_color);
 
                 let header_pad = 4;
                 let header_x = dialog_x + header_pad;
@@ -2736,10 +2628,10 @@ impl DialogState {
                 let title_style = Style::default()
                     .fg(rgba_color(theme.text))
                     .add_modifier(Modifier::BOLD);
-                draw_text_line(buf, "Reasoning", header_x, dialog_y, header_w, title_style);
+                draw_text_line_compact(buf, "Reasoning", header_x, dialog_y, header_w, title_style);
                 let esc_label = "esc";
                 let esc_x = header_x + header_w.saturating_sub(esc_label.len() as u16);
-                draw_text_line(
+                draw_text_line_compact(
                     buf,
                     esc_label,
                     esc_x,
@@ -2750,7 +2642,7 @@ impl DialogState {
 
                 // Line 1: the picked model (muted, may be long — truncate).
                 let model_style = Style::default().fg(rgba_color(theme.text_muted));
-                draw_text_line(buf, model, header_x, dialog_y + 1, header_w, model_style);
+                draw_text_line_compact(buf, model, header_x, dialog_y + 1, header_w, model_style);
 
                 // Line 2: gap.
 
@@ -2842,7 +2734,7 @@ impl DialogState {
                     } else {
                         (rgba_color(theme.text), bg_element)
                     };
-                    draw_text_line(
+                    draw_text_line_compact(
                         buf,
                         &label,
                         list_x + 2,
@@ -2866,19 +2758,7 @@ impl DialogState {
                 let dialog_area = Rect::new(dialog_x, dialog_y, dialog_w, dialog_h);
 
                 let bg_color = rgba_color(theme.background_panel);
-                for y in dialog_area.y..dialog_area.bottom() {
-                    for x in dialog_area.x..dialog_area.right() {
-                        if let Some(cell) = buf.cell_mut((x, y)) {
-                            cell.set_char(' ');
-                            cell.set_style(
-                                Style::default()
-                                    .bg(bg_color)
-                                    .remove_modifier(Modifier::all()),
-                            );
-                            cell.set_diff_option(CellDiffOption::None);
-                        }
-                    }
-                }
+                clear_dialog_surface(buf, dialog_area, bg_color);
 
                 let header_pad = 4;
                 let header_x = dialog_x + header_pad;
@@ -2887,10 +2767,10 @@ impl DialogState {
                 let title_style = Style::default()
                     .fg(rgba_color(theme.text))
                     .add_modifier(Modifier::BOLD);
-                draw_text_line(buf, "Undo", header_x, dialog_y + 1, header_w, title_style);
+                draw_text_line_compact(buf, "Undo", header_x, dialog_y + 1, header_w, title_style);
                 let esc_label = "esc";
                 let esc_x = header_x + header_w.saturating_sub(esc_label.len() as u16);
-                draw_text_line(
+                draw_text_line_compact(
                     buf,
                     esc_label,
                     esc_x,
@@ -2900,7 +2780,7 @@ impl DialogState {
                 );
 
                 // Line 2: subtle hint (muted).
-                draw_text_line(
+                draw_text_line_compact(
                     buf,
                     "restore a snapshot",
                     header_x,
@@ -2939,22 +2819,22 @@ impl DialogState {
                     };
 
                     let indicator = if is_selected { "🞴 " } else { "   " };
-                    draw_text_line(buf, indicator, list_x, y, 3, name_style);
+                    draw_text_line_compact(buf, indicator, list_x, y, 3, name_style);
                     let text_x = list_x + 3;
                     let text_w = list_w.saturating_sub(3);
                     let label = prompt_preview.trim();
                     if label.is_empty() {
                         // Reverts recorded before the preview existed (or
                         // non-user targets) fall back to the bare version.
-                        draw_text_line(buf, version, text_x, y, text_w, name_style);
+                        draw_text_line_compact(buf, version, text_x, y, text_w, name_style);
                     } else {
-                        draw_text_line(buf, label, text_x, y, text_w, name_style);
+                        draw_text_line_compact(buf, label, text_x, y, text_w, name_style);
                         // Right-aligned version label keeps the ordering
                         // glanceable without competing with the preview.
                         let version_w = version.chars().count() as u16;
                         let version_x = text_x + text_w.saturating_sub(version_w);
                         if version_x >= text_x.saturating_add(label.chars().count() as u16) {
-                            draw_text_line(
+                            draw_text_line_compact(
                                 buf,
                                 version,
                                 version_x,
@@ -2994,19 +2874,7 @@ impl DialogState {
                 // a bare floating surface with no border characters, like the
                 // rename dialog.
                 let bg_color = rgba_color(theme.background_panel);
-                for y in dialog_area.y..dialog_area.bottom() {
-                    for x in dialog_area.x..dialog_area.right() {
-                        if let Some(cell) = buf.cell_mut((x, y)) {
-                            cell.set_char(' ');
-                            cell.set_style(
-                                Style::default()
-                                    .bg(bg_color)
-                                    .remove_modifier(Modifier::all()),
-                            );
-                            cell.set_diff_option(CellDiffOption::None);
-                        }
-                    }
-                }
+                clear_dialog_surface(buf, dialog_area, bg_color);
 
                 let header_pad = 4;
                 let header_x = dialog_x + header_pad;
@@ -3018,7 +2886,7 @@ impl DialogState {
                 let title_style = Style::default()
                     .fg(rgba_color(theme.text))
                     .add_modifier(Modifier::BOLD);
-                draw_text_line(
+                draw_text_line_compact(
                     buf,
                     "Message Actions",
                     header_x,
@@ -3028,7 +2896,7 @@ impl DialogState {
                 );
                 let esc_label = "esc";
                 let esc_x = header_x + header_w.saturating_sub(esc_label.len() as u16);
-                draw_text_line(
+                draw_text_line_compact(
                     buf,
                     esc_label,
                     esc_x,
@@ -3038,7 +2906,7 @@ impl DialogState {
                 );
 
                 // Line 2: clicked message preview (muted, truncated).
-                draw_text_line(
+                draw_text_line_compact(
                     buf,
                     preview,
                     header_x,
@@ -3090,14 +2958,14 @@ impl DialogState {
 
                     let indicator = if is_selected { "🞴 " } else { "   " };
                     let indicator_x = list_x;
-                    draw_text_line(buf, indicator, indicator_x, y, 3, name_style);
+                    draw_text_line_compact(buf, indicator, indicator_x, y, 3, name_style);
 
                     let name_x = list_x + 3;
-                    draw_text_line(buf, name, name_x, y, list_w - 3, name_style);
+                    draw_text_line_compact(buf, name, name_x, y, list_w - 3, name_style);
 
                     let desc_x = list_x + 15;
                     if desc_x < list_x + list_w {
-                        draw_text_line(
+                        draw_text_line_compact(
                             buf,
                             desc,
                             desc_x,
@@ -3128,19 +2996,7 @@ impl DialogState {
                 // Same surface as the left sidebar panel so the box reads as
                 // part of the panel family.
                 let bg_color = rgba_color(theme.background_panel);
-                for y in dialog_area.y..dialog_area.bottom() {
-                    for x in dialog_area.x..dialog_area.right() {
-                        if let Some(cell) = buf.cell_mut((x, y)) {
-                            cell.set_char(' ');
-                            cell.set_style(
-                                Style::default()
-                                    .bg(bg_color)
-                                    .remove_modifier(Modifier::all()),
-                            );
-                            cell.set_diff_option(CellDiffOption::None);
-                        }
-                    }
-                }
+                clear_dialog_surface(buf, dialog_area, bg_color);
 
                 let header_pad = 4;
                 let header_x = dialog_x + header_pad;
@@ -3150,7 +3006,7 @@ impl DialogState {
                 let title_style = Style::default()
                     .fg(rgba_color(theme.text))
                     .add_modifier(Modifier::BOLD);
-                draw_text_line(
+                draw_text_line_compact(
                     buf,
                     "Queue Actions",
                     header_x,
@@ -3160,7 +3016,7 @@ impl DialogState {
                 );
                 let esc_label = "esc";
                 let esc_x = header_x + header_w.saturating_sub(esc_label.len() as u16);
-                draw_text_line(
+                draw_text_line_compact(
                     buf,
                     esc_label,
                     esc_x,
@@ -3170,7 +3026,7 @@ impl DialogState {
                 );
 
                 // Line 2: clicked message preview (muted, truncated).
-                draw_text_line(
+                draw_text_line_compact(
                     buf,
                     preview,
                     header_x,
@@ -3215,14 +3071,14 @@ impl DialogState {
 
                     // Indicator takes 2 cols, like the sidebar rows.
                     let ind = if is_selected { "🞴 " } else { "   " };
-                    draw_text_line(buf, ind, list_x, y, 3, name_style);
+                    draw_text_line_compact(buf, ind, list_x, y, 3, name_style);
 
                     let name_x = list_x + 3;
-                    draw_text_line(buf, name, name_x, y, list_w - 3, name_style);
+                    draw_text_line_compact(buf, name, name_x, y, list_w - 3, name_style);
 
                     let desc_x = list_x + 15;
                     if desc_x < list_x + list_w {
-                        draw_text_line(
+                        draw_text_line_compact(
                             buf,
                             desc,
                             desc_x,
@@ -3249,20 +3105,7 @@ impl DialogState {
                     .saturating_add((area.height.saturating_sub(dialog_h)) / 2);
                 let dialog_area = Rect::new(dialog_x, dialog_y, dialog_w, dialog_h);
 
-                let bg_color = rgba_color(theme.background_element);
-                for y in dialog_area.y..dialog_area.bottom() {
-                    for x in dialog_area.x..dialog_area.right() {
-                        if let Some(cell) = buf.cell_mut((x, y)) {
-                            cell.set_char(' ');
-                            cell.set_style(
-                                Style::default()
-                                    .bg(bg_color)
-                                    .remove_modifier(Modifier::all()),
-                            );
-                            cell.set_diff_option(CellDiffOption::None);
-                        }
-                    }
-                }
+                clear_dialog_surface(buf, dialog_area, rgba_color(theme.background_element));
 
                 let header_pad = 4;
                 let header_x = dialog_x + header_pad;
@@ -3271,7 +3114,7 @@ impl DialogState {
                 let title_style = Style::default()
                     .fg(rgba_color(theme.text))
                     .add_modifier(Modifier::BOLD);
-                draw_text_line(
+                draw_text_line_compact(
                     buf,
                     "Checkup model",
                     header_x,
@@ -3281,7 +3124,7 @@ impl DialogState {
                 );
                 let esc_label = "esc";
                 let esc_x = header_x + header_w.saturating_sub(esc_label.len() as u16);
-                draw_text_line(
+                draw_text_line_compact(
                     buf,
                     esc_label,
                     esc_x,
@@ -3291,7 +3134,7 @@ impl DialogState {
                 );
 
                 // Line 1: explanation (muted).
-                draw_text_line(
+                draw_text_line_compact(
                     buf,
                     "Resident decision-model checkpoint",
                     header_x,
@@ -3383,7 +3226,7 @@ impl DialogState {
                         (rgba_color(theme.text), bg_element)
                     };
                     let label = format!("{name}  —  {desc}");
-                    draw_text_line(
+                    draw_text_line_compact(
                         buf,
                         &label,
                         list_x + 2,
@@ -3413,20 +3256,7 @@ impl DialogState {
                     .saturating_add((area.height.saturating_sub(dialog_h)) / 2);
                 let dialog_area = Rect::new(dialog_x, dialog_y, dialog_w, dialog_h);
 
-                let bg_color = rgba_color(theme.background_element);
-                for y in dialog_area.y..dialog_area.bottom() {
-                    for x in dialog_area.x..dialog_area.right() {
-                        if let Some(cell) = buf.cell_mut((x, y)) {
-                            cell.set_char(' ');
-                            cell.set_style(
-                                Style::default()
-                                    .bg(bg_color)
-                                    .remove_modifier(Modifier::all()),
-                            );
-                            cell.set_diff_option(CellDiffOption::None);
-                        }
-                    }
-                }
+                clear_dialog_surface(buf, dialog_area, rgba_color(theme.background_element));
 
                 let header_pad = 4;
                 let header_x = dialog_x + header_pad;
@@ -3435,10 +3265,17 @@ impl DialogState {
                 let title_style = Style::default()
                     .fg(rgba_color(theme.text))
                     .add_modifier(Modifier::BOLD);
-                draw_text_line(buf, "Tool calls", header_x, dialog_y, header_w, title_style);
+                draw_text_line_compact(
+                    buf,
+                    "Tool calls",
+                    header_x,
+                    dialog_y,
+                    header_w,
+                    title_style,
+                );
                 let esc_label = "esc";
                 let esc_x = header_x + header_w.saturating_sub(esc_label.len() as u16);
-                draw_text_line(
+                draw_text_line_compact(
                     buf,
                     esc_label,
                     esc_x,
@@ -3448,7 +3285,7 @@ impl DialogState {
                 );
 
                 // Line 1: explanation (muted).
-                draw_text_line(
+                draw_text_line_compact(
                     buf,
                     "How the model calls tools",
                     header_x,
@@ -3539,7 +3376,7 @@ impl DialogState {
                         (rgba_color(theme.text), bg_element)
                     };
                     let label = format!("{name}  —  {desc}");
-                    draw_text_line(
+                    draw_text_line_compact(
                         buf,
                         &label,
                         list_x + 2,
@@ -3579,73 +3416,24 @@ fn render_text_input_dialog(
     // the same surface layer as the sidebar (the hook registration form
     // already follows this rule).
     let bg_color = rgba_color(theme.background_panel);
-    for y in dialog_y..dialog_y + dialog_h {
-        for x in dialog_x..dialog_x + dialog_w {
-            if let Some(cell) = buf.cell_mut((x, y)) {
-                cell.set_char(' ');
-                cell.set_style(
-                    Style::default()
-                        .bg(bg_color)
-                        .remove_modifier(Modifier::all()),
-                );
-                cell.set_diff_option(CellDiffOption::None);
-            }
-        }
-    }
+    clear_dialog_surface(
+        buf,
+        Rect::new(dialog_x, dialog_y, dialog_w, dialog_h),
+        bg_color,
+    );
 
-    // Draw border (rounded corners via unicode)
-    let border_color = rgba_color(theme.border_active);
-    let max_x = dialog_x + dialog_w - 1;
-    let max_y = dialog_y + dialog_h - 1;
-
-    // Top & bottom horizontal lines
-    for x in (dialog_x + 1)..max_x {
-        if let Some(cell) = buf.cell_mut((x, dialog_y)) {
-            cell.set_char('\u{2500}');
-            cell.set_style(Style::default().fg(border_color));
-        }
-        if let Some(cell) = buf.cell_mut((x, max_y)) {
-            cell.set_char('\u{2500}');
-            cell.set_style(Style::default().fg(border_color));
-        }
-    }
-
-    // Left & right vertical lines
-    for y in (dialog_y + 1)..max_y {
-        if let Some(cell) = buf.cell_mut((dialog_x, y)) {
-            cell.set_char('\u{2502}');
-            cell.set_style(Style::default().fg(border_color));
-        }
-        if let Some(cell) = buf.cell_mut((max_x, y)) {
-            cell.set_char('\u{2502}');
-            cell.set_style(Style::default().fg(border_color));
-        }
-    }
-
-    // Corners (rounded)
-    if let Some(cell) = buf.cell_mut((dialog_x, dialog_y)) {
-        cell.set_char('\u{256D}');
-        cell.set_style(Style::default().fg(border_color));
-    }
-    if let Some(cell) = buf.cell_mut((max_x, dialog_y)) {
-        cell.set_char('\u{256E}');
-        cell.set_style(Style::default().fg(border_color));
-    }
-    if let Some(cell) = buf.cell_mut((dialog_x, max_y)) {
-        cell.set_char('\u{2570}');
-        cell.set_style(Style::default().fg(border_color));
-    }
-    if let Some(cell) = buf.cell_mut((max_x, max_y)) {
-        cell.set_char('\u{256F}');
-        cell.set_style(Style::default().fg(border_color));
-    }
+    draw_rounded_border(
+        buf,
+        Rect::new(dialog_x, dialog_y, dialog_w, dialog_h),
+        rgba_color(theme.border_active),
+    );
 
     // Content area
     let content_x = dialog_x + 2;
     let content_w = dialog_w.saturating_sub(4);
 
     // Title
-    draw_text_line(
+    draw_text_line_compact(
         buf,
         title,
         content_x,
@@ -3657,7 +3445,7 @@ fn render_text_input_dialog(
     );
 
     // Subtitle (env var or URL example)
-    draw_text_line(
+    draw_text_line_compact(
         buf,
         subtitle,
         content_x,
@@ -3994,23 +3782,15 @@ fn render_form_panel(
     // Solid background panel — same color as the history sidebar, a bare
     // floating surface with no border characters (rename-prompt style).
     let bg_color = rgba_color(theme.background_panel);
-    for y in dialog_y..dialog_y + dialog_h {
-        for x in dialog_x..dialog_x + dialog_w {
-            if let Some(cell) = buf.cell_mut((x, y)) {
-                cell.set_char(' ');
-                cell.set_style(
-                    Style::default()
-                        .bg(bg_color)
-                        .remove_modifier(Modifier::all()),
-                );
-                cell.set_diff_option(CellDiffOption::None);
-            }
-        }
-    }
+    clear_dialog_surface(
+        buf,
+        Rect::new(dialog_x, dialog_y, dialog_w, dialog_h),
+        bg_color,
+    );
 
     // Header row: bold title left, muted "esc" right (rename-prompt style).
     let header_y = dialog_y + 1;
-    draw_text_line(
+    draw_text_line_compact(
         buf,
         title,
         content_x,
@@ -4021,7 +3801,7 @@ fn render_form_panel(
             .add_modifier(Modifier::BOLD),
     );
     let esc_hint = "esc";
-    draw_text_line(
+    draw_text_line_compact(
         buf,
         esc_hint,
         dialog_x + dialog_w - 2 - esc_hint.len() as u16,
@@ -4031,7 +3811,7 @@ fn render_form_panel(
     );
 
     // Subtitle row (muted).
-    draw_text_line(
+    draw_text_line_compact(
         buf,
         subtitle,
         content_x,
@@ -4066,7 +3846,7 @@ fn render_form_panel(
             }
         }
         let hint_x = content_x + marked.chars().count() as u16 + 1;
-        draw_text_line(
+        draw_text_line_compact(
             buf,
             hint(field),
             hint_x,

@@ -3,7 +3,7 @@
 //! progress events.
 //!
 //! Lives in the BINARY (not the lib): it depends on the setup config
-//! (`crate::util::setup`), the TUI event channel and the `onnx` feature.
+//! (`cosh::setup`), the TUI event channel and the `onnx` feature.
 //! The mirror repo id lives HERE via setup.json (`model_decision.hub`) —
 //! the `cosh-onnx` crate receives it as a parameter and carries no
 //! default.
@@ -15,9 +15,9 @@
 
 use std::sync::{Arc, Mutex};
 
-#[cfg(feature = "onnx")]
-use crate::util::setup::{DecisionHub, DecisionModel};
 use cosh::harness::events::{HarnessEvent, WeightsInstallEvent};
+#[cfg(feature = "onnx")]
+use cosh::setup::{DecisionHub, DecisionModel};
 
 /// The graph candidates, quantized first (the mirror may not ship the
 /// int8 twin yet — the installer falls back to fp32).

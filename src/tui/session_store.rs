@@ -138,13 +138,13 @@ pub struct SessionStore {
 impl SessionStore {
     /// Create a new `SessionStore`, resolving the CWD and creating the
     /// per-CWD sessions directory. Honours `COSH_DATA_DIR` (test isolation;
-    /// see `util::setup::data_dir_override`).
+    /// see `cosh::setup::data_dir_override`).
     ///
     /// # Panics
     /// Panics if the data directory cannot be determined (no override AND
     /// `ProjectDirs` fails, e.g. no `$HOME` set).
     pub fn new() -> Self {
-        let sessions_dir = crate::util::setup::data_dir_override()
+        let sessions_dir = cosh::setup::data_dir_override()
             .join("sessions")
             .join(compute_cwd_hash());
         std::fs::create_dir_all(&sessions_dir).ok();

@@ -395,7 +395,7 @@ pub struct App {
     model_cache: crate::util::cache::StaleCache<String, Vec<cosh::ModelEntry>>,
     /// Structured user preferences (theme, tools, routing) persisted in
     /// `~/.config/cosh/setup.json`.
-    setup: crate::util::setup::Setup,
+    setup: cosh::setup::Setup,
     /// Telemetry facade: consent-resolved state (setup.json flag + env
     /// override + CI hard-off) plus the local event queue.
     telemetry: cosh::telemetry::Telemetry,
@@ -532,7 +532,7 @@ impl App {
         state.session_summaries = session_store.list_sessions();
 
         let theme_registry = ThemeRegistry::new();
-        let setup = crate::util::setup::Setup::load();
+        let setup = cosh::setup::Setup::load();
 
         // Load saved fallback chain from setup config
         let saved_fallbacks = fallback::load_fallbacks(&setup);
@@ -1015,6 +1015,25 @@ impl App {
             sidebar_w,
             right_panel_w,
         }
+    }
+
+    /// The main content area for mouse/keyboard hit-testing on every
+    /// non-session route (home, RAG, settings, …): full terminal minus the
+    /// open left panel — the right panel only overlays Session mode.
+    /// Mirrors the `main` rect of [`Self::session_main_area`] without the
+    /// right-panel subtraction.
+    fn main_content_area(&self, area: Rect) -> Rect {
+        let sidebar_w = if self.sidebar.open && area.width >= MIN_WIDTH_FOR_LEFT_PANEL {
+            self.left_panel_width()
+        } else {
+            0
+        };
+        Rect::new(
+            area.x + sidebar_w,
+            area.y,
+            area.width.saturating_sub(sidebar_w),
+            area.height,
+        )
     }
 
     /// Width of the left panel. The usage dashboard and the file explorer

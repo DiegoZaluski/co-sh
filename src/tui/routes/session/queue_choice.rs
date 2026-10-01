@@ -8,6 +8,7 @@ use cosh_tui::core::types::MouseEvent;
 use super::super::super::theme::Theme;
 use crate::component::wall;
 use crate::theme::rgba_color;
+use crate::util::draw::draw_text_line;
 
 /// Which pending queue a message typed during a running agent loop joins.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,23 +17,6 @@ pub enum QueueTarget {
     NextRequest,
     /// The message waits for the current loop to end and starts a new one.
     NextLoop,
-}
-
-fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
-    let right = x + max_w;
-    for (i, ch) in text.chars().enumerate() {
-        if ch.is_control() {
-            continue;
-        }
-        let cx = x + i as u16;
-        if cx >= right {
-            break;
-        }
-        if let Some(cell) = buf.cell_mut((cx, y)) {
-            cell.set_char(ch);
-            cell.set_style(style);
-        }
-    }
 }
 
 /// Option rows of the dialog, parallel to [`QueueTarget`].

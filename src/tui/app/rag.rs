@@ -352,17 +352,7 @@ impl App {
     #[cfg(feature = "embed")]
     pub(super) fn handle_rag_mouse_click(&mut self, mouse: &MouseEvent) -> bool {
         let area = self.terminal_size();
-        let sidebar_w = if self.sidebar.open && area.width >= super::MIN_WIDTH_FOR_LEFT_PANEL {
-            self.left_panel_width()
-        } else {
-            0
-        };
-        let main_area = Rect::new(
-            area.x + sidebar_w,
-            area.y,
-            area.width.saturating_sub(sidebar_w),
-            area.height,
-        );
+        let main_area = self.main_content_area(area);
         let tools_area = Rect::new(
             main_area.x,
             area.y + 1,

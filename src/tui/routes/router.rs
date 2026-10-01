@@ -8,6 +8,7 @@ use cosh_tui::core::types::MouseEvent;
 use crate::component::search_bar::SearchBar;
 use crate::fallback::{FallbackEntry, PromptCorrectorFallback, default_fallbacks};
 use crate::theme::{Theme, rgba_color};
+use crate::util::draw::draw_text_line;
 use crate::util::list_selection::ListSelection;
 
 const FOOTER_MARGIN: u16 = 3;
@@ -29,20 +30,6 @@ const TAB_PROMPT_TITLE: &str = " Fallback Prompt Corrector ";
 /// columns past it, and the row fill skips the hint's cells entirely so the
 /// hint stays visible.
 const TAB_BAR_LEFT_PAD: u16 = 8;
-
-fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
-    let right = x + max_w;
-    for (i, ch) in text.chars().enumerate() {
-        let cx = x + i as u16;
-        if cx >= right {
-            break;
-        }
-        if let Some(cell) = buf.cell_mut((cx, y)) {
-            cell.set_char(ch);
-            cell.set_style(style);
-        }
-    }
-}
 
 fn fill_rect(buf: &mut Buffer, x: u16, y: u16, w: u16, h: u16, style: Style) {
     for dy in 0..h {
@@ -66,18 +53,8 @@ fn section_title(buf: &mut Buffer, x: u16, y: u16, title: &str, bg: Color, fg: C
     }
 }
 
-fn primary_contrast_fg(theme: &Theme) -> Color {
-    let (pr, pg, pb, _) = theme.primary.to_ints();
-    let lum = (0.299 * f32::from(pr) + 0.587 * f32::from(pg) + 0.114 * f32::from(pb)) / 255.0;
-    if lum > 0.5 {
-        Color::Rgb(0, 0, 0)
-    } else {
-        Color::Rgb(255, 255, 255)
-    }
-}
-
-/// Perceived luminance of an RGB color on the same 0.5 pivot
-/// [`primary_contrast_fg`] uses: below it the theme surface is "dark".
+/// Perceived luminance of an RGB color on the theme's contrast pivot:
+/// below it the theme surface is "dark".
 fn luma(color: Color) -> f32 {
     let (r, g, b) = match color {
         Color::Rgb(r, g, b) => (r, g, b),
@@ -88,7 +65,7 @@ fn luma(color: Color) -> f32 {
 
 /// Nudge a block's background one step toward legibility for the hover
 /// highlight: dark surfaces blend toward white, light ones toward black
-/// (same pivot as `primary_contrast_fg`). `Color::Reset` — the transparent
+/// (same pivot as `theme::contrast_color`). `Color::Reset` — the transparent
 /// theme convention for "no fill" — is returned untouched so the wash is a
 /// no-op there.
 fn lightened(color: Color) -> Color {
@@ -1000,7 +977,7 @@ impl RouterView {
     /// Draw the clickable tab bar: active tab highlighted, inactive muted.
     fn render_tab_bar(&self, buf: &mut Buffer, layout: &RouterLayout, theme: &Theme) {
         let primary = rgba_color(theme.primary);
-        let contrast = primary_contrast_fg(theme);
+        let contrast = crate::theme::contrast_color(theme.primary);
         let muted = rgba_color(theme.text_muted);
         let bg_full = rgba_color(theme.background);
         // Fill only past the "← esc" hint: `App::render` draws the hint on

@@ -217,17 +217,7 @@ impl App {
                 #[cfg(feature = "embed")]
                 if matches!(self.mode(), AppMode::Rag) {
                     let area = self.terminal_size();
-                    let sidebar_w = if self.sidebar.open && area.width >= MIN_WIDTH_FOR_LEFT_PANEL {
-                        self.left_panel_width()
-                    } else {
-                        0
-                    };
-                    let main_area = Rect::new(
-                        area.x + sidebar_w,
-                        area.y,
-                        area.width.saturating_sub(sidebar_w),
-                        area.height,
-                    );
+                    let main_area = self.main_content_area(area);
                     let tools_area = Rect::new(
                         main_area.x,
                         area.y + 1,
@@ -302,17 +292,7 @@ impl App {
                 #[cfg(feature = "embed")]
                 if matches!(self.mode(), AppMode::Rag) && self.rag_view.field_selection.is_some() {
                     let area = self.terminal_size();
-                    let sidebar_w = if self.sidebar.open && area.width >= MIN_WIDTH_FOR_LEFT_PANEL {
-                        self.left_panel_width()
-                    } else {
-                        0
-                    };
-                    let main_area = Rect::new(
-                        area.x + sidebar_w,
-                        area.y,
-                        area.width.saturating_sub(sidebar_w),
-                        area.height,
-                    );
+                    let main_area = self.main_content_area(area);
                     let tools_area = Rect::new(
                         main_area.x,
                         area.y + 1,
@@ -1081,17 +1061,7 @@ impl App {
         // 4b. Queue-choice dialog (inline, shown while the agent loop runs)
         if self.queue_choice_dialog.visible && matches!(self.mode(), AppMode::Session) {
             let area = self.terminal_size();
-            let sidebar_w = if self.sidebar.open && area.width >= MIN_WIDTH_FOR_LEFT_PANEL {
-                self.left_panel_width()
-            } else {
-                0
-            };
-            let main_area = Rect::new(
-                area.x + sidebar_w,
-                area.y,
-                area.width.saturating_sub(sidebar_w),
-                area.height,
-            );
+            let main_area = self.main_content_area(area);
             let footer_y = main_area.bottom().saturating_sub(1);
             let queue_choice_h = self
                 .queue_choice_dialog
@@ -1124,17 +1094,7 @@ impl App {
         // 5b. Free-gateway recommendation dialog (inline)
         if self.free_gateway_dialog.visible && matches!(self.mode(), AppMode::Session) {
             let area = self.terminal_size();
-            let sidebar_w = if self.sidebar.open && area.width >= MIN_WIDTH_FOR_LEFT_PANEL {
-                self.left_panel_width()
-            } else {
-                0
-            };
-            let main_area = Rect::new(
-                area.x + sidebar_w,
-                area.y,
-                area.width.saturating_sub(sidebar_w),
-                area.height,
-            );
+            let main_area = self.main_content_area(area);
             let footer_y = main_area.bottom().saturating_sub(1);
             let _prompt_h = 0u16; // prompt is hidden when dialog is visible
             let rec_h = self
@@ -1270,17 +1230,7 @@ impl App {
         #[cfg(feature = "home")]
         if matches!(self.mode(), AppMode::Home) && !self.dialog.visible() {
             let area = self.terminal_size();
-            let sidebar_w = if self.sidebar.open && area.width >= MIN_WIDTH_FOR_LEFT_PANEL {
-                self.left_panel_width()
-            } else {
-                0
-            };
-            let main_area = Rect::new(
-                area.x + sidebar_w,
-                area.y,
-                area.width.saturating_sub(sidebar_w),
-                area.height,
-            );
+            let main_area = self.main_content_area(area);
             let footer_y = main_area.bottom().saturating_sub(1);
             let session_area = Rect::new(
                 main_area.x,
@@ -1391,17 +1341,7 @@ impl App {
         // 8a. Settings view — mouse click on a setting row toggles it
         if matches!(self.mode(), AppMode::Settings) && !self.dialog.visible() {
             let area = self.terminal_size();
-            let sidebar_w = if self.sidebar.open && area.width >= MIN_WIDTH_FOR_LEFT_PANEL {
-                self.left_panel_width()
-            } else {
-                0
-            };
-            let main_area = Rect::new(
-                area.x + sidebar_w,
-                area.y,
-                area.width.saturating_sub(sidebar_w),
-                area.height,
-            );
+            let main_area = self.main_content_area(area);
             // Matches the render geometry: in non-Session modes the render
             // path resolves to terminal height - 4 (session_main_area drops
             // the footer rows and the mode arm subtracts 1 more). Keeping
@@ -1486,17 +1426,7 @@ impl App {
         // 8b. Internal Tools view — mouse click on a tool row toggles it
         if matches!(self.mode(), AppMode::InternalTools) && !self.dialog.visible() {
             let area = self.terminal_size();
-            let sidebar_w = if self.sidebar.open && area.width >= MIN_WIDTH_FOR_LEFT_PANEL {
-                self.left_panel_width()
-            } else {
-                0
-            };
-            let main_area = Rect::new(
-                area.x + sidebar_w,
-                area.y,
-                area.width.saturating_sub(sidebar_w),
-                area.height,
-            );
+            let main_area = self.main_content_area(area);
             let tools_area = Rect::new(
                 main_area.x,
                 area.y + 1,
@@ -1520,17 +1450,7 @@ impl App {
         // 8c. AddProvider view — mouse click on a provider row opens API key input
         if matches!(self.mode(), AppMode::AddProvider) && !self.dialog.visible() {
             let area = self.terminal_size();
-            let sidebar_w = if self.sidebar.open && area.width >= MIN_WIDTH_FOR_LEFT_PANEL {
-                self.left_panel_width()
-            } else {
-                0
-            };
-            let main_area = Rect::new(
-                area.x + sidebar_w,
-                area.y,
-                area.width.saturating_sub(sidebar_w),
-                area.height,
-            );
+            let main_area = self.main_content_area(area);
             let tools_area = Rect::new(
                 main_area.x,
                 area.y + 1,

@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use cosh::mcp::McpConfig;
+use crate::mcp::McpConfig;
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
@@ -125,6 +125,18 @@ impl Default for Tools {
     }
 }
 
+/// The application's default provider→model fallback chain, applied when
+/// the user has not customized `setup.json` → `routing.fallbacks`. Lives
+/// here, next to the [`Routing`] section it defaults, because the chain is
+/// persisted app configuration — the TUI's Router Settings screen edits it,
+/// and the harness connectors consume it.
+pub const DEFAULT_FALLBACKS: &[(&str, &str)] = &[
+    ("nvidia", "deepseek-ai/deepseek-v4-pro"),
+    ("openrouter", "deepseek/deepseek-v4-pro"),
+    ("groq", "openai/gpt-oss-120b"),
+    ("charm", "deepseek-ai/deepseek-v4-pro"),
+];
+
 /// Model routing / fallback chain.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Routing {
@@ -143,7 +155,7 @@ impl Default for Routing {
         Self {
             summarization_models: Vec::new(),
             fallback_prompt_corrector: Vec::new(),
-            fallbacks: crate::fallback::DEFAULT_FALLBACKS
+            fallbacks: DEFAULT_FALLBACKS
                 .iter()
                 .map(|&(p, m)| FallbackEntry {
                     provider: p.to_string(),
@@ -658,8 +670,9 @@ fn config_dir() -> PathBuf {
 /// Resolve the data directory path (`~/.local/share/cosh/` on Unix).
 ///
 /// `COSH_DATA_DIR` overrides the location when set — same rationale as
-/// [`config_dir`]'s `COSH_CONFIG_DIR` override.
-pub(crate) fn data_dir_override() -> PathBuf {
+/// [`config_dir`]'s `COSH_CONFIG_DIR` override. Public: the TUI's session
+/// store and usage cache resolve their storage roots through it.
+pub fn data_dir_override() -> PathBuf {
     if let Ok(dir) = std::env::var("COSH_DATA_DIR")
         && !dir.is_empty()
     {
@@ -746,16 +759,16 @@ impl Setup {
         self.save();
     }
 
-    /// The globally persisted agent mode (`cosh::harness::Mode`), if the
+    /// The globally persisted agent mode (`crate::harness::Mode`), if the
     /// user ever cycled away from the default. Unrecognized stored names
     /// (e.g. from a newer version) fall back to `None`.
     #[must_use]
-    pub fn persisted_mode(&self) -> Option<cosh::harness::Mode> {
+    pub fn persisted_mode(&self) -> Option<crate::harness::Mode> {
         match self.mode.mode.as_str() {
-            "build" => Some(cosh::harness::Mode::Build),
-            "ask" => Some(cosh::harness::Mode::Ask),
-            "yolo" => Some(cosh::harness::Mode::Yolo),
-            "command" => Some(cosh::harness::Mode::Command),
+            "build" => Some(crate::harness::Mode::Build),
+            "ask" => Some(crate::harness::Mode::Ask),
+            "yolo" => Some(crate::harness::Mode::Yolo),
+            "command" => Some(crate::harness::Mode::Command),
             _ => None,
         }
     }
@@ -764,12 +777,12 @@ impl Setup {
     ///
     /// An unchanged selection skips the disk write (cycling through the
     /// modes with Tab must not rewrite the file four times per decision).
-    pub fn set_mode_selection(&mut self, mode: cosh::harness::Mode) {
+    pub fn set_mode_selection(&mut self, mode: crate::harness::Mode) {
         let name = match mode {
-            cosh::harness::Mode::Build => "build",
-            cosh::harness::Mode::Ask => "ask",
-            cosh::harness::Mode::Yolo => "yolo",
-            cosh::harness::Mode::Command => "command",
+            crate::harness::Mode::Build => "build",
+            crate::harness::Mode::Ask => "ask",
+            crate::harness::Mode::Yolo => "yolo",
+            crate::harness::Mode::Command => "command",
         };
         if self.mode.mode == name {
             return;
@@ -923,18 +936,18 @@ mod tests {
         let mut setup = Setup::default();
         assert_eq!(setup.persisted_mode(), None);
 
-        setup.set_mode_selection(cosh::harness::Mode::Ask);
-        assert_eq!(setup.persisted_mode(), Some(cosh::harness::Mode::Ask));
+        setup.set_mode_selection(crate::harness::Mode::Ask);
+        assert_eq!(setup.persisted_mode(), Some(crate::harness::Mode::Ask));
 
         // A later selection OVERWRITES the slot — no history is kept.
-        setup.set_mode_selection(cosh::harness::Mode::Command);
-        assert_eq!(setup.persisted_mode(), Some(cosh::harness::Mode::Command));
+        setup.set_mode_selection(crate::harness::Mode::Command);
+        assert_eq!(setup.persisted_mode(), Some(crate::harness::Mode::Command));
 
         let restored: Setup =
             serde_json::from_str(&serde_json::to_string(&setup).unwrap()).unwrap();
         assert_eq!(
             restored.persisted_mode(),
-            Some(cosh::harness::Mode::Command)
+            Some(crate::harness::Mode::Command)
         );
 
         // An old config without the `mode` category loads with no selection.
@@ -983,9 +996,9 @@ mod tests {
         assert!(legacy.mcp.servers.is_empty());
 
         let mut setup = Setup::default();
-        setup.mcp.servers.push(cosh::mcp::McpServerEntry {
+        setup.mcp.servers.push(crate::mcp::McpServerEntry {
             name: "docs".to_string(),
-            transport: cosh::mcp::McpTransport::Http(cosh::mcp::HttpTransport {
+            transport: crate::mcp::McpTransport::Http(crate::mcp::HttpTransport {
                 url: "https://example.com/mcp".to_string(),
                 headers: Default::default(),
                 api_key_env: None,

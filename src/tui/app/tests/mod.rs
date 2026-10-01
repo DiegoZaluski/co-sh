@@ -33,7 +33,7 @@ static CLIPBOARD_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 /// `$HOME` alone is NOT enough: on Windows `directories::ProjectDirs`
 /// resolves through the known-folders API (`APPDATA`), ignoring `HOME`
 /// entirely. The `COSH_CONFIG_DIR` / `COSH_DATA_DIR` overrides (read by
-/// `util::setup`) pin every consumer to the scratch dir on all platforms.
+/// `cosh::setup`) pin every consumer to the scratch dir on all platforms.
 fn isolate_home() {
     let home = std::env::temp_dir().join("cosh-hook-test-home");
     let _ = std::fs::remove_dir_all(&home);

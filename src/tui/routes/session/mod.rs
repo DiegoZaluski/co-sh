@@ -18,7 +18,8 @@ use ratatui::style::{Color, Modifier, Style};
 
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 
-use cosh_tui::core::lib::border::{BorderCharacters, BorderSidesConfig};
+use self::tool_render::{blank_border_chars, left_border_chars};
+use cosh_tui::core::lib::border::BorderSidesConfig;
 use cosh_tui::core::lib::rgba::{ColorInput, RGBA, ansi256_index_to_rgb};
 use cosh_tui::core::renderable::Renderable;
 use cosh_tui::core::renderables::r#box::BoxRenderable;
@@ -38,22 +39,6 @@ use crate::types::{
     SessionStatus, ToolPart, ToolStatus,
 };
 use std::time::Instant;
-
-const fn left_border_chars() -> BorderCharacters {
-    BorderCharacters {
-        top_left: ' ',
-        top_right: ' ',
-        bottom_left: ' ',
-        bottom_right: ' ',
-        horizontal: ' ',
-        vertical: '┃',
-        top_t: ' ',
-        bottom_t: ' ',
-        left_t: '┃',
-        right_t: ' ',
-        cross: ' ',
-    }
-}
 
 /// Copy `rows` full rows of `src_cells` (a `stride`-wide cell grid) into
 /// `buf` starting at (`dst_x`, `dst_y`).
@@ -128,30 +113,6 @@ fn draw_hint_button(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, th
             break;
         };
         if cx >= inner_x.saturating_add(inner_max_w) {
-            break;
-        }
-        if let Some(cell) = buf.cell_mut((cx, y)) {
-            cell.set_char(ch);
-            cell.set_style(style);
-        }
-    }
-}
-
-fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
-    let Some(right) = x.checked_add(max_w) else {
-        return;
-    };
-    for (i, ch) in text.chars().enumerate() {
-        // Skip control characters: writing them into buffer cells makes
-        // ratatui's buffer diff panic ("control character passed to
-        // cell_width without filtering").
-        if ch.is_control() {
-            continue;
-        }
-        let Some(cx) = x.checked_add(i as u16) else {
-            break;
-        };
-        if cx >= right {
             break;
         }
         if let Some(cell) = buf.cell_mut((cx, y)) {
@@ -453,6 +414,7 @@ fn msg_content_token(
     h
 }
 
+use crate::util::draw::draw_text_line;
 use crate::util::text_region::{
     TextRegion, extract_text_in_region, regions_from_full_width_cells, text_from_cell_row,
 };
@@ -1129,19 +1091,7 @@ impl SessionView {
             right: false,
             bottom: false,
         });
-        border_box.set_custom_border_chars(BorderCharacters {
-            top_left: ' ',
-            top_right: ' ',
-            bottom_left: ' ',
-            bottom_right: ' ',
-            horizontal: ' ',
-            vertical: ' ',
-            top_t: ' ',
-            bottom_t: ' ',
-            left_t: ' ',
-            right_t: ' ',
-            cross: ' ',
-        });
+        border_box.set_custom_border_chars(blank_border_chars());
         border_box.render_self(buf, area);
 
         let x_off = x + 3;

@@ -5,6 +5,42 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::Path;
 
+/// Every glyph blank: renders a `BoxRenderable` with no visible frame, used
+/// for tool panels that only need background/padding behavior.
+pub(crate) const fn blank_border_chars() -> BorderCharacters {
+    BorderCharacters {
+        top_left: ' ',
+        top_right: ' ',
+        bottom_left: ' ',
+        bottom_right: ' ',
+        horizontal: ' ',
+        vertical: ' ',
+        top_t: ' ',
+        bottom_t: ' ',
+        left_t: ' ',
+        right_t: ' ',
+        cross: ' ',
+    }
+}
+
+/// Left-rail border: `┃` on the left side only, everything else blank —
+/// the chat/tool message gutter.
+pub(crate) const fn left_border_chars() -> BorderCharacters {
+    BorderCharacters {
+        top_left: ' ',
+        top_right: ' ',
+        bottom_left: ' ',
+        bottom_right: ' ',
+        horizontal: ' ',
+        vertical: '┃',
+        top_t: ' ',
+        bottom_t: ' ',
+        left_t: '┃',
+        right_t: ' ',
+        cross: ' ',
+    }
+}
+
 use cosh_sdk::hashline::format::{HL_FILE_PREFIX, HL_LINE_BODY_SEP};
 use cosh_sdk::tree_sitter::highlight::{HighlightCategory, highlight};
 use cosh_tools::question::types::QuestionOutput;
@@ -19,6 +55,7 @@ use crate::component::spinner_highlight::HighlightSpinner;
 use crate::routes::session::right_panel::types::{subagent_display_output, subagent_visible_body};
 use crate::theme::{Theme, rgba_color};
 use crate::types::{ToolPart, ToolStatus};
+use crate::util::draw::draw_text_line;
 
 /// Pick the foreground color for an inline tool label based on its status.
 /// Failed tools are red; completed tools are muted; running tools are normal.
@@ -72,27 +109,6 @@ pub fn draw_hint_button(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16
         }
         let cx = inner_x + i as u16;
         if cx >= inner_x.saturating_add(inner_max_w) {
-            break;
-        }
-        if let Some(cell) = buf.cell_mut((cx, y)) {
-            cell.set_char(ch);
-            cell.set_style(style);
-        }
-    }
-}
-
-fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
-    let right = x + max_w;
-    for (i, ch) in text.chars().enumerate() {
-        // Skip control characters (e.g. \r progress spinners, \t, ESC/ANSI
-        // bytes from raw tool output). Writing them into buffer cells makes
-        // ratatui's buffer diff panic:
-        //   "control character passed to cell_width without filtering"
-        if ch.is_control() {
-            continue;
-        }
-        let cx = x + i as u16;
-        if cx >= right {
             break;
         }
         if let Some(cell) = buf.cell_mut((cx, y)) {
@@ -756,19 +772,7 @@ pub fn render_shell(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
             right: false,
             bottom: false,
         });
-        border_box.set_custom_border_chars(BorderCharacters {
-            top_left: ' ',
-            top_right: ' ',
-            bottom_left: ' ',
-            bottom_right: ' ',
-            horizontal: ' ',
-            vertical: ' ',
-            top_t: ' ',
-            bottom_t: ' ',
-            left_t: ' ',
-            right_t: ' ',
-            cross: ' ',
-        });
+        border_box.set_custom_border_chars(blank_border_chars());
         border_box.render_self(ctx.buf, area);
 
         let x_off = ctx.x + 3;
@@ -798,20 +802,7 @@ pub fn render_shell(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
             );
         }
         if collapsed.overflow {
-            let hint_y = ctx.y + TOOL_BOX_PAD_V + 1 + display.lines().count() as u16;
-            let hint = if expanded {
-                "Click to collapse"
-            } else {
-                "Click to expand"
-            };
-            draw_hint_button(
-                ctx.buf,
-                hint,
-                x_off,
-                hint_y,
-                ctx.max_w.saturating_sub(3),
-                ctx.theme,
-            );
+            draw_overflow_hint(ctx, x_off, expanded, display.lines().count() as u16);
         }
     }
 }
@@ -943,6 +934,84 @@ fn draw_highlighted_code_with_ln(
     lines_drawn
 }
 
+/// Expand/collapse affordance below a collapsed tool box: the hint row sits
+/// one row under the last content row (`rows` = number of content lines
+/// drawn).
+fn draw_overflow_hint(ctx: &mut ToolRenderCtx, x_off: u16, expanded: bool, rows: u16) {
+    let hint_y = ctx.y + TOOL_BOX_PAD_V + 1 + rows;
+    let hint = if expanded {
+        "Click to collapse"
+    } else {
+        "Click to expand"
+    };
+    draw_hint_button(
+        ctx.buf,
+        hint,
+        x_off,
+        hint_y,
+        ctx.max_w.saturating_sub(3),
+        ctx.theme,
+    );
+}
+
+/// Shared body of the Write/Read code boxes: background frame (with or
+/// without the left `┃` rail), muted `# <verb> <path>` title row, then the
+/// syntax-highlighted, line-numbered code block.
+fn draw_code_panel(
+    ctx: &mut ToolRenderCtx,
+    area: Rect,
+    title: &str,
+    filepath: &str,
+    content: &str,
+    max_lines: u16,
+    with_left_rail: bool,
+) {
+    let mut border_box = BoxRenderable::new();
+    border_box.set_background_color(Some(ctx.theme.background_panel.into()));
+    border_box.set_border_color(Some(ctx.theme.background.into()));
+    border_box.set_border_sides(BorderSidesConfig {
+        left: with_left_rail,
+        top: false,
+        right: false,
+        bottom: false,
+    });
+    border_box.set_custom_border_chars(if with_left_rail {
+        left_border_chars()
+    } else {
+        blank_border_chars()
+    });
+    border_box.render_self(ctx.buf, area);
+
+    let title_style = Style::default().fg(rgba_color(ctx.theme.text_muted));
+    draw_text_line(
+        ctx.buf,
+        title,
+        ctx.x + 3,
+        ctx.y + TOOL_BOX_PAD_V,
+        ctx.max_w.saturating_sub(3),
+        title_style,
+    );
+
+    let max_w_inner = ctx.max_w.saturating_sub(3);
+    let default_fg = rgba_color(ctx.theme.text);
+    let ln_fg = rgba_color(ctx.theme.text_muted);
+    let lang = lang_name_from_path(filepath);
+    draw_highlighted_code_with_ln(
+        ctx.buf,
+        ctx.x + 3,
+        ctx.y + 1 + TOOL_BOX_PAD_V,
+        max_w_inner,
+        CodeBlockSpec {
+            content,
+            lang,
+            default_fg,
+            ln_fg,
+            max_lines,
+            theme: ctx.theme,
+        },
+    );
+}
+
 pub fn render_write(ctx: &mut ToolRenderCtx, part: &ToolPart) {
     let filepath = input_filepath(&part.input).unwrap_or_default();
     let content = input_content(&part.input).unwrap_or_default();
@@ -959,58 +1028,14 @@ pub fn render_write(ctx: &mut ToolRenderCtx, part: &ToolPart) {
         );
         *ctx.line_h = area.height;
 
-        let mut border_box = BoxRenderable::new();
-        border_box.set_background_color(Some(ctx.theme.background_panel.into()));
-        border_box.set_border_color(Some(ctx.theme.background.into()));
-        border_box.set_border_sides(BorderSidesConfig {
-            left: true,
-            top: false,
-            right: false,
-            bottom: false,
-        });
-        border_box.set_custom_border_chars(BorderCharacters {
-            top_left: ' ',
-            top_right: ' ',
-            bottom_left: ' ',
-            bottom_right: ' ',
-            horizontal: ' ',
-            vertical: '┃',
-            top_t: ' ',
-            bottom_t: ' ',
-            left_t: '┃',
-            right_t: ' ',
-            cross: ' ',
-        });
-        border_box.render_self(ctx.buf, area);
-
-        let title = format!("# Wrote {filepath}");
-        let title_style = Style::default().fg(rgba_color(ctx.theme.text_muted));
-        draw_text_line(
-            ctx.buf,
-            &title,
-            ctx.x + 3,
-            ctx.y + TOOL_BOX_PAD_V,
-            ctx.max_w.saturating_sub(3),
-            title_style,
-        );
-
-        let max_w_inner = ctx.max_w.saturating_sub(3);
-        let default_fg = rgba_color(ctx.theme.text);
-        let ln_fg = rgba_color(ctx.theme.text_muted);
-        let lang = lang_name_from_path(&filepath);
-        draw_highlighted_code_with_ln(
-            ctx.buf,
-            ctx.x + 3,
-            ctx.y + 1 + TOOL_BOX_PAD_V,
-            max_w_inner,
-            CodeBlockSpec {
-                content: &content,
-                lang,
-                default_fg,
-                ln_fg,
-                max_lines,
-                theme: ctx.theme,
-            },
+        draw_code_panel(
+            ctx,
+            area,
+            &format!("# Wrote {filepath}"),
+            &filepath,
+            &content,
+            max_lines,
+            true,
         );
     } else {
         let label = format!("Write {filepath}");
@@ -1052,19 +1077,7 @@ pub fn render_edit(ctx: &mut ToolRenderCtx, part: &ToolPart) {
             right: false,
             bottom: false,
         });
-        border_box.set_custom_border_chars(BorderCharacters {
-            top_left: ' ',
-            top_right: ' ',
-            bottom_left: ' ',
-            bottom_right: ' ',
-            horizontal: ' ',
-            vertical: ' ',
-            top_t: ' ',
-            bottom_t: ' ',
-            left_t: ' ',
-            right_t: ' ',
-            cross: ' ',
-        });
+        border_box.set_custom_border_chars(blank_border_chars());
         border_box.render_self(ctx.buf, area);
 
         let diff_area = Rect::new(ctx.x + 2, ctx.y + 1, ctx.max_w.saturating_sub(2), diff_rows);
@@ -1360,19 +1373,7 @@ pub fn render_glob(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
         right: false,
         bottom: false,
     });
-    border_box.set_custom_border_chars(BorderCharacters {
-        top_left: ' ',
-        top_right: ' ',
-        bottom_left: ' ',
-        bottom_right: ' ',
-        horizontal: ' ',
-        vertical: ' ',
-        top_t: ' ',
-        bottom_t: ' ',
-        left_t: ' ',
-        right_t: ' ',
-        cross: ' ',
-    });
+    border_box.set_custom_border_chars(blank_border_chars());
     border_box.render_self(ctx.buf, area);
 
     let x_off = ctx.x + 3;
@@ -1409,20 +1410,7 @@ pub fn render_glob(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
         );
     }
     if collapsed.overflow {
-        let hint_y = ctx.y + TOOL_BOX_PAD_V + 1 + display.lines().count() as u16;
-        let hint = if expanded {
-            "Click to collapse"
-        } else {
-            "Click to expand"
-        };
-        draw_hint_button(
-            ctx.buf,
-            hint,
-            x_off,
-            hint_y,
-            ctx.max_w.saturating_sub(3),
-            ctx.theme,
-        );
+        draw_overflow_hint(ctx, x_off, expanded, display.lines().count() as u16);
     }
 }
 
@@ -1465,74 +1453,17 @@ pub fn render_read(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
         );
         *ctx.line_h = area.height;
 
-        let mut border_box = BoxRenderable::new();
-        border_box.set_background_color(Some(ctx.theme.background_panel.into()));
-        border_box.set_border_color(Some(ctx.theme.background.into()));
-        border_box.set_border_sides(BorderSidesConfig {
-            left: false,
-            top: false,
-            right: false,
-            bottom: false,
-        });
-        border_box.set_custom_border_chars(BorderCharacters {
-            top_left: ' ',
-            top_right: ' ',
-            bottom_left: ' ',
-            bottom_right: ' ',
-            horizontal: ' ',
-            vertical: ' ',
-            top_t: ' ',
-            bottom_t: ' ',
-            left_t: ' ',
-            right_t: ' ',
-            cross: ' ',
-        });
-        border_box.render_self(ctx.buf, area);
-
-        let title = format!("# Read {filepath}");
-        let title_style = Style::default().fg(rgba_color(ctx.theme.text_muted));
-        draw_text_line(
-            ctx.buf,
-            &title,
-            ctx.x + 3,
-            ctx.y + TOOL_BOX_PAD_V,
-            ctx.max_w.saturating_sub(3),
-            title_style,
-        );
-
-        let max_w_inner = ctx.max_w.saturating_sub(3);
-        let default_fg = rgba_color(ctx.theme.text);
-        let ln_fg = rgba_color(ctx.theme.text_muted);
-        let lang = lang_name_from_path(&filepath);
-        draw_highlighted_code_with_ln(
-            ctx.buf,
-            ctx.x + 3,
-            ctx.y + 1 + TOOL_BOX_PAD_V,
-            max_w_inner,
-            CodeBlockSpec {
-                content: display,
-                lang,
-                default_fg,
-                ln_fg,
-                max_lines: content_lines,
-                theme: ctx.theme,
-            },
+        draw_code_panel(
+            ctx,
+            area,
+            &format!("# Read {filepath}"),
+            &filepath,
+            display,
+            content_lines,
+            false,
         );
         if collapsed.overflow {
-            let hint_y = ctx.y + TOOL_BOX_PAD_V + 1 + content_lines;
-            let hint = if expanded {
-                "Click to collapse"
-            } else {
-                "Click to expand"
-            };
-            draw_hint_button(
-                ctx.buf,
-                hint,
-                ctx.x + 3,
-                hint_y,
-                ctx.max_w.saturating_sub(3),
-                ctx.theme,
-            );
+            draw_overflow_hint(ctx, ctx.x + 3, expanded, content_lines);
         }
         return;
     }

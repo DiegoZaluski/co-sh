@@ -1061,70 +1061,7 @@ impl App {
 
             // If slash menu is visible, arrow keys should move selection there
             if self.slash_menu.visible {
-                match key.code {
-                    KeyCode::Up => self.slash_menu.select_prev(),
-                    KeyCode::Down => self.slash_menu.select_next(),
-                    KeyCode::Enter => {
-                        self.prompt_view.note_activity();
-                        if let Some(cmd) = self.slash_menu.get_selected_command().cloned() {
-                            self.run_slash_command(&cmd);
-                        }
-                    }
-                    KeyCode::Esc => {
-                        self.prompt_view.note_activity();
-                        // Draft context ends: the edit history is dropped
-                        // with it (nothing to undo back to).
-                        self.prompt_view.clear_draft();
-                        self.slash_menu.visible = false;
-                    }
-                    KeyCode::Backspace => {
-                        if key.modifiers.contains(KeyModifiers::CONTROL) {
-                            self.prompt_view.delete_word_before_cursor();
-                            self.slash_menu.update(&self.prompt_view.input);
-                        } else {
-                            self.prompt_view.note_activity();
-                            if !self.prompt_view.input.is_empty() {
-                                // Route through `backspace()` so a pasted
-                                // virtual-text placeholder is still removed
-                                // atomically instead of chipped char by char.
-                                self.prompt_view.backspace();
-                                self.slash_menu.update(&self.prompt_view.input);
-                            }
-                        }
-                    }
-                    KeyCode::Char(ch) => {
-                        // A Ctrl-combo (Ctrl+Z undo, Ctrl+Y redo, Ctrl+J
-                        // newline, Ctrl+W delete-word) must NEVER type its
-                        // letter into the filtered command — the menu sits
-                        // BEFORE the Session-mode Char handler, so handle
-                        // the known combos here and swallow the rest.
-                        if key.modifiers.contains(KeyModifiers::CONTROL) {
-                            match ch {
-                                'z' => self.prompt_undo(),
-                                'y' => self.prompt_redo(),
-                                'j' => self.prompt_view.insert_newline(),
-                                'w' => self.prompt_view.delete_word_before_cursor(),
-                                _ => {}
-                            }
-                            return Ok(false);
-                        }
-                        // Typing hands keyboard control back
-                        // from the right panel to the prompt.
-                        self.state.right_panel.panel_focus = None;
-                        self.prompt_view.note_activity();
-                        self.prompt_view.type_char(ch);
-                        let was_visible = self.slash_menu.visible;
-                        self.slash_menu.update(&self.prompt_view.input);
-                        if was_visible
-                            && !self.slash_menu.visible
-                            && self.prompt_view.input.starts_with('/')
-                        {
-                            self.prompt_view.strip_leading_slash();
-                        }
-                    }
-                    _ => {}
-                }
-                return Ok(false);
+                return self.handle_slash_menu_key(key);
             }
 
             // When the usage dashboard is open, Tab / Shift+Tab cycle the
@@ -1535,67 +1472,7 @@ impl App {
                 }
                 None => {
                     if self.slash_menu.visible {
-                        match key.code {
-                            KeyCode::Up => self.slash_menu.select_prev(),
-                            KeyCode::Down => self.slash_menu.select_next(),
-                            KeyCode::Enter => {
-                                self.prompt_view.note_activity();
-                                if let Some(cmd) = self.slash_menu.get_selected_command().cloned() {
-                                    self.run_slash_command(&cmd);
-                                }
-                            }
-                            KeyCode::Esc => {
-                                self.prompt_view.note_activity();
-                                // Draft context ends: the edit history is
-                                // dropped with it (nothing to undo back to).
-                                self.prompt_view.clear_draft();
-                                self.slash_menu.visible = false;
-                            }
-                            KeyCode::Backspace => {
-                                if key.modifiers.contains(KeyModifiers::CONTROL) {
-                                    self.prompt_view.delete_word_before_cursor();
-                                    self.slash_menu.update(&self.prompt_view.input);
-                                } else {
-                                    self.prompt_view.note_activity();
-                                    if !self.prompt_view.input.is_empty() {
-                                        // Route through `backspace()` so the
-                                        // deletion lands in the edit history.
-                                        self.prompt_view.backspace();
-                                        self.slash_menu.update(&self.prompt_view.input);
-                                    }
-                                }
-                            }
-                            KeyCode::Char(ch) => {
-                                // Same Ctrl-combo rule as the first menu
-                                // arm above: modifiers never type.
-                                if key.modifiers.contains(KeyModifiers::CONTROL) {
-                                    match ch {
-                                        'z' => self.prompt_undo(),
-                                        'y' => self.prompt_redo(),
-                                        'j' => self.prompt_view.insert_newline(),
-                                        'w' => self.prompt_view.delete_word_before_cursor(),
-                                        _ => {}
-                                    }
-                                    return Ok(false);
-                                }
-                                // Typing hands keyboard control back
-                                // from the right panel to the prompt.
-                                self.state.right_panel.panel_focus = None;
-                                self.prompt_view.note_activity();
-                                self.prompt_view.type_char(ch);
-                                let was_visible = self.slash_menu.visible;
-                                self.slash_menu.update(&self.prompt_view.input);
-                                // If menu closed (e.g., user typed space), remove the leading "/"
-                                if was_visible
-                                    && !self.slash_menu.visible
-                                    && self.prompt_view.input.starts_with('/')
-                                {
-                                    self.prompt_view.strip_leading_slash();
-                                }
-                            }
-                            _ => {}
-                        }
-                        return Ok(false);
+                        return self.handle_slash_menu_key(key);
                     }
 
                     if matches!(self.mode(), AppMode::Session) {
@@ -1909,5 +1786,74 @@ impl App {
         self.prompt_view.note_activity();
         self.prompt_view.handle_paste(&text);
         self.slash_menu.update(&self.prompt_view.input);
+    }
+
+    /// Key handling while the slash menu is visible: menu navigation,
+    /// editing of the filtered command, and handoff back to the prompt.
+    /// Runs BEFORE the mode-specific Char handler, so Ctrl-combos
+    /// (Ctrl+Z undo, Ctrl+Y redo, Ctrl+J newline, Ctrl+W delete-word) are
+    /// intercepted here and never type their letter into the filter.
+    /// Consumes the key either way — the menu owns the keyboard while open.
+    fn handle_slash_menu_key(&mut self, key: KeyEvent) -> io::Result<bool> {
+        match key.code {
+            KeyCode::Up => self.slash_menu.select_prev(),
+            KeyCode::Down => self.slash_menu.select_next(),
+            KeyCode::Enter => {
+                self.prompt_view.note_activity();
+                if let Some(cmd) = self.slash_menu.get_selected_command().cloned() {
+                    self.run_slash_command(&cmd);
+                }
+            }
+            KeyCode::Esc => {
+                self.prompt_view.note_activity();
+                // Draft context ends: the edit history is dropped
+                // with it (nothing to undo back to).
+                self.prompt_view.clear_draft();
+                self.slash_menu.visible = false;
+            }
+            KeyCode::Backspace => {
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    self.prompt_view.delete_word_before_cursor();
+                    self.slash_menu.update(&self.prompt_view.input);
+                } else {
+                    self.prompt_view.note_activity();
+                    if !self.prompt_view.input.is_empty() {
+                        // Route through `backspace()` so a pasted
+                        // virtual-text placeholder is still removed
+                        // atomically instead of chipped char by char.
+                        self.prompt_view.backspace();
+                        self.slash_menu.update(&self.prompt_view.input);
+                    }
+                }
+            }
+            KeyCode::Char(ch) => {
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    match ch {
+                        'z' => self.prompt_undo(),
+                        'y' => self.prompt_redo(),
+                        'j' => self.prompt_view.insert_newline(),
+                        'w' => self.prompt_view.delete_word_before_cursor(),
+                        _ => {}
+                    }
+                    return Ok(false);
+                }
+                // Typing hands keyboard control back
+                // from the right panel to the prompt.
+                self.state.right_panel.panel_focus = None;
+                self.prompt_view.note_activity();
+                self.prompt_view.type_char(ch);
+                let was_visible = self.slash_menu.visible;
+                self.slash_menu.update(&self.prompt_view.input);
+                // If menu closed (e.g., user typed space), remove the leading "/"
+                if was_visible
+                    && !self.slash_menu.visible
+                    && self.prompt_view.input.starts_with('/')
+                {
+                    self.prompt_view.strip_leading_slash();
+                }
+            }
+            _ => {}
+        }
+        Ok(false)
     }
 }

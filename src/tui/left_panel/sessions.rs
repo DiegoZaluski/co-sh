@@ -9,33 +9,9 @@ use crate::left_panel::layout::SessionListLayout;
 use crate::session_store::SessionSummary;
 use crate::theme::{Theme, rgba_color};
 use crate::types::SessionStatus;
+use crate::util::draw::draw_text_line;
 use crate::util::list_selection::ListSelection;
 use ratatui::crossterm::event::KeyCode;
-
-fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
-    let Some(right) = x.checked_add(max_w) else {
-        return;
-    };
-    for (i, ch) in text.chars().enumerate() {
-        // Skip control characters (session titles derive from user message
-        // text, which can contain `\n`/`\t`): writing them into cells makes
-        // ratatui's buffer diff panic ("control character passed to
-        // cell_width without filtering").
-        if ch.is_control() {
-            continue;
-        }
-        let Some(cx) = x.checked_add(i as u16) else {
-            break;
-        };
-        if cx >= right {
-            break;
-        }
-        if let Some(cell) = buf.cell_mut((cx, y)) {
-            cell.set_char(ch);
-            cell.set_style(style);
-        }
-    }
-}
 
 /// Action returned by the left panel after a mouse click.
 #[derive(Debug, Clone, PartialEq, Eq)]

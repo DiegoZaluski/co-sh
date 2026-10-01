@@ -21,7 +21,7 @@ use cosh_tui::core::types::MouseEvent;
 
 use crate::theme::{Theme, rgba_color};
 use crate::util::list_selection::ListSelection;
-use crate::util::setup::{HookEntry, Setup};
+use cosh::setup::{HookEntry, Setup};
 
 /// Event section keys inside `setup.json` (`hooks.events`).
 pub const PRE_TOOL_USE_EVENT: &str = "PreToolUse";
@@ -259,10 +259,10 @@ fn cache_choice_value(id: &str, setup: &Setup) -> Option<String> {
         } else {
             format!("{} configured", setup.routing.summarization_models.len())
         }),
-        "anthropic_cache_ttl" => Some(crate::util::setup::format_cache_duration(
+        "anthropic_cache_ttl" => Some(cosh::setup::format_cache_duration(
             setup.cache.anthropic_ttl_min,
         )),
-        "openai_cache_retention" => Some(crate::util::setup::format_cache_duration(
+        "openai_cache_retention" => Some(cosh::setup::format_cache_duration(
             setup.cache.openai_retention_min,
         )),
         "editor" => Some(if setup.editor.trim().is_empty() {
@@ -1376,7 +1376,7 @@ mod tests {
     fn summarizer_list_reorders_edits_removes_to_default_and_scrolls_with_mouse_alignment() {
         let mut setup = Setup::default();
         setup.routing.summarization_models = (0..30)
-            .map(|index| crate::util::setup::FallbackEntry {
+            .map(|index| cosh::setup::FallbackEntry {
                 provider: "local".into(),
                 model: format!("model-{index}"),
             })
@@ -1539,7 +1539,7 @@ mod tests {
         // the row stays visible even though the block cannot be framed.
         let mut setup = Setup::default();
         setup.routing.summarization_models = (0..30)
-            .map(|index| crate::util::setup::FallbackEntry {
+            .map(|index| cosh::setup::FallbackEntry {
                 provider: "local".into(),
                 model: format!("model-{index}"),
             })
@@ -1917,10 +1917,7 @@ mod tests {
             Some(SettingsAction::OpenCheckupModelDialog)
         );
         assert!(
-            matches!(
-                setup.decision.model,
-                crate::util::setup::DecisionModel::English
-            ),
+            matches!(setup.decision.model, cosh::setup::DecisionModel::English),
             "activation never mutates the setting"
         );
         assert_eq!(
@@ -1940,7 +1937,7 @@ mod tests {
         );
 
         // The values track the persisted config.
-        setup.decision.model = crate::util::setup::DecisionModel::Multilingual;
+        setup.decision.model = cosh::setup::DecisionModel::Multilingual;
         setup.decision.termination.min_confidence = 0.75;
         assert_eq!(
             cache_choice_value("checkup_model", &setup),
@@ -2396,7 +2393,7 @@ mod tests {
     fn preview_screen() {
         let theme = test_theme();
         let mut setup = setup_with_hooks(true, &[("block rm", "exit 2"), ("b", "cmd b")]);
-        setup.routing.summarization_models = vec![crate::util::setup::FallbackEntry {
+        setup.routing.summarization_models = vec![cosh::setup::FallbackEntry {
             provider: "local".into(),
             model: "qwen2.5-coder:7b".into(),
         }];

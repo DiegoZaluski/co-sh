@@ -4,34 +4,7 @@ use ratatui::style::Style;
 
 use crate::state::AppState;
 use crate::theme::{Theme, rgba_color};
-
-fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
-    let right = x + max_w;
-    let mut cx = x;
-    for ch in text.chars() {
-        // Wide glyphs (CJK, emoji — all legal in branch names and paths)
-        // occupy two terminal cells; advancing one cell per char would
-        // shift the right-anchored segments and overwrite the wide char's
-        // second half.
-        let w = unicode_width::UnicodeWidthChar::width(ch)
-            .unwrap_or(0)
-            .max(1) as u16;
-        if cx + w > right {
-            break;
-        }
-        if let Some(cell) = buf.cell_mut((cx, y)) {
-            cell.set_char(ch);
-            cell.set_style(style);
-        }
-        if w == 2
-            && let Some(cell) = buf.cell_mut((cx + 1, y))
-        {
-            cell.set_char(' ');
-            cell.set_style(style);
-        }
-        cx += w;
-    }
-}
+use crate::util::draw::draw_text_line_wide;
 
 pub struct FooterView;
 
@@ -60,7 +33,7 @@ impl FooterView {
         let accent = Style::default().fg(rgba_color(theme.accent));
 
         let version = concat!("v", env!("CARGO_PKG_VERSION"));
-        draw_text_line(
+        draw_text_line_wide(
             buf,
             version,
             area.x.saturating_add(1),
@@ -82,20 +55,20 @@ impl FooterView {
 
             let dir_str = format!(" {dir_display}");
             rx = rx.saturating_sub(disp_w(&dir_str));
-            draw_text_line(buf, &dir_str, rx, area.y, disp_w(&dir_str), muted);
+            draw_text_line_wide(buf, &dir_str, rx, area.y, disp_w(&dir_str), muted);
 
             // Current git branch (or detached SHA) beside the working
             // directory; hidden entirely outside a repository.
             if let Some(branch) = &state.git_branch {
                 let branch_str = format!(" {branch}");
                 rx = rx.saturating_sub(disp_w(&branch_str));
-                draw_text_line(buf, &branch_str, rx, area.y, disp_w(&branch_str), accent);
+                draw_text_line_wide(buf, &branch_str, rx, area.y, disp_w(&branch_str), accent);
             }
 
             if state.permission_count > 0 {
                 let s = format!("  perm {}", state.permission_count);
                 rx = rx.saturating_sub(disp_w(&s));
-                draw_text_line(buf, &s, rx, area.y, disp_w(&s), muted);
+                draw_text_line_wide(buf, &s, rx, area.y, disp_w(&s), muted);
             }
 
             if state.mcp_count > 0 || state.mcp_errors > 0 {
@@ -105,13 +78,13 @@ impl FooterView {
                     format!("  mcp {}", state.mcp_count)
                 };
                 rx = rx.saturating_sub(disp_w(&s));
-                draw_text_line(buf, &s, rx, area.y, disp_w(&s), muted);
+                draw_text_line_wide(buf, &s, rx, area.y, disp_w(&s), muted);
             }
 
             if !state.lsp_servers.is_empty() {
                 let s = format!("  lsp {}", state.lsp_servers.len());
                 rx = rx.saturating_sub(disp_w(&s));
-                draw_text_line(buf, &s, rx, area.y, disp_w(&s), muted);
+                draw_text_line_wide(buf, &s, rx, area.y, disp_w(&s), muted);
             }
         }
     }

@@ -6,35 +6,15 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 
 use cosh_tools::question::types::{AnswerItem, QuestionItem, QuestionType};
-use cosh_tui::core::lib::rgba::RGBA;
 use cosh_tui::core::types::MouseEvent;
 
 use super::super::super::component::cursor::{Cursor, CursorState};
 use super::super::super::theme::Theme;
 use crate::component::wall;
 use crate::theme::rgba_color;
+use crate::util::draw::draw_text_line;
 use crate::util::edit_history::{EditHistory, EditKind, RedoOutcome, UndoOutcome};
 use crate::util::field_selection::DragSelection;
-
-fn draw_text_line(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
-    let right = x + max_w;
-    for (i, ch) in text.chars().enumerate() {
-        // Skip control characters: writing them into buffer cells makes
-        // ratatui's buffer diff panic ("control character passed to
-        // cell_width without filtering").
-        if ch.is_control() {
-            continue;
-        }
-        let cx = x + i as u16;
-        if cx >= right {
-            break;
-        }
-        if let Some(cell) = buf.cell_mut((cx, y)) {
-            cell.set_char(ch);
-            cell.set_style(style);
-        }
-    }
-}
 
 /// How many rows a PageUp/PageDown or mouse-wheel scroll step moves the
 /// question-text region.
@@ -2260,14 +2240,7 @@ impl QuestionDialog {
                     rgba_color(theme.background_panel)
                 };
                 let tab_foreground = if is_active {
-                    let (red, green, blue, _) = theme.accent.to_ints();
-                    let lum =
-                        0.299 * f32::from(red) + 0.587 * f32::from(green) + 0.114 * f32::from(blue);
-                    if lum > 128.0 {
-                        RGBA::from_ints(0, 0, 0, 255)
-                    } else {
-                        RGBA::from_ints(255, 255, 255, 255)
-                    }
+                    crate::theme::contrast_fg(theme.accent)
                 } else {
                     theme.text_muted
                 };
@@ -2294,14 +2267,7 @@ impl QuestionDialog {
                 rgba_color(theme.background_panel)
             };
             let confirm_foreground = if is_confirm {
-                let (red, green, blue, _) = theme.accent.to_ints();
-                let lum =
-                    0.299 * f32::from(red) + 0.587 * f32::from(green) + 0.114 * f32::from(blue);
-                if lum > 128.0 {
-                    RGBA::from_ints(0, 0, 0, 255)
-                } else {
-                    RGBA::from_ints(255, 255, 255, 255)
-                }
+                crate::theme::contrast_fg(theme.accent)
             } else {
                 theme.text_muted
             };

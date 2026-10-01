@@ -748,7 +748,7 @@ impl App {
             "anthropic_cache_ttl" => self.setup.cache.anthropic_ttl_min,
             _ => self.setup.cache.openai_retention_min,
         };
-        let current = crate::util::setup::format_cache_duration(minutes);
+        let current = cosh::setup::format_cache_duration(minutes);
         let input = if current == "default" {
             String::new()
         } else {
@@ -863,7 +863,7 @@ impl App {
                 }
             }
             DialogType::CacheTtlInput { setting, input, .. } => {
-                match crate::util::setup::parse_cache_duration(input) {
+                match cosh::setup::parse_cache_duration(input) {
                     Ok(minutes) => {
                         let minutes = minutes.unwrap_or(0);
                         match *setting {
