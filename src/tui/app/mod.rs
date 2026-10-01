@@ -1445,9 +1445,41 @@ impl App {
         x >= right_panel_x
     }
 
-    /// Compute the prompt area rectangle (same calculation as in `render()`).
-    /// Must match the render logic exactly so mouse clicks land on the
-    /// visual prompt position, including the empty-session centered layout.
+    /// Vertical layout of the prompt — and, when it fits, the centered
+    /// static logo block above it — for the session screen. Returns
+    /// `(prompt_area_y, logo_start_y)` where `logo_start_y` is `None` when
+    /// the terminal is too short to hold the logo block between the header
+    /// and the footer: the logo is dropped and the prompt bottom-anchored
+    /// above the footer instead. Shared by the renderer (`render.rs`) and
+    /// the mouse hit-testing helpers below so clicks always land on the
+    /// rows that were actually drawn.
+    fn prompt_vertical_layout(
+        top_y: u16,
+        footer_y: u16,
+        prompt_h: u16,
+        is_empty_session: bool,
+    ) -> (u16, Option<u16>) {
+        // Logo block: logo (6 rows) + gap before prompt (1)
+        let logo_block_h = if is_empty_session {
+            LOGO_CHAT.len() as u16 + 1
+        } else {
+            0
+        };
+        let logo_fits = is_empty_session
+            && prompt_h > 0
+            && logo_block_h + prompt_h <= footer_y.saturating_sub(top_y + 1);
+        if logo_fits {
+            let header_y = top_y + 1;
+            let total_block_h = logo_block_h + prompt_h;
+            let available = footer_y.saturating_sub(header_y);
+            let top_spacer = (available - total_block_h) / 2;
+            let start_y = header_y + top_spacer;
+            (start_y + logo_block_h, Some(start_y))
+        } else {
+            (footer_y.saturating_sub(prompt_h), None)
+        }
+    }
+
     fn compute_prompt_area(&self) -> Option<Rect> {
         if !matches!(self.mode(), AppMode::Session) {
             return None;
@@ -1505,21 +1537,11 @@ impl App {
             .prompt_view
             .required_height(prompt_area_w, prompt_budget);
 
-        let logo_block_h = if is_empty_session {
-            LOGO_CHAT.len() as u16 + 1
-        } else {
-            0
-        };
-
-        let prompt_area_y = if is_empty_session && prompt_h > 0 {
-            let header_y = area.y + 1;
-            let total_block_h = logo_block_h + prompt_h;
-            let available = footer_y.saturating_sub(header_y);
-            let top_spacer = available.saturating_sub(total_block_h) / 2;
-            header_y + top_spacer + logo_block_h
-        } else {
-            footer_y.saturating_sub(prompt_h)
-        };
+        // Shared with `render()` so mouse mapping matches the drawn layout,
+        // including the empty-session centered logo block and its short-screen
+        // fallback.
+        let (prompt_area_y, _logo_start_y) =
+            Self::prompt_vertical_layout(area.y, footer_y, prompt_h, is_empty_session);
 
         Some(Rect::new(
             prompt_area_x,
@@ -1592,21 +1614,11 @@ impl App {
             .prompt_view
             .required_height(prompt_area_w, prompt_budget);
 
-        let logo_block_h = if is_empty_session {
-            LOGO_CHAT.len() as u16 + 1
-        } else {
-            0
-        };
-
-        let prompt_area_y = if is_empty_session && prompt_h > 0 {
-            let header_y = area.y + 1;
-            let total_block_h = logo_block_h + prompt_h;
-            let available = footer_y.saturating_sub(header_y);
-            let top_spacer = available.saturating_sub(total_block_h) / 2;
-            header_y + top_spacer + logo_block_h
-        } else {
-            footer_y.saturating_sub(prompt_h)
-        };
+        // Shared with `render()` so the strip grows upward from the exact row
+        // the prompt is drawn at, including the empty-session centered logo
+        // block and its short-screen fallback.
+        let (prompt_area_y, _logo_start_y) =
+            Self::prompt_vertical_layout(area.y, footer_y, prompt_h, is_empty_session);
 
         // Same clamp as `render()`: the wrapped strip never covers the header.
         let pending_h = pending_h.min(prompt_area_y.saturating_sub(area.y + 1));

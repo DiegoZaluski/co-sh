@@ -574,23 +574,15 @@ impl App {
                 0
             };
 
-            // Logo block: logo (6 rows) + gap before prompt (1)
-            let logo_block_h = if is_empty_session {
-                LOGO_CHAT.len() as u16 + 1
-            } else {
-                0
-            };
-
-            let (prompt_area_y, logo_start_y) = if is_empty_session && prompt_h > 0 {
-                let header_y = area.y + 1;
-                let total_block_h = logo_block_h + prompt_h;
-                let available = footer_y.saturating_sub(header_y);
-                let top_spacer = available.saturating_sub(total_block_h) / 2;
-                let start_y = header_y + top_spacer;
-                (start_y + logo_block_h, start_y)
-            } else {
-                (footer_y.saturating_sub(prompt_h), 0)
-            };
+            // Shared with the mouse hit-testing helpers (`App::prompt_vertical_layout`)
+            // so clicks always land on the rows that were actually drawn. On very
+            // short terminals the centered logo block + prompt don't fit between
+            // the header and the footer: the logo is dropped (`logo_start_y` is
+            // `None`) and the prompt bottom-anchored instead — drawing the static
+            // logo's unclamped `set_string` rows past the buffer bottom is what
+            // panicked with "index outside of buffer" on a resize to a few rows.
+            let (prompt_area_y, logo_start_y) =
+                Self::prompt_vertical_layout(area.y, footer_y, prompt_h, is_empty_session);
 
             // Both spinners share the row above the prompt. The correction
             // indicator yields to the agent loop rather than replacing it.
@@ -909,8 +901,12 @@ impl App {
                         );
 
                         // Static LOGO_CHAT replaces the animation when /anim is off,
-                        // centered above the prompt input.
-                        if is_empty_session && !self.anim_enabled {
+                        // centered above the prompt input. Skipped on short
+                        // terminals where the layout dropped the logo block.
+                        if is_empty_session
+                            && !self.anim_enabled
+                            && let Some(logo_start_y) = logo_start_y
+                        {
                             for (i, line) in LOGO_CHAT.iter().enumerate() {
                                 let line_w = line.chars().count() as u16;
                                 let logo_x =

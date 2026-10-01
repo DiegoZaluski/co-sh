@@ -16,13 +16,21 @@ Highlights:
 
 Tested on Linux and Windows. macOS hasn't been tested yet — if anything fails, [open an issue](https://github.com/DiegoZaluski/co-sh/issues) with as much detail as possible.
 
-**Linux, macOS, Windows (Git Bash / WSL):**
+**Linux & macOS** (also works on Windows via Git Bash / WSL):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/DiegoZaluski/co-sh/main/download.sh | bash
 ```
 
-Optional variables: `COSH_BIN_DIR` (install directory), `COSH_VERSION` (specific version) and `COSH_VARIANT` (`slim`, the default, or `slim-embed`, with local RAG via fastembed).
+**Windows (PowerShell):**
+
+```powershell
+irm https://raw.githubusercontent.com/DiegoZaluski/co-sh/main/download.ps1 | iex
+```
+
+> Note: the `curl | bash` command does **not** work in PowerShell or CMD — Windows has no native `bash`. Use the PowerShell script above instead (Git Bash and WSL also work).
+
+Optional variables: `COSH_BIN_DIR` (install directory), `COSH_VERSION` (specific version) and `COSH_VARIANT` (`slim`, the default, or `slim-embed`, with local RAG via fastembed). On PowerShell, set them as `$env:COSH_VERSION = "v0.1.0"` before running the command.
 
 After installing, run `cosh` in your terminal. If the install directory isn't on your `PATH`, the script prints the command to add it. If anything goes wrong during installation, open an issue — I'll be glad to help!
 
