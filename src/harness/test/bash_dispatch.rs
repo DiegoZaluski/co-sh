@@ -43,6 +43,11 @@ async fn bash_run_exit_code_non_zero() {
     );
 }
 
+// `printf` + `$(seq ...)` are POSIX binaries resolved through the child
+// bash's PATH; on Windows the harness's resolved Git Bash may not expose
+// `usr\bin` to the child (see `resolve_bash` in cosh-tools), producing
+// "command not found" (the 47-char error message instead of 10_000 chars).
+#[cfg(unix)]
 #[tokio::test]
 async fn bash_run_multiple_chunks_accumulated() {
     let tools = make_tools();
@@ -132,6 +137,10 @@ async fn bash_run_dangerous_pattern_rejected() {
     );
 }
 
+// `ls` is a POSIX binary resolved through the child bash's PATH; on Windows
+// the harness's resolved Git Bash may not expose `usr\bin` to the child
+// (see `resolve_bash` in cosh-tools), producing "command not found".
+#[cfg(unix)]
 #[tokio::test]
 async fn bash_run_ls_output_is_complete() {
     let tools = make_tools();

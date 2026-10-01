@@ -1535,9 +1535,182 @@ impl Tools for CoshTools {
                     &call_input,
                     input.code_review,
                 );
+
+                // Background mode (opt-in): register the task, spawn the ACP
+                // turn DETACHED on the process-wide runtime, and return the
+                // receipt immediately — the model keeps working. The detached
+                // task streams live events to the TUI (the user watches the
+                // sub-agent box as usual) and records the outcome in the
+                // registry when the turn ends; the report reaches the MODEL
+                // later — as the automated completion notification pushed by
+                // the top-level loop's next drain, or via `subagent_status`
+                // (poll). Session bookkeeping shares the same map the
+                // synchronous path uses (via `session_recorder`), so a later
+                // `continue_session` call resumes the background turn's
+                // session as normal.
+                if input.run_in_background {
+                    // Busy guard: a second background spawn for the SAME
+                    // agent with `continue_session` (the default) would
+                    // resume the same remote ACP session concurrently with
+                    // the running task — two interleaved turns in one
+                    // session. Rejected with an actionable message instead;
+                    // `continue_session: false` opens an independent session
+                    // and skips the guard.
+                    if input.continue_session
+                        && let Some(running) = super::background::running_task_for(&agent)
+                    {
+                        return Err(format!(
+                            "agent '{agent}' already has a background task running ({running}). \
+                             Wait for it to finish (subagent_status), or spawn with \
+                             continue_session: false for an independent session."
+                        ));
+                    }
+                    let task_id = super::background::register(&agent, &call_input);
+                    let recorder = self.subagent.session_recorder();
+                    let event_tx_bg = self.event_tx.clone();
+                    let cwd = self.project_root().clone();
+                    let stop_signal = self
+                        .stop_signal
+                        .clone()
+                        .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+                    let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel::<
+                        cosh_tools::subagent::events::SubagentEvent,
+                    >();
+                    // Clones for the detached task: the originals stay with
+                    // the caller, which returns the spawn receipt below.
+                    let bg_agent = agent.clone();
+                    let bg_task_id = task_id.clone();
+                    super::background::spawn_detached(async move {
+                        // Panic safety net: a panic (or runtime cancellation)
+                        // inside the turn body must not leave the task
+                        // eternally Running — it would never notify AND,
+                        // with the busy guard, would block every later
+                        // `continue_session` spawn for this agent. The body
+                        // runs in an inner task; a JoinError (panic) marks
+                        // the task failed, exactly like the internal path's
+                        // `catch_unwind` does for its thread.
+                        // Clones for the INNER spawned task: made here, in
+                        // the outer block, so the inner `async move` never
+                        // captures (and moves) the originals — the match
+                        // arms below still use them for bookkeeping.
+                        let body_tx = event_tx_bg.clone();
+                        let body_agent = bg_agent.clone();
+                        let turn_body = tokio::spawn(async move {
+                            // Forward typed events while the turn runs; the
+                            // loop ends when `acp::call` returns and drops
+                            // `chunk_tx`.
+                            let forward = tokio::spawn(async move {
+                                while let Some(event) = chunk_rx.recv().await {
+                                    if let Some(ref tx) = body_tx {
+                                        let _ = tx.send(HarnessEvent::SubagentEvent {
+                                            tool: "subagent_call".to_string(),
+                                            event,
+                                        });
+                                    }
+                                }
+                            });
+                            let turn = cosh_tools::subagent::acp::call(
+                                &body_agent,
+                                &call_input,
+                                resume,
+                                cwd,
+                                stop_signal,
+                                chunk_tx,
+                            )
+                            .await;
+                            let _ = forward.await;
+                            turn
+                        });
+                        match turn_body.await {
+                            Ok(Ok((output, stop_reason, session_id))) => {
+                                // Same bookkeeping as the synchronous path:
+                                // only a successful turn's session id is
+                                // stored (an errored turn returns None).
+                                if let Some(session_id) = session_id {
+                                    recorder
+                                        .lock()
+                                        .unwrap_or_else(|p| p.into_inner())
+                                        .insert(bg_agent.clone(), session_id);
+                                }
+                                // Same severity enforcement as the
+                                // synchronous path: only a COMPLETED review
+                                // turn gets the header injected.
+                                let completed = stop_reason == "end_turn";
+                                let output = if is_review
+                                    && completed
+                                    && !output.trim().is_empty()
+                                {
+                                    cosh_tools::subagent::severity::enforce_severity_header(
+                                        &output, true,
+                                    )
+                                } else {
+                                    output
+                                };
+                                // Close the TUI sub-agent box with the final
+                                // report (same mirror the synchronous path
+                                // uses), then record completion for push/poll.
+                                if let Some(ref tx) = event_tx_bg {
+                                    let _ = tx.send(HarnessEvent::ToolOutput {
+                                        tool: "subagent_call".to_string(),
+                                        output: output.clone(),
+                                        finished: true,
+                                    });
+                                }
+                                super::background::complete(&bg_task_id, Some(output), None);
+                            }
+                            Ok(Err(error)) => {
+                                // Total failure (no partial output): the
+                                // registry records the error, and the failed
+                                // task's notification says so.
+                                super::background::complete(&bg_task_id, None, Some(error));
+                            }
+                            Err(join_error) => {
+                                // The turn body panicked: surface it as a
+                                // task failure (never a silent zombie).
+                                super::background::complete(
+                                    &bg_task_id,
+                                    None,
+                                    Some(format!("background sub-agent task panicked: {join_error}")),
+                                );
+                            }
+                        }
+                    });
+                    // The receipt is enveloped as a `SubAgentCallOutput`
+                    // (the shape the TUI unwraps for the sub-agent box)
+                    // with a HUMAN-READABLE summary: a bare
+                    // `{"task_id": ...}` object would leak as raw JSON in
+                    // the panel (the TUI's parser falls back to the raw
+                    // string on unknown shapes). The task_id stays verbatim
+                    // in the text for the model.
+                    return serde_json::to_string(&SubAgentCallOutput {
+                        output: format!(
+                            "Background sub-agent '{agent}' spawned (task_id: {task_id}). \
+                             Its final report will arrive automatically as an [automated \
+                             notification]; poll subagent_status for progress in the meantime."
+                        ),
+                        stop_reason: "spawned".to_string(),
+                    })
+                    .map_err(|e| e.to_string());
+                }
+
                 let event_tx_during = self.event_tx.clone();
                 // The ACP session is rooted at the workspace directory.
                 let cwd = self.project_root().clone();
+                // Busy guard (foreground twin of the background-spawn guard
+                // above): a synchronous turn for an agent with a RUNNING
+                // background task would resume the SAME remote ACP session
+                // concurrently with that task (dispatch is sequential here,
+                // but the detached background turn is not). Same opt-out:
+                // `continue_session: false` opens an independent session.
+                if input.continue_session
+                    && let Some(running) = super::background::running_task_for(&agent)
+                {
+                    return Err(format!(
+                        "agent '{agent}' has a background task still running ({running}). \
+                         Wait for it to finish (subagent_status), or pass \
+                         continue_session: false for an independent session."
+                    ));
+                }
                 // Cancellation (Phase 5): share the agent loop's stop flag so
                 // ESC interrupts the remote turn via `session/cancel`. Tools
                 // dispatched outside an agent loop (or before the flag is

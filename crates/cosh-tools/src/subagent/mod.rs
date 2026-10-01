@@ -63,7 +63,7 @@ pub mod severity;
 pub mod types;
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::ToolDescription;
 pub use types::{SubAgentCallInput, SubAgentCallOutput};
@@ -100,11 +100,22 @@ pub struct SubAgent {
     /// across calls. Failed turns store nothing — a session whose
     /// turn errored is not trusted.
     ///
+    /// Behind an `Arc` so a BACKGROUND turn (spawned detached on the
+    /// process-wide runtime, long after this dispatcher's borrow ends) can
+    /// still record the session id its harness returned. The inner `Mutex`
+    /// keeps every other access pattern unchanged.
+    ///
     /// Concurrency invariant: the read-then-store-after-await pattern in
     /// the dispatch layer is safe because tool dispatch is sequential per
     /// agent loop and each harness owns its own `SubAgent` — a parallel
-    /// dispatch change would need its own synchronization here.
-    last_session: Mutex<HashMap<String, String>>,
+    /// dispatch change would need its own synchronization here. Background
+    /// turns are the one deliberate exception: exactly ONE detached task
+    /// stores per spawned turn (the store happens once, at turn end), and
+    /// the dispatch path's busy guard (`background::running_task_for`)
+    /// rejects a second background spawn for the same agent while one is
+    /// running, so two turns never share (and interleave in) one remote
+    /// session.
+    last_session: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl Default for SubAgent {
@@ -123,7 +134,7 @@ impl SubAgent {
             description_call: Self::build_tool_description(""),
             note: String::new(),
             last_input: Mutex::new(None),
-            last_session: Mutex::new(HashMap::new()),
+            last_session: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -180,6 +191,12 @@ impl SubAgent {
                      false` when the new task is unrelated and needs clean context.\n\
                      - Omit `agent` (or pass an empty string) to call the internal \
                      agent instead of an external ACP harness.\n\
+                     - Set `run_in_background: true` to spawn the sub-agent without \
+                     blocking: the call returns a `task_id` immediately and the final \
+                     report is delivered later as an automated completion notification. \
+                     Query progress with `subagent_status`. Keep background spawns \
+                     focused: prefer 3–5 parallel sub-agents, and use the synchronous \
+                     mode when you need the result before continuing.\n\
                      - Use `bash_run` for regular shell commands. \
                      These are separate tools with different purposes.";
 
@@ -253,6 +270,10 @@ impl SubAgent {
                         "type": "boolean",
                         "description": "Resume the agent's most recent session, keeping its context (default). Set false to start a brand-new session when the new task is unrelated and needs clean context.",
                     },
+                    "run_in_background": {
+                        "type": "boolean",
+                        "description": "Set true to spawn the sub-agent WITHOUT blocking: the call returns a task_id immediately and the final report is delivered later as an automated completion notification. Query progress with the subagent_status tool. Omitted or false (default): the call blocks until the sub-agent finishes and returns its report directly.",
+                    },
                 },
                 "required": [],
             },
@@ -316,6 +337,20 @@ impl SubAgent {
             .lock()
             .unwrap()
             .insert(agent.to_string(), session_id);
+    }
+
+    /// Cloneable recorder of the ACP session map, for BACKGROUND turns.
+    ///
+    /// A background `subagent_call` spawns a detached task and returns
+    /// immediately, so it cannot call [`Self::store_session`] after the
+    /// (much later) turn ends — the dispatcher borrow is long gone. The
+    /// detached task keeps this handle and records the session id at turn
+    /// end, exactly where the synchronous path would. Sharing the same
+    /// `Arc<Mutex<..>>` keeps background and synchronous bookkeeping in ONE
+    /// map, so `resume_id` sees both.
+    #[must_use]
+    pub fn session_recorder(&self) -> Arc<Mutex<HashMap<String, String>>> {
+        Arc::clone(&self.last_session)
     }
 
     /// The session id to resume for `agent`, when `continue_session` is

@@ -55,6 +55,18 @@ pub struct SubAgentCallInput {
     /// internal agent never persists state across calls).
     #[serde(default = "default_true")]
     pub continue_session: bool,
+    /// Run the sub-agent in the BACKGROUND (default `false`).
+    ///
+    /// `true`: the harness spawns the sub-agent without blocking, returns a
+    /// `task_id` immediately, and the final report is delivered later — as
+    /// an automated completion notification in a subsequent turn. Query
+    /// progress at any time with the `subagent_status` tool (by `task_id`,
+    /// or omit its argument to list all background tasks).
+    ///
+    /// Omitted or `false`: the call blocks until the sub-agent finishes and
+    /// returns its report directly (the default synchronous behavior).
+    #[serde(default)]
+    pub run_in_background: bool,
 }
 
 /// Serde default for [`SubAgentCallInput::continue_session`]: omitted means

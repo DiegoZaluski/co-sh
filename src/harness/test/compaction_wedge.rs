@@ -78,14 +78,34 @@ async fn streaming_server() -> (std::net::SocketAddr, tokio::task::JoinHandle<()
                 let mut bytes = Vec::new();
                 let mut buffer = [0u8; 4096];
                 loop {
+                    // Drain the request HEADERS *and BODY* before answering.
+                    // Stopping at the header terminator (the old logic) left
+                    // the ~9 KB summarizer prompt mid-flight: the socket
+                    // closed under the client, which got an RST and failed
+                    // the request with "error sending request" — before the
+                    // 200 ms reply window below ever mattered.
+                    let header_end = bytes
+                        .windows(4)
+                        .position(|part| part == b"\r\n\r\n")
+                        .map(|i| i + 4);
+                    if let Some(end) = header_end {
+                        let content_length = String::from_utf8_lossy(&bytes[..end])
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.trim()
+                                    .eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().ok())
+                                    .flatten()
+                            })
+                            .unwrap_or(0);
+                        if bytes.len() >= end + content_length {
+                            break;
+                        }
+                    }
                     match socket.read(&mut buffer).await {
                         Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            bytes.extend_from_slice(&buffer[..n]);
-                            if bytes.windows(4).any(|part| part == b"\r\n\r\n") {
-                                break;
-                            }
-                        }
+                        Ok(n) => bytes.extend_from_slice(&buffer[..n]),
                     }
                 }
                 // The wedge wins the race before this delay elapses.
