@@ -4,9 +4,7 @@
 
 Cosh es un coding agent de propósito general para la terminal, con herramientas de ingeniería de software y *computer tools* que le permiten interactuar con aplicaciones gráficas.
 
-<!-- Demo: reemplaza el enlace de abajo por la URL https://github.com/user-attachments/assets/... que se genera al arrastrar demox.mp4 en el editor del README en GitHub -->
-
-[Demonstración de cosh](https://github.com/user-attachments/assets/demox-placeholder)
+<img width="560" height="315" alt="demo" src="https://github.com/user-attachments/assets/d746684d-ecc1-4ce7-ad0c-a0b18d9892b8" />
 
 Aspectos destacados:
 

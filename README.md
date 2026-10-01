@@ -4,7 +4,7 @@
 
 Cosh is a general-purpose coding agent for the terminal, with software engineering tools and *computer tools* that let it interact with graphical applications.
 
-[Cosh demo](https://github.com/user-attachments/assets/d069f7f5-d517-4df4-ab36-0a3943f096fa)
+<img width="560" height="315" alt="demo" src="https://github.com/user-attachments/assets/d746684d-ecc1-4ce7-ad0c-a0b18d9892b8" />
 
 Highlights:
 
