@@ -32,6 +32,11 @@ pub enum Action {
     NextSession,
     PrevSession,
     ToggleMode,
+    /// Cycle the active model's reasoning effort to the next level
+    /// (Ctrl+R): walks the model's reasoning levels in display order and
+    /// wraps back to the start — the same levels the reasoning sub-dialog
+    /// of the /models picker offers.
+    CycleReasoning,
     ClearQueue,
     /// Maximize the Subagent section over the right panel (header hint F1).
     MaximizeSubagent,
@@ -184,6 +189,13 @@ impl KeyMap {
                     KeyBinding {
                         key: Tab,
                         modifiers: KeyModifiers::NONE,
+                    },
+                ),
+                (
+                    Action::CycleReasoning,
+                    KeyBinding {
+                        key: Char('r'),
+                        modifiers: KeyModifiers::CONTROL,
                     },
                 ),
                 (

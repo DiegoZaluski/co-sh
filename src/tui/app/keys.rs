@@ -1472,6 +1472,12 @@ impl App {
                 Some(crate::keymap::Action::ToggleGenericToolOutput) => {
                     self.config.show_generic_tool_output = !self.config.show_generic_tool_output;
                 }
+                Some(crate::keymap::Action::CycleReasoning) => {
+                    if matches!(self.mode(), AppMode::Session) {
+                        self.cycle_reasoning();
+                        return Ok(false);
+                    }
+                }
                 Some(crate::keymap::Action::ToggleMode) => {
                     if matches!(self.mode(), AppMode::Session) {
                         use cosh::harness::Mode;

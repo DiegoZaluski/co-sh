@@ -61,6 +61,7 @@ const SHORTCUTS: &[ShortcutLine] = &[
     ShortcutLine::Key("Ctrl+D", "Toggle tool details (show/hide completed)"),
     ShortcutLine::Key("Ctrl+E", "Toggle diagnostics (show/hide LSP findings)"),
     ShortcutLine::Key("Ctrl+G", "Toggle generic tool output"),
+    ShortcutLine::Key("Ctrl+R", "Cycle reasoning effort (low/medium/high)"),
     ShortcutLine::Gap,
     ShortcutLine::Header("Session"),
     ShortcutLine::Key("Tab", "Cycle mode (Build/Ask/Yolo)"),

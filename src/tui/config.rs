@@ -108,6 +108,19 @@ pub fn model_reasoning_levels(model: &str) -> Vec<String> {
     levels
 }
 
+/// The standard effort set offered for `auto` mode: auto may land on ANY
+/// fallback model, so its reasoning picker (and the Ctrl+R cycle) offers the
+/// common default/low/medium/high list instead of one model's specific
+/// levels. Keep in sync with the fallback set in [`model_reasoning_levels`].
+pub fn auto_reasoning_levels() -> Vec<String> {
+    vec![
+        "default".to_string(),
+        "low".to_string(),
+        "medium".to_string(),
+        "high".to_string(),
+    ]
+}
+
 /// Name-based fallback for models the catalog does not know (or that predate
 /// its reasoning metadata).
 fn heuristic_model_supports_reasoning(model: &str) -> bool {

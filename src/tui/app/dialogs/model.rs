@@ -329,12 +329,7 @@ impl App {
             // level each fallback model actually accepts (both here and on
             // every harness fallback switch via `resolve_reasoning_effort`).
             let current = self.llm_config.reasoning.clone().unwrap_or_default();
-            let levels = vec![
-                "default".to_string(),
-                "low".to_string(),
-                "medium".to_string(),
-                "high".to_string(),
-            ];
+            let levels = crate::config::auto_reasoning_levels();
             let start = levels.iter().position(|l| l == &current).unwrap_or(0);
             self.dialog.show(DialogType::ReasoningList {
                 model: model.to_string(),
@@ -496,6 +491,43 @@ impl App {
             // confidently, so the active config stays as-is.
             _ => {}
         }
+    }
+
+    /// Cycle the active model's reasoning effort to the next level
+    /// (Ctrl+R). Walks the same level list the reasoning sub-dialog of the
+    /// model picker offers — `default` first, then the model's advertised
+    /// efforts in display order — and wraps back to the start when the end
+    /// is reached. The new level goes through `commit_model_selection`, so
+    /// it persists globally and on the current session exactly like a pick
+    /// made through /models. A model that exposes no configurable reasoning
+    /// (or `auto` with only the default effort) leaves the config untouched.
+    pub(in crate::app) fn cycle_reasoning(&mut self) {
+        let model = self.llm_config.model.clone().unwrap_or_default();
+
+        // `auto` may land on ANY fallback model, so it cycles the standard
+        // effort set (mirroring the auto branch of `confirm_model_entry`);
+        // a concrete model only cycles when it supports reasoning at all.
+        let levels = if model == "auto" {
+            crate::config::auto_reasoning_levels()
+        } else if crate::config::model_supports_reasoning(&model) {
+            crate::config::model_reasoning_levels(&model)
+        } else {
+            return;
+        };
+        if levels.len() <= 1 {
+            return;
+        }
+
+        // An effort left over from a previous model (not in this list)
+        // maps to index 0 (`default`) — the next press then walks the list
+        // from the top instead of erroring or skipping.
+        let current = self.llm_config.reasoning.clone().unwrap_or_default();
+        let start = levels.iter().position(|l| l == &current).unwrap_or(0);
+        let next = &levels[(start + 1) % levels.len()];
+        let reasoning: Option<&str> = if next == "default" { None } else { Some(next) };
+
+        let provider = self.llm_config.provider.clone();
+        self.commit_model_selection(&model, &provider, reasoning);
     }
 
     pub(in crate::app) fn is_reasoning_dialog_visible(&self) -> bool {
