@@ -15,7 +15,8 @@ set -eu
 # Environment variables:
 #   COSH_BIN_DIR  - Installation directory (default: $HOME/.local/bin, Windows: %USERPROFILE%/cosh)
 #   COSH_VERSION  - Specific version to install (e.g., "v0.1.0" or "0.1.0")
-#   COSH_VARIANT  - Package variant: "base" (default) or "embed" (includes fastembed/embed support)
+#   COSH_VARIANT  - Package variant: "slim" (default, no RAG, no Home) or
+#                   "slim-embed" (local RAG via fastembed, no Home)
 #   INSTALL_OS    - Override OS detection: "linux", "darwin", or "win32"
 #
 # Release artifacts are produced by .github/workflows/release.yml on tag push
@@ -31,7 +32,7 @@ else
 fi
 
 COSH_BIN_DIR="${COSH_BIN_DIR:-$DEFAULT_BIN_DIR}"
-COSH_VARIANT="${COSH_VARIANT:-base}"
+COSH_VARIANT="${COSH_VARIANT:-slim}"
 
 if ! command -v curl >/dev/null 2>&1; then
   echo "Error: 'curl' is required to download cosh. Please install curl and try again."
@@ -92,18 +93,16 @@ if [ "$OS" = "win32" ] && [ "$ARCH" != "x64" ]; then
   exit 1
 fi
 
-# Variant note: "embed" builds with the workspace `embed` feature
-# (cosh-tools/embed + fastembed) and is produced by the release workflow
-# alongside the "base" variant.
+# Variant note: both variants are built without the Home screen
+# (--no-default-features). "slim-embed" additionally enables the workspace
+# `embed` feature (cosh-tools/embed + fastembed) for local RAG. Both are
+# produced by the release workflow.
 case "$COSH_VARIANT" in
-  base|embed) ;;
-  *) echo "Error: Unsupported COSH_VARIANT '$COSH_VARIANT'. Expected 'base' or 'embed'."; exit 1 ;;
+  slim|slim-embed) ;;
+  *) echo "Error: Unsupported COSH_VARIANT '$COSH_VARIANT'. Expected 'slim' or 'slim-embed'."; exit 1 ;;
 esac
 
-SUFFIX=""
-if [ "$COSH_VARIANT" = "embed" ]; then
-  SUFFIX="-embed"
-fi
+SUFFIX="-$COSH_VARIANT"
 
 VERSION="${COSH_VERSION#v}"
 if [ "$OS" = "win32" ]; then
@@ -123,7 +122,7 @@ if ! curl -sLf "$DOWNLOAD_URL" --output "$FILE"; then
   echo "Error: Failed to download $DOWNLOAD_URL"
   echo ""
   echo "If you requested a variant, make sure it exists for this release."
-  echo "Try setting COSH_VARIANT=base or removing the environment variable."
+  echo "Try setting COSH_VARIANT=slim or removing the environment variable."
   exit 1
 fi
 

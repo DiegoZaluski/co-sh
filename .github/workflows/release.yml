@@ -50,10 +50,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Two variants per platform, matching what download.sh/download.ps1 expect:
-        #   base  -> cosh-v<VERSION>-<OS>-<ARCH>.tar.gz|.zip
-        #   embed -> cosh-v<VERSION>-<OS>-<ARCH>-embed.tar.gz|.zip (workspace `embed` feature)
-        variant: [base, embed]
+        # Two variants per platform, matching what download.sh/download.ps1 expect.
+        # Both ship WITHOUT the Home screen (`--no-default-features` drops the
+        # default `home` feature, so the app boots straight into a session):
+        #   slim       -> cosh-v<VERSION>-<OS>-<ARCH>-slim.tar.gz|.zip
+        #                 (no RAG, no Home)
+        #   slim-embed -> cosh-v<VERSION>-<OS>-<ARCH>-slim-embed.tar.gz|.zip
+        #                 (workspace `embed` feature = local RAG, no Home)
+        variant: [slim, slim-embed]
 
         include:
           - os: ubuntu-latest
@@ -104,17 +108,21 @@ jobs:
         id: vars
         shell: bash
         run: |
-          if [ "${{ matrix.variant }}" = "embed" ]; then
-            echo "variant_suffix=-embed" >> $GITHUB_OUTPUT
-            echo "features=--features embed" >> $GITHUB_OUTPUT
+          # Both variants drop the default `home` feature
+          # (--no-default-features); slim-embed additionally enables the
+          # workspace `embed` feature (local RAG via fastembed).
+          if [ "${{ matrix.variant }}" = "slim-embed" ]; then
+            echo "variant_suffix=-slim-embed" >> $GITHUB_OUTPUT
+            echo "features=--no-default-features --features embed" >> $GITHUB_OUTPUT
           else
-            echo "variant_suffix=" >> $GITHUB_OUTPUT
-            echo "features=" >> $GITHUB_OUTPUT
+            echo "variant_suffix=-slim" >> $GITHUB_OUTPUT
+            echo "features=--no-default-features" >> $GITHUB_OUTPUT
           fi
 
-      # The `embed` variant enables the workspace `embed` feature
+      # The `slim-embed` variant enables the workspace `embed` feature
       # (cosh-tools/embed + fastembed). fastembed pulls the ONNX Runtime
       # shared library as a build-time download, so this job is slower.
+      # Both variants are built `--no-default-features` (no Home screen).
       # Both `cosh` and `cosh-uninstall` are shipped; `highlight-demo` is a
       # dev-only target.
       - name: Build cosh (${{ matrix.variant }})
