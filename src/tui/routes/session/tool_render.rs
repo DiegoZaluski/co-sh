@@ -1035,7 +1035,7 @@ pub fn render_write(ctx: &mut ToolRenderCtx, part: &ToolPart) {
             &filepath,
             &content,
             max_lines,
-            true,
+            false,
         );
     } else {
         let label = format!("Write {filepath}");

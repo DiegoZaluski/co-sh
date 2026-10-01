@@ -116,9 +116,10 @@ const SHORTCUTS: &[ShortcutLine] = &[
     ShortcutLine::Key("Ctrl+D", "Toggle tool details (show/hide completed)"),
     ShortcutLine::Key("Ctrl+E", "Toggle diagnostics (show/hide LSP findings)"),
     ShortcutLine::Key("Ctrl+G", "Toggle generic tool output"),
+    ShortcutLine::Key("Ctrl+R", "Cycle reasoning effort (low/medium/high)"),
     ShortcutLine::Gap,
     ShortcutLine::Header("Session"),
-    ShortcutLine::Key("Tab", "Cycle mode (Build/Ask/Yolo)"),
+    ShortcutLine::Key("Tab / Ctrl+I", "Cycle mode (Build/Ask/Yolo/Command)"),
     ShortcutLine::Key("Ctrl+\u{2191}/\u{2193}", "Prompt history"),
     ShortcutLine::Key("Ctrl+Z", "Undo prompt edit / revert correction"),
     ShortcutLine::Key("Ctrl+Y", "Redo prompt edit / reapply correction"),
@@ -179,11 +180,7 @@ fn shortcuts_layout(area: Rect) -> ShortcutsLayout {
         .min(area.width.saturating_sub(6))
         .max(10);
 
-    let entries = SHORTCUTS.len();
-    let max_visible = (area.height.saturating_sub(4) as usize)
-        .min(entries)
-        .max(1)
-        .clamp(1, 20);
+    let max_visible = shortcuts_max_visible(area);
     let list_h = max_visible as u16;
     // Title row + gap row + list rows + padding top/bottom (no border).
     let dialog_h = 1 + 1 + list_h + 2;
@@ -199,6 +196,24 @@ fn shortcuts_layout(area: Rect) -> ShortcutsLayout {
     }
 }
 
+/// Visible list rows of the Shortcuts overlay for the given frame size —
+/// the single definition used by both the layout and the scroll bounds.
+fn shortcuts_max_visible(area: Rect) -> usize {
+    (area.height.saturating_sub(4) as usize)
+        .min(SHORTCUTS.len())
+        .max(1)
+        .clamp(1, 20)
+}
+
+/// Upper scroll bound for the Shortcuts overlay: how many list rows exist
+/// beyond what fits on screen. Key handlers must clamp against this — the
+/// render clamps only its own local view (it receives the dialog by shared
+/// reference and cannot write the value back), so an unbounded scroll keeps
+/// climbing past it and the subsequent scroll-up sits "dead" on screen
+/// until the raw value crawls back under this ceiling.
+pub fn shortcuts_max_scroll(area: Rect) -> usize {
+    SHORTCUTS.len().saturating_sub(shortcuts_max_visible(area))
+}
 /// Message and option row of the [`DialogType::ProviderKeyChoice`] box,
 /// drawn inside the border the caller already painted (message at +2,
 /// "Forget key" / "Overwrite key" side by side at +4 — the selected option
