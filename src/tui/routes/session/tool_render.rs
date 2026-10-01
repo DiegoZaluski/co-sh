@@ -963,7 +963,7 @@ pub fn render_write(ctx: &mut ToolRenderCtx, part: &ToolPart) {
         border_box.set_background_color(Some(ctx.theme.background_panel.into()));
         border_box.set_border_color(Some(ctx.theme.background.into()));
         border_box.set_border_sides(BorderSidesConfig {
-            left: true,
+            left: false,
             top: false,
             right: false,
             bottom: false,
@@ -974,10 +974,10 @@ pub fn render_write(ctx: &mut ToolRenderCtx, part: &ToolPart) {
             bottom_left: ' ',
             bottom_right: ' ',
             horizontal: ' ',
-            vertical: '┃',
+            vertical: ' ',
             top_t: ' ',
             bottom_t: ' ',
-            left_t: '┃',
+            left_t: ' ',
             right_t: ' ',
             cross: ' ',
         });
