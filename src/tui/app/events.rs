@@ -76,11 +76,22 @@ impl App {
         const DEFAULT: Duration = Duration::from_millis(200);
         const MIN: Duration = Duration::from_millis(16);
 
+        // Candidate deadlines, composed with `min()` — NEVER early-returned.
+        // An early return here lets the FIRST matching animation dictate the
+        // idle cadence for everything else: in the session router the prompt
+        // cursor is always present, so its blink deadline (up to 500 ms) used
+        // to shadow the header sparkle's 33 ms animation wait entirely — the
+        // starfield stepped at the cursor blink rate (~2 fps) and looked
+        // frozen/laggy even though each frame renders in well under a
+        // millisecond. Every animation that needs wakeups contributes its own
+        // deadline; the loop redraws at the fastest one actually due.
+        let mut wait = DEFAULT;
+
         // Toast countdown: repaint as soon as the remaining lifetime can
         // still change the visible state (its progress is not animated
         // frame-by-frame, so the expiry tick is the only deadline).
         if let Some(toast) = &self.toast_state.current {
-            return MIN.max(Duration::from_millis(
+            wait = wait.min(Duration::from_millis(
                 toast.duration_ms.saturating_sub(self.toast_state.elapsed),
             ));
         }
@@ -103,38 +114,38 @@ impl App {
             && !self.queue_choice_dialog.visible
             && !self.free_gateway_dialog.visible
         {
-            if let Some(wait) = blink_deadline(&self.prompt_view.cursor) {
-                return wait.max(MIN);
+            if let Some(blink) = blink_deadline(&self.prompt_view.cursor) {
+                wait = wait.min(blink);
             }
         }
         // Modal dialog stack cursors blink too.
         if let Some(d) = self.dialog.current()
-            && let Some(wait) = blink_deadline(&d.cursor)
+            && let Some(blink) = blink_deadline(&d.cursor)
         {
-            return wait.max(MIN);
+            wait = wait.min(blink);
         }
 
         // RAG input and AddProvider search bar have blinking cursors as well
         // (neither route activates the live-render gate on its own).
-        if let Some(wait) = blink_deadline(&self.add_provider_view.search_bar.cursor) {
-            return wait.max(MIN);
+        if let Some(blink) = blink_deadline(&self.add_provider_view.search_bar.cursor) {
+            wait = wait.min(blink);
         }
         #[cfg(feature = "embed")]
-        if let Some(wait) = blink_deadline(&self.rag_view.url_input.cursor) {
-            return wait.max(MIN);
+        if let Some(blink) = blink_deadline(&self.rag_view.url_input.cursor) {
+            wait = wait.min(blink);
         }
 
         // Paste burst in flight: the flush is due BURST_WINDOW after the
         // last absorbed key — wake exactly then so a long paste lands
         // atomically at the right moment instead of up to 200 ms late.
         if self.paste_burst_pending_flush_deadline() {
-            return MIN;
+            wait = wait.min(MIN);
         }
 
         // Header sparkle flourish: time-driven starfield — keep redraws at
         // animation cadence while it plays.
         if self.sparkle.is_animating() {
-            return Duration::from_millis(33);
+            wait = wait.min(Duration::from_millis(33));
         }
 
         // ModelList loading spinner on top of the dialog stack: frame-counted
@@ -142,10 +153,10 @@ impl App {
         if let Some(d) = self.dialog.current()
             && matches!(d.dialog_type, DialogType::ModelList { loading: true, .. })
         {
-            return Duration::from_millis(33);
+            wait = wait.min(Duration::from_millis(33));
         }
 
-        DEFAULT
+        wait.max(MIN)
     }
 
     pub(super) fn handle_events_with_wait(&mut self, wait: Duration) -> io::Result<bool> {
