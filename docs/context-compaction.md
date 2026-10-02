@@ -203,9 +203,6 @@ store its original error toast or provider finish reason. Other incomplete
 termination signals remain errors; the fix does not accept truncated text as
 checkpoint evidence.
 
-See [the boundary audit](context-compaction-audit.md) for the responsibility
-boundaries, regression evidence, and validation details.
-
 ## Reproducible offline evaluation
 
 Run:

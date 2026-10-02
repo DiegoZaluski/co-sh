@@ -34,10 +34,11 @@ curl -fsSL https://raw.githubusercontent.com/DiegoZaluski/co-sh/main/download.sh
 | [`cosh-tui`](../../crates/cosh-tui/README.md) | TUI 组件库（markdown/diff 渲染、布局）— 应用终端界面所基于的组件层 |
 | [`cosh-sdk`](../../crates/cosh-sdk) | 用于在 cosh 之上构建智能体的 SDK |
 | [`cosh-recall`](../../crates/cosh-recall) | 记忆与上下文召回 |
+| [`cosh-onnx`](../../crates/cosh-onnx/README.md) | 由 `onnx` feature 启用的 ONNX 决策引擎 |
 
 ## 路线图
 
-- **Laya** — 用于辅助 harness 的小型决策模型，将作为 feature 随单独版本发布。
+- **Laya/ONNX 决策引擎** — 由 `cosh-onnx` crate 提供的可选 `onnx` feature；参见 [crate 指南](../onnx/onnx.md)。
 - **基于图的 harness 编排** — 一种用于协调多个 harness 的新会话模式。
 
 ## 许可证

@@ -34,10 +34,11 @@ Depois de instalar, rode `cosh` no terminal. Se o diretório de instalação nã
 | [`cosh-tui`](../../crates/cosh-tui/README.md) | Biblioteca de widgets de TUI (renderização de markdown/diff, layout) — os componentes sobre os quais a interface de terminal do app é construída |
 | [`cosh-sdk`](../../crates/cosh-sdk) | SDK para construir agentes sobre o cosh |
 | [`cosh-recall`](../../crates/cosh-recall) | Memória e recall de contexto |
+| [`cosh-onnx`](../../crates/cosh-onnx/README.md) | Motor de decisões ONNX, habilitado pela feature `onnx` |
 
 ## Roadmap
 
-- **Laya** — pequeno modelo de decisão para auxiliar o harness, distribuído como feature em versão separada.
+- **Motor de decisões Laya/ONNX** — feature opcional `onnx`, fornecida pelo crate `cosh-onnx`; veja o [guia do crate](../onnx/onnx.md).
 - **Orquestração de harness em grafo** — um novo modo de sessão para coordenar múltiplos harnesses.
 
 ## Licença

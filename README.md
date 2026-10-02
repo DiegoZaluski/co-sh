@@ -46,7 +46,7 @@ After installing, run `cosh` in your terminal. If the install directory isn't on
 
 ## Roadmap
 
-- **Laya** — a small decision-making model to assist the harness, shipped as a feature in a separate release.
+- **Laya/ONNX decision engine** — optional `onnx` feature backed by the `cosh-onnx` crate; see the [crate guide](./docs/onnx/onnx.md).
 - **Graph-based harness orchestration** — a new session mode for coordinating multiple harnesses.
 
 ## License

@@ -34,10 +34,11 @@ curl -fsSL https://raw.githubusercontent.com/DiegoZaluski/co-sh/main/download.sh
 | [`cosh-tui`](../../crates/cosh-tui/README.md) | TUI ウィジェットライブラリ（markdown/diff のレンダリング、レイアウト）— アプリのターミナル UI を構成するコンポーネント群 |
 | [`cosh-sdk`](../../crates/cosh-sdk) | cosh 上にエージェントを構築するための SDK |
 | [`cosh-recall`](../../crates/cosh-recall) | メモリとコンテキストの再呼び出し |
+| [`cosh-onnx`](../../crates/cosh-onnx/README.md) | `onnx` feature で有効にする ONNX 意思決定エンジン |
 
 ## ロードマップ
 
-- **Laya** — harness を補助する小型の意思決定モデル。別バージョンの feature として提供予定。
+- **Laya/ONNX 意思決定エンジン** — `cosh-onnx` crate が提供する任意の `onnx` feature。[crate ガイド](../onnx/onnx.md)を参照してください。
 - **グラフによる harness オーケストレーション** — 複数の harness を協調させる新しいセッションモード。
 
 ## ライセンス

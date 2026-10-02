@@ -34,10 +34,11 @@ curl -fsSL https://raw.githubusercontent.com/DiegoZaluski/co-sh/main/download.sh
 | [`cosh-tui`](../../crates/cosh-tui/README.md) | Библиотека TUI-виджетов (рендеринг markdown/diff, layout) — компоненты, на которых построен терминальный интерфейс приложения |
 | [`cosh-sdk`](../../crates/cosh-sdk) | SDK для создания агентов на базе cosh |
 | [`cosh-recall`](../../crates/cosh-recall) | Память и восстановление контекста |
+| [`cosh-onnx`](../../crates/cosh-onnx/README.md) | Движок принятия решений ONNX, включаемый feature `onnx` |
 
 ## Планы
 
-- **Laya** — небольшая модель принятия решений для помощи harness, будет распространяться как feature в отдельном релизе.
+- **Движок решений Laya/ONNX** — необязательная feature `onnx`, предоставляемая crate `cosh-onnx`; см. [руководство crate](../onnx/onnx.md).
 - **Оркестрация harness'ов через граф** — новый режим сессии для координации нескольких harness'ов.
 
 ## Лицензия
