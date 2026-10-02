@@ -6,11 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.1.1] - 2026-10-02
+
 ### Added
 
-- TUI: scroll-to-bottom pill — when the user scrolls away from the live
-  transcript, a small `↓` button appears just above the prompt box; clicking
-  it jumps back to the latest content and re-engages sticky auto-follow.
+- Subagents can now run in the background, allowing the main agent flow to
+  continue while the task remains available for progress tracking.
+
+### Fixed
+
+- Adjusted the Spark animation frame pacing so the sparkle starfield no longer
+  appears stuck while the TUI continues to perform smoothly.
 
 ## [0.1.0] - 2026-10-01
 
@@ -79,5 +86,6 @@ The agent's building blocks are published as reusable libraries:
 - Linux and Windows are tested. macOS builds are published but untested —
   report any issues with details.
 
-[Unreleased]: https://github.com/DiegoZaluski/co-sh/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/DiegoZaluski/co-sh/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/DiegoZaluski/co-sh/releases/tag/v0.1.1
 [0.1.0]: https://github.com/DiegoZaluski/co-sh/releases/tag/v0.1.0
