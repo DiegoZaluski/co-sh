@@ -152,8 +152,16 @@ jobs:
       # Both variants are built `--no-default-features` (no Home screen).
       # Both `cosh` and `cosh-uninstall` are shipped; `highlight-demo` is a
       # dev-only target.
+      #
+      # COSH_TELEMETRY_PUBLISHABLE_KEY is a BUILD-TIME constant: option_env!()
+      # bakes the publishable key (safe-to-ship — it only reaches what the
+      # public grants allow) into the binaries. Release builds embed it so the
+      # installed CLI can upload telemetry without any user-side env setup;
+      # local/dev builds leave it unset and the sink stays idle (fail closed).
       - name: Build cosh (${{ matrix.variant }})
         shell: bash
+        env:
+          COSH_TELEMETRY_PUBLISHABLE_KEY: ${{ secrets.COSH_TELEMETRY_PUBLISHABLE_KEY }}
         run: cargo build --release --locked --bin cosh --bin cosh-uninstall --target ${{ matrix.target }} ${{ steps.vars.outputs.features }}
 
       - name: Package GitHub Release asset

@@ -20,7 +20,12 @@ async fn telemetry_tracks_tui_events_and_rendered_views() {
                 .env("COSH_TUI_TELEMETRY_TEST", NAME)
                 .env("COSH_TELEMETRY", enabled)
                 .env_remove("CI")
-                .env_remove("COSH_TELEMETRY_ENDPOINT")
+                // Hermetic-by-construction: a non-https endpoint fails
+                // SinkConfig::validate() → flush returns Idle without a single
+                // network attempt, EVEN IF this test binary was compiled with
+                // a publishable key baked in (option_env! in the sink). The
+                // key env var is removed so no runtime override leaks either.
+                .env("COSH_TELEMETRY_ENDPOINT", "http://127.0.0.1:9/never")
                 .env_remove("COSH_TELEMETRY_PUBLISHABLE_KEY")
                 .env("HOME", root.path())
                 .env("XDG_DATA_HOME", root.path().join("data"))

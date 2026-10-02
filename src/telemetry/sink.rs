@@ -33,18 +33,45 @@ pub struct SinkConfig {
 }
 
 impl SinkConfig {
-    /// Deployment config from the environment: `COSH_TELEMETRY_ENDPOINT`
-    /// (edge-function URL) and `COSH_TELEMETRY_PUBLISHABLE_KEY`. `None` when
-    /// either is unset or blank: a build without ingest configuration never
-    /// sends anything (the queue persists locally for a later flush).
+    /// Production ingest endpoint (the deployed edge function). Baked into
+    /// every build as the DEFAULT endpoint so a release binary needs no
+    /// environment setup; `COSH_TELEMETRY_ENDPOINT` still overrides it at
+    /// runtime (staging, self-hosted ingest, or an empty value to disable).
+    pub const DEFAULT_INGEST_ENDPOINT: &str =
+        "https://tvmnidfaecrpvfojpekv.supabase.co/functions/v1/telemetry-ingest";
+
+    /// Publishable key embedded at COMPILE time. Set ONLY in the release
+    /// workflow (`COSH_TELEMETRY_PUBLISHABLE_KEY` build env from a GitHub
+    /// secret). Local and test builds leave it unset → `None` → the sink is
+    /// idle and nothing ever leaves the machine (fail closed): tests and dev
+    /// runs cannot pollute the production table even with consent enabled.
+    /// An EMPTY value (secret unset in CI) is filtered out at resolve time.
+    const EMBEDDED_PUBLISHABLE_KEY: Option<&str> =
+        option_env!("COSH_TELEMETRY_PUBLISHABLE_KEY");
+
+    /// Deployment config, resolved in order: runtime env first (explicit
+    /// override), then the compile-time embedded key, with the production
+    /// endpoint as the endpoint fallback. `None` when NO key can be resolved
+    /// (unset env + unbaked build): a build without ingest configuration
+    /// never sends anything (the queue persists locally for a later flush).
+    /// An EXPLICITLY EMPTY `COSH_TELEMETRY_ENDPOINT` disables the sink
+    /// (returns `None`): the user's intent to opt out at the transport level
+    /// must never be "corrected" into the production default.
     pub fn from_env() -> Option<Self> {
-        let endpoint = std::env::var("COSH_TELEMETRY_ENDPOINT").ok()?;
-        let publishable_key = std::env::var("COSH_TELEMETRY_PUBLISHABLE_KEY").ok()?;
-        let endpoint = endpoint.trim().to_string();
-        let publishable_key = publishable_key.trim().to_string();
-        if endpoint.is_empty() || publishable_key.is_empty() {
-            return None;
-        }
+        let endpoint = match std::env::var("COSH_TELEMETRY_ENDPOINT") {
+            // Explicit blank = deliberate opt-out of uploading: disabled.
+            Ok(v) if v.trim().is_empty() => return None,
+            Ok(v) => v.trim().to_string(),
+            Err(_) => Self::DEFAULT_INGEST_ENDPOINT.to_string(),
+        };
+        let publishable_key = match std::env::var("COSH_TELEMETRY_PUBLISHABLE_KEY") {
+            Ok(v) if !v.trim().is_empty() => v.trim().to_string(),
+            // Compile-time key, when the release build baked one in. An empty
+            // baked value (secret unset in CI) counts as "no key".
+            _ => Self::EMBEDDED_PUBLISHABLE_KEY
+                .filter(|key| !key.trim().is_empty())?
+                .to_string(),
+        };
         Some(Self {
             endpoint,
             publishable_key,
