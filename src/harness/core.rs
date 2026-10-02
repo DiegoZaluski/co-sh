@@ -3930,6 +3930,7 @@ impl Harness {
                         tool: "subagent_status".to_string(),
                         output: note.clone(),
                         finished: true,
+                        agent: None,
                     });
                     self.context_manager.add_user(&note);
                 }
@@ -5113,6 +5114,7 @@ impl Harness {
                                 tool: "subagent_status".to_string(),
                                 output: note.clone(),
                                 finished: true,
+                                agent: None,
                             });
                             self.context_manager.add_user(&note);
                         }
@@ -5703,6 +5705,11 @@ impl Harness {
                                     tool: "subagent_call".to_string(),
                                     output: report.clone(),
                                     finished: true,
+                                    // The internal window registers as a
+                                    // BLANK agent CLI (`subagent: `); the
+                                    // literal `internal` name routes through
+                                    // `is_window_of`.
+                                    agent: Some("internal".to_string()),
                                 });
                             }
                             Ok(report)

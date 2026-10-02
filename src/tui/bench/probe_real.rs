@@ -157,6 +157,7 @@ async fn probe_real_session() {
                 tool: "bash_run".into(),
                 output: format!("compiling crate {i}/500\n"),
                 finished: false,
+                agent: None,
             })
             .unwrap();
         app.poll_events();
@@ -190,6 +191,7 @@ async fn probe_real_session() {
                 tool: "subagent_call".into(),
                 output: "- reading src/**\n- found hot loop\n".repeat(5),
                 finished: false,
+                agent: None,
             })
             .unwrap();
         app.poll_events();
@@ -217,6 +219,7 @@ async fn probe_real_session() {
                 tool: "subagent_call".into(),
                 output: "- exploring more\n".repeat(6),
                 finished: false,
+                agent: None,
             })
             .unwrap();
         app.poll_events();

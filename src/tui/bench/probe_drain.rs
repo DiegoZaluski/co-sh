@@ -127,6 +127,7 @@ async fn probe_drain_costs() {
                 tool: "bash_run".into(),
                 output: bash_chunk.clone(),
                 finished: false,
+                agent: None,
             },
         );
         measure(
@@ -136,6 +137,7 @@ async fn probe_drain_costs() {
                 tool: "subagent_call".into(),
                 output: sub_chunk.clone(),
                 finished: false,
+                agent: None,
             },
         );
         measure(

@@ -574,12 +574,23 @@ impl App {
 
                     // Find and complete the running tool part, capture its name
                     let mut completed_tool_name: Option<String> = None;
+                    // The sub-agent CLI of the completed `subagent_call`
+                    // part (from its INPUT): routes the panel completion to
+                    // the right window (see `complete_last_pty_for_agent`).
+                    let mut agent_hint: Option<String> = None;
                     'find_running: for msg in session.messages.iter_mut().rev() {
                         for part in msg.parts.iter_mut().rev() {
                             if let Part::Tool(tp) = part
                                 && tp.status == ToolStatus::Running
                             {
                                 completed_tool_name = Some(tp.tool.clone());
+                                if tp.tool == "subagent_call" {
+                                    agent_hint = tp
+                                        .input
+                                        .get("agent")
+                                        .and_then(|v| v.as_str())
+                                        .map(String::from);
+                                }
                                 tp.status = ToolStatus::Completed;
                                 tp.output = Some(output.clone());
                                 break 'find_running;
@@ -627,6 +638,31 @@ impl App {
                     // Harmless for subagent_call (PTY already Completed via finished:true,
                     // complete_last_pty is a no-op for non-Running sessions).
                     // Required for bash_run which only completes via ToolResult.
+                    //
+                    // Sub-agent guard (the leak fix, ToolResult twin): a
+                    // `subagent_status` RESULT (the model's own poll) must
+                    // never complete a window at all — a poll of a RUNNING
+                    // task is pure JSON status, and completing the
+                    // last-Running subagent window with it would both leak
+                    // the JSON and mark a live turn finished. Same for a
+                    // `subagent_call` result, which routes by the event's
+                    // agent hint instead of the last-Running guess.
+                    if completed_tool_name.as_deref() == Some("subagent_status") {
+                        if let Some(todos) = todo_update {
+                            self.state.right_panel.set_todos(todos);
+                        }
+                        continue;
+                    }
+                    if completed_tool_name.as_deref() == Some("subagent_call") {
+                        self.state.right_panel.complete_last_pty_for_agent(
+                            output.clone(),
+                            agent_hint.as_deref(),
+                        );
+                        if let Some(todos) = todo_update {
+                            self.state.right_panel.set_todos(todos);
+                        }
+                        continue;
+                    }
                     self.state.right_panel.complete_last_pty(output.clone());
 
                     if let Some(todos) = todo_update {
@@ -661,6 +697,7 @@ impl App {
                     tool,
                     output,
                     finished,
+                    agent,
                 } => {
                     // Streaming find results (glob/grep matches) are appended to
                     // the running tool part so the chat shows a live counter.
@@ -698,14 +735,66 @@ impl App {
                         }
                         continue;
                     }
-                    // Update right panel PTY with streaming output
-                    self.state.right_panel.update_last_pty(output.clone());
-                    // Auto-follow if user is at the bottom
-                    if !self.state.right_panel.is_scrolled_up() {
-                        self.state.right_panel.scroll_to_bottom();
+                    // Sub-agent routing (the leak fix): a `subagent_status`
+                    // event is a BACKGROUND sub-agent's completion
+                    // notification — its wrapper carries the owning agent,
+                    // so resolve the hint before any window consumes the
+                    // text. A `subagent_call` event's routing hint travels
+                    // in the event itself. Everything else (bash) is
+                    // untargeted.
+                    let routing_hint: Option<String> = match tool.as_str() {
+                        "subagent_call" => agent.clone(),
+                        "subagent_status" => {
+                            crate::routes::session::right_panel::types::subagent_notification_agent(
+                                &output,
+                            )
+                        }
+                        _ => None,
+                    };
+                    let hint_ref = routing_hint.as_deref();
+                    // A notification is NEVER a live chunk: appending it
+                    // through `update_last_pty` would double-parse it (the
+                    // completion below classifies the same text again) and
+                    // an UNIDENTIFIED one (malformed wrapper, no agent
+                    // hint) would land verbatim in the last-Running window
+                    // — possibly a bash run (the pre-fix leak shape). So
+                    // `subagent_status` output only ever reaches the panel
+                    // as a routed COMPLETION; without a hint it is dropped
+                    // from the panel entirely (the injected user turn still
+                    // renders it in the chat).
+                    if tool == "subagent_status" {
+                        if finished
+                            && let Some(hint) = routing_hint
+                        {
+                            self.state
+                                .right_panel
+                                .complete_last_pty_for_agent(output.clone(), Some(&hint));
+                        }
+                        continue;
                     }
-                    if finished {
-                        self.state.right_panel.complete_last_pty(output.clone());
+                    if tool == "subagent_call" {
+                        self.state
+                            .right_panel
+                            .update_last_pty_for_agent(output.clone(), hint_ref);
+                        // Auto-follow if user is at the bottom
+                        if !self.state.right_panel.is_scrolled_up() {
+                            self.state.right_panel.scroll_to_bottom();
+                        }
+                        if finished {
+                            self.state
+                                .right_panel
+                                .complete_last_pty_for_agent(output.clone(), hint_ref);
+                        }
+                    } else {
+                        // Bash (and any other streaming tool): untargeted.
+                        self.state.right_panel.update_last_pty(output.clone());
+                        // Auto-follow if user is at the bottom
+                        if !self.state.right_panel.is_scrolled_up() {
+                            self.state.right_panel.scroll_to_bottom();
+                        }
+                        if finished {
+                            self.state.right_panel.complete_last_pty(output.clone());
+                        }
                     }
                 }
 

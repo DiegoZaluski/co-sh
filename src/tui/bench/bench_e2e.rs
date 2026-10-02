@@ -205,6 +205,7 @@ fn push_agent_round(app: &mut App, seed: usize) {
                 tool: "bash_run".into(),
                 output: format!("{}\n", shell_out(40)),
                 finished: false,
+                agent: None,
             })
             .unwrap();
     }
@@ -226,6 +227,7 @@ fn push_agent_round(app: &mut App, seed: usize) {
                 output: "- reading src/**\n- found hot loop in worker.rs\n- summarizing findings\n"
                     .repeat(8),
                 finished: false,
+                agent: None,
             })
             .unwrap();
     }

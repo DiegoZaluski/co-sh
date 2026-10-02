@@ -129,6 +129,7 @@ impl StreamBatcher {
             tool: self.tool.to_string(),
             output: format!("{}\n", batch.join("\n")),
             finished: false,
+            agent: None,
         });
         self.last_flush = Instant::now();
     }
@@ -1056,6 +1057,7 @@ impl Tools for CoshTools {
                                     tool: "bash_run".to_string(),
                                     output: text.clone(),
                                     finished: false,
+                                    agent: None,
                                 });
                             }
                             output.push_str(&text);
@@ -1073,6 +1075,7 @@ impl Tools for CoshTools {
                                 tool: "bash_run".to_string(),
                                 output: text.clone(),
                                 finished: false,
+                                agent: None,
                             });
                         }
                         output.push_str(&text);
@@ -1091,6 +1094,7 @@ impl Tools for CoshTools {
                                     tool: "bash_run".to_string(),
                                     output: text.clone(),
                                     finished: false,
+                                    agent: None,
                                 });
                             }
                             output.push_str(&text);
@@ -1649,11 +1653,16 @@ impl Tools for CoshTools {
                                 // Close the TUI sub-agent box with the final
                                 // report (same mirror the synchronous path
                                 // uses), then record completion for push/poll.
+                                // The agent hint routes the report to THIS
+                                // agent's window — with parallel background
+                                // spawns the last-Running window may be a
+                                // sibling's.
                                 if let Some(ref tx) = event_tx_bg {
                                     let _ = tx.send(HarnessEvent::ToolOutput {
                                         tool: "subagent_call".to_string(),
                                         output: output.clone(),
                                         finished: true,
+                                        agent: Some(bg_agent.clone()),
                                     });
                                 }
                                 super::background::complete(&bg_task_id, Some(output), None);
@@ -1808,6 +1817,7 @@ impl Tools for CoshTools {
                         tool: "subagent_call".to_string(),
                         output: accumulated.clone(),
                         finished: true,
+                        agent: Some(stored_agent.clone()),
                     });
                 }
 
@@ -1998,6 +2008,7 @@ mod stream_batcher_tests {
             tool,
             output,
             finished,
+            ..
         } = event
         else {
             panic!("expected ToolOutput event");

@@ -278,21 +278,61 @@ pub(crate) enum SubagentOutputShape {
     /// does not exist yet. The payload is the human-readable pending line.
     Spawned(String),
     /// A finished report, unwrapped from its `SubAgentCallOutput` envelope
-    /// or stripped of its push-notification wrapper.
-    Report(String),
+    /// or stripped of its push-notification wrapper. `agent` is the agent
+    /// the notification was about (`None`: no routing hint — envelopes and
+    /// plain reports belong to the window they arrive at). The hint routes
+    /// a completion to the RIGHT window when several background sub-agents
+    /// run in parallel and the last-Running window is a different call.
+    Report {
+        body: String,
+        agent: Option<String>,
+    },
     /// Plain text (bash output, older internal-subagent reports): no
     /// wrapping to remove.
     Plain,
 }
 
 fn classify_subagent_output(chunk: &str) -> SubagentOutputShape {
-    // Push-notification body: the wrapper sentence is transport framing,
-    // the report body is the payload.
-    if let Some((_, body)) = chunk
-        .strip_prefix("[automated notification]")
-        .and_then(|rest| rest.split_once("Final report:\n"))
+    // Push-notification wrapper (the push half of the background feature):
+    //   completed: "[automated notification] Background sub-agent {id}
+    //               (agent={agent}) completed.\nFinal report:\n{body}"
+    //   failed:    "[automated notification] Background sub-agent {id}
+    //               (agent={agent}) failed{reason}.\nLast available
+    //               output:\n{body}"
+    // The wrapper sentence is transport framing; the report body is the
+    // payload. BOTH variants must be stripped here — the failed variant
+    // used to leak verbatim into the subagent window (its marker sentence
+    // differs), and the agent hint must survive for routing.
+    if let Some(rest) = chunk
+        .strip_prefix("[automated notification] ")
+        .and_then(|rest| rest.strip_prefix("Background sub-agent "))
+        && let Some((_, after_agent)) = rest.split_once("(agent=")
+        && let Some((agent, after_agent)) = after_agent.split_once(')')
     {
-        return SubagentOutputShape::Report(body.to_string());
+        let agent = agent.trim().to_string();
+        // Status-first matching: a failed note's free-form reason sits
+        // entirely BEFORE its marker, so a reason imitating the completed
+        // marker can only break its own (already-failed) delivery — it can
+        // never be mistaken for a completed note.
+        if after_agent.starts_with(" completed.")
+            && let Some((_, body)) = after_agent.split_once("Final report:\n")
+        {
+            return SubagentOutputShape::Report {
+                body: body.to_string(),
+                agent: Some(agent),
+            };
+        }
+        if after_agent.starts_with(" failed")
+            && let Some((_, body)) = after_agent.split_once("Last available output:\n")
+        {
+            return SubagentOutputShape::Report {
+                body: body.to_string(),
+                agent: Some(agent),
+            };
+        }
+        // Header parsed but no known marker sentence: a malformed note —
+        // deliberately NOT classified (fall through to Plain rather than
+        // guess at the payload).
     }
     // Tool-result envelope (`SubAgentCallOutput`).
     if let Ok(env) =
@@ -301,9 +341,25 @@ fn classify_subagent_output(chunk: &str) -> SubagentOutputShape {
         if env.stop_reason == "spawned" {
             return SubagentOutputShape::Spawned(format!("⏳ {}", env.output));
         }
-        return SubagentOutputShape::Report(env.output);
+        return SubagentOutputShape::Report {
+            body: env.output,
+            agent: None,
+        };
     }
     SubagentOutputShape::Plain
+}
+
+/// The agent a background-completion notification is about, if `chunk`
+/// parses as one. Routing aid for `HarnessEvent::ToolOutput` with
+/// `tool == "subagent_status"`: the notification must finish the spawning
+/// agent's window, which (parallel background spawns) need not be the
+/// last-Running one. `None` for everything else — the caller then keeps
+/// its default window choice.
+pub(crate) fn subagent_notification_agent(chunk: &str) -> Option<String> {
+    match classify_subagent_output(chunk) {
+        SubagentOutputShape::Report { agent, .. } => agent,
+        _ => None,
+    }
 }
 
 /// Unwrap a `subagent_call` tool result for display: the chat's tool part
@@ -316,7 +372,7 @@ fn classify_subagent_output(chunk: &str) -> SubagentOutputShape {
 pub(crate) fn subagent_display_output(output: String) -> String {
     match classify_subagent_output(&output) {
         SubagentOutputShape::Spawned(line) => line,
-        SubagentOutputShape::Report(body) => body,
+        SubagentOutputShape::Report { body, .. } => body,
         SubagentOutputShape::Plain => {
             // Defense in depth: a bare spawn receipt (`{"task_id": ...}`, the
             // pre-envelope shape that older persisted sessions still carry)
@@ -2405,18 +2461,44 @@ impl RightPanelState {
     fn subagent_live_chunk(chunk: &str) -> String {
         match classify_subagent_output(chunk) {
             SubagentOutputShape::Spawned(line) => line,
-            SubagentOutputShape::Report(body) => body,
+            SubagentOutputShape::Report { body, .. } => body,
             SubagentOutputShape::Plain => chunk.to_string(),
         }
     }
 
+    /// True when `session` is a window of `agent`. Internal subagents have
+    /// no agent CLI (the model omits `agent`, so the window's command is
+    /// `subagent: ` with a BLANK name) but their background receipts and
+    /// notifications are registered under the literal name `internal` —
+    /// both spellings must match or an internal completion notification
+    /// would never find its window (and the window would stay Running).
+    fn is_window_of(session: &PtySession, agent: &str) -> bool {
+        let cli = session.subagent_agent();
+        cli == Some(agent) || (agent == "internal" && cli == Some(""))
+    }
+
     pub fn update_last_pty(&mut self, output: String) {
+        self.update_last_pty_for_agent(output, None);
+    }
+
+    /// `update_last_pty`, targeted at one agent's subagent window (see
+    /// `complete_last_pty_for_agent`): a live ToolOutput of a PARALLEL
+    /// background turn must land in ITS window — the sibling's spawn
+    /// receipt would otherwise collect this call's pending line.
+    /// `None` keeps the default last-Running behavior (bash sessions and
+    /// the single-window callers rely on it).
+    pub fn update_last_pty_for_agent(&mut self, output: String, agent: Option<&str>) {
         let mut found_kind = None;
         if let Some(session) = self
             .pty_sessions
             .iter_mut()
             .rev()
-            .find(|s| matches!(s.status, PtyStatus::Running))
+            .find(|s| match agent {
+                Some(agent) => {
+                    matches!(s.status, PtyStatus::Running) && Self::is_window_of(s, agent)
+                }
+                None => matches!(s.status, PtyStatus::Running),
+            })
         {
             found_kind = if session.command.starts_with("subagent:") {
                 Some(SectionKind::Subagent)
@@ -2438,12 +2520,32 @@ impl RightPanelState {
 
     /// Mark the last running PTY session as completed.
     pub fn complete_last_pty(&mut self, final_output: String) {
+        self.complete_last_pty_for_agent(final_output, None);
+    }
+
+    /// `complete_last_pty`, targeted at one agent's subagent window.
+    /// `HarnessEvent`s carry no session id (see the `SubagentEvent`
+    /// handler in `app/events.rs`), so the default method acts on the
+    /// LAST Running window. With PARALLEL background sub-agents (ACP,
+    /// `run_in_background: true`) the first completion notification must
+    /// close ITS OWN window, not whichever sibling happens to be last —
+    /// otherwise one window finishes with the wrong agent's report and
+    /// the other's report lands in the WRONG window (both leak). The
+    /// agent hint comes from the notification wrapper itself
+    /// (`subagent_notification_agent`); `None` keeps the default
+    /// last-Running choice (single-window callers, the internal path).
+    pub fn complete_last_pty_for_agent(&mut self, final_output: String, agent: Option<&str>) {
         let mut final_output = final_output;
         if let Some(session) = self
             .pty_sessions
             .iter_mut()
             .rev()
-            .find(|s| matches!(s.status, PtyStatus::Running))
+            .find(|s| match agent {
+                Some(agent) => {
+                    matches!(s.status, PtyStatus::Running) && Self::is_window_of(s, agent)
+                }
+                None => matches!(s.status, PtyStatus::Running),
+            })
         {
             if session.is_subagent() {
                 // The tool result of a `subagent_call` arrives JSON-wrapped
@@ -2468,7 +2570,7 @@ impl RightPanelState {
                         self.mark_activity(SectionKind::Subagent);
                         return;
                     }
-                    SubagentOutputShape::Report(body) => final_output = body,
+                    SubagentOutputShape::Report { body, .. } => final_output = body,
                     SubagentOutputShape::Plain => {}
                 }
                 // Review reports declare their outcome in a leading
@@ -3001,6 +3103,119 @@ mod tests {
             state.pty_sessions[0].output, "<!-- severity: green -->\nAll done.",
             "wrapper and receipt line must not leak into the panel"
         );
+    }
+
+    /// REGRESSION (ACP parallel-spawn leak): with TWO background sub-agents
+    /// running, the FIRST completion notification must close ITS OWN
+    /// agent's window — the last-Running choice would hand one report to
+    /// the sibling's window (both windows end up with the wrong body).
+    #[test]
+    fn complete_last_pty_for_agent_routes_parallel_completions() {
+        let mut state = RightPanelState::new();
+        // Spawn order: kilo first, opencode second — opencode is the
+        // last-Running window a naive complete would close.
+        state.start_pty("subagent: kilo".to_string(), None);
+        state.start_pty("subagent: opencode".to_string(), None);
+
+        let note_kilo = "[automated notification] Background sub-agent bg-1 \
+                    (agent=kilo) completed.\nFinal report:\nkilo findings.";
+        state.complete_last_pty_for_agent(
+            note_kilo.to_string(),
+            subagent_notification_agent(note_kilo).as_deref(),
+        );
+        assert!(
+            matches!(state.pty_sessions[0].status, PtyStatus::Completed),
+            "the kilo notification must close the KILO window"
+        );
+        assert_eq!(state.pty_sessions[0].output, "kilo findings.");
+        assert!(
+            matches!(state.pty_sessions[1].status, PtyStatus::Running),
+            "the opencode window must stay Running"
+        );
+
+        let note_oco = "[automated notification] Background sub-agent bg-2 \
+                    (agent=opencode) completed.\nFinal report:\noco findings.";
+        state.complete_last_pty_for_agent(
+            note_oco.to_string(),
+            subagent_notification_agent(note_oco).as_deref(),
+        );
+        assert!(matches!(state.pty_sessions[1].status, PtyStatus::Completed));
+        assert_eq!(state.pty_sessions[1].output, "oco findings.");
+    }
+
+    /// REGRESSION (failed-notification leak): the FAILED wrapper variant
+    /// (`Last available output:` marker, free-form reason before it) must
+    /// be stripped to its body exactly like the completed one — it used to
+    /// fall through the classifier verbatim and leak into the window.
+    #[test]
+    fn complete_last_pty_strips_failed_notification_wrapper() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: codex".to_string(), None);
+
+        let note = "[automated notification] Background sub-agent bg-3 \
+                    (agent=codex) failed: connection reset.\nLast available output:\npartial thoughts";
+        state.complete_last_pty_for_agent(
+            note.to_string(),
+            subagent_notification_agent(note).as_deref(),
+        );
+        assert!(matches!(state.pty_sessions[0].status, PtyStatus::Completed));
+        assert_eq!(
+            state.pty_sessions[0].output, "partial thoughts",
+            "the failed wrapper must not leak into the panel"
+        );
+    }
+
+    /// The agent hint resolves from the notification wrapper (both status
+    /// variants) and stays None for envelopes/plain text.
+    #[test]
+    fn subagent_notification_agent_parses_wrapper_header() {
+        assert_eq!(
+            subagent_notification_agent(
+                "[automated notification] Background sub-agent bg-4 \
+                 (agent=kilo) completed.\nFinal report:\nbody"
+            ),
+            Some("kilo".to_string())
+        );
+        assert_eq!(
+            subagent_notification_agent(
+                "[automated notification] Background sub-agent bg-4 \
+                 (agent=kilo) failed: x.\nLast available output:\nbody"
+            ),
+            Some("kilo".to_string())
+        );
+        // Envelope reports and plain text carry no routing hint.
+        assert_eq!(
+            subagent_notification_agent(r#"{"output":"report","stop_reason":"end_turn"}"#),
+            None
+        );
+        assert_eq!(subagent_notification_agent("plain report"), None);
+        // Malformed wrapper (header but no marker): unclassified, no hint.
+        assert_eq!(
+            subagent_notification_agent(
+                "[automated notification] Background sub-agent bg-4 (agent=kilo) ???"
+            ),
+            None
+        );
+    }
+
+    /// Live ToolOutput chunks of a PARALLEL background turn land in THAT
+    /// agent's window, not the sibling's (update twin of the routing test
+    /// above).
+    #[test]
+    fn update_last_pty_for_agent_targets_the_agents_window() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: kilo".to_string(), None);
+        state.start_pty("subagent: opencode".to_string(), None);
+
+        state.update_last_pty_for_agent("oco chunk".to_string(), Some("opencode"));
+        assert_eq!(state.pty_sessions[0].output, "", "kilo window untouched");
+        assert_eq!(state.pty_sessions[1].output, "oco chunk");
+
+        // The internal sub-agent registers under the literal `internal`
+        // name while its window's CLI is blank — both spellings match.
+        state.start_pty("subagent: ".to_string(), None);
+        state.update_last_pty_for_agent("int chunk".to_string(), Some("internal"));
+        assert_eq!(state.pty_sessions[2].output, "int chunk");
     }
 
     #[test]

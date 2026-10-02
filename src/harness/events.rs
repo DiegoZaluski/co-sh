@@ -93,6 +93,16 @@ pub enum HarnessEvent {
         output: String,
         /// Whether this is the final chunk for this tool call.
         finished: bool,
+        /// The sub-agent CLI this output belongs to (`subagent_call`
+        /// mirrors only): the TUI routes the output to THAT agent's
+        /// right-panel window. Parallel background sub-agents (ACP,
+        /// `run_in_background: true`) each have a Running window, so a
+        /// "last Running window" choice would land the report in a
+        /// SIBLING's window — both leak. `None` everywhere else (bash,
+        /// find, `subagent_status` notifications — those self-identify
+        /// through their wrapper text) and whenever no routing hint is
+        /// known: the TUI keeps its last-Running default.
+        agent: Option<String>,
     },
     /// A typed progress event from a running ACP sub-agent
     /// ([`cosh_tools::subagent::events::SubagentEvent`]). Message-text
