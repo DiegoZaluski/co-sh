@@ -1,6 +1,6 @@
 [package]
 name = "cosh-onnx"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "ONNX decision-engine crate for cosh - coding agent for the terminal"
 license = "Apache-2.0"

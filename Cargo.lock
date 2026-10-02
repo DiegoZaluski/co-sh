@@ -1476,7 +1476,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "cosh"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1524,7 +1524,7 @@ dependencies = [
 
 [[package]]
 name = "cosh-onnx"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "fancy-regex 0.17.0",
  "hex",
@@ -1543,7 +1543,7 @@ dependencies = [
 
 [[package]]
 name = "cosh-recall"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -1561,7 +1561,7 @@ dependencies = [
 
 [[package]]
 name = "cosh-sdk"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ast-grep-core",
  "async-stream",
@@ -1658,7 +1658,7 @@ dependencies = [
 
 [[package]]
 name = "cosh-tools"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "agent-client-protocol",
  "ast-grep-core",
@@ -1687,7 +1687,7 @@ dependencies = [
 
 [[package]]
 name = "cosh-tui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bitflags 2.13.0",
  "cosh-sdk",

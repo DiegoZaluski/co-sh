@@ -6,7 +6,7 @@ license = "Apache-2.0"
 readme = "README.md"
 name = "cosh-recall"
 repository = "https://github.com/DiegoZaluski/co-sh"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 
 [features]
@@ -33,7 +33,7 @@ arrow-schema = { version = "58", optional = true }
 futures = { version = "0.3", optional = true }
 
 # Cloud embedding via cosh-sdk connector
-cosh-sdk = { path = "../cosh-sdk", version = "0.1.0", optional = true }
+cosh-sdk = { path = "../cosh-sdk", version = "0.1.1", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

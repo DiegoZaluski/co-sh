@@ -28,7 +28,8 @@
 //!   the original failure) has no Rust equivalent: the original error is
 //!   returned and the hook's own failure is logged through the `log` facade.
 //! - `_SKIP_DEFAULTS` is a thread-local flag (upstream: a `contextvars`
-//!   ContextVar); the Router port drives it through [`skip_default_hooks`].
+//!   ContextVar); the Router port drives it through the private
+//!   `skip_default_hooks` helper.
 
 use std::cell::Cell;
 use std::sync::{Arc, Mutex, OnceLock};

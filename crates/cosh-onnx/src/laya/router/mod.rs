@@ -36,7 +36,8 @@
 //!
 //! Divergences from the Python original, all mechanical consequences of the
 //! runtime stack:
-//! - The Router drives the ONNX backend: `load` builds an [`OnnxAgent`]
+//! - The Router drives the ONNX backend: `load` builds an
+//!   [`crate::laya::agent::OnnxAgent`]
 //!   where upstream builds the torch `Agent` (out of scope for this port).
 //!   Residents hold the duck-typed [`AgentLike`] trait object instead of a
 //!   concrete agent, because upstream accepts any agent-like object:
