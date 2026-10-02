@@ -179,7 +179,8 @@ impl Feature {
     }
 }
 
-/// Known tool names (allowlist). Unknown tool names are NOT shipped raw — they
+/// Tool names/categories on the wire (allowlist). `normalize_tool` maps exact
+/// built-in dispatch names to these categories. Unknown names are NOT shipped raw — they
 /// fall into the `other` bucket, since a tool name can embed project context.
 pub const TOOL_ALLOWLIST: &[&str] = &[
     "bash",
@@ -188,6 +189,7 @@ pub const TOOL_ALLOWLIST: &[&str] = &[
     "fs_edit",
     "fs_edit_lines",
     "fs_ast_edit",
+    "fs_rollback",
     "find_glob",
     "find_grep",
     "plan",
@@ -198,4 +200,5 @@ pub const TOOL_ALLOWLIST: &[&str] = &[
     "recall",
     "subagent",
     "question",
+    "computer",
 ];

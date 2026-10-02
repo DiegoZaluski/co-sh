@@ -401,6 +401,8 @@ pub struct App {
     telemetry: cosh::telemetry::Telemetry,
     /// Per-session aggregate accumulator — one `session_summary` at exit.
     session_telemetry: cosh::telemetry::session::SessionTelemetry,
+    /// Last rendered route; repeated frames must not inflate feature counts.
+    telemetry_last_feature: Option<cosh::telemetry::schema::Feature>,
     /// Persistent random install id (`None`: entropy/fs failed — events are
     /// dropped, fail closed, audit F04).
     telemetry_install_id: Option<cosh::telemetry::events::UuidId>,
@@ -694,6 +696,7 @@ impl App {
             setup,
             telemetry,
             session_telemetry: cosh::telemetry::session::SessionTelemetry::new(),
+            telemetry_last_feature: None,
             telemetry_install_id,
             session_store,
             pending_delete: None,
@@ -1202,6 +1205,37 @@ impl App {
         }
     }
 
+    /// Count route visits at the shared render boundary (keyboard and mouse).
+    fn telemetry_view(&mut self) {
+        use cosh::telemetry::schema::Feature;
+        if !self.telemetry.enabled() {
+            return;
+        }
+        let feature = match self.mode() {
+            #[cfg(feature = "home")]
+            AppMode::Home => Feature::Home,
+            AppMode::Session => Feature::Session,
+            AppMode::InternalTools => Feature::Tools,
+            AppMode::AddProvider => Feature::AddProvider,
+            AppMode::Settings => Feature::Settings,
+            AppMode::Router => Feature::Other,
+            #[cfg(feature = "embed")]
+            AppMode::Rag => Feature::Rag,
+        };
+        if self.telemetry_last_feature != Some(feature) {
+            self.telemetry_feature(feature);
+            self.telemetry_last_feature = Some(feature);
+        }
+        self.telemetry_mcp_count();
+    }
+
+    fn telemetry_mcp_count(&mut self) {
+        if self.telemetry.enabled() {
+            self.session_telemetry
+                .set_mcp_server_count(self.setup.mcp.servers.len().min(u32::MAX as usize) as u32);
+        }
+    }
+
     /// Tool aggregate: one tool call dispatched.
     fn telemetry_tool_call(&mut self, tool: &str) {
         if self.telemetry.enabled() {
@@ -1258,6 +1292,7 @@ impl App {
         if !self.telemetry.enabled() {
             return;
         }
+        self.telemetry_mcp_count();
         let Some(install_id) = self.telemetry_install_id.clone() else {
             return;
         };

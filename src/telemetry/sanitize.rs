@@ -126,11 +126,37 @@ pub fn normalize_provider(name: &str) -> String {
 /// into the `other` bucket (never shipped raw).
 pub fn normalize_tool(name: &str) -> &'static str {
     let lower = name.trim().to_lowercase();
-    if TOOL_ALLOWLIST.contains(&lower.as_str()) {
+    // Map exact built-in dispatch names to the existing wire categories.
+    // Never match prefixes: an arbitrary MCP name must still become `other`.
+    let canonical = match lower.as_str() {
+        "bash_run" => "bash",
+        "plan_todo_write" => "plan",
+        "skills_list" | "skills_read" | "skills_read_asset" | "skills_match_skills" => "skills",
+        "recall_search" => "recall",
+        "subagent_call" | "subagent_status" => "subagent",
+        "ask_questions" => "question",
+        "computer_apps"
+        | "computer_snapshot"
+        | "computer_wait"
+        | "computer_screenshot"
+        | "computer_act"
+        | "computer_control" => "computer",
+        "lsp_definitions"
+        | "lsp_references"
+        | "lsp_symbols"
+        | "lsp_restart"
+        | "lsp_rename"
+        | "lsp_hover"
+        | "lsp_workspace_symbols"
+        | "lsp_call_hierarchy"
+        | "lsp_code_actions" => "lsp",
+        other => other,
+    };
+    if TOOL_ALLOWLIST.contains(&canonical) {
         // Safe: the name is in TOOL_ALLOWLIST.
         TOOL_ALLOWLIST
             .iter()
-            .find(|t| **t == lower)
+            .find(|t| **t == canonical)
             .copied()
             .unwrap_or("other")
     } else {
@@ -240,6 +266,37 @@ mod tests {
     fn unknown_tools_fall_into_other() {
         assert_eq!(normalize_tool("bash"), "bash");
         assert_eq!(normalize_tool("user_internal_tool"), "other");
+    }
+
+    #[test]
+    fn builtin_dispatch_names_use_stable_categories() {
+        for (name, category) in [
+            ("bash_run", "bash"),
+            ("plan_todo_write", "plan"),
+            ("skills_list", "skills"),
+            ("skills_read", "skills"),
+            ("skills_read_asset", "skills"),
+            ("skills_match_skills", "skills"),
+            ("recall_search", "recall"),
+            ("subagent_call", "subagent"),
+            ("subagent_status", "subagent"),
+            ("ask_questions", "question"),
+            ("lsp_definitions", "lsp"),
+            ("lsp_code_actions", "lsp"),
+            ("fs_rollback", "fs_rollback"),
+            ("computer_control", "computer"),
+        ] {
+            assert_eq!(normalize_tool(name), category, "{name}");
+            assert!(is_normalized_identifier(category));
+        }
+        for private_name in [
+            "lsp_private_project",
+            "skills_company_secret",
+            "bash_run_private",
+            "computer_private_app",
+        ] {
+            assert_eq!(normalize_tool(private_name), "other");
+        }
     }
 
     #[test]

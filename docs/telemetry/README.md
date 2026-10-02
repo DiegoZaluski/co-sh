@@ -65,12 +65,14 @@ the TUI flow.
 This is one event per session, created when the TUI exits. It contains only:
 
 - duration, rounded to 30-second blocks;
-- turn and message counts;
+- turn counts and newly created transcript message counts (not streamed chunks
+  or history restored from disk);
 - counts by allowed provider;
 - counts by model, using a hash for unknown names;
 - counts by allowed feature and tool;
 - the number of configured MCP servers, without their names;
-- the number of context compactions;
+- the number of committed context-compaction checkpoints (not attempts or
+  duplicate lifecycle notifications);
 - input and output token counts;
 - aggregated cost in cents;
 - error categories, error fingerprints, allowed internal source, and occurrence counts;
@@ -118,7 +120,8 @@ The schema uses closed sets and cardinality limits:
 
 - known providers remain only as names from an allowlist; other names become a
   16-character hash;
-- known tools remain as allowed names; other tools become `other`;
+- built-in tool dispatch names map to allowed names or categories, such as
+  `bash_run` → `bash` and `skills_read` → `skills`; unknown tools become `other`;
 - features are enums such as `session`, `settings`, `tools`, and `rag`;
 - model names are hashed, so the literal identifier is not sent;
 - error sources must belong to the internal allowlist;
@@ -167,6 +170,8 @@ The transport:
 - revalidates every persisted event before transmitting it;
 - sends at most 50 events per batch;
 - retries transient network failures, HTTP 429, and HTTP 5xx responses;
+- limits each flush to a total network budget of three seconds, including
+  requests and retry waits; a timeout returns the batch to the local queue;
 - keeps the batch in the queue when a transient failure prevents delivery;
 - discards a permanent 4xx response because retrying would not fix it.
 

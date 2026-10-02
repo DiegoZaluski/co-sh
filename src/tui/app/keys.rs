@@ -667,7 +667,6 @@ impl App {
                                 self.show_add_provider = true;
                             }
                             HomeAction::OpenSettings => {
-                                self.telemetry_feature(cosh::telemetry::schema::Feature::Settings);
                                 self.show_settings = true;
                             }
                             HomeAction::OpenModelRouter => {

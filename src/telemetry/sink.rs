@@ -89,6 +89,10 @@ fn backoff_ms(attempt: u32) -> u64 {
 /// buggy server cannot pin a flush task for more than this.
 const MAX_RETRY_AFTER_SECS: u64 = 300;
 
+/// Total network budget per flush, including all requests and retry waits.
+/// The TUI awaits this at exit; a timeout must return the batch to the queue.
+pub(crate) const FLUSH_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// Parse a `Retry-After` header (RFC 9110 §10.2.3). BOTH standardized forms
 /// are honored: delta-seconds and HTTP-date. Values above
 /// [`MAX_RETRY_AFTER_SECS`] are CLAMPED to the cap, not discarded: the
@@ -172,7 +176,10 @@ pub(crate) async fn flush(
         "drain_batch returned more than MAX_BATCH"
     );
     let payload = &batch[..batch.len().min(MAX_BATCH)];
-    match send_batch(payload, config, client).await {
+    let result = tokio::time::timeout(FLUSH_TIMEOUT, send_batch(payload, config, client))
+        .await
+        .unwrap_or(Err(SendError::Transient));
+    match result {
         Ok(()) => FlushOutcome::Sent(payload.len()),
         // Permanent rejection: the payload is invalid (schema changed, too
         // big). Re-queueing would poison the queue head — drop the batch.

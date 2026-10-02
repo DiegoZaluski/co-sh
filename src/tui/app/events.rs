@@ -275,6 +275,12 @@ impl App {
                     tool_name,
                     compaction,
                 } => {
+                    // Count committed checkpoints, not lifecycle Finished
+                    // notifications: nested fallbacks may emit several of
+                    // those for a single applied compaction.
+                    if compaction && self.telemetry.enabled() {
+                        self.session_telemetry.record_compaction();
+                    }
                     let owner = self
                         .active_loop_session_id
                         .as_ref()
@@ -411,6 +417,9 @@ impl App {
                         None => {
                             let id = format!("msg-{}", session.messages.len());
                             self.stream_msg_id = cur_session.map(|sid| (sid, id.clone()));
+                            if self.telemetry.enabled() {
+                                self.session_telemetry.record_message();
+                            }
                             session.messages.push(Message {
                                 id,
                                 role: MessageRole::Assistant,
@@ -496,17 +505,22 @@ impl App {
                     });
                     match session.messages.last_mut() {
                         Some(msg) if msg.role == MessageRole::Assistant => msg.parts.push(part),
-                        _ => session.messages.push(Message {
-                            id: format!("msg-{}", session.messages.len()),
-                            role: MessageRole::Assistant,
-                            parts: vec![part],
-                            created_at: std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_millis() as u64,
-                            agent: None,
-                            model: None,
-                        }),
+                        _ => {
+                            if self.telemetry.enabled() {
+                                self.session_telemetry.record_message();
+                            }
+                            session.messages.push(Message {
+                                id: format!("msg-{}", session.messages.len()),
+                                role: MessageRole::Assistant,
+                                parts: vec![part],
+                                created_at: std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis() as u64,
+                                agent: None,
+                                model: None,
+                            });
+                        }
                     }
                     // Session borrow dropped; pre-create the spinner for the
                     // new tool call so the beam is visible even if ToolResult
@@ -859,6 +873,9 @@ impl App {
                         None => {
                             let id = format!("msg-{}", session.messages.len());
                             self.stream_msg_id = cur_session.map(|sid| (sid, id.clone()));
+                            if self.telemetry.enabled() {
+                                self.session_telemetry.record_message();
+                            }
                             session.messages.push(Message {
                                 id,
                                 role: MessageRole::Assistant,
@@ -936,6 +953,9 @@ impl App {
                             // context (the harness records the same text
                             // there), and the session log persists it like
                             // any assistant turn. TextDelta appends to it.
+                            if self.telemetry.enabled() {
+                                self.session_telemetry.record_message();
+                            }
                             session.messages.push(Message {
                                 id: format!("msg-install-{}", crate::types::now_ms()),
                                 role: MessageRole::Assistant,
@@ -973,6 +993,9 @@ impl App {
                             let idx = match running_install(session) {
                                 Some(idx) => idx,
                                 None => {
+                                    if self.telemetry.enabled() {
+                                        self.session_telemetry.record_message();
+                                    }
                                     session.messages.push(Message {
                                         id: format!("msg-install-{}", crate::types::now_ms()),
                                         role: MessageRole::Assistant,
@@ -1189,6 +1212,7 @@ impl App {
                 }
 
                 HarnessEvent::UserMessageInjected { text } => {
+                    self.telemetry_feature(cosh::telemetry::schema::Feature::Prompt);
                     // The running loop consumed a "next request" message:
                     // retire the in-flight marker and pop the deque head
                     // (FIFO — the harness drains the channel in order).
@@ -1227,6 +1251,9 @@ impl App {
                         .as_ref()
                         .is_none_or(|owner| self.state.current_session_id.as_ref() == Some(owner));
                     if owner_matches && let Some(session) = self.state.current_session_mut() {
+                        if self.telemetry.enabled() {
+                            self.session_telemetry.record_message();
+                        }
                         session.messages.push(Message {
                             id: format!("msg-{}", session.messages.len()),
                             role: MessageRole::User,
@@ -1424,6 +1451,16 @@ impl App {
                     context,
                     checkup_verdict,
                 } => {
+                    if self.telemetry.enabled() {
+                        // This event has no typed cause. Preserve Unknown rather
+                        // than guessing a provider category from free-form text.
+                        self.session_telemetry.record_error(
+                            cosh::telemetry::schema::ErrorCategory::Unknown,
+                            "harness::core",
+                            None,
+                            &message,
+                        );
+                    }
                     // The decision model's audit of a heuristic guard stop:
                     // an improper stop is never silent.
                     // Record-everywhere, toast-on-disagreement: the verdict
@@ -1448,6 +1485,9 @@ impl App {
                     // Push error as an assistant message so it appears inline in the chat
                     let error_text = format!("Error: {message}");
                     if let Some(session) = self.state.current_session_mut() {
+                        if self.telemetry.enabled() {
+                            self.session_telemetry.record_message();
+                        }
                         session.messages.push(Message {
                             id: format!("msg-err-{}", session.messages.len()),
                             role: MessageRole::Assistant,

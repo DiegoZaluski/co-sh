@@ -82,6 +82,7 @@ pub struct BannerView {
     button_area: Option<Rect>,
     /// Changelog-link hitbox from the last render.
     link_area: Option<Rect>,
+    visible: bool,
 }
 
 impl BannerView {
@@ -91,6 +92,7 @@ impl BannerView {
             status: UpdateStatus::Idle,
             button_area: None,
             link_area: None,
+            visible: false,
         }
     }
 
@@ -111,8 +113,14 @@ impl BannerView {
     /// terminal is too short): a banner that is not on screen must never
     /// receive clicks from hitboxes left over by a previous frame.
     pub fn clear_hitboxes(&mut self) {
+        self.visible = false;
         self.button_area = None;
         self.link_area = None;
+    }
+
+    /// Whether the last render actually drew the announcement.
+    pub fn is_visible(&self) -> bool {
+        self.visible
     }
 
     /// Hit-test a click against the last-rendered hitboxes.
@@ -144,8 +152,7 @@ impl BannerView {
     ) {
         // Fresh hitboxes every frame: stale areas from a previous layout
         // must never receive clicks.
-        self.button_area = None;
-        self.link_area = None;
+        self.clear_hitboxes();
 
         let Some(BannerContent::ReleaseUpdate { version, .. }) = self.content.clone() else {
             return;
@@ -187,6 +194,7 @@ impl BannerView {
             return;
         }
         let rect = Rect::new(area.x + (area.width - banner_w) / 2, y, banner_w, banner_h);
+        self.visible = true;
 
         let border_style = Style::default().fg(white);
         let right = rect.right().saturating_sub(1);

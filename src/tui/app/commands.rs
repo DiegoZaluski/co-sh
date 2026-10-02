@@ -245,7 +245,6 @@ impl App {
         } else if cmd.name == "providers" {
             self.show_add_provider = true;
         } else if cmd.name == "settings" {
-            self.telemetry_feature(cosh::telemetry::schema::Feature::Settings);
             self.show_settings = true;
         } else if cmd.name == "tools" {
             self.show_internal_tools = true;

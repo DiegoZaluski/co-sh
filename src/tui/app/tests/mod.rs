@@ -64,3 +64,5 @@ mod rag;
 mod render;
 mod router_mouse;
 mod sessions_mouse;
+#[cfg(target_os = "linux")] // subprocess isolation uses XDG data/config roots
+mod telemetry;

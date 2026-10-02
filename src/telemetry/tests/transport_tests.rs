@@ -166,6 +166,9 @@ impl Fixture {
                         response.push_str("Location: http://127.0.0.1:1/ingest\r\n");
                     }
                     response.push_str("Content-Length: 0\r\n\r\n");
+                    if let Some(delay) = spec.get("delay_ms").and_then(Value::as_u64) {
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
+                    }
                     let _ = tls.write_all(response.as_bytes()).await;
                     let _ = tls.flush().await;
                     let _ = tls.shutdown().await;
@@ -280,6 +283,35 @@ async fn control_503_retry_sends_identical_event_then_succeeds() {
 }
 
 #[tokio::test]
+async fn flush_deadline_preserves_events_during_retry_wait_and_slow_response() {
+    for response in [
+        json!({"status": 503, "headers": {"Retry-After": "300"}}),
+        json!({"status": 204, "delay_ms": 30_000}),
+    ] {
+        let fixture = Fixture::start(json!([response])).await;
+        let queue = fixture.queue();
+        let event = synthetic(EventType::SessionSummary);
+        queue.push(&event);
+        let result = tokio::time::timeout(
+            crate::telemetry::sink::FLUSH_TIMEOUT + Duration::from_secs(2),
+            flush(
+                &queue,
+                &fixture.config(3),
+                &fixture.client(),
+                Consent::granted(),
+            ),
+        )
+        .await
+        .expect("flush must return within its total network budget");
+        assert_eq!(result, FlushOutcome::Failed);
+        assert_eq!(fixture.receipts().len(), 1, "no early retry");
+        let retained = queue.drain_batch();
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].client_event_id(), event.client_event_id());
+    }
+}
+
+#[tokio::test]
 async fn retry_after_http_date_is_honored() {
     // RFC 9110 §10.2.3: the HTTP-date form of `Retry-After`
     // must be parsed and honored. The date is +2s (kept short so the flush
@@ -373,11 +405,12 @@ async fn consent_cannot_be_overridden_by_a_caller() {
     // time: `sink::flush` requires a `Consent` token whose only constructor
     // is `pub(crate)` (called exclusively by the enabled facade), so no
     // external caller can pass a hand-made `true` anymore.
-    const NAME: &str = "telemetry::transport_tests::consent_cannot_be_overridden_by_a_caller";
+    const NAME: &str = concat!(module_path!(), "::consent_cannot_be_overridden_by_a_caller");
     if std::env::var("COSH_TRANSPORT_CHILD").as_deref() != Ok(NAME) {
         let root = tempfile::tempdir().unwrap();
         let output = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", NAME, "--nocapture"])
+            // libtest names omit the crate prefix included by module_path!().
+            .args(["--exact", NAME.split_once("::").unwrap().1, "--nocapture"])
             .env("COSH_TRANSPORT_CHILD", NAME)
             .env("COSH_TELEMETRY", "off")
             .env("CI", "1")
@@ -388,6 +421,11 @@ async fn consent_cannot_be_overridden_by_a_caller() {
             output.status.success(),
             "{}",
             String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
+            "consent subprocess did not execute its test: {}",
+            String::from_utf8_lossy(&output.stdout)
         );
         return;
     }

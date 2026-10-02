@@ -32,6 +32,9 @@ impl App {
         };
         match event {
             cosh::harness::events::LlmCompactionEvent::Started => {
+                if self.telemetry.enabled() {
+                    self.session_telemetry.record_message();
+                }
                 session.messages.push(Message {
                     id: format!("msg-ctx-{}", session.messages.len()),
                     role: MessageRole::Assistant,

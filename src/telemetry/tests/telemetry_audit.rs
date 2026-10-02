@@ -128,11 +128,12 @@ async fn f02_flush_is_consent_gated() {
     // Was repro_flush_sends_disabled_and_unsanitized_queue: a disabled
     // facade's queue could be flushed anyway. Now the facade flush re-checks
     // consent at call time and never transmits when disabled.
-    const NAME: &str = "f02_flush_is_consent_gated";
+    const NAME: &str = concat!(module_path!(), "::f02_flush_is_consent_gated");
     if std::env::var("COSH_AUDIT_CHILD").as_deref() != Ok(NAME) {
         let dir = tempfile::tempdir().unwrap();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", NAME, "--nocapture"])
+            // libtest names omit the crate prefix included by module_path!().
+            .args(["--exact", NAME.split_once("::").unwrap().1, "--nocapture"])
             .env("COSH_AUDIT_CHILD", NAME)
             .env("COSH_TELEMETRY", "off")
             .env("CI", "1")
@@ -143,6 +144,11 @@ async fn f02_flush_is_consent_gated() {
             output.status.success(),
             "{}",
             String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
+            "consent subprocess did not execute its test: {}",
+            String::from_utf8_lossy(&output.stdout)
         );
         return;
     }

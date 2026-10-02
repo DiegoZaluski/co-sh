@@ -215,6 +215,9 @@ impl App {
         }
 
         if let Some(session) = self.state.current_session_mut() {
+            if self.telemetry.enabled() {
+                self.session_telemetry.record_message();
+            }
             session.messages.push(crate::types::Message {
                 id: format!("msg-{}", session.messages.len()),
                 role: crate::types::MessageRole::User,
@@ -235,6 +238,7 @@ impl App {
         self.state.status = crate::types::SessionStatus::Working;
         // Telemetry aggregate: one full user-request → final-answer cycle.
         self.telemetry_turn();
+        self.telemetry_feature(cosh::telemetry::schema::Feature::Prompt);
         // The loop starts in the generic state; the event intake narrows it
         // (pondering / searching / recalling) as harness events arrive.
         self.agent_activity = crate::types::AgentActivity::Working;
@@ -728,6 +732,7 @@ impl App {
         // `title_generated`: a session that later receives real agent turns
         // still gets its semantic title.
         self.command_mode_turn = true;
+        self.telemetry_feature(cosh::telemetry::schema::Feature::Prompt);
 
         // C1: route the Done save to THIS session. Without an owner the
         // handler falls back to a stale `active_loop_session_id` from a
@@ -738,6 +743,9 @@ impl App {
         // Display transcript: the command line as a user message (the
         // "terminal echo").
         if let Some(session) = self.state.current_session_mut() {
+            if self.telemetry.enabled() {
+                self.session_telemetry.record_message();
+            }
             session.messages.push(crate::types::Message {
                 id: format!("msg-{}", session.messages.len()),
                 role: crate::types::MessageRole::User,

@@ -81,6 +81,7 @@ impl PendingQueueRow {
 
 impl App {
     pub(super) fn render(&mut self, frame: &mut Frame<'_>, delta_time: f64) {
+        self.telemetry_view();
         // The draw loop can run at 60 fps, but frame-counted animations were
         // designed for 30 fps. Advance them by elapsed time so they keep the
         // same visual speed at either pacing rate.
@@ -684,6 +685,9 @@ impl App {
                     self.prompt_view.blur();
                     self.home_view
                         .render(buf, session_area, &self.theme, animation_ticks);
+                    if self.telemetry.enabled() && self.home_view.banner.is_visible() {
+                        self.session_telemetry.mark_update_banner();
+                    }
                 }
                 AppMode::InternalTools => {
                     self.prompt_view.blur();
