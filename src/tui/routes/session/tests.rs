@@ -7111,3 +7111,137 @@ fn bench_dashboard_summarize_per_frame() {
         eprintln!("summarize n={n:>7}: median {:?}", times[10]);
     }
 }
+
+/// Regression test for the TUI panic:
+/// `thread 'main' panicked at src/tui/routes/session/mod.rs:4584:73:
+///  range start index 3152 out of range for slice of length 2150`
+///
+/// The cache-fill row loop of the fully-visible-assistant branch indexed
+/// `buf.content[base..base + w]` assuming the rendered height
+/// (`render_actual_h`) never exceeds the rows between `visible_top` and the
+/// buffer bottom. That assumption fails when `msg_height_cache` holds a
+/// stale-small estimate for a message whose real render is much taller:
+/// `render_parts` advances by `scanned.max(est_h)` per part — unclamped — so
+/// the render overflows past the viewport bottom and the loop read rows past
+/// the end of the buffer, panicking the whole TUI.
+///
+/// Repro: render once (populates the height + cell caches), then deflate
+/// `msg_height_cache[0]`, rebuild the prefix sums and invalidate the cell
+/// cache. The next frame re-renders message 0 through the cache-fill path
+/// while it *looks* fully visible (`msg_bottom = msg_top + 1`).
+#[test]
+fn fully_visible_cache_fill_does_not_index_past_buffer_end() {
+    let theme = test_theme();
+    let config = test_config();
+    let area = Rect::new(0, 0, 80, 40);
+
+    let session = Session {
+        id: "test-session".into(),
+        title: "Test".into(),
+        created_at: 0,
+        title_generated: false,
+        provider: None,
+        model: None,
+        reasoning: None,
+        ctx_ids: Default::default(),
+        messages: vec![
+            // Tall: the real render far exceeds the 40-row buffer.
+            build_streaming_message(400),
+            // Trailing message so message 0 is not the streaming-cached last one.
+            Message {
+                id: "msg-tail".into(),
+                role: MessageRole::Assistant,
+                parts: vec![Part::Text(TextPart {
+                    text: "done".into(),
+                    synthetic: false,
+                })],
+                created_at: 0,
+                agent: None,
+                model: None,
+            },
+        ],
+    };
+    let mut state = AppState::new();
+    state.add_session(session);
+    state.current_session_id = Some("test-session".into());
+    // Non-streaming: the vulnerable cache-fill path only runs for
+    // non-streaming messages.
+    state.status = SessionStatus::Idle;
+
+    let mut view = SessionView::new();
+
+    // Frame 1: honest render — height cache + cell cache populated.
+    let mut buf = Buffer::empty(area);
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+    let real_h = view.msg_height_cache[0];
+    assert!(
+        real_h > i32::from(area.height),
+        "precondition: message 0 must render taller than the buffer \
+         (real_h={real_h}, buf_h={})",
+        area.height
+    );
+
+    // Simulate height-estimate drift: cached height stale-small, cell cache
+    // invalidated → the next frame re-renders through the cache-fill path.
+    view.msg_height_cache[0] = 1;
+    view.rebuild_prefix_y();
+    view.msg_cache_h[0] = 0;
+    view.msg_cache_cells[0] = None;
+    view.scroll_y = 0;
+
+    // Frame 2: pre-fix this panicked with
+    // `range start index 3202 out of range for slice of length 3200`.
+    let mut buf2 = Buffer::empty(area);
+    view.render(&mut buf2, area, &state, &theme, &config, 0.016);
+
+    // The deflated height must have survived the incremental height pass
+    // (message 0 is neither last nor mutable, so it is never re-estimated).
+    // If that scoping ever changes, the drift simulation would be repaired
+    // here and this test would keep passing vacuously — fail loudly instead.
+    assert_eq!(
+        view.msg_height_cache[0], 1,
+        "precondition: the deflated height must survive the incremental height pass"
+    );
+
+    // The clamped render (fewer rows inside the buffer than the logical
+    // height) must NOT be written to the cell cache: a cached clamped height
+    // would make later cache-hit frames advance the layout by less than this
+    // fill frame did (scroll jitter).
+    assert_eq!(
+        view.msg_cache_h.first().copied().unwrap_or(0),
+        0,
+        "a render clipped at the buffer bottom must not poison the cell cache"
+    );
+
+    // Frame 3 must be equally safe: the cache is still empty, so this
+    // re-renders fresh again.
+    let mut buf3 = Buffer::empty(area);
+    view.render(&mut buf3, area, &state, &theme, &config, 0.016);
+    assert_eq!(view.msg_cache_h.first().copied().unwrap_or(0), 0);
+}
+
+/// Companion guard for the regression above: the skip-when-clamped behavior
+/// must not degenerate into "never cache". A render that fits inside the
+/// buffer must still populate the cell cache exactly as before.
+#[test]
+fn render_cache_still_fills_when_render_fits_in_buffer() {
+    let theme = test_theme();
+    let config = test_config();
+    let area = Rect::new(0, 0, 80, 40);
+
+    let mut state = test_state(build_streaming_message(50));
+    // test_state leaves the session Working; the cache-fill path requires
+    // non-streaming messages.
+    state.status = SessionStatus::Idle;
+
+    let mut view = SessionView::new();
+    let mut buf = Buffer::empty(area);
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+    assert!(
+        view.msg_cache_h.first().copied().unwrap_or(0) > 0
+            && view.msg_cache_cells.first().is_some_and(|c| c.is_some()),
+        "a fully visible message that fits the buffer must be cached"
+    );
+}

@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Adjusted the Spark animation frame pacing so the sparkle starfield no longer
   appears stuck while the TUI continues to perform smoothly.
+- Fixed a panic (`range start index … out of range for slice of length …` in
+  the session view render) that froze the TUI whenever a message's cached
+  height underestimated its real render: the render-cache fill loop indexed
+  past the end of the terminal buffer. The loop is now clamped to the rows
+  that actually fit, and clipped renders are no longer written to the cache
+  (guarding against layout jitter on later frames). Covered by regression
+  tests in `tui::routes::session::tests`.
 
 ## [0.1.0] - 2026-10-01
 

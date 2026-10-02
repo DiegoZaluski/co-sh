@@ -4570,53 +4570,78 @@ impl SessionView {
 
                             // Save non-streaming messages to cache (cells + text regions)
                             if !is_streaming_msg {
-                                let ah = render_actual_h as u16;
+                                let full_ah = render_actual_h as u16;
                                 let w = inner_area.width as usize;
-                                // Row-slice read: the saved rows are fully
-                                // inside the buffer's area (they were just
-                                // painted there), so one bounds-checked slice
-                                // per row replaces a per-cell `buf.cell(..)`.
                                 let buf_w = buf.area.width as usize;
+                                let buf_h = buf.area.height as usize;
                                 let buf_x = inner_area.x as usize;
-                                let mut cells = Vec::with_capacity(w * ah as usize);
-                                for dy in 0..ah {
-                                    let base = (visible_top + dy) as usize * buf_w + buf_x;
-                                    cells.extend_from_slice(&buf.content[base..base + w]);
+                                // Rows must fit inside the buffer: a render clipped
+                                // at the viewport bottom can leave
+                                // `visible_top + dy` past the last buffer row, and
+                                // `buf.content[base..base + w]` would panic. Clamp
+                                // to the rows that actually fit — mirroring the
+                                // guards in `blit_cell_rows` — instead of indexing
+                                // past the end.
+                                let fit_rows = if buf_x.saturating_add(w) <= buf_w {
+                                    buf_h.saturating_sub(usize::from(visible_top))
+                                } else {
+                                    0
+                                };
+                                let ah = full_ah.min(fit_rows as u16);
+                                // Cache only complete renders: a clamp here means
+                                // the render was clipped at the buffer bottom, so
+                                // fewer rows exist in `buf` than the logical height.
+                                // Caching the clamped count would make cache-hit
+                                // frames advance the layout by less than this fill
+                                // frame did (render_actual_h divergence → scroll
+                                // jitter), so skip caching instead; `msg_cache_h`
+                                // stays stale, and the token check in `cache_hit`
+                                // makes the next frame re-render.
+                                if ah == full_ah {
+                                    // Row-slice read: the saved rows are fully
+                                    // inside the buffer's area (they were just
+                                    // painted there), so one bounds-checked slice
+                                    // per row replaces a per-cell `buf.cell(..)`.
+                                    let mut cells = Vec::with_capacity(w * ah as usize);
+                                    for dy in 0..ah {
+                                        let base = (visible_top + dy) as usize * buf_w + buf_x;
+                                        cells.extend_from_slice(&buf.content[base..base + w]);
+                                    }
+                                    // Region text is content-only (x1 = inner_area.x + 3):
+                                    // the border/margin columns are stripped by
+                                    // regions_from_full_width_cells, so they never enter
+                                    // the text as ghost leading columns (they would
+                                    // shift the copy 3 chars left of the painted
+                                    // selection and drop the last 3 chars).
+                                    let x_off_text = inner_area.x + 3;
+                                    let msg_content_top = msg_top - vp_top + self.scroll_y;
+                                    let regions = regions_from_full_width_cells(
+                                        &cells,
+                                        w,
+                                        3,
+                                        x_off_text,
+                                        x_off_text + max_w,
+                                        (0..ah as usize).zip(msg_content_top..),
+                                    );
+                                    self.msg_cache_bytes = self.msg_cache_bytes.saturating_sub(
+                                        Self::cache_entry_bytes_of(
+                                            &self.msg_cache_cells[idx],
+                                            &self.msg_cache_text_regions[idx],
+                                        ),
+                                    );
+                                    self.msg_cache_tokens[idx] = token;
+                                    self.msg_cache_w[idx] = inner_area.width;
+                                    self.msg_cache_h[idx] = ah;
+                                    self.msg_cache_cells[idx] = Some(cells);
+                                    self.msg_cache_text_regions[idx] = Some(regions);
+                                    self.msg_cache_bytes = self.msg_cache_bytes.saturating_add(
+                                        Self::cache_entry_bytes_of(
+                                            &self.msg_cache_cells[idx],
+                                            &self.msg_cache_text_regions[idx],
+                                        ),
+                                    );
+                                    self.msg_cache_last_used[idx] = self.render_frame;
                                 }
-                                // Region text is content-only (x1 = inner_area.x + 3):
-                                // the border/margin columns are stripped by
-                                // regions_from_full_width_cells, so they never enter
-                                // the text as ghost leading columns (they would
-                                // shift the copy 3 chars left of the painted
-                                // selection and drop the last 3 chars).
-                                let x_off_text = inner_area.x + 3;
-                                let msg_content_top = msg_top - vp_top + self.scroll_y;
-                                let regions = regions_from_full_width_cells(
-                                    &cells,
-                                    w,
-                                    3,
-                                    x_off_text,
-                                    x_off_text + max_w,
-                                    (0..ah as usize).zip(msg_content_top..),
-                                );
-                                self.msg_cache_bytes = self.msg_cache_bytes.saturating_sub(
-                                    Self::cache_entry_bytes_of(
-                                        &self.msg_cache_cells[idx],
-                                        &self.msg_cache_text_regions[idx],
-                                    ),
-                                );
-                                self.msg_cache_tokens[idx] = token;
-                                self.msg_cache_w[idx] = inner_area.width;
-                                self.msg_cache_h[idx] = ah;
-                                self.msg_cache_cells[idx] = Some(cells);
-                                self.msg_cache_text_regions[idx] = Some(regions);
-                                self.msg_cache_bytes = self.msg_cache_bytes.saturating_add(
-                                    Self::cache_entry_bytes_of(
-                                        &self.msg_cache_cells[idx],
-                                        &self.msg_cache_text_regions[idx],
-                                    ),
-                                );
-                                self.msg_cache_last_used[idx] = self.render_frame;
                             }
                         }
                     }
