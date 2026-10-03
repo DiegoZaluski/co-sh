@@ -123,6 +123,18 @@ impl App {
         // fetches fresh models without the removed key.
         self.model_cache.invalidate(&provider);
 
+        // A persisted global model selection pointing at this provider is
+        // now orphaned: without a key it can no longer authenticate, yet the
+        // boot/session restore paths would resurrect it and the prompt
+        // footer would advertise a dead provider. Clear the selection so
+        // the next boot falls back to the env-var defaults.
+        if self.setup.model.provider == provider {
+            self.setup.model.provider = String::new();
+            self.setup.model.model = String::new();
+            self.setup.model.reasoning = None;
+            self.setup.save();
+        }
+
         // Pop the Confirm, then the forget/overwrite picker beneath it.
         self.dialog.pop();
         self.dialog.pop();

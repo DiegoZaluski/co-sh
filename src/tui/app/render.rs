@@ -567,13 +567,15 @@ impl App {
             } else {
                 0
             };
-            // Free-gateway recommendation dialog (same position).
-            let recommendation_h = if is_session && self.free_gateway_dialog.visible {
-                self.free_gateway_dialog
-                    .required_height(main_area.width.saturating_sub(4))
-            } else {
-                0
-            };
+            // Free-gateway recommendation dialog (same position, Session
+            // only — every trigger lives in a session).
+            let recommendation_h =
+                if self.gateway_dialog_route() && self.free_gateway_dialog.visible {
+                    self.free_gateway_dialog
+                        .required_height(main_area.width.saturating_sub(4))
+                } else {
+                    0
+                };
 
             // Shared with the mouse hit-testing helpers (`App::prompt_vertical_layout`)
             // so clicks always land on the rows that were actually drawn. On very

@@ -412,9 +412,27 @@ pub struct App {
     /// What the current Confirm dialog is asking to delete, if any: one
     /// session, or every session of the current working directory.
     pending_delete: Option<PendingSessionDelete>,
-    /// Message captured while the one-time Zen free-gateway prompt was open;
+    /// Message captured while the one-time free-gateway prompt was open;
     /// replayed through `start_agent_loop` when the user opts in.
     pending_gateway_message: Option<String>,
+    /// Charm device sign-in in flight (opt-in accepted, token not stored yet).
+    /// While set, no new recommendation is offered and the prompt is busy.
+    charm_signing_in: bool,
+    /// The user declined the Charm recommendation this run: never ask again
+    /// until the app restarts.
+    charm_declined: bool,
+    /// The model picker currently on screen was opened BY the gateway
+    /// `Authorized` event with a parked message waiting: when the picker
+    /// resolves (commit or cancel) the message replays — never under the
+    /// dialog (the original code sent it the same instant the picker
+    /// opened, so the reply streamed with the default model).
+    gateway_model_pick: bool,
+    /// (tx, rx) for Charm device sign-in outcomes into the UI thread. The rx
+    /// half is drained by [`App::pump_gateway_events`] once per frame.
+    gateway_event_tx:
+        tokio::sync::mpsc::UnboundedSender<gateway_recommendation::GatewaySignInEvent>,
+    gateway_event_rx:
+        tokio::sync::mpsc::UnboundedReceiver<gateway_recommendation::GatewaySignInEvent>,
     /// Whether a title has already been generated for the current session.
     /// Set to `false` when a new session is created; set to `true` after
     /// the async title generation task is spawned.
@@ -574,15 +592,26 @@ impl App {
 
         // Restore the globally persisted model selection (the last one the
         // user picked) so new sessions start with it — a stored selection
-        // wins over the env-var defaults.
+        // wins over the env-var defaults. A selection whose provider lost
+        // its credential (key removed from the keyring, charm tokens
+        // forgotten) must NOT come back as the live model: the footer
+        // would show a provider that can no longer authenticate.
         let mut llm_config = LlmConfig {
             tool_call_mode: saved_tool_call_mode,
             ..LlmConfig::from_env()
         };
         if let Some(model) = setup.persisted_model() {
-            llm_config.model = Some(model.to_string());
-            llm_config.provider = setup.model.provider.clone();
-            llm_config.reasoning = setup.model.reasoning.clone();
+            let provider = setup.model.provider.clone();
+            // An empty provider is never a valid live selection (auto picks
+            // resolve to a real provider at commit time) — treat it as
+            // unrestorable, same as a provider that lost its credential.
+            let still_credentialed =
+                !provider.is_empty() && crate::app::providers::provider_has_credential(&provider);
+            if still_credentialed {
+                llm_config.model = Some(model.to_string());
+                llm_config.provider = provider;
+                llm_config.reasoning = setup.model.reasoning.clone();
+            }
         }
 
         // Propagate the persisted LSP switch to the process-wide flag the
@@ -603,6 +632,11 @@ impl App {
         // (tx, rx) for update-related background tasks, created here so both
         // halves can be moved into the struct below.
         let (update_event_tx, update_event_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // (tx, rx) for Charm device sign-in outcomes (gateway recommendation
+        // opt-in): the worker on the shared agent runtime sends Authorized /
+        // Failed; the UI thread drains it once per frame.
+        let (gateway_event_tx, gateway_event_rx) = tokio::sync::mpsc::unbounded_channel();
 
         // Boot-time GitHub release check: announces a newer release on the
         // home banner. Runs in the background so startup never blocks on the
@@ -701,6 +735,11 @@ impl App {
             session_store,
             pending_delete: None,
             pending_gateway_message: None,
+            charm_signing_in: false,
+            charm_declined: false,
+            gateway_model_pick: false,
+            gateway_event_tx: gateway_event_tx.clone(),
+            gateway_event_rx,
             title_generated: false,
             command_mode_turn: false,
             manual_compaction_active: false,
@@ -984,6 +1023,7 @@ impl App {
             self.paste_burst_flush_if_due();
             self.pump_queued_messages();
             self.pump_update_events();
+            self.pump_gateway_events();
         }
 
         restore_terminal()?;
@@ -1519,8 +1559,17 @@ impl App {
         if !matches!(self.mode(), AppMode::Session) {
             return None;
         }
-        // When question or permission dialog is visible, prompt is hidden
-        if self.question_dialog.visible || self.permission_dialog.visible {
+        // When an inline dialog is visible the prompt is hidden (like
+        // OpenCode). Without the free-gateway/queue-choice gates the
+        // layout helper still returns the PHANTOM prompt rect it would
+        // have had — bottom-anchored over the dialog's code/URL rows —
+        // and the mouse prompt-click branch steals presses meant for the
+        // dialog's copyable regions.
+        if self.question_dialog.visible
+            || self.permission_dialog.visible
+            || self.queue_choice_dialog.visible
+            || self.free_gateway_dialog.visible
+        {
             return None;
         }
         let area = self.terminal_size();

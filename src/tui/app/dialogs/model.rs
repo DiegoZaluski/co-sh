@@ -452,6 +452,11 @@ impl App {
             return;
         };
         let provider = self.setup.model.provider.clone();
+        // Same credential gate as the boot restore: a selection whose
+        // provider lost its key must not become the live model.
+        if provider.is_empty() || !crate::app::providers::provider_has_credential(&provider) {
+            return;
+        }
         let reasoning = self.setup.model.reasoning.clone();
         self.set_llm_model(model, provider, reasoning);
         self.record_model_on_current_session();

@@ -212,6 +212,30 @@ impl App {
                     self.question_dialog.clear_selection();
                 }
 
+                // Press inside the free-gateway dialog's copyable regions
+                // (explanation body, device code, verification URL) anchors a
+                // copy selection — same pattern as the question dialog. Any
+                // press inside the drawn box is CONSUMED: on a non-copyable
+                // cell (gap row, padding) it just clears the selection, it
+                // never arms the chat's drag selection underneath.
+                if self.gateway_dialog_contains(x, y) {
+                    let ga = self.free_gateway_dialog_area();
+                    if let Some(pos) = self.free_gateway_dialog.selection_target_at(x, y, ga) {
+                        self.free_gateway_dialog
+                            .begin_selection(pos, ga.width.saturating_sub(5));
+                    } else {
+                        self.free_gateway_dialog.clear_selection();
+                    }
+                    return Ok(true);
+                }
+                // A press OUTSIDE the box heals a sticky anchor: if a
+                // mouse-Up was ever lost, the orphaned anchor would keep
+                // `gateway_dialog_owns_drag` true and swallow every drag
+                // on screen until the user clicked inside the box again.
+                if self.free_gateway_dialog.has_selection_anchor() {
+                    self.free_gateway_dialog.clear_selection();
+                }
+
                 // Click inside a create-db field (RAG) starts a drag selection,
                 // mirroring the chat prompt's press-and-drag text selection.
                 #[cfg(feature = "embed")]
@@ -325,6 +349,25 @@ impl App {
                         return Ok(true);
                     }
                 }
+                // The free-gateway dialog's regions (body, device code,
+                // verification URL). A drag belongs to the box when it was
+                // ANCHORED in it (gap rows only pause the extension) OR the
+                // PRESS started inside it (the options row, the question row
+                // and the footer are click targets, not copy anchors — but
+                // their drags must never spill into the chat's selection
+                // either). Both cases consume unconditionally.
+                let press_started_in_box = self
+                    .mouse_down_pos
+                    .is_some_and(|(sx, sy)| self.gateway_dialog_contains(sx, sy));
+                if press_started_in_box || self.gateway_dialog_owns_drag() {
+                    if self.gateway_dialog_owns_drag() {
+                        let ga = self.free_gateway_dialog_area();
+                        if let Some(pos) = self.free_gateway_dialog.selection_target_at(x, y, ga) {
+                            self.free_gateway_dialog.extend_selection(pos);
+                        }
+                    }
+                    return Ok(true);
+                }
                 if self.state.right_panel.has_selection() {
                     self.state.right_panel.update_drag_selection(x, y);
                     return Ok(true);
@@ -405,6 +448,16 @@ impl App {
                 self.mouse_drag_active = false;
                 self.release_was_drag = is_drag;
 
+                // A PLAIN click (no drag) on a copyable cell anchored a
+                // selection the drag-only copy block below never consumes —
+                // the leftover anchor would then swallow the NEXT chat drag
+                // (the drag arm routes every event to the box while it
+                // lives). Drop it now; the click continues to the ordinary
+                // dispatch below.
+                if !is_drag && self.gateway_dialog_owns_drag() {
+                    self.free_gateway_dialog.clear_selection();
+                }
+
                 // Clicks that start and land over the open session-list
                 // left panel belong to the left panel — never to whatever occupies
                 // the same row in the chat (the prompt input or a user
@@ -463,6 +516,27 @@ impl App {
                             selection::copy_selection(&text, &mut self.toast_state);
                         }
                         self.question_dialog.clear_selection();
+                        return Ok(true);
+                    }
+
+                    // Auto-copy a free-gateway dialog drag selection on
+                    // release (body / device code / URL) — the SAME drag
+                    // pattern as the question dialog. The bare anchor also
+                    // consumes the release so it never clicks through. A
+                    // drag that STARTED in the box without an anchor (press
+                    // on the options/question row) is consumed too — it
+                    // must never reach the session-view copy below.
+                    if self.free_gateway_dialog.visible
+                        && self.gateway_dialog_route()
+                        && (self.free_gateway_dialog.has_selection_anchor()
+                            || drag_start
+                                .is_some_and(|(sx, sy)| self.gateway_dialog_contains(sx, sy)))
+                    {
+                        if self.free_gateway_dialog.has_selection() {
+                            let text = self.free_gateway_dialog.selected_text();
+                            selection::copy_selection(&text, &mut self.toast_state);
+                        }
+                        self.free_gateway_dialog.clear_selection();
                         return Ok(true);
                     }
 
@@ -1091,23 +1165,13 @@ impl App {
             }
         }
 
-        // 5b. Free-gateway recommendation dialog (inline)
-        if self.free_gateway_dialog.visible && matches!(self.mode(), AppMode::Session) {
-            let area = self.terminal_size();
-            let main_area = self.main_content_area(area);
-            let footer_y = main_area.bottom().saturating_sub(1);
-            let _prompt_h = 0u16; // prompt is hidden when dialog is visible
-            let rec_h = self
-                .free_gateway_dialog
-                .required_height(main_area.width.saturating_sub(4));
-            let rec_h = rec_h.min(footer_y.saturating_sub(area.y + 1));
-            let rec_area_y = footer_y.saturating_sub(rec_h);
-            let rec_area = Rect::new(
-                main_area.x + 2,
-                rec_area_y,
-                main_area.width.saturating_sub(4),
-                rec_h,
-            );
+        // 5b. Free-gateway recommendation dialog (inline, Session only —
+        // every trigger lives in a session). The rect comes from
+        // `free_gateway_dialog_area` — the SAME geometry render draws with
+        // (`session_main_area` already handles the right-panel subtraction
+        // per mode), so click rows and drawn rows can never disagree.
+        if self.free_gateway_dialog.visible && self.gateway_dialog_route() {
+            let rec_area = self.free_gateway_dialog_area();
             if !self.mouse_drag_active && self.drag_selection.is_none() {
                 let consumed = self
                     .free_gateway_dialog
@@ -1518,6 +1582,52 @@ impl App {
             question_area_y,
             main_area.width.saturating_sub(4),
             question_h,
+        )
+    }
+
+    /// Whether the point lies inside the free-gateway dialog's DRAWN rect
+    /// (visible + routed + within `free_gateway_dialog_area`). Shared by the
+    /// press/drag arms so a press on ANY cell of the box — copyable or not —
+    /// is consumed by the box and never reaches the chat underneath.
+    pub(crate) fn gateway_dialog_contains(&self, x: u16, y: u16) -> bool {
+        self.free_gateway_dialog.visible && self.gateway_dialog_route() && {
+            let ga = self.free_gateway_dialog_area();
+            x >= ga.x && x < ga.x + ga.width && y >= ga.y && y < ga.y + ga.height
+        }
+    }
+
+    /// Whether an in-flight mouse drag BELONGS to the free-gateway dialog:
+    /// it was anchored inside the box, so it must never spill into the
+    /// chat's drag selection — even when the cursor crosses gap rows,
+    /// padding or leaves the rect mid-drag (the hit-test yields `None`
+    /// there and the extension just pauses). NOT the same check as
+    /// [`Self::gateway_dialog_contains`] (which tests a point): this one
+    /// tests drag ownership and deliberately ignores the cursor position.
+    pub(crate) fn gateway_dialog_owns_drag(&self) -> bool {
+        self.free_gateway_dialog.visible
+            && self.gateway_dialog_route()
+            && self.free_gateway_dialog.has_selection_anchor()
+    }
+
+    /// Rect of the free-gateway recommendation dialog, using the SAME
+    /// geometry the renderer draws with (shared content area, prompt hidden
+    /// while the box is up). Selection hit-tests read this, so clicks always
+    /// land on the rows that were actually drawn.
+    pub(crate) fn free_gateway_dialog_area(&self) -> Rect {
+        let area = self.terminal_size();
+        let main_area = self.session_main_area(area).main;
+        let footer_y = main_area.bottom().saturating_sub(1);
+        // Prompt is hidden while the dialog is visible (like OpenCode).
+        let rec_h = self
+            .free_gateway_dialog
+            .required_height(main_area.width.saturating_sub(4));
+        let rec_h = rec_h.min(footer_y.saturating_sub(area.y + 1));
+        let rec_area_y = footer_y.saturating_sub(rec_h);
+        Rect::new(
+            main_area.x + 2,
+            rec_area_y,
+            main_area.width.saturating_sub(4),
+            rec_h,
         )
     }
 

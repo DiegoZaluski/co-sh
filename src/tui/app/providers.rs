@@ -128,6 +128,16 @@ pub(super) fn keyring_has_provider_key(env_var: &str) -> bool {
         .is_ok()
 }
 
+/// Whether a persisted model selection pointing at `provider` may still be
+/// restored: local providers need no credential, cloud providers must still
+/// have one somewhere (env var or keyring). A selection whose key was
+/// forgotten must not come back as the live model — the prompt footer would
+/// advertise a provider that can no longer authenticate.
+pub(super) fn provider_has_credential(provider: &str) -> bool {
+    use cosh_sdk::connector::{has_api_key, is_local_provider};
+    is_local_provider(provider) || has_api_key(provider)
+}
+
 /// Remove a provider API key from the OS credential store through the
 /// keyring's own deletion API (`Entry::delete_credential`) — the library's
 /// recommended, store-agnostic way to drop a credential cleanly; cosh never

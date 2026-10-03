@@ -191,6 +191,16 @@ impl App {
                     self.question_dialog.clear_selection();
                     return Ok(false);
                 }
+                // Same for the free-gateway dialog's Authorizing regions:
+                // the device code, the verification URL and the explanation
+                // body are all drag-copyable (the code is the whole point —
+                // the Charm page asks for it after login).
+                if self.free_gateway_dialog.has_selection() {
+                    let text = self.free_gateway_dialog.selected_text();
+                    selection::copy_selection(&text, &mut self.toast_state);
+                    self.free_gateway_dialog.clear_selection();
+                    return Ok(false);
+                }
                 // Same gate, no selection: Ctrl+C wipes the focused answer
                 // field (readline-style kill, same as the prompt below). The
                 // clear is recorded as ONE atomic Replace step, so a single
@@ -370,9 +380,10 @@ impl App {
             // (Confirm dialog keys are handled by the sovereignty gate at the
             // top of this function — nothing here can run while it decides.)
 
-            // Free-gateway recommendation dialog (inline, shown after HTTP
-            // errors or when no API key is configured).
-            if self.free_gateway_dialog.visible && matches!(self.mode(), AppMode::Session) {
+            // Free-gateway recommendation dialog (inline, shown when a
+            // message is sent without credentials, or after an auth-shaped
+            // error). Session only — every trigger lives in a session.
+            if self.free_gateway_dialog.visible && self.gateway_dialog_route() {
                 let consumed = self.free_gateway_dialog.handle_key_event(key);
                 if consumed {
                     if self.free_gateway_dialog.submitted {
@@ -1314,6 +1325,12 @@ impl App {
                         self.prompt_view.focus();
                         return Ok(false);
                     } else if self.free_gateway_dialog.visible {
+                        // Esc yields the box in EVERY phase — offer AND
+                        // mid-sign-in. The device flow keeps polling in the
+                        // background and ends itself (Authorized/Failed hide
+                        // + toast); dismissing here only gives the screen
+                        // back (the code was already shown and is
+                        // drag-copyable before Esc).
                         self.free_gateway_dialog.hide();
                         self.restore_pending_gateway_message();
                         return Ok(false);
@@ -1346,6 +1363,12 @@ impl App {
                         self.prompt_view.focus();
                         return Ok(false);
                     } else if self.free_gateway_dialog.visible {
+                        // Esc yields the box in EVERY phase — offer AND
+                        // mid-sign-in. The device flow keeps polling in the
+                        // background and ends itself (Authorized/Failed hide
+                        // + toast); dismissing here only gives the screen
+                        // back (the code was already shown and is
+                        // drag-copyable before Esc).
                         self.free_gateway_dialog.hide();
                         self.restore_pending_gateway_message();
                         return Ok(false);

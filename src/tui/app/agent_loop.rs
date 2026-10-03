@@ -28,7 +28,11 @@ static COMMAND_CALL_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomi
 /// and the language servers' transport tasks must outlive individual turns —
 /// a per-turn runtime would kill them (and, via `kill_on_drop`, the server
 /// processes) the moment a turn ends.
-static AGENT_RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+/// Shared tokio runtime for agent-loop work AND background device sign-ins
+/// (gateway recommendation): both must outlive individual UI turns, and the
+/// UI thread has no ambient runtime context to spawn into.
+pub(super) static AGENT_RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> =
+    std::sync::OnceLock::new();
 
 impl App {
     /// True while the loop must not consume the next queued message: either
@@ -176,11 +180,9 @@ impl App {
         // a provider without credentials asks ONCE whether to use the free
         // gateway. The message is parked and only replayed on opt-in;
         // Esc closes without recording anything.
-        if self.needs_gateway_recommendation() {
+        if let Some(content) = self.gateway_recommendation_content(false) {
             self.pending_gateway_message = Some(msg);
-            if let Some(content) = self.gateway_recommendation_content() {
-                self.free_gateway_dialog.show(content);
-            }
+            self.free_gateway_dialog.show(content);
             return;
         }
 
