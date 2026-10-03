@@ -2481,6 +2481,27 @@ impl RightPanelState {
         self.update_last_pty_for_agent(output, None);
     }
 
+    /// `update_last_pty` scoped to BASH windows: the streaming path of a
+    /// MAIN-AGENT tool must never append into a RUNNING background subagent
+    /// window — with a parallel background turn, the subagent window IS the
+    /// last-Running session, and an untargeted append would graft the other
+    /// tool's output into the mini-chat (the plan/stream leak family).
+    /// Subagent windows are fed exclusively through the targeted
+    /// `_for_agent` path and the typed `SubagentEvent` stream.
+    pub fn update_last_bash_pty(&mut self, output: String) {
+        if let Some(session) = self
+            .pty_sessions
+            .iter_mut()
+            .rev()
+            .find(|s| matches!(s.status, PtyStatus::Running) && !s.is_subagent())
+        {
+            session.output.push_str(&output);
+            Self::truncate_output(&mut session.output);
+            self.pty_gen = self.pty_gen.wrapping_add(1);
+            self.mark_activity(SectionKind::Bash);
+        }
+    }
+
     /// `update_last_pty`, targeted at one agent's subagent window (see
     /// `complete_last_pty_for_agent`): a live ToolOutput of a PARALLEL
     /// background turn must land in ITS window — the sibling's spawn
@@ -2521,6 +2542,30 @@ impl RightPanelState {
     /// Mark the last running PTY session as completed.
     pub fn complete_last_pty(&mut self, final_output: String) {
         self.complete_last_pty_for_agent(final_output, None);
+    }
+
+    /// `complete_last_pty` scoped to BASH windows: a MAIN-AGENT tool result
+    /// (`bash_run`, `plan_todo_write`, …) must never close a RUNNING
+    /// background subagent window — with a parallel background turn, the
+    /// subagent window IS the last-Running session, and the untargeted
+    /// completion used to (a) stamp the other tool's output into its body
+    /// and (b) mark it Completed, so the later completion notification then
+    /// found no Running window and DROPPED the sub-agent's real report.
+    /// Subagent windows are closed exclusively through the targeted
+    /// `_for_agent` path (spawn receipts keep them Running on purpose).
+    pub fn complete_last_bash_pty(&mut self, final_output: String) {
+        let mut final_output = final_output;
+        if let Some(session) = self
+            .pty_sessions
+            .iter_mut()
+            .rev()
+            .find(|s| matches!(s.status, PtyStatus::Running) && !s.is_subagent())
+        {
+            Self::truncate_output(&mut final_output);
+            session.output = final_output;
+            session.status = PtyStatus::Completed;
+            self.pty_gen = self.pty_gen.wrapping_add(1);
+        }
     }
 
     /// `complete_last_pty`, targeted at one agent's subagent window.
@@ -2593,17 +2638,51 @@ impl RightPanelState {
 
     /// Mark the last running PTY session as failed.
     pub fn fail_last_pty(&mut self, error: String) {
+        self.fail_last_pty_for_agent(error, None);
+    }
+
+    /// `fail_last_pty`, targeted at one agent's subagent window (same
+    /// routing contract as `complete_last_pty_for_agent`). With `None` it
+    /// keeps the legacy last-Running-ANY behavior — the main-agent tool
+    /// paths must NOT use it (see `fail_last_bash_pty`).
+    pub fn fail_last_pty_for_agent(&mut self, error: String, agent: Option<&str>) {
         let mut error = error;
         Self::truncate_output(&mut error);
         if let Some(session) = self
             .pty_sessions
             .iter_mut()
             .rev()
-            .find(|s| matches!(s.status, PtyStatus::Running))
+            .find(|s| match agent {
+                Some(agent) => {
+                    matches!(s.status, PtyStatus::Running) && Self::is_window_of(s, agent)
+                }
+                None => matches!(s.status, PtyStatus::Running),
+            })
         {
             session.output = error;
             session.status = PtyStatus::Failed;
             session.subagent_activity = SubagentActivity::default();
+            self.pty_gen = self.pty_gen.wrapping_add(1);
+        }
+    }
+
+    /// `fail_last_pty` scoped to BASH windows: a MAIN-AGENT tool error must
+    /// never fail a RUNNING background subagent window — with a parallel
+    /// background turn, the subagent window IS the last-Running session,
+    /// and the untargeted failure used to stamp the other tool's error into
+    /// the mini-chat and kill a live turn. Subagent windows are failed
+    /// exclusively through the targeted `_for_agent` path.
+    pub fn fail_last_bash_pty(&mut self, error: String) {
+        let mut error = error;
+        Self::truncate_output(&mut error);
+        if let Some(session) = self
+            .pty_sessions
+            .iter_mut()
+            .rev()
+            .find(|s| matches!(s.status, PtyStatus::Running) && !s.is_subagent())
+        {
+            session.output = error;
+            session.status = PtyStatus::Failed;
             self.pty_gen = self.pty_gen.wrapping_add(1);
         }
     }
@@ -3230,6 +3309,138 @@ mod tests {
 
         assert_eq!(state.pty_sessions[0].output, "done");
         assert_eq!(state.pty_sessions[1].output, "output2");
+    }
+
+    /// REGRESSION (plan-JSON leak): a MAIN-AGENT tool result completing
+    /// while a background subagent window is still Running must never close
+    /// that window. The untargeted completion used to pick the last-Running
+    /// session — the subagent window itself — stamping the other tool's
+    /// output (e.g. the `plan_todo_write` JSON) into its body AND marking it
+    /// Completed, so the later completion notification found no Running
+    /// window and DROPPED the sub-agent's real report. The bash-scoped
+    /// completion skips subagent windows; the window keeps its ⏳ pending
+    /// line and the real notification still lands.
+    #[test]
+    fn complete_last_bash_pty_never_closes_running_background_window() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: kilo".to_string(), None);
+        let receipt = serde_json::json!({
+            "output": "Background sub-agent spawned (task_id: bg-5).",
+            "stop_reason": "spawned",
+        })
+        .to_string();
+        state.update_last_pty_for_agent(receipt, Some("kilo"));
+
+        // The main agent's next tool result completes while the background
+        // turn is still running — exactly the leak scenario.
+        let plan_json = r#"{"list":{"items":[{"id":"task-1","description":"x","status":"in_progress","depends_on":[]}]},"nags":[]}"#;
+        state.complete_last_bash_pty(plan_json.to_string());
+
+        assert!(
+            matches!(state.pty_sessions[0].status, PtyStatus::Running),
+            "the background subagent window must stay Running"
+        );
+        assert!(
+            state.pty_sessions[0].output.starts_with('⏳'),
+            "the tool result must not leak into the subagent body: {:?}",
+            state.pty_sessions[0].output
+        );
+
+        // The real completion notification still finds its window.
+        let note = "[automated notification] Background sub-agent bg-5 \
+                    (agent=kilo) completed.\nFinal report:\n<!-- severity: green -->\nAll done.";
+        state.complete_last_pty_for_agent(
+            note.to_string(),
+            subagent_notification_agent(note).as_deref(),
+        );
+        assert!(matches!(state.pty_sessions[0].status, PtyStatus::Completed));
+        assert_eq!(state.pty_sessions[0].output, "<!-- severity: green -->\nAll done.");
+    }
+
+    /// The bash-scoped streaming/complete/fail variants keep behaving like
+    /// the old untargeted ones for BASH windows.
+    #[test]
+    fn bash_scoped_variants_still_target_bash_windows() {
+        let mut state = RightPanelState::new();
+        state.start_pty("cmd".to_string(), None);
+        state.update_last_bash_pty("stream".to_string());
+        assert_eq!(state.pty_sessions[0].output, "stream");
+        state.complete_last_bash_pty("final".to_string());
+        assert!(matches!(state.pty_sessions[0].status, PtyStatus::Completed));
+        assert_eq!(state.pty_sessions[0].output, "final");
+
+        state.start_pty("cmd2".to_string(), None);
+        state.fail_last_bash_pty("boom".to_string());
+        assert!(matches!(state.pty_sessions[1].status, PtyStatus::Failed));
+        assert_eq!(state.pty_sessions[1].output, "boom");
+    }
+
+    /// REGRESSION (same leak family, streaming/failure twins): live chunks
+    /// and error stamps of a MAIN-AGENT tool must never touch a RUNNING
+    /// background subagent window.
+    #[test]
+    fn update_and_fail_bash_scoped_skip_running_subagent_windows() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: kilo".to_string(), None);
+
+        state.update_last_bash_pty("plan chunk".to_string());
+        assert!(
+            state.pty_sessions[0].output.is_empty(),
+            "a main-agent tool's live chunk must not append into the subagent window"
+        );
+
+        state.fail_last_bash_pty("boom".to_string());
+        assert!(
+            matches!(state.pty_sessions[0].status, PtyStatus::Running),
+            "a main-agent tool's error must not fail the subagent window"
+        );
+    }
+
+    /// A `subagent_call` whose dispatch FAILED must fail ITS OWN window (the
+    /// agent hint routes it), leaving sibling windows running.
+    #[test]
+    fn fail_last_pty_for_agent_targets_the_agents_window() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: kilo".to_string(), None);
+        state.start_pty("subagent: opencode".to_string(), None);
+
+        state.fail_last_pty_for_agent("kilo boom".to_string(), Some("kilo"));
+        assert!(matches!(state.pty_sessions[0].status, PtyStatus::Failed));
+        assert!(matches!(state.pty_sessions[1].status, PtyStatus::Running));
+        assert_eq!(state.pty_sessions[0].output, "kilo boom");
+    }
+
+    /// INTERNAL subagents: the window is created with a BLANK CLI name
+    /// (`subagent: `) because the model omitted `agent`. The hint `Some("")`
+    /// (the normalized missing-agent form used by the app handlers) must
+    /// target THAT window — complete AND fail — and never a bash window or a
+    /// sibling's. (Reviewer coverage gap: the blank-name routing was only
+    /// exercised through the literal `internal` spelling.)
+    #[test]
+    fn blank_agent_hint_routes_to_the_internal_window() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: ".to_string(), None);
+
+        // COMPLETE with the blank hint: a report unwraps into the window.
+        state.complete_last_pty_for_agent(
+            "<!-- severity: green -->\ninternal report".to_string(),
+            Some(""),
+        );
+        assert!(matches!(state.pty_sessions[0].status, PtyStatus::Completed));
+        assert_eq!(state.pty_sessions[0].output, "<!-- severity: green -->\ninternal report");
+
+        // FAIL with the blank hint (fresh internal window).
+        state.start_pty("subagent: ".to_string(), None);
+        state.fail_last_pty_for_agent("internal boom".to_string(), Some(""));
+        assert!(matches!(state.pty_sessions[1].status, PtyStatus::Failed));
+        assert_eq!(state.pty_sessions[1].output, "internal boom");
+
+        // The hint must NOT leak to a bash window: a Running bash session is
+        // invisible to a blank-agent targeted fail.
+        state.start_pty("cmd".to_string(), None);
+        state.fail_last_pty_for_agent("misrouted".to_string(), Some(""));
+        assert!(matches!(state.pty_sessions[2].status, PtyStatus::Running));
+        assert!(state.pty_sessions[2].output.is_empty());
     }
 
     // ── Sub-agent live activity (Phase 3a) ────────────────────────────

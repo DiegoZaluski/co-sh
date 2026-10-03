@@ -473,7 +473,13 @@ impl App {
                         if let Some(line) =
                             crate::routes::session::right_panel::types::subagent_input_line(msg)
                         {
-                            self.state.right_panel.update_last_pty(line);
+                            // Targeted at THIS agent's window: with a parallel
+                            // background turn running, the untargeted append
+                            // would graft the echo into the sibling's
+                            // mini-chat.
+                            self.state
+                                .right_panel
+                                .update_last_pty_for_agent(line, Some(agent));
                         }
                         self.state.right_panel.scroll_to_bottom();
                     }
@@ -599,11 +605,20 @@ impl App {
                             {
                                 completed_tool_name = Some(tp.tool.clone());
                                 if tp.tool == "subagent_call" {
-                                    agent_hint = tp
-                                        .input
-                                        .get("agent")
-                                        .and_then(|v| v.as_str())
-                                        .map(String::from);
+                                    // A MISSING agent means internal: the
+                                    // window was created with the same
+                                    // `unwrap_or("")` (blank CLI name), so
+                                    // the hint is ALWAYS Some — `Some("")`
+                                    // targets THAT window exactly and can
+                                    // never land on a bash window or a
+                                    // sibling background turn's window.
+                                    agent_hint = Some(
+                                        tp.input
+                                            .get("agent")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("")
+                                            .to_string(),
+                                    );
                                 }
                                 tp.status = ToolStatus::Completed;
                                 tp.output = Some(output.clone());
@@ -677,7 +692,18 @@ impl App {
                         }
                         continue;
                     }
-                    self.state.right_panel.complete_last_pty(output.clone());
+                    // BASH-scoped completion: a main-agent tool result
+                    // (`bash_run`, `plan_todo_write`, …) must never close a
+                    // RUNNING background subagent window — with a parallel
+                    // background turn, the subagent window IS the
+                    // last-Running session, and the untargeted completion
+                    // used to stamp the other tool's output into its body
+                    // AND mark it Completed, so the later completion
+                    // notification found no Running window and DROPPED the
+                    // sub-agent's real report (the plan-JSON leak). The
+                    // `subagent_call`/`subagent_status` arms above carry
+                    // their own routing; everything else is a bash window.
+                    self.state.right_panel.complete_last_bash_pty(output.clone());
 
                     if let Some(todos) = todo_update {
                         self.state.right_panel.set_todos(todos);
@@ -697,15 +723,49 @@ impl App {
                     let Some(session) = self.state.current_session_mut() else {
                         continue;
                     };
+                    // The failing tool's name routes the panel failure: a
+                    // `subagent_call` whose dispatch failed must fail ITS
+                    // OWN window (the agent hint comes from its input),
+                    // while any other tool's error must never kill a
+                    // RUNNING background subagent window (the bash-scoped
+                    // variant keeps the last-Running bash choice only).
+                    let mut failed_agent_hint: Option<String> = None;
                     for part in session.messages.iter_mut().rev().flat_map(|m| &mut m.parts) {
                         if let Part::Tool(tp) = part
                             && tp.status == ToolStatus::Running
                         {
+                            if tp.tool == "subagent_call" {
+                                // Same normalization as the ToolResult arm:
+                                // a missing agent means internal — the hint
+                                // is ALWAYS Some, so the failure targets the
+                                // calling subagent's own window and can never
+                                // land on a bash window or a sibling turn.
+                                failed_agent_hint = Some(
+                                    tp.input
+                                        .get("agent")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .to_string(),
+                                );
+                            }
                             tp.status = ToolStatus::Failed(error.clone());
                             break;
                         }
                     }
-                    self.state.right_panel.fail_last_pty(error.clone());
+                    if let Some(hint) = failed_agent_hint.as_deref() {
+                        // The hint is only set for `subagent_call`:
+                        // `Some("")` matches the blank-CLI internal window
+                        // directly (is_window_of); a named agent routes to
+                        // its own window. Both are exact matches.
+                        self.state
+                            .right_panel
+                            .fail_last_pty_for_agent(error.clone(), Some(hint));
+                    } else {
+                        // Any other tool's failure (or no Running part at
+                        // all): BASH-scoped — a main-agent tool error must
+                        // never kill a RUNNING background subagent window.
+                        self.state.right_panel.fail_last_bash_pty(error.clone());
+                    }
                 }
                 HarnessEvent::ToolOutput {
                     tool,
@@ -800,14 +860,20 @@ impl App {
                                 .complete_last_pty_for_agent(output.clone(), hint_ref);
                         }
                     } else {
-                        // Bash (and any other streaming tool): untargeted.
-                        self.state.right_panel.update_last_pty(output.clone());
+                        // Bash (and any other streaming tool): BASH-scoped —
+                        // a main-agent tool's live chunks must never append
+                        // into a RUNNING background subagent window (with a
+                        // parallel background turn, the subagent window IS
+                        // the last-Running session, and the untargeted
+                        // append grafted the other tool's output into the
+                        // mini-chat — the plan/stream leak family).
+                        self.state.right_panel.update_last_bash_pty(output.clone());
                         // Auto-follow if user is at the bottom
                         if !self.state.right_panel.is_scrolled_up() {
                             self.state.right_panel.scroll_to_bottom();
                         }
                         if finished {
-                            self.state.right_panel.complete_last_pty(output.clone());
+                            self.state.right_panel.complete_last_bash_pty(output.clone());
                         }
                     }
                 }
