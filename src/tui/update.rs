@@ -1,35 +1,11 @@
 //! GitHub release check and in-app update pipeline.
 //!
 //! At boot a background task queries the GitHub releases API for the latest
-//! published release. When its tag is newer than the running binary, the
-//! home banner announces `"🎉 Vx.y.z Now available"` with a changelog link
-//! and an "Update" button.
+//! published release. When its tag is newer than the running binary the UI
+//! announces the update (session footer hint, update toast, home banner)
+//! and offers both the in-app pipeline and the manual install command.
 
 use serde::Deserialize;
-
-// ─────────────────────────────────────────────────────────────────────────────
-// DEV MOCK TOGGLE ── flip this to see the banner without a real release
-// ─────────────────────────────────────────────────────────────────────────────
-/// When `true`, the release check returns a FAKE release (see
-/// [`mock_release`]) without touching the network, and the update pipeline
-/// is NOT run (it is only logged) — the TUI still closes and must be
-/// reopened manually.
-///
-/// Set to `false` (or remove) for real behavior: the GitHub API check and
-/// the actual install pipeline, which closes the TUI, installs and
-/// relaunches cosh.
-const MOCK_UPDATE_BANNER: bool = true;
-
-/// Fake release shown while [`MOCK_UPDATE_BANNER`] is on. The running
-/// version is 0.1.0, so 0.1.1 is correctly detected as an update.
-fn mock_release() -> LatestRelease {
-    LatestRelease {
-        tag: "v0.1.1".to_string(),
-        version: "0.1.1".to_string(),
-        url: format!("https://github.com/{REPO}/releases/tag/v0.1.1"),
-    }
-}
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// GitHub repo the releases are published under (matches `download.sh`).
 pub const REPO: &str = "DiegoZaluski/co-sh";
@@ -118,11 +94,6 @@ pub fn is_update_available(current_version: &str, tag: &str) -> bool {
 /// Returns `None` on any network/parse error (the banner simply stays
 /// hidden — a failed check must never degrade the app).
 pub async fn fetch_latest_release() -> Option<LatestRelease> {
-    // DEV MOCK: skip the network entirely while the toggle is on.
-    if MOCK_UPDATE_BANNER {
-        return Some(mock_release());
-    }
-
     let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
     let client = reqwest::Client::builder()
         .user_agent(concat!("cosh/", env!("CARGO_PKG_VERSION")))
@@ -162,6 +133,37 @@ pub async fn fetch_latest_release() -> Option<LatestRelease> {
     })
 }
 
+/// The manual update command for the RUNNING OS, pinned to `latest_tag` —
+/// the exact documented install invocation (`curl … | bash` on Unix, the
+/// PowerShell one-liner on Windows), minus the relaunch tail the automated
+/// pipeline appends. Shown in the update toast so the user can update by
+/// hand from their own terminal (the ⧉ button copies it).
+///
+/// The tag only enters a URL / env var inside the command string, and the
+/// toast hands it to the system clipboard — never to a shell. `spawn_update_
+/// pipeline`'s `is_valid_tag` still guards the automated path; here the tag
+/// is additionally validated so a malformed value can never render.
+pub fn manual_update_command(latest_tag: &str) -> Option<String> {
+    if !is_valid_tag(latest_tag) {
+        log::warn!("manual update command: invalid release tag {latest_tag:?}");
+        return None;
+    }
+    let script_url = if cfg!(windows) {
+        format!("https://raw.githubusercontent.com/{REPO}/{latest_tag}/download.ps1")
+    } else {
+        format!("https://raw.githubusercontent.com/{REPO}/{latest_tag}/download.sh")
+    };
+    if cfg!(windows) {
+        Some(format!(
+            "iwr -Uri \"{script_url}\" -OutFile download.ps1; .\\download.ps1"
+        ))
+    } else {
+        Some(format!(
+            "curl -fsSL {script_url} | COSH_VERSION={latest_tag} bash"
+        ))
+    }
+}
+
 /// Fire-and-forget the OS install pipeline (the documented manual install:
 /// `curl … | bash` / `download.ps1`) pinned to `latest_tag`.
 ///
@@ -173,13 +175,6 @@ pub async fn fetch_latest_release() -> Option<LatestRelease> {
 /// closes and reopens. Errors (failed spawn, invalid tag) are just logged;
 /// there is no in-app retry surface.
 pub fn spawn_update_pipeline(latest_tag: &str) {
-    // DEV MOCK: nothing to run — the real pipeline closes the TUI and
-    // relaunches it, so the mock only logs; the caller still closes the app.
-    if MOCK_UPDATE_BANNER {
-        log::info!("[MOCK] update pipeline for {latest_tag} (would close the TUI and relaunch)");
-        return;
-    }
-
     // The tag lands on a shell command line and inside download URLs:
     // validate before anything runs (defense-in-depth; the release check
     // already rejects malformed tags).

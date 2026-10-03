@@ -6,16 +6,30 @@ use crate::state::AppState;
 use crate::theme::{Theme, rgba_color};
 use crate::util::draw::draw_text_line_wide;
 
+/// Cell width of the ` → ` separator between the running and the new
+/// version (space + arrow + space — all single-cell glyphs).
+const UPDATE_ARROW_W: u16 = 3;
+
 pub struct FooterView;
 
 impl FooterView {
+    /// Renders the footer row.
+    ///
+    /// Returns the click hitbox of the update button (`v0.1.2` in
+    /// `v0.1.1 → v0.1.2`) when it was drawn this frame; `None` when no
+    /// update is available, the text is hidden (dialogs) or the row is too
+    /// narrow. The caller stores the rect and resolves the hover state for
+    /// the NEXT frame — the same muted→text swap the header's
+    /// `bug report` / `← esc` links use.
     pub fn render_with_mode(
         buf: &mut Buffer,
         area: Rect,
         state: &AppState,
         theme: &Theme,
         hide_text: bool,
-    ) {
+        update_version: Option<&str>,
+        update_hover: bool,
+    ) -> Option<Rect> {
         let bg_color = rgba_color(theme.background);
         for x in area.x..area.right() {
             if let Some(cell) = buf.cell_mut((x, area.y)) {
@@ -26,7 +40,7 @@ impl FooterView {
 
         // When hide_text is true (e.g. question dialog is visible), just render the background
         if hide_text {
-            return;
+            return None;
         }
 
         let muted = Style::default().fg(rgba_color(theme.text_muted));
@@ -41,6 +55,49 @@ impl FooterView {
             area.width.saturating_sub(2),
             muted,
         );
+
+        // Update hint `v0.1.1 → v0.1.2`, drawn right after the running
+        // version when a newer release is available. Only the new version
+        // is the clickable button; the arrow stays muted. Pure display
+        // work — the hitbox handed back covers exactly the button glyphs.
+        let button = update_version.and_then(|new_version| {
+            // Release versions are plain ASCII digits/dots, so the char
+            // count is the terminal-cell width.
+            let cur_w = version.chars().count() as u16;
+            let button_text = format!("v{new_version}");
+            let button_w = button_text.chars().count() as u16;
+            let button_x = area.x.saturating_add(1 + cur_w + UPDATE_ARROW_W);
+            // Skip the whole hint when it would run past the footer row
+            // (right-anchored segments live at the other end).
+            if button_x + button_w > area.right() {
+                return None;
+            }
+            draw_text_line_wide(
+                buf,
+                " \u{2192} ",
+                area.x.saturating_add(1 + cur_w),
+                area.y,
+                area.width.saturating_sub(2),
+                muted,
+            );
+            draw_text_line_wide(
+                buf,
+                &button_text,
+                button_x,
+                area.y,
+                button_w,
+                // At rest the button sits in the muted color; the caller
+                // flips it to the text color while hovered (accent can't
+                // mark the hover state: in the default theme accent == text,
+                // so swapping between them is invisible).
+                if update_hover {
+                    Style::default().fg(rgba_color(theme.text))
+                } else {
+                    muted
+                },
+            );
+            Some(Rect::new(button_x, area.y, button_w, 1))
+        });
 
         if state.current_session().is_some() {
             let dir = &state.working_directory;
@@ -87,6 +144,8 @@ impl FooterView {
                 draw_text_line_wide(buf, &s, rx, area.y, disp_w(&s), muted);
             }
         }
+
+        button
     }
 }
 
@@ -120,7 +179,7 @@ mod tests {
         let area = Rect::new(0, 0, 80, 1);
         let mut buf = Buffer::empty(area);
 
-        FooterView::render_with_mode(&mut buf, area, &state, &theme, false);
+        FooterView::render_with_mode(&mut buf, area, &state, &theme, false, None, false);
 
         let line: String = (area.x..area.right())
             .filter_map(|x| buf.cell((x, area.y)).map(|cell| cell.symbol()))
@@ -128,5 +187,70 @@ mod tests {
         assert!(line.contains(concat!("v", env!("CARGO_PKG_VERSION"))));
         assert!(!line.contains('●'));
         assert!(!line.contains('○'));
+    }
+
+    #[test]
+    fn renders_update_hint_with_button_hitbox() {
+        let mut state = AppState::new();
+        state.working_directory = "~/project".into();
+
+        let theme = ThemeRegistry::new().default_theme().clone();
+        let area = Rect::new(0, 0, 80, 1);
+        let mut buf = Buffer::empty(area);
+
+        let hitbox =
+            FooterView::render_with_mode(&mut buf, area, &state, &theme, false, Some("0.1.2"), true);
+
+        let line: String = (area.x..area.right())
+            .filter_map(|x| buf.cell((x, area.y)).map(|cell| cell.symbol()))
+            .collect();
+        assert!(line.contains("v0.1.1 → v0.1.2"), "line: {line}");
+
+        // The hitbox covers exactly the `v0.1.2` glyphs.
+        let hitbox = hitbox.expect("button hitbox drawn");
+        assert_eq!(hitbox.width, 6);
+        let button_text: String = (hitbox.x..hitbox.right())
+            .filter_map(|x| buf.cell((x, hitbox.y)).map(|cell| cell.symbol()))
+            .collect();
+        assert_eq!(button_text, "v0.1.2");
+    }
+
+    #[test]
+    fn hides_update_hint_when_text_hidden() {
+        let mut state = AppState::new();
+        state.working_directory = "~/project".into();
+
+        let theme = ThemeRegistry::new().default_theme().clone();
+        let area = Rect::new(0, 0, 80, 1);
+        let mut buf = Buffer::empty(area);
+
+        let hitbox =
+            FooterView::render_with_mode(&mut buf, area, &state, &theme, true, Some("0.1.2"), false);
+
+        let line: String = (area.x..area.right())
+            .filter_map(|x| buf.cell((x, area.y)).map(|cell| cell.symbol()))
+            .collect();
+        assert!(!line.contains("→"));
+        assert!(hitbox.is_none());
+    }
+
+    #[test]
+    fn skips_update_hint_when_row_too_narrow() {
+        let mut state = AppState::new();
+        state.working_directory = "~/project".into();
+
+        let theme = ThemeRegistry::new().default_theme().clone();
+        // Fits `v0.1.1` (padded) but not the full `v0.1.1 → v0.1.2` hint.
+        let area = Rect::new(0, 0, 9, 1);
+        let mut buf = Buffer::empty(area);
+
+        let hitbox =
+            FooterView::render_with_mode(&mut buf, area, &state, &theme, false, Some("0.1.2"), false);
+
+        let line: String = (area.x..area.right())
+            .filter_map(|x| buf.cell((x, area.y)).map(|cell| cell.symbol()))
+            .collect();
+        assert!(!line.contains("→"), "line: {line}");
+        assert!(hitbox.is_none());
     }
 }

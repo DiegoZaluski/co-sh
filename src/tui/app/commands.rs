@@ -76,6 +76,23 @@ impl App {
         }
     }
 
+    /// Click on the session footer's update button (`v0.1.2` in
+    /// `v0.1.1 → v0.1.2`): run the SAME install pipeline the Home banner's
+    /// "Update version" button uses — `spawn_update_pipeline` downloads the
+    /// release with the pinned installer script, replaces the binary and
+    /// relaunches cosh; closing the TUI is the whole feedback.
+    pub(super) fn click_footer_update(&mut self) {
+        // The RAW release tag (`v0.1.2`) straight from the GitHub check —
+        // the same value the Home banner passes, never a reconstruction:
+        // `spawn_update_pipeline` pins both the installer-script URL and the
+        // `COSH_VERSION` to this tag, so a tag published without the `v`
+        // prefix must survive verbatim. It is validated again inside.
+        if let Some(tag) = self.update_latest_tag.clone() {
+            crate::update::spawn_update_pipeline(&tag);
+            self.should_quit = true;
+        }
+    }
+
     /// Drain update-related events from the background release check (drives
     /// the banner content). Called once per frame.
     pub(super) fn pump_update_events(&mut self) {
@@ -83,6 +100,29 @@ impl App {
             match event {
                 crate::update::UpdateEvent::CheckFinished(Some(release)) => {
                     self.update_changelog_url = Some(release.url.clone());
+                    // The version also feeds the session footer's
+                    // `v0.1.1 → v0.1.2` hint; the raw tag is what the
+                    // footer's click hands to the install pipeline (same
+                    // value the Home banner passes).
+                    self.update_latest_version = Some(release.version.clone());
+                    self.update_latest_tag = Some(release.tag.clone());
+                    // Announce the release in a toast: title = new version,
+                    // message = the manual install command for the running
+                    // OS. The ⧉ button on the toast copies the command —
+                    // too long to retype by hand.
+                    if let Some(command) = crate::update::manual_update_command(&release.tag) {
+                        use crate::ui::toast::{ToastOptions, ToastVariant};
+                        self.toast_state.show_copyable(
+                            ToastOptions {
+                                title: Some(format!("Update to v{}", release.version)),
+                                message: command.clone(),
+                                variant: ToastVariant::Info,
+                                // Long enough to read a curl one-liner.
+                                duration_ms: 50_000,
+                            },
+                            command,
+                        );
+                    }
                     #[cfg(feature = "home")]
                     {
                         use crate::routes::home::{BannerContent, UpdateStatus};
