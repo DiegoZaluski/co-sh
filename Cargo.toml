@@ -28,7 +28,7 @@ license = "Apache-2.0"
 name = "cosh"
 readme = "README.md"
 repository = "https://github.com/DiegoZaluski/co-sh"
-version = "0.1.1"
+version = "0.1.2"
 keywords = ["terminal", "cli"]
 categories = ["command-line-utilities"]
 
@@ -84,6 +84,9 @@ chrono = "0.4"
 log = { version = "0.4", features = ["std"] }
 dotenvy = "0.15.7"
 anyhow = "1"
+# System-browser handoff for the Charm gateway device sign-in (same crate and
+# `hardened` feature the cosh-sdk OAuth module uses for its own flows).
+webbrowser = { version = "1", features = ["hardened"] }
 # Parallel cold rebuild of the session view's height cache (a left-panel
 # toggle re-estimates every message height; see SessionView's width-snapshot
 # logic). Same crate/version the workspace already uses in cosh-sdk.

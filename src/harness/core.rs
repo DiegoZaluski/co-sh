@@ -1,6 +1,6 @@
+use super::background;
 #[cfg(not(test))]
 use super::context::error_catalog_window;
-use super::background;
 use super::context::{ContextManager, MAX_CONTEXT_TOKENS, MapRequest, RunOutcome};
 use super::correction_memory::CorrectionMemory;
 use super::tools::{CoshTools, Tools, is_tool_disabled};
@@ -1503,7 +1503,7 @@ impl Harness {
         &mut self,
         tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
     ) -> bool {
-        use super::events::{HarnessEvent, LlmCompactionEvent, ToastVariant};
+        use super::events::{HarnessEvent, LlmCompactionEvent};
         // The stuck state is keyed by MODEL: the constraint is the model's
         // context window, not the provider's API — a model switch inside the
         // same provider must get a fresh chance.
@@ -1597,21 +1597,16 @@ impl Harness {
                     self.compaction_generic_retries = 0;
                     break CompactionOutcome::Failed;
                 }
-                Err(CompactionErr::Incomplete(reason)) => {
-                    let _ = tx.send(HarnessEvent::Toast {
-                        message: format!("LLM compaction failed: {reason}"),
-                        variant: ToastVariant::Error,
-                    });
+                Err(CompactionErr::Incomplete(_reason)) => {
+                    // No toast: the failure is visible in the chat — the
+                    // "Summarizing" line freezes on Failed and the loop's
+                    // error path renders the provider error inline.
                     break CompactionOutcome::Failed;
                 }
-                Err(CompactionErr::Other(e)) => {
+                Err(CompactionErr::Other(_e)) => {
                     self.compaction_generic_retries += 1;
                     if self.compaction_generic_retries >= MAX_COMPACTION_RETRIES {
                         self.compaction_generic_retries = 0;
-                        let _ = tx.send(HarnessEvent::Toast {
-                            message: format!("LLM compaction failed: {e}"),
-                            variant: ToastVariant::Error,
-                        });
                         break CompactionOutcome::Failed;
                     }
                     tokio::select! {
@@ -1627,17 +1622,10 @@ impl Harness {
                 let summary = summary.trim();
                 let ok = !summary.is_empty()
                     && self.context_manager.apply_llm_summary(summary.to_string());
-                if !ok {
-                    let reason = if summary.is_empty() {
-                        "summarizer returned an empty response"
-                    } else {
-                        "summary and retained context exceed the compaction budget"
-                    };
-                    let _ = tx.send(HarnessEvent::Toast {
-                        message: format!("LLM compaction failed: {reason}"),
-                        variant: ToastVariant::Error,
-                    });
-                }
+                // No toast on failure. Note the budget case emits no error
+                // event at all: the frozen "Summarizing" line is the only
+                // signal in the chat — a toast here would be the sole copy
+                // of the failure, not a duplicate.
                 ok
             }
             // The contingency resolved the overflow — a successful pass.
@@ -1783,7 +1771,7 @@ impl Harness {
         &mut self,
         tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
     ) -> bool {
-        use super::events::{HarnessEvent, LlmCompactionEvent, ToastVariant};
+        use super::events::{HarnessEvent, LlmCompactionEvent};
 
         let model = self.compaction_model_key();
         if self.context_manager.overflow_stuck(&model) {
@@ -1806,11 +1794,9 @@ impl Harness {
         self.emit_compaction_snapshot(tx);
         self.compaction_generic_retries = 0;
         match &result {
-            Err(CompactionErr::Other(message)) => {
-                let _ = tx.send(HarnessEvent::Toast {
-                    message: format!("LLM compaction failed: {message}"),
-                    variant: ToastVariant::Error,
-                });
+            Err(CompactionErr::Other(_message)) => {
+                // No toast: the frozen "Summarizing" line (Failed) already
+                // reports it in the chat.
             }
             Err(CompactionErr::ContextWindow { window_tokens }) => {
                 if let Some(window) = window_tokens {
@@ -1819,11 +1805,9 @@ impl Harness {
                 self.context_manager.mark_overflow(&model);
                 self.notify_context_overflow(tx);
             }
-            Err(CompactionErr::Incomplete(message)) => {
-                let _ = tx.send(HarnessEvent::Toast {
-                    message: format!("LLM compaction failed: {message}"),
-                    variant: ToastVariant::Error,
-                });
+            Err(CompactionErr::Incomplete(_message)) => {
+                // No toast: the frozen "Summarizing" line (Failed) already
+                // reports it in the chat.
             }
             Err(CompactionErr::Interrupted) => self.compaction_interrupted = true,
             Ok(_) => {}
@@ -2460,7 +2444,7 @@ impl Harness {
         &mut self,
         tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
     ) -> bool {
-        use super::events::{HarnessEvent, LlmCompactionEvent, ToastVariant};
+        use super::events::{HarnessEvent, LlmCompactionEvent};
         let model = self.compaction_model_key();
         // Resume an in-progress split without needing a fresh window (the
         // window is persisted in the staging). A fresh split sizes against the
@@ -2544,26 +2528,22 @@ impl Harness {
                     self.notify_context_overflow(tx);
                     break false;
                 }
-                Err(CompactionErr::Incomplete(e)) => {
+                Err(CompactionErr::Incomplete(_e)) => {
                     if self.summarization_connector.is_none() {
                         self.context_manager.abort_split();
                     }
-                    let _ = tx.send(HarnessEvent::Toast {
-                        message: format!("LLM compaction failed: {e}"),
-                        variant: ToastVariant::Error,
-                    });
+                    // No toast: the frozen "Summarizing" line (Failed)
+                    // already reports it in the chat.
                     break false;
                 }
-                Err(CompactionErr::Other(e)) => {
+                Err(CompactionErr::Other(_e)) => {
                     generic_retries += 1;
                     if generic_retries >= MAX_COMPACTION_RETRIES {
                         if self.summarization_connector.is_none() {
                             self.context_manager.abort_split();
                         }
-                        let _ = tx.send(HarnessEvent::Toast {
-                            message: format!("LLM compaction failed: {e}"),
-                            variant: ToastVariant::Error,
-                        });
+                        // No toast: the frozen "Summarizing" line (Failed)
+                        // already reports it in the chat.
                         break false;
                     }
                     tokio::select! {
@@ -4145,11 +4125,13 @@ impl Harness {
                     continue;
                 }
 
-                // Generic terminal error: also surface a TUI notification, as
-                // the user asked (the context-window case is notified
-                // separately and throttled — do not double-toast it here).
-                // The CONTEXT_WINDOW_MARKER is internal — never show it to
-                // the user: translate it to a human message first.
+                // Generic terminal error. No separate toast: the error is
+                // rendered inline in the chat (emit_terminal_error records
+                // the styled "Error: …" line), so a toast would only repeat
+                // what is already on screen. The context-window case keeps
+                // its own throttled overflow notification. The
+                // CONTEXT_WINDOW_MARKER is internal — never show it to the
+                // user: translate it to a human message first.
                 let user_msg = if e == CONTEXT_WINDOW_MARKER {
                     format!(
                         "Context window exceeded ({}). Switch model or start new session.",
@@ -4159,13 +4141,6 @@ impl Harness {
                     e.clone()
                 };
                 self.emit_terminal_error(&tx, user_msg, None);
-                if e != CONTEXT_WINDOW_MARKER {
-                    use super::events::ToastVariant;
-                    let _ = tx.send(HarnessEvent::Toast {
-                        message: e,
-                        variant: ToastVariant::Error,
-                    });
-                }
                 break;
             }
 
@@ -5094,9 +5069,7 @@ impl Harness {
                     log::debug!(
                         "run_agent_loop WAITING for background sub-agent tasks before Done"
                     );
-                    while background::has_running_tasks()
-                        && !stop_signal.load(Ordering::Relaxed)
-                    {
+                    while background::has_running_tasks() && !stop_signal.load(Ordering::Relaxed) {
                         tokio::time::sleep(Duration::from_millis(100)).await;
                     }
                     // Esc during the wait ends the turn normally: no

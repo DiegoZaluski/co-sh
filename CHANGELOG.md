@@ -5,7 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.2] - 2026-10-03
+
+### Added
+
+- Free gateway with OAuth 2.0 sign-in. When a message fails for missing
+  credentials — or a provider key is broken, revoked or out of quota — cosh
+  offers its free gateway once, right in the session. Opting in runs the
+  Charm device sign-in entirely in the interface: the recommendation dialog
+  becomes the sign-in screen with the verification URL and a drag-copyable
+  device code, Esc dismisses the box in any phase without cancelling the
+  flow (it finishes on its own with a toast), and the parked message replays
+  only after the user picks a model — never under the picker with a default.
+  Under the hood, a hardened in-house OAuth 2.0 client (Authorization Code +
+  PKCE S256, loopback redirect, device grant, issuer validation, zeroized
+  secrets, single-flight token renewal) joins `cosh-sdk`'s connector, ready
+  to back other providers.
+- In-app update announcement. When a newer release is detected, the session
+  footer shows a `current → new` version hint whose version button updates
+  cosh in place — the same install pipeline as the Home banner's button —
+  and the announcement toast carries a copy button with the manual install
+  command, so updating never requires retyping a curl one-liner.
+
+### Fixed
+
+- Tool output no longer leaks into the TUI's right panel through an orphaned
+  schema update: with a background subagent turn running, a main-agent
+  tool's live chunks, results and failures were grafted into the running
+  subagent window (and the subagent's own completion could then be dropped).
+  The panel's update/complete/fail paths are now scoped to the tool's own
+  window, and the leak family is covered by regression tests.
 
 ## [0.1.1] - 2026-10-02
 
@@ -93,6 +122,7 @@ The agent's building blocks are published as reusable libraries:
 - Linux and Windows are tested. macOS builds are published but untested —
   report any issues with details.
 
-[Unreleased]: https://github.com/DiegoZaluski/co-sh/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/DiegoZaluski/co-sh/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/DiegoZaluski/co-sh/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/DiegoZaluski/co-sh/releases/tag/v0.1.1
 [0.1.0]: https://github.com/DiegoZaluski/co-sh/releases/tag/v0.1.0

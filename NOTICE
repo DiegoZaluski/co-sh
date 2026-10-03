@@ -6,6 +6,3 @@ See the LICENSE file for the full license text.
 
 If you fork or redistribute this project, you must keep this NOTICE file
 intact, including this copyright statement.
-
-Third-party tree-sitter grammar:
-- tree-sitter-kotlin (Apache-2.0) — https://github.com/fwcd/tree-sitter-kotlin

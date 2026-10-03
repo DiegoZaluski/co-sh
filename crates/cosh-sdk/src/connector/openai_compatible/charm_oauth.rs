@@ -20,12 +20,6 @@
 //! Because there is no public third-party contract, the base URL is
 //! configurable (Charm may change the protocol; the crush CLI itself honors a
 //! `HYPER_URL` override).
-//!
-//! Wiring status: the adapter is reachable only through its tests until the
-//! application layer integrates it with `Connector` authentication; the
-//! module-level `dead_code` tolerance below documents that state and must be
-//! removed when the wiring lands.
-#![allow(dead_code)]
 
 use crate::connector::oauth::{
     OAuthError, Result, Secret, TokenRefresher, TokenSet,

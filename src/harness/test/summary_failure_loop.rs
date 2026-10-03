@@ -301,9 +301,21 @@ async fn rejected_completed_summary_is_reported_once_and_manual_retry_still_work
     let mut h = work_harness(2_000).with_mock_chat(Ok(&oversized));
     let events = run_small_work(&mut h).await;
     assert_eq!(h.mock_compaction_models.len(), 1);
-    assert!(events.iter().any(|event| matches!(event,
-        HarnessEvent::Toast { message, .. }
-            if message.contains("summary and retained context exceed the compaction budget"))));
+    // No error toast (the failure shows inline in the chat): the frozen
+    // "Summarizing" line reports it via LlmCompaction::Failed.
+    assert!(events.iter().any(|event| matches!(
+        event,
+        HarnessEvent::LlmCompaction {
+            event: LlmCompactionEvent::Failed
+        }
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        HarnessEvent::Toast {
+            variant: crate::harness::events::ToastVariant::Error,
+            ..
+        }
+    )));
     assert!(
         !h.context_manager
             .items_snapshot()
@@ -418,6 +430,13 @@ async fn truncated_summary_is_attempted_once_and_never_committed() {
                 crate::harness::context::ContextItem::Compaction { .. }
             ))
     );
-    assert!(events.iter().any(|event| matches!(event,
-        HarnessEvent::Toast { message, .. } if message.contains("finish reason: length"))));
+    // No error toast (the failure shows inline in the chat): the frozen
+    // "Summarizing" line reports it via LlmCompaction::Failed.
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        HarnessEvent::Toast {
+            variant: crate::harness::events::ToastVariant::Error,
+            ..
+        }
+    )));
 }

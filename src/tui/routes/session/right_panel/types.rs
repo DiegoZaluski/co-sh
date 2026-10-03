@@ -283,10 +283,7 @@ pub(crate) enum SubagentOutputShape {
     /// plain reports belong to the window they arrive at). The hint routes
     /// a completion to the RIGHT window when several background sub-agents
     /// run in parallel and the last-Running window is a different call.
-    Report {
-        body: String,
-        agent: Option<String>,
-    },
+    Report { body: String, agent: Option<String> },
     /// Plain text (bash output, older internal-subagent reports): no
     /// wrapping to remove.
     Plain,
@@ -335,9 +332,7 @@ fn classify_subagent_output(chunk: &str) -> SubagentOutputShape {
         // guess at the payload).
     }
     // Tool-result envelope (`SubAgentCallOutput`).
-    if let Ok(env) =
-        serde_json::from_str::<cosh_tools::subagent::SubAgentCallOutput>(chunk)
-    {
+    if let Ok(env) = serde_json::from_str::<cosh_tools::subagent::SubAgentCallOutput>(chunk) {
         if env.stop_reason == "spawned" {
             return SubagentOutputShape::Spawned(format!("⏳ {}", env.output));
         }
@@ -2510,17 +2505,10 @@ impl RightPanelState {
     /// the single-window callers rely on it).
     pub fn update_last_pty_for_agent(&mut self, output: String, agent: Option<&str>) {
         let mut found_kind = None;
-        if let Some(session) = self
-            .pty_sessions
-            .iter_mut()
-            .rev()
-            .find(|s| match agent {
-                Some(agent) => {
-                    matches!(s.status, PtyStatus::Running) && Self::is_window_of(s, agent)
-                }
-                None => matches!(s.status, PtyStatus::Running),
-            })
-        {
+        if let Some(session) = self.pty_sessions.iter_mut().rev().find(|s| match agent {
+            Some(agent) => matches!(s.status, PtyStatus::Running) && Self::is_window_of(s, agent),
+            None => matches!(s.status, PtyStatus::Running),
+        }) {
             found_kind = if session.command.starts_with("subagent:") {
                 Some(SectionKind::Subagent)
             } else {
@@ -2581,17 +2569,10 @@ impl RightPanelState {
     /// last-Running choice (single-window callers, the internal path).
     pub fn complete_last_pty_for_agent(&mut self, final_output: String, agent: Option<&str>) {
         let mut final_output = final_output;
-        if let Some(session) = self
-            .pty_sessions
-            .iter_mut()
-            .rev()
-            .find(|s| match agent {
-                Some(agent) => {
-                    matches!(s.status, PtyStatus::Running) && Self::is_window_of(s, agent)
-                }
-                None => matches!(s.status, PtyStatus::Running),
-            })
-        {
+        if let Some(session) = self.pty_sessions.iter_mut().rev().find(|s| match agent {
+            Some(agent) => matches!(s.status, PtyStatus::Running) && Self::is_window_of(s, agent),
+            None => matches!(s.status, PtyStatus::Running),
+        }) {
             if session.is_subagent() {
                 // The tool result of a `subagent_call` arrives JSON-wrapped
                 // (`SubAgentCallOutput`) — classification happens through the
@@ -2624,8 +2605,7 @@ impl RightPanelState {
                 // green/orange/red. Extracted from the UNWRAPPED report and
                 // BEFORE the tail-only truncation below, or a large report
                 // would lose its header.
-                let (severity, _) =
-                    cosh_tools::subagent::severity::extract_severity(&final_output);
+                let (severity, _) = cosh_tools::subagent::severity::extract_severity(&final_output);
                 session.severity = severity;
             }
             Self::truncate_output(&mut final_output);
@@ -2648,17 +2628,10 @@ impl RightPanelState {
     pub fn fail_last_pty_for_agent(&mut self, error: String, agent: Option<&str>) {
         let mut error = error;
         Self::truncate_output(&mut error);
-        if let Some(session) = self
-            .pty_sessions
-            .iter_mut()
-            .rev()
-            .find(|s| match agent {
-                Some(agent) => {
-                    matches!(s.status, PtyStatus::Running) && Self::is_window_of(s, agent)
-                }
-                None => matches!(s.status, PtyStatus::Running),
-            })
-        {
+        if let Some(session) = self.pty_sessions.iter_mut().rev().find(|s| match agent {
+            Some(agent) => matches!(s.status, PtyStatus::Running) && Self::is_window_of(s, agent),
+            None => matches!(s.status, PtyStatus::Running),
+        }) {
             session.output = error;
             session.status = PtyStatus::Failed;
             session.subagent_activity = SubagentActivity::default();
@@ -3354,7 +3327,10 @@ mod tests {
             subagent_notification_agent(note).as_deref(),
         );
         assert!(matches!(state.pty_sessions[0].status, PtyStatus::Completed));
-        assert_eq!(state.pty_sessions[0].output, "<!-- severity: green -->\nAll done.");
+        assert_eq!(
+            state.pty_sessions[0].output,
+            "<!-- severity: green -->\nAll done."
+        );
     }
 
     /// The bash-scoped streaming/complete/fail variants keep behaving like
@@ -3427,7 +3403,10 @@ mod tests {
             Some(""),
         );
         assert!(matches!(state.pty_sessions[0].status, PtyStatus::Completed));
-        assert_eq!(state.pty_sessions[0].output, "<!-- severity: green -->\ninternal report");
+        assert_eq!(
+            state.pty_sessions[0].output,
+            "<!-- severity: green -->\ninternal report"
+        );
 
         // FAIL with the blank hint (fresh internal window).
         state.start_pty("subagent: ".to_string(), None);

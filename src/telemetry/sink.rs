@@ -46,8 +46,7 @@ impl SinkConfig {
     /// idle and nothing ever leaves the machine (fail closed): tests and dev
     /// runs cannot pollute the production table even with consent enabled.
     /// An EMPTY value (secret unset in CI) is filtered out at resolve time.
-    const EMBEDDED_PUBLISHABLE_KEY: Option<&str> =
-        option_env!("COSH_TELEMETRY_PUBLISHABLE_KEY");
+    const EMBEDDED_PUBLISHABLE_KEY: Option<&str> = option_env!("COSH_TELEMETRY_PUBLISHABLE_KEY");
 
     /// Deployment config, resolved in order: runtime env first (explicit
     /// override), then the compile-time embedded key, with the production

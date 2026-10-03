@@ -114,12 +114,9 @@ pub(crate) async fn post_token_form(
     validate_token_body(&body)?;
     Ok(body)
 }
-/// POST a JSON body to a provider-specific endpoint. Currently consumed only
-/// by the JSON-based proprietary device-protocol adapter (a single file
-/// inside its family directory), which is why it is unreachable from the
-/// generic flows — hence the `dead_code` tolerance until the Connector
-/// wiring lands.
-#[allow(dead_code)]
+/// POST a JSON body to a provider-specific endpoint. Consumed by the
+/// JSON-based proprietary device-protocol adapter (a single file inside its
+/// family directory); unreachable from the generic flows.
 pub(crate) async fn post_json<T: Serialize + ?Sized>(
     url: &url::Url,
     body: &T,
@@ -138,7 +135,6 @@ pub(crate) async fn post_json<T: Serialize + ?Sized>(
     )
     .await
 }
-#[allow(dead_code)]
 pub(crate) async fn get_json(
     url: &url::Url,
     allow_loopback: bool,

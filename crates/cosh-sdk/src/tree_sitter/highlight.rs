@@ -180,29 +180,9 @@ fn query_for_language(lang: &str) -> Option<&'static str> {
         // C-family grammars with (comment)/(type_identifier)/(integer_literal)
         // node types. Kotlin is NOT in this group: its grammar (the maintained
         // WillBooster fork we ship) names these nodes differently.
-        "c#"
-            | "csharp"
-            | "cs"
-            | "go"
-            | "java"
-            | "scala"
-            | "groovy"
-            | "haskell"
-            | "hs"
-            | "lhs"
-            | "swift"
-            | "zig"
-            | "zon"
-            | "c"
-            | "h"
-            | "cpp"
-            | "c++"
-            | "cxx"
-            | "hpp"
-            | "objectivec"
-            | "objc"
-            | "m"
-            | "mm" => {
+        "c#" | "csharp" | "cs" | "go" | "java" | "scala" | "groovy" | "haskell" | "hs" | "lhs"
+        | "swift" | "zig" | "zon" | "c" | "h" | "cpp" | "c++" | "cxx" | "hpp" | "objectivec"
+        | "objc" | "m" | "mm" => {
             "(string_literal) @string
              (comment) @comment
              (type_identifier) @type

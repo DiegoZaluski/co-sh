@@ -815,8 +815,9 @@ async fn run_agent_loop_marks_provider_stuck_when_map_reduce_cannot_fit() {
 }
 
 // A generic (non-context-window) summarizer error is retried
-// MAX_COMPACTION_RETRIES times with backoff, then surfaces an Error toast;
-// the loop still completes.
+// MAX_COMPACTION_RETRIES times with backoff. No Error toast is emitted —
+// the failure is visible inline in the chat instead; the loop still
+// completes.
 #[tokio::test]
 async fn run_agent_loop_retries_generic_compaction_failures_then_notifies() {
     use crate::harness::context::ContextManager;
@@ -871,14 +872,15 @@ async fn run_agent_loop_retries_generic_compaction_failures_then_notifies() {
     handle.abort();
 
     assert!(
-        events.iter().any(|e| matches!(
+        !events.iter().any(|e| matches!(
             e,
             HarnessEvent::Toast {
                 variant: ToastVariant::Error,
                 ..
             }
         )),
-        "the generic failure must surface an error toast; events={events:?}"
+        "the failure must NOT toast: the error is rendered inline in the \
+         chat instead; events={events:?}"
     );
     assert!(
         events.iter().any(|e| matches!(

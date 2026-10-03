@@ -14,7 +14,7 @@ pub(crate) mod discovery;
 pub(crate) mod gemini;
 pub mod oauth;
 pub(crate) mod openai;
-pub(crate) mod openai_compatible;
+pub mod openai_compatible;
 
 mod client;
 mod error;
