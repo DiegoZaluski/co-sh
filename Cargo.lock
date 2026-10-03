@@ -1568,10 +1568,14 @@ dependencies = [
  "base64 0.22.1",
  "directories",
  "env_logger",
+ "getrandom 0.3.4",
  "globset",
  "grep-matcher",
  "grep-regex",
  "grep-searcher",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "ignore",
  "insta",
  "keyring",
@@ -1588,6 +1592,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serial_test",
+ "sha2",
  "similar 3.1.1",
  "smallvec",
  "tempfile",
@@ -1651,6 +1656,7 @@ dependencies = [
  "tree-sitter-yaml",
  "tree-sitter-zig",
  "url",
+ "webbrowser",
  "willbooster-tree-sitter-kotlin",
  "xxhash-rust",
  "zeroize",
@@ -3779,6 +3785,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
+name = "httpdate"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
+
+[[package]]
 name = "humantime"
 version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3798,6 +3810,7 @@ dependencies = [
  "http",
  "http-body",
  "httparse",
+ "httpdate",
  "itoa",
  "pin-project-lite",
  "smallvec",
@@ -5600,6 +5613,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "ndk-context"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27b02d87554356db9e9a873add8782d4ea6e3e58ea071a9adb9a2e8ddb884a8b"
+
+[[package]]
 name = "new_debug_unreachable"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7301,6 +7320,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
@@ -9934,6 +9954,22 @@ dependencies = [
  "phf_codegen 0.13.1",
  "string_cache",
  "string_cache_codegen",
+]
+
+[[package]]
+name = "webbrowser"
+version = "1.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62c35be770821a214dbc362fc26908c853e776c0004294d0b10b8a6bad582f94"
+dependencies = [
+ "jni",
+ "log",
+ "ndk-context",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "url",
+ "web-sys",
 ]
 
 [[package]]

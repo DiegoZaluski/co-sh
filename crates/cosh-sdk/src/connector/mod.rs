@@ -12,6 +12,7 @@ pub(crate) mod common;
 pub(crate) mod cost;
 pub(crate) mod discovery;
 pub(crate) mod gemini;
+pub mod oauth;
 pub(crate) mod openai;
 pub(crate) mod openai_compatible;
 

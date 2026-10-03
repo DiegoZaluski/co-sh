@@ -6,6 +6,7 @@
 //! it to the provider's base URL, and parse the OpenAI-shaped response.
 
 pub mod caller;
+pub mod charm_oauth;
 pub mod tokens;
 
 pub use caller::{chat, chat_stream, chat_stream_with_messages, embed, list_models};

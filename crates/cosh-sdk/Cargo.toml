@@ -103,8 +103,28 @@ xxhash-rust = { version = "0.8", features = ["xxh32"] }
 tokio = { version = "1.52.3", features = ["full"] }
 async-stream = "0.3"
 tokio-stream = "0.1"
-reqwest = { version = "0.13", features = ["json"] }
+reqwest = { version = "0.13", features = ["json", "form"] }
 url = "2"
+# connector::oauth — Authorization Code + PKCE (RFC 7636), loopback redirect
+# (RFC 8252) and Device Grant (RFC 8628), profiled per RFC 9700 (BCP 240).
+# The `oauth2` crate was rejected: 5.0 pins reqwest 0.12 while this crate is
+# on 0.13, and the protocol surface needed here is small enough to own with
+# the exact security invariants the research calls for.
+# PKCE S256 (RFC 7636 §4.2): SHA-256 over the verifier, base64url no-pad.
+sha2 = "0.10"
+# OS entropy for code_verifier / CSRF state — no time/seed-derived fallback;
+# if entropy is unavailable the authorization attempt aborts (same policy as
+# the root crate's telemetry identifiers).
+getrandom = "0.3"
+# Loopback redirect receiver: hyper 1 with real header/read limits instead of
+# a hand-rolled HTTP parser over TcpListener (RFC 8252 §7.3, §8.1).
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+# System-browser handoff for the authorization URL. `hardened` restricts the
+# launcher to http(s) schemes. Opening is best-effort — the caller can always
+# display the URL for manual visit (headless/SSH sessions).
+webbrowser = { version = "1", features = ["hardened"] }
 serde = { version = "1.0.228", features = ["derive", "rc"] }
 directories = "6.0.0"
 zeroize = { version = "=1.7", features = ["derive"] }
