@@ -930,6 +930,23 @@ impl App {
             }
 
             let footer_area = Rect::new(main_area.x, footer_y, main_area.width, 1);
+            // Hover state for the footer's update button, resolved against
+            // the hitbox the PREVIOUS frame stored — read BEFORE the clear
+            // below (the same one-frame-muted→text swap the header's
+            // `bug report` / `← esc` links use, which also read their area
+            // before overwriting it later in the frame).
+            let update_hover = self.footer_update_area.is_some_and(|link_area| {
+                self.last_mouse_x >= link_area.x
+                    && self.last_mouse_x < link_area.right()
+                    && self.last_mouse_y >= link_area.y
+                    && self.last_mouse_y < link_area.bottom()
+            });
+            // Stale-hitbox guard: the footer's update-button hitbox is only
+            // (re)assigned by the Session arm below, so clear it every frame
+            // first — a leftover rect from a previous session frame must
+            // never stay clickable after leaving that route (the same
+            // re-assignment contract `bug_link_area`/`back_link_area` follow).
+            self.footer_update_area = None;
             match self.mode() {
                 #[cfg(feature = "home")]
                 AppMode::Home => {
@@ -940,12 +957,14 @@ impl App {
                         || self.permission_dialog.visible
                         || self.queue_choice_dialog.visible
                         || self.free_gateway_dialog.visible;
-                    FooterView::render_with_mode(
+                    self.footer_update_area = FooterView::render_with_mode(
                         buf,
                         footer_area,
                         &self.state,
                         &self.theme,
                         hide_text,
+                        self.update_latest_version.as_deref(),
+                        update_hover,
                     );
                 }
                 _ => {}
@@ -973,8 +992,14 @@ impl App {
             // Toasts render last so transient feedback (copied, not saved,
             // unavailable clipboard) is never buried under a modal panel —
             // the centered registration forms cover the top-right toast
-            // corner on compact terminals.
-            self.toast_state.render(buf, area, &self.theme);
+            // corner on compact terminals. The tracked mouse position drives
+            // the ⧉ copy button's hover highlight (None when untracked).
+            self.toast_state.render(
+                buf,
+                area,
+                &self.theme,
+                Some((self.last_mouse_x, self.last_mouse_y)),
+            );
         }
     }
 

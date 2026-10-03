@@ -490,6 +490,19 @@ pub struct App {
     bug_link_area: Option<Rect>,
     /// Clickable area of the header's back/escape button (None when not drawn).
     back_link_area: Option<Rect>,
+    /// Version of the announced release (e.g. `0.1.2`), without the `v`
+    /// prefix. `None` = up to date / no check result — the session footer
+    /// then shows only the running version.
+    update_latest_version: Option<String>,
+    /// Raw git tag of the announced release (e.g. `v0.1.2`), exactly as
+    /// published on GitHub — the value `spawn_update_pipeline` pins the
+    /// installer script and `COSH_VERSION` to (kept verbatim: a tag
+    /// published without the `v` prefix must survive reconstruction-free
+    /// into the pipeline, same contract the Home banner path follows).
+    update_latest_tag: Option<String>,
+    /// Clickable area of the session footer's update button (`v0.1.2` in
+    /// `v0.1.1 → v0.1.2`). Refreshed by every frame; None when not drawn.
+    footer_update_area: Option<Rect>,
     /// Astra-style starfield flourish in the session header (see
     /// `component/sparkle.rs`). Session-router-only: armed per session id,
     /// drawn exclusively on blank cells of the header row.
@@ -756,6 +769,9 @@ impl App {
             sidebar_focused: false,
             bug_link_area: None,
             back_link_area: None,
+            update_latest_version: None,
+            update_latest_tag: None,
+            footer_update_area: None,
             update_event_rx,
             update_event_tx,
             update_changelog_url: None,

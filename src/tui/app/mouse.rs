@@ -870,6 +870,42 @@ impl App {
             return Ok(true);
         }
 
+        // ⧉ copy button of a copyable toast (e.g. the update announcement) —
+        // copy the payload to the clipboard. Toasts render on top of all
+        // chrome, so their button outranks the links below in z-order; the
+        // toast's own lifetime clears the hitbox when it is dismissed.
+        if let Some(text) = self.toast_state.copy_button_hit(x, y) {
+            let copied = crate::util::selection::copy_to_clipboard(&text);
+            use crate::ui::toast::{ToastOptions, ToastVariant};
+            self.toast_state.show(ToastOptions {
+                title: None,
+                message: if copied {
+                    "Command copied to clipboard".to_string()
+                } else {
+                    "Clipboard write unavailable".to_string()
+                },
+                variant: if copied { ToastVariant::Success } else { ToastVariant::Warning },
+                duration_ms: 2500,
+            });
+            return Ok(true);
+        }
+
+        // Session footer's update button (`v0.1.2` in `v0.1.1 → v0.1.2`) —
+        // run the same install pipeline the Home banner's update button uses.
+        // Guarded by dialog visibility: this click INSTALLS software and
+        // closes the app, so it must never fire through a modal dialog
+        // (the header links above are inert by comparison).
+        if let Some(link_area) = self.footer_update_area
+            && !self.dialog.visible()
+            && x >= link_area.x
+            && x < link_area.right()
+            && y >= link_area.y
+            && y < link_area.bottom()
+        {
+            self.click_footer_update();
+            return Ok(true);
+        }
+
         // 1. Dialogs (highest z-order)
         if self.dialog.visible() {
             let area = self.terminal_size();
