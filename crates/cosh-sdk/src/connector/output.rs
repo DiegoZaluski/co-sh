@@ -403,6 +403,7 @@ fn extract_family_usage(family: Family, raw: &str) -> Option<TokenUsage> {
         Family::OpenAi => super::openai::extract_usage(raw),
         Family::Claude => super::claude::extract_usage(raw),
         Family::Gemini => super::gemini::extract_usage(raw),
+        Family::Copilot => super::copilot::extract_usage(raw),
     }
 }
 
