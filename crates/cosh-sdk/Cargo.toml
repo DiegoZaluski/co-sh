@@ -126,6 +126,12 @@ http-body-util = "0.1"
 # display the URL for manual visit (headless/SSH sessions).
 webbrowser = { version = "1", features = ["hardened"] }
 serde = { version = "1.0.228", features = ["derive", "rc"] }
+# connector::copilot — the OFFICIAL GitHub Copilot agent runtime SDK
+# (github/ org, MIT). Drives the Copilot runtime binary over JSON-RPC
+# (stdio), which is how GitHub now exposes model inference to Rust clients
+# since the GitHub Models inference API was retired (2026-07-30). An
+# isolated connector family wraps it — see connector/copilot/mod.rs.
+github-copilot-sdk = "1.0.16"
 directories = "6.0.0"
 zeroize = { version = "=1.7", features = ["derive"] }
 keyring = { version = "4.1.6", features = [

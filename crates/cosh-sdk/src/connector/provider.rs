@@ -139,6 +139,13 @@ pub enum Family {
     OpenAi,
     Gemini,
     Claude,
+    /// GitHub's official Copilot agent runtime, driven through the official
+    /// `github-copilot-sdk` crate (JSON-RPC over a spawned runtime process
+    /// — no HTTP chat endpoint). An ISOLATED family: it shares none of the
+    /// OpenAI-compatible request machinery, only the connector's output
+    /// types. `embed` is unsupported; `list_models` uses the runtime's
+    /// (experimental) `models.list` RPC.
+    Copilot,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -392,6 +399,19 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
         ),
     ),
     (
+        "copilot",
+        ProviderConfig::cloud(
+            "copilot",
+            Family::Copilot,
+            // No HTTP endpoint: the family drives the official Copilot
+            // runtime over JSON-RPC (see connector/copilot). The URL field
+            // stays a stable identifier pointing at the runtime's home.
+            "https://github.com/copilot",
+            // Runtime default; overridable via `params.model`.
+            "claude-sonnet-4.5",
+        ),
+    ),
+    (
         "zai",
         ProviderConfig::cloud(
             "zai",
@@ -495,7 +515,7 @@ const API_KEY_ENVS: &[(&str, &str)] = &[
     ("together", "TOGETHER_API_KEY"),
     ("huggingface", "HUGGINGFACE_API_KEY"),
     ("nvidia", "NVIDIA_API_KEY"),
-    ("github", "GITHUB_TOKEN"),
+    ("copilot", "GITHUB_TOKEN"),
     ("cloudflare", "CLOUDFLARE_API_KEY"),
     ("fireworks", "FIREWORKS_API_KEY"),
     ("xai", "XAI_API_KEY"),

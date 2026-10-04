@@ -7,6 +7,7 @@ use super::provider::{Family, ProviderConfig, get_provider};
 
 use super::claude;
 use super::gemini;
+use super::copilot;
 use super::openai;
 use super::openai_compatible;
 
@@ -319,6 +320,9 @@ impl Connector {
             Family::OpenAi => openai::chat(provider, &self.params, prompt, None, service).await,
             Family::Gemini => gemini::chat(provider, &self.params, prompt, None, service).await,
             Family::Claude => claude::chat(provider, &self.params, prompt, None, service).await,
+            Family::Copilot => {
+                copilot::chat(provider, &self.params, prompt, None, service).await
+            }
         }
     }
 
@@ -348,6 +352,9 @@ impl Connector {
             Family::Claude => {
                 claude::chat(provider, &self.params, prompt, Some(system), service).await
             }
+            Family::Copilot => {
+                copilot::chat(provider, &self.params, prompt, Some(system), service).await
+            }
         }
     }
 
@@ -372,6 +379,8 @@ impl Connector {
             }
             Family::Gemini => gemini::embed(provider, &self.params, input, service).await,
             Family::Claude => Err(ConnectorError::NotImplemented("embedding")),
+            // The Copilot runtime has no embeddings surface.
+            Family::Copilot => Err(ConnectorError::NotImplemented("embedding")),
         }
     }
 
@@ -402,6 +411,9 @@ impl Connector {
             }
             Family::Claude => {
                 claude::chat_stream(provider, &self.params, prompt, None, service).await
+            }
+            Family::Copilot => {
+                copilot::chat_stream(provider, &self.params, prompt, None, service).await
             }
         }
     }
@@ -443,6 +455,9 @@ impl Connector {
             Family::Claude => {
                 claude::chat_stream(provider, &self.params, prompt, Some(system), service).await
             }
+            Family::Copilot => {
+                copilot::chat_stream(provider, &self.params, prompt, Some(system), service).await
+            }
         }
     }
 
@@ -481,6 +496,9 @@ impl Connector {
             }
             Family::Claude => {
                 claude::chat_stream(provider, &params, prompt, Some(system), service).await
+            }
+            Family::Copilot => {
+                copilot::chat_stream(provider, &params, prompt, Some(system), service).await
             }
         }
     }
@@ -547,6 +565,16 @@ impl Connector {
                 )
                 .await
             }
+            Family::Copilot => {
+                copilot::chat_stream_with_messages(
+                    provider,
+                    params,
+                    system,
+                    messages,
+                    self.params.service_keyring.as_deref(),
+                )
+                .await
+            }
         }
     }
 
@@ -567,6 +595,7 @@ impl Connector {
             Family::OpenAi => openai::extract_tokens(raw),
             Family::Claude => claude::extract_tokens(raw),
             Family::Gemini => gemini::extract_tokens(raw),
+            Family::Copilot => copilot::extract_tokens(raw),
         }
     }
 
@@ -601,6 +630,7 @@ impl Connector {
             Family::OpenAICompatible => openai_compatible::extract_usage(raw),
             Family::OpenAi => openai::extract_usage(raw),
             Family::Gemini => gemini::extract_usage(raw),
+            Family::Copilot => copilot::extract_usage(raw),
         }?;
         usage.reported_cost = super::output::extract_reported_cost(raw).or(usage.reported_cost);
         usage.reported_cost_credits =
@@ -846,6 +876,14 @@ impl Connector {
             }
             Family::Claude => {
                 claude::list_models(
+                    provider,
+                    &self.params,
+                    self.params.service_keyring.as_deref(),
+                )
+                .await
+            }
+            Family::Copilot => {
+                copilot::list_models(
                     provider,
                     &self.params,
                     self.params.service_keyring.as_deref(),
