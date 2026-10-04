@@ -124,11 +124,14 @@ impl App {
         self.model_cache.invalidate(&provider);
 
         // A persisted global model selection pointing at this provider is
-        // now orphaned: without a key it can no longer authenticate, yet the
-        // boot/session restore paths would resurrect it and the prompt
-        // footer would advertise a dead provider. Clear the selection so
-        // the next boot falls back to the env-var defaults.
-        if self.setup.model.provider == provider {
+        // orphaned ONLY when the provider really lost its last credential:
+        // a failed keyring deletion (key still there) or a surviving env-var
+        // key both keep the provider usable, and erasing the selection in
+        // those cases threw away a perfectly valid configuration (that
+        // regression ignored the match arm — the cleanup must not run on
+        // the failure path).
+        let provider_now_keyless = !cosh_sdk::connector::has_api_key(&provider);
+        if provider_now_keyless && self.setup.model.provider == provider {
             self.setup.model.provider = String::new();
             self.setup.model.model = String::new();
             self.setup.model.reasoning = None;

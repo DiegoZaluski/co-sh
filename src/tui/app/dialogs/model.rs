@@ -452,9 +452,11 @@ impl App {
             return;
         };
         let provider = self.setup.model.provider.clone();
-        // Same credential gate as the boot restore: a selection whose
-        // provider lost its key must not become the live model.
-        if provider.is_empty() || !crate::app::providers::provider_has_credential(&provider) {
+        // Same credential gate as the boot restore — with the same `auto`
+        // exception: an empty provider is the persisted `auto` selection,
+        // not an orphan. A concrete provider must still have a credential,
+        // or the selection died with its key.
+        if !provider.is_empty() && !crate::app::providers::provider_has_credential(&provider) {
             return;
         }
         let reasoning = self.setup.model.reasoning.clone();

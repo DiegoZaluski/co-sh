@@ -54,6 +54,7 @@ mod agent_loop;
 mod commands;
 mod cost;
 mod dialogs;
+mod gateway_offer;
 mod keys;
 mod model_persistence;
 mod paste_burst;

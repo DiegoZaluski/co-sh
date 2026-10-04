@@ -194,8 +194,16 @@ impl App {
                 // Same for the free-gateway dialog's Authorizing regions:
                 // the device code, the verification URL and the explanation
                 // body are all drag-copyable (the code is the whole point —
-                // the Charm page asks for it after login).
-                if self.free_gateway_dialog.has_selection() {
+                // the Charm page asks for it after login). The dialog must
+                // still OWN the screen (visible + routed, no modal stacked
+                // on top): an Esc'd dialog keeps a stale selection alive —
+                // copy it here and every later Ctrl+C would silently copy
+                // dead text instead of quitting.
+                if self.free_gateway_dialog.visible
+                    && self.gateway_dialog_route()
+                    && !self.dialog.visible()
+                    && self.free_gateway_dialog.has_selection()
+                {
                     let text = self.free_gateway_dialog.selected_text();
                     selection::copy_selection(&text, &mut self.toast_state);
                     self.free_gateway_dialog.clear_selection();

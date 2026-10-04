@@ -605,21 +605,21 @@ impl App {
 
         // Restore the globally persisted model selection (the last one the
         // user picked) so new sessions start with it — a stored selection
-        // wins over the env-var defaults. A selection whose provider lost
-        // its credential (key removed from the keyring, charm tokens
-        // forgotten) must NOT come back as the live model: the footer
-        // would show a provider that can no longer authenticate.
+        // wins over the env-var defaults. `auto` is a REAL selection the
+        // picker persists deliberately with an empty provider: it restores
+        // as-is (empty provider = fallback chain routes at send time). A
+        // CONCRETE selection whose provider lost its credential (key
+        // removed from the keyring, charm tokens forgotten) must NOT come
+        // back as the live model: the footer would show a provider that
+        // can no longer authenticate.
         let mut llm_config = LlmConfig {
             tool_call_mode: saved_tool_call_mode,
             ..LlmConfig::from_env()
         };
         if let Some(model) = setup.persisted_model() {
             let provider = setup.model.provider.clone();
-            // An empty provider is never a valid live selection (auto picks
-            // resolve to a real provider at commit time) — treat it as
-            // unrestorable, same as a provider that lost its credential.
             let still_credentialed =
-                !provider.is_empty() && crate::app::providers::provider_has_credential(&provider);
+                provider.is_empty() || crate::app::providers::provider_has_credential(&provider);
             if still_credentialed {
                 llm_config.model = Some(model.to_string());
                 llm_config.provider = provider;

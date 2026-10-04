@@ -974,7 +974,11 @@ impl App {
                 } else {
                     "Clipboard write unavailable".to_string()
                 },
-                variant: if copied { ToastVariant::Success } else { ToastVariant::Warning },
+                variant: if copied {
+                    ToastVariant::Success
+                } else {
+                    ToastVariant::Warning
+                },
                 duration_ms: 2500,
             });
             return Ok(true);
@@ -1645,12 +1649,18 @@ impl App {
     /// Whether the point lies inside the free-gateway dialog's DRAWN rect
     /// (visible + routed + within `free_gateway_dialog_area`). Shared by the
     /// press/drag arms so a press on ANY cell of the box — copyable or not —
-    /// is consumed by the box and never reaches the chat underneath.
+    /// is consumed by the box and never reaches the chat underneath. A
+    /// MODAL stacked on top owns the input first: the box can stay visible
+    /// underneath another dialog, and its hit-test must not steal presses
+    /// from the modal that actually covers the screen.
     pub(crate) fn gateway_dialog_contains(&self, x: u16, y: u16) -> bool {
-        self.free_gateway_dialog.visible && self.gateway_dialog_route() && {
-            let ga = self.free_gateway_dialog_area();
-            x >= ga.x && x < ga.x + ga.width && y >= ga.y && y < ga.y + ga.height
-        }
+        self.free_gateway_dialog.visible
+            && self.gateway_dialog_route()
+            && !self.dialog.visible()
+            && {
+                let ga = self.free_gateway_dialog_area();
+                x >= ga.x && x < ga.x + ga.width && y >= ga.y && y < ga.y + ga.height
+            }
     }
 
     /// Whether an in-flight mouse drag BELONGS to the free-gateway dialog:
@@ -1660,9 +1670,12 @@ impl App {
     /// there and the extension just pauses). NOT the same check as
     /// [`Self::gateway_dialog_contains`] (which tests a point): this one
     /// tests drag ownership and deliberately ignores the cursor position.
+    /// A modal that opened mid-drag takes over: ownership yields so the
+    /// modal's own dispatch handles the gesture.
     pub(crate) fn gateway_dialog_owns_drag(&self) -> bool {
         self.free_gateway_dialog.visible
             && self.gateway_dialog_route()
+            && !self.dialog.visible()
             && self.free_gateway_dialog.has_selection_anchor()
     }
 

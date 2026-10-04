@@ -155,3 +155,85 @@ async fn forget_confirmation_closes_confirm_and_picker() {
         "both the Confirm and the picker must close"
     );
 }
+
+/// REGRESSION: the orphaned-selection cleanup ran on BOTH match arms — a
+/// FAILED keyring deletion (the key is still there!) erased the persisted
+/// global model selection anyway, throwing away a perfectly valid
+/// configuration. The cleanup may only run when the provider REALLY lost
+/// its last credential.
+#[tokio::test]
+async fn failed_forget_keeps_the_persisted_model_selection() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    // A concrete selection pointing at the provider whose key "forget" will
+    // target — with a key still resolvable through the provider's env var
+    // (under HOME_LOCK: the process env is test-global state).
+    app.setup
+        .set_model_selection("openai", "gpt-test-model", Some("high"));
+    let env_var = "OPENAI_API_KEY";
+    let had_env = std::env::var(env_var).ok();
+    // SAFETY: HOME_LOCK serializes env access across the test threads.
+    unsafe { std::env::set_var(env_var, "test-key-keeps-provider-alive") };
+    // The in-process cache may hold a stale MISS from earlier tests.
+    cosh_sdk::connector::invalidate_api_key(env_var);
+
+    // The fake keyring entry: the delete is a no-op error on any machine,
+    // so `forget_provider_api_key` takes the FAILURE branch — exactly the
+    // regression's trigger.
+    app.dialog.show(DialogType::ProviderKeyChoice {
+        provider: "openai".into(),
+        env_var: "COSH_TEST_NONEXISTENT_KEY".into(),
+    });
+    app.handle_provider_key_choice_key(KeyCode::Enter);
+    assert!(app.process_key_event(key(KeyCode::Enter)).is_ok());
+
+    assert_eq!(
+        app.setup.persisted_model(),
+        Some("gpt-test-model"),
+        "a failed keyring deletion must NOT erase the persisted selection"
+    );
+    assert_eq!(
+        app.setup.model.provider, "openai",
+        "the provider survives: its env-var key still authenticates"
+    );
+    assert_eq!(app.setup.model.reasoning.as_deref(), Some("high"));
+
+    // Restore the process env exactly as found (HOME_LOCK holds).
+    match had_env {
+        Some(value) => unsafe { std::env::set_var(env_var, value) },
+        None => unsafe { std::env::remove_var(env_var) },
+    }
+    cosh_sdk::connector::invalidate_api_key(env_var);
+}
+
+/// The cleanup's happy path is unchanged: when the forget REALLY leaves the
+/// provider keyless, the persisted selection pointing at it is cleared so
+/// the boot restore cannot resurrect a dead provider.
+#[tokio::test]
+async fn successful_forget_of_last_key_clears_the_persisted_selection() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    // A provider whose env var does not exist on any machine: after the
+    // (no-op error) keyring delete, `has_api_key` is reliably false — the
+    // provider is keyless for real.
+    app.setup
+        .set_model_selection("testprovider", "test-model", Some("low"));
+
+    app.dialog.show(DialogType::ProviderKeyChoice {
+        provider: "testprovider".into(),
+        env_var: "COSH_TEST_NONEXISTENT_KEY".into(),
+    });
+    app.handle_provider_key_choice_key(KeyCode::Enter);
+    assert!(app.process_key_event(key(KeyCode::Enter)).is_ok());
+
+    assert!(
+        app.setup.persisted_model().is_none(),
+        "a provider that truly lost its last credential must not keep a persisted selection"
+    );
+    assert!(
+        app.setup.model.provider.is_empty(),
+        "the orphaned provider reference must be cleared"
+    );
+}

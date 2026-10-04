@@ -370,6 +370,11 @@ impl FreeGatewayRecommendationDialog {
             }
             KeyCode::Esc => {
                 self.visible = false;
+                // A dismissed dialog owns nothing: leave a stale selection
+                // behind and a later Ctrl+C (gated on ownership, correctly)
+                // would skip it forever — but nothing would ever clear it
+                // either. Drop it here so dismissal is a full reset.
+                self.clear_selection();
                 true
             }
             KeyCode::Char(_) if ctrl => true,
@@ -1336,6 +1341,41 @@ mod tests {
             d.revealed_text()
                 .contains(body_part.split(' ').next_back().unwrap_or_default()),
             "the body tail of the copy must come from the revealed text: {copied:?}"
+        );
+    }
+
+    /// REGRESSION (stale-selection leak): Esc dismisses the box but used to
+    /// keep the drag selection alive — a hidden selection that nothing
+    /// would ever clear. Dismissal must be a full reset.
+    #[test]
+    fn esc_dismissal_clears_the_drag_selection() {
+        let mut d = FreeGatewayRecommendationDialog::new();
+        d.show(&SAMPLE);
+        d.phase = Phase::WaitingForResponse;
+        d.stream_chars = d.content.stream_text.chars().count();
+
+        let area = Rect::new(0, 0, 80, 24);
+        let Some(anchor) = d.selection_target_at(10, 1, area) else {
+            panic!("the body band must be hit-testable");
+        };
+        d.begin_selection(anchor, area.width.saturating_sub(5));
+        // An anchor alone is not an ACTIVE selection yet — extend it, same
+        // as a real drag's first move.
+        let Some(end) = d.selection_target_at(20, 1, area) else {
+            panic!("the drag end must be hit-testable too");
+        };
+        d.extend_selection(end);
+        assert!(d.has_selection(), "fixture needs a live selection");
+
+        d.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!d.visible);
+        assert!(
+            !d.has_selection(),
+            "a dismissed dialog must not carry a stale selection"
+        );
+        assert!(
+            !d.has_selection_anchor(),
+            "the anchor must die with the dismissal too"
         );
     }
 }

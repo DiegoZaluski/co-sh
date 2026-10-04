@@ -474,3 +474,35 @@ async fn reasoning_dialog_enter_commits_selection() {
     );
     assert_eq!(app.setup.model.reasoning.as_deref(), Some("high"));
 }
+
+/// REGRESSION: the credential gate on the restore paths treated the
+/// persisted `auto` selection (deliberately stored with an EMPTY provider)
+/// as an orphan and refused to restore it — after a reboot, `auto` + its
+/// reasoning were silently replaced by whatever the config fell back to.
+/// An empty provider is a valid persisted selection, not an orphan.
+#[tokio::test]
+async fn persisted_auto_selection_survives_the_credential_gate() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    // Boot with `auto` persisted exactly as the picker stores it (empty
+    // provider, a reasoning level) — e.g. a previous run picked auto/high.
+    let mut app = App::new("/tmp".to_string());
+    app.setup.set_model_selection("", "auto", Some("high"));
+
+    // The pre-send restore path (fresh session) must restore auto as-is.
+    app.apply_global_model();
+    assert_eq!(
+        app.llm_config.model.as_deref(),
+        Some("auto"),
+        "the persisted auto selection must survive the restore gate"
+    );
+    assert!(
+        app.llm_config.provider.is_empty(),
+        "auto must not pin a provider"
+    );
+    assert_eq!(
+        app.llm_config.reasoning.as_deref(),
+        Some("high"),
+        "auto's persisted reasoning must survive the restore gate too"
+    );
+}

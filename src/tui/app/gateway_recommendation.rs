@@ -40,25 +40,31 @@ impl App {
         matches!(self.mode(), AppMode::Session)
     }
 
-    /// Whether the one-time gateway offer was already made (or deliberately
-    /// skipped) on this install.
-    fn gateway_offer_marker_exists() -> bool {
-        directories::BaseDirs::new()
-            .map(|dirs| {
-                dirs.data_local_dir()
-                    .join("cosh/gateway-recommendation")
-                    .exists()
-            })
-            .unwrap_or(false)
+    /// Whether the one-time gateway offer was already answered on this
+    /// install — and, when it was, WHICH answer was given. The marker file
+    /// stores the answer itself (`declined` / `authorized`): a plain
+    /// existence check cannot distinguish "never ask again" from "already
+    /// using the gateway, may re-offer if its credential dies".
+    const GATEWAY_MARKER_DECLINED: &[u8] = b"declined";
+    const GATEWAY_MARKER_AUTHORIZED: &[u8] = b"authorized";
+
+    fn gateway_offer_marker() -> Option<Vec<u8>> {
+        let dirs = directories::BaseDirs::new()?;
+        std::fs::read(dirs.data_local_dir().join("cosh/gateway-recommendation")).ok()
     }
 
-    /// Burn the one-time offer marker. Best-effort: a read-only disk just
-    /// means the offer may reappear on the next launch.
-    fn burn_gateway_offer_marker(&self) {
+    fn gateway_offer_marker_exists() -> bool {
+        Self::gateway_offer_marker().is_some()
+    }
+
+    /// Burn the one-time offer marker WITH the answer that justifies it.
+    /// Best-effort: a read-only disk just means the offer may reappear on
+    /// the next launch.
+    fn burn_gateway_offer_marker(&self, answer: &[u8]) {
         if let Some(dirs) = directories::BaseDirs::new() {
             let marker = dirs.data_local_dir().join("cosh/gateway-recommendation");
             let _ = std::fs::create_dir_all(marker.parent().unwrap_or(&marker));
-            let _ = std::fs::write(&marker, b"");
+            let _ = std::fs::write(&marker, answer);
         }
     }
 
@@ -74,6 +80,14 @@ impl App {
         auth_failure: bool,
     ) -> Option<&'static GatewayRecommendationContent> {
         if self.charm_signing_in || self.charm_declined {
+            return None;
+        }
+        // The one-time offer is ONE per install: an answered dialog (decline
+        // or opt-in) burned the marker, and it must never come back — not
+        // on the next launch, not on a later error. Auth-shaped failures
+        // re-offer ONLY when the Charm credential itself is dead (cleared
+        // below); a healthy install stays silent.
+        if Self::gateway_offer_marker_exists() && !auth_failure {
             return None;
         }
         let provider = &self.llm_config.provider;
@@ -106,6 +120,11 @@ impl App {
         if !opted_in {
             self.free_gateway_dialog.hide();
             self.charm_declined = true;
+            // The decline is a FINAL answer, not a per-run preference: burn
+            // the one-time marker so the offer never comes back after a
+            // reboot (the in-memory latch alone dies with the process —
+            // that regression let the box reappear on every launch).
+            self.burn_gateway_offer_marker(Self::GATEWAY_MARKER_DECLINED);
             self.restore_pending_gateway_message();
             self.toast_state.show(ToastOptions {
                 title: Some("Free gateway declined".into()),
@@ -191,15 +210,16 @@ impl App {
                 }
                 GatewaySignInEvent::Authorized => {
                     self.charm_signing_in = false;
+                    // The offer was ANSWERED (opt-in → success): record it
+                    // so a later boot knows the install already uses the
+                    // gateway — re-offers are then reserved for a DEAD
+                    // credential, never for a transient error.
+                    self.burn_gateway_offer_marker(Self::GATEWAY_MARKER_AUTHORIZED);
                     // Whether the user kept the sign-in box up: an Esc
                     // mid-flow asked the screen back — the outcome must not
                     // steal it again with a fresh modal one event later.
                     let box_was_open = self.free_gateway_dialog.visible;
                     self.free_gateway_dialog.hide();
-                    // Route the (re)played message through the newly
-                    // authorized gateway (provider default model).
-                    self.llm_config.provider = "charm".into();
-                    self.llm_config.model = None;
                     // Replay only from an idle Session view: a message sent
                     // while the sign-in was in flight may already own the
                     // agent loop, and start_agent_loop from another route
@@ -214,6 +234,23 @@ impl App {
                     // a surprise modal (same principle as the `Started`
                     // gate above). Otherwise the toast carries the hint.
                     let show_models = box_was_open && !self.dialog.visible() && idle_session;
+                    // Route the (re)played message through the newly
+                    // authorized gateway (provider default model) — but
+                    // ONLY when this completion actually takes over the
+                    // UI right now. The sign-in runs in the background: a
+                    // user who Esc'd the box and picked another model (or
+                    // another session) in the meantime must keep that
+                    // choice; unconditionally rewriting the live config
+                    // here clobbered it and left stale reasoning applied.
+                    let taking_over =
+                        idle_session && (show_models || self.pending_gateway_message.is_some());
+                    if taking_over {
+                        self.llm_config.provider = "charm".into();
+                        self.llm_config.model = None;
+                        // The old reasoning belongs to the previous model —
+                        // a fresh gateway default starts unscoped.
+                        self.llm_config.reasoning = None;
+                    }
                     // A parked message + picker is the "authorized, now pick
                     // a model" moment: the message must WAIT until the pick
                     // resolves — sending it under the dialog streamed the
@@ -297,14 +334,19 @@ impl App {
     ///    whatever the error shape. This is the "at least once during the
     ///    app's life" guarantee: a user whose very first send fails sees the
     ///    recommendation, not just a raw error.
-    /// 2. Subsequent auth-shaped failures (401/403, revoked or expired key,
-    ///    exhausted quota) — a broken credential is exactly what the free
-    ///    gateway fixes. Transient errors (network, 5xx) must not nag.
+    /// 2. A DEAD Charm credential on an install already using the gateway —
+    ///    a revoked/expired token is exactly what re-running the sign-in
+    ///    fixes, so the offer may come back ONLY for that. Transient errors
+    ///    (network, 5xx) must not nag, and heuristics NEVER delete stored
+    ///    credentials: a "billing" substring in an error must not wipe a
+    ///    valid keyring entry (that regression silently destroyed working
+    ///    Charm credentials). Re-running the opt-in overwrites the keyring
+    ///    entries — that IS the recovery path, destructive cleanup is not.
     ///
     /// A running local server needs no credentials and must never be offered
     /// a cloud replacement because of one bad response. The user's own key
-    /// is NEVER deleted here; the Charm flow below clears only its own
-    /// tokens.
+    /// is NEVER deleted here; the Charm flow's save step replaces only its
+    /// own tokens.
     pub(in crate::app) fn maybe_offer_gateway_on_error(&mut self, error: &str) {
         if !self.gateway_dialog_route() || self.free_gateway_dialog.visible {
             return;
@@ -313,38 +355,31 @@ impl App {
             return;
         }
         let auth_failure = is_auth_shaped_error(error);
-        let first_offer = !Self::gateway_offer_marker_exists();
-        if !first_offer && !auth_failure {
+        // An already-answered install stays quiet UNLESS this install uses
+        // the gateway itself (marker = authorized) AND the error looks like
+        // its credential died — the one state re-running the sign-in fixes.
+        let marker = Self::gateway_offer_marker();
+        let gateway_died = marker.as_deref() == Some(Self::GATEWAY_MARKER_AUTHORIZED)
+            && self.llm_config.provider == "charm"
+            && auth_failure;
+        if marker.is_some() && !gateway_died {
             return;
         }
-        // A sign-in still polling owns the flow: never wipe credentials or
-        // re-offer underneath it. This must precede the destructive cleanup
-        // below — an Esc'd-but-polling flow (the box dismissed, the device
-        // transaction alive) would otherwise have its just-saved token
-        // deleted by a 401 that arrived mid-poll.
+        // A sign-in still polling owns the flow: never re-offer underneath
+        // it — an Esc'd-but-polling flow (the box dismissed, the device
+        // transaction alive) would otherwise get its flow disturbed by a
+        // 401 that arrived mid-poll.
         if self.charm_signing_in {
             return;
         }
-        // A stale or revoked Charm token still satisfies has_api_key, which
-        // would silence the recommendation forever. An auth-shaped failure
-        // clears the dead credential — and the decline latch — so the offer
-        // can come back. Worst case is a needless dialog on a transient
-        // error, which the user can decline; the alternative is a bricked
-        // flow.
-        if self.llm_config.provider == "charm" && auth_failure {
-            if let Some(env_var) = get_provider_env_var("charm") {
-                let _ = super::providers::forget_provider_api_key(env_var);
-                let _ = super::providers::forget_provider_api_key(&format!("{env_var}_REFRESH"));
-                invalidate_api_key(env_var);
-            }
-            self.charm_declined = false;
-        }
         // `first_offer` widens the keyless-only gate: the one-time offer is
-        // about REACHING the user once, not about their key state.
-        if let Some(content) = self.gateway_recommendation_content(auth_failure || first_offer) {
-            // Burn only when the dialog actually shows — an early return
-            // above (decline latch, sign-in in flight) keeps the offer due.
-            self.burn_gateway_offer_marker();
+        // about REACHING the user once, not about their key state. A dead
+        // gateway credential re-opens the offer through the same gate.
+        let force_open = auth_failure && marker.is_none() || gateway_died;
+        if let Some(content) = self.gateway_recommendation_content(force_open) {
+            // The marker burns on the ANSWER (decline → `declined`, opt-in
+            // success → `authorized`), never on merely showing the box: a
+            // dialog closed by Esc/disk-error leaves the offer due.
             self.free_gateway_dialog.show(content);
         }
     }
