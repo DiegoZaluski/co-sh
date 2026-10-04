@@ -4,7 +4,7 @@
 
 Cosh 是一个运行在终端中的通用编码智能体（coding agent），除软件工程工具外，还配备了 *computer tools*，使其能够与图形应用程序交互。
 
-<img width="560" height="315" alt="demo" src="https://github.com/user-attachments/assets/d746684d-ecc1-4ce7-ad0c-a0b18d9892b8" />
+<img width="560" height="315" alt="demo" src="https://github.com/user-attachments/assets/83b0e1c9-bbcc-422f-bef8-55012eca8647" />
 
 主要特性：
 

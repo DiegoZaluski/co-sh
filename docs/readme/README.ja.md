@@ -4,7 +4,7 @@
 
 Cosh はターミナル上で動作する汎用コーディングエージェントです。ソフトウェア開発ツールに加え、*computer tools* を備えており、グラフィカルアプリケーションとも対話できます。
 
-<img width="560" height="315" alt="demo" src="https://github.com/user-attachments/assets/d746684d-ecc1-4ce7-ad0c-a0b18d9892b8" />
+<img width="560" height="315" alt="demo" src="https://github.com/user-attachments/assets/83b0e1c9-bbcc-422f-bef8-55012eca8647" />
 
 主な特徴:
 

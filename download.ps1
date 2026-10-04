@@ -163,3 +163,5 @@ if ($CURRENT_PATH -notlike "*$env:COSH_BIN_DIR*") {
 }
 
 Write-Host "cosh $RELEASE_TAG installed successfully at $DEST" -ForegroundColor Green
+Write-Host ""
+Write-Host "Run it with: cosh" -ForegroundColor Cyan

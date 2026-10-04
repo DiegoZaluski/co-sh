@@ -196,3 +196,5 @@ if [[ ":$PATH:" != *":$COSH_BIN_DIR:"* ]]; then
 fi
 
 echo "cosh $COSH_VERSION installed successfully at $COSH_BIN_DIR/$OUT_FILE"
+echo ""
+echo "Run it with: cosh"
