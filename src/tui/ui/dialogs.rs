@@ -9,7 +9,7 @@ use cosh::ModelEntry;
 use cosh_tui::core::lib::rgba::RGBA;
 use cosh_tui::core::renderable::Renderable;
 use cosh_tui::core::renderables::r#box::BoxRenderable;
-use cosh_tui::core::types::MouseEvent;
+use cosh_tui::core::types::{MouseButton, MouseEvent, MouseEventType};
 
 use crate::component::cursor::{Cursor, CursorState};
 use crate::component::spinner::SpinnerState;
@@ -1445,52 +1445,52 @@ impl DialogState {
 
                 let list_top = dialog_y + 3;
 
-                // Compute scroll offset based on visual_selection
-                // Simplify: just iterate visible rows
-                // We need to map the visual list to rows, accounting for scroll
+                // Build the same visual-to-model map used by the renderer.
+                // Headers occupy rows but are not selectable.
+                let mut model_idx = 0;
+                let mut visual_to_model = Vec::with_capacity(visual_list.len());
+                for (_, is_model) in &visual_list {
+                    if *is_model {
+                        visual_to_model.push(Some(model_idx));
+                        model_idx += 1;
+                    } else {
+                        visual_to_model.push(None);
+                    }
+                }
+
+                // Compute the visible window from the currently selected model,
+                // just like render(). Hovering a row updates the shared
+                // selection; the following frame then keeps that row visible.
+                let visual_selection = visual_to_model
+                    .iter()
+                    .position(|index| *index == Some(selection))
+                    .unwrap_or(0);
+                let scroll_offset =
+                    if visual_selection >= max_visible && max_visible < visual_list.len() {
+                        visual_selection.saturating_sub(max_visible - 1)
+                    } else {
+                        0
+                    };
+                let scroll_offset =
+                    scroll_offset.min(visual_list.len().saturating_sub(max_visible));
+
                 if y_click >= list_top {
                     let row = (y_click - list_top) as usize;
                     if row < max_visible {
-                        // Compute scroll offset by finding the visual row of current selection
-                        let mut model_idx = 0;
-                        let mut visual_to_model = Vec::new();
-                        for (_, is_model) in &visual_list {
-                            if *is_model {
-                                visual_to_model.push(model_idx);
-                                model_idx += 1;
-                            } else {
-                                visual_to_model.push(usize::MAX); // header
-                            }
-                        }
-
-                        let visual_selection = {
-                            let mut pos = 0;
-                            let mut seen = 0;
-                            for (_, is_model) in &visual_list {
-                                if *is_model {
-                                    if seen == selection {
-                                        break;
-                                    }
-                                    seen += 1;
-                                }
-                                pos += 1;
-                            }
-                            pos.min(visual_list.len().saturating_sub(1))
-                        };
-
-                        let scroll_offset =
-                            if visual_selection >= max_visible && max_visible < visual_list.len() {
-                                visual_selection.saturating_sub(max_visible - 1)
-                            } else {
-                                0
-                            };
-                        let scroll_offset =
-                            scroll_offset.min(visual_list.len().saturating_sub(max_visible));
-
                         let vis_idx = scroll_offset + row;
-                        if vis_idx < visual_list.len() && visual_to_model[vis_idx] != usize::MAX {
-                            instance.selected = visual_to_model[vis_idx];
-                            return DialogAction::Confirmed;
+                        if let Some(Some(model_index)) = visual_to_model.get(vis_idx) {
+                            instance.selected = *model_index;
+                            return match mouse.event_type {
+                                // Match the slash menu: hover moves only the
+                                // visual selection, while release confirms it.
+                                MouseEventType::Move
+                                | MouseEventType::Drag
+                                | MouseEventType::Down => DialogAction::Consumed,
+                                MouseEventType::Up if mouse.button == MouseButton::Left => {
+                                    DialogAction::Confirmed
+                                }
+                                _ => DialogAction::Consumed,
+                            };
                         }
                     }
                 }
@@ -2439,28 +2439,22 @@ impl DialogState {
                         }
                     }
 
-                    // Map selection to visual index
-                    // Selection is a model index (0..flat_entries.len())
-                    // Visual index includes headers
+                    // Map selection to visual index. Selection is a model
+                    // index, while headers also occupy rows in the dialog.
+                    // Keeping this lookup identical to handle_mouse() makes
+                    // hover, scrolling, and the painted highlight agree.
                     let mut model_count = 0;
-                    let mut visual_selection = 0;
-                    for item in &visual_items {
-                        match item {
-                            VisualItem::Header(_) => {
-                                if model_count <= selection {
-                                    visual_selection += 1;
-                                }
-                            }
+                    let visual_selection = visual_items
+                        .iter()
+                        .position(|item| match item {
+                            VisualItem::Header(_) => false,
                             VisualItem::Model(_) => {
-                                if model_count == selection {
-                                    visual_selection += 1;
-                                    break;
-                                }
-                                visual_selection += 1;
+                                let is_selected = model_count == selection;
                                 model_count += 1;
+                                is_selected
                             }
-                        }
-                    }
+                        })
+                        .unwrap_or(0);
 
                     // Calculate scroll offset
                     let mut scroll_offset = 0;
@@ -4233,6 +4227,56 @@ mod hook_panel_tests {
             &entry("nvidia", "deepseek-v4-pro"),
             "openrouter"
         ));
+    }
+}
+
+#[cfg(test)]
+mod model_list_mouse_tests {
+    use super::{DialogAction, DialogState, DialogType};
+    use crate::theme::ThemeRegistry;
+    use cosh::ModelEntry;
+    use cosh_tui::core::types::{MouseButton, MouseEvent, MouseEventType, MouseModifiers};
+    use ratatui::layout::Rect;
+
+    fn entry(provider: &str, model: &str) -> ModelEntry {
+        ModelEntry {
+            provider: provider.to_string(),
+            model: model.to_string(),
+        }
+    }
+
+    fn mouse(event_type: MouseEventType, x: u16, y: u16) -> MouseEvent {
+        MouseEvent::new(event_type, MouseButton::Left, x, y, MouseModifiers::none())
+    }
+
+    #[test]
+    fn model_hover_moves_selection_without_confirming() {
+        let mut state = DialogState::new();
+        state.show(DialogType::ModelList {
+            models: vec![
+                entry("", "auto"),
+                entry("provider", "model-a"),
+                entry("provider", "model-b"),
+            ],
+            current: "auto".into(),
+            filter: String::new(),
+            loading: false,
+        });
+
+        let area = Rect::new(0, 0, 80, 24);
+        let theme = ThemeRegistry::new().default_theme().clone();
+
+        // At 80x24 the list starts at y=10: provider header, auto, provider
+        // header, model-a, model-b. Hovering model-a must move the highlight
+        // but must not execute the selection.
+        let action = state.handle_mouse(&mouse(MouseEventType::Move, 20, 13), area, &theme);
+        assert_eq!(action, DialogAction::Consumed);
+        assert_eq!(state.current().unwrap().selected, 1);
+        assert!(state.visible());
+
+        let click = state.handle_mouse(&mouse(MouseEventType::Up, 20, 13), area, &theme);
+        assert_eq!(click, DialogAction::Confirmed);
+        assert_eq!(state.current().unwrap().selected, 1);
     }
 }
 

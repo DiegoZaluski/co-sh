@@ -835,6 +835,22 @@ impl App {
             }
         }
 
+        // Model picker hover owns its non-release events too. The regular
+        // dialog click dispatch below intentionally runs only on release, so
+        // without this path the model highlight could never follow the mouse.
+        if matches!(
+            event_type,
+            MouseEventType::Move | MouseEventType::Drag | MouseEventType::Down
+        ) && self
+            .dialog
+            .current()
+            .is_some_and(|d| matches!(&d.dialog_type, DialogType::ModelList { .. }))
+        {
+            let area = self.terminal_size();
+            self.dialog.handle_mouse(&mouse, area, &self.theme);
+            return Ok(true);
+        }
+
         // Only handle left-click UP events (standard "click" action)
         if event_type != MouseEventType::Up || button != MouseButton::Left {
             // Hover tracking for user messages and pending-queue rows
@@ -1029,17 +1045,22 @@ impl App {
                                 }
                             }
                             DialogType::ModelList { .. } => {
-                                let models =
-                                    if let DialogType::ModelList { models, .. } = &d.dialog_type {
-                                        models.clone()
+                                let selection =
+                                    if let DialogType::ModelList { models, filter, .. } =
+                                        &d.dialog_type
+                                    {
+                                        App::model_dialog_flat_entries(models, filter)
+                                            .get(d.selected)
+                                            .map(|entry| {
+                                                ((*entry).model.clone(), (*entry).provider.clone())
+                                            })
                                     } else {
-                                        vec![]
+                                        None
                                     };
-                                let selected_idx = d.selected.min(models.len().saturating_sub(1));
-                                if let Some(entry) = models.get(selected_idx) {
+                                if let Some((model, provider)) = selection {
                                     // Applies the model — or pushes the reasoning
                                     // sub-dialog when the model supports it.
-                                    self.confirm_model_entry(&entry.model, &entry.provider);
+                                    self.confirm_model_entry(&model, &provider);
                                 }
                                 // confirm_model_entry pops the dialog itself (or
                                 // stacked a reasoning dialog on top) — skip the
