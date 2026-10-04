@@ -106,8 +106,14 @@ struct UsageTotals {
 
 impl UsageTotals {
     fn add(&mut self, usage: &serde_json::Value) {
-        self.input_tokens += usage.get("inputTokens").and_then(|v| v.as_i64()).unwrap_or(0);
-        self.output_tokens += usage.get("outputTokens").and_then(|v| v.as_i64()).unwrap_or(0);
+        self.input_tokens += usage
+            .get("inputTokens")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        self.output_tokens += usage
+            .get("outputTokens")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
         self.cache_read_tokens += usage
             .get("cacheReadTokens")
             .and_then(|v| v.as_i64())
@@ -294,16 +300,6 @@ impl Runtime {
         *guard = Some(Arc::clone(&rt));
         Ok(rt)
     }
-
-    /// The runtime's typed RPC namespace (experimental `models.list`).
-    pub(crate) fn rpc(&self) -> github_copilot_sdk::rpc::ClientRpc<'_> {
-        self.client.rpc()
-    }
-}
-
-/// Access the shared runtime connection (for `list_models`).
-pub(crate) async fn shared_runtime(api_key: Option<&str>) -> Result<Arc<Runtime>, ConnectorError> {
-    Runtime::get(api_key).await
 }
 
 /// Everything needed to start one runtime turn.
@@ -340,11 +336,10 @@ pub(crate) async fn start_turn(
     if let Some(token) = api_key {
         config = config.with_github_token(token);
     }
-    let session = runtime
-        .client
-        .create_session(config)
-        .await
-        .map_err(|e| ConnectorError::Network(format!("failed to create Copilot session: {e}")))?;
+    let session =
+        runtime.client.create_session(config).await.map_err(|e| {
+            ConnectorError::Network(format!("failed to create Copilot session: {e}"))
+        })?;
     let name_map = plan.name_map;
 
     let (tx, rx) = mpsc::channel::<SessionEvent>(256);
@@ -401,11 +396,7 @@ pub(crate) async fn start_turn(
             }
         }
     });
-    Ok(TurnHandle {
-        rx,
-        done,
-        name_map,
-    })
+    Ok(TurnHandle { rx, done, name_map })
 }
 
 /// Lower the connector's parameters onto a runtime [`SessionConfig`].
@@ -481,9 +472,22 @@ pub(crate) fn build_session_config(
             // The sanitized name already satisfies the runtime's
             // `/^[a-zA-Z0-9_-]+$/`, so the `custom:` filter entry is valid.
             allow.push(format!("custom:{sanitized}"));
-            let mut t = Tool::new(sanitized).with_description(
-                tool.function.description.clone().unwrap_or_default(),
-            );
+            // `overrides_built_in_tool` is REQUIRED for names that collide
+            // with the runtime's own tools (cosh's `web_fetch` vs the
+            // builtin `web_fetch`): without the flag the runtime's
+            // `session.options.update` REJECTS the whole declaration list
+            // ("External tool … conflicts with a built-in tool of the same
+            // name") and every turn fails. Set UNCONDITIONALLY — the
+            // runtime's builtin roster is not enumerable (no SDK API lists
+            // it; the names drift across runtime versions) and a
+            // collision-name list would rot silently; non-colliding names
+            // ignore the flag. The flag makes cosh's handler the
+            // authoritative implementation for that name — which is
+            // exactly the containment contract: built-ins stay disabled,
+            // calls route to the harness registry.
+            let mut t = Tool::new(sanitized)
+                .with_description(tool.function.description.clone().unwrap_or_default())
+                .with_overrides_built_in_tool(true);
             if let Some(schema) = &tool.function.parameters {
                 t = t.with_parameters(schema.clone());
             }
@@ -704,7 +708,9 @@ mod tests {
         .expect("valid SessionEvent JSON")
     }
 
-    fn collector(events: &mut Vec<RuntimeEvent>) -> impl FnMut(RuntimeEvent) -> Result<(), ConnectorError> + '_ {
+    fn collector(
+        events: &mut Vec<RuntimeEvent>,
+    ) -> impl FnMut(RuntimeEvent) -> Result<(), ConnectorError> + '_ {
         move |ev| {
             events.push(ev);
             Ok(())
@@ -741,9 +747,9 @@ mod tests {
         use super::super::super::params::{Parameters, ToolCallMode, ToolDefinition, ToolFunction};
         let mut params = Parameters::default();
         params.tool_call_mode = ToolCallMode::Native;
-        params.tools = Some(vec![ToolDefinition::new(
-            ToolFunction::new("mcp.server/tool"),
-        )]);
+        params.tools = Some(vec![ToolDefinition::new(ToolFunction::new(
+            "mcp.server/tool",
+        ))]);
         let plan = build_session_config(&params, Some("sys"));
         assert_eq!(
             plan.name_map.get("mcp_server_tool").map(String::as_str),
@@ -797,6 +803,41 @@ mod tests {
     }
 
     #[test]
+    fn declared_tools_override_built_ins_of_the_same_name() {
+        use super::super::super::params::{Parameters, ToolCallMode, ToolDefinition, ToolFunction};
+        // cosh declares tools whose names collide with the runtime's
+        // built-ins (e.g. `web_fetch`). Without `overrides_built_in_tool`
+        // the runtime's `session.options.update` REJECTS the whole
+        // declaration list and every turn fails — the flag must be set on
+        // EVERY declaration, unconditionally.
+        let mut params = Parameters::default();
+        params.tool_call_mode = ToolCallMode::Native;
+        params.tools = Some(vec![
+            ToolDefinition::new(ToolFunction::new("web_fetch")),
+            ToolDefinition::new(ToolFunction::new("find_glob")),
+        ]);
+        let plan = build_session_config(&params, None);
+        let declarations = plan.config.tools.expect("native mode declares tools");
+        assert_eq!(declarations.len(), 2);
+        for tool in declarations {
+            assert!(
+                tool.overrides_built_in_tool,
+                "{} must declare the override flag or the runtime rejects the turn",
+                tool.name
+            );
+        }
+        // The override flag must not change the allowlist shape: an
+        // overridden builtin is still classified `custom:` at registration
+        // time (source-qualified filter, mode.rs), so the colliding name
+        // keeps its `custom:` entry.
+        assert!(
+            plan.available_tools
+                .contains(&"custom:web_fetch".to_string()),
+            "the overridden builtin keeps its custom: allowlist entry"
+        );
+    }
+
+    #[test]
     fn final_message_not_re_emitted_after_deltas() {
         let mut events = Vec::new();
         let mut result = TurnResult::default();
@@ -804,14 +845,24 @@ mod tests {
             "assistant.message_delta",
             serde_json::json!({ "deltaContent": "Hi ", "messageId": "m1" }),
         );
-        apply_event(&delta, &mut result, &HashMap::new(), &mut collector(&mut events))
-            .expect("delta applies");
+        apply_event(
+            &delta,
+            &mut result,
+            &HashMap::new(),
+            &mut collector(&mut events),
+        )
+        .expect("delta applies");
         let final_msg = event(
             "assistant.message",
             serde_json::json!({ "content": "Hi there", "messageId": "m1" }),
         );
-        apply_event(&final_msg, &mut result, &HashMap::new(), &mut collector(&mut events))
-            .expect("final message applies");
+        apply_event(
+            &final_msg,
+            &mut result,
+            &HashMap::new(),
+            &mut collector(&mut events),
+        )
+        .expect("final message applies");
         // Exactly ONE token chunk (the delta); the full message is NOT
         // re-emitted, or every consumer would render the response twice.
         assert_eq!(events.len(), 1);
@@ -827,8 +878,13 @@ mod tests {
             "assistant.message",
             serde_json::json!({ "content": "full answer", "messageId": "m1" }),
         );
-        apply_event(&final_msg, &mut result, &HashMap::new(), &mut collector(&mut events))
-            .expect("final message applies");
+        apply_event(
+            &final_msg,
+            &mut result,
+            &HashMap::new(),
+            &mut collector(&mut events),
+        )
+        .expect("final message applies");
         // Non-streaming fallback: the message IS surfaced as one token.
         assert!(matches!(events[0], RuntimeEvent::Token(ref t) if t == "full answer"));
         assert_eq!(result.message, "full answer");
@@ -849,8 +905,13 @@ mod tests {
                 "toolName": "find_glob",
             }),
         );
-        apply_event(&delta, &mut result, &HashMap::new(), &mut collector(&mut events))
-            .expect("delta applies");
+        apply_event(
+            &delta,
+            &mut result,
+            &HashMap::new(),
+            &mut collector(&mut events),
+        )
+        .expect("delta applies");
         let final_msg = event(
             "assistant.message",
             serde_json::json!({
@@ -861,8 +922,13 @@ mod tests {
                 ],
             }),
         );
-        apply_event(&final_msg, &mut result, &HashMap::new(), &mut collector(&mut events))
-            .expect("final message applies");
+        apply_event(
+            &final_msg,
+            &mut result,
+            &HashMap::new(),
+            &mut collector(&mut events),
+        )
+        .expect("final message applies");
         let calls: Vec<_> = events
             .iter()
             .filter(|ev| matches!(ev, RuntimeEvent::ToolCall(_)))
@@ -886,8 +952,13 @@ mod tests {
                 ],
             }),
         );
-        apply_event(&final_msg, &mut result, &name_map, &mut collector(&mut events))
-            .expect("applies");
+        apply_event(
+            &final_msg,
+            &mut result,
+            &name_map,
+            &mut collector(&mut events),
+        )
+        .expect("applies");
         match &events[0] {
             RuntimeEvent::ToolCall(tc) => assert_eq!(tc.name, "mcp.server/tool"),
             other => panic!("expected tool call, got {other:?}"),
@@ -908,8 +979,13 @@ mod tests {
                     "finishReason": "stop",
                 }),
             );
-            apply_event(&ev, &mut result, &HashMap::new(), &mut collector(&mut events))
-                .expect("usage applies");
+            apply_event(
+                &ev,
+                &mut result,
+                &HashMap::new(),
+                &mut collector(&mut events),
+            )
+            .expect("usage applies");
         }
         let usage = result.usage.expect("usage accumulated");
         assert_eq!(usage["inputTokens"], 150);

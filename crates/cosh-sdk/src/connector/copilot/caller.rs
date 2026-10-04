@@ -19,7 +19,7 @@
 //! raw HTTP bodies — parse it manually for provider-specific fields).
 
 use super::super::error::ConnectorError;
-use super::super::output::{ChatOutput, ChatStream, LsOutput, ModelInfo, StreamChunk};
+use super::super::output::{ChatOutput, ChatStream, LsOutput, StreamChunk};
 use super::super::params::{ChatMessage, Parameters};
 use super::super::provider::{Family, ProviderConfig, get_api_key};
 use super::runtime::{RuntimeEvent, TurnHandle, build_session_config, start_turn};
@@ -144,8 +144,7 @@ pub async fn chat_stream_with_messages(
 /// the async stream: send only fails when the consumer is gone, which is
 /// exactly the abort condition.
 fn event_stream(handle: TurnHandle) -> ChatStream {
-    let (tx, rx) =
-        tokio::sync::mpsc::unbounded_channel::<Result<StreamChunk, ConnectorError>>();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Result<StreamChunk, ConnectorError>>();
     tokio::spawn(async move {
         let outcome = handle
             .run(|event| {
@@ -252,48 +251,31 @@ fn event_stream_member(event: RuntimeEvent) -> Option<Result<StreamChunk, Connec
             // Batches are unwrapped by the caller before reaching here.
             return None;
         }
-        RuntimeEvent::Failed(failure) => {
-            return Some(Err(super::runtime::session_error(&failure)))
-        }
+        RuntimeEvent::Failed(failure) => return Some(Err(super::runtime::session_error(&failure))),
     };
     Some(Ok(chunk))
 }
 
-/// List the Copilot models available to the authenticated user.
+/// List the Copilot models available to the authenticated account.
 ///
-/// The runtime's `models.list` RPC returns full capability metadata; the
-/// connector's [`ModelInfo`] carries only the id, so the RAW response is
-/// preserved verbatim in [`LsOutput::raw`] for callers that need the rest.
-///
-/// The credential is passed at CLIENT level (`ClientOptions::github_token`,
-/// applied when the shared runtime is first created) because client-level
-/// RPCs are outside any session's token scope.
+/// Delegates to [`models::list_catalog`] — the direct exchange +
+/// shared-catalog chain. The runtime's own `models.list` RPC is NOT used
+/// for listing: it reads the agent-mode catalog, which stays EMPTY for
+/// Free-tier accounts even though the account can chat fine (verified
+/// live); the shared chat catalog carries the real picker entries.
 pub async fn list_models(
     config: &ProviderConfig,
     params: &Parameters,
     service: Option<&str>,
 ) -> Result<LsOutput, ConnectorError> {
     let api_key = resolve_api_key(config, params, service)?;
-    let runtime = super::runtime::shared_runtime(Some(api_key.as_str())).await?;
-    let list = runtime
-        .rpc()
-        .models()
-        .list()
-        .await
-        .map_err(|e| ConnectorError::Network(format!("Copilot models.list failed: {e}")))?;
-    let models: Vec<ModelInfo> = list
-        .models
-        .iter()
-        .map(|m| ModelInfo { id: m.id.clone() })
-        .collect();
-    let raw = serde_json::to_string(&list).unwrap_or_else(|_| "{}".to_string());
-    Ok(LsOutput::new(raw, models))
+    super::models::list_catalog(&api_key).await
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::runtime::SessionFailure;
+    use super::*;
 
     #[test]
     fn history_renders_roles_and_tool_calls() {
@@ -348,7 +330,10 @@ mod tests {
     #[test]
     fn usage_raw_renders_null_as_empty_object() {
         assert_eq!(usage_raw(&serde_json::Value::Null), "{}");
-        assert_eq!(usage_raw(&serde_json::json!({"inputTokens": 5})), r#"{"inputTokens":5}"#);
+        assert_eq!(
+            usage_raw(&serde_json::json!({"inputTokens": 5})),
+            r#"{"inputTokens":5}"#
+        );
     }
 
     #[test]

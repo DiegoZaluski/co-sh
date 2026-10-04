@@ -19,30 +19,61 @@ use crate::util::field_selection::DragSelection;
 /// Each gateway defines its own constant of this type. The UI dialog is
 /// completely generic — it only reads these fields.
 pub struct GatewayRecommendationContent {
-    /// Bold title displayed in the header (e.g. "Use the OpenCode Zen free gateway?").
+    /// Short tab label (question-dialog tab bar).
+    pub tab_label: &'static str,
+    /// Bold question displayed in the offer phase (e.g. "Use the free
+    /// Charm gateway with OAuth?").
     pub title: &'static str,
     /// Markdown text revealed progressively during the fake streaming phase.
-    /// Rendered via `MarkdownRenderable` as it grows, simulating an agent response.
+    /// Rendered via `MarkdownRenderable` as it grows, simulating an agent
+    /// response. SHARED across tabs (see `GATEWAY_PITCH`): the streamed
+    /// body is one generic message that covers every offered gateway, so a
+    /// mid-stream tab switch never rewinds or restarts the reveal.
     pub stream_text: &'static str,
+}
+
+/// One selectable gateway in the tabbed offer: the provider id the sign-in
+/// dispatches on (the same id the provider registry resolves) plus that
+/// gateway's copy. The slice order IS the tab order.
+pub struct GatewayOffer {
+    /// Provider id (`"charm"`, `"copilot"`).
+    pub provider: &'static str,
+    pub content: &'static GatewayRecommendationContent,
 }
 
 /// Placeholder for future free-gateway recommendations.
 ///
 /// The dialog itself is generic — to recommend a new gateway, define a
-/// `GatewayRecommendationContent` const here (title + markdown body) and
-/// return it from `App::gateway_recommendation_content()`.
+/// `GatewayRecommendationContent` const here, add a `GatewayOffer` entry
+/// to [`OFFERS`], and route its device sign-in in
+/// `gateway_sign_in_inner` (`app/gateway_recommendation.rs`) — the
+/// provider id in `OFFERS` is what the dispatcher matches on.
 ///
 /// Example:
 /// ```ignore
 /// pub const EXAMPLE: GatewayRecommendationContent = GatewayRecommendationContent {
+///     tab_label: "Example",
 ///     title: "Use the Example free gateway?",
 ///     stream_text: "Description shown while streaming…",
 /// };
 /// ```
 pub const PLACEHOLDER: GatewayRecommendationContent = GatewayRecommendationContent {
+    tab_label: "",
     title: "",
     stream_text: "",
 };
+
+/// The streamed body, shared by every offered gateway. Generic on purpose:
+/// the tabs (not the prose) carry which gateway is which, so one reveal
+/// covers Charm and GitHub alike and switching tabs mid-stream is seamless.
+const GATEWAY_PITCH: &str = "No provider key is configured, so this model cannot be reached. \
+Two gateways are offered as alternatives — select a tab and choose Yes to sign in.\n\n\
+**Charm** is free and ready to use. **GitHub Copilot** is available if you already have a \
+Copilot subscription. These are recommendations only: cosh has no sponsorship, affiliation \
+or agreement with either provider.\n\n\
+Choosing Yes opens your browser to authorize cosh with a device code. The token is stored \
+in your OS keyring. Choosing No closes this dialog; \u{2190} \u{2192} switch tabs to \
+compare the gateways.";
 
 /// Charm Hyper — the free gateway cosh recommends.
 ///
@@ -50,23 +81,36 @@ pub const PLACEHOLDER: GatewayRecommendationContent = GatewayRecommendationConte
 /// because it is good, practical, fairly priced for what it offers and,
 /// above all, honest about its contracts — the device protocol cosh speaks
 /// is the same one Charm's own CLI uses, in the open, with no surprise
-/// deprecations or silent contract changes. The copy states that in the
-/// first person (the agent recommending), which is why it reads "we" —
-/// it is the product's voice, and it must stay accurate.
+/// deprecations or silent contract changes.
 pub const CHARM: GatewayRecommendationContent = GatewayRecommendationContent {
+    tab_label: "Charm",
     title: "Sign in to the Charm gateway with OAuth?",
-    stream_text: "No API key is configured, so I can't reach this model — but \
-I have a recommendation: the **Charm** free gateway.\n\n\
-I like Charm for practical reasons: it works well, it's simple to set up \
-and the free tier is fair for what it offers. But the real reason I \
-recommend it is that they're honest about contracts — the device sign-in \
-flow I use is the same one their own CLI uses, published openly, with no \
-surprise deprecations or silent breaking changes. Nothing about this \
-recommendation is sponsored; it's just a provider I trust.\n\n\
-Choosing **Yes** opens your browser to authorize cosh (a device code, \
-like pairing a TV). The token is stored in your OS keyring — I never see \
-your password. You can decline and configure an API key instead.",
+    stream_text: GATEWAY_PITCH,
 };
+
+/// GitHub Copilot — for users who already carry a Copilot subscription.
+/// The device flow is GitHub's standard RFC 8628 endpoints (see the SDK's
+/// `copilot::oauth`), and the resulting token is the `GITHUB_TOKEN`
+/// credential the Copilot family resolves.
+pub const GITHUB: GatewayRecommendationContent = GatewayRecommendationContent {
+    tab_label: "GitHub",
+    title: "Sign in to GitHub Copilot with OAuth?",
+    stream_text: GATEWAY_PITCH,
+};
+
+/// The offered gateways, in tab order. One list drives the whole offer:
+/// the dialog renders a tab per entry, and the sign-in dispatch reads the
+/// active entry's `provider`.
+pub const OFFERS: &[GatewayOffer] = &[
+    GatewayOffer {
+        provider: "charm",
+        content: &CHARM,
+    },
+    GatewayOffer {
+        provider: "copilot",
+        content: &GITHUB,
+    },
+];
 
 /// Characters revealed per second during the fake streaming phase.
 const CHARS_PER_SECOND: f64 = 120.0;
@@ -116,8 +160,16 @@ pub struct FreeGatewayRecommendationDialog {
     pub selected: usize,
     /// Set to `true` when the user presses Enter or clicks an option.
     pub submitted: bool,
-    /// The content being displayed (varies per gateway).
+    /// The ACTIVE tab's content (varies per gateway; the only content the
+    /// render/copy paths read).
     content: &'static GatewayRecommendationContent,
+    /// The offered gateways, in tab order. Empty = single-content mode (no
+    /// tab bar, generic/tests use): Left/Right keep driving Yes/No. Non-empty
+    /// = tabbed mode: Left/Right switch tabs, Up/Down drive Yes/No — the
+    /// arrows' two jobs never share a key.
+    offers: &'static [GatewayOffer],
+    /// Which offer tab is active (index into `offers`).
+    active_tab: usize,
     /// Current streaming phase.
     phase: Phase,
     /// How many *characters* of `stream_text` have been revealed so far.
@@ -146,7 +198,9 @@ impl FreeGatewayRecommendationDialog {
             visible: false,
             selected: 0,
             submitted: false,
-            content: &PLACEHOLDER, // placeholder, overwritten by `show()`
+            content: &PLACEHOLDER, // placeholder, overwritten by `show*()`
+            offers: &[],
+            active_tab: 0,
             phase: Phase::Streaming,
             stream_chars: 0,
             last_frame: Instant::now(),
@@ -156,9 +210,26 @@ impl FreeGatewayRecommendationDialog {
         }
     }
 
-    /// Open the dialog for a specific recommendation.
+    /// Open the dialog for a single recommendation (no tab bar).
     pub fn show(&mut self, content: &'static GatewayRecommendationContent) {
+        self.offers = &[];
+        self.active_tab = 0;
         self.content = content;
+        self.reset_for_show();
+    }
+
+    /// Open the dialog with one tab per offered gateway (question-dialog
+    /// tab-bar design). The streamed body is shared across tabs, so the
+    /// reveal never rewinds on a switch.
+    pub fn show_offers(&mut self, offers: &'static [GatewayOffer]) {
+        self.offers = offers;
+        self.active_tab = 0;
+        self.content = offers.first().map_or(&PLACEHOLDER, |o| o.content);
+        self.reset_for_show();
+    }
+
+    /// State shared by both open paths: a fresh offer, nothing in flight.
+    fn reset_for_show(&mut self) {
         self.visible = true;
         self.submitted = false;
         self.selected = 0;
@@ -168,6 +239,56 @@ impl FreeGatewayRecommendationDialog {
         self.sign_in = None;
         self.selection = None;
         self.sel_width = 0;
+    }
+
+    /// Number of tabs the tab bar renders (1 = no bar).
+    fn tab_count(&self) -> usize {
+        if self.offers.is_empty() {
+            1
+        } else {
+            self.offers.len()
+        }
+    }
+
+    /// Whether the tab bar is drawn (two or more offered gateways).
+    fn has_tabs(&self) -> bool {
+        self.tab_count() > 1
+    }
+
+    /// The active offer (provider + content), when in tabbed mode. The
+    /// sign-in dispatch reads the provider off this.
+    pub fn active_offer(&self) -> Option<&'static GatewayOffer> {
+        self.offers.get(self.active_tab)
+    }
+
+    /// Pre-select the tab of `provider`, when offered. Used by the
+    /// dead-credential re-offer: the gateway that just died should be the
+    /// tab the user lands on, not whichever happens to be first.
+    /// Returns `true` when the tab was found and selected.
+    pub fn select_provider_tab(&mut self, provider: &str) -> bool {
+        if let Some(i) = self.offers.iter().position(|o| o.provider == provider) {
+            self.active_tab = i;
+            self.content = self.offers[i].content;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Cycle to the neighboring tab (question-dialog semantics): selection
+    /// resets to Yes, the stream reveal carries over (the body text is
+    /// shared across tabs by contract — see `GATEWAY_PITCH`), and any drag
+    /// selection dies (its offsets address the old tab's document).
+    fn switch_tab(&mut self, delta: isize) {
+        let count = self.tab_count();
+        if count < 2 {
+            return;
+        }
+        let next = (self.active_tab as isize + delta).rem_euclid(count as isize) as usize;
+        self.active_tab = next;
+        self.content = self.offers[next].content;
+        self.selected = 0;
+        self.clear_selection();
     }
 
     /// Hide and reset the dialog.
@@ -292,24 +413,30 @@ impl FreeGatewayRecommendationDialog {
         // same wrap the renderer draws, so layout = render = hit-test.
         let text_h = self.body_height(inner_w);
 
+        // The tab bar (question-dialog design) reserves a label row plus a
+        // separator row between the top pad and the body. Single-content
+        // mode reserves nothing.
+        let tabs = u16::from(self.has_tabs()) * 2;
+
         match self.phase {
             Phase::Streaming => {
                 // 1 top padding + text + cursor row + 1 bottom padding
-                MIN_HEIGHT + text_h + 1
+                MIN_HEIGHT + tabs + text_h + 1
             }
             Phase::WaitingForResponse => {
-                // 1 top padding + text + 1 gap + question(1) + 1 breathing
-                // gap + options(1) + 1 bottom padding
-                MIN_HEIGHT + text_h + 1 + 1 + 1 + 1
+                // 1 top padding + text + question(1) + 1 breathing gap
+                // + options COLUMN (Yes 1 + No 1) + 1 footer gap
+                // + footer(1) + 1 bottom padding
+                MIN_HEIGHT + tabs + text_h + 1 + 1 + 1 + 2 + 1
             }
             Phase::Connecting => {
                 // 1 top padding + body + hint row + 1 bottom padding
-                MIN_HEIGHT + text_h + 2
+                MIN_HEIGHT + tabs + text_h + 2
             }
             Phase::Authorizing => {
                 // 1 top padding + body + 1 gap + code line + url line
                 // + 1 hint + 1 bottom padding
-                MIN_HEIGHT + text_h + 4
+                MIN_HEIGHT + tabs + text_h + 4
             }
         }
     }
@@ -325,9 +452,24 @@ impl FreeGatewayRecommendationDialog {
         let code = key.code;
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
-        // During streaming, skip navigation keys — only Esc is accepted.
+        // During streaming, skip navigation keys — only Esc and (tabbed
+        // mode) the tab arrows are accepted: the tab bar is part of the
+        // box's chrome in every phase, and the streamed body is shared
+        // across tabs, so switching mid-stream is seamless (no rewind, no
+        // restart) — that seamlessness is WHY the body is shared.
         if self.phase == Phase::Streaming {
-            return matches!(code, KeyCode::Esc);
+            match code {
+                KeyCode::Esc => return true,
+                KeyCode::Left | KeyCode::Char('h') if self.has_tabs() => {
+                    self.switch_tab(-1);
+                    return true;
+                }
+                KeyCode::Right | KeyCode::Char('l') if self.has_tabs() => {
+                    self.switch_tab(1);
+                    return true;
+                }
+                _ => return false,
+            }
         }
 
         // Connecting/Authorizing: no options to drive. Esc YIELDS the box to
@@ -345,12 +487,34 @@ impl FreeGatewayRecommendationDialog {
         }
 
         // WaitingForResponse phase
+        //
+        // Tabbed mode splits the arrows' two jobs: Left/Right switch gateway
+        // tabs (question-dialog semantics), Up/Down move the Yes/No
+        // highlight — the options are a COLUMN, so the vertical arrows drive
+        // them and the lateral arrows never fight the selection. Single-
+        // content mode (no tabs) keeps Left/Right on Yes/No.
         match code {
             KeyCode::Left | KeyCode::Char('h') => {
-                self.selected = 0;
+                if self.has_tabs() {
+                    self.switch_tab(-1);
+                } else {
+                    self.selected = 0;
+                }
                 true
             }
             KeyCode::Right | KeyCode::Char('l') => {
+                if self.has_tabs() {
+                    self.switch_tab(1);
+                } else {
+                    self.selected = 1;
+                }
+                true
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.selected = 0;
+                true
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
                 self.selected = 1;
                 true
             }
@@ -516,18 +680,20 @@ impl FreeGatewayRecommendationDialog {
             return None;
         }
         // Screen y of each document row — the SAME layout the renderer
-        // draws: body rows from the top pad, ONE gap row, then the hard
-        // rows (device code + URL in Authorizing, the question title in
-        // the offer phase).
+        // draws: the tab bar (when drawn) takes the first label row plus a
+        // separator, body rows follow from the top pad, ONE gap row, then
+        // the hard rows (device code + URL in Authorizing, the question
+        // title in the offer phase).
         let text_h = self.body_height(inner_w);
-        let body_start = area.y + 1;
+        let tabs = u16::from(self.has_tabs()) * 2;
+        let body_start = area.y + 1 + tabs;
         let hard_y = body_start + text_h + 1;
         let title_y = {
             let height = self.required_height(area.width).min(area.height);
             // Mirror render's offer branch: footer at height-2, the
-            // question TWO rows above it (one breathing gap before the
-            // Yes/No row at footer-1).
-            (area.y + height.saturating_sub(2)).saturating_sub(3)
+            // question FIVE rows above it (breathing gap + the Yes/No
+            // COLUMN: Yes at footer-3, No at footer-2 + footer gap).
+            (area.y + height.saturating_sub(2)).saturating_sub(5)
         };
         let mut rows: Vec<(u16, usize, usize, u16)> = Vec::with_capacity(doc.len()); // (y, doc_start, len, x_prefix)
         let mut off = 0usize;
@@ -593,6 +759,32 @@ impl FreeGatewayRecommendationDialog {
             return true;
         }
 
+        let inner_x = area.x + 3;
+        let _inner_w = area.width.saturating_sub(5);
+
+        // Click on the tab bar (question-dialog design): " Label " chips on
+        // the first inner row. Streaming and the offer phase — the tab bar
+        // is chrome in every NAVIGABLE phase (keyboard Left/Right switch
+        // tabs mid-stream too; mouse must not lag the keyboard).
+        // Connecting/Authorizing pin the provider whose sign-in is running
+        // (handled above) and never reach this arm.
+        if self.has_tabs() && y_click == area.y + 1 {
+            let mut tx = inner_x;
+            for (i, offer) in self.offers.iter().enumerate() {
+                let label_len = format!(" {} ", offer.content.tab_label).chars().count() as u16;
+                if x >= tx && x < tx + label_len {
+                    if i != self.active_tab {
+                        // Left/Right parity with the keyboard path: reset to
+                        // Yes, drop the selection (old tab's offsets).
+                        self.switch_tab(if i > self.active_tab { 1 } else { -1 });
+                    }
+                    return true;
+                }
+                tx += label_len + 1;
+            }
+            return true;
+        }
+
         // Streaming: presses inside the box anchor a copy selection (the
         // body is drag-copyable from the first revealed character) — a
         // click no longer dismisses; Esc still does. Clicks outside keep
@@ -601,32 +793,25 @@ impl FreeGatewayRecommendationDialog {
             return true;
         }
 
-        // WaitingForResponse: hit-test the Yes/No options and footer
-        let inner_x = area.x + 3;
-        let _inner_w = area.width.saturating_sub(5);
+        // WaitingForResponse: hit-test the Yes/No options and the footer
         let footer_y = area.y + height.saturating_sub(2);
 
         // The question and options are at fixed positions relative to
-        // footer — the question two rows above it (one breathing gap
-        // before the options row), mirroring the render branch.
-        let question_y = footer_y.saturating_sub(3);
-        let options_y = footer_y.saturating_sub(1);
+        // footer — mirroring the render branch: question at footer-5, then
+        // the Yes/No COLUMN (Yes at footer-3, No at footer-2).
+        let yes_y = footer_y.saturating_sub(3);
+        let no_y = footer_y.saturating_sub(2);
 
-        // Click on options row
-        if y_click == options_y {
-            // "Yes" at inner_x
-            if x >= inner_x && x < inner_x + 3 {
-                self.selected = 0;
-                self.submitted = true;
-                return true;
-            }
-            // "No" after gap
-            let no_x = inner_x + 9; // "Yes   " (6) + "◉ " (2) + offset → simplified
-            if x >= no_x && x < no_x + 2 {
-                self.selected = 1;
-                self.submitted = true;
-                return true;
-            }
+        // Click on the Yes/No column (each option's row, indicator + label)
+        if y_click == yes_y && x >= inner_x && x < inner_x + 5 {
+            self.selected = 0;
+            self.submitted = true;
+            return true;
+        }
+        if y_click == no_y && x >= inner_x && x < inner_x + 4 {
+            self.selected = 1;
+            self.submitted = true;
+            return true;
         }
 
         // Click on footer: "enter" or "esc"
@@ -636,17 +821,16 @@ impl FreeGatewayRecommendationDialog {
                 self.submitted = true;
                 return true;
             }
-            let esc_x = inner_x + 5 + 7; // "enter" + " confirm" (8)
+            // Render draws " confirm" spanning inner_x+5..inner_x+13 and
+            // " esc" from inner_x+14 — the hit-test must read the SAME
+            // columns (an overlap here dismissed on clicks meant for the
+            // label text).
+            let esc_x = inner_x + 14;
             if x >= esc_x && x < esc_x + 3 {
                 // "esc"
                 self.visible = false;
                 return true;
             }
-        }
-
-        // Click on question row — no action
-        if y_click == question_y {
-            return true;
         }
 
         true
@@ -669,15 +853,54 @@ impl FreeGatewayRecommendationDialog {
         let inner_w = area.width.saturating_sub(pad + 2);
         let footer_y = area.y + height.saturating_sub(2);
 
+        // Tab bar (question-dialog design): one label row plus a separator
+        // row between the top pad and the body. Tabbed mode only.
+        let tab_y = area.y + 1;
+        let tabs = u16::from(self.has_tabs()) * 2;
+
         // Body: PLAIN text (markdown stripped) wrapped at inner_w — the
         // exact rows `selection_target_at` addresses, in EVERY phase
         // (streaming included): drag-copy works from the first revealed
-        // character.
+        // character. Below the tab bar when tabs are drawn.
         let text_h = self.body_height(inner_w);
-        let text_y = area.y + 1;
+        let text_y = area.y + 1 + tabs;
 
         let rows = self.body_rows(inner_w);
         let base_style = Style::default().fg(rgba_color(theme.text));
+
+        // Tab bar labels (question-dialog design): " Label " chips on the
+        // first inner row, the active one bold in the accent color, the
+        // rest muted; a blank separator row divides bar and body. Drawn in
+        // EVERY phase (the bar is part of the box's chrome, and the shared
+        // stream body makes a mid-stream switch seamless). Hit-tested in
+        // the offer phase only — Connecting/Authorizing pin the provider
+        // whose sign-in is running.
+        if self.has_tabs() {
+            let mut tx = inner_x;
+            for (i, offer) in self.offers.iter().enumerate() {
+                let label = format!(" {} ", offer.content.tab_label);
+                let style = if i == self.active_tab {
+                    Style::default()
+                        .fg(rgba_color(theme.accent))
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(rgba_color(theme.text_muted))
+                };
+                draw_text_line(
+                    buf,
+                    &label,
+                    tx,
+                    tab_y,
+                    inner_w.saturating_sub(tx - inner_x),
+                    style,
+                );
+                tx += label.chars().count() as u16 + 1;
+            }
+            // Separator row: intentionally blank — the wall background
+            // already separates the bar from the body; the ROW is what the
+            // required-height budget reserves (tabs = 2).
+        }
+
         let sel_style = Style::default()
             .fg(rgba_color(theme.background_panel))
             .bg(rgba_color(theme.text))
@@ -740,9 +963,15 @@ impl FreeGatewayRecommendationDialog {
             let hint_y = text_y + text_h + 1;
             let box_bottom = area.y + height.saturating_sub(1);
             if hint_y <= box_bottom {
+                // Provider-neutral: the ACTIVE tab's gateway is the one
+                // whose device flow is starting (GitHub tab opted in →
+                // "connecting to the GitHub Copilot gateway…").
+                let gateway = self
+                    .active_offer()
+                    .map_or("gateway", |offer| offer.content.tab_label);
                 draw_text_line(
                     buf,
-                    "connecting to the Charm gateway…",
+                    &format!("connecting to the {gateway} gateway…"),
                     inner_x,
                     hint_y,
                     inner_w,
@@ -849,10 +1078,14 @@ impl FreeGatewayRecommendationDialog {
                 );
             }
         } else {
-            // Question + options — ONE breathing gap row between the
-            // question and the Yes/No row (footer-2 stays empty).
-            let question_y = footer_y.saturating_sub(3);
-            let options_y = footer_y.saturating_sub(1);
+            // Question + Yes/No COLUMN — one breathing gap row between the
+            // question and the options, and the options stacked vertically
+            // (Yes above No) so the vertical arrows drive them and the
+            // lateral arrows stay free for tab switching. (footer-1 holds
+            // the gap between No and the footer.)
+            let question_y = footer_y.saturating_sub(5);
+            let yes_y = footer_y.saturating_sub(3);
+            let no_y = footer_y.saturating_sub(2);
 
             // Question text — drag-copyable (the last hard row of the
             // copy document in the offer phase).
@@ -889,7 +1122,9 @@ impl FreeGatewayRecommendationDialog {
                 }
             }
 
-            // Options: "Yes   No" (matching permission.rs style)
+            // Options: a Yes/No COLUMN (Yes above No), both at the inner
+            // edge — the question-dialog option column, so Up/Down drives
+            // the highlight and Left/Right switch tabs in tabbed mode.
             let yes_selected = self.selected == 0;
             let no_selected = self.selected == 1;
 
@@ -900,29 +1135,28 @@ impl FreeGatewayRecommendationDialog {
             } else {
                 Style::default().fg(rgba_color(theme.text_muted))
             };
-            draw_text_line(buf, yes_indicator, inner_x, options_y, 2, yes_style);
+            draw_text_line(buf, yes_indicator, inner_x, yes_y, 2, yes_style);
             let yes_label_style = if yes_selected {
                 Style::default().fg(rgba_color(theme.success))
             } else {
                 Style::default().fg(rgba_color(theme.text_muted))
             };
-            draw_text_line(buf, "Yes", inner_x + 2, options_y, 3, yes_label_style);
+            draw_text_line(buf, "Yes", inner_x + 2, yes_y, 3, yes_label_style);
 
-            // No
-            let no_x = inner_x + 9; // indicator(2) + "Yes"(3) + gap(4)
+            // No — own row, directly below Yes
             let no_indicator = if no_selected { "\u{1F7B4} " } else { "  " };
             let no_style = if no_selected {
                 Style::default().fg(rgba_color(theme.error))
             } else {
                 Style::default().fg(rgba_color(theme.text_muted))
             };
-            draw_text_line(buf, no_indicator, no_x, options_y, 2, no_style);
+            draw_text_line(buf, no_indicator, inner_x, no_y, 2, no_style);
             let no_label_style = if no_selected {
                 Style::default().fg(rgba_color(theme.error))
             } else {
                 Style::default().fg(rgba_color(theme.text_muted))
             };
-            draw_text_line(buf, "No", no_x + 2, options_y, 2, no_label_style);
+            draw_text_line(buf, "No", inner_x + 2, no_y, 2, no_label_style);
 
             // Footer
             let bg = rgba_color(theme.background_panel);
@@ -1013,9 +1247,15 @@ fn wrap_plain(text: &str, width: u16) -> Vec<String> {
 mod tests {
     use super::*;
 
+    fn test_theme() -> Theme {
+        crate::theme::ThemeRegistry::new().default_theme().clone()
+    }
+
     /// Sample content for exercising the generic dialog (the shipped
-    /// `PLACEHOLDER` is intentionally empty).
+    /// `PLACEHOLDER` is intentionally empty). Not part of [`OFFERS`] —
+    /// the dialog must stay generic over ANY content.
     const SAMPLE: GatewayRecommendationContent = GatewayRecommendationContent {
+        tab_label: "Sample",
         title: "Use the sample free gateway?",
         stream_text: "Sample recommendation body used to exercise the generic dialog. \
             It spans several sentences so streaming advances over multiple frames.",
@@ -1044,8 +1284,9 @@ mod tests {
         d.phase = Phase::WaitingForResponse;
         d.stream_chars = d.content.stream_text.chars().count();
         let h = d.required_height(80);
-        // text + gap + question + options + padding
-        assert!(h > MIN_HEIGHT + 1 + 1);
+        // Two body rows + question + question gap + options + footer gap
+        // + footer + top/bottom padding.
+        assert_eq!(h, 10);
     }
 
     #[test]
@@ -1263,7 +1504,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 80, 24);
         let height = d.required_height(area.width).min(area.height);
-        let question_y = area.y + height.saturating_sub(2) - 3; // footer - 3 (gap before Yes/No)
+        let question_y = area.y + height.saturating_sub(2) - 5; // footer - 5 (question row)
         let Some(anchor) = d.selection_target_at(5, question_y, area) else {
             panic!("the title row must be hit-testable in the offer phase");
         };
@@ -1310,7 +1551,7 @@ mod tests {
         let area = Rect::new(0, 0, 80, 24);
         let inner_w = area.width.saturating_sub(5);
         let height = d.required_height(area.width).min(area.height);
-        let question_y = area.y + height.saturating_sub(2) - 3; // footer - 3 (gap before Yes/No)
+        let question_y = area.y + height.saturating_sub(2) - 5; // footer - 5 (question row)
         // Anchor mid-body (row 0, past the first chars)...
         let Some(anchor) = d.selection_target_at(10, 1, area) else {
             panic!("the body band must be hit-testable in the offer phase");
@@ -1377,5 +1618,199 @@ mod tests {
             !d.has_selection_anchor(),
             "the anchor must die with the dismissal too"
         );
+    }
+
+    /// REGRESSION (tabbed offer): with two or more offered gateways the
+    /// arrows SPLIT jobs — Left/Right switch tabs (question-dialog
+    /// semantics), Up/Down drive the Yes/No column. The stream reveal is
+    /// shared across tabs, so a switch never rewinds it, and the Yes/No
+    /// selection resets to Yes.
+    #[test]
+    fn tabbed_offer_switches_tabs_without_touching_the_stream() {
+        let mut d = FreeGatewayRecommendationDialog::new();
+        d.show_offers(&OFFERS);
+        assert!(d.has_tabs(), "fixture: OFFERS must render a tab bar");
+        assert_eq!(
+            d.active_offer().unwrap().provider,
+            "charm",
+            "tab order = OFFERS order"
+        );
+        d.stream_chars = 40; // mid-stream reveal
+        d.phase = Phase::WaitingForResponse;
+
+        // Right → next tab; the reveal carries over, the selection resets.
+        d.selected = 1;
+        assert!(d.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)));
+        assert_eq!(d.active_offer().unwrap().provider, "copilot");
+        assert_eq!(d.active_offer().unwrap().content.title, GITHUB.title);
+        assert_eq!(
+            d.stream_chars, 40,
+            "the shared body must not rewind on a switch"
+        );
+        assert_eq!(
+            d.selected, 0,
+            "a tab switch resets the Yes/No selection to Yes"
+        );
+
+        // Left wraps back around.
+        assert!(d.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)));
+        assert_eq!(d.active_offer().unwrap().provider, "charm");
+
+        // Up/Down drive the COLUMN; Left/Right no longer touch it.
+        d.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(d.selected, 1, "Down moves the highlight to No");
+        d.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(d.selected, 0, "Up moves the highlight back to Yes");
+        d.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(
+            d.active_offer().unwrap().provider,
+            "copilot",
+            "Right switches tabs, never the Yes/No selection"
+        );
+        assert_eq!(d.selected, 0);
+    }
+
+    /// A tab switch drops any live drag selection: its char offsets address
+    /// the OLD tab's copy document, and carrying them over would silently
+    /// copy the new tab's text.
+    #[test]
+    fn tab_switch_drops_the_drag_selection() {
+        let mut d = FreeGatewayRecommendationDialog::new();
+        d.show_offers(&OFFERS);
+        d.stream_chars = d.content.stream_text.chars().count();
+        d.phase = Phase::WaitingForResponse;
+
+        let area = Rect::new(0, 0, 80, 24);
+        // Tabbed offer: body starts after the tab bar (label row + separator).
+        let body_y = 1 + 2;
+        let Some(anchor) = d.selection_target_at(10, body_y, area) else {
+            panic!("the body band must be hit-testable in the tabbed offer");
+        };
+        d.begin_selection(anchor, area.width.saturating_sub(5));
+        let Some(end) = d.selection_target_at(20, body_y, area) else {
+            panic!("the drag end must be hit-testable too");
+        };
+        d.extend_selection(end);
+        assert!(d.has_selection(), "fixture needs a live selection");
+
+        d.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert!(
+            !d.has_selection(),
+            "a tab switch must drop the old tab's offsets, not copy the new tab's text"
+        );
+    }
+
+    /// Single-content mode (no tab bar) keeps the old arrow map: Left/Right
+    /// still drive Yes/No — the split only exists when tabs exist.
+    #[test]
+    fn single_content_mode_keeps_the_old_arrow_map() {
+        let mut d = FreeGatewayRecommendationDialog::new();
+        d.show(&SAMPLE);
+        d.phase = Phase::WaitingForResponse;
+        assert!(!d.has_tabs());
+
+        d.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(d.selected, 1, "Right still selects No without tabs");
+        d.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(d.selected, 0, "Left still selects Yes without tabs");
+        d.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(d.selected, 1, "Down also drives the column in single mode");
+    }
+
+    /// Mouse/keyboard parity: a click on a tab chip switches tabs DURING
+    /// the Streaming phase too — the tab bar is chrome in every navigable
+    /// phase, and the shared body makes the switch seamless.
+    #[test]
+    fn mouse_click_switches_tabs_mid_stream() {
+        use cosh_tui::core::types::{MouseButton, MouseEventType, MouseModifiers};
+
+        let mut d = FreeGatewayRecommendationDialog::new();
+        d.show_offers(&OFFERS);
+        d.stream_chars = 30; // mid-stream reveal
+        d.phase = Phase::Streaming;
+
+        let area = Rect::new(0, 0, 80, 24);
+        // The second tab's chip: first inner row, after " Charm " + gap.
+        let tab_x = 3 + format!(" {} ", OFFERS[0].content.tab_label).chars().count() as u16 + 1;
+        let click = MouseEvent::new(
+            MouseEventType::Up,
+            MouseButton::Left,
+            tab_x,
+            area.y + 1,
+            MouseModifiers::none(),
+        );
+        assert!(
+            d.handle_mouse(&click, area, &test_theme()),
+            "the tab chip must claim its click"
+        );
+        assert_eq!(
+            d.active_offer().unwrap().provider,
+            "copilot",
+            "a mid-stream click on the GitHub chip must switch tabs"
+        );
+        assert_eq!(d.stream_chars, 30, "the shared body must not rewind");
+        assert!(d.visible, "a tab click is navigation, never dismissal");
+    }
+
+    /// REGRESSION (geometry drift): the question row sits at footer-5 — a
+    /// regression moving it would otherwise go uncaught because the
+    /// hit-test clamps out-of-band rows back into the options. The click
+    /// ON the real row is swallowed (no action), a row BELOW it (the gap)
+    /// is not claimed by the options either.
+    #[test]
+    fn the_question_row_is_hit_tested_at_footer_minus_five() {
+        let mut d = FreeGatewayRecommendationDialog::new();
+        d.show_offers(&OFFERS);
+        d.phase = Phase::WaitingForResponse;
+
+        let area = Rect::new(0, 0, 80, 24);
+        let footer_y = area.y + d.required_height(area.width).min(area.height) - 2;
+        let question_y = footer_y - 5;
+
+        // The exact question row: inside the box, no action fires…
+        let click = cosh_tui::core::types::MouseEvent::new(
+            cosh_tui::core::types::MouseEventType::Up,
+            cosh_tui::core::types::MouseButton::Left,
+            10,
+            question_y,
+            cosh_tui::core::types::MouseModifiers::none(),
+        );
+        assert!(d.handle_mouse(&click, area, &test_theme()));
+        assert!(!d.submitted, "the question row never submits");
+        assert!(d.visible, "…and it never dismisses the box either");
+    }
+
+    /// The streamed body is ONE generic message shared by every offered
+    /// gateway — the tabs (not the prose) carry which gateway is which, so
+    /// a mid-stream switch is seamless and the copy mentions both by name.
+    #[test]
+    fn the_streamed_pitch_is_shared_and_covers_every_offered_gateway() {
+        assert!(
+            OFFERS.len() >= 2,
+            "the tabbed offer needs at least two gateways"
+        );
+        let pitch = OFFERS[0].content.stream_text;
+        for offer in OFFERS {
+            assert_eq!(
+                offer.content.stream_text, pitch,
+                "every tab shares the same body — a switch must never restart the reveal"
+            );
+            assert!(
+                !offer.content.tab_label.is_empty(),
+                "every tab needs a label for the tab bar"
+            );
+        }
+        for name in ["Charm", "GitHub Copilot"] {
+            assert!(
+                pitch.contains(name),
+                "the generic pitch must cover {name} by name"
+            );
+        }
+        for pair in OFFERS.windows(2) {
+            assert_ne!(
+                pair[0].provider, pair[1].provider,
+                "two tabs must never dispatch the same provider"
+            );
+        }
     }
 }

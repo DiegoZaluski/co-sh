@@ -180,9 +180,9 @@ impl App {
         // a provider without credentials asks ONCE whether to use the free
         // gateway. The message is parked and only replayed on opt-in;
         // Esc closes without recording anything.
-        if let Some(content) = self.gateway_recommendation_content(false) {
+        if let Some(offers) = self.gateway_recommendation_offers(false) {
             self.pending_gateway_message = Some(msg);
-            self.free_gateway_dialog.show(content);
+            self.free_gateway_dialog.show_offers(offers);
             return;
         }
 

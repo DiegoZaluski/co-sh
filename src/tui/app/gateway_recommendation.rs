@@ -1,8 +1,9 @@
 use super::{App, AppMode};
 
-use crate::routes::session::free_gateway_recommendation::{self, GatewayRecommendationContent};
+use crate::routes::session::free_gateway_recommendation::{GatewayOffer, OFFERS};
 use crate::ui::toast::{ToastOptions, ToastVariant};
 
+use cosh_sdk::connector::copilot_oauth;
 use cosh_sdk::connector::openai_compatible::charm_oauth::{self, CharmOAuthConfig};
 use cosh_sdk::connector::{
     get_provider_env_var, has_api_key, invalidate_api_key, is_local_provider,
@@ -10,20 +11,41 @@ use cosh_sdk::connector::{
 
 use tokio::sync::mpsc::UnboundedSender;
 
-/// Messages from the background Charm device sign-in into the UI thread.
+/// Messages from a background gateway device sign-in into the UI thread.
+/// Every variant carries the provider id it signed in for — the UI thread
+/// stays stateless about WHICH flow is running (no extra App field to
+/// forget to reset), and the `Authorized` arm switches the live config to
+/// exactly the provider whose token just landed in the keyring.
 #[derive(Debug)]
 pub(super) enum GatewaySignInEvent {
     /// The device transaction started: hold the verification URL and user
     /// code on the App so they stay VISIBLE (spinner line) for as long as
     /// the sign-in runs — a transient toast is not enough; the Charm page
     /// asks for the code after login, minutes later.
-    Started { url: String, user_code: String },
+    Started {
+        provider: &'static str,
+        url: String,
+        user_code: String,
+    },
     /// The token is stored in the OS keyring; the parked message can be
     /// replayed through the newly authorized gateway.
-    Authorized,
+    Authorized { provider: &'static str },
     /// Sign-in failed, was denied or crashed; the parked message goes back
     /// to the prompt untouched.
-    Failed(String),
+    Failed {
+        provider: &'static str,
+        error: String,
+    },
+}
+
+/// The display name of a provider id, for toasts. Known providers map to
+/// their product name; unknown ones surface the raw id (never a blank).
+fn provider_display(provider: &str) -> String {
+    match provider {
+        "charm" => "Charm".into(),
+        "copilot" => "GitHub Copilot".into(),
+        other => other.into(),
+    }
 }
 
 impl App {
@@ -45,6 +67,17 @@ impl App {
     /// stores the answer itself (`declined` / `authorized`): a plain
     /// existence check cannot distinguish "never ask again" from "already
     /// using the gateway, may re-offer if its credential dies".
+    ///
+    /// The marker is INSTALL-WIDE and provider-neutral by contract: one
+    /// offer per install, whichever gateway the user picked. Authorizing
+    /// GitHub Copilot mutes the first-run offer for Charm too — the tabs
+    /// exist so the user picks freely at offer time, not so the offer
+    /// replays once per gateway. The `gateway_died` gate re-opens the offer
+    /// for ANY offered provider whose credential dies (the current
+    /// provider's sign-in is the repair). One accepted edge: an install
+    /// that authorized a gateway but then points a KEYLESS non-gateway
+    /// provider gets raw send failures, not a re-offer — the one-time
+    /// contract wins over re-prompting.
     const GATEWAY_MARKER_DECLINED: &[u8] = b"declined";
     const GATEWAY_MARKER_AUTHORIZED: &[u8] = b"authorized";
 
@@ -68,24 +101,25 @@ impl App {
         }
     }
 
-    /// Which gateway recommendation to offer, if any.
+    /// Which gateway recommendations to offer (one per tab), if any.
     ///
     /// Two offer paths: (1) the active provider is keyless — the primary
     /// first-run scenario; (2) the provider HAS credentials but just failed
     /// with an auth-shaped error (`auth_failure`) — a broken or revoked key
     /// makes the free gateway the sensible fallback. The user's own key is
-    /// NEVER touched on path 2; only the Charm flow clears its own tokens.
-    pub(in crate::app) fn gateway_recommendation_content(
+    /// NEVER touched on path 2; a sign-in only replaces the tokens of the
+    /// provider it signed in to.
+    pub(in crate::app) fn gateway_recommendation_offers(
         &self,
         auth_failure: bool,
-    ) -> Option<&'static GatewayRecommendationContent> {
-        if self.charm_signing_in || self.charm_declined {
+    ) -> Option<&'static [GatewayOffer]> {
+        if self.gateway_signing_in || self.gateway_declined {
             return None;
         }
         // The one-time offer is ONE per install: an answered dialog (decline
         // or opt-in) burned the marker, and it must never come back — not
         // on the next launch, not on a later error. Auth-shaped failures
-        // re-offer ONLY when the Charm credential itself is dead (cleared
+        // re-offer ONLY when the gateway credential itself is dead (cleared
         // below); a healthy install stays silent.
         if Self::gateway_offer_marker_exists() && !auth_failure {
             return None;
@@ -95,7 +129,7 @@ impl App {
             return None;
         }
         if !has_api_key(provider) || auth_failure {
-            return Some(&free_gateway_recommendation::CHARM);
+            return Some(OFFERS);
         }
         None
     }
@@ -112,17 +146,17 @@ impl App {
     /// Enter on the free gateway recommendation dialog.
     ///
     /// Decline: record the choice (never ask again this run) and put the
-    /// parked message back. Opt-in: run the Charm device sign-in in the
-    /// background — the parked message replays once the token is in the
+    /// parked message back. Opt-in: run the ACTIVE tab's device sign-in in
+    /// the background — the parked message replays once the token is in the
     /// keyring, or goes back untouched on failure.
     pub(in crate::app) fn commit_gateway_choice(&mut self) {
         let opted_in = self.free_gateway_dialog.selected == 0;
         if !opted_in {
             self.free_gateway_dialog.hide();
-            self.charm_declined = true;
+            self.gateway_declined = true;
             // The decline is a FINAL answer, not a per-run preference: burn
-            // the one-time marker so the offer never comes back after a
-            // reboot (the in-memory latch alone dies with the process —
+            // the one-time marker so the offer never comes back after an
+            // app restart (the in-memory latch alone dies with the process —
             // that regression let the box reappear on every launch).
             self.burn_gateway_offer_marker(Self::GATEWAY_MARKER_DECLINED);
             self.restore_pending_gateway_message();
@@ -136,10 +170,19 @@ impl App {
         }
 
         // Opted in: keep the box EXACTLY where it is (Connecting phase —
-        // the options rows give way to a hint) and start the device flow.
-        // Hiding here would visibly close and reopen it a frame later.
+        // the options rows give way to a hint) and start the device flow
+        // for the ACTIVE tab's provider. Hiding here would visibly close
+        // and reopen it a frame later.
+        let Some(offer) = self.free_gateway_dialog.active_offer() else {
+            // Single-content mode (no offers): nothing to dispatch on —
+            // restore the message instead of silently dropping it.
+            self.free_gateway_dialog.hide();
+            self.restore_pending_gateway_message();
+            return;
+        };
         self.free_gateway_dialog.begin_connecting();
-        self.charm_signing_in = true;
+        self.gateway_signing_in = true;
+        let provider = offer.provider;
         let tx = self.gateway_event_tx.clone();
         // The shared agent runtime: the UI thread has no ambient tokio
         // context, and the sign-in must survive any turn teardown.
@@ -148,18 +191,19 @@ impl App {
         runtime.spawn(async move {
             // The inner spawn converts a panic inside the sign-in future into
             // a JoinError — and therefore a Failed event — instead of leaving
-            // `charm_signing_in` stuck true and the parked message lost.
+            // `gateway_signing_in` stuck true and the parked message lost.
             let inner_tx = tx.clone();
-            if let Err(join_error) = tokio::spawn(charm_sign_in(inner_tx)).await {
-                let _ = tx.send(GatewaySignInEvent::Failed(format!(
-                    "the sign-in task crashed: {join_error}"
-                )));
+            if let Err(join_error) = tokio::spawn(gateway_sign_in(provider, inner_tx)).await {
+                let _ = tx.send(GatewaySignInEvent::Failed {
+                    provider,
+                    error: format!("the sign-in task crashed: {join_error}"),
+                });
             }
         });
     }
 
-    /// Drain Charm sign-in outcomes from the shared runtime. Called once per
-    /// frame, next to the update pump.
+    /// Drain gateway sign-in outcomes from the shared runtime. Called once
+    /// per frame, next to the update pump.
     pub(in crate::app) fn pump_gateway_events(&mut self) {
         // A gateway-authorized model pick resolved since the last frame
         // (commit or cancel popped the picker): the parked message can
@@ -173,7 +217,7 @@ impl App {
             if let Some(msg) = self.pending_gateway_message.take() {
                 if idle_session && !self.dialog.visible() {
                     self.toast_state.show(ToastOptions {
-                        title: Some("Charm gateway authorized".into()),
+                        title: Some("Gateway authorized".into()),
                         message: "Sending your message.".into(),
                         variant: ToastVariant::Success,
                         duration_ms: 6000,
@@ -185,7 +229,7 @@ impl App {
                     // nothing fires from the wrong route.
                     self.pending_gateway_message = Some(msg);
                     self.toast_state.show(ToastOptions {
-                        title: Some("Charm gateway authorized".into()),
+                        title: Some("Gateway authorized".into()),
                         message: "Resend your message to use the gateway.".into(),
                         variant: ToastVariant::Success,
                         duration_ms: 8000,
@@ -195,7 +239,11 @@ impl App {
         }
         while let Ok(event) = self.gateway_event_rx.try_recv() {
             match event {
-                GatewaySignInEvent::Started { url, user_code } => {
+                GatewaySignInEvent::Started {
+                    provider: _,
+                    url,
+                    user_code,
+                } => {
                     // The dialog ITSELF becomes the sign-in display: its
                     // Yes/No options give way to the device code + URL,
                     // drag-copyable, for the whole sign-in. No toast — the
@@ -208,8 +256,8 @@ impl App {
                         self.free_gateway_dialog.begin_authorizing(&url, &user_code);
                     }
                 }
-                GatewaySignInEvent::Authorized => {
-                    self.charm_signing_in = false;
+                GatewaySignInEvent::Authorized { provider } => {
+                    self.gateway_signing_in = false;
                     // The offer was ANSWERED (opt-in → success): record it
                     // so a later boot knows the install already uses the
                     // gateway — re-offers are then reserved for a DEAD
@@ -245,7 +293,7 @@ impl App {
                     let taking_over =
                         idle_session && (show_models || self.pending_gateway_message.is_some());
                     if taking_over {
-                        self.llm_config.provider = "charm".into();
+                        self.llm_config.provider = provider.into();
                         self.llm_config.model = None;
                         // The old reasoning belongs to the previous model —
                         // a fresh gateway default starts unscoped.
@@ -257,6 +305,7 @@ impl App {
                     // reply with the provider default model, and the user's
                     // pick landed too late to matter.
                     self.gateway_model_pick = show_models && self.pending_gateway_message.is_some();
+                    let title = format!("{} authorized", provider_display(provider));
                     if show_models {
                         // Straight into model selection: the gateway just
                         // came online, so its models are the natural next
@@ -272,7 +321,7 @@ impl App {
                         Some(msg) if show_models => {
                             self.pending_gateway_message = Some(msg);
                             self.toast_state.show(ToastOptions {
-                                title: Some("Charm gateway authorized".into()),
+                                title: Some(title.clone()),
                                 message:
                                     "Token saved to your OS keyring. Pick a model to send your message."
                                         .into(),
@@ -282,7 +331,7 @@ impl App {
                         }
                         Some(msg) if idle_session => {
                             self.toast_state.show(ToastOptions {
-                                title: Some("Charm gateway authorized".into()),
+                                title: Some(title.clone()),
                                 message: "Token saved to your OS keyring. Sending your message."
                                     .into(),
                                 variant: ToastVariant::Success,
@@ -304,7 +353,7 @@ impl App {
                                 );
                             }
                             self.toast_state.show(ToastOptions {
-                                title: Some("Charm gateway authorized".into()),
+                                title: Some(title),
                                 message,
                                 variant: ToastVariant::Success,
                                 duration_ms: 8000,
@@ -312,13 +361,13 @@ impl App {
                         }
                     }
                 }
-                GatewaySignInEvent::Failed(message) => {
-                    self.charm_signing_in = false;
+                GatewaySignInEvent::Failed { provider, error } => {
+                    self.gateway_signing_in = false;
                     self.free_gateway_dialog.hide();
                     self.restore_pending_gateway_message();
                     self.toast_state.show(ToastOptions {
-                        title: Some("Charm sign-in failed".into()),
-                        message,
+                        title: Some(format!("{} sign-in failed", provider_display(provider))),
+                        message: error,
                         variant: ToastVariant::Error,
                         duration_ms: 10000,
                     });
@@ -334,19 +383,20 @@ impl App {
     ///    whatever the error shape. This is the "at least once during the
     ///    app's life" guarantee: a user whose very first send fails sees the
     ///    recommendation, not just a raw error.
-    /// 2. A DEAD Charm credential on an install already using the gateway —
-    ///    a revoked/expired token is exactly what re-running the sign-in
-    ///    fixes, so the offer may come back ONLY for that. Transient errors
-    ///    (network, 5xx) must not nag, and heuristics NEVER delete stored
-    ///    credentials: a "billing" substring in an error must not wipe a
-    ///    valid keyring entry (that regression silently destroyed working
-    ///    Charm credentials). Re-running the opt-in overwrites the keyring
-    ///    entries — that IS the recovery path, destructive cleanup is not.
+    /// 2. A DEAD gateway credential on an install already using one of the
+    ///    offered gateways — a revoked/expired token is exactly what
+    ///    re-running that provider's sign-in fixes, so the offer may come
+    ///    back ONLY for that. Transient errors (network, 5xx) must not nag,
+    ///    and heuristics NEVER delete stored credentials: a "billing"
+    ///    substring in an error must not wipe a valid keyring entry (that
+    ///    regression silently destroyed working Charm credentials).
+    ///    Re-running the opt-in overwrites the keyring entries — that IS
+    ///    the recovery path, destructive cleanup is not.
     ///
     /// A running local server needs no credentials and must never be offered
     /// a cloud replacement because of one bad response. The user's own key
-    /// is NEVER deleted here; the Charm flow's save step replaces only its
-    /// own tokens.
+    /// is NEVER deleted here; a sign-in's save step replaces only its own
+    /// provider's tokens.
     pub(in crate::app) fn maybe_offer_gateway_on_error(&mut self, error: &str) {
         if !self.gateway_dialog_route() || self.free_gateway_dialog.visible {
             return;
@@ -356,11 +406,14 @@ impl App {
         }
         let auth_failure = is_auth_shaped_error(error);
         // An already-answered install stays quiet UNLESS this install uses
-        // the gateway itself (marker = authorized) AND the error looks like
-        // its credential died — the one state re-running the sign-in fixes.
+        // one of the offered gateways itself (marker = authorized) AND the
+        // error looks like its credential died — the one state re-running
+        // that sign-in fixes.
         let marker = Self::gateway_offer_marker();
         let gateway_died = marker.as_deref() == Some(Self::GATEWAY_MARKER_AUTHORIZED)
-            && self.llm_config.provider == "charm"
+            && OFFERS
+                .iter()
+                .any(|offer| offer.provider == self.llm_config.provider)
             && auth_failure;
         if marker.is_some() && !gateway_died {
             return;
@@ -369,18 +422,25 @@ impl App {
         // it — an Esc'd-but-polling flow (the box dismissed, the device
         // transaction alive) would otherwise get its flow disturbed by a
         // 401 that arrived mid-poll.
-        if self.charm_signing_in {
+        if self.gateway_signing_in {
             return;
         }
         // `first_offer` widens the keyless-only gate: the one-time offer is
         // about REACHING the user once, not about their key state. A dead
         // gateway credential re-opens the offer through the same gate.
         let force_open = auth_failure && marker.is_none() || gateway_died;
-        if let Some(content) = self.gateway_recommendation_content(force_open) {
+        if let Some(offers) = self.gateway_recommendation_offers(force_open) {
             // The marker burns on the ANSWER (decline → `declined`, opt-in
             // success → `authorized`), never on merely showing the box: a
             // dialog closed by Esc/disk-error leaves the offer due.
-            self.free_gateway_dialog.show(content);
+            self.free_gateway_dialog.show_offers(offers);
+            // A dead-credential re-offer lands on the tab of the gateway
+            // that just died — the one the user needs to re-run — not on
+            // whichever tab happens to be first.
+            if gateway_died {
+                self.free_gateway_dialog
+                    .select_provider_tab(&self.llm_config.provider);
+            }
         }
     }
 }
@@ -410,48 +470,40 @@ fn is_auth_shaped_error(error: &str) -> bool {
     .any(|marker| error.contains(marker))
 }
 
-/// Run the Charm device sign-in end to end: start the transaction, surface
-/// the verification URL + user code (manual fallback), hand the URL to the
-/// system browser, poll until approved and store the resulting tokens in the
-/// OS keyring. Runs on the shared agent runtime — keyring access is blocking
-/// and must stay off the UI thread.
-async fn charm_sign_in(tx: UnboundedSender<GatewaySignInEvent>) {
-    let result = charm_sign_in_inner(&tx).await;
+/// Run the ACTIVE gateway's device sign-in end to end: start the
+/// transaction, surface the verification URL + user code (manual fallback),
+/// hand the URL to the system browser, poll until approved and store the
+/// resulting tokens in the OS keyring under the provider's own env-var
+/// name. Runs on the shared agent runtime — keyring access is blocking and
+/// must stay off the UI thread.
+async fn gateway_sign_in(provider: &'static str, tx: UnboundedSender<GatewaySignInEvent>) {
+    let result = gateway_sign_in_inner(provider, &tx).await;
     let _ = tx.send(match result {
-        Ok(()) => GatewaySignInEvent::Authorized,
         // OAuthError is redacted (no request URLs, no secrets), so its
         // Display form is safe to surface verbatim.
-        Err(error) => GatewaySignInEvent::Failed(error),
+        Err(error) => GatewaySignInEvent::Failed { provider, error },
+        Ok(()) => GatewaySignInEvent::Authorized { provider },
     });
 }
 
-async fn charm_sign_in_inner(tx: &UnboundedSender<GatewaySignInEvent>) -> Result<(), String> {
-    let config = CharmOAuthConfig::default();
-    let auth = charm_oauth::begin(&config)
-        .await
-        .map_err(|error| error.to_string())?;
-    // Manual fallback FIRST: the browser launch below is best-effort and may
-    // never open (headless, SSH, sandboxed). The user needs the URL and the
-    // device code regardless.
-    let _ = tx.send(GatewaySignInEvent::Started {
-        url: auth.verification_url.to_string(),
-        user_code: auth.user_code.clone(),
-    });
-    let url = auth.verification_url.to_string();
-    let _ = std::thread::Builder::new()
-        .name("oauth-browser".into())
-        .spawn(move || {
-            let _ = webbrowser::open(url.as_str());
-        });
-    let tokens = charm_oauth::poll_and_exchange(auth)
-        .await
-        .map_err(|error| error.to_string())?;
+async fn gateway_sign_in_inner(
+    provider: &'static str,
+    tx: &UnboundedSender<GatewaySignInEvent>,
+) -> Result<(), String> {
+    let tokens = match provider {
+        "charm" => charm_device_sign_in(tx).await?,
+        "copilot" => copilot_device_sign_in(tx).await?,
+        other => return Err(format!("no device sign-in flow for provider {other:?}")),
+    };
 
     // Store under the same env-var name the provider table resolves, so
-    // `get_api_key("charm")` picks the access token up with no other wiring.
-    let env_var = get_provider_env_var("charm").unwrap_or("CHARM_API_KEY");
+    // `get_api_key(provider)` picks the access token up with no other wiring.
+    let env_var = match get_provider_env_var(provider) {
+        Some(env_var) => env_var.to_string(),
+        None => format!("{}_API_KEY", provider.to_uppercase()),
+    };
     if let Err(error) =
-        super::providers::save_provider_api_key(env_var, tokens.access_token().expose())
+        super::providers::save_provider_api_key(&env_var, tokens.access_token().expose())
     {
         return Err(format!(
             "could not store the token in the OS keyring: {error}"
@@ -460,15 +512,78 @@ async fn charm_sign_in_inner(tx: &UnboundedSender<GatewaySignInEvent>) -> Result
     // Preserve the refresh token under its own entry: the access token WILL
     // expire (and Charm's exchange may even return one born expired when it
     // omits both expiries), and this is the credential a future automatic
-    // refresh — or manual recovery — needs.
-    if let Some(refresh) = tokens.refresh_token() {
-        let _ = super::providers::save_provider_api_key(
-            &format!("{env_var}_REFRESH"),
-            refresh.expose(),
+    // refresh — or manual recovery — needs. A failed write is not fatal
+    // (the access token works now) but must not vanish silently: without
+    // the refresh entry the session is doomed to a manual re-sign-in with
+    // no diagnostic anywhere.
+    if let Some(refresh) = tokens.refresh_token()
+        && let Err(error) =
+            super::providers::save_provider_api_key(&format!("{env_var}_REFRESH"), refresh.expose())
+    {
+        log::warn!(
+            "gateway sign-in: could not store the {env_var}_REFRESH token in the OS keyring: {error}"
         );
     }
     // Drop the cached keyring MISS so the very next send resolves the fresh
     // token instead of the remembered absence.
-    invalidate_api_key(env_var);
+    invalidate_api_key(&env_var);
     Ok(())
+}
+
+/// Charm's device sign-in. Charm's device protocol is its own (JSON bodies,
+/// an exchange step) — the provider-specific adapter owns it; this only
+/// surfaces the codes and drives the browser.
+async fn charm_device_sign_in(
+    tx: &UnboundedSender<GatewaySignInEvent>,
+) -> Result<cosh_sdk::connector::oauth::TokenSet, String> {
+    let config = CharmOAuthConfig::default();
+    let auth = charm_oauth::begin(&config)
+        .await
+        .map_err(|error| error.to_string())?;
+    announce_device_transaction(tx, "charm", auth.verification_url.as_str(), &auth.user_code);
+    let tokens = charm_oauth::poll_and_exchange(auth)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(tokens)
+}
+
+/// GitHub Copilot's device sign-in over the SDK's generic RFC 8628 device
+/// grant pinned to GitHub's endpoints (see `connector::copilot::oauth`).
+async fn copilot_device_sign_in(
+    tx: &UnboundedSender<GatewaySignInEvent>,
+) -> Result<cosh_sdk::connector::oauth::TokenSet, String> {
+    let config = copilot_oauth::CopilotOAuthConfig::default();
+    let auth = config.begin().await.map_err(|error| error.to_string())?;
+    announce_device_transaction(
+        tx,
+        "copilot",
+        auth.verification_uri.as_str(),
+        &auth.user_code,
+    );
+    copilot_oauth::poll_and_exchange(auth)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// The shared visible-start of every device flow: the box shows the code +
+/// URL (manual fallback FIRST — the browser launch below is best-effort and
+/// may never open on headless/SSH/sandboxed setups), then the system
+/// browser opens the verification page.
+fn announce_device_transaction(
+    tx: &UnboundedSender<GatewaySignInEvent>,
+    provider: &'static str,
+    verification_url: &str,
+    user_code: &str,
+) {
+    let _ = tx.send(GatewaySignInEvent::Started {
+        provider,
+        url: verification_url.to_string(),
+        user_code: user_code.to_string(),
+    });
+    let url = verification_url.to_string();
+    let _ = std::thread::Builder::new()
+        .name("oauth-browser".into())
+        .spawn(move || {
+            let _ = webbrowser::open(url.as_str());
+        });
 }

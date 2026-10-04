@@ -130,18 +130,28 @@ pub async fn poll_device_token(auth: DeviceAuthorization) -> Result<TokenSet> {
             }
             result => result?,
         };
-        if (200..300).contains(&status) {
-            let mut tokens = http::into_token_set(http::parse_json(&bytes)?)?;
-            tokens.inherit_scopes(&auth.config.scopes);
-            return Ok(tokens);
-        }
+        // The BODY is authoritative for 2xx too: several servers (GitHub
+        // included) answer the pending and slow-down states with HTTP 200
+        // and an `error` member, instead of the 4xx the RFC sketches — so
+        // classifying the body FIRST is what keeps the loop alive. A token
+        // body carries no `error` member, so the classify pass yields no
+        // code and falls through to the token parse.
         let error = http::classify_error(status, &bytes);
         match error.error_code() {
             Some("authorization_pending") => {}
             Some("slow_down") => interval = backoff(interval, true)?,
             Some("access_denied") => return Err(OAuthError::DeviceDenied),
             Some("expired_token") => return Err(OAuthError::DeviceExpired),
-            _ => return Err(error),
+            // Any other protocol error (2xx or not) is terminal…
+            Some(_) => return Err(error),
+            // …and no error member means either a token body (2xx) or a
+            // bare HTTP failure (non-2xx) — the status decides.
+            None if (200..300).contains(&status) => {
+                let mut tokens = http::into_token_set(http::parse_json(&bytes)?)?;
+                tokens.inherit_scopes(&auth.config.scopes);
+                return Ok(tokens);
+            }
+            None => return Err(error),
         }
     }
 }
@@ -250,5 +260,54 @@ mod tests {
                 .await
                 .is_ok()
         );
+    }
+
+    /// REGRESSION (GitHub's device flow): the token endpoint answers the
+    /// PENDING state with HTTP 200 and `{"error":"authorization_pending"}`
+    /// in the body — not the 4xx the RFC sketches. Classifying only on the
+    /// status killed the loop on the first poll (before the user had even
+    /// approved in the browser), so the flow reported failure while GitHub
+    /// showed a completed authorization. The BODY must be authoritative
+    /// for 2xx too: pending keeps polling, the token body resolves.
+    #[tokio::test]
+    async fn two_hundred_with_error_body_keeps_polling_until_the_token() {
+        let pending = r#"{"error":"authorization_pending","error_description":"The authorization request is still pending."}"#.to_string();
+        let slow_down =
+            r#"{"error":"slow_down","error_description":"Too many requests.","interval":1}"#
+                .to_string();
+        let token =
+            r#"{"access_token":"gho_test","token_type":"bearer","scope":"read:user"}"#.to_string();
+        let (url, server) = super::super::test::support::serve(vec![
+            (200, pending),
+            (200, slow_down),
+            (200, token),
+        ])
+        .await;
+        let auth = DeviceAuthorization {
+            device_code: Secret::new("D"),
+            user_code: "U".into(),
+            verification_uri: Url::parse("https://provider.example/verify").unwrap(),
+            verification_uri_complete: None,
+            interval: Duration::from_millis(1),
+            deadline: Instant::now().checked_add(Duration::from_secs(10)).unwrap(),
+            config: super::super::test::support::config(url),
+        };
+        let tokens = poll_device_token(auth).await.unwrap();
+        assert_eq!(tokens.access_token().expose(), "gho_test");
+        let requests = server.await.unwrap();
+        assert_eq!(
+            requests.len(),
+            3,
+            "pending and slow_down must keep the loop alive"
+        );
+        for request in &requests {
+            assert!(
+                request
+                    .body
+                    .windows(b"device_code=D".len())
+                    .any(|w| w == b"device_code=D"),
+                "every poll must carry the fixture's device code grant"
+            );
+        }
     }
 }

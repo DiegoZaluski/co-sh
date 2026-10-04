@@ -1,6 +1,7 @@
 use super::{App, HOME_LOCK, isolate_home};
 use crate::app::gateway_recommendation::GatewaySignInEvent;
 use cosh_sdk::connector::has_api_key;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 fn new_cmd() -> crate::ui::slash_menu::SlashCommand {
     crate::ui::slash_menu::SlashCommand {
@@ -74,9 +75,9 @@ async fn declined_offer_burns_the_marker_and_stays_silent_after_reboot() {
         !rebooted.free_gateway_dialog.visible,
         "a declined install must never re-offer, not even on an auth-shaped error"
     );
-    // …AND on the pre-send path (`gateway_recommendation_content`).
+    // …AND on the pre-send path (`gateway_recommendation_offers`).
     assert!(
-        rebooted.gateway_recommendation_content(false).is_none(),
+        rebooted.gateway_recommendation_offers(false).is_none(),
         "a declined install must not reopen the offer on a keyless send"
     );
 }
@@ -156,7 +157,7 @@ async fn authorized_completion_without_takeover_keeps_the_live_model() {
     app.llm_config.reasoning = Some("low".into());
 
     let tx = app.gateway_event_tx.clone();
-    let _ = tx.send(GatewaySignInEvent::Authorized);
+    let _ = tx.send(GatewaySignInEvent::Authorized { provider: "charm" });
     app.pump_gateway_events();
 
     assert_eq!(
@@ -187,7 +188,7 @@ async fn authorized_completion_with_parked_message_takes_over() {
     app.pending_gateway_message = Some("hello".into());
 
     let tx = app.gateway_event_tx.clone();
-    let _ = tx.send(GatewaySignInEvent::Authorized);
+    let _ = tx.send(GatewaySignInEvent::Authorized { provider: "charm" });
     app.pump_gateway_events();
 
     assert_eq!(app.llm_config.provider, "charm");
@@ -228,5 +229,106 @@ async fn gateway_hit_tests_yield_to_a_stacked_modal() {
     assert!(
         !app.gateway_dialog_owns_drag(),
         "drag ownership yields to a stacked modal too"
+    );
+}
+
+/// The offer opens TABBED (question-dialog design): one tab per offered
+/// gateway, Charm first, and the active tab is what the sign-in dispatch
+/// reads. Switching the active tab must retarget the dispatch.
+#[tokio::test]
+async fn the_offer_opens_tabbed_and_the_dispatch_follows_the_active_tab() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+
+    let mut app = session_app("openai");
+    app.maybe_offer_gateway_on_error("connection reset by peer");
+    assert!(app.free_gateway_dialog.visible);
+    assert_eq!(
+        app.free_gateway_dialog.active_offer().unwrap().provider,
+        "charm",
+        "tab order = OFFERS order; Charm is the default tab"
+    );
+
+    // The user flips to the GitHub tab: the dispatch must follow.
+    app.free_gateway_dialog
+        .handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    assert_eq!(
+        app.free_gateway_dialog.active_offer().unwrap().provider,
+        "copilot",
+        "Right switches to the next gateway tab"
+    );
+}
+
+/// The `Authorized` completion switches the live config to the provider the
+/// event SAYS it signed in for — not hardcoded charm. GitHub's token lands
+/// in the keyring and the takeover routes the parked message through copilot.
+#[tokio::test]
+async fn authorized_completion_switches_to_the_provider_it_signed_in() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = session_app("openai");
+    app.pending_gateway_message = Some("hello".into());
+
+    let tx = app.gateway_event_tx.clone();
+    let _ = tx.send(GatewaySignInEvent::Authorized {
+        provider: "copilot",
+    });
+    app.pump_gateway_events();
+
+    assert_eq!(
+        app.llm_config.provider, "copilot",
+        "the takeover must target the provider whose token just landed"
+    );
+    assert_eq!(app.llm_config.model, None);
+}
+
+/// A `Failed` completion from ANY provider restores the parked message,
+/// hides the box and never burns the marker — the provider-neutral event
+/// shape must treat copilot's failure exactly like charm's.
+#[tokio::test]
+async fn failed_completion_restores_the_message_and_never_burns_the_marker() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = session_app("openai");
+    app.pending_gateway_message = Some("hello".into());
+    app.gateway_signing_in = true; // fixture: a flow was in flight
+
+    let tx = app.gateway_event_tx.clone();
+    let _ = tx.send(GatewaySignInEvent::Failed {
+        provider: "copilot",
+        error: "device flow denied".into(),
+    });
+    app.pump_gateway_events();
+
+    assert!(
+        !app.gateway_signing_in,
+        "a failed flow must release the latch"
+    );
+    assert!(!app.free_gateway_dialog.visible);
+    assert!(
+        !marker_path().exists(),
+        "a failure is NOT an answer: the one-time offer must stay due"
+    );
+}
+
+/// The dead-credential re-offer works for the COPILOT gateway too (the
+/// `OFFERS.any` arm), and the box opens PRE-SELECTED on the copilot tab —
+/// the gateway the user needs to re-run, not the first tab.
+#[tokio::test]
+async fn dead_copilot_credential_reoffers_on_the_copilot_tab() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    write_marker("authorized");
+
+    let mut app = session_app("copilot");
+    app.maybe_offer_gateway_on_error("401 unauthorized");
+    assert!(
+        app.free_gateway_dialog.visible,
+        "a dead copilot credential is exactly what re-running its sign-in fixes"
+    );
+    assert_eq!(
+        app.free_gateway_dialog.active_offer().unwrap().provider,
+        "copilot",
+        "the re-offer must land on the tab of the gateway that died"
     );
 }

@@ -25,11 +25,18 @@
 //! is passed as the session's `github_token`. The Copilot OAuth device flow
 //! (`copilot login`) is NOT auto-started here — an embedded agent must not
 //! silently drive a browser login; a missing token fails with
-//! [`ConnectorError::MissingApiKey`] like every other provider.
+//! [`ConnectorError::MissingApiKey`] like every other provider. Model
+//! listing does NOT go through the runtime: [`models::list_catalog`] is a
+//! direct HTTP chain (GitHub token exchange, then the shared chat catalog)
+//! because the runtime's own `models.list` RPC reads the agent-mode
+//! catalog, which stays empty for Free-tier accounts even though the
+//! account can chat fine.
 //!
 //! [`github_copilot_sdk`]: https://docs.rs/github-copilot-sdk
 
 pub mod caller;
+pub mod models;
+pub mod oauth;
 pub mod runtime;
 pub mod tokens;
 

@@ -16,6 +16,58 @@ async fn has_api_key_env() {
     assert!(has_api_key("openai"));
 }
 
+/// REGRESSION (empty env export): a shell profile exporting `FOO_API_KEY=`
+/// (placeholder, template leak, cleanup leftover) must NOT count as a
+/// credential — the empty string used to ride `resolve_env_var_key` as
+/// `Some("")`, making `has_api_key` report the provider as configured. The
+/// keyless gates (pre-send gateway offer, error-driven offer) then stayed
+/// silent while the send failed deep inside the HTTP call with a
+/// non-auth-shaped error. An empty value resolves to None everywhere.
+///
+/// Hermeticity: `has_api_key` consults the REAL `cosh` service keyring
+/// before the env var, so a machine with a key saved through the app's ADD
+/// Provider flow would spuriously flip these assertions — and DELETING the
+/// entry would destroy a real user credential. The prologue SKIPS the test
+/// when a non-blank keyring key exists (mirroring the cache tests'
+/// no-keyring skip); blank entries need no cleanup — the filter under test
+/// ignores them by construction.
+#[tokio::test]
+async fn empty_env_value_is_not_a_credential() {
+    let _lock = ENV_LOCK.lock().await;
+    for env_var in ["OPENAI_API_KEY", "OPENCODE_API_KEY"] {
+        if let Ok(entry) = keyring::Entry::new(super::super::COSH_SERVICE, env_var)
+            && let Ok(stored) = entry.get_password()
+            && !stored.trim().is_empty()
+        {
+            eprintln!("skipping: a real {env_var} key exists in the cosh keyring");
+            return;
+        }
+    }
+    let _guard = EnvGuard::set("OPENAI_API_KEY", "");
+    assert!(
+        !has_api_key("openai"),
+        "an empty env export is a placeholder, not a configured key"
+    );
+    assert_eq!(
+        get_api_key("openai", None),
+        None,
+        "get_api_key must not hand out the empty string either"
+    );
+    // The fallback-var path filters symmetrically.
+    let _guard_go = EnvGuard::set("OPENCODE_API_KEY", "");
+    assert!(
+        !has_api_key("opencode-go"),
+        "the fallback env var is filtered the same way"
+    );
+    // Whitespace-only is the same placeholder class (a quoted-space export
+    // or a stray space pasted into the ADD Provider input).
+    let _guard_ws = EnvGuard::set("OPENAI_API_KEY", "   ");
+    assert!(
+        !has_api_key("openai"),
+        "a blank env export is not a credential either"
+    );
+}
+
 /// `detect_provider` picks the first provider (registration order) with a key.
 #[tokio::test]
 async fn detect_provider_env() {

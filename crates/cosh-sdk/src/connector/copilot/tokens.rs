@@ -97,7 +97,13 @@ mod tests {
 
     #[test]
     fn tokens_filter_zero_output() {
-        assert_eq!(extract_tokens(r#"{"inputTokens":10,"outputTokens":0}"#), None);
-        assert_eq!(extract_tokens(r#"{"inputTokens":10,"outputTokens":3}"#), Some(3));
+        assert_eq!(
+            extract_tokens(r#"{"inputTokens":10,"outputTokens":0}"#),
+            None
+        );
+        assert_eq!(
+            extract_tokens(r#"{"inputTokens":10,"outputTokens":3}"#),
+            Some(3)
+        );
     }
 }

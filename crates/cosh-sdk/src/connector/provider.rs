@@ -143,8 +143,12 @@ pub enum Family {
     /// `github-copilot-sdk` crate (JSON-RPC over a spawned runtime process
     /// — no HTTP chat endpoint). An ISOLATED family: it shares none of the
     /// OpenAI-compatible request machinery, only the connector's output
-    /// types. `embed` is unsupported; `list_models` uses the runtime's
-    /// (experimental) `models.list` RPC.
+    /// types. `embed` is unsupported; `list_models` does NOT use the
+    /// runtime — it is a direct HTTP chain (GitHub token exchange, then
+    /// the shared chat catalog), because the runtime's `models.list` RPC
+    /// reads the agent-mode catalog, which stays empty for Free-tier
+    /// accounts even though the account can chat fine (see
+    /// `copilot::models`).
     Copilot,
 }
 
@@ -550,9 +554,22 @@ pub fn get_provider(name: &str) -> Option<&'static ProviderConfig> {
 
 /// Keyring first, environment second — the shared resolution used for both
 /// a provider's primary env var and its fallback (see
-/// [`API_KEY_FALLBACK_ENVS`]).
+/// [`API_KEY_FALLBACK_ENVS`]). An empty (or blank) value is NOT a
+/// credential: a shell profile exporting `FOO_API_KEY=` (placeholder,
+/// template leak, cleanup leftover) must not make the provider look
+/// configured — the empty string would ride the whole send path and fail
+/// deep inside the HTTP call with an error shape no gate understands.
+/// The UI save paths reject empty input and the OAuth adapters validate
+/// their tokens, but the filter here is what actually holds the line:
+/// it is symmetric over both backends and needs no caller cooperation.
 fn resolve_env_var_key(service: &str, env_var: &str) -> Option<String> {
-    keyring_lookup(service, env_var).or_else(|| std::env::var(env_var).ok())
+    keyring_lookup(service, env_var)
+        .filter(|key| !key.trim().is_empty())
+        .or_else(|| {
+            std::env::var(env_var)
+                .ok()
+                .filter(|key| !key.trim().is_empty())
+        })
 }
 
 pub fn get_api_key(provider: &str, service: Option<&str>) -> Option<String> {

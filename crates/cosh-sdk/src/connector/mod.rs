@@ -9,10 +9,10 @@
 
 pub(crate) mod claude;
 pub(crate) mod common;
+pub(crate) mod copilot;
 pub(crate) mod cost;
 pub(crate) mod discovery;
 pub(crate) mod gemini;
-pub(crate) mod copilot;
 pub mod oauth;
 pub(crate) mod openai;
 pub mod openai_compatible;
@@ -28,6 +28,10 @@ pub mod retry;
 pub use cost::{CostError, ProviderCost, provider_session_cost, supports_cost_reporting};
 
 pub use client::Connector;
+// The Copilot family's device-flow adapter is consumed by the app's
+// sign-in dispatcher (the family itself stays `pub(crate)` — only its
+// OAuth surface is public, like `openai_compatible`'s).
+pub use copilot::oauth as copilot_oauth;
 pub use discovery::{
     ModelReasoning, discover_context_window, effective_context_window, model_reasoning,
     model_reasoning_from_catalog, refresh_pricing_catalog, resolve_reasoning_effort,

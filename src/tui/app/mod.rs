@@ -415,12 +415,13 @@ pub struct App {
     /// Message captured while the one-time free-gateway prompt was open;
     /// replayed through `start_agent_loop` when the user opts in.
     pending_gateway_message: Option<String>,
-    /// Charm device sign-in in flight (opt-in accepted, token not stored yet).
-    /// While set, no new recommendation is offered and the prompt is busy.
-    charm_signing_in: bool,
-    /// The user declined the Charm recommendation this run: never ask again
-    /// until the app restarts.
-    charm_declined: bool,
+    /// Gateway device sign-in in flight (opt-in accepted, token not stored
+    /// yet). While set, no new recommendation is offered and the prompt is
+    /// busy. Provider-neutral: Charm, GitHub Copilot, any offered gateway.
+    gateway_signing_in: bool,
+    /// The user declined the gateway recommendation this run: never ask
+    /// again until the app restarts.
+    gateway_declined: bool,
     /// The model picker currently on screen was opened BY the gateway
     /// `Authorized` event with a parked message waiting: when the picker
     /// resolves (commit or cancel) the message replays — never under the
@@ -748,8 +749,8 @@ impl App {
             session_store,
             pending_delete: None,
             pending_gateway_message: None,
-            charm_signing_in: false,
-            charm_declined: false,
+            gateway_signing_in: false,
+            gateway_declined: false,
             gateway_model_pick: false,
             gateway_event_tx: gateway_event_tx.clone(),
             gateway_event_rx,
