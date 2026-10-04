@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] - 2026-10-04
+
+### Added
+
+- OAuth 2.0 device sign-in for the GitHub Copilot and Charm providers: sign
+  in from within the interface and the token lands in the OS keyring, ready
+  to use.
+
 ## [0.1.2] - 2026-10-03
 
 ### Added
@@ -122,7 +130,8 @@ The agent's building blocks are published as reusable libraries:
 - Linux and Windows are tested. macOS builds are published but untested —
   report any issues with details.
 
-[Unreleased]: https://github.com/DiegoZaluski/co-sh/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/DiegoZaluski/co-sh/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/DiegoZaluski/co-sh/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/DiegoZaluski/co-sh/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/DiegoZaluski/co-sh/releases/tag/v0.1.1
 [0.1.0]: https://github.com/DiegoZaluski/co-sh/releases/tag/v0.1.0
