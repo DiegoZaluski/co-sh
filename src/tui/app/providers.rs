@@ -100,9 +100,17 @@ impl App {
                 env_var: entry.hint.clone(),
                 input: String::new(),
                 cursor_pos: 0,
+                device_login: provider_has_device_login(entry.name),
             });
         }
     }
+}
+
+/// Whether a provider offers OAuth device sign-in (the Login button in its
+/// API-key dialog). A plain function of the provider id so both
+/// construction sites (first open, overwrite) agree without state.
+pub(super) fn provider_has_device_login(provider: &str) -> bool {
+    matches!(provider, "charm" | "copilot")
 }
 
 /// Persist a provider API key in the OS credential store (keyring) under the

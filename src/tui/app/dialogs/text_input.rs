@@ -42,6 +42,25 @@ impl App {
                 self.dialog.pop();
                 true
             }
+            KeyCode::Tab => {
+                // The API-key dialog's Login button as a keyboard trigger
+                // (the same start-the-device-flow path the button's click
+                // runs): push the sign-in display over this box and begin.
+                // OTHER text inputs have no use for Tab and must keep
+                // treating it as unhandled — report handled ONLY here.
+                if let Some(d) = self.dialog.current()
+                    && let DialogType::ApiKeyInput {
+                        provider,
+                        device_login: true,
+                        ..
+                    } = &d.dialog_type
+                {
+                    let provider = provider.clone();
+                    self.begin_device_login(&provider);
+                    return true;
+                }
+                false
+            }
             KeyCode::Left => {
                 if let Some(d) = self.dialog.current_mut()
                     && let DialogType::ApiKeyInput { cursor_pos, .. }

@@ -1,6 +1,9 @@
 use super::{App, AppMode};
 
+use crossterm::event::KeyCode;
+
 use crate::routes::session::free_gateway_recommendation::{GatewayOffer, OFFERS};
+use crate::ui::dialogs::{DeviceLoginPhase, DialogType};
 use crate::ui::toast::{ToastOptions, ToastVariant};
 
 use cosh_sdk::connector::copilot_oauth;
@@ -11,29 +14,44 @@ use cosh_sdk::connector::{
 
 use tokio::sync::mpsc::UnboundedSender;
 
-/// Messages from a background gateway device sign-in into the UI thread.
-/// Every variant carries the provider id it signed in for — the UI thread
-/// stays stateless about WHICH flow is running (no extra App field to
-/// forget to reset), and the `Authorized` arm switches the live config to
-/// exactly the provider whose token just landed in the keyring.
+/// Which surface started a device sign-in. The pump routes the outcome to
+/// the right display: the gateway offer box owns the whole Session flow
+/// (parked message, model picker, takeover) while the ADD Provider box
+/// only needs its dialog updated and a toast — the UI thread stays
+/// stateless about WHICH flow is running (no extra App field to forget
+/// to reset), because every event names its origin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SignInOrigin {
+    /// The free-gateway recommendation dialog in the Session route.
+    GatewayOffer,
+    /// The Login button in the ADD Provider API-key dialog.
+    ProviderDialog,
+}
+
+/// Messages from a background device sign-in into the UI thread.
+/// Every variant carries the origin it was started from and the provider
+/// id it signed in for.
 #[derive(Debug)]
-pub(super) enum GatewaySignInEvent {
+pub(super) enum DeviceSignInEvent {
     /// The device transaction started: hold the verification URL and user
-    /// code on the App so they stay VISIBLE (spinner line) for as long as
+    /// code on the requesting surface so they stay VISIBLE for as long as
     /// the sign-in runs — a transient toast is not enough; the Charm page
     /// asks for the code after login, minutes later.
     Started {
-        provider: &'static str,
+        origin: SignInOrigin,
+        provider: String,
         url: String,
         user_code: String,
     },
-    /// The token is stored in the OS keyring; the parked message can be
-    /// replayed through the newly authorized gateway.
-    Authorized { provider: &'static str },
-    /// Sign-in failed, was denied or crashed; the parked message goes back
-    /// to the prompt untouched.
+    /// The token is stored in the OS keyring.
+    Authorized {
+        origin: SignInOrigin,
+        provider: String,
+    },
+    /// Sign-in failed, was denied or crashed.
     Failed {
-        provider: &'static str,
+        origin: SignInOrigin,
+        provider: String,
         error: String,
     },
 }
@@ -183,22 +201,141 @@ impl App {
         self.free_gateway_dialog.begin_connecting();
         self.gateway_signing_in = true;
         let provider = offer.provider;
-        let tx = self.gateway_event_tx.clone();
-        // The shared agent runtime: the UI thread has no ambient tokio
-        // context, and the sign-in must survive any turn teardown.
-        let runtime = super::agent_loop::AGENT_RUNTIME
-            .get_or_init(|| tokio::runtime::Runtime::new().expect("shared agent runtime"));
-        runtime.spawn(async move {
-            // The inner spawn converts a panic inside the sign-in future into
-            // a JoinError — and therefore a Failed event — instead of leaving
-            // `gateway_signing_in` stuck true and the parked message lost.
-            let inner_tx = tx.clone();
-            if let Err(join_error) = tokio::spawn(gateway_sign_in(provider, inner_tx)).await {
-                let _ = tx.send(GatewaySignInEvent::Failed {
-                    provider,
-                    error: format!("the sign-in task crashed: {join_error}"),
-                });
+        spawn_device_sign_in(SignInOrigin::GatewayOffer, provider, &self.gateway_event_tx);
+    }
+
+    /// Start the device sign-in the ADD Provider Login button asked for:
+    /// the SAME background flow the gateway offer runs, tagged with the
+    /// `ProviderDialog` origin so the pump routes the outcome back to the
+    /// API-key dialog instead of the Session route. `provider` comes from
+    /// the dialog's own state (an owned `String`) and must be one of the
+    /// providers with a device flow — anything else surfaces as a Failed
+    /// event rather than silently doing nothing.
+    pub(in crate::app) fn start_provider_device_login(&mut self, provider: &str) {
+        spawn_device_sign_in(
+            SignInOrigin::ProviderDialog,
+            provider,
+            &self.gateway_event_tx,
+        );
+        self.gateway_signing_in = true;
+    }
+
+    /// Open the device sign-in display for `provider` and start its
+    /// background flow — the ONE entry both Login-button triggers (click
+    /// and Tab) share. The DeviceLogin box is PUSHED on top of the API-key
+    /// input it was launched from — never a `replace`, which would wipe the
+    /// whole stack and destroy the half-typed key the user may still want
+    /// to paste manually; the pump moves the box to Authorizing when the
+    /// transaction starts.
+    ///
+    /// Refused while another device sign-in is already polling: two
+    /// concurrent flows would race their outcome events against the one
+    /// shared `gateway_signing_in` flag and each other's box-live gating.
+    pub(in crate::app) fn begin_device_login(&mut self, provider: &str) {
+        if self.gateway_signing_in {
+            self.toast_state.show(ToastOptions {
+                title: Some("Sign-in in progress".into()),
+                message: "Wait for the current sign-in to finish first.".into(),
+                variant: ToastVariant::Warning,
+                duration_ms: 6000,
+            });
+            return;
+        }
+        self.dialog.show(DialogType::DeviceLogin {
+            provider: provider.to_string(),
+            label: provider_display(provider),
+            phase: DeviceLoginPhase::Connecting,
+        });
+        self.start_provider_device_login(provider);
+    }
+
+    /// Whether the device sign-in box is on top of the dialog stack.
+    pub(in crate::app) fn is_device_login_visible(&self) -> bool {
+        matches!(
+            self.dialog.current().map(|d| &d.dialog_type),
+            Some(DialogType::DeviceLogin { .. })
+        )
+    }
+
+    /// Keyboard while the device sign-in box is up: it is a passive
+    /// progress display, so Esc pops it (the background flow keeps polling
+    /// and its outcome reports via toast — the gateway offer box's same
+    /// Esc-does-not-cancel contract) and every other key is swallowed.
+    pub(in crate::app) fn handle_device_login_key(&mut self, key: KeyCode) {
+        if key == KeyCode::Esc {
+            self.dialog.pop();
+        }
+    }
+
+    /// The provider the CURRENT DeviceLogin dialog is signing in for, when
+    /// it is on top of the stack. Stale-event gating: a `Started` event for
+    /// a box the user already Esc'd away (or moved past) must not repaint
+    /// whatever dialog now owns the screen.
+    pub(in crate::app) fn current_device_login_provider(&self) -> Option<String> {
+        match &self.dialog.current()?.dialog_type {
+            DialogType::DeviceLogin { provider, .. } => Some(provider.clone()),
+            _ => None,
+        }
+    }
+
+    /// Move the current DeviceLogin box from `Connecting` to `Authorizing`
+    /// with the just-arrived verification URL + user code.
+    pub(in crate::app) fn begin_device_login_authorizing(&mut self, url: &str, user_code: &str) {
+        if let Some(d) = self.dialog.current_mut()
+            && let DialogType::DeviceLogin { phase, .. } = &mut d.dialog_type
+        {
+            *phase = DeviceLoginPhase::Authorizing {
+                url: url.to_string(),
+                user_code: user_code.to_string(),
+            };
+        }
+    }
+
+    /// Resolve the `Authorized` completion of a Login-button sign-in: pop
+    /// the DeviceLogin box (only when IT is still the live one — an Esc'd
+    /// box's outcome reports via toast instead) and confirm the save.
+    pub(in crate::app) fn provider_login_authorized(&mut self, provider: &str) {
+        self.gateway_signing_in = false;
+        let box_live = self.current_device_login_provider().as_deref() == Some(provider);
+        if box_live {
+            // Pop the sign-in box AND the API-key input beneath it: the
+            // sign-in just produced the credential that input was opened
+            // to collect, so both have served their purpose. (The box was
+            // PUSHED, not swapped in, so the input is still there.)
+            self.dialog.pop();
+            if matches!(
+                self.dialog.current().map(|d| &d.dialog_type),
+                Some(DialogType::ApiKeyInput { provider: input_provider, .. })
+                    if input_provider == provider
+            ) {
+                self.dialog.pop();
             }
+        }
+        self.model_cache.invalidate(&provider.to_string());
+        self.toast_state.show(ToastOptions {
+            title: Some(format!("{} authorized", provider_display(provider))),
+            message: "Token saved to your OS keyring. Your provider is ready to use.".into(),
+            variant: ToastVariant::Success,
+            duration_ms: 8000,
+        });
+    }
+
+    /// Resolve the `Failed` completion of a Login-button sign-in: pop the
+    /// DeviceLogin box when it is still live, returning to the API-key
+    /// input the user came from (it was only PUSHED over — the half-typed
+    /// key and the manual paste path survive) and surface the redacted
+    /// error.
+    pub(in crate::app) fn provider_login_failed(&mut self, provider: &str, error: &str) {
+        self.gateway_signing_in = false;
+        let box_live = self.current_device_login_provider().as_deref() == Some(provider);
+        if box_live {
+            self.dialog.pop();
+        }
+        self.toast_state.show(ToastOptions {
+            title: Some(format!("{} sign-in failed", provider_display(provider))),
+            message: error.to_string(),
+            variant: ToastVariant::Error,
+            duration_ms: 10000,
         });
     }
 
@@ -239,11 +376,28 @@ impl App {
         }
         while let Ok(event) = self.gateway_event_rx.try_recv() {
             match event {
-                GatewaySignInEvent::Started {
-                    provider: _,
+                DeviceSignInEvent::Started {
+                    origin,
+                    provider,
                     url,
                     user_code,
                 } => {
+                    if origin == SignInOrigin::ProviderDialog {
+                        // The ADD Provider box ITSELF becomes the sign-in
+                        // display: its input row gives way to the device
+                        // code + URL (drag-copyable), exactly like the
+                        // gateway offer box. A dialog that is no longer the
+                        // DeviceLogin box for THIS provider (Esc'd, or the
+                        // user moved on) has nothing to update — the flow
+                        // keeps polling and its outcome still reports via
+                        // toast; the screen is never forced back.
+                        if self.current_device_login_provider().as_deref()
+                            == Some(provider.as_str())
+                        {
+                            self.begin_device_login_authorizing(&url, &user_code);
+                        }
+                        continue;
+                    }
                     // The dialog ITSELF becomes the sign-in display: its
                     // Yes/No options give way to the device code + URL,
                     // drag-copyable, for the whole sign-in. No toast — the
@@ -256,7 +410,11 @@ impl App {
                         self.free_gateway_dialog.begin_authorizing(&url, &user_code);
                     }
                 }
-                GatewaySignInEvent::Authorized { provider } => {
+                DeviceSignInEvent::Authorized { origin, provider } => {
+                    if origin == SignInOrigin::ProviderDialog {
+                        self.provider_login_authorized(&provider);
+                        continue;
+                    }
                     self.gateway_signing_in = false;
                     // The offer was ANSWERED (opt-in → success): record it
                     // so a later boot knows the install already uses the
@@ -293,7 +451,7 @@ impl App {
                     let taking_over =
                         idle_session && (show_models || self.pending_gateway_message.is_some());
                     if taking_over {
-                        self.llm_config.provider = provider.into();
+                        self.llm_config.provider = provider.clone();
                         self.llm_config.model = None;
                         // The old reasoning belongs to the previous model —
                         // a fresh gateway default starts unscoped.
@@ -305,7 +463,7 @@ impl App {
                     // reply with the provider default model, and the user's
                     // pick landed too late to matter.
                     self.gateway_model_pick = show_models && self.pending_gateway_message.is_some();
-                    let title = format!("{} authorized", provider_display(provider));
+                    let title = format!("{} authorized", provider_display(&provider));
                     if show_models {
                         // Straight into model selection: the gateway just
                         // came online, so its models are the natural next
@@ -361,12 +519,20 @@ impl App {
                         }
                     }
                 }
-                GatewaySignInEvent::Failed { provider, error } => {
+                DeviceSignInEvent::Failed {
+                    origin,
+                    provider,
+                    error,
+                } => {
+                    if origin == SignInOrigin::ProviderDialog {
+                        self.provider_login_failed(&provider, &error);
+                        continue;
+                    }
                     self.gateway_signing_in = false;
                     self.free_gateway_dialog.hide();
                     self.restore_pending_gateway_message();
                     self.toast_state.show(ToastOptions {
-                        title: Some(format!("{} sign-in failed", provider_display(provider))),
+                        title: Some(format!("{} sign-in failed", provider_display(&provider))),
                         message: error,
                         variant: ToastVariant::Error,
                         duration_ms: 10000,
@@ -470,29 +636,62 @@ fn is_auth_shaped_error(error: &str) -> bool {
     .any(|marker| error.contains(marker))
 }
 
-/// Run the ACTIVE gateway's device sign-in end to end: start the
-/// transaction, surface the verification URL + user code (manual fallback),
-/// hand the URL to the system browser, poll until approved and store the
-/// resulting tokens in the OS keyring under the provider's own env-var
-/// name. Runs on the shared agent runtime — keyring access is blocking and
-/// must stay off the UI thread.
-async fn gateway_sign_in(provider: &'static str, tx: UnboundedSender<GatewaySignInEvent>) {
-    let result = gateway_sign_in_inner(provider, &tx).await;
-    let _ = tx.send(match result {
-        // OAuthError is redacted (no request URLs, no secrets), so its
-        // Display form is safe to surface verbatim.
-        Err(error) => GatewaySignInEvent::Failed { provider, error },
-        Ok(()) => GatewaySignInEvent::Authorized { provider },
+/// Spawn a device sign-in on the shared agent runtime — the ONE entry point
+/// both origins go through (the free-gateway offer opt-in and the ADD
+/// Provider Login button). The UI thread has no ambient tokio context, and
+/// the sign-in must survive any turn teardown.
+fn spawn_device_sign_in(
+    origin: SignInOrigin,
+    provider: &str,
+    tx: &UnboundedSender<DeviceSignInEvent>,
+) {
+    let tx = tx.clone();
+    let provider = provider.to_string();
+    // The shared agent runtime: the UI thread has no ambient tokio
+    // context, and the sign-in must survive any turn teardown.
+    let runtime = super::agent_loop::AGENT_RUNTIME
+        .get_or_init(|| tokio::runtime::Runtime::new().expect("shared agent runtime"));
+    runtime.spawn(async move {
+        // The INNER spawn converts a panic inside the sign-in future into a
+        // JoinError — and therefore a Failed event — instead of killing the
+        // outer task silently and leaving `gateway_signing_in` stuck true
+        // (the box would hang in "Starting sign-in…" forever).
+        let inner_tx = tx.clone();
+        let inner_provider = provider.clone();
+        // The owned clones move INTO the inner task: `tokio::spawn` needs
+        // a 'static future, so the borrow must live inside it, not in the
+        // outer block.
+        if let Err(join_error) =
+            tokio::spawn(
+                async move { device_sign_in_inner(origin, &inner_provider, &inner_tx).await },
+            )
+            .await
+        {
+            let _ = tx.send(DeviceSignInEvent::Failed {
+                origin,
+                provider,
+                error: format!("the sign-in task crashed: {join_error}"),
+            });
+            return;
+        }
+        let _ = tx.send(DeviceSignInEvent::Authorized { origin, provider });
     });
 }
 
-async fn gateway_sign_in_inner(
-    provider: &'static str,
-    tx: &UnboundedSender<GatewaySignInEvent>,
+/// Run a device sign-in end to end: start the transaction, surface the
+/// verification URL + user code (manual fallback), hand the URL to the
+/// system browser, poll until approved and store the resulting tokens in
+/// the OS keyring under the provider's own env-var name. Runs on the
+/// shared agent runtime — keyring access is blocking and must stay off
+/// the UI thread.
+async fn device_sign_in_inner(
+    origin: SignInOrigin,
+    provider: &str,
+    tx: &UnboundedSender<DeviceSignInEvent>,
 ) -> Result<(), String> {
     let tokens = match provider {
-        "charm" => charm_device_sign_in(tx).await?,
-        "copilot" => copilot_device_sign_in(tx).await?,
+        "charm" => charm_device_sign_in(origin, tx).await?,
+        "copilot" => copilot_device_sign_in(origin, tx).await?,
         other => return Err(format!("no device sign-in flow for provider {other:?}")),
     };
 
@@ -521,7 +720,7 @@ async fn gateway_sign_in_inner(
             super::providers::save_provider_api_key(&format!("{env_var}_REFRESH"), refresh.expose())
     {
         log::warn!(
-            "gateway sign-in: could not store the {env_var}_REFRESH token in the OS keyring: {error}"
+            "device sign-in: could not store the {env_var}_REFRESH token in the OS keyring: {error}"
         );
     }
     // Drop the cached keyring MISS so the very next send resolves the fresh
@@ -534,13 +733,20 @@ async fn gateway_sign_in_inner(
 /// an exchange step) — the provider-specific adapter owns it; this only
 /// surfaces the codes and drives the browser.
 async fn charm_device_sign_in(
-    tx: &UnboundedSender<GatewaySignInEvent>,
+    origin: SignInOrigin,
+    tx: &UnboundedSender<DeviceSignInEvent>,
 ) -> Result<cosh_sdk::connector::oauth::TokenSet, String> {
     let config = CharmOAuthConfig::default();
     let auth = charm_oauth::begin(&config)
         .await
         .map_err(|error| error.to_string())?;
-    announce_device_transaction(tx, "charm", auth.verification_url.as_str(), &auth.user_code);
+    announce_device_transaction(
+        tx,
+        origin,
+        "charm",
+        auth.verification_url.as_str(),
+        &auth.user_code,
+    );
     let tokens = charm_oauth::poll_and_exchange(auth)
         .await
         .map_err(|error| error.to_string())?;
@@ -550,12 +756,14 @@ async fn charm_device_sign_in(
 /// GitHub Copilot's device sign-in over the SDK's generic RFC 8628 device
 /// grant pinned to GitHub's endpoints (see `connector::copilot::oauth`).
 async fn copilot_device_sign_in(
-    tx: &UnboundedSender<GatewaySignInEvent>,
+    origin: SignInOrigin,
+    tx: &UnboundedSender<DeviceSignInEvent>,
 ) -> Result<cosh_sdk::connector::oauth::TokenSet, String> {
     let config = copilot_oauth::CopilotOAuthConfig::default();
     let auth = config.begin().await.map_err(|error| error.to_string())?;
     announce_device_transaction(
         tx,
+        origin,
         "copilot",
         auth.verification_uri.as_str(),
         &auth.user_code,
@@ -565,18 +773,20 @@ async fn copilot_device_sign_in(
         .map_err(|error| error.to_string())
 }
 
-/// The shared visible-start of every device flow: the box shows the code +
-/// URL (manual fallback FIRST — the browser launch below is best-effort and
-/// may never open on headless/SSH/sandboxed setups), then the system
-/// browser opens the verification page.
+/// The shared visible-start of every device flow: the requesting surface
+/// shows the code + URL (manual fallback FIRST — the browser launch below
+/// is best-effort and may never open on headless/SSH/sandboxed setups),
+/// then the system browser opens the verification page.
 fn announce_device_transaction(
-    tx: &UnboundedSender<GatewaySignInEvent>,
+    tx: &UnboundedSender<DeviceSignInEvent>,
+    origin: SignInOrigin,
     provider: &'static str,
     verification_url: &str,
     user_code: &str,
 ) {
-    let _ = tx.send(GatewaySignInEvent::Started {
-        provider,
+    let _ = tx.send(DeviceSignInEvent::Started {
+        origin,
+        provider: provider.to_string(),
         url: verification_url.to_string(),
         user_code: user_code.to_string(),
     });

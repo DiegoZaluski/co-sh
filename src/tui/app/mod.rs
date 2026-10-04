@@ -428,12 +428,13 @@ pub struct App {
     /// dialog (the original code sent it the same instant the picker
     /// opened, so the reply streamed with the default model).
     gateway_model_pick: bool,
-    /// (tx, rx) for Charm device sign-in outcomes into the UI thread. The rx
-    /// half is drained by [`App::pump_gateway_events`] once per frame.
-    gateway_event_tx:
-        tokio::sync::mpsc::UnboundedSender<gateway_recommendation::GatewaySignInEvent>,
+    /// (tx, rx) for device sign-in outcomes (gateway offer OR ADD Provider
+    /// Login button — the event's `origin` tells them apart) into the UI
+    /// thread. The rx half is drained by [`App::pump_gateway_events`] once
+    /// per frame.
+    gateway_event_tx: tokio::sync::mpsc::UnboundedSender<gateway_recommendation::DeviceSignInEvent>,
     gateway_event_rx:
-        tokio::sync::mpsc::UnboundedReceiver<gateway_recommendation::GatewaySignInEvent>,
+        tokio::sync::mpsc::UnboundedReceiver<gateway_recommendation::DeviceSignInEvent>,
     /// Whether a title has already been generated for the current session.
     /// Set to `false` when a new session is created; set to `true` after
     /// the async title generation task is spawned.

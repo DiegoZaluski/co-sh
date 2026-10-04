@@ -1032,6 +1032,49 @@ impl App {
                     }
                     return Ok(true);
                 }
+                DialogAction::Login => {
+                    // The API-key dialog's Login button: swap the box for
+                    // the device sign-in display and start the background
+                    // flow. The provider comes from the dialog's own state —
+                    // nothing else in the stack carries it. The shared
+                    // entry keeps click and Tab on one code path.
+                    if let Some(d) = self.dialog.current()
+                        && let DialogType::ApiKeyInput { provider, .. } = &d.dialog_type
+                    {
+                        let provider = provider.clone();
+                        self.begin_device_login(&provider);
+                    }
+                    return Ok(true);
+                }
+                DialogAction::CopyCode => {
+                    // The device sign-in box's code row: copy the user code
+                    // so the paste at the verification URL is one click.
+                    if let Some(d) = self.dialog.current()
+                        && let DialogType::DeviceLogin {
+                            phase:
+                                crate::ui::dialogs::DeviceLoginPhase::Authorizing { user_code, .. },
+                            ..
+                        } = &d.dialog_type
+                    {
+                        let copied = crate::util::selection::copy_to_clipboard(user_code);
+                        use crate::ui::toast::{ToastOptions, ToastVariant};
+                        self.toast_state.show(ToastOptions {
+                            title: None,
+                            message: if copied {
+                                "Device code copied to clipboard".to_string()
+                            } else {
+                                "Clipboard write unavailable".to_string()
+                            },
+                            variant: if copied {
+                                ToastVariant::Success
+                            } else {
+                                ToastVariant::Warning
+                            },
+                            duration_ms: 2500,
+                        });
+                    }
+                    return Ok(true);
+                }
                 DialogAction::Confirmed => {
                     if let Some(d) = self.dialog.current() {
                         match &d.dialog_type {

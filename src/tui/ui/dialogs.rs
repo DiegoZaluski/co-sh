@@ -397,6 +397,18 @@ fn confirm_dialog_w(message: &str, area_width: u16) -> u16 {
     30u16.max(needed).min(area_width.saturating_sub(4)).max(16)
 }
 
+/// Phases of the [`DialogType::DeviceLogin`] sign-in, mirroring the
+/// gateway offer box's Connecting → Authorizing progression.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeviceLoginPhase {
+    /// The background transaction is starting: no code yet — a spinner hint
+    /// stands in for the input row.
+    Connecting,
+    /// The verification URL + user code arrived: the box shows them
+    /// (drag-copyable) while the background poll runs.
+    Authorizing { url: String, user_code: String },
+}
+
 #[derive(Clone)]
 pub enum DialogType {
     Alert {
@@ -454,6 +466,11 @@ pub enum DialogType {
         env_var: String,
         input: String,
         cursor_pos: usize,
+        /// Whether this provider has an OAuth device flow (Charm, GitHub
+        /// Copilot): the box then renders a Login button in its bottom-right
+        /// corner and Tab starts the sign-in. Decided by the app layer at
+        /// construction; the UI layer stays vendor-neutral.
+        device_login: bool,
     },
     /// Base URL entry for a LOCAL provider (no API key). Unmasked input saved
     /// to setup.json instead of the keyring.
@@ -469,6 +486,21 @@ pub enum DialogType {
     ProviderKeyChoice {
         provider: String,
         env_var: String,
+    },
+    /// Live OAuth device sign-in started from the ADD Provider box's Login
+    /// button: the API-key dialog itself turns into the sign-in display —
+    /// the same "box becomes the device code" mechanic the free-gateway
+    /// offer uses. `Connecting` shows a spinner hint; `Authorizing` shows
+    /// the verification URL + user code (both drag-copyable) while the
+    /// background poll runs. The provider id is kept so a stale event
+    /// (the user Esc'd and moved on) can be told apart from the live one.
+    DeviceLogin {
+        provider: String,
+        /// Display name for the title ("GitHub Copilot", "Charm") — computed
+        /// by the caller (app layer owns the provider-name mapping; the UI
+        /// layer stays vendor-neutral).
+        label: String,
+        phase: DeviceLoginPhase,
     },
     /// Cache duration entry for one prompt-cache setting (Settings screen).
     /// The user types a duration ("30m", "1h", "1h30m") or "default";
@@ -648,12 +680,14 @@ impl std::fmt::Debug for DialogType {
                 env_var,
                 input,
                 cursor_pos,
+                device_login,
             } => f
                 .debug_struct("ApiKeyInput")
                 .field("provider", provider)
                 .field("env_var", env_var)
                 .field("input", &secret(input))
                 .field("cursor_pos", cursor_pos)
+                .field("device_login", device_login)
                 .finish(),
             Self::LocalUrlInput {
                 provider,
@@ -669,6 +703,13 @@ impl std::fmt::Debug for DialogType {
                 .debug_struct("ProviderKeyChoice")
                 .field("provider", provider)
                 .field("env_var", env_var)
+                .finish(),
+            Self::DeviceLogin {
+                provider, phase, ..
+            } => f
+                .debug_struct("DeviceLogin")
+                .field("provider", provider)
+                .field("phase", phase)
                 .finish(),
             Self::CacheTtlInput {
                 setting,
@@ -786,6 +827,11 @@ pub struct DialogInstance {
     /// Animation state for the ModelList loading spinner (advanced by the
     /// app render tick while a ModelList with `loading: true` is on top).
     pub spinner: SpinnerState,
+    /// Whether the pointer sits on the API-key dialog's Login button (the
+    /// caller resolves it against the PREVIOUS frame's stored hitbox — the
+    /// same one-frame-muted→text swap the footer's update button uses).
+    /// Render reads it; the mouse handler stores it.
+    pub login_hover: bool,
 }
 
 pub struct DialogState {
@@ -803,6 +849,14 @@ pub enum DialogAction {
     Confirmed,
     /// User dismissed the dialog (clicked "esc" or outside).
     Dismissed,
+    /// User clicked the API-key dialog's Login button: start the device
+    /// OAuth flow. A dedicated variant (not `Confirmed`) so the generic
+    /// save-and-pop Enter/click handling can never fire for it.
+    Login,
+    /// User clicked the device sign-in box's code row: copy the user code
+    /// to the clipboard (the dialog stack has no drag-selection machinery,
+    /// so click-to-copy is the affordance here).
+    CopyCode,
 }
 
 impl DialogState {
@@ -816,6 +870,7 @@ impl DialogState {
             selected: 0,
             cursor: Cursor::new(),
             spinner: SpinnerState::new(),
+            login_hover: false,
         });
     }
 
@@ -1269,8 +1324,49 @@ impl DialogState {
 
                 DialogAction::Consumed
             }
-            DialogType::ApiKeyInput { .. }
-            | DialogType::LocalUrlInput { .. }
+            DialogType::ApiKeyInput { .. } => {
+                // Same box geometry as render (`render_text_input_dialog`):
+                // the Login button lives on the box's bottom row, right-aligned.
+                let dialog_w = 50u16.min(area.width.saturating_sub(8)).max(30);
+                let dialog_h = 7;
+                let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
+                let dialog_y = area.y + area.height.saturating_sub(dialog_h) / 2;
+
+                if x < dialog_x
+                    || x >= dialog_x + dialog_w
+                    || y_click < dialog_y
+                    || y_click >= dialog_y + dialog_h
+                {
+                    return DialogAction::Dismissed;
+                }
+                if api_key_login_button_area(area)
+                    .is_some_and(|r| x >= r.x && x < r.right() && y_click == r.y)
+                {
+                    return DialogAction::Login;
+                }
+                DialogAction::Consumed
+            }
+            DialogType::DeviceLogin { phase, .. } => {
+                // Same box geometry as render (the DeviceLogin arm below):
+                // outside the box → dismiss; on the code row → copy it (the
+                // dialog stack has no drag-selection machinery, so
+                // click-to-copy is the affordance); elsewhere → inert.
+                let box_rect = text_input_dialog_box(area);
+                if x < box_rect.x
+                    || x >= box_rect.x + box_rect.width
+                    || y_click < box_rect.y
+                    || y_click >= box_rect.y + box_rect.height
+                {
+                    return DialogAction::Dismissed;
+                }
+                if matches!(phase, DeviceLoginPhase::Authorizing { .. })
+                    && y_click == box_rect.y + 4
+                {
+                    return DialogAction::CopyCode;
+                }
+                DialogAction::Consumed
+            }
+            DialogType::LocalUrlInput { .. }
             | DialogType::CacheTtlInput { .. }
             | DialogType::EditorInput { .. }
             | DialogType::SkillsInput { .. }
@@ -2054,6 +2150,7 @@ impl DialogState {
                 env_var,
                 input,
                 cursor_pos,
+                device_login,
             } => {
                 render_text_input_dialog(
                     buf,
@@ -2067,6 +2164,80 @@ impl DialogState {
                     input,
                     *cursor_pos,
                 );
+                // The Login button (device-OAuth providers only): rendered
+                // inside the box's bottom row, right-aligned — the same
+                // hover-swap styling the footer's update button uses.
+                if *device_login && let Some(button) = api_key_login_button_area(area) {
+                    draw_api_key_login_button(buf, button, theme, instance.login_hover);
+                }
+            }
+            DialogType::DeviceLogin { label, phase, .. } => {
+                // Same box language as the API-key input (the dialog it
+                // replaced): the box IS the sign-in display — code + URL
+                // where the input row used to be, the gateway offer box's
+                // "box becomes the device code" mechanic.
+                let box_rect = text_input_dialog_box(area);
+                let bg_color = rgba_color(theme.background_panel);
+                clear_dialog_surface(buf, box_rect, bg_color);
+                draw_rounded_border(buf, box_rect, rgba_color(theme.border_active));
+
+                let content_x = box_rect.x + 2;
+                let content_w = box_rect.width.saturating_sub(4);
+
+                draw_text_line_compact(
+                    buf,
+                    &format!("Sign in to {label}"),
+                    content_x,
+                    box_rect.y + 1,
+                    content_w,
+                    Style::default()
+                        .fg(rgba_color(theme.text))
+                        .add_modifier(Modifier::BOLD),
+                );
+                draw_text_line_compact(
+                    buf,
+                    "(device code — paste it at the URL)",
+                    content_x,
+                    box_rect.y + 2,
+                    content_w,
+                    Style::default().fg(rgba_color(theme.text_muted)),
+                );
+
+                match phase {
+                    DeviceLoginPhase::Connecting => {
+                        draw_text_line_compact(
+                            buf,
+                            DEVICE_LOGIN_CONNECTING_HINT,
+                            content_x,
+                            box_rect.y + 4,
+                            content_w,
+                            Style::default().fg(rgba_color(theme.text_muted)),
+                        );
+                    }
+                    DeviceLoginPhase::Authorizing { url, user_code } => {
+                        // The code is the thing to confirm at the URL: bold
+                        // primary, the URL muted below. Click-to-copy on the
+                        // code row (see the mouse arm).
+                        draw_text_line_compact(
+                            buf,
+                            user_code,
+                            content_x,
+                            box_rect.y + 4,
+                            content_w,
+                            Style::default()
+                                .fg(rgba_color(theme.primary))
+                                .add_modifier(Modifier::BOLD),
+                        );
+                        draw_text_line_compact(
+                            buf,
+                            url,
+                            content_x,
+                            box_rect.y + 5,
+                            content_w,
+                            Style::default().fg(rgba_color(theme.text_muted)),
+                        );
+                    }
+                }
             }
             DialogType::LocalUrlInput {
                 provider,
@@ -3398,6 +3569,65 @@ impl DialogState {
         }
     }
 }
+
+/// Shared geometry of the single-line text-input dialog box (API key,
+/// local URL, device sign-in): ONE source for render, the mouse hit-test
+/// and the Login-button placement so the three can never drift. Mirrors
+/// the sizing `render_text_input_dialog` has always used.
+fn text_input_dialog_box(area: Rect) -> Rect {
+    let dialog_w = 50u16.min(area.width.saturating_sub(8)).max(30);
+    let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
+    let dialog_y = area.y + area.height.saturating_sub(7) / 2;
+    Rect::new(dialog_x, dialog_y, dialog_w, 7)
+}
+
+/// The API-key dialog's Login button: the box's bottom interior row,
+/// right-aligned against the border. `None` when the box is too narrow to
+/// host the button without crowding the input row.
+pub fn api_key_login_button_area(area: Rect) -> Option<Rect> {
+    let box_rect = text_input_dialog_box(area);
+    const LABEL: &str = "Login";
+    // One cell of padding on each side of the label.
+    let button_w = LABEL.len() as u16 + 2;
+    // The input row keeps its width: the button may not claim more than
+    // roughly half the interior.
+    if box_rect.width.saturating_sub(4) < button_w * 2 + 4 {
+        return None;
+    }
+    let button_x = box_rect.x + box_rect.width.saturating_sub(button_w + 2);
+    Some(Rect::new(button_x, box_rect.y + 5, button_w, 1))
+}
+
+/// Draw the API-key dialog's Login button: the label in the muted color at
+/// rest (the theme's disabled/inactive shade — the same one the LSP
+/// "disabled" tag and the Settings off-labels use) and the plain text
+/// color while hovered; bold in both states so it reads as a button, not
+/// a label. A dialog button has no separate rest-state token to swap FROM
+/// (unlike the footer's update button), so the hover state is computed
+/// fresh each frame by the caller and handed in through `hovered`.
+fn draw_api_key_login_button(buf: &mut Buffer, button: Rect, theme: &Theme, hovered: bool) {
+    let fg = if hovered {
+        theme.text
+    } else {
+        theme.text_muted
+    };
+    draw_text_line_compact(
+        buf,
+        "Login",
+        button.x + 1,
+        button.y,
+        button.width.saturating_sub(2),
+        Style::default()
+            .fg(rgba_color(fg))
+            .add_modifier(Modifier::BOLD),
+    );
+}
+
+/// Hint shown in the DeviceLogin box while the background transaction is
+/// starting (no device code yet). Static on purpose: the Connecting phase
+/// typically lasts well under a second, and the frame cadence here must
+/// not depend on a spinner wake.
+const DEVICE_LOGIN_CONNECTING_HINT: &str = "Starting sign-in…";
 
 /// Shared box for the single-line text input dialogs (API key for cloud
 /// providers, server URL for local providers). `masked` draws the input as

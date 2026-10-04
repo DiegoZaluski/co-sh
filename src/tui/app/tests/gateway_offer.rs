@@ -1,5 +1,5 @@
 use super::{App, HOME_LOCK, isolate_home};
-use crate::app::gateway_recommendation::GatewaySignInEvent;
+use crate::app::gateway_recommendation::{DeviceSignInEvent, SignInOrigin};
 use cosh_sdk::connector::has_api_key;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -157,7 +157,10 @@ async fn authorized_completion_without_takeover_keeps_the_live_model() {
     app.llm_config.reasoning = Some("low".into());
 
     let tx = app.gateway_event_tx.clone();
-    let _ = tx.send(GatewaySignInEvent::Authorized { provider: "charm" });
+    let _ = tx.send(DeviceSignInEvent::Authorized {
+        origin: SignInOrigin::GatewayOffer,
+        provider: "charm".to_string(),
+    });
     app.pump_gateway_events();
 
     assert_eq!(
@@ -188,7 +191,10 @@ async fn authorized_completion_with_parked_message_takes_over() {
     app.pending_gateway_message = Some("hello".into());
 
     let tx = app.gateway_event_tx.clone();
-    let _ = tx.send(GatewaySignInEvent::Authorized { provider: "charm" });
+    let _ = tx.send(DeviceSignInEvent::Authorized {
+        origin: SignInOrigin::GatewayOffer,
+        provider: "charm".to_string(),
+    });
     app.pump_gateway_events();
 
     assert_eq!(app.llm_config.provider, "charm");
@@ -270,8 +276,9 @@ async fn authorized_completion_switches_to_the_provider_it_signed_in() {
     app.pending_gateway_message = Some("hello".into());
 
     let tx = app.gateway_event_tx.clone();
-    let _ = tx.send(GatewaySignInEvent::Authorized {
-        provider: "copilot",
+    let _ = tx.send(DeviceSignInEvent::Authorized {
+        origin: SignInOrigin::GatewayOffer,
+        provider: "copilot".to_string(),
     });
     app.pump_gateway_events();
 
@@ -294,8 +301,9 @@ async fn failed_completion_restores_the_message_and_never_burns_the_marker() {
     app.gateway_signing_in = true; // fixture: a flow was in flight
 
     let tx = app.gateway_event_tx.clone();
-    let _ = tx.send(GatewaySignInEvent::Failed {
-        provider: "copilot",
+    let _ = tx.send(DeviceSignInEvent::Failed {
+        origin: SignInOrigin::GatewayOffer,
+        provider: "copilot".to_string(),
         error: "device flow denied".into(),
     });
     app.pump_gateway_events();
