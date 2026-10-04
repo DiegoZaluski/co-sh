@@ -990,6 +990,26 @@ impl App {
             // inline chrome, the dialog is a modal overlay that owns the
             // whole input surface while visible (sovereign keys + mouse).
             self.slash_menu.render(buf, prompt_area, &self.theme);
+            // Hover state for the API-key dialog's Login button, resolved
+            // against the tracked pointer — the button's rect is pure
+            // geometry (`api_key_login_button_area`), so this reads the SAME
+            // source the render and the mouse hit-test use (no stored hitbox
+            // to go stale). Written back into the instance the render below
+            // reads; a non-ApiKeyInput stack top simply keeps `false`.
+            if let Some(d) = self.dialog.current_mut() {
+                d.login_hover = matches!(
+                    &d.dialog_type,
+                    DialogType::ApiKeyInput {
+                        device_login: true,
+                        ..
+                    }
+                ) && crate::ui::dialogs::api_key_login_button_area(area)
+                    .is_some_and(|r| {
+                        self.last_mouse_x >= r.x
+                            && self.last_mouse_x < r.right()
+                            && self.last_mouse_y == r.y
+                    });
+            }
             self.dialog.render(buf, area, &self.theme, now);
             // Toasts render last so transient feedback (copied, not saved,
             // unavailable clipboard) is never buried under a modal panel —

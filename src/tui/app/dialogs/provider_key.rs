@@ -61,10 +61,11 @@ impl App {
         if selected == 1 {
             // Overwrite: replace the picker with the regular key input.
             self.dialog.replace(DialogType::ApiKeyInput {
-                provider,
+                provider: provider.clone(),
                 env_var,
                 input: String::new(),
                 cursor_pos: 0,
+                device_login: crate::app::providers::provider_has_device_login(&provider),
             });
         } else {
             // Forget: confirm first — the keyring delete is destructive and

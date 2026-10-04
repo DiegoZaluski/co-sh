@@ -410,6 +410,15 @@ impl App {
                 return Ok(false);
             }
 
+            // Device sign-in display: a passive progress box that owns the
+            // keyboard (Esc pops it; every other key is swallowed) — the
+            // same sovereignty the other modal boxes have, so typing never
+            // leaks into whatever sits beneath the stack.
+            if self.is_device_login_visible() {
+                self.handle_device_login_key(key.code);
+                return Ok(false);
+            }
+
             // Check ApiKey/LocalUrl input dialog
             if self.is_text_input_visible() {
                 let handled = self.handle_text_input_dialog_key(key.code);
