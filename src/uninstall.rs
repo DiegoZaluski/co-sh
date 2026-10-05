@@ -507,7 +507,9 @@ mod tests {
 
     /// `COSH_CONFIG_DIR` is process-global state: env-touching tests serialize
     /// on this lock so parallel test threads cannot race each other's value.
-    static ENV_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+    /// Shared crate-wide (the `setup` module's tests also redirect the var)
+    /// so two env-mutating tests can never interleave.
+    use crate::setup::CONFIG_DIR_LOCK as ENV_LOCK;
 
     #[test]
     fn consented_in_config_reads_telemetry_flag() {

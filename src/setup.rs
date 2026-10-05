@@ -6,7 +6,9 @@
 //! changes through [`Setup::save`]. A missing or corrupt file is treated as
 //! defaults.
 
-use std::path::PathBuf;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use crate::mcp::McpConfig;
 use directories::ProjectDirs;
@@ -53,6 +55,20 @@ pub struct Setup {
     /// This flag is only the USER's choice — the effective consent still
     /// goes through `Telemetry::resolve` (env override + CI hard-off).
     pub telemetry: bool,
+    /// Raw bytes of the file this struct was last loaded from (or last
+    /// wrote), kept as JSON text. NOT serialized — this is the merge
+    /// baseline for [`Setup::save`]: with several cosh processes sharing one
+    /// config file, a save must re-read the disk, carry forward sections
+    /// this process never touched, and only overwrite what actually
+    /// changed here. Without it the second process's save clobbers the
+    /// first's unrelated changes (the "settings keep vanishing" bug).
+    #[serde(skip)]
+    disk_snapshot: Option<String>,
+    /// How long a save waits for a foreign process's config lock before
+    /// skipping the write (the change stays in memory for the next save).
+    /// Not persisted; only tests shrink it (a real holder is waited out).
+    #[serde(skip)]
+    pub(crate) lock_wait: Duration,
 }
 
 impl Default for Setup {
@@ -72,6 +88,8 @@ impl Default for Setup {
             mcp: McpConfig::default(),
             editor: String::new(),
             telemetry: true,
+            disk_snapshot: None,
+            lock_wait: Duration::from_millis(250),
         }
     }
 }
@@ -688,26 +706,255 @@ fn setup_path() -> PathBuf {
     config_dir().join("setup.json")
 }
 
+/// Try to acquire the exclusive cross-process lock guarding `setup.json`.
+///
+/// Kernel-managed (`flock` via the standard library — the same mechanism the
+/// session store uses): released on drop AND automatically when the holder
+/// dies, so a crashed process can never wedge the config. The lock file is
+/// a sibling (`setup.json.lock`) and is left on disk after release: removing
+/// it would race with a foreign holder.
+///
+/// On contention the call polls until the wait window expires, then gives
+/// up with `None` (the caller skips the write rather than blocking the UI).
+fn acquire_config_lock(path: &Path, wait: Duration) -> Option<std::fs::File> {
+    let lock_path = path.with_extension("json.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .ok()?;
+    const POLL: Duration = Duration::from_millis(25);
+    let deadline = Instant::now() + wait;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Some(file),
+            Err(std::fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                std::thread::sleep(POLL);
+            }
+            Err(std::fs::TryLockError::WouldBlock) => return None,
+            Err(std::fs::TryLockError::Error(_)) => return None,
+        }
+    }
+}
+
+/// True when two serde section values differ. Serialization-based because
+/// the section structs are generated data carriers with no `PartialEq`;
+/// an empty diff means "untouched" for the save-time merge.
+fn section_differs<T: Serialize>(current: &T, baseline: &T) -> bool {
+    let (Ok(a), Ok(b)) = (
+        serde_json::to_value(current),
+        serde_json::to_value(baseline),
+    ) else {
+        // Unserializable section (cannot happen for the schema types): treat
+        // as changed so local state wins instead of being dropped.
+        return true;
+    };
+    a != b
+}
+
 impl Setup {
-    /// Load from disk. Returns defaults if the file is missing or corrupt.
+    /// Load from disk. Returns defaults when the file is missing.
+    ///
+    /// Resilient to corruption: an unparsable file is NOT reset silently —
+    /// it is quarantined to `setup.json.corrupt-<epoch-ms>` beside the
+    /// original (nothing is ever lost, and the cause stays visible) and
+    /// defaults are returned with a logged warning. The old behavior
+    /// (`unwrap_or_default`) made a truncated JSON look like "the user
+    /// never configured anything", hiding the real cause.
+    ///
+    /// The raw file text is also kept as this instance's merge baseline for
+    /// [`Setup::save`]: with several cosh processes sharing one config
+    /// file, a save must be able to tell what changed on disk since this
+    /// process last read or wrote it.
     pub fn load() -> Self {
         let path = setup_path();
         let content = match std::fs::read_to_string(&path) {
             Ok(c) => c,
+            // Missing file: defaults and no baseline — a later save
+            // overwrites wholesale, which is correct (nothing to merge with).
             Err(_) => return Self::default(),
         };
-        serde_json::from_str(&content).unwrap_or_default()
+        match serde_json::from_str::<Self>(&content) {
+            Ok(mut setup) => {
+                setup.disk_snapshot = Some(content);
+                setup
+            }
+            Err(error) => {
+                let epoch_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis();
+                // The pid suffix keeps two processes quarantining in the
+                // same millisecond from clobbering each other's backup.
+                let quarantine = path.with_extension(format!(
+                    "json.corrupt-{epoch_ms}-{}",
+                    std::process::id()
+                ));
+                match std::fs::rename(&path, &quarantine) {
+                    Ok(()) => log::warn!(
+                        "setup.json is corrupt ({error}); quarantined to {} and defaults apply",
+                        quarantine.display()
+                    ),
+                    Err(rename_error) => log::warn!(
+                        "setup.json is corrupt ({error}) and could not be quarantined \
+                         ({rename_error}); defaults apply"
+                    ),
+                }
+                Self::default()
+            }
+        }
     }
 
     /// Persist to disk, creating the config directory if needed.
-    pub fn save(&self) {
+    ///
+    /// Cross-process safe (the old save was neither, which is how two cosh
+    /// processes erased each other's settings):
+    ///
+    /// - the whole read-decide-write window holds an exclusive advisory
+    ///   lock on `setup.json.lock` (same flock mechanism as the session
+    ///   store), so two saves never interleave;
+    /// - sections this process did NOT touch are carried over from the disk
+    ///   content — a concurrent process's change survives this save instead
+    ///   of being clobbered by a stale in-memory copy;
+    /// - the write lands in a sibling temp file and is atomically renamed
+    ///   over the target, so a reader (or a crash mid-write) never sees a
+    ///   half-written JSON — the corruption that used to reset every
+    ///   setting on the next launch.
+    ///
+    /// When the lock cannot be taken within the wait window the write is
+    /// skipped (`false` return): the change stays in memory and the next
+    /// save persists it. Skipping beats blocking the UI thread behind a
+    /// stuck holder — the same trade-off the session store makes for its
+    /// write jobs. The wait itself is kept short (250ms): saves are
+    /// millisecond-scale, so any longer contention is a stuck holder, and
+    /// this method runs on the UI thread.
+    ///
+    /// Returns `true` when the merged state was persisted; `false` when the
+    /// write was skipped (lock unavailable) or the file could not be
+    /// written — the change stays in memory for the next save either way,
+    /// and the reason is always logged.
+    pub fn save(&mut self) -> bool {
         let path = setup_path();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        if let Ok(json) = serde_json::to_string_pretty(self) {
-            std::fs::write(&path, json).ok();
+        let Some(_lock) = acquire_config_lock(&path, self.lock_wait) else {
+            log::warn!(
+                "setup.json is locked by another process; the change stays in memory \
+                 and will be saved on the next change"
+            );
+            return false;
+        };
+        // Baseline: the content this process last loaded or wrote. Sections
+        // equal to it are "untouched by us" and follow the disk; sections
+        // that differ carry this process's change.
+        let baseline: Self = self
+            .disk_snapshot
+            .as_deref()
+            .and_then(|text| serde_json::from_str(text).ok())
+            .unwrap_or_default();
+        // Disk now: whatever other processes wrote since our baseline.
+        let merged = match std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Self>(&text).ok())
+        {
+            Some(disk) => self.merged_over(&baseline, disk),
+            // Absent or unparsable disk file: the in-memory state is the
+            // only trustworthy source. (A corrupt file was already
+            // quarantined at load; one corrupted out-of-band gets the same
+            // treatment on the next load.)
+            None => {
+                log::warn!(
+                    "setup.json on disk is missing or unreadable; rewriting it from this process's settings"
+                );
+                self.clone()
+            }
+        };
+        let Ok(json) = serde_json::to_string_pretty(&merged) else {
+            log::warn!("setup.json could not be serialized; the change stays in memory");
+            return false;
+        };
+        // Atomic replace: write the sibling temp file fully (fsync'd), then
+        // rename it over the target. `rename` replaces the destination
+        // atomically on Unix AND Windows (MOVEFILE_REPLACE_EXISTING).
+        let tmp = path.with_extension("json.tmp");
+        let written = std::fs::File::create(&tmp).ok().and_then(|mut file| {
+            file.write_all(json.as_bytes()).ok()?;
+            file.sync_all().ok()?;
+            Some(())
+        });
+        match written {
+            Some(()) if std::fs::rename(&tmp, &path).is_ok() => {
+                // The baseline moves to exactly what this write produced, so
+                // the NEXT save compares against it — a value reverted back
+                // to a pre-session state still registers as a change.
+                self.disk_snapshot = Some(json);
+                true
+            }
+            _ => {
+                log::warn!(
+                    "failed to persist setup.json; the change stays in memory \
+                     and will be saved on the next change"
+                );
+                let _ = std::fs::remove_file(&tmp);
+                false
+            }
         }
+    }
+
+    /// Merge policy for [`Setup::save`]: a section this process CHANGED
+    /// since its baseline keeps this process's value (the user's latest
+    /// action wins); an untouched section adopts the disk's value, so a
+    /// concurrent process's change survives. When both sides changed the
+    /// same section, ours wins — a true conflict is unavoidable, and the
+    /// local user's intent is the one they can see and react to.
+    fn merged_over(&self, baseline: &Self, disk: Self) -> Self {
+        let mut merged = disk;
+        if section_differs(&self.appearance, &baseline.appearance) {
+            merged.appearance = self.appearance.clone();
+        }
+        if section_differs(&self.tools, &baseline.tools) {
+            merged.tools = self.tools.clone();
+        }
+        if section_differs(&self.routing, &baseline.routing) {
+            merged.routing = self.routing.clone();
+        }
+        if section_differs(&self.hooks, &baseline.hooks) {
+            merged.hooks = self.hooks.clone();
+        }
+        if section_differs(&self.providers, &baseline.providers) {
+            merged.providers = self.providers.clone();
+        }
+        if section_differs(&self.model, &baseline.model) {
+            merged.model = self.model.clone();
+        }
+        if section_differs(&self.mode, &baseline.mode) {
+            merged.mode = self.mode.clone();
+        }
+        if section_differs(&self.cache, &baseline.cache) {
+            merged.cache = self.cache.clone();
+        }
+        if section_differs(&self.skills, &baseline.skills) {
+            merged.skills = self.skills.clone();
+        }
+        if section_differs(&self.decision, &baseline.decision) {
+            merged.decision = self.decision.clone();
+        }
+        if section_differs(&self.mcp, &baseline.mcp) {
+            merged.mcp = self.mcp.clone();
+        }
+        // Flat fields compare directly (no section wrapper).
+        if self.lsp != baseline.lsp {
+            merged.lsp = self.lsp;
+        }
+        if self.editor != baseline.editor {
+            merged.editor = self.editor.clone();
+        }
+        if self.telemetry != baseline.telemetry {
+            merged.telemetry = self.telemetry;
+        }
+        merged
     }
 
     /// The configured base URL for a local provider, if the user saved one
@@ -809,7 +1056,45 @@ impl Setup {
 }
 
 #[cfg(test)]
+pub(crate) static CONFIG_DIR_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+#[cfg(test)]
 mod tests {
+    /// Serializes tests that redirect the config directory: `config_dir()`
+    /// reads the process-wide environment (`COSH_CONFIG_DIR`), and cargo
+    /// runs test threads in parallel. Shared with every OTHER test in this
+    /// crate that touches the env var (`uninstall`), so the two can never
+    /// interleave each other's override.
+    use super::CONFIG_DIR_LOCK as ENV_LOCK;
+
+    /// Redirect `setup.json` to a scratch config dir for the test's
+    /// lifetime. Every `save()` reached through a test MUST run under this:
+    /// without it the test persists DEFAULTS over the developer's real
+    /// `~/.config/cosh/setup.json` — a settings-vanishing bug caused by the
+    /// test suite itself (found while investigating the multi-process
+    /// lost-update regression; same symptom, third distinct cause).
+    struct IsolatedConfig {
+        /// Keeps the scratch dir alive for the guard's lifetime; the value
+        /// itself is never read (the path is already in the env override).
+        _dir: tempfile::TempDir,
+    }
+
+    impl IsolatedConfig {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().expect("scratch config dir");
+            // SAFETY: ENV_LOCK serializes env mutation across tests; the
+            // override is removed when the guard drops.
+            unsafe { std::env::set_var("COSH_CONFIG_DIR", dir.path()) };
+            Self { _dir: dir }
+        }
+    }
+
+    impl Drop for IsolatedConfig {
+        fn drop(&mut self) {
+            unsafe { std::env::remove_var("COSH_CONFIG_DIR") };
+        }
+    }
+
     #[test]
     fn routing_round_trips_summarization_models_in_order() {
         let mut setup = super::Setup::default();
@@ -933,6 +1218,12 @@ mod tests {
     /// config loads as "no selection yet" (the Build default applies).
     #[test]
     fn mode_selection_is_overwritten_and_roundtrips() {
+        // set_mode_selection persists: the config dir must be a scratch
+        // dir, never the developer's real setup.json. The env lock comes
+        // FIRST: mutating the var under the lock is the only ordering that
+        // keeps two env-touching tests from interleaving.
+        let _env_guard = ENV_LOCK.lock();
+        let _isolated = IsolatedConfig::new();
         let mut setup = Setup::default();
         assert_eq!(setup.persisted_mode(), None);
 
@@ -1093,6 +1384,11 @@ mod tests {
     /// old config loads as "no selection yet".
     #[test]
     fn model_selection_is_overwritten_and_roundtrips() {
+        // set_model_selection persists: the config dir must be a scratch
+        // dir, never the developer's real setup.json. The env lock comes
+        // FIRST (same ordering contract as the mode-selection test).
+        let _env_guard = ENV_LOCK.lock();
+        let _isolated = IsolatedConfig::new();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("setup.json");
 
@@ -1187,5 +1483,278 @@ mod tests {
         let legacy_section: Setup =
             serde_json::from_str(r#"{"checkup": {"termination": {"enabled": false}}}"#).unwrap();
         assert!(!legacy_section.decision.termination.enabled);
+    }
+
+    // ── Cross-process persistence (the settings-vanishing regression) ──────
+
+    /// REGRESSION (settings vanishing across processes): two cosh processes
+    /// share one setup.json. B changes the theme and saves; A — still
+    /// holding its own older in-memory copy — then changes the model and
+    /// saves. The old save wrote A's WHOLE in-memory struct, erasing B's
+    /// theme. The save must merge: sections A did not touch follow the disk.
+    #[test]
+    fn save_from_a_stale_process_keeps_the_other_process_change() {
+        let _env_guard = ENV_LOCK.lock();
+        let _isolated = IsolatedConfig::new();
+
+        // Seed the disk so both processes have a real baseline.
+        let seed = Setup::default();
+        std::fs::write(setup_path(), serde_json::to_string_pretty(&seed).unwrap()).unwrap();
+
+        // Process A loads.
+        let mut process_a = Setup::load();
+        // Process B loads and changes ONLY the theme.
+        let mut process_b = Setup::load();
+        process_b.appearance.theme = "dracula".to_string();
+        process_b.save();
+
+        // Process A changes ONLY the model — through the same accessor the
+        // model dialog uses (it persists inside the setter).
+        process_a.set_model_selection("groq", "openai/gpt-oss-120b", None);
+
+        // The NEXT load sees BOTH changes.
+        let reloaded = Setup::load();
+        assert_eq!(
+            reloaded.appearance.theme, "dracula",
+            "a concurrent process's theme change must survive process A's save"
+        );
+        assert_eq!(
+            reloaded.persisted_model(),
+            Some("openai/gpt-oss-120b"),
+            "process A's own change must persist too"
+        );
+    }
+
+    /// True conflict (both processes changed the SAME section): the local
+    /// user's latest action wins — they can see and react to it, unlike a
+    /// foreign change that happened behind their back.
+    #[test]
+    fn same_section_changed_by_both_processes_lets_the_local_change_win() {
+        let _env_guard = ENV_LOCK.lock();
+        let _isolated = IsolatedConfig::new();
+
+        let seed = Setup::default();
+        std::fs::write(setup_path(), serde_json::to_string_pretty(&seed).unwrap()).unwrap();
+
+        let mut process_a = Setup::load();
+        let mut process_b = Setup::load();
+        process_b.appearance.theme = "dracula".to_string();
+        process_b.save();
+
+        process_a.appearance.theme = "nord".to_string();
+        process_a.save();
+
+        assert_eq!(
+            Setup::load().appearance.theme,
+            "nord",
+            "the last local save wins a true same-section conflict"
+        );
+    }
+
+    /// A save must never leave a half-written file behind: the write lands
+    /// in a temp file and is renamed over the target. A crash mid-write
+    /// used to truncate setup.json, and the next launch reset EVERYTHING
+    /// (the corruption half of the settings-vanishing report).
+    #[test]
+    fn save_is_atomic_and_leaves_no_temp_file() {
+        let _env_guard = ENV_LOCK.lock();
+        let _isolated = IsolatedConfig::new();
+
+        let mut setup = Setup::default();
+        setup.appearance.theme = "dracula".to_string();
+        setup.save();
+
+        let path = setup_path();
+        assert!(
+            !path.with_extension("json.tmp").exists(),
+            "the temp file must be consumed by the rename"
+        );
+        // The on-disk file is complete, parseable JSON — never a fragment.
+        let parsed: Setup =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(parsed.appearance.theme, "dracula");
+    }
+
+    /// A corrupt setup.json is quarantined beside the original instead of
+    /// being silently reset: nothing is lost, and the cause stays visible.
+    /// The old `unwrap_or_default` made truncation look like "the user
+    /// never configured anything".
+    #[test]
+    fn corrupt_setup_json_is_quarantined_not_silently_reset() {
+        let _env_guard = ENV_LOCK.lock();
+        let _isolated = IsolatedConfig::new();
+
+        let path = setup_path();
+        std::fs::write(&path, "{\"appearance\": { \"theme\": \"drac").unwrap();
+
+        let loaded = Setup::load();
+        assert_eq!(
+            loaded.appearance.theme, "",
+            "an unparsable file loads defaults"
+        );
+        assert!(!path.exists(), "the corrupt file must move out of the way");
+        let quarantine = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|entry| {
+                entry.file_name().to_string_lossy().starts_with("setup.json.corrupt-")
+            })
+            .expect("the corrupt file must be quarantined beside the original");
+        assert!(
+            std::fs::read_to_string(quarantine.path())
+                .unwrap()
+                .starts_with("{\"appearance\""),
+            "the quarantine must preserve the original bytes"
+        );
+    }
+
+    /// When another process holds the config lock past the wait window, the
+    /// save is SKIPPED (the change stays in memory for the next save) — it
+    /// must never block forever, and must never clobber the locked file.
+    #[test]
+    fn save_under_a_foreign_lock_is_skipped_not_clobbered() {
+        let _env_guard = ENV_LOCK.lock();
+        let _isolated = IsolatedConfig::new();
+
+        let path = setup_path();
+        let mut setup = Setup::default();
+        setup.save(); // seed the disk
+        let disk_before = std::fs::read_to_string(&path).unwrap();
+
+        // A foreign process holds the lock for longer than we are willing
+        // to wait (tests shrink the window; production waits only 250ms —
+        // saves are millisecond-scale, so longer contention means a stuck
+        // holder, and save runs on the UI thread).
+        let holder = acquire_config_lock(&path, std::time::Duration::ZERO).unwrap();
+        setup.lock_wait = std::time::Duration::from_millis(80);
+        setup.appearance.theme = "dracula".to_string();
+        setup.save();
+        drop(holder);
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            disk_before,
+            "a skipped save must not touch the locked file"
+        );
+        // The in-memory change survives for the NEXT save (once the lock is
+        // free), which persists it.
+        setup.lock_wait = std::time::Duration::from_secs(1);
+        setup.save();
+        assert_eq!(Setup::load().appearance.theme, "dracula");
+    }
+
+    /// A fresh in-memory `Setup` (never loaded — no disk baseline) still
+    /// writes wholesale: there is nothing to merge with, so the explicit
+    /// state is authoritative. This pins the "first save creates the file"
+    /// path the isolation-dependent tests above never exercise.
+    #[test]
+    fn first_save_without_a_baseline_writes_wholesale() {
+        let _env_guard = ENV_LOCK.lock();
+        let _isolated = IsolatedConfig::new();
+
+        let mut setup = Setup::default();
+        setup.lsp = false;
+        setup.save();
+        let reloaded = Setup::load();
+        assert!(!reloaded.lsp);
+        // The next save's baseline is this file, so an unrelated concurrent
+        // change is honored from now on (covered by the stale-process test).
+    }
+
+    // ── Merge-schema tripwire ───────────────────────────────────────────────
+
+    /// Nudge the FIRST scalar found inside a JSON value (recursing through
+    /// arrays and objects) so it differs from the original. Tag keys of
+    /// serde enums (`kind`, `type`) are never touched: renaming one would
+    /// break deserialization instead of changing a value. Returns `false`
+    /// when the value contains no nudgeable scalar (empty structures).
+    fn bump_first_scalar(value: &mut serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Bool(b) => {
+                *b = !*b;
+                true
+            }
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    *value = serde_json::json!(i + 1);
+                } else if let Some(f) = n.as_f64() {
+                    *value = serde_json::json!(f + 1.0);
+                } else {
+                    return false;
+                }
+                true
+            }
+            serde_json::Value::String(s) => {
+                s.push_str("-changed");
+                true
+            }
+            serde_json::Value::Array(items) => {
+                items.iter_mut().any(bump_first_scalar)
+            }
+            serde_json::Value::Object(map) => map
+                .iter_mut()
+                .filter(|(key, _)| key.as_str() != "kind" && key.as_str() != "type")
+                .any(|(_, item)| bump_first_scalar(item)),
+            serde_json::Value::Null => false,
+        }
+    }
+
+    /// SCHEMA TRIPWIRE for the save-time merge: every serialized top-level
+    /// field of `Setup` must be honored by `merged_over` — a field changed
+    /// locally (against a default baseline, disk unchanged) must WIN the
+    /// merge. Without this test, adding a new section to `Setup` and
+    /// forgetting to add it to `merged_over` would compile fine and then
+    /// silently DROP that field's local changes on every concurrent save
+    /// (the exact class of bug these changes fix, reintroduced by growth).
+    #[test]
+    fn merged_over_honors_every_serialized_field() {
+        let baseline = Setup::default();
+        let base_json = serde_json::to_value(&baseline).unwrap();
+        let serde_json::Value::Object(defaults) = base_json else {
+            panic!("Setup must serialize as a JSON object");
+        };
+
+        let mut checked = 0usize;
+        for field in defaults.keys() {
+            // Build the "local" state by nudging one scalar inside this
+            // field, through the SAME serde round-trip the real merge path
+            // uses (this is also what keeps the test honest about renames
+            // and tagged enums).
+            let mut local_json = serde_json::to_value(&baseline).unwrap();
+            let slot = local_json
+                .get_mut(field.as_str())
+                .expect("field just listed");
+            if !bump_first_scalar(slot) {
+                // A field with no nudgeable scalar (e.g. an empty map in the
+                // default) cannot be tested through this construction — the
+                // per-section merge tests cover it concretely.
+                continue;
+            }
+            let local: Setup = serde_json::from_value(local_json.clone()).unwrap();
+            assert_ne!(
+                serde_json::to_value(&local).unwrap(),
+                serde_json::to_value(&baseline).unwrap(),
+                "the nudge must actually change field {field}"
+            );
+
+            // Disk = baseline (another process wrote nothing we care about):
+            // the merge must adopt the LOCAL change for this field and leave
+            // everything else at the disk value.
+            let merged = local.merged_over(&baseline, baseline.clone());
+            let merged_json = serde_json::to_value(&merged).unwrap();
+            assert_eq!(
+                merged_json.get(&field),
+                local_json.get(&field),
+                "merged_over dropped the local change to `{field}` — \
+                 add the field to the merge (a Setup field not handled by \
+                 merged_over loses its local changes whenever a concurrent \
+                 process saves)"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= 10,
+            "the merge tripwire must cover the real schema (checked {checked})"
+        );
     }
 }
