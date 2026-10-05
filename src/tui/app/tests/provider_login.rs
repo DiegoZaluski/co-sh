@@ -36,9 +36,10 @@ fn in_flight(app: &mut App) {
 /// REGRESSION (review R1): the sign-in display must be PUSHED over the
 /// API-key input — never a `replace()`, which wipes the whole stack and
 /// destroys the half-typed key the user may still want to paste manually.
-/// The real spawn runs here (an in-sandbox charm.sh attempt fails on its
-/// own); the assertions below run BEFORE any pump, so a stray outcome
-/// event sitting in the channel cannot interfere.
+/// The real spawn runs here: on a machine with network access the flow
+/// reaches charm.sh and `announce_device_transaction` opens the SYSTEM
+/// BROWSER — run explicitly (`cargo test -- --ignored`).
+#[ignore = "spawns the real charm.sh device flow, which opens the system browser"]
 #[tokio::test]
 async fn login_pushes_the_sign_in_over_the_key_input() {
     let _guard = HOME_LOCK.lock();

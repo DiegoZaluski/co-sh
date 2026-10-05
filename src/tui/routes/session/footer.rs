@@ -198,8 +198,15 @@ mod tests {
         let area = Rect::new(0, 0, 80, 1);
         let mut buf = Buffer::empty(area);
 
-        let hitbox =
-            FooterView::render_with_mode(&mut buf, area, &state, &theme, false, Some("0.1.2"), true);
+        let hitbox = FooterView::render_with_mode(
+            &mut buf,
+            area,
+            &state,
+            &theme,
+            false,
+            Some("0.1.2"),
+            true,
+        );
 
         let line: String = (area.x..area.right())
             .filter_map(|x| buf.cell((x, area.y)).map(|cell| cell.symbol()))
@@ -224,8 +231,15 @@ mod tests {
         let area = Rect::new(0, 0, 80, 1);
         let mut buf = Buffer::empty(area);
 
-        let hitbox =
-            FooterView::render_with_mode(&mut buf, area, &state, &theme, true, Some("0.1.2"), false);
+        let hitbox = FooterView::render_with_mode(
+            &mut buf,
+            area,
+            &state,
+            &theme,
+            true,
+            Some("0.1.2"),
+            false,
+        );
 
         let line: String = (area.x..area.right())
             .filter_map(|x| buf.cell((x, area.y)).map(|cell| cell.symbol()))
@@ -244,8 +258,15 @@ mod tests {
         let area = Rect::new(0, 0, 9, 1);
         let mut buf = Buffer::empty(area);
 
-        let hitbox =
-            FooterView::render_with_mode(&mut buf, area, &state, &theme, false, Some("0.1.2"), false);
+        let hitbox = FooterView::render_with_mode(
+            &mut buf,
+            area,
+            &state,
+            &theme,
+            false,
+            Some("0.1.2"),
+            false,
+        );
 
         let line: String = (area.x..area.right())
             .filter_map(|x| buf.cell((x, area.y)).map(|cell| cell.symbol()))

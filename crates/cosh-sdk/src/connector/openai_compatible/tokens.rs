@@ -36,7 +36,24 @@ pub fn extract_usage(raw: &str) -> Option<TokenUsage> {
         completion_tokens_details: Option<Details>,
     }
     let v: serde_json::Value = serde_json::from_str(raw).ok()?;
-    let usage: Usage = serde_json::from_value(v["usage"].clone()).ok()?;
+    // Kimi (docs: platform.kimi.ai/docs/guide/context-caching, streaming) is
+    // OpenAI-compatible but historically ALSO duplicated `usage` inside each
+    // choice (their forum: "usage information is under choices"). Top-level
+    // `usage` is tried first — OpenAI's shape, and Kimi's when
+    // `stream_options.include_usage` is set — with the per-choice copy as a
+    // fallback so a Kimi stream frame that only carries it there still
+    // resolves. Within one choice set only completion/total differ, so any
+    // choice works.
+    let usage_value = if v.get("usage").is_some_and(|u| u.is_object()) {
+        v["usage"].clone()
+    } else {
+        v["choices"]
+            .get(0)
+            .and_then(|c| c.get("usage"))
+            .filter(|u| u.is_object())
+            .cloned()?
+    };
+    let usage: Usage = serde_json::from_value(usage_value).ok()?;
     // OpenAI's `prompt_tokens` INCLUDES cached tokens
     // (prompt_tokens_details.cached_tokens ⊆ prompt_tokens), unlike
     // Anthropic where input excludes them. Normalize onto the shared
@@ -122,5 +139,49 @@ mod tests {
         let usage = extract_usage(json).unwrap();
         assert_eq!(usage.cache_read_input_tokens, 0);
         assert_eq!(usage.reasoning_tokens, 0);
+    }
+
+    /// Kimi (Moonshot) historically duplicated `usage` INSIDE each choice
+    /// instead of top level (docs: platform.kimi.ai/docs/guide/utilize-the-
+    /// streaming-output-feature-of-kimi-api; Kimi forum thread "API not fully
+    /// OpenAI-compatible"). With `stream_options.include_usage` the top-level
+    /// copy appears — but a frame that only carries the per-choice copy must
+    /// still resolve, otherwise token accounting silently drops to nothing.
+    #[test]
+    fn kimi_per_choice_usage_falls_back() {
+        let json = r#"{"choices":[{"delta":{},"usage":{"prompt_tokens":100,"completion_tokens":20}}]}"#;
+        let usage = extract_usage(json).expect("per-choice usage must resolve");
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 20);
+    }
+
+    /// The top-level usage always WINS over a per-choice copy: the OpenAI
+    /// shape (and Kimi's final include_usage frame, which this caller always
+    /// requests) must not be mis-parsed through the fallback.
+    #[test]
+    fn top_level_usage_wins_over_choice_copy() {
+        let json = r#"{"choices":[{"delta":{},"usage":{"prompt_tokens":1,"completion_tokens":1}}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#;
+        let usage = extract_usage(json).unwrap();
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.output_tokens, 5);
+    }
+
+    /// A per-choice usage with BOTH counters zero (a degenerate/keep-alive
+    /// choice frame) is not a usable accounting record — same None contract
+    /// as the empty top-level usage.
+    #[test]
+    fn kimi_per_choice_empty_usage_is_none() {
+        let json = r#"{"choices":[{"delta":{},"usage":{}}]}"#;
+        assert_eq!(extract_usage(json), None);
+    }
+
+    /// A `usage: null` mid-stream frame (some gateways emit it on every
+    /// text delta) must not consume the fallback with a non-object: the
+    /// choice copy is then the only signal, and with neither present the
+    /// result stays None rather than a deserialization error.
+    #[test]
+    fn null_usage_frame_without_choice_usage_is_none() {
+        let json = r#"{"choices":[{"delta":{"content":"x"}}],"usage":null}"#;
+        assert_eq!(extract_usage(json), None);
     }
 }

@@ -285,6 +285,16 @@ pub fn deepseek_connector(port: u16) -> Connector {
         .with_api_key("sk-deepseek-test")
 }
 
+/// Build a Kimi (Moonshot) Connector pointed at a mock server on the given
+/// port — exercises the same OpenAI-compatible caller as the real
+/// `api.moonshot.ai/v1` endpoint.
+pub fn kimi_connector(port: u16) -> Connector {
+    Connector::new("kimi")
+        .unwrap()
+        .with_base_url(format!("http://127.0.0.1:{port}/v1"))
+        .with_api_key("sk-kimi-test")
+}
+
 /// Build a Gemini Connector pointed at a mock server on the given port.
 pub fn gemini_connector(port: u16) -> Connector {
     Connector::new("gemini")

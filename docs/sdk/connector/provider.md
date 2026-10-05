@@ -115,6 +115,43 @@ pub fn set_zen_public_tier_enabled(enabled: bool);   // process-wide opt-in
 pub fn zen_public_tier_enabled() -> bool;
 ```
 
+## The Bedrock provider (`bedrock`) — region-templated base URL
+
+`bedrock` joins the OpenAI-compatible family through Amazon Bedrock's official
+OpenAI-compatible endpoint on `bedrock-runtime` — no AWS SDK, no SigV4: auth
+rides the shared `Authorization: Bearer` path with the Bedrock API key
+(`AWS_BEARER_TOKEN_BEDROCK`, the endpoint's documented API-key mode). Because
+the endpoint is region-scoped, the registry entry only pins a default region
+(`us-east-1`); the live base URL is resolved at request time by:
+
+```rust,ignore
+pub fn resolved_provider_base_url(provider: &str) -> Cow<'static, str>
+```
+
+It re-points the registry URL to the ambient `AWS_REGION` (falling back to
+`AWS_DEFAULT_REGION`). The region value is validated against the AWS region
+grammar (`^[a-z]{2,4}(-[a-z]+)*-[0-9]+$`) before it is spliced into the
+endpoint host — an unvalidated `AWS_REGION` would silently redirect the
+bearer token to a foreign origin, so anything invalid (or blank) defers to
+the next variable or falls back to the registry default. An explicit
+`params.base_url` (connector `with_base_url`) always wins over the ambient
+resolution.
+
+Two endpoint surfaces are NOT part of Bedrock's OpenAI-compatible API, so
+`embed` and `list_models` fail up front with an explanatory `NotImplemented`
+error (unless an explicit base URL points the connector at the
+`bedrock-mantle` compatibility endpoint, which serves the model catalog, or
+at a proxy serving embeddings). Streaming, native tool calling, reasoning
+effort, and image input work through the shared family path unchanged.
+
+**Decision — no AWS SDK.** The full `aws-sdk-bedrockruntime` (and its
+`Converse` API, SigV4 chain, Guardrails, embeddings) is deliberately NOT a
+dependency: the OpenAI-compatible endpoint covers everything cosh needs and
+the SDK would pull dozens of crates into the slim build. If a future
+requirement genuinely needs the native surface, the plan is to add it as an
+opt-in **feature gate** (`bedrock-sdk`) wrapping the SDK behind the existing
+isolated-family pattern — not to replace this integration.
+
 ## API key resolution
 
 ```rust,ignore
@@ -178,8 +215,8 @@ Next: [discovery — context windows and reasoning](discovery.md).
 
 ## Summary
 
-- The provider registry contains ~26 providers with `ProviderConfig` entries: name, family (OpenAICompatible/Gemini/Claude), base URL, default model, extra-headers flag, and `local` flag.
-- Providers include cloud services (openai, groq, mistral, together, openrouter, xai, deepseek, perplexity, etc.) and local model servers (ollama, lmstudio, vllm, llamacpp, llamafile, koboldcpp, text-generation-webui, localai, jan, gpt4all, aphrodite, sglang, tabbyapi) pointing at localhost.
+- The provider registry contains ~30 providers with `ProviderConfig` entries: name, family (OpenAICompatible/OpenAi/Gemini/Claude/Copilot), base URL, default model, extra-headers flag, and `local` flag.
+- Providers include cloud services (openai, groq, mistral, together, openrouter, xai, deepseek, perplexity, bedrock, etc.) and local model servers (ollama, lmstudio, vllm, llamacpp, llamafile, koboldcpp, text-generation-webui, localai, jan, gpt4all, aphrodite, sglang, tabbyapi) pointing at localhost.
 - Enumeration: `known_providers()` (iterator), `known_providers_with_env()` (pairs with env vars), and `get_provider_env_var()` (env var name for a provider). Local providers are excluded from `known_providers_with_env` — they have no key and must not be "detected" as configured cloud providers.
 - `is_local_provider` / `known_local_providers` classify the registry; `get_provider` returns the full `ProviderConfig` (default port, family, model).
 - `normalize_local_base_url(provider, url)` appends `/v1` for bare OpenAI-compatible URLs; it is applied at request time in the TUI layer, never persisted.

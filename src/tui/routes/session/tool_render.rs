@@ -46,7 +46,7 @@ use cosh_sdk::tree_sitter::highlight::{HighlightCategory, highlight};
 use cosh_tools::question::types::QuestionOutput;
 use cosh_tui::core::lib::border::{BorderCharacters, BorderSidesConfig};
 use cosh_tui::core::lib::rgba::RGBA;
-use cosh_tui::core::lib::unicode_util::word_wrap;
+use cosh_tui::core::lib::unicode_util::{word_wrap, word_wrap_spans};
 use cosh_tui::core::renderable::Renderable;
 use cosh_tui::core::renderables::r#box::BoxRenderable;
 use cosh_tui::core::renderables::diff::{DiffRenderable, DiffViewMode};
@@ -563,6 +563,77 @@ pub(crate) fn write_box_lines(part: &ToolPart) -> Option<u16> {
     Some(content.lines().count().min(MAX_LINES) as u16)
 }
 
+/// How many rows the write box's code panel PAINTS at the given chat width,
+/// or `None` when `render_write` falls back to the inline label (same
+/// predicate as [`write_box_lines`]). The count comes from the shared
+/// wrapped-row counter at the panel's actual wrap budget — see
+/// [`code_panel_rows`]. Shared by the renderer and `estimate_part_height`
+/// so a wrapped preview is never sized shorter than what it paints.
+pub(crate) fn write_box_rows(part: &ToolPart, max_w: u16) -> Option<u16> {
+    write_box_lines(part)?;
+    let content = input_content(&part.input).unwrap_or_default();
+    Some(code_panel_rows(&content, max_w, 20))
+}
+
+/// Columns a tool box's content row may use: the box paints its text at
+/// `x + TOOL_BOX_X_PAD` with `max_w - TOOL_BOX_X_PAD` usable columns — the
+/// single source both the renderers and the row estimator wrap against.
+pub(crate) fn tool_box_content_w(max_w: u16) -> u16 {
+    max_w.saturating_sub(TOOL_BOX_X_PAD)
+}
+
+/// Visual rows a set of source lines paints inside a tool box at
+/// `content_w` columns: every line folds onto `word_wrap` chunks, so long
+/// lines wrap at the box edge instead of being cut off. `cap` bounds the
+/// source lines drawn (the boxes' collapse/preview limit); `None` means the
+/// caller already pre-selected the display lines. This is THE row counter
+/// shared by the renderers and `estimate_part_height`, so a wrapped box is
+/// never sized shorter than what it paints.
+pub(crate) fn tool_box_rows(
+    lines: impl Iterator<Item = impl AsRef<str>>,
+    cap: Option<usize>,
+    content_w: u16,
+) -> u16 {
+    let rows: usize = lines
+        .take(cap.unwrap_or(usize::MAX))
+        .map(|l| word_wrap(l.as_ref(), content_w).len().max(1))
+        .sum();
+    rows.min(u16::MAX as usize) as u16
+}
+
+/// Line-number gutter width of a code panel: digits for the highest drawn
+/// line number, at least 2 (matching `draw_highlighted_code_with_ln`).
+pub(crate) fn code_ln_width(drawn_lines: usize) -> u16 {
+    ((drawn_lines as f64).log10().floor() as u16 + 1).max(2)
+}
+
+/// Wrap budget of a code panel's content rows: the panel's inner width
+/// (already past the box's X pad) minus the line-number gutter and its
+/// trailing space. Shared by the panel renderer and the row estimator.
+pub(crate) fn code_panel_content_w(inner_max_w: u16, ln_width: u16) -> u16 {
+    inner_max_w.saturating_sub(ln_width + 1)
+}
+
+/// Visual rows a code panel paints for `content` at the given chat width,
+/// drawing at most `max_lines` source lines: every line folds onto
+/// `word_wrap` chunks inside the panel's wrap budget, so long code lines
+/// wrap at the box edge instead of being cut off. Shared by the renderer
+/// (`draw_highlighted_code_with_ln`) and the estimators.
+pub(crate) fn code_panel_rows(content: &str, max_w: u16, max_lines: usize) -> u16 {
+    let drawn = content.lines().count().min(max_lines);
+    if drawn == 0 {
+        return 0;
+    }
+    // Mirror the painter's degenerate-width bail: at `max_w` too narrow to
+    // fit gutter + one glyph the panel draws nothing, so the estimator must
+    // not reserve rows for it either.
+    let content_w = code_panel_content_w(tool_box_content_w(max_w), code_ln_width(drawn));
+    if content_w == 0 {
+        return 0;
+    }
+    tool_box_rows(content.lines(), Some(drawn), content_w).max(1)
+}
+
 /// The unified diff `render_edit` draws for a completed edit, or `None` when
 /// it falls back to the inline label. Shared by the renderer, the height
 /// estimate and `tool_is_block` so all three agree.
@@ -752,7 +823,13 @@ pub fn render_shell(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
         };
 
         let title = format!("$ {command}");
-        let lines = display.lines().count() as u16 + u16::from(collapsed.overflow);
+        let content_w = tool_box_content_w(ctx.max_w);
+        // Wrapped rows: long output lines fold onto extra visual rows inside
+        // the box instead of being cut off at its edge (shared counter —
+        // `estimate_part_height` sizes the box from the same source).
+        let lines = tool_box_rows(display.lines(), None, content_w)
+            .max(1)
+            .saturating_add(u16::from(collapsed.overflow));
         // 1 blank row of internal padding above the title (the bottom-padding
         // row is the last row of the box), matching the Glob box.
         let area = Rect::new(
@@ -775,34 +852,33 @@ pub fn render_shell(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
         border_box.set_custom_border_chars(blank_border_chars());
         border_box.render_self(ctx.buf, area);
 
-        let x_off = ctx.x + 3;
+        let x_off = ctx.x + TOOL_BOX_X_PAD;
         let title_style = Style::default().fg(rgba_color(ctx.theme.text_muted));
         draw_text_line(
             ctx.buf,
             &title,
             x_off,
             ctx.y + TOOL_BOX_PAD_V,
-            ctx.max_w.saturating_sub(3),
+            content_w,
             title_style,
         );
 
         let content_style = Style::default().fg(rgba_color(ctx.theme.text));
-        for (i, line) in display.lines().enumerate() {
-            let ly = ctx.y + TOOL_BOX_PAD_V + 1 + i as u16;
-            if ly >= area.bottom() {
-                break;
+        let mut ly = ctx.y + TOOL_BOX_PAD_V + 1;
+        for line in display.lines() {
+            // `word_wrap` always yields at least one chunk per line (a blank
+            // line arrives as a single empty chunk), so every source line
+            // reserves exactly the rows the shared counter counted.
+            for chunk in word_wrap(line, content_w) {
+                if ly >= area.bottom() {
+                    break;
+                }
+                draw_text_line(ctx.buf, &chunk, x_off, ly, content_w, content_style);
+                ly += 1;
             }
-            draw_text_line(
-                ctx.buf,
-                line,
-                x_off,
-                ly,
-                ctx.max_w.saturating_sub(3),
-                content_style,
-            );
         }
         if collapsed.overflow {
-            draw_overflow_hint(ctx, x_off, expanded, display.lines().count() as u16);
+            draw_overflow_hint(ctx, x_off, expanded, ly - (ctx.y + TOOL_BOX_PAD_V + 1));
         }
     }
 }
@@ -837,7 +913,15 @@ fn draw_highlighted_code_with_ln(
     if ln_count == 0 {
         return 0;
     }
-    let ln_width = ((ln_count as f64).log10().floor() as u16 + 1).max(2);
+    let ln_width = code_ln_width(ln_count);
+
+    // Wrap budget: the line-number gutter plus its trailing space is carved
+    // out of the panel width; every wrapped chunk paints after the same
+    // gutter (the estimator counts rows at the exact same budget).
+    let content_w = code_panel_content_w(max_w, ln_width);
+    if content_w == 0 {
+        return 0;
+    }
 
     let Some(lang) = lang else {
         let mut lines_drawn = 0u16;
@@ -848,15 +932,23 @@ fn draw_highlighted_code_with_ln(
             let ly = y + lines_drawn;
             let ln_text = format!("{:>w$} ", i + 1, w = ln_width as usize);
             draw_text_line(buf, &ln_text, x, ly, max_w, Style::default().fg(ln_fg));
-            draw_text_line(
-                buf,
-                line,
-                x + ln_width + 1,
-                ly,
-                max_w.saturating_sub(ln_width + 1),
-                Style::default().fg(default_fg),
-            );
-            lines_drawn += 1;
+            // `word_wrap` always yields at least one chunk per line (a blank
+            // line arrives as a single empty chunk): the gutter row above
+            // paints that empty chunk's row.
+            for chunk in word_wrap(line, content_w) {
+                if lines_drawn >= max_lines {
+                    break;
+                }
+                draw_text_line(
+                    buf,
+                    &chunk,
+                    x + ln_width + 1,
+                    y + lines_drawn,
+                    max_w.saturating_sub(ln_width + 1),
+                    Style::default().fg(default_fg),
+                );
+                lines_drawn += 1;
+            }
         }
         return lines_drawn;
     };
@@ -874,62 +966,85 @@ fn draw_highlighted_code_with_ln(
 
     let mut lines_drawn = 0u16;
     let mut byte_offset = 0usize;
-    let mut y_pos = y;
 
     for (i, line) in content.lines().enumerate() {
         if lines_drawn >= max_lines {
             break;
         }
-        if i > 0 {
-            y_pos += 1;
-        }
 
-        let mut x_pos = x;
-
-        let ln_text = format!("{:>w$}", i + 1, w = ln_width as usize);
-        for ch in ln_text.chars() {
-            if let Some(cell) = buf.cell_mut((x_pos, y_pos)) {
-                cell.set_char(ch);
-                cell.set_style(Style::default().fg(ln_fg));
-            }
-            x_pos += 1;
-        }
-
-        if x_pos < x + max_w {
-            if let Some(cell) = buf.cell_mut((x_pos, y_pos)) {
-                cell.set_char(' ');
-                cell.set_style(Style::default().fg(ln_fg));
-            }
-            x_pos += 1;
-        }
-
-        for (ci, ch) in line.char_indices() {
-            // Skip control characters (same reason as draw_text_line).
-            if ch.is_control() {
-                continue;
-            }
-            if x_pos >= x + max_w {
+        // Word-wrapped spans: each chunk carries its byte offset within
+        // `line`, added to `byte_offset` to index the FULL-content highlight
+        // map — so a token folded across wrap rows keeps a single color.
+        // `word_wrap_spans` always yields at least one chunk per line (a
+        // blank line arrives as a single empty chunk), so every source line
+        // reserves exactly the rows the shared counter counted.
+        for (chunk_idx, (chunk, chunk_start)) in
+            word_wrap_spans(line, content_w).into_iter().enumerate()
+        {
+            if lines_drawn >= max_lines {
                 break;
             }
-            let byte_pos = byte_offset + ci;
-            let cat = cat_map.get(byte_pos).copied().flatten();
-            let style = code_highlight_style(cat, default_fg, theme);
-            if let Some(cell) = buf.cell_mut((x_pos, y_pos)) {
-                cell.set_char(ch);
-                cell.set_style(style);
-            }
-            x_pos += 1;
-        }
+            let y_pos = y + lines_drawn;
+            let mut x_pos = x;
 
-        while x_pos < x + max_w {
-            if let Some(cell) = buf.cell_mut((x_pos, y_pos)) {
-                cell.set_style(Style::default().fg(default_fg));
+            if chunk_idx == 0 {
+                let ln_text = format!("{:>w$}", i + 1, w = ln_width as usize);
+                for ch in ln_text.chars() {
+                    if let Some(cell) = buf.cell_mut((x_pos, y_pos)) {
+                        cell.set_char(ch);
+                        cell.set_style(Style::default().fg(ln_fg));
+                    }
+                    x_pos += 1;
+                }
+            } else {
+                // Continuation row: blank gutter so the folded chunks stay
+                // column-aligned with the line's first row.
+                for _ in 0..ln_width {
+                    if let Some(cell) = buf.cell_mut((x_pos, y_pos)) {
+                        cell.set_char(' ');
+                        cell.set_style(Style::default().fg(ln_fg));
+                    }
+                    x_pos += 1;
+                }
             }
-            x_pos += 1;
+
+            if x_pos < x + max_w {
+                if let Some(cell) = buf.cell_mut((x_pos, y_pos)) {
+                    cell.set_char(' ');
+                    cell.set_style(Style::default().fg(ln_fg));
+                }
+                x_pos += 1;
+            }
+
+            for (ci, ch) in chunk.char_indices() {
+                // Skip control characters (same reason as draw_text_line).
+                if ch.is_control() {
+                    continue;
+                }
+                if x_pos >= x + max_w {
+                    break;
+                }
+                let byte_pos = byte_offset + chunk_start + ci;
+                let cat = cat_map.get(byte_pos).copied().flatten();
+                let style = code_highlight_style(cat, default_fg, theme);
+                if let Some(cell) = buf.cell_mut((x_pos, y_pos)) {
+                    cell.set_char(ch);
+                    cell.set_style(style);
+                }
+                x_pos += 1;
+            }
+
+            while x_pos < x + max_w {
+                if let Some(cell) = buf.cell_mut((x_pos, y_pos)) {
+                    cell.set_style(Style::default().fg(default_fg));
+                }
+                x_pos += 1;
+            }
+
+            lines_drawn += 1;
         }
 
         byte_offset += line.len() + 1;
-        lines_drawn += 1;
     }
     lines_drawn
 }
@@ -1016,8 +1131,17 @@ pub fn render_write(ctx: &mut ToolRenderCtx, part: &ToolPart) {
     let filepath = input_filepath(&part.input).unwrap_or_default();
     let content = input_content(&part.input).unwrap_or_default();
 
-    if let Some(display_lines) = write_box_lines(part) {
-        let max_lines = 20u16;
+    // The box height comes from the wrap-aware counter (same source as
+    // `estimate_part_height`), not the raw line count: long preview lines
+    // fold onto extra rows inside the code panel, and the box must reserve
+    // every one of them.
+    if let Some(display_lines) = write_box_rows(part, ctx.max_w) {
+        // `write_box_rows` already caps the SOURCE lines at 20 and counts
+        // their WRAPPED rows; passing that count as the painter's row cap
+        // makes the panel paint exactly the rows the box reserves — the
+        // painter walks source lines in order and stops after the same
+        // wrapped-row total, so no row is clipped and none is left blank.
+        let max_lines = display_lines;
         // 1 blank row of internal padding above the title (the bottom-padding
         // row is the last row of the box), matching the Glob box.
         let area = Rect::new(
@@ -1051,7 +1175,10 @@ pub fn render_edit(ctx: &mut ToolRenderCtx, part: &ToolPart) {
     let diff_content = edit_diff_content(part);
 
     if let Some(ref diff_content) = diff_content {
-        let diff_rows = edit_box_rows(part, ctx.max_w);
+        // Size from the DIFF BODY's own width (max_w - 2), the exact area
+        // `DiffRenderable::render_self` receives below: painted_rows wraps
+        // at that width, so the estimate and the paint stay in lockstep.
+        let diff_rows = edit_box_rows(part, ctx.max_w.saturating_sub(2));
         // The split leaves pad their gutter by one leaf-colored column
         // (DiffRenderable::SPLIT_PAD), so the box gives back one column of
         // its own left padding: content sits at x+2 instead of x+3 and the
@@ -1299,6 +1426,11 @@ fn glob_status(part: &ToolPart) -> Option<GlobStatus<'_>> {
 /// box).
 const TOOL_BOX_PAD_V: u16 = 1;
 
+/// Columns a tool box reserves left of its content (frame rail + indent):
+/// content paints at `x + TOOL_BOX_X_PAD` with `max_w - TOOL_BOX_X_PAD`
+/// usable columns. Shared by every box renderer and the row estimator.
+const TOOL_BOX_X_PAD: u16 = 3;
+
 pub fn render_glob(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
     let pattern = input_value(&part.input, "pattern").unwrap_or_default();
     let path = input_value(&part.input, "path");
@@ -1353,7 +1485,13 @@ pub fn render_glob(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
         &collapsed.output
     };
 
-    let lines = display.lines().count().max(1) as u16 + u16::from(collapsed.overflow);
+    let content_w = tool_box_content_w(ctx.max_w);
+    // Wrapped rows: long path lines fold onto extra visual rows inside the
+    // box instead of being cut off at its edge (shared counter —
+    // `estimate_part_height` sizes the box from the same source).
+    let lines = tool_box_rows(display.lines(), None, content_w)
+        .max(1)
+        .saturating_add(u16::from(collapsed.overflow));
     // 1 blank row of internal padding above the title (the bottom-padding
     // row is the last row of the box), matching the Summarizing box.
     let area = Rect::new(
@@ -1376,14 +1514,14 @@ pub fn render_glob(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
     border_box.set_custom_border_chars(blank_border_chars());
     border_box.render_self(ctx.buf, area);
 
-    let x_off = ctx.x + 3;
+    let x_off = ctx.x + TOOL_BOX_X_PAD;
     let title_style = Style::default().fg(rgba_color(ctx.theme.text_muted));
     draw_text_line(
         ctx.buf,
         &label,
         x_off,
         ctx.y + TOOL_BOX_PAD_V,
-        ctx.max_w.saturating_sub(3),
+        content_w,
         title_style,
     );
 
@@ -1391,26 +1529,34 @@ pub fn render_glob(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
     let link_style = Style::default()
         .fg(rgba_color(ctx.theme.markdown_link))
         .add_modifier(Modifier::UNDERLINED);
-    for (i, line) in display.lines().enumerate() {
-        let ly = ctx.y + TOOL_BOX_PAD_V + 1 + i as u16;
-        if ly >= area.bottom() {
-            break;
+    let mut ly = ctx.y + TOOL_BOX_PAD_V + 1;
+    for line in display.lines() {
+        // `word_wrap` always yields at least one chunk per line (a blank
+        // line arrives as a single empty chunk), so every source line
+        // reserves exactly the rows the shared counter counted.
+        for chunk in word_wrap(line, content_w) {
+            if ly >= area.bottom() {
+                break;
+            }
+            // Emulate the chat's markdown link styling for file rows: the
+            // underline starts on the first path glyph (leading grouped/tree
+            // indentation is exempt). Directory headers (ending in `/`) stay
+            // plain. Each wrap chunk carries its own indent, so a folded
+            // path keeps the styling on its continuation rows.
+            draw_link_row(
+                ctx.buf,
+                &chunk,
+                x_off,
+                ly,
+                content_w,
+                content_style,
+                link_style,
+            );
+            ly += 1;
         }
-        // Emulate the chat's markdown link styling for file rows: the underline
-        // starts on the first path glyph (leading grouped/tree indentation is
-        // exempt). Directory headers (ending in `/`) stay plain.
-        draw_link_row(
-            ctx.buf,
-            line,
-            x_off,
-            ly,
-            ctx.max_w.saturating_sub(3),
-            content_style,
-            link_style,
-        );
     }
     if collapsed.overflow {
-        draw_overflow_hint(ctx, x_off, expanded, display.lines().count() as u16);
+        draw_overflow_hint(ctx, x_off, expanded, ly - (ctx.y + TOOL_BOX_PAD_V + 1));
     }
 }
 
@@ -1441,8 +1587,11 @@ pub fn render_read(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
         } else {
             &collapsed.output
         };
-        let content_lines = display.lines().count().max(1) as u16;
-        let lines = content_lines + u16::from(collapsed.overflow);
+        // Wrapped rows: long file lines fold onto extra visual rows inside
+        // the code panel (same counter as `estimate_part_height`), and the
+        // panel draws every chunk of the pre-selected display text.
+        let content_rows = code_panel_rows(display, ctx.max_w, usize::MAX).max(1);
+        let lines = content_rows + u16::from(collapsed.overflow);
         // 1 blank row of internal padding above the title (the bottom-padding
         // row is the last row of the box), matching the Write box.
         let area = Rect::new(
@@ -1459,11 +1608,11 @@ pub fn render_read(ctx: &mut ToolRenderCtx, part: &ToolPart, part_idx: u16) {
             &format!("# Read {filepath}"),
             &filepath,
             display,
-            content_lines,
+            content_rows,
             false,
         );
         if collapsed.overflow {
-            draw_overflow_hint(ctx, ctx.x + 3, expanded, content_lines);
+            draw_overflow_hint(ctx, ctx.x + TOOL_BOX_X_PAD, expanded, content_rows);
         }
         return;
     }
@@ -1926,7 +2075,11 @@ pub fn render_todo(ctx: &mut ToolRenderCtx, part: &ToolPart) {
         *ctx.line_h = 1;
         return;
     }
-    let total_lines = formatted.len() as u16;
+    let content_w = tool_box_content_w(ctx.max_w);
+    // Wrapped rows: long descriptions fold onto extra visual rows inside
+    // the box instead of being cut off at its edge (shared counter —
+    // `estimate_part_height` sizes the box from the same source).
+    let total_lines = tool_box_rows(formatted.iter(), None, content_w).max(1);
     let box_h = total_lines.saturating_add(2);
     *ctx.line_h = box_h;
 
@@ -1944,25 +2097,29 @@ pub fn render_todo(ctx: &mut ToolRenderCtx, part: &ToolPart) {
     }
 
     let title_style = Style::default().fg(rgba_color(ctx.theme.text_muted));
-    let content_x = ctx.x + 3;
-    let content_w = ctx.max_w.saturating_sub(3);
-    draw_text_line(
-        ctx.buf,
-        &formatted[0],
-        content_x,
-        ctx.y + 1,
-        content_w,
-        title_style,
-    );
-
     let item_style = Style::default().fg(rgba_color(ctx.theme.text));
+    let content_x = ctx.x + TOOL_BOX_X_PAD;
     let content_bottom = area.bottom().saturating_sub(1);
-    for (i, line) in formatted.iter().enumerate().skip(1) {
-        let ly = ctx.y + 1 + i as u16;
+    let mut ly = ctx.y + 1;
+    for chunk in word_wrap(&formatted[0], content_w) {
         if ly >= content_bottom {
             break;
         }
-        draw_text_line(ctx.buf, line, content_x, ly, content_w, item_style);
+        draw_text_line(ctx.buf, &chunk, content_x, ly, content_w, title_style);
+        ly += 1;
+    }
+
+    for line in formatted.iter().skip(1) {
+        // `word_wrap` always yields at least one chunk per line (a blank
+        // line arrives as a single empty chunk), so every source line
+        // reserves exactly the rows the shared counter counted.
+        for chunk in word_wrap(line, content_w) {
+            if ly >= content_bottom {
+                break;
+            }
+            draw_text_line(ctx.buf, &chunk, content_x, ly, content_w, item_style);
+            ly += 1;
+        }
     }
 }
 

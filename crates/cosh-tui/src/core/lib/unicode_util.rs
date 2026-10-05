@@ -91,108 +91,131 @@ pub fn graphemes_with_width(text: &str) -> impl Iterator<Item = (&str, u16)> + '
     })
 }
 
+/// State of one line under construction while word-wrapping: the text
+/// accumulated so far, the byte offset of its first grapheme in the source,
+/// and its display width — plus the word being accumulated with the same
+/// fields.
+struct WrapState {
+    current: String,
+    current_start: usize,
+    current_w: u16,
+    word: String,
+    word_start: usize,
+    word_w: u16,
+}
+
 /// Word-wrap text to fit within `max_width` display columns, keeping words
 /// intact where possible. Words longer than `max_width` are broken at
 /// character level so no line exceeds the width.
 #[must_use]
 pub fn word_wrap(text: &str, max_width: u16) -> Vec<String> {
-    let mut lines: Vec<String> = Vec::new();
-    let mut current = String::new();
-    let mut current_w: u16 = 0;
-    let mut word = String::new();
-    let mut word_w: u16 = 0;
+    word_wrap_spans(text, max_width)
+        .into_iter()
+        .map(|(line, _)| line)
+        .collect()
+}
+
+/// [`word_wrap`] with source positions: each wrapped line is returned
+/// alongside the byte offset of its first grapheme in `text`, so callers can
+/// map a chunk back into the source (e.g. syntax highlighting that must not
+/// restart at every wrap — a token folded across two rows keeps one color).
+#[must_use]
+pub fn word_wrap_spans(text: &str, max_width: u16) -> Vec<(String, usize)> {
+    let mut st = WrapState {
+        current: String::new(),
+        current_start: 0,
+        current_w: 0,
+        word: String::new(),
+        word_start: 0,
+        word_w: 0,
+    };
+    let mut lines: Vec<(String, usize)> = Vec::new();
+    let mut offset = 0usize;
 
     for grapheme in Graphemes::new(text) {
+        let g_len = grapheme.len();
         if grapheme == "\n" {
-            flush_word(
-                &mut word,
-                &mut word_w,
-                &mut current,
-                &mut current_w,
-                &mut lines,
-                max_width,
-            );
-            lines.push(current);
-            current = String::new();
-            current_w = 0;
+            flush_word(&mut st, &mut lines, max_width);
+            lines.push((st.current.clone(), st.current_start));
+            st.current.clear();
+            st.current_w = 0;
+            offset += g_len;
             continue;
         }
 
         let w = grapheme_display_width(grapheme);
 
         if grapheme == " " {
-            flush_word(
-                &mut word,
-                &mut word_w,
-                &mut current,
-                &mut current_w,
-                &mut lines,
-                max_width,
-            );
-            if current_w < max_width {
-                current.push(' ');
-                current_w += 1;
+            flush_word(&mut st, &mut lines, max_width);
+            if st.current_w < max_width {
+                if st.current.is_empty() {
+                    st.current_start = offset;
+                }
+                st.current.push(' ');
+                st.current_w += 1;
             }
+            offset += g_len;
             continue;
         }
 
-        word.push_str(grapheme);
-        word_w += w;
+        if st.word.is_empty() {
+            st.word_start = offset;
+        }
+        st.word.push_str(grapheme);
+        st.word_w += w;
+        offset += g_len;
     }
 
-    flush_word(
-        &mut word,
-        &mut word_w,
-        &mut current,
-        &mut current_w,
-        &mut lines,
-        max_width,
-    );
+    flush_word(&mut st, &mut lines, max_width);
 
-    if !current.is_empty() || lines.is_empty() {
-        lines.push(current);
+    if !st.current.is_empty() || lines.is_empty() {
+        lines.push((st.current, st.current_start));
     }
 
     lines
 }
 
-fn flush_word(
-    word: &mut String,
-    word_w: &mut u16,
-    current: &mut String,
-    current_w: &mut u16,
-    lines: &mut Vec<String>,
-    max_width: u16,
-) {
-    if *word_w == 0 {
+/// Flush the pending word into the current line (wrapping first when it
+/// would overflow), recording where each produced line started in the source.
+fn flush_word(st: &mut WrapState, lines: &mut Vec<(String, usize)>, max_width: u16) {
+    if st.word_w == 0 {
         return;
     }
-    if *current_w + *word_w > max_width && !current.is_empty() {
-        lines.push(current.clone());
-        current.clear();
-        *current_w = 0;
+    if st.current_w + st.word_w > max_width && !st.current.is_empty() {
+        lines.push((st.current.clone(), st.current_start));
+        st.current.clear();
+        st.current_w = 0;
     }
     // A word that fits on a fresh line is flushed whole.
-    if *word_w <= max_width {
-        current.push_str(word);
-        *current_w += *word_w;
-        word.clear();
-        *word_w = 0;
+    if st.word_w <= max_width {
+        if st.current.is_empty() {
+            st.current_start = st.word_start;
+        }
+        st.current.push_str(&st.word);
+        st.current_w += st.word_w;
+        st.word.clear();
+        st.word_w = 0;
         return;
     }
     // The word alone is wider than the whole line: break it at character
     // level so no single line exceeds `max_width` columns.
-    for (g, gw) in Graphemes::new(word).map(|g| (g, grapheme_display_width(g))) {
-        if *current_w + gw > max_width && !current.is_empty() {
-            lines.push(current.clone());
-            current.clear();
-            *current_w = 0;
+    let mut word_off = 0usize;
+    for g in Graphemes::new(&st.word) {
+        let gw = grapheme_display_width(g);
+        if st.current_w + gw > max_width && !st.current.is_empty() {
+            lines.push((st.current.clone(), st.current_start));
+            st.current.clear();
+            st.current_w = 0;
         }
-        current.push_str(g);
-        *current_w += gw;
+        if st.current.is_empty() {
+            st.current_start = st.word_start + word_off;
+        }
+        st.current.push_str(g);
+        st.current_w += gw;
+        word_off += g.len();
     }
-    word.clear();
-    *word_w = 0;
+    st.word.clear();
+    st.word_w = 0;
 }
 
 #[cfg(test)]

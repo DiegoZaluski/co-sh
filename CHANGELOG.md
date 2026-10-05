@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Amazon Bedrock as a provider. The `bedrock` entry joins the connector's
+  OpenAI-compatible family through Amazon Bedrock's official OpenAI-compatible
+  endpoint on `bedrock-runtime`: streaming, native tool calling, reasoning
+  effort, and image input all work through the shared family path with no new
+  dependencies. Auth rides the standard bearer path with the Bedrock API key
+  (`AWS_BEARER_TOKEN_BEDROCK`); the endpoint is region-scoped, so the base URL
+  follows the ambient `AWS_REGION` / `AWS_DEFAULT_REGION` automatically (with
+  an explicit `with_base_url` always winning), and the region value is
+  validated against the AWS region grammar before it ever touches the endpoint
+  host — a malformed or hostile `AWS_REGION` falls back to the default region
+  instead of silently re-pointing the bearer token elsewhere. AWS error bodies
+  (`{"__type": "ThrottlingException", …}`, flat or wrapped) now classify
+  through the shared error path, with throttling/service-outage kinds marked
+  retryable so the existing backoff middleware paces them. The two surfaces
+  the OpenAI-compatible endpoint genuinely lacks — model listing (`GET
+  /models` exists only on `bedrock-mantle`) and embeddings (Titan/Cohere are
+  Invoke-only) — fail up front with errors that explain the workaround
+  (point `with_base_url` at the Mantle catalog, or use a proxy). Sixteen new
+  tests cover the registry wiring, auth, streaming, tool calls, error
+  classification, the gates, and the region resolution.
+
+- The decision to NOT take on the full `aws-sdk-bedrockruntime`: the
+  OpenAI-compatible endpoint covers everything cosh needs today, and the SDK
+  would pull dozens of crates into the slim build. Users who later need the
+  native Bedrock surface (Converse, Guardrails, Titan embeddings) will get an
+  opt-in `bedrock-sdk` feature gate wrapping the SDK — the integration stays
+  basic and light by default.
+
 ## [0.1.3] - 2026-10-04
 
 ### Added

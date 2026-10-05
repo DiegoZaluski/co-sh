@@ -43,6 +43,30 @@ struct SplitLine {
     right: Option<LineInfo>,
 }
 
+/// Pre-wrapped content spans for one split pair: the left side's wrap spans
+/// and the right side's (`None` = the side paints its content whole). Each
+/// span carries the byte offset of its first grapheme in the line's content.
+type SplitPairChunks = (Option<Vec<(String, usize)>>, Option<Vec<(String, usize)>>);
+
+/// The content chunk one visual row of a split panel paints. `text` set
+/// paints that wrapped chunk starting `start` bytes into the line's
+/// content; `text` unset on a first row paints the line's whole content;
+/// `text` unset on a continuation row paints nothing but background (the
+/// side is shorter than its wrapped counterpart).
+struct SplitChunk<'a> {
+    text: Option<&'a str>,
+    start: usize,
+    is_continuation: bool,
+}
+
+/// One split-panel side for a row: the line to paint and its highlight map
+/// (one pass over the line's full content, so a token folded across wrap
+/// rows keeps a single color).
+struct SplitSide<'a> {
+    line: Option<&'a LineInfo>,
+    cats: Option<&'a [Option<HighlightCategory>]>,
+}
+
 /// Geometry of one panel in the split view.
 struct PanelLayout {
     /// Left edge of the panel.
@@ -53,6 +77,86 @@ struct PanelLayout {
     ln_w: u16,
     /// Rightmost column of the whole diff area.
     max_x: u16,
+}
+
+/// Panel geometry of the split view for one area width: panel widths,
+/// gutter widths and per-panel content (wrap) budgets. Computed ONCE and
+/// shared by `render_split_view` and `split_painted_rows`, so the wrap
+/// budget the row count uses is exactly the wrap budget the renderer
+/// paints with — no drift, no duplicated arithmetic.
+struct SplitGeometry {
+    left_x: u16,
+    sep_x: u16,
+    right_x: u16,
+    left_panel_w: u16,
+    right_panel_w: u16,
+    left_ln_w: u16,
+    right_ln_w: u16,
+    left_content_w: u16,
+    right_content_w: u16,
+}
+
+impl SplitGeometry {
+    /// Lay out the split view for `area` over `split_lines`. `None` when
+    /// the area is too narrow for two panels — the renderer paints
+    /// nothing there, and the row counter mirrors that with zero rows.
+    fn for_lines(area: &Rect, show_line_numbers: bool, split_lines: &[SplitLine]) -> Option<Self> {
+        if area.width < 3 {
+            return None;
+        }
+        let side_ln_w = |get: fn(&SplitLine) -> &Option<LineInfo>| -> u16 {
+            let max_n = split_lines
+                .iter()
+                .filter_map(|sl| get(sl).as_ref().and_then(|li| li.old_ln.or(li.new_ln)))
+                .max()
+                .unwrap_or(0);
+            if show_line_numbers && max_n > 0 {
+                max_n.ilog10() as u16 + 1
+            } else {
+                1
+            }
+        };
+        let left_ln_w = side_ln_w(|sl| &sl.left);
+        let right_ln_w = side_ln_w(|sl| &sl.right);
+        // Panel widths: left gets floor, right gets ceil, 1 separator column
+        let left_panel_w = (area.width.saturating_sub(1)) / 2;
+        let right_panel_w = area.width.saturating_sub(1) - left_panel_w;
+        let left_x = area.x;
+        let sep_x = left_x + left_panel_w;
+        Some(Self {
+            left_x,
+            sep_x,
+            right_x: sep_x + 1,
+            left_panel_w,
+            right_panel_w,
+            left_ln_w,
+            right_ln_w,
+            left_content_w: DiffRenderable::split_content_w(
+                left_panel_w,
+                left_ln_w,
+                show_line_numbers,
+            ),
+            right_content_w: DiffRenderable::split_content_w(
+                right_panel_w,
+                right_ln_w,
+                show_line_numbers,
+            ),
+        })
+    }
+}
+
+/// The chunk one visual row of a split pair paints on one side: the row's
+/// wrapped span, or background-only when the side has no span for this row
+/// (shorter than its wrapped counterpart).
+fn split_chunk<'a>(chunks: Option<&'a Vec<(String, usize)>>, row: usize) -> SplitChunk<'a> {
+    let (text, start) = chunks
+        .and_then(|c| c.get(row))
+        .map_or((None, 0), |(t, s)| (Some(t.as_str()), *s));
+    SplitChunk {
+        text,
+        start,
+        is_continuation: row > 0,
+    }
 }
 
 pub struct DiffRenderable {
@@ -366,6 +470,50 @@ impl DiffRenderable {
         out
     }
 
+    /// Wrap one diff line's content into visual spans that fit `max_w`
+    /// display columns — word wrapping, so long lines fold at word
+    /// boundaries instead of being cut off at the box edge. Each span
+    /// carries the byte offset of its first grapheme in the line's content,
+    /// so highlighting maps back into the full line. Headers and hunk
+    /// headers are structural one-liners and are never wrapped: `None`
+    /// means "paint the line whole" (the renderer still truncates it at
+    /// the area edge as a last resort).
+    fn wrap_diff_line(&self, li: &LineInfo, max_w: u16) -> Option<Vec<(String, usize)>> {
+        if max_w == 0
+            || matches!(
+                li.line_type,
+                DiffLineType::FileHeader | DiffLineType::HunkHeader
+            )
+        {
+            return None;
+        }
+        Some(unicode_util::word_wrap_spans(
+            Self::content_part(&li.content, li.line_type),
+            max_w,
+        ))
+    }
+
+    /// Content width in a split panel: the panel minus the leaf padding,
+    /// the sign character and its trailing space (always painted) and,
+    /// when line numbers are on, the line-number gutter plus its space.
+    fn split_content_w(panel_w: u16, ln_w: u16, show_ln: bool) -> u16 {
+        let gutter = u16::from(show_ln) * (ln_w + 1);
+        panel_w.saturating_sub(Self::LEAF_PAD + 2 + gutter)
+    }
+
+    /// Rows one split line paints: the taller of its two sides' wrap
+    /// chunk counts (a side without a wrapped line paints exactly one).
+    fn split_rows_for(
+        left: Option<&Vec<(String, usize)>>,
+        right: Option<&Vec<(String, usize)>>,
+    ) -> usize {
+        match (left, right) {
+            (Some(l), Some(r)) => l.len().max(r.len()),
+            (Some(l), None) | (None, Some(l)) => l.len(),
+            (None, None) => 1,
+        }
+    }
+
     fn render_split_view(&self, buf: &mut Buffer, area: Rect) {
         let split_lines = self.build_split_lines();
         if split_lines.is_empty() {
@@ -375,84 +523,97 @@ impl DiffRenderable {
         let max_y = area.y.saturating_add(area.height);
         let max_x = area.x.saturating_add(area.width);
 
-        // Max line numbers per side
-        let left_max_n = split_lines
-            .iter()
-            .filter_map(|sl| sl.left.as_ref().and_then(|l| l.old_ln.or(l.new_ln)))
-            .max()
-            .unwrap_or(0);
-        let right_max_n = split_lines
-            .iter()
-            .filter_map(|sl| sl.right.as_ref().and_then(|l| l.old_ln.or(l.new_ln)))
-            .max()
-            .unwrap_or(0);
-
-        let left_ln_w = if self.show_line_numbers && left_max_n > 0 {
-            left_max_n.ilog10() as u16 + 1
-        } else {
-            1
-        };
-        let right_ln_w = if self.show_line_numbers && right_max_n > 0 {
-            right_max_n.ilog10() as u16 + 1
-        } else {
-            1
-        };
-
-        // Panel widths: left gets floor, right gets ceil, 1 separator column
-        let avail_w = area.width;
-        if avail_w < 3 {
+        let Some(geo) = SplitGeometry::for_lines(&area, self.show_line_numbers, &split_lines)
+        else {
             return;
-        }
-        let left_panel_w = (avail_w.saturating_sub(1)) / 2;
-        let right_panel_w = avail_w.saturating_sub(1) - left_panel_w;
+        };
 
-        let left_x = area.x;
-        let sep_x = left_x + left_panel_w;
-        let right_x = sep_x + 1;
+        // Wrap every side once, up front: one visual row paints the same
+        // wrap index on both panels (word-wrapped long lines fold onto
+        // extra rows instead of being truncated at the panel edge).
+        let wrapped: Vec<SplitPairChunks> = split_lines
+            .iter()
+            .map(|sl| {
+                (
+                    sl.left
+                        .as_ref()
+                        .and_then(|li| self.wrap_diff_line(li, geo.left_content_w)),
+                    sl.right
+                        .as_ref()
+                        .and_then(|li| self.wrap_diff_line(li, geo.right_content_w)),
+                )
+            })
+            .collect();
+
+        // One highlight pass per line over its full content — a token
+        // folded across wrap rows keeps a single color on every row.
+        type SideCats = Option<Vec<Option<HighlightCategory>>>;
+        let cats: Vec<(SideCats, SideCats)> = split_lines
+            .iter()
+            .map(|sl| {
+                (
+                    self.side_cats(sl.left.as_ref()),
+                    self.side_cats(sl.right.as_ref()),
+                )
+            })
+            .collect();
 
         let mut y = area.y;
-        for sl in &split_lines {
-            if y >= max_y {
-                break;
+        for ((sl, (left_chunks, right_chunks)), (left_cats, right_cats)) in
+            split_lines.iter().zip(&wrapped).zip(&cats)
+        {
+            let rows = Self::split_rows_for(left_chunks.as_ref(), right_chunks.as_ref());
+            for row in 0..rows {
+                if y >= max_y {
+                    return;
+                }
+
+                // Left side
+                self.render_split_line(
+                    buf,
+                    y,
+                    &PanelLayout {
+                        x: geo.left_x,
+                        w: geo.left_panel_w,
+                        ln_w: geo.left_ln_w,
+                        max_x,
+                    },
+                    true,
+                    SplitSide {
+                        line: sl.left.as_ref(),
+                        cats: left_cats.as_deref(),
+                    },
+                    split_chunk(left_chunks.as_ref(), row),
+                );
+
+                // Separator column
+                if geo.sep_x < max_x
+                    && let Some(cell) = buf.cell_mut((geo.sep_x, y))
+                {
+                    cell.set_char(' ');
+                    cell.set_style(Style::default());
+                }
+
+                // Right side
+                self.render_split_line(
+                    buf,
+                    y,
+                    &PanelLayout {
+                        x: geo.right_x,
+                        w: geo.right_panel_w,
+                        ln_w: geo.right_ln_w,
+                        max_x,
+                    },
+                    false,
+                    SplitSide {
+                        line: sl.right.as_ref(),
+                        cats: right_cats.as_deref(),
+                    },
+                    split_chunk(right_chunks.as_ref(), row),
+                );
+
+                y += 1;
             }
-
-            // Left side
-            self.render_split_line(
-                buf,
-                y,
-                &PanelLayout {
-                    x: left_x,
-                    w: left_panel_w,
-                    ln_w: left_ln_w,
-                    max_x,
-                },
-                true,
-                sl.left.as_ref(),
-            );
-
-            // Separator column
-            if sep_x < max_x
-                && let Some(cell) = buf.cell_mut((sep_x, y))
-            {
-                cell.set_char(' ');
-                cell.set_style(Style::default());
-            }
-
-            // Right side
-            self.render_split_line(
-                buf,
-                y,
-                &PanelLayout {
-                    x: right_x,
-                    w: right_panel_w,
-                    ln_w: right_ln_w,
-                    max_x,
-                },
-                false,
-                sl.right.as_ref(),
-            );
-
-            y += 1;
         }
     }
 
@@ -463,15 +624,39 @@ impl DiffRenderable {
     /// the unified leaf — so their line numbers land on the same column.
     const LEAF_PAD: u16 = 1;
 
+    /// The highlight map for one split-panel side: one pass over the line's
+    /// full content, or `None` for a missing side, a non-code line or an
+    /// unsupported language. Computed once per line (not per wrap chunk) so
+    /// a token folded across rows keeps a single color.
+    fn side_cats(&self, line: Option<&LineInfo>) -> Option<Vec<Option<HighlightCategory>>> {
+        let li = line?;
+        let is_code = matches!(
+            li.line_type,
+            DiffLineType::Add | DiffLineType::Remove | DiffLineType::Context
+        );
+        if !is_code {
+            return None;
+        }
+        self.highlight_cats(Self::content_part(&li.content, li.line_type))
+    }
+
     /// Render one line within a split panel.
+    ///
+    /// `chunk` carries the pre-wrapped content to paint on THIS visual row
+    /// (`text` unset on a first row paints `content_part` whole — the caller
+    /// wraps when the content can exceed the panel). On continuation rows
+    /// (`is_continuation`) the gutter paints in the content background — no
+    /// sign, no line number — so a folded line reads as one block.
     fn render_split_line(
         &self,
         buf: &mut Buffer,
         y: u16,
         layout: &PanelLayout,
         is_left: bool,
-        line: Option<&LineInfo>,
+        side: SplitSide<'_>,
+        chunk: SplitChunk<'_>,
     ) {
+        let SplitSide { line, cats } = side;
         let max_x_panel = (layout.x + layout.w).min(layout.max_x);
 
         let (default_bg, sign_ch, line_num) = line.map_or_else(
@@ -537,8 +722,29 @@ impl DiffRenderable {
             x += 1;
         }
 
+        // Gutter prefix width: leaf pad + line number + its space + sign +
+        // its space. Continuation rows paint it in the content background
+        // so a folded line reads as one continuous block.
+        let prefix_w = Self::LEAF_PAD
+            + if self.show_line_numbers {
+                layout.ln_w + 1
+            } else {
+                0
+            }
+            + 2;
+        if chunk.is_continuation {
+            let prefix_end = layout.x.saturating_add(prefix_w);
+            while x < prefix_end && x < max_x_panel {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    cell.set_char(' ');
+                    cell.set_style(content_style);
+                }
+                x += 1;
+            }
+        }
+
         // Line number
-        if self.show_line_numbers {
+        if self.show_line_numbers && !chunk.is_continuation {
             let ln_str = line_num.map_or_else(
                 || " ".repeat(layout.ln_w as usize),
                 |n| format!("{:>w$}", n, w = layout.ln_w as usize),
@@ -556,7 +762,7 @@ impl DiffRenderable {
         }
 
         // Space after line number
-        if self.show_line_numbers && x < max_x_panel {
+        if self.show_line_numbers && !chunk.is_continuation && x < max_x_panel {
             if let Some(cell) = buf.cell_mut((x, y)) {
                 cell.set_char(' ');
                 cell.set_style(ln_style);
@@ -565,7 +771,7 @@ impl DiffRenderable {
         }
 
         // Sign character
-        if x < max_x_panel {
+        if !chunk.is_continuation && x < max_x_panel {
             if let Some(cell) = buf.cell_mut((x, y)) {
                 cell.set_char(sign_ch);
                 cell.set_style(content_style);
@@ -574,7 +780,7 @@ impl DiffRenderable {
         }
 
         // Space after sign
-        if x < max_x_panel {
+        if !chunk.is_continuation && x < max_x_panel {
             if let Some(cell) = buf.cell_mut((x, y)) {
                 cell.set_char(' ');
                 cell.set_style(content_style);
@@ -582,20 +788,38 @@ impl DiffRenderable {
             x += 1;
         }
 
-        // Content (truncated to panel width, no wrapping), syntax-highlighted
-        // with the codeblock palette when the line carries code.
+        // Content — the caller's pre-wrapped chunk when one was handed in
+        // (word wrapping at the box edge), else the whole content truncated
+        // at the panel edge. A continuation row without a chunk paints only
+        // background: this side is shorter than its wrapped counterpart, so
+        // repainting its content would duplicate text. Highlighted with the
+        // side's precomputed map, offset by where the chunk starts in the
+        // line's content.
         if let Some(li) = line {
-            let content = Self::content_part(&li.content, li.line_type);
+            let content_start = if chunk.is_continuation {
+                chunk.start
+            } else {
+                0
+            };
+            let content = if chunk.is_continuation {
+                chunk.text.unwrap_or("")
+            } else {
+                chunk
+                    .text
+                    .unwrap_or_else(|| Self::content_part(&li.content, li.line_type))
+            };
+            // Code lines keep the side's precomputed highlight map — one
+            // pass over the full content, so a token folded across wrap
+            // rows keeps a single color. `is_code` comes from the line type
+            // (as in the unified view), so an un-highlightable code line —
+            // no language or unsupported — still paints through
+            // `code_style(None, …)`: the code background and default code
+            // foreground, never the bare content style.
             let is_code = matches!(
                 li.line_type,
                 DiffLineType::Add | DiffLineType::Remove | DiffLineType::Context
             );
-            let cats = if is_code {
-                self.highlight_cats(content)
-            } else {
-                None
-            };
-            let mut byte_pos = 0usize;
+            let mut byte_pos = content_start;
             // Skip control characters (e.g. \t in diffs): writing them into
             // buffer cells makes ratatui's buffer diff panic
             // ("control character passed to cell_width without filtering").
@@ -611,7 +835,7 @@ impl DiffRenderable {
                     break;
                 }
                 let style = if is_code {
-                    self.code_style(cats.as_deref(), cat_pos, default_bg)
+                    self.code_style(cats, cat_pos, default_bg)
                 } else {
                     content_style
                 };
@@ -802,12 +1026,79 @@ impl DiffRenderable {
     /// it paints FEWER rows than the diff has source lines; the unified view
     /// may paint more (long lines wrap). Box callers size themselves from
     /// this so their bottom padding stays symmetric.
+    ///
+    /// Both counts count WRAPPED rows: every wrapped visual row a long
+    /// content line folds onto is included, so a box sized from this shows
+    /// every wrapped row instead of clipping the folded text.
     pub fn painted_rows(&self, area_width: u16) -> usize {
         if self.view_mode == DiffViewMode::Split && area_width >= 50 {
-            self.build_split_lines().len()
+            self.split_painted_rows(area_width)
         } else {
-            self.parse_lines().len()
+            self.unified_painted_rows(area_width)
         }
+    }
+
+    /// Rows the split view paints at `area_width`: for each aligned
+    /// left/right pair, the taller side's wrap chunk count. Shares
+    /// [`SplitGeometry`] with `render_split_view`, so the wrap budget
+    /// counted here is exactly the wrap budget the renderer paints with.
+    /// A width too narrow for two panels paints nothing (the renderer's
+    /// early return) — mirrored with zero rows.
+    fn split_painted_rows(&self, area_width: u16) -> usize {
+        let split_lines = self.build_split_lines();
+        let area = Rect::new(0, 0, area_width, 1);
+        let Some(geo) = SplitGeometry::for_lines(&area, self.show_line_numbers, &split_lines)
+        else {
+            return 0;
+        };
+
+        split_lines
+            .iter()
+            .map(|sl| {
+                let left = sl
+                    .left
+                    .as_ref()
+                    .and_then(|li| self.wrap_diff_line(li, geo.left_content_w));
+                let right = sl
+                    .right
+                    .as_ref()
+                    .and_then(|li| self.wrap_diff_line(li, geo.right_content_w));
+                Self::split_rows_for(left.as_ref(), right.as_ref())
+            })
+            .sum()
+    }
+
+    /// Rows the unified view paints at `area_width`: each source line plus
+    /// the visual rows its content folds onto at the unified wrap budget.
+    /// Mirrors `render_unified_view`'s geometry (`gutter_w`, `LEAF_PAD`),
+    /// including its degenerate case: a `content_max_w` of zero makes the
+    /// renderer skip the line entirely (`continue`), so it counts 0 rows.
+    fn unified_painted_rows(&self, area_width: u16) -> usize {
+        let lines = self.parse_lines();
+        let max_ln_width = if self.show_line_numbers {
+            Self::max_ln(&lines)
+        } else {
+            0
+        };
+        let gutter_w = if self.show_line_numbers {
+            max_ln_width + 2
+        } else {
+            2
+        };
+        let content_max_w = area_width
+            .saturating_sub(gutter_w)
+            .saturating_sub(Self::LEAF_PAD);
+        if content_max_w == 0 {
+            return 0;
+        }
+
+        lines
+            .iter()
+            .map(|li| match self.wrap_diff_line(li, content_max_w) {
+                Some(chunks) => chunks.len(),
+                None => 1,
+            })
+            .sum()
     }
 
     fn render_unified_view(&self, buf: &mut Buffer, area: Rect) {
@@ -870,14 +1161,21 @@ impl DiffRenderable {
                 continue;
             }
 
-            let wrapped = unicode_util::word_wrap(content_w, content_max_w);
+            let wrapped = unicode_util::word_wrap_spans(content_w, content_max_w);
             let is_code = matches!(
                 li.line_type,
                 DiffLineType::Add | DiffLineType::Remove | DiffLineType::Context
             );
+            // One highlight pass over the line's full content — a token
+            // folded across wrap rows keeps a single color on every row.
+            let cats = if is_code {
+                self.highlight_cats(content_w)
+            } else {
+                None
+            };
             let content_bg = content_style.bg.unwrap_or(Color::Reset);
 
-            for (wl_idx, wl) in wrapped.iter().enumerate() {
+            for (wl_idx, (wl, wl_start)) in wrapped.iter().enumerate() {
                 if y >= max_y {
                     break;
                 }
@@ -943,16 +1241,11 @@ impl DiffRenderable {
                     }
                 }
 
-                // Render content, syntax-highlighted with the codeblock
-                // palette when the line carries code. Each wrapped chunk is
-                // highlighted on its own so grapheme byte offsets line up
-                // with the highlight map.
-                let cats = if is_code {
-                    self.highlight_cats(wl)
-                } else {
-                    None
-                };
-                let mut byte_pos = 0usize;
+                // Render content, highlighted with the line's single
+                // precomputed highlight map — `wl_start` offsets the grapheme
+                // byte positions back into the full content, so a token
+                // folded across rows keeps one color.
+                let mut byte_pos = *wl_start;
                 for (grapheme, w) in unicode_util::graphemes_with_width(wl) {
                     let len = grapheme.len();
                     // Skip control characters (e.g. \t in diffs) — see above.

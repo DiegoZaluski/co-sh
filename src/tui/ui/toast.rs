@@ -159,7 +159,9 @@ impl ToastState {
         // the box must leave no clickable ⧉ behind (same contract as the
         // header/footer link areas).
         self.copy_button_area = None;
-        let Some(toast) = self.current.clone() else { return };
+        let Some(toast) = self.current.clone() else {
+            return;
+        };
         let copy_text = self.copy_text.clone();
 
         // Width hugs the widest content line (plus horizontal padding). The
@@ -206,10 +208,7 @@ impl ToastState {
         // extra lines are dropped instead.
         const BOTTOM_PAD_ROWS: u16 = 1;
         let title_rows: u16 = 1;
-        let max_rows = area
-            .bottom()
-            .saturating_sub(toast_y)
-            .saturating_sub(1) as usize;
+        let max_rows = area.bottom().saturating_sub(toast_y).saturating_sub(1) as usize;
         let shown_lines: Vec<String> = msg_lines
             .into_iter()
             .take(
@@ -257,7 +256,11 @@ impl ToastState {
             let hovered = mouse.is_some_and(|(mx, my)| {
                 mx >= button_x && mx < button_x + 1 && my >= toast_y && my < toast_y + 1
             });
-            let fg = if hovered { theme.text } else { theme.text_muted };
+            let fg = if hovered {
+                theme.text
+            } else {
+                theme.text_muted
+            };
             if let Some(cell) = buf.cell_mut((button_x, toast_y)) {
                 cell.set_char('\u{29c9}');
                 // BOLD on the button only (user request): a clickable glyph
@@ -578,10 +581,7 @@ mod tests {
             "the whole command must sit on ONE row on a wide screen: {tail_row:?}"
         );
         // And the box must have exactly one message row (title + 1 line).
-        let msg_rows = rows
-            .iter()
-            .filter(|r| r.contains("curl -fsSL"))
-            .count();
+        let msg_rows = rows.iter().filter(|r| r.contains("curl -fsSL")).count();
         assert_eq!(msg_rows, 1, "the command must not be split across rows");
     }
 
@@ -592,8 +592,11 @@ mod tests {
 
     /// The (x, y) of the ⧉ glyph, if drawn.
     fn find_copy_glyph(buf: &Buffer, area: Rect) -> Option<(u16, u16)> {
-        (0..area.width)
-            .find_map(|x| (0..area.height).find(|&y| buf[(x, y)].symbol() == "⧉").map(|y| (x, y)))
+        (0..area.width).find_map(|x| {
+            (0..area.height)
+                .find(|&y| buf[(x, y)].symbol() == "⧉")
+                .map(|y| (x, y))
+        })
     }
 
     /// A copyable toast draws the ⧉ button in its top row (title row for a
@@ -739,11 +742,10 @@ mod tests {
         // message rows) — the command cannot fit one 80-col row.
         let rows_with_content = (0..area.height)
             .filter(|&yy| {
-                (0..area.width)
-                    .any(|xx| {
-                        let c = buf[(xx, yy)].symbol();
-                        !c.trim().is_empty() && c != "│"
-                    })
+                (0..area.width).any(|xx| {
+                    let c = buf[(xx, yy)].symbol();
+                    !c.trim().is_empty() && c != "│"
+                })
             })
             .count();
         assert!(
@@ -769,6 +771,9 @@ mod tests {
         assert_eq!(wrap_message("short", 60), vec!["short"]);
 
         // A source newline forces a line break (doc contract).
-        assert_eq!(wrap_message("line one\nline two", 60), vec!["line one", "line two"]);
+        assert_eq!(
+            wrap_message("line one\nline two", 60),
+            vec!["line one", "line two"]
+        );
     }
 }

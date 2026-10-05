@@ -47,7 +47,7 @@ impl Connector {
     /// `xai`, `deepseek`, `perplexity`, `fireworks`, `cohere`, `huggingface`,
     /// `sambanova`, `poe`, `cerebras`, `nvidia`, `anyscale`, `vercel`, `cloudflare`,
     /// `azure`, `ollama`, `lmstudio`, `vllm`, `llamacpp`, `gemini`, `zai`,
-    /// `zen`, `opencode-go`.
+    /// `kimi`, `zen`, `opencode-go`.
     ///
     /// # Errors
     ///
@@ -646,7 +646,8 @@ impl Connector {
     ///     `opencode-go`,
     ///     `charm`,
     ///     `xai`,
-    ///     `vercel`.
+    ///     `vercel`,
+    ///     `kimi`.
     ///
     /// Unsupported:
     ///     `openai`,
@@ -678,7 +679,10 @@ impl Connector {
     /// `session_reported_costs` are the per-request costs the provider
     /// already reported in each response ([`TokenUsage::reported_cost`]);
     /// their sum is the session spend. For `openrouter` the figure comes
-    /// from the provider's account endpoint instead.
+    /// from the provider's account endpoint instead. `kimi` reports no
+    /// per-request cost in its responses, so the session figure stays the
+    /// (empty) reported sum and only `balance_usd` carries real data
+    /// (account `available_balance` from `GET /users/me/balance`).
     ///
     /// # Errors
     ///

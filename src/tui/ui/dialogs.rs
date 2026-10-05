@@ -419,6 +419,9 @@ pub enum DialogType {
     },
     ThemeList {
         themes: Vec<String>,
+        /// Palette fingerprint per theme, parallel to `themes`: the color
+        /// chips rendered after each name as a preview of the theme.
+        swatches: Vec<Vec<RGBA>>,
         current: String,
         filter: String,
     },
@@ -630,11 +633,13 @@ impl std::fmt::Debug for DialogType {
             }
             Self::ThemeList {
                 themes,
+                swatches,
                 current,
                 filter,
             } => f
                 .debug_struct("ThemeList")
                 .field("themes", themes)
+                .field("swatches", swatches)
                 .field("current", current)
                 .field("filter", filter)
                 .finish(),
@@ -998,6 +1003,7 @@ impl DialogState {
 
             DialogType::ThemeList {
                 themes,
+                swatches: _,
                 current: _,
                 filter,
             } => {
@@ -1770,18 +1776,33 @@ impl DialogState {
 
             DialogType::ThemeList {
                 themes,
+                swatches,
                 current,
                 filter,
             } => {
-                // Compute filtered list (like fuzzysort in original)
-                let filtered: Vec<&str> = if filter.is_empty() {
-                    themes.iter().map(String::as_str).collect()
+                // Swatches must stay parallel to themes — the zip below
+                // silently drops trailing rows if the invariant ever breaks.
+                debug_assert_eq!(
+                    themes.len(),
+                    swatches.len(),
+                    "ThemeList swatches must stay parallel to themes"
+                );
+                // Compute filtered list (like fuzzysort in original). Names
+                // stay zipped with their swatches so filtering never
+                // desynchronizes the chips from their theme.
+                let filtered: Vec<(&str, &[RGBA])> = if filter.is_empty() {
+                    themes
+                        .iter()
+                        .map(String::as_str)
+                        .zip(swatches.iter().map(Vec::as_slice))
+                        .collect()
                 } else {
                     let lower = filter.to_lowercase();
                     themes
                         .iter()
-                        .filter(|t| t.to_lowercase().contains(&lower))
                         .map(String::as_str)
+                        .zip(swatches.iter().map(Vec::as_slice))
+                        .filter(|(t, _)| t.to_lowercase().contains(&lower))
                         .collect()
                 };
 
@@ -1944,7 +1965,7 @@ impl DialogState {
                     };
                     let scroll_offset =
                         scroll_offset.min(filtered.len().saturating_sub(max_visible));
-                    for (vis_idx, &theme_name) in filtered
+                    for (vis_idx, &(theme_name, theme_row_swatches)) in filtered
                         .iter()
                         .enumerate()
                         .skip(scroll_offset)
@@ -2035,13 +2056,38 @@ impl DialogState {
                         } else {
                             (rgba_color(theme.text), bg_element)
                         };
+
+                        // Color chips right-anchor at the row's edge, so the
+                        // strips line up in a clean column across rows no
+                        // matter how long the name is; the name is truncated
+                        // to leave room for them.
+                        let row_swatches: &[RGBA] = theme_row_swatches;
+                        let chips_w = crate::ui::theme_swatches::swatches_width(row_swatches.len());
+                        let row_bg = if is_selected {
+                            rgba_color(theme.primary)
+                        } else {
+                            bg_element
+                        };
+                        let gap_after_name = u16::from(!row_swatches.is_empty());
+                        let name_max_w = list_w
+                            .saturating_sub(2)
+                            .saturating_sub(chips_w)
+                            .saturating_sub(gap_after_name);
                         draw_text_line_compact(
                             buf,
                             theme_name,
                             list_x + 2,
                             ry,
-                            list_w.saturating_sub(2),
+                            name_max_w,
                             Style::default().fg(name_fg).bg(name_bg),
+                        );
+
+                        crate::ui::theme_swatches::draw_theme_swatches(
+                            buf,
+                            list_x + list_w.saturating_sub(chips_w),
+                            ry,
+                            row_swatches,
+                            row_bg,
                         );
                     }
                 }
@@ -4552,5 +4598,132 @@ mod shortcuts_tests {
                 ("F4", "Restore mixed view"),
             ][..]
         );
+    }
+}
+
+#[cfg(test)]
+mod theme_list_swatch_tests {
+    use super::*;
+    use crate::theme::ThemeRegistry;
+    use crate::ui::theme_swatches::{swatches_width, theme_swatches};
+    use cosh_tui::core::types::{MouseButton, MouseEventType, MouseModifiers};
+
+    fn mouse(event_type: MouseEventType, x: u16, y: u16) -> MouseEvent {
+        MouseEvent::new(event_type, MouseButton::Left, x, y, MouseModifiers::none())
+    }
+
+    /// Foreground of a cell as a plain [`Color`] (ratatui wraps it in
+    /// `Option`; every cell we assert on was explicitly painted).
+    fn fg(buf: &Buffer, x: u16, y: u16) -> Color {
+        buf[(x, y)].style().fg.expect("painted fg")
+    }
+
+    /// A two-theme dialog so the geometry is deterministic: 2 rows visible
+    /// → dialog_h = 6, dialog_y = (24-6)/2 = 9, list_top = 12.
+    fn theme_list(registry: &ThemeRegistry, names: &[&str]) -> DialogType {
+        let themes: Vec<String> = names.iter().map(|n| (*n).to_string()).collect();
+        let swatches = themes
+            .iter()
+            .map(|name| theme_swatches(registry.get(name).expect("theme")))
+            .collect();
+        DialogType::ThemeList {
+            themes,
+            swatches,
+            current: "cosh".into(),
+            filter: String::new(),
+        }
+    }
+
+    #[test]
+    fn chips_render_after_each_theme_name() {
+        let registry = ThemeRegistry::new();
+        let theme = registry.default_theme().clone();
+        let area = Rect::new(0, 0, 80, 24);
+        let mut state = DialogState::new();
+        state.show(theme_list(&registry, &["cosh", "sakura"]));
+
+        let mut buf = Buffer::empty(area);
+        state.render(&mut buf, area, &theme, std::time::SystemTime::now());
+
+        // dialog_w = 40 → dialog_x = 20; list_x = dialog_x + 1 padding,
+        // list_w = dialog_w - 2 = 38. Chips right-anchor at the row's edge:
+        // they start at list_x + list_w - chips_w on EVERY row.
+        let list_x = 21u16;
+        let list_w = 38u16;
+        let cosh_swatches = theme_swatches(registry.get("cosh").expect("cosh"));
+        let chips_w = swatches_width(cosh_swatches.len());
+        // Each chip paints SWATCH_WIDTH cells, so its fg appears once per cell.
+        let expected: Vec<Color> = cosh_swatches
+            .iter()
+            .flat_map(|c| std::iter::repeat_n(rgba_color(*c), 2))
+            .collect();
+        let start = list_x + list_w - chips_w;
+        let got: Vec<Color> = (start..start + chips_w).map(|x| fg(&buf, x, 12)).collect();
+        assert_eq!(got, expected);
+        // Chips paint as solid blocks, not spaces.
+        assert_eq!(buf[(start, 12)].symbol(), "\u{2588}");
+
+        // sakura row: chips right-anchor at the SAME edge despite its longer
+        // name — that alignment is the whole point of this layout. Each chip
+        // paints SWATCH_WIDTH cells, so its fg appears once per cell.
+        let sakura = registry.get("sakura").expect("sakura");
+        let sakura_swatches = theme_swatches(sakura);
+        let sakura_chips_w = swatches_width(sakura_swatches.len());
+        let expected_sakura: Vec<Color> = sakura_swatches
+            .iter()
+            .flat_map(|c| std::iter::repeat_n(rgba_color(*c), 2))
+            .collect();
+        let sakura_start = list_x + list_w - sakura_chips_w;
+        let got_sakura: Vec<Color> = (sakura_start..sakura_start + sakura_chips_w)
+            .map(|x| fg(&buf, x, 13))
+            .collect();
+        assert_eq!(got_sakura, expected_sakura);
+        // Both strips share the same right edge (list_x + list_w - 1).
+        assert_eq!(start + chips_w, sakura_start + sakura_chips_w);
+    }
+
+    #[test]
+    fn filtering_keeps_chips_paired_with_their_theme() {
+        let registry = ThemeRegistry::new();
+        let theme = registry.default_theme().clone();
+        let area = Rect::new(0, 0, 80, 24);
+        let mut state = DialogState::new();
+        let mut dialog = theme_list(&registry, &["cosh", "sakura"]);
+        if let DialogType::ThemeList { filter, .. } = &mut dialog {
+            filter.push('s');
+            filter.push('a'); // matches "sakura" only
+        }
+        state.show(dialog);
+
+        let mut buf = Buffer::empty(area);
+        state.render(&mut buf, area, &theme, std::time::SystemTime::now());
+
+        // Only sakura survives the filter, so row 0 must carry sakura's
+        // chips — not the chips of the theme that used to be above it.
+        let sakura = registry.get("sakura").expect("sakura");
+        let first = rgba_color(theme_swatches(sakura)[0]);
+        let start = 21 + 38 - swatches_width(theme_swatches(sakura).len());
+        assert_eq!(fg(&buf, start, 12), first);
+        assert_eq!(fg(&buf, start + 1, 12), first);
+    }
+
+    #[test]
+    fn click_over_the_chips_still_selects_the_row() {
+        let registry = ThemeRegistry::new();
+        let theme = registry.default_theme().clone();
+        let area = Rect::new(0, 0, 80, 24);
+        let mut state = DialogState::new();
+        state.show(theme_list(&registry, &["cosh", "sakura"]));
+
+        // Click inside the chip region of row 0 (chips right-anchor: with
+        // list_x=21, list_w=38, an 8-cell strip starts at x=51).
+        let action = state.handle_mouse(&mouse(MouseEventType::Up, 52, 12), area, &theme);
+        assert_eq!(action, DialogAction::Confirmed);
+        assert_eq!(state.current().unwrap().selected, 0);
+
+        // And inside the chip region of row 1.
+        let action = state.handle_mouse(&mouse(MouseEventType::Up, 56, 13), area, &theme);
+        assert_eq!(action, DialogAction::Confirmed);
+        assert_eq!(state.current().unwrap().selected, 1);
     }
 }

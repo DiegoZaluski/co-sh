@@ -9,6 +9,7 @@ use cosh_tui::core::types::MouseEvent;
 
 use crate::component::search_bar::SearchBar;
 use crate::theme::{Theme, rgba_color};
+use crate::util::draw::draw_text_line;
 use crate::util::list_selection::ListSelection;
 use cosh::setup::Setup;
 
@@ -67,7 +68,8 @@ pub struct AddProviderView {
     /// The vertical centering depends on the exact area the render used, so
     /// the mouse path must reuse it instead of re-deriving it from its own
     /// (differently sized) area — re-deriving shifted every hit by one row.
-    list_start_y: u16,
+    /// `pub(crate)` so tests can hover the same rows the render drew.
+    pub(crate) list_start_y: u16,
 }
 
 impl AddProviderView {
@@ -166,6 +168,20 @@ impl AddProviderView {
         None
     }
 
+    /// Move the visual selection to the row under the pointer WITHOUT
+    /// executing it — the same hover-follow contract as the model picker.
+    /// Returns whether the pointer hit a provider row; hovering outside the
+    /// list keeps the current selection.
+    pub fn follow_hover(&mut self, mouse: &MouseEvent, area: Rect) -> bool {
+        match self.find_row_for_mouse(mouse, area) {
+            Some(idx) => {
+                self.selection.selected_index = idx;
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn handle_mouse(&self, mouse: &MouseEvent, area: Rect) -> Option<usize> {
         self.find_row_for_mouse(mouse, area)
     }
@@ -180,17 +196,14 @@ impl AddProviderView {
         let row_x = area.x + (area.width.saturating_sub(max_w as u16)) / 2;
 
         // Title pinned to top
-        let title_y = area.y;
-        for (i, ch) in "ADD Provider".chars().enumerate() {
-            let cx = row_x + i as u16;
-            if cx >= area.right() {
-                break;
-            }
-            if let Some(cell) = buf.cell_mut((cx, title_y)) {
-                cell.set_char(ch);
-                cell.set_style(Style::default().fg(muted));
-            }
-        }
+        draw_text_line(
+            buf,
+            "ADD Provider",
+            row_x,
+            area.y,
+            area.right() - row_x,
+            Style::default().fg(muted),
+        );
 
         // Search + gap + items: vertically centered below the title
         let remaining_h = area.height.saturating_sub(1);
@@ -209,7 +222,10 @@ impl AddProviderView {
         }
 
         let sym_x = row_x;
-        let name_x = row_x + 2;
+        let cols = columns();
+        let name_x = row_x + cols.name_x as u16;
+        let tag_x = row_x + cols.tag_x as u16;
+        let hint_x = row_x + cols.hint_x as u16;
 
         if providers.is_empty() {
             let empty_msg = if self.search_bar.is_empty() {
@@ -218,16 +234,14 @@ impl AddProviderView {
                 "No matching providers"
             };
             let msg_x = area.x + (area.width.saturating_sub(empty_msg.len() as u16)) / 2;
-            for (i, ch) in empty_msg.chars().enumerate() {
-                let cx = msg_x + i as u16;
-                if cx >= area.right() {
-                    break;
-                }
-                if let Some(cell) = buf.cell_mut((cx, list_start_y)) {
-                    cell.set_char(ch);
-                    cell.set_style(Style::default().fg(muted));
-                }
-            }
+            draw_text_line(
+                buf,
+                empty_msg,
+                msg_x,
+                list_start_y,
+                area.right() - msg_x,
+                Style::default().fg(muted),
+            );
             return;
         }
 
@@ -253,39 +267,79 @@ impl AddProviderView {
                 row_color
             };
 
-            let sym_ch = symbol.chars().next().unwrap();
-            if let Some(cell) = buf.cell_mut((sym_x, y)) {
-                cell.set_char(sym_ch);
-                cell.set_style(Style::default().fg(sym_color));
-            }
-
-            let rest = format!(
-                "{}{}  ({})",
-                entry.name,
-                if entry.local { " (local)" } else { "" },
-                entry.hint
+            // Fixed columns: symbol, name, `(local)` tag and hint. The tag
+            // column stays reserved even on cloud rows so the hint column
+            // never shifts between rows.
+            draw_text_line(
+                buf,
+                symbol,
+                sym_x,
+                y,
+                area.right() - sym_x,
+                Style::default().fg(sym_color),
             );
-            for (j, ch) in rest.chars().enumerate() {
-                let cx = name_x + j as u16;
-                if cx >= area.right() {
-                    break;
-                }
-                if let Some(cell) = buf.cell_mut((cx, y)) {
-                    cell.set_char(ch);
-                    cell.set_style(Style::default().fg(row_color));
-                }
+            draw_text_line(
+                buf,
+                entry.name,
+                name_x,
+                y,
+                area.right() - name_x,
+                Style::default().fg(row_color),
+            );
+            if entry.local {
+                draw_text_line(
+                    buf,
+                    "(local)",
+                    tag_x,
+                    y,
+                    area.right() - tag_x,
+                    Style::default().fg(muted),
+                );
             }
+            draw_text_line(
+                buf,
+                &format!("({})", entry.hint),
+                hint_x,
+                y,
+                area.right() - hint_x,
+                Style::default().fg(muted),
+            );
         }
     }
 }
 
+/// Reserved width of the `(local)` tag column — cloud rows leave it empty
+/// but the hint column must still start at the same x on every row.
+const TAG_W: usize = "(local)".len();
+
+/// Fixed column layout of the provider list, derived once from the widest
+/// name/hint so every row aligns: `[✔ ] [name] [(local)] [hint]`. The
+/// render, the centering budget and the mouse hit-test all share it.
+struct Columns {
+    name_x: usize,
+    tag_x: usize,
+    hint_x: usize,
+    /// Total width a row can occupy.
+    total: usize,
+}
+
+fn columns() -> Columns {
+    let providers = all_providers();
+    let name_w = providers.iter().map(|e| e.name.len()).max().unwrap_or(0);
+    let hint_w = providers.iter().map(|e| e.hint.len()).max().unwrap_or(0) + 2; // "(…)"
+    let name_x = 2;
+    let tag_x = name_x + name_w + 1;
+    let hint_x = tag_x + TAG_W + 2;
+    Columns {
+        name_x,
+        tag_x,
+        hint_x,
+        total: hint_x + hint_w,
+    }
+}
+
 fn max_row_width() -> usize {
-    all_providers()
-        .iter()
-        .map(|entry| 2 + entry.name.len() + 8 + entry.hint.len())
-        .max()
-        .unwrap_or(0)
-        .max("ADD Provider".len())
+    columns().total.max("ADD Provider".len())
 }
 
 const fn max_visible_items(remaining_h: u16) -> usize {
@@ -366,5 +420,85 @@ mod tests {
         );
         let below = view.list_start_y + view.visible_count as u16;
         assert_eq!(view.handle_mouse(&click(name_x, below), mouse_area), None);
+    }
+
+    /// The hover-follow contract: a Move over a row moves the highlight and
+    /// reports a hit, while a Move outside the list keeps the selection —
+    /// the same behavior the model picker gives its rows.
+    #[test]
+    fn hover_moves_the_selection_without_confirming() {
+        let theme = ThemeRegistry::new().themes[0].theme.clone();
+        let setup = Setup::default();
+        let term = Rect::new(0, 0, 100, 30);
+
+        let mut view = AddProviderView::new();
+        let mut buf = Buffer::empty(term);
+        view.render(
+            &mut buf,
+            Rect::new(0, 1, 100, term.height - 4),
+            &theme,
+            &setup,
+        );
+
+        let max_w = max_row_width();
+        let row_x = 0 + (100u16.saturating_sub(max_w as u16)) / 2;
+        let mouse_area = Rect::new(0, 1, 100, term.height - 3);
+        let move_to = |x: u16, y: u16| {
+            MouseEvent::new(
+                MouseEventType::Move,
+                MouseButton::Left,
+                x,
+                y,
+                MouseModifiers::none(),
+            )
+        };
+
+        // Hover the second row: the selection follows, nothing executes.
+        assert!(view.follow_hover(&move_to(row_x + 2, view.list_start_y + 1), mouse_area));
+        assert_eq!(view.selection.selected_index, 1);
+
+        // Hovering above the list (title/search area) keeps the selection.
+        assert!(!view.follow_hover(&move_to(row_x + 2, view.list_start_y - 1), mouse_area));
+        assert_eq!(view.selection.selected_index, 1);
+    }
+
+    /// Column alignment regression: every drawn row must start its name and
+    /// its hint at the SAME x — the fixed-column layout, not a free-form
+    /// string that drifts per row.
+    #[test]
+    fn columns_align_across_rows() {
+        let theme = ThemeRegistry::new().themes[0].theme.clone();
+        let setup = Setup::default();
+        let term = Rect::new(0, 0, 100, 30);
+        let render_area = Rect::new(0, 1, 100, term.height - 4);
+
+        let mut view = AddProviderView::new();
+        let mut buf = Buffer::empty(term);
+        view.render(&mut buf, render_area, &theme, &setup);
+
+        let cols = columns();
+        let row_x = render_area.x + (render_area.width.saturating_sub(max_row_width() as u16)) / 2;
+        let name_x = row_x + cols.name_x as u16;
+        let hint_x = row_x + cols.hint_x as u16;
+
+        for i in 0..view.visible_count {
+            let y = view.list_start_y + i as u16;
+            let name = buf
+                .cell((name_x, y))
+                .map(|c| c.symbol().to_owned())
+                .unwrap_or_default();
+            assert_ne!(
+                name, " ",
+                "row {i}: no name drawn at the name column x={name_x}"
+            );
+            let hint = buf
+                .cell((hint_x, y))
+                .map(|c| c.symbol().to_owned())
+                .unwrap_or_default();
+            assert_eq!(
+                hint, "(",
+                "row {i}: the hint column must open with '(' at x={hint_x}"
+            );
+        }
     }
 }

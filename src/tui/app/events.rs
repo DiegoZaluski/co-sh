@@ -683,10 +683,9 @@ impl App {
                         continue;
                     }
                     if completed_tool_name.as_deref() == Some("subagent_call") {
-                        self.state.right_panel.complete_last_pty_for_agent(
-                            output.clone(),
-                            agent_hint.as_deref(),
-                        );
+                        self.state
+                            .right_panel
+                            .complete_last_pty_for_agent(output.clone(), agent_hint.as_deref());
                         if let Some(todos) = todo_update {
                             self.state.right_panel.set_todos(todos);
                         }
@@ -703,7 +702,9 @@ impl App {
                     // sub-agent's real report (the plan-JSON leak). The
                     // `subagent_call`/`subagent_status` arms above carry
                     // their own routing; everything else is a bash window.
-                    self.state.right_panel.complete_last_bash_pty(output.clone());
+                    self.state
+                        .right_panel
+                        .complete_last_bash_pty(output.clone());
 
                     if let Some(todos) = todo_update {
                         self.state.right_panel.set_todos(todos);
@@ -837,9 +838,7 @@ impl App {
                     // from the panel entirely (the injected user turn still
                     // renders it in the chat).
                     if tool == "subagent_status" {
-                        if finished
-                            && let Some(hint) = routing_hint
-                        {
+                        if finished && let Some(hint) = routing_hint {
                             self.state
                                 .right_panel
                                 .complete_last_pty_for_agent(output.clone(), Some(&hint));
@@ -873,7 +872,9 @@ impl App {
                             self.state.right_panel.scroll_to_bottom();
                         }
                         if finished {
-                            self.state.right_panel.complete_last_bash_pty(output.clone());
+                            self.state
+                                .right_panel
+                                .complete_last_bash_pty(output.clone());
                         }
                     }
                 }

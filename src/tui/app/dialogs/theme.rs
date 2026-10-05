@@ -13,6 +13,19 @@ impl App {
             .collect();
         themes.sort_by_key(|a| a.to_lowercase());
 
+        // Palette fingerprints (color chips) per theme, always from the
+        // pristine registry entry — NOT from `self.theme`, which carries the
+        // /background override and would leak the toggle into the preview.
+        let swatches = themes
+            .iter()
+            .map(|name| {
+                self.theme_registry
+                    .get(name)
+                    .map(crate::ui::theme_swatches::theme_swatches)
+                    .unwrap_or_default()
+            })
+            .collect();
+
         // Resolve the current theme by comparing against each registry entry
         // WITH the /background preference applied — self.theme carries the
         // transparent-background override, so a plain equality check would
@@ -32,6 +45,7 @@ impl App {
 
         self.dialog.replace(DialogType::ThemeList {
             themes,
+            swatches,
             current,
             filter: String::new(),
         });

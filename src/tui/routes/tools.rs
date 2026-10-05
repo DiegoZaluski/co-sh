@@ -7,6 +7,7 @@ use ratatui::style::{Color, Style};
 use cosh_tui::core::types::MouseEvent;
 
 use crate::theme::{Theme, rgba_color};
+use crate::util::draw::draw_text_line;
 use crate::util::list_selection::ListSelection;
 
 pub fn load_disabled_tools(setup: &cosh::setup::Setup) -> HashSet<String> {
@@ -105,7 +106,8 @@ pub struct InternalToolsView {
     /// The vertical centering depends on the exact area the render used, so
     /// the mouse path must reuse it instead of re-deriving it from its own
     /// (differently sized) area.
-    list_start_y: u16,
+    /// `pub(crate)` so tests can hover the same rows the render drew.
+    pub(crate) list_start_y: u16,
 }
 
 impl InternalToolsView {
@@ -173,6 +175,20 @@ impl InternalToolsView {
         None
     }
 
+    /// Move the visual selection to the row under the pointer WITHOUT
+    /// toggling it — the same hover-follow contract as the model picker and
+    /// the ADD Provider list. Returns whether the pointer hit a tool row;
+    /// hovering outside the list keeps the current selection.
+    pub fn follow_hover(&mut self, mouse: &MouseEvent, area: Rect) -> bool {
+        match self.find_row_for_mouse(mouse, area) {
+            Some(idx) => {
+                self.selection.selected_index = idx;
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn handle_mouse(&self, mouse: &MouseEvent, area: Rect) -> Option<usize> {
         self.find_row_for_mouse(mouse, area)
     }
@@ -189,17 +205,14 @@ impl InternalToolsView {
         let max_w = max_row_width();
         let row_x = area.x + (area.width.saturating_sub(max_w as u16)) / 2;
 
-        let title_x = row_x;
-        for (i, ch) in title.chars().enumerate() {
-            let cx = title_x + i as u16;
-            if cx >= area.right() {
-                break;
-            }
-            if let Some(cell) = buf.cell_mut((cx, start_y)) {
-                cell.set_char(ch);
-                cell.set_style(Style::default().fg(muted));
-            }
-        }
+        draw_text_line(
+            buf,
+            title,
+            row_x,
+            start_y,
+            area.right() - row_x,
+            Style::default().fg(muted),
+        );
 
         // Clamp selection and scroll before rendering
         let count = visible_items(area).min(internal_tools().len());
@@ -216,7 +229,9 @@ impl InternalToolsView {
 
         // "  " column for the symbol (ZERO WIDTH prefix so column 0 = symbol)
         let sym_x = row_x;
-        let name_x = row_x + 2; // symbol + 1 space
+        let cols = columns();
+        let name_x = row_x + cols.name_x as u16;
+        let desc_x = row_x + cols.desc_x as u16;
 
         for i in 0..count {
             let idx = self.selection.scroll_offset + i;
@@ -235,26 +250,56 @@ impl InternalToolsView {
             let is_selected = idx == self.selection.selected_index;
             let row_color = if is_selected { primary } else { fg };
 
-            // Symbol (✔ / ✗)
-            let sym_ch = symbol.chars().next().unwrap();
-            if let Some(cell) = buf.cell_mut((sym_x, y)) {
-                cell.set_char(sym_ch);
-                cell.set_style(Style::default().fg(sym_color));
-            }
-
-            // Name + " - " + description
-            let rest = format!("{name} - {desc}");
-            for (j, ch) in rest.chars().enumerate() {
-                let cx = name_x + j as u16;
-                if cx >= area.right() {
-                    break;
-                }
-                if let Some(cell) = buf.cell_mut((cx, y)) {
-                    cell.set_char(ch);
-                    cell.set_style(Style::default().fg(row_color));
-                }
-            }
+            // Fixed columns: symbol, name and description. Every tool row
+            // carries all three, so the description column never shifts.
+            draw_text_line(
+                buf,
+                symbol,
+                sym_x,
+                y,
+                area.right() - sym_x,
+                Style::default().fg(sym_color),
+            );
+            draw_text_line(
+                buf,
+                name,
+                name_x,
+                y,
+                area.right() - name_x,
+                Style::default().fg(row_color),
+            );
+            draw_text_line(
+                buf,
+                desc,
+                desc_x,
+                y,
+                area.right() - desc_x,
+                Style::default().fg(muted),
+            );
         }
+    }
+}
+
+/// Fixed column layout of the tools list, derived once from the widest
+/// name/description so every row aligns: `[✔/✗] [name] [description]`. The
+/// render, the centering budget and the mouse hit-test all share it.
+struct Columns {
+    name_x: usize,
+    desc_x: usize,
+    /// Total width a row can occupy.
+    total: usize,
+}
+
+fn columns() -> Columns {
+    let tools = internal_tools();
+    let name_w = tools.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
+    let desc_w = tools.iter().map(|(_, d)| d.len()).max().unwrap_or(0);
+    let name_x = 2;
+    let desc_x = name_x + name_w + 2;
+    Columns {
+        name_x,
+        desc_x,
+        total: desc_x + desc_w,
     }
 }
 
@@ -266,11 +311,7 @@ fn content_start_y(area: Rect) -> u16 {
 }
 
 fn max_row_width() -> usize {
-    internal_tools()
-        .iter()
-        .map(|(name, desc)| 2 + name.len() + 4 + desc.len()) // "✔ name - desc"
-        .max()
-        .unwrap_or(0)
+    columns().total
 }
 
 const fn visible_items(area: Rect) -> usize {
@@ -386,5 +427,80 @@ mod tests {
         let len = names.len();
         names.dedup();
         assert_eq!(names.len(), len);
+    }
+
+    /// The hover-follow contract: a Move over a row moves the highlight and
+    /// reports a hit, while a Move outside the list keeps the selection —
+    /// the same behavior the model picker and the ADD Provider list give
+    /// their rows. Hovering never toggles a tool.
+    #[test]
+    fn hover_moves_the_selection_without_toggling() {
+        let theme = ThemeRegistry::new().themes[0].theme.clone();
+        let term = Rect::new(0, 0, 100, 30);
+
+        let mut view = InternalToolsView::new();
+        let mut buf = Buffer::empty(term);
+        view.render(&mut buf, Rect::new(0, 1, 100, term.height - 4), &theme);
+
+        let max_w = max_row_width();
+        let row_x = 0 + (100u16.saturating_sub(max_w as u16)) / 2;
+        let mouse_area = Rect::new(0, 1, 100, term.height - 4 + 1);
+        let move_to = |x: u16, y: u16| {
+            MouseEvent::new(
+                MouseEventType::Move,
+                MouseButton::Left,
+                x,
+                y,
+                MouseModifiers::none(),
+            )
+        };
+
+        // Hover the second row: the selection follows, nothing toggles.
+        assert!(view.follow_hover(&move_to(row_x + 2, view.list_start_y + 1), mouse_area));
+        assert_eq!(view.selection.selected_index, 1);
+        assert!(!view.changed, "a Move must never toggle the hovered tool");
+
+        // Hovering above the list (title area) keeps the selection.
+        assert!(!view.follow_hover(&move_to(row_x + 2, view.list_start_y - 1), mouse_area));
+        assert_eq!(view.selection.selected_index, 1);
+    }
+
+    /// Column alignment regression: every drawn row must start its name and
+    /// its description at the SAME x — the fixed-column layout, not a
+    /// free-form string that drifts per row.
+    #[test]
+    fn columns_align_across_rows() {
+        let theme = ThemeRegistry::new().themes[0].theme.clone();
+        let term = Rect::new(0, 0, 100, 30);
+        let render_area = Rect::new(0, 1, 100, term.height - 4);
+
+        let mut view = InternalToolsView::new();
+        let mut buf = Buffer::empty(term);
+        view.render(&mut buf, render_area, &theme);
+
+        let cols = columns();
+        let row_x = render_area.x + (render_area.width.saturating_sub(max_row_width() as u16)) / 2;
+        let name_x = row_x + cols.name_x as u16;
+        let desc_x = row_x + cols.desc_x as u16;
+
+        for i in 0..view.visible_count {
+            let y = view.list_start_y + i as u16;
+            let name = buf
+                .cell((name_x, y))
+                .map(|c| c.symbol().to_owned())
+                .unwrap_or_default();
+            assert_ne!(
+                name, " ",
+                "row {i}: no name drawn at the name column x={name_x}"
+            );
+            let desc = buf
+                .cell((desc_x, y))
+                .map(|c| c.symbol().to_owned())
+                .unwrap_or_default();
+            assert_ne!(
+                desc, " ",
+                "row {i}: no description drawn at the description column x={desc_x}"
+            );
+        }
     }
 }

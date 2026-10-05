@@ -52,6 +52,7 @@ pub use provider::{
     detect_provider, get_api_key, get_provider, get_provider_env_var, has_api_key,
     invalidate_api_key, is_local_provider, is_opencode_gateway, known_local_providers,
     known_providers, known_providers_with_env, normalize_local_base_url,
+    resolved_provider_base_url,
 };
 pub use usage::TokenUsage;
 
