@@ -211,19 +211,33 @@ pub fn spawn_update_pipeline(latest_tag: &str) {
             let script =
                 std::env::temp_dir().join(format!("cosh-update-{}.ps1", std::process::id()));
             let cmd = format!(
-                "curl.exe -fsSL -o \"{}\" \"{script_url}\" && powershell -NoProfile -ExecutionPolicy Bypass -File \"{}\" & set COSH_UPDATE_RC=!ERRORLEVEL! & del /q \"{}\" & start \"\" \"{current_exe}\" & exit /b !COSH_UPDATE_RC!",
+                "curl.exe -fsSL -o \"{}\" \"{script_url}\" && powershell -NoProfile -ExecutionPolicy Bypass -File \"{}\" & set \"COSH_UPDATE_RC=!ERRORLEVEL!\" & del /q \"{}\" & start \"\" \"{current_exe}\" & exit /b !COSH_UPDATE_RC!",
                 script.display(),
                 script.display(),
                 script.display(),
             );
             use std::os::windows::process::CommandExt;
+            // raw_arg, NOT args(): the std quotes each `.args()` argument
+            // with the MSVCRT rules -- the whole one-liner gets outer quotes
+            // and every embedded double quote becomes backslash-quote -- but
+            // cmd.exe parses the command line with its OWN rules (backslash
+            // is literal, a double quote just toggles in-quote state). Routed
+            // through `.args()`, those backslash-escaped quotes survive as
+            // LITERAL quote characters, so curl.exe receives an invalid
+            // quoted output path like C:\...\cosh-update-N.ps1 wrapped in
+            // real quotes; the download fails, the && chain short-circuits
+            // and the installer never runs -- all invisible under
+            // CREATE_NO_WINDOW. raw_arg puts the string VERBATIM on the
+            // command line, which is what cmd.exe expects for a /C script.
             std::process::Command::new("cmd")
                 // /V:ON enables DELAYED variable expansion: without it cmd
                 // expands %VAR% at PARSE time (the whole one-liner is read
                 // at once), so the recorded code would be the shell's
                 // startup errorlevel (0) instead of the install's exit
                 // code. With /V:ON, !VAR! expands at execution time.
-                .args(["/V:ON", "/C", &cmd])
+                .raw_arg("/V:ON")
+                .raw_arg("/C")
+                .raw_arg(&cmd)
                 .creation_flags(0x0800_0000)
                 .spawn()
         }
