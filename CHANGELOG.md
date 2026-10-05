@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.4] - 2026-10-05
 
 ### Added
 
@@ -36,6 +36,115 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   native Bedrock surface (Converse, Guardrails, Titan embeddings) will get an
   opt-in `bedrock-sdk` feature gate wrapping the SDK — the integration stays
   basic and light by default.
+
+- Kimi (Moonshot AI) as a provider, through the connector's
+  OpenAI-compatible family at `https://api.moonshot.ai/v1` with the
+  `MOONSHOT_API_KEY`. The default model is `kimi-k3` (1M context,
+  always-thinking with top-level `reasoning_effort`). Two Kimi quirks are
+  handled in the shared path: streams that historically carry `usage` only
+  inside each choice (top-level `usage` is tried first, the per-choice copy
+  as a fallback), and cost reporting — Kimi's responses carry no per-request
+  cost, so the session figure stays the reported sum while the account
+  balance comes from the documented `GET /users/me/balance` endpoint, read
+  defensively (a missing `data` reports the cost as unavailable instead of a
+  silently wrong 0.0).
+
+- Mouse-hover selection in the ADD Provider list and the /tools list,
+  matching the model picker's behavior: moving the pointer over a row moves
+  the highlight, and only the left-button release executes the action —
+  hovering never toggles a tool or opens a provider credential dialog.
+
+- Theme color swatches next to each theme name in the theme picker: a strip
+  of the theme's identity colors (near-duplicates filtered out), so themes
+  are told apart at a glance.
+
+### Fixed
+
+- Setup settings no longer vanish during sessions. `setup.json` saves were
+  a plain whole-file rewrite with no locking: two cosh processes running
+  side by side performed a lost update (the last save silently discarded
+  the other's changes to providers, mode selection and everything else), a
+  crash or concurrent write mid-serialization could truncate the file, and
+  any unparsable file was treated as missing — resetting the user to
+  defaults without a trace. Saving is now a locked read-modify-write: an
+  flock on `setup.json.lock` guards the section, what is currently on disk
+  is read and merged under the in-memory settings (a section is kept from
+  memory only when it differs from the save's own baseline snapshot, so
+  sections this process never touched survive a concurrent writer), and
+  the merged document is written to a temp file, fsynced and renamed into
+  place so readers never observe a partial file. A corrupt `setup.json` is
+  quarantined to `setup.json.corrupt-<timestamp>-<pid>` instead of silently
+  reset, preserving the evidence for recovery, and the test suite no longer
+  overwrites the developer's real config (an isolated config-dir guard
+  covers the setup and uninstall tests).
+
+- Sessions no longer vanish from the sidebar while another cosh process is
+  still using them. The per-session flock was only claimed when switching
+  to a session — every path that CREATED one assigned it directly, so a
+  second process could adopt a brand-new session and both went on writing
+  history to it concurrently. Session creation now goes through a single
+  claim funnel that mints the id, takes the lock at creation time and only
+  then hands the session over (/new, both agent-loop bootstraps and the
+  fork action); a released claim is never re-minted by the original issuer,
+  so two /new landing in the same millisecond cannot collide, and the lock
+  follows the session through its lifecycle instead of being held until
+  process death. Pressing Esc toward the Home screen is gated on the agent
+  being Idle, so the hand-off can never persist a half-written session
+  behind the running loop's back.
+
+- Deleting or editing a queued message while the agent loop runs now
+  actually reaches the loop. The old queued-input path was fire-and-forget:
+  once the pump had pushed the head message the harness owned it, so a
+  deleted message still reached the model on the next request, and editing
+  the message the chain would send next paused nothing. The queue now
+  lives in a shared retractable deque both sides hold by reference — the
+  harness pops an entry only at the moment it injects it into the model
+  context, a Delete retracts the pumped copy outright, an Edit retracts the
+  stale text so the edited version is what gets injected, and editing the
+  head of the next-agent-loop queue pauses the chain until the edit is
+  submitted. All teardown paths (Esc stop, ClearQueue, session deletion,
+  loop-end cleanup) clear the shared queue, so nothing parked can reach a
+  dying loop and the next loop always starts fresh.
+
+- Long lines in the session tool boxes are now wrapped instead of clipped:
+  the bash output box, the glob file list, the write and read code panels,
+  the todo list and the edit diff box all cut every source line at the box
+  edge, and the height estimator counted raw source lines, so clipped boxes
+  were also sized too short. One set of shared wrap/width helpers now sizes
+  and paints every box, the code panels wrap without losing syntax
+  highlighting (a token folded across two rows keeps a single color) and
+  the estimated height always matches the painted rows.
+
+- Direct answers no longer trigger a spurious continuation. The termination
+  checkup audited every natural stop by sending the assistant's final text
+  to the decision model alone, so a plain answer with no task wording ("2+2
+  é 4") was judged as mid-task and the loop kept going after the work was
+  already done. The agent loop now tracks whether any tool ran during the
+  turn and only consults the checkup when it did: a cycle with no tool
+  dispatch is a pure text exchange, answerable directly, with nothing to
+  audit. A failed tool call still counts as agentic work, while a cycle
+  whose tool calls were refused by the user lands unaudited — explicit user
+  intent is never reviewed by the model. Enriching the decision state with
+  the user's request was measured against the cached checkpoints and made
+  things worse (every closing summary flipped to "running"); the negative
+  result is recorded in the checkup module docs and kept as a standing
+  evaluation probe.
+
+- The footer's update button works again on Windows. The update pipeline
+  built its cmd.exe one-liner (curl download, PowerShell installer,
+  delayed-expansion exit code, relaunch) and dispatched it through
+  `Command::args`: the standard library quotes arguments with the MSVCRT
+  rules, but cmd.exe parses its command line with its own rules, where a
+  backslash is literal — the backslash-escaped quotes therefore survived as
+  literal quote characters, curl received an invalid quoted output path, the
+  download failed and the `&&` chain short-circuited before the installer
+  ever ran, all invisible under `CREATE_NO_WINDOW`, so the app closed and
+  relaunched still on the old version. The one-liner is now passed with
+  `raw_arg`, verbatim on the command line, and the installer's exit code is
+  recorded with the `set "VAR=..."` idiom so the cleanup no longer appends a
+  trailing space to the value. (The manual command copied from the update
+  toast never went through this quoting layer, which is why it always
+  worked.)
 
 ## [0.1.3] - 2026-10-04
 
@@ -162,7 +271,8 @@ The agent's building blocks are published as reusable libraries:
 - Linux and Windows are tested. macOS builds are published but untested —
   report any issues with details.
 
-[Unreleased]: https://github.com/DiegoZaluski/co-sh/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/DiegoZaluski/co-sh/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/DiegoZaluski/co-sh/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/DiegoZaluski/co-sh/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/DiegoZaluski/co-sh/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/DiegoZaluski/co-sh/releases/tag/v0.1.1
