@@ -3619,19 +3619,28 @@ impl Harness {
         stop_signal: Arc<AtomicBool>,
     ) {
         // Legacy entry point (used by tests and callers that never queue
-        // mid-loop messages): a disconnected receiver that drains nothing.
-        let (_never, queued_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        self.run_agent_loop_inner(input, tx, answer_rx, perm_rx, stop_signal, queued_rx)
-            .await;
+        // mid-loop messages): an empty shared queue that nothing pushes into.
+        self.run_agent_loop_inner(
+            input,
+            tx,
+            answer_rx,
+            perm_rx,
+            stop_signal,
+            super::queued_input::QueuedInput::default(),
+        )
+        .await;
         self.drain_mcp().await;
     }
 
     /// Like [`run_agent_loop`](Self::run_agent_loop) but with an additional
-    /// channel the TUI can push user messages into WHILE the loop is running:
-    /// every message is recorded as a regular user turn and delivered to the
-    /// model before the NEXT request (the "next request" queue), and the
-    /// TUI is acknowledged via [`HarnessEvent::UserMessageInjected`].
-    /// Messages still queued when the loop ends are never injected.
+    /// SHARED queue the TUI can push user messages into WHILE the loop is
+    /// running: every message is recorded as a regular user turn and delivered
+    /// to the model before the NEXT request (the "next request" queue), and
+    /// the TUI is acknowledged via [`HarnessEvent::UserMessageInjected`].
+    /// The queue is shared by reference with the TUI, which keeps ownership of
+    /// its entries until injection — a deleted or edited message is reflected
+    /// here immediately (see [`super::queued_input::QueuedInput`]). Messages
+    /// still queued when the loop ends are never injected.
     pub async fn run_agent_loop_with_queued_input(
         &mut self,
         input: &str,
@@ -3641,9 +3650,9 @@ impl Harness {
         >,
         perm_rx: tokio::sync::mpsc::UnboundedReceiver<super::guardrails::PermissionAction>,
         stop_signal: Arc<AtomicBool>,
-        queued_input_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+        queued_input: super::queued_input::QueuedInput,
     ) {
-        self.run_agent_loop_inner(input, tx, answer_rx, perm_rx, stop_signal, queued_input_rx)
+        self.run_agent_loop_inner(input, tx, answer_rx, perm_rx, stop_signal, queued_input)
             .await;
         self.drain_mcp().await;
     }
@@ -3660,9 +3669,10 @@ impl Harness {
 
     /// Shared implementation of [`run_agent_loop`](Self::run_agent_loop) and
     /// [`run_agent_loop_with_queued_input`](Self::run_agent_loop_with_queued_input).
-    /// The `queued_input_rx` channel is drained before every request; its
+    /// The shared `queued_input` queue is drained before every request; its
     /// messages are injected into the model context (see the docs of the
-    /// public wrappers).
+    /// public wrappers). The drain pops each entry right before injecting it,
+    /// so a TUI-side delete/edit of a still-pending message is always honored.
     async fn run_agent_loop_inner(
         &mut self,
         input: &str,
@@ -3672,7 +3682,7 @@ impl Harness {
         >,
         mut perm_rx: tokio::sync::mpsc::UnboundedReceiver<super::guardrails::PermissionAction>,
         stop_signal: Arc<AtomicBool>,
-        mut queued_input_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+        queued_input: super::queued_input::QueuedInput,
     ) {
         use super::events::{HarnessEvent, ToastVariant};
         self.context_manager.set_binding_sender(tx.clone());
@@ -3870,13 +3880,17 @@ impl Harness {
 
             // Inject user messages queued for the NEXT REQUEST (the TUI's
             // "next request" queue) into the model context before this
-            // request is built. Each is a regular protected user turn and is
+            // request is built. Each message is popped from the SHARED queue
+            // right before it is recorded (pop-on-inject), so a TUI-side
+            // delete or edit of a still-pending message is always honored —
+            // an entry the TUI removed can never reach the model. Each
+            // injected message is a regular protected user turn and is
             // acknowledged via `UserMessageInjected` so the TUI can move it
             // out of its pending area into the normal history. An injected
             // message is the newest instruction: it supersedes the
             // per-iteration steering prompt.
             let mut injected_any = false;
-            while let Ok(text) = queued_input_rx.try_recv() {
+            for text in queued_input.drain() {
                 injected_any = true;
                 let _ = tx.send(HarnessEvent::UserMessageInjected { text: text.clone() });
                 self.context_manager.add_user(&text);

@@ -88,11 +88,11 @@ impl App {
             // Same mechanism as the ESC stop. Raising the flag is safe even
             // if the user already pressed ESC (an idempotent store).
             self.stop_signal.store(true, Ordering::Relaxed);
-            // Drop the loop-owned plumbing NOW so nothing can be injected
-            // into a loop that is on its way out, and no queued auto-start
-            // can fire for the deleted session between this delete and the
-            // harness's `Stopped` event.
-            self.queued_input_tx = None;
+            // Clear the SHARED queued-input queue NOW so nothing can be
+            // injected into a loop that is on its way out, and no queued
+            // auto-start can fire for the deleted session between this
+            // delete and the harness's `Stopped` event.
+            self.queued_input.clear();
             self.next_request_in_flight = false;
             self.queue_actions_deferred_start = false;
             self.hovered_queue_row = None;
@@ -161,8 +161,7 @@ mod tests {
         app.state.status = SessionStatus::Working;
         app.active_loop_session_id = Some(id.to_string());
         app.stop_signal.store(false, Ordering::Relaxed);
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        app.queued_input_tx = Some(tx);
+        app.queued_input.push("pending".to_string());
         app.next_request_in_flight = true;
         app
     }
@@ -181,8 +180,8 @@ mod tests {
             "the running loop must be stopped when its session is deleted"
         );
         assert!(
-            app.queued_input_tx.is_none(),
-            "the loop's queued-input channel must be dropped"
+            app.queued_input.is_empty(),
+            "the loop's queued-input queue must be cleared"
         );
         assert!(
             !app.next_request_in_flight,
@@ -241,8 +240,8 @@ mod tests {
             "another session's running loop must not be stopped"
         );
         assert!(
-            app.queued_input_tx.is_some(),
-            "the running loop's channel must stay alive"
+            !app.queued_input.is_empty(),
+            "an unrelated delete must not touch the running loop's queued input"
         );
         assert_eq!(app.active_loop_session_id.as_deref(), Some("loop-owner"));
         assert!(app.state.current_session_id.is_some());

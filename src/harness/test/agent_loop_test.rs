@@ -1587,14 +1587,14 @@ async fn queued_next_request_messages_are_injected_into_context() {
     let stop_signal = Arc::new(AtomicBool::new(false));
 
     // Pre-queue two messages (FIFO) before the loop starts.
-    let (queued_tx, queued_rx) = tokio::sync::mpsc::unbounded_channel();
-    queued_tx.send("fix the test".to_string()).unwrap();
-    queued_tx.send("and the docs".to_string()).unwrap();
+    let queued = crate::harness::queued_input::QueuedInput::default();
+    queued.push("fix the test".to_string());
+    queued.push("and the docs".to_string());
 
     // Run directly (like bug_hunt::run_loop_and_collect) so `h` is still
     // owned by this test after the loop terminates; the mock stream makes the
     // run deterministic and fast.
-    h.run_agent_loop_with_queued_input("hello", tx, answer_rx, perm_rx, stop_signal, queued_rx)
+    h.run_agent_loop_with_queued_input("hello", tx, answer_rx, perm_rx, stop_signal, queued)
         .await;
 
     let mut events = Vec::new();
@@ -1652,10 +1652,10 @@ async fn queued_next_request_message_enters_the_next_request_with_tool_work() {
     let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
     let stop_signal = Arc::new(AtomicBool::new(false));
 
-    let (queued_tx, queued_rx) = tokio::sync::mpsc::unbounded_channel();
-    queued_tx.send("follow up".to_string()).unwrap();
+    let queued = crate::harness::queued_input::QueuedInput::default();
+    queued.push("follow up".to_string());
 
-    h.run_agent_loop_with_queued_input("use tool", tx, answer_rx, perm_rx, stop_signal, queued_rx)
+    h.run_agent_loop_with_queued_input("use tool", tx, answer_rx, perm_rx, stop_signal, queued)
         .await;
 
     let mut events = Vec::new();

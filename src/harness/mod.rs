@@ -12,6 +12,7 @@ pub mod events;
 pub mod guardrails;
 pub mod hooks;
 pub mod lsp;
+pub mod queued_input;
 pub mod title;
 pub mod tools;
 pub mod truncate;

@@ -74,9 +74,9 @@ async fn loop_end_promotes_unconsumed_next_request_to_next_loop() {
         ],
         "promoted message joins the back of the next-loop queue (FIFO)"
     );
-    // The sender channel is dropped at loop end so nothing can be injected
-    // into the finished loop.
-    assert!(app.queued_input_tx.is_none());
+    // The shared queued-input queue is reset at loop end so nothing can be
+    // injected into the finished loop.
+    assert!(app.queued_input.is_empty());
 }
 
 /// The user's exact scenario: a "next request" message that the loop

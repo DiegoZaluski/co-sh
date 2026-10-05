@@ -1295,7 +1295,14 @@ impl App {
                             Some(id) => self.state.pending_queues.get_mut(id),
                             None => self.state.current_pending_queues_mut(),
                         };
-                        if let Some(queues) = queues {
+                        // Pop the head ONLY when it is still the acked
+                        // message. A queue Delete/Edit that raced the
+                        // injection already removed it (and reopened the
+                        // delivery lane); popping blindly here would retire
+                        // the FOLLOWING message instead.
+                        if let Some(queues) = queues
+                            && queues.next_request.front().is_some_and(|head| *head == text)
+                        {
                             queues.next_request.pop_front();
                         }
                         // A delivered head shifts the edited message's home

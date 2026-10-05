@@ -23,6 +23,11 @@ impl App {
         self.queue_actions_grace_until = Some(Instant::now() + QUEUE_ACTIONS_GRACE);
         self.active_queue_actions_session = self.state.current_session_id.clone();
         self.hovered_queue_row = None;
+        // Sync the shared queued-input hold RIGHT NOW: the pump only syncs
+        // once per main-loop iteration, and between opening this box and the
+        // next pump tick the harness could otherwise drain (and inject) the
+        // very message the user is about to delete or edit.
+        self.sync_queued_input_hold();
         let preview = super::super::dialog_preview_text(text);
         self.dialog.replace(DialogType::QueueActions {
             queue,
@@ -75,6 +80,31 @@ impl App {
         }
     }
 
+    /// True when `queue`/`index` selects the message the chain will send
+    /// NEXT — the head of the Next queue, the immediate one. The edit hold
+    /// only ever applies to that message (per spec): while it is being
+    /// edited, the loop chain must wait — a running loop waits at closure,
+    /// an idle chain waits before its auto-start — so the user can finish
+    /// editing before the message is sent. Any other position (or the
+    /// next-request queue, whose correctness is handled by the shared-queue
+    /// retraction above) never pauses the loop.
+    fn is_head_of_next_chain(&self, queue: QueueTarget, index: usize) -> bool {
+        if index != 0 || queue != QueueTarget::NextLoop {
+            return false;
+        }
+        let Some(id) = self.state.current_session_id.as_deref() else {
+            return false;
+        };
+        // The chain auto-starts the Next head in exactly these states: a
+        // live loop hands it over at closure (Working), an idle chain fires
+        // it right away (Idle, including the deferred start).
+        matches!(self.state.status, SessionStatus::Idle | SessionStatus::Working)
+            && self
+                .active_loop_session_id
+                .as_deref()
+                .is_none_or(|owner| owner == id)
+    }
+
     /// Execute the picked Queue Actions entry: 0 = Edit, 1 = Delete,
     /// 2 = Copy (same order as the rendered dialog).
     ///
@@ -96,6 +126,10 @@ impl App {
             self.dialog.clear();
             return;
         }
+        // Snapshot the loop-ownership check BEFORE the mutation block: the
+        // Edit branch moves `owner` into the requeue hint.
+        let loop_owner_matches =
+            self.active_loop_session_id.as_deref() == Some(owner.as_str());
         let text = {
             let Some(queues) = self.state.current_pending_queues_mut() else {
                 return;
@@ -142,6 +176,43 @@ impl App {
         let Some(text) = text else {
             return;
         };
+
+        // The deque mutation above and the shared queued-input retraction
+        // must stay consistent: the HEAD message may already have been pumped
+        // into the shared queue (in-flight, awaiting injection) while the
+        // pending deque still carries it. Retract it there too — otherwise a
+        // Delete would only be visual and the model would still receive the
+        // removed text on the next request. ONLY index 0 qualifies: the pump
+        // forwards one message at a time, so the shared queue can hold at
+        // most the head — a remove-by-text on a non-head action could match
+        // the in-flight head when duplicate texts exist.
+        if matches!(action, 0 | 1)
+            && index == 0
+            && queue == QueueTarget::NextRequest
+            && self.state.status == SessionStatus::Working
+            && loop_owner_matches
+            && self.next_request_in_flight
+        {
+            // Retract the pumped copy so the model never sees the removed or
+            // stale text (the shared queue held at most this one message —
+            // the pump forwards one at a time).
+            self.queued_input.remove(&text);
+            // Reopen the delivery lane for the message that now follows.
+            self.next_request_in_flight = false;
+        }
+
+        // Editing the head of the NEXT queue — the immediate message —
+        // pauses the chain until the edit is submitted:
+        // * while idle: the auto-start waits (the submit clears the hold and
+        //   starts the loop with the edited text).
+        // * while working: the loop waits at CLOSURE — the deferred start
+        //   fires only after the hold lifts (the pump branch).
+        // Delete never holds the chain: the retraction above already keeps
+        // the removed text away from the model. Any other position runs the
+        // loop on untouched.
+        if action == 0 && self.is_head_of_next_chain(queue, index) {
+            self.edit_hold_queue = Some(queue);
+        }
 
         match action {
             0 => {
@@ -228,11 +299,15 @@ impl App {
             _ => {
                 // Plain submission (no edited message in flight here).
                 self.edit_requeue_hint = None;
+                self.edit_hold_queue = None;
                 self.start_agent_loop(text);
                 return;
             }
         };
         self.enqueue_pending_message(target, text);
+        // The edited message is back in its slot: the head-edit hold ends
+        // here — the chain may consume it again.
+        self.edit_hold_queue = None;
 
         if self.state.status != SessionStatus::Idle {
             return;

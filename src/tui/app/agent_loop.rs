@@ -37,10 +37,12 @@ pub(super) static AGENT_RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> =
 impl App {
     /// True while the loop must not consume the next queued message: either
     /// a Queue Actions box is open (the queued indexes it carries must stay
-    /// stable until its action runs) or the user is still inside the
-    /// [`QUEUE_ACTIONS_GRACE`] window granted when the box was opened.
+    /// stable until its action runs), the user is still inside the
+    /// [`QUEUE_ACTIONS_GRACE`] window granted when the box was opened, or
+    /// the user is editing the head of a queue (the head hold — see
+    /// [`App::edit_hold_queue`]).
     pub(super) fn queue_actions_hold_active(&self) -> bool {
-        if self.is_queue_actions_dialog_visible() {
+        if self.is_queue_actions_dialog_visible() || self.edit_hold_queue.is_some() {
             return true;
         }
         self.queue_actions_grace_until
@@ -97,6 +99,22 @@ impl App {
         }
     }
 
+    /// Mirror the TUI-side HARD holds (open Queue Actions box, grace window)
+    /// into the shared queued-input queue: while held, the harness's
+    /// before-request drain returns nothing, so a message the user is
+    /// deleting or editing in the Queue Actions box can never be injected in
+    /// that window (the delete/edit race of the old fire-and-forget channel
+    /// is closed by construction). The NEXT-queue head-edit hold
+    /// deliberately does NOT block the drain: a running loop keeps consuming
+    /// "next request" messages — only its closure waits.
+    pub(super) fn sync_queued_input_hold(&self) {
+        let hard_hold = self.is_queue_actions_dialog_visible()
+            || self
+                .queue_actions_grace_until
+                .is_some_and(|until| Instant::now() < until);
+        self.queued_input.set_hold(hard_hold);
+    }
+
     /// Deliver queued messages to the running agent loop and start deferred
     /// loops — but only while the queue-actions hold
     /// ([`App::queue_actions_hold_active`]) is not active.
@@ -105,11 +123,22 @@ impl App {
     /// effective message is always the head of the queue and can be held,
     /// edited or deleted before it ever reaches the running loop. The deque
     /// entry is only retired when the harness acknowledges the injection
-    /// (`UserMessageInjected`), so a message already sitting in the loop's
-    /// channel can never be lost if the loop ends before injecting it.
+    /// (`UserMessageInjected`), so a message already sitting in the shared
+    /// queue can never be lost if the loop ends before injecting it.
     /// Called once per main-loop iteration from `run()`.
     pub(super) fn pump_queued_messages(&mut self) {
-        if self.queue_actions_hold_active() {
+        // Keep the shared queue's hold in sync BEFORE anything moves: this
+        // runs every main-loop iteration, so grace-window expiry is noticed
+        // here too.
+        self.sync_queued_input_hold();
+        // Full hold: a Queue Actions box or the grace window — nothing may
+        // move until they clear. (A NEXT-queue head edit only pauses the
+        // chain START below, never these deliveries.)
+        if self.is_queue_actions_dialog_visible()
+            || self
+                .queue_actions_grace_until
+                .is_some_and(|until| Instant::now() < until)
+        {
             return;
         }
 
@@ -118,6 +147,12 @@ impl App {
         // promotion of leftover "next request" messages happens here too —
         // never while a Queue Actions box holds indexes into the deque.
         if self.queue_actions_deferred_start && self.state.status == SessionStatus::Idle {
+            // The user is editing the head of the NEXT queue: the chain may
+            // not start until the edited message is back in its slot (the
+            // submit clears the hold and this branch fires).
+            if self.edit_hold_queue.is_some() {
+                return;
+            }
             let current = self.state.current_session_id.clone();
             if self
                 .active_loop_session_id
@@ -137,10 +172,10 @@ impl App {
             return;
         }
 
-        // Forward the head of the "next request" queue into the live loop's
-        // channel; the harness injects it into the context before its next
-        // request. FIFO is preserved: one in-flight message at a time, both
-        // sides are queues, and the deque entry retires on acknowledgment.
+        // Forward the head of the "next request" queue into the SHARED queue
+        // the live loop drains before its next request. FIFO is preserved:
+        // one in-flight message at a time, both sides are queues, and the
+        // deque entry retires on acknowledgment (`UserMessageInjected`).
         if self.state.status == SessionStatus::Working
             && !self.next_request_in_flight
             && let Some(owner) = self.active_loop_session_id.clone()
@@ -150,9 +185,8 @@ impl App {
                 .pending_queues
                 .get(&owner)
                 .and_then(|q| q.next_request.front().cloned())
-            && let Some(tx) = &self.queued_input_tx
         {
-            let _ = tx.send(text);
+            self.queued_input.push(text);
             self.next_request_in_flight = true;
         }
     }
@@ -303,12 +337,16 @@ impl App {
         let (perm_tx, perm_rx) = mpsc::unbounded_channel();
         self.perm_tx = perm_tx;
 
-        // Create a fresh queued-input channel for the "next request" queue.
-        // The harness drains it before every request of THIS loop. Queued
+        // Shared queued-input queue for the "next request" queue. The
+        // harness drains it before every request of THIS loop. Queued
         // messages are forwarded by `pump_queued_messages`, one at a time,
-        // so an open Queue Actions box can always hold them back.
-        let (queued_tx, queued_rx) = mpsc::unbounded_channel();
-        self.queued_input_tx = Some(queued_tx.clone());
+        // so an open Queue Actions box can always hold them back; the TUI
+        // keeps ownership of every entry until injection, so a queue Delete
+        // or Edit reaches the loop (`QueuedInput::remove`/`replace`).
+        // The reset MUST precede the clone: the thread gets the fresh queue,
+        // never leftovers from the previous loop.
+        self.queued_input = cosh::harness::queued_input::QueuedInput::default();
+        let queued_input = self.queued_input.clone();
         self.active_loop_session_id = self.state.current_session_id.clone();
 
         let mut disabled_tools = self.internal_tools_view.disabled.clone();
@@ -678,7 +716,7 @@ impl App {
                             answer_rx,
                             perm_rx,
                             stop_signal,
-                            queued_rx,
+                            queued_input.clone(),
                         )
                         .await;
                 });
@@ -898,7 +936,9 @@ impl App {
     /// stay parked: the user decides when to resend (e.g. after switching the
     /// model) — a later manual message rolls them in.
     pub(super) fn handle_loop_end(&mut self, start_next: bool) -> bool {
-        self.queued_input_tx = None;
+        // Reset the shared queued-input queue: a finished loop drained
+        // everything it injected; anything left must not leak into the next.
+        self.queued_input = cosh::harness::queued_input::QueuedInput::default();
         let Some(id) = self.state.current_session_id.clone() else {
             return false;
         };

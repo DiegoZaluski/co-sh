@@ -1398,15 +1398,18 @@ impl App {
                         self.stop_signal.store(true, Ordering::Relaxed);
                         // Clear pending queues: the user explicitly
                         // cancelled, so queued follow-ups should not
-                        // auto-start a new loop.
+                        // auto-start a new loop — and nothing still parked in
+                        // the SHARED queue may reach the dying loop either.
                         if let Some(id) = self.state.current_session_id.clone()
                             && let Some(queues) = self.state.pending_queues.get_mut(&id)
                         {
                             queues.clear();
                         }
+                        self.queued_input.clear();
                         self.next_request_in_flight = false;
                         self.queue_actions_deferred_start = false;
                         self.edit_requeue_hint = None;
+                        self.edit_hold_queue = None;
                         self.hovered_queue_row = None;
                         return Ok(false);
                     }
@@ -1521,10 +1524,14 @@ impl App {
                     {
                         queues.clear();
                     }
-                    // Nothing left to acknowledge, resume or highlight.
+                    // Nothing left to acknowledge, resume or highlight —
+                    // and nothing still parked in the SHARED queue may reach
+                    // the running loop either.
+                    self.queued_input.clear();
                     self.next_request_in_flight = false;
                     self.queue_actions_deferred_start = false;
                     self.edit_requeue_hint = None;
+                    self.edit_hold_queue = None;
                     self.hovered_queue_row = None;
                 }
                 None => {

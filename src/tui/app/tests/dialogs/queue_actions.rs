@@ -174,8 +174,6 @@ async fn full_edit_resend_flow_restores_position_via_keys() {
     let mut app = app_with_queues();
     app.state.status = SessionStatus::Working;
     app.active_loop_session_id = Some("t".into());
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    app.queued_input_tx = Some(tx);
 
     // Edit "request-one" (head of next_request).
     app.run_queue_action(0, QueueTarget::NextRequest, 0);
@@ -223,8 +221,6 @@ async fn requeue_position_tracks_delivered_heads() {
     }
     app.state.status = SessionStatus::Working;
     app.active_loop_session_id = Some("t".into());
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    app.queued_input_tx = Some(tx);
 
     // Edit "request-two" (index 1); deliver and acknowledge "request-one".
     app.run_queue_action(0, QueueTarget::NextRequest, 1);
@@ -366,14 +362,15 @@ async fn opening_queue_actions_holds_the_next_effective_message() {
     let mut app = app_with_queues();
     app.state.status = SessionStatus::Working;
     app.active_loop_session_id = Some("t".into());
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    app.queued_input_tx = Some(tx);
 
     // Opening the box grants the grace window: nothing may be delivered.
     open_queue_actions(&mut app, QueueTarget::NextLoop, 0, "loop-one");
     assert!(app.queue_actions_hold_active());
     app.pump_queued_messages();
-    assert!(rx.try_recv().is_err(), "held while the actions box is open");
+    assert!(
+        app.queued_input.is_empty(),
+        "held while the actions box is open"
+    );
     assert_eq!(
         app.state
             .current_pending_queues()
@@ -388,14 +385,21 @@ async fn opening_queue_actions_holds_the_next_effective_message() {
     app.dialog.pop();
     assert!(app.queue_actions_hold_active());
     app.pump_queued_messages();
-    assert!(rx.try_recv().is_err());
+    assert!(
+        app.queued_input.is_empty(),
+        "the grace window still holds the delivery"
+    );
 
     // Once the window expires, the pump delivers FIFO again — one in-flight
     // message at a time, retired only on acknowledgment.
     app.queue_actions_grace_until = Some(Instant::now() - Duration::from_millis(1));
     assert!(!app.queue_actions_hold_active());
     app.pump_queued_messages();
-    assert_eq!(rx.try_recv().as_deref().ok(), Some("request-one"));
+    assert_eq!(
+        app.queued_input.drain(),
+        vec!["request-one".to_string()],
+        "the pump forwarded the head into the shared queue"
+    );
     assert!(app.next_request_in_flight);
     assert_eq!(
         app.state
@@ -426,7 +430,11 @@ async fn opening_queue_actions_holds_the_next_effective_message() {
         "injection acknowledgment must not drop the next queued message"
     );
     app.pump_queued_messages();
-    assert_eq!(rx.try_recv().as_deref().ok(), Some("request-two"));
+    assert_eq!(
+        app.queued_input.drain(),
+        vec!["request-two".to_string()],
+        "the pump forwarded the next message after the acknowledgment"
+    );
 }
 
 #[tokio::test]
@@ -435,8 +443,6 @@ async fn in_flight_message_survives_loop_end_without_injection() {
     let mut app = app_with_queues();
     app.state.status = SessionStatus::Working;
     app.active_loop_session_id = Some("t".into());
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    app.queued_input_tx = Some(tx);
 
     // The head is handed to the loop's channel but the harness ends (stop /
     // error / clean Done) before injecting it.
@@ -790,3 +796,260 @@ async fn plain_submit_without_outstanding_edit_still_sends_directly() {
     let queues = app.state.current_pending_queues().unwrap();
     assert_eq!(queues.queued_count(), 4);
 }
+
+// ── Bug 1: a DELETE of an in-flight "next request" message must retract it
+// from the shared queued-input queue too — previously the removal was only
+// visual and the model still received the text on the next request. ──────
+
+#[tokio::test]
+async fn deleting_in_flight_next_request_head_retracts_it_from_the_loop() {
+    let _guard = HOME_LOCK.lock();
+    let mut app = app_with_queues();
+    app.state.status = SessionStatus::Working;
+    app.active_loop_session_id = Some("t".into());
+
+    // The head was already pumped into the shared queue (awaiting injection).
+    app.pump_queued_messages();
+    assert!(app.next_request_in_flight);
+    assert_eq!(app.queued_input.drain(), vec!["request-one".to_string()]);
+    // Re-stage the pumped copy (the drain above was only for inspection).
+    app.queued_input.push("request-one".into());
+
+    // Delete the in-flight head.
+    app.run_queue_action(1, QueueTarget::NextRequest, 0);
+
+    // The shared queue no longer carries it: the model will never see it.
+    assert!(
+        app.queued_input.is_empty(),
+        "the pumped copy must be retracted on delete"
+    );
+    // The pending deque dropped it and the delivery lane reopened for the
+    // message that now follows.
+    assert!(!app.next_request_in_flight);
+    assert_eq!(
+        app.state
+            .current_pending_queues()
+            .unwrap()
+            .next_request
+            .iter()
+            .collect::<Vec<_>>(),
+        ["request-two"]
+    );
+
+    // The pump now forwards the FOLLOWER, not the deleted message.
+    app.pump_queued_messages();
+    assert_eq!(app.queued_input.drain(), vec!["request-two".to_string()]);
+}
+
+// ── Bug 1 (edit twin): an EDIT of the in-flight head retracts the stale
+// text; the edited text is re-pumped fresh when the user resubmits. ──────
+
+#[tokio::test]
+async fn editing_in_flight_next_request_head_retracts_the_stale_copy() {
+    let _guard = HOME_LOCK.lock();
+    let mut app = app_with_queues();
+    app.state.status = SessionStatus::Working;
+    app.active_loop_session_id = Some("t".into());
+
+    // The head was already pumped into the shared queue (awaiting injection).
+    app.pump_queued_messages();
+    assert!(app.next_request_in_flight);
+    assert_eq!(app.queued_input.drain(), vec!["request-one".to_string()]);
+    // Re-stage the pumped copy (the drain above was only for inspection).
+    app.queued_input.push("request-one".into());
+
+    // Edit the in-flight head.
+    app.run_queue_action(0, QueueTarget::NextRequest, 0);
+
+    assert!(
+        app.queued_input.is_empty(),
+        "the stale pumped copy must be retracted on edit"
+    );
+    assert!(!app.next_request_in_flight);
+    // The head-edit hold must NOT apply: only the Next (immediate) queue
+    // pauses the loop, never the next-request queue.
+    assert!(app.edit_hold_queue.is_none());
+    // The prompt now carries the message for editing.
+    assert_eq!(app.prompt_view.input, "request-one");
+}
+
+// ── Bug 2: editing the head of the Next (immediate) queue holds the chain
+// until the edit is submitted — a running loop waits at closure, an idle
+// chain waits before its auto-start. ─────────────────────────────────────
+
+#[tokio::test]
+async fn editing_next_queue_head_holds_the_deferred_auto_start() {
+    let _guard = HOME_LOCK.lock();
+    use std::time::{Duration, Instant};
+    let mut app = app_with_queues();
+    app.active_loop_session_id = Some("t".into());
+
+    // Edit the head of the Next queue (the immediate message).
+    app.run_queue_action(0, QueueTarget::NextLoop, 0);
+    assert_eq!(app.edit_hold_queue, Some(QueueTarget::NextLoop));
+    assert_eq!(app.prompt_view.input, "loop-one");
+    // The message is out of the queue while being edited.
+    assert_eq!(
+        app.state
+            .current_pending_queues()
+            .unwrap()
+            .next_loop
+            .iter()
+            .collect::<Vec<_>>(),
+        ["loop-two"]
+    );
+
+    // The chain wants to start "loop-two" but the head edit is in flight:
+    // the pump must defer the start until the edit is submitted.
+    app.queue_actions_grace_until = Some(Instant::now() - Duration::from_millis(1));
+    app.pump_queued_messages();
+    assert!(app.edit_hold_queue.is_some());
+    assert_eq!(app.state.status, SessionStatus::Idle);
+    assert_eq!(
+        app.state
+            .current_pending_queues()
+            .unwrap()
+            .next_loop
+            .iter()
+            .collect::<Vec<_>>(),
+        ["loop-two"],
+        "the chain must not start while the Next head is being edited"
+    );
+
+    // Resubmitting the edited message returns it to its slot and clears the
+    // hold; the chain may then start it.
+    app.prompt_view.input = "loop-one (edited)".into();
+    app.prompt_view.cursor_pos = 17;
+    app.process_key_event(key(KeyCode::Enter)).unwrap();
+    app.process_key_event(key(KeyCode::Enter)).unwrap();
+    assert!(app.edit_hold_queue.is_none(), "submit clears the hold");
+    // The idle chain resumes FIFO right away: the edited head starts the
+    // loop and the leftover next-request messages are promoted behind it.
+    assert_eq!(app.state.status, SessionStatus::Working);
+    assert_eq!(
+        app.state
+            .current_pending_queues()
+            .unwrap()
+            .next_loop
+            .iter()
+            .collect::<Vec<_>>(),
+        ["loop-two", "request-one", "request-two"],
+    );
+    let last = app
+        .state
+        .current_session()
+        .unwrap()
+        .messages
+        .last()
+        .map(text_of);
+    assert_eq!(last.as_deref(), Some("loop-one (edited)"));
+}
+
+#[tokio::test]
+async fn editing_next_queue_head_while_working_waits_at_loop_closure() {
+    let _guard = HOME_LOCK.lock();
+    use std::time::{Duration, Instant};
+    let mut app = app_with_queues();
+    app.state.status = SessionStatus::Working;
+    app.active_loop_session_id = Some("t".into());
+
+    // Edit the head of the Next queue while a loop is still running.
+    app.run_queue_action(0, QueueTarget::NextLoop, 0);
+    assert_eq!(app.edit_hold_queue, Some(QueueTarget::NextLoop));
+
+    // The loop closes cleanly (the Done handler sets Idle before the
+    // loop-end cleanup runs). The auto-start of the (edited) head must be
+    // deferred, not fired over the user's edit.
+    app.state.status = SessionStatus::Idle;
+    assert!(app.handle_loop_end(true));
+    assert!(app.queue_actions_deferred_start);
+    assert_eq!(app.state.status, SessionStatus::Idle);
+    assert_eq!(
+        app.state
+            .current_pending_queues()
+            .unwrap()
+            .next_loop
+            .iter()
+            .collect::<Vec<_>>(),
+        ["loop-two"]
+    );
+
+    // Submitting the edited message clears the hold; the pump then starts
+    // the chain with the edited text.
+    app.prompt_view.input = "loop-one (edited)".into();
+    app.prompt_view.cursor_pos = 17;
+    app.process_key_event(key(KeyCode::Enter)).unwrap();
+    app.process_key_event(key(KeyCode::Enter)).unwrap();
+    assert!(app.edit_hold_queue.is_none());
+    app.queue_actions_grace_until = Some(Instant::now() - Duration::from_millis(1));
+    app.pump_queued_messages();
+    assert_eq!(app.state.status, SessionStatus::Working);
+    let last = app
+        .state
+        .current_session()
+        .unwrap()
+        .messages
+        .last()
+        .map(text_of);
+    assert_eq!(last.as_deref(), Some("loop-one (edited)"));
+}
+
+// Editing a NON-head message (or deleting any message) must never pause the
+// chain — the hold is exclusive to the head of the Next queue.
+
+#[tokio::test]
+async fn editing_a_non_head_message_never_holds_the_chain() {
+    let _guard = HOME_LOCK.lock();
+    use std::time::{Duration, Instant};
+    let mut app = app_with_queues();
+    app.state.status = SessionStatus::Working;
+    app.active_loop_session_id = Some("t".into());
+
+    // Edit the SECOND next-loop message.
+    app.run_queue_action(0, QueueTarget::NextLoop, 1);
+    assert!(app.edit_hold_queue.is_none(), "only the head may hold");
+    assert_eq!(app.prompt_view.input, "loop-two");
+
+    // Delete a next-request message mid-queue: also no hold (the shared
+    // retraction handles correctness).
+    app.run_queue_action(1, QueueTarget::NextRequest, 1);
+    assert!(app.edit_hold_queue.is_none());
+
+    // The chain behaves normally (grace aside).
+    app.queue_actions_grace_until = Some(Instant::now() - Duration::from_millis(1));
+    app.pump_queued_messages();
+    assert_eq!(
+        app.queued_input.drain(),
+        vec!["request-one".to_string()],
+        "the chain keeps flowing while non-head messages are edited"
+    );
+}
+
+#[tokio::test]
+async fn deleting_next_queue_head_does_not_hold_the_chain() {
+    let _guard = HOME_LOCK.lock();
+    use std::time::{Duration, Instant};
+    let mut app = app_with_queues();
+    app.state.status = SessionStatus::Working;
+    app.active_loop_session_id = Some("t".into());
+
+    // Delete the head of the Next queue.
+    app.run_queue_action(1, QueueTarget::NextLoop, 0);
+    assert!(app.edit_hold_queue.is_none(), "delete never holds");
+    assert_eq!(
+        app.state
+            .current_pending_queues()
+            .unwrap()
+            .next_loop
+            .iter()
+            .collect::<Vec<_>>(),
+        ["loop-two"]
+    );
+
+    // The chain flows normally: the pump keeps delivering next-request
+    // messages.
+    app.queue_actions_grace_until = Some(Instant::now() - Duration::from_millis(1));
+    app.pump_queued_messages();
+    assert_eq!(app.queued_input.drain(), vec!["request-one".to_string()]);
+}
+

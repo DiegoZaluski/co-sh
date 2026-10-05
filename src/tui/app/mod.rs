@@ -291,12 +291,15 @@ pub struct App {
     answer_tx: mpsc::UnboundedSender<Result<Vec<cosh_tools::question::types::AnswerItem>, String>>,
     /// Sender for permission responses back to the harness.
     perm_tx: mpsc::UnboundedSender<cosh::harness::PermissionAction>,
-    /// Sender for user messages queued for the NEXT REQUEST of the running
-    /// agent loop (the "next request" queue). `None` while no loop runs.
-    /// `pub(crate)`: the session route's deletion lifecycle
-    /// (`routes::session::delete`) drops it when it stops a deleted
-    /// session's loop.
-    pub(crate) queued_input_tx: Option<mpsc::UnboundedSender<String>>,
+    /// Handle to the SHARED "next request" queue of the running agent loop
+    /// (the harness drains it before every request and acknowledges each
+    /// injection via `UserMessageInjected`). The TUI keeps ownership of every
+    /// entry until injection, so a queue Delete/Edit of a still-pending
+    /// message is honored by the loop (`remove`/`replace` retract it before
+    /// the model ever sees it). Empty while no loop runs. `pub(crate)`:
+    /// cleared by the session route's deletion lifecycle
+    /// (`routes::session::delete`) when it stops a deleted session's loop.
+    pub(crate) queued_input: cosh::harness::queued_input::QueuedInput,
     /// Session id that owns the currently running agent loop — guards the
     /// queue auto-start against mid-run session switches. `pub(crate)`: read
     /// by `routes::session::delete` to decide whether a deleted session
@@ -314,6 +317,17 @@ pub struct App {
     /// opened; while a Queue Actions box is open the hold applies regardless
     /// (queued indexes must stay stable until the action runs).
     pub(super) queue_actions_grace_until: Option<Instant>,
+    /// The queue whose head the user is currently EDITING — the loop chain
+    /// must wait for the edit to be submitted before consuming that head:
+    /// * `Some(NextRequest)` — the head would be delivered to the running
+    ///   loop next: the pump may not forward anything until the edit lands.
+    /// * `Some(NextLoop)` — the head would start the next loop: the
+    ///   auto-start (including the deferred one at loop closure) waits,
+    ///   while "next request" deliveries continue untouched.
+    /// `None` when no head edit is in flight. Cleared by
+    /// [`App::enqueue_pending_message`] (the edited message returned to its
+    /// slot), the ESC stop and the queue-clear paths.
+    pub(super) edit_hold_queue: Option<QueueTarget>,
     /// Set when a loop ended cleanly with a next-loop message waiting but its
     /// start was deferred by the queue-actions hold. Consumed by
     /// [`App::pump_queued_messages`] once the hold expires. `pub(crate)`:
@@ -772,10 +786,11 @@ impl App {
             event_rx,
             answer_tx,
             perm_tx,
-            queued_input_tx: None,
+            queued_input: cosh::harness::queued_input::QueuedInput::default(),
             active_loop_session_id: None,
             hovered_queue_row: None,
             queue_actions_grace_until: None,
+            edit_hold_queue: None,
             queue_actions_deferred_start: false,
             next_request_in_flight: false,
             edit_requeue_hint: None,
