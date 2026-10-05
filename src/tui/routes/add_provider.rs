@@ -67,7 +67,8 @@ pub struct AddProviderView {
     /// The vertical centering depends on the exact area the render used, so
     /// the mouse path must reuse it instead of re-deriving it from its own
     /// (differently sized) area — re-deriving shifted every hit by one row.
-    list_start_y: u16,
+    /// `pub(crate)` so tests can hover the same rows the render drew.
+    pub(crate) list_start_y: u16,
 }
 
 impl AddProviderView {
@@ -164,6 +165,20 @@ impl AddProviderView {
             }
         }
         None
+    }
+
+    /// Move the visual selection to the row under the pointer WITHOUT
+    /// executing it — the same hover-follow contract as the model picker.
+    /// Returns whether the pointer hit a provider row; hovering outside the
+    /// list keeps the current selection.
+    pub fn follow_hover(&mut self, mouse: &MouseEvent, area: Rect) -> bool {
+        match self.find_row_for_mouse(mouse, area) {
+            Some(idx) => {
+                self.selection.selected_index = idx;
+                true
+            }
+            None => false,
+        }
     }
 
     pub fn handle_mouse(&self, mouse: &MouseEvent, area: Rect) -> Option<usize> {
@@ -366,5 +381,45 @@ mod tests {
         );
         let below = view.list_start_y + view.visible_count as u16;
         assert_eq!(view.handle_mouse(&click(name_x, below), mouse_area), None);
+    }
+
+    /// The hover-follow contract: a Move over a row moves the highlight and
+    /// reports a hit, while a Move outside the list keeps the selection —
+    /// the same behavior the model picker gives its rows.
+    #[test]
+    fn hover_moves_the_selection_without_confirming() {
+        let theme = ThemeRegistry::new().themes[0].theme.clone();
+        let setup = Setup::default();
+        let term = Rect::new(0, 0, 100, 30);
+
+        let mut view = AddProviderView::new();
+        let mut buf = Buffer::empty(term);
+        view.render(
+            &mut buf,
+            Rect::new(0, 1, 100, term.height - 4),
+            &theme,
+            &setup,
+        );
+
+        let max_w = max_row_width();
+        let row_x = 0 + (100u16.saturating_sub(max_w as u16)) / 2;
+        let mouse_area = Rect::new(0, 1, 100, term.height - 3);
+        let move_to = |x: u16, y: u16| {
+            MouseEvent::new(
+                MouseEventType::Move,
+                MouseButton::Left,
+                x,
+                y,
+                MouseModifiers::none(),
+            )
+        };
+
+        // Hover the second row: the selection follows, nothing executes.
+        assert!(view.follow_hover(&move_to(row_x + 2, view.list_start_y + 1), mouse_area));
+        assert_eq!(view.selection.selected_index, 1);
+
+        // Hovering above the list (title/search area) keeps the selection.
+        assert!(!view.follow_hover(&move_to(row_x + 2, view.list_start_y - 1), mouse_area));
+        assert_eq!(view.selection.selected_index, 1);
     }
 }

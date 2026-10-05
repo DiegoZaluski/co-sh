@@ -721,3 +721,68 @@ async fn slash_menu_lists_background_command() {
         .collect();
     assert_eq!(names, vec!["background".to_string()]);
 }
+
+/// `/providers` hover-follow (same contract the model picker got): a Move
+/// over a provider row moves the highlight WITHOUT executing it, and only
+/// the release click opens the provider dialog. Exercises the full App
+/// dispatch so the hover arm and the click path cannot drift apart.
+#[tokio::test]
+async fn providers_hover_moves_selection_and_release_click_opens_dialog() {
+    use crossterm::event::{
+        KeyModifiers, MouseButton as CBtn, MouseEvent as CMouse, MouseEventKind as CKind,
+    };
+
+    use super::super::AppMode;
+
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.set_test_size(100, 40);
+    app.run_slash_command(&slash_cmd("providers"));
+    assert!(matches!(app.mode(), AppMode::AddProvider));
+    let before = app.add_provider_view.selection.selected_index;
+
+    // Render once so the view captures the list geometry (list_start_y),
+    // then hover the SECOND row through the real App dispatch.
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 40)).unwrap();
+    terminal.draw(|f| app.render(f, 0.0)).unwrap();
+
+    let row_y = app.add_provider_view.list_start_y + 1;
+    app.handle_mouse_event(CMouse {
+        kind: CKind::Moved,
+        column: 40,
+        row: row_y,
+        modifiers: KeyModifiers::NONE,
+    })
+    .expect("hover handled");
+    assert_eq!(
+        app.add_provider_view.selection.selected_index,
+        before + 1,
+        "hover must follow the mouse to the second row"
+    );
+    assert!(
+        !app.dialog.visible(),
+        "a Move must never open the provider dialog"
+    );
+
+    // Release click on the same row executes the selection: the provider
+    // dialog opens (key input for cloud, URL input for local).
+    app.handle_mouse_event(CMouse {
+        kind: CKind::Down(CBtn::Left),
+        column: 40,
+        row: row_y,
+        modifiers: KeyModifiers::NONE,
+    })
+    .expect("press handled");
+    app.handle_mouse_event(CMouse {
+        kind: CKind::Up(CBtn::Left),
+        column: 40,
+        row: row_y,
+        modifiers: KeyModifiers::NONE,
+    })
+    .expect("release handled");
+    assert!(
+        app.dialog.visible(),
+        "the release click must open the provider credential dialog"
+    );
+}

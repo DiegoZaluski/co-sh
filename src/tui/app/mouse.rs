@@ -851,6 +851,23 @@ impl App {
             return Ok(true);
         }
 
+        // Provider picker (ADD Provider route) hover owns its non-release
+        // events too — same contract as the model picker above: the regular
+        // dispatch below runs only on release, so without this path the
+        // provider highlight could never follow the mouse.
+        if matches!(
+            event_type,
+            MouseEventType::Move | MouseEventType::Drag | MouseEventType::Down
+        ) && matches!(self.mode(), AppMode::AddProvider)
+            && !self.dialog.visible()
+        {
+            let area = self.add_provider_mouse_area();
+            // The bool result is intentionally discarded: a Move that misses
+            // the list simply keeps the current selection.
+            let _ = self.add_provider_view.follow_hover(&mouse, area);
+            return Ok(true);
+        }
+
         // Only handle left-click UP events (standard "click" action)
         if event_type != MouseEventType::Up || button != MouseButton::Left {
             // Hover tracking for user messages and pending-queue rows
@@ -1616,14 +1633,7 @@ impl App {
 
         // 8c. AddProvider view — mouse click on a provider row opens API key input
         if matches!(self.mode(), AppMode::AddProvider) && !self.dialog.visible() {
-            let area = self.terminal_size();
-            let main_area = self.main_content_area(area);
-            let tools_area = Rect::new(
-                main_area.x,
-                area.y + 1,
-                main_area.width,
-                main_area.height.saturating_sub(3),
-            );
+            let tools_area = self.add_provider_mouse_area();
             if let Some(clicked_idx) = self.add_provider_view.handle_mouse(&mouse, tools_area) {
                 self.add_provider_view.selection.selected_index = clicked_idx;
                 if let Some(entry) = self.add_provider_view.selected_provider() {
@@ -1651,6 +1661,20 @@ impl App {
         }
 
         Ok(true)
+    }
+
+    /// Hit-test area of the ADD Provider route — the single source of truth
+    /// shared by the hover-follow path and the click path, so both agree with
+    /// what the render drew (the route occupies everything below the header).
+    fn add_provider_mouse_area(&self) -> Rect {
+        let area = self.terminal_size();
+        let main_area = self.main_content_area(area);
+        Rect::new(
+            main_area.x,
+            area.y + 1,
+            main_area.width,
+            main_area.height.saturating_sub(3),
+        )
     }
 
     /// Geometry of the inline question dialog — the single source of truth
