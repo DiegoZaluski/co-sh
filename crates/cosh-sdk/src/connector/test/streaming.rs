@@ -4,7 +4,7 @@
 //! HTTP error propagation before stream start, and stream termination without
 //! a `[DONE]` signal.
 use super::super::{Connector, StreamChunk, user_message};
-use super::common::{connector, deepseek_connector, mock_server};
+use super::common::{connector, deepseek_connector, kimi_connector, mock_server};
 use tokio_stream::StreamExt;
 
 /// Ensures all SSE data chunks are concatenated correctly.
@@ -383,6 +383,99 @@ data: [DONE]\n\n";
     let body = captured.lock().unwrap().take().unwrap();
     let json: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert!(json.get("thinking").is_none(), "non-deepseek: no toggle");
+}
+
+// ── Kimi (Moonshot) ──────────────────────────────────────────────────────
+// Docs: platform.kimi.ai/docs/api/overview (base URL + MOONSHOT_API_KEY
+// Bearer auth), /docs/guide/use-reasoning-effort (K3 top-level
+// `reasoning_effort`, no `thinking` toggle), /docs/guide/context-caching
+// (`prompt_cache_options`, implicit cache writes, per-choice usage).
+
+/// Kimi K3 configures reasoning with the OpenAI-style top-level
+/// `reasoning_effort` (`low`/`high`/`max`) — it must NOT receive the
+/// DeepSeek-style `thinking` toggle (the docs warn against sending
+/// `thinking` to K3).
+#[tokio::test]
+async fn kimi_effort_uses_top_level_field_without_toggle() {
+    let sse = "\
+data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n\
+data: [DONE]\n\n";
+    let (port, captured, _raw, handle) = mock_server(sse, 200);
+    let c = kimi_connector(port).with_reasoning_effort("high");
+    let mut stream = c
+        .stream_chat_with_messages("sys", &[user_message("hi")])
+        .await
+        .unwrap();
+    while stream.next().await.is_some() {}
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        json["reasoning_effort"], "high",
+        "kimi sends effort top-level, got: {body}"
+    );
+    assert!(
+        json.get("thinking").is_none(),
+        "kimi must NOT get the deepseek toggle: {body}"
+    );
+}
+
+/// Kimi's prompt-cache policy rides `prompt_cache_options` on EVERY kimi
+/// request (implicit mode, cheap `5m` TTL): automatic prefix caching bills
+/// cache hits at 1/10 of the input price, and omitting the field leaves the
+/// same behavior — but the explicit field pins the intent and documents the
+/// connector's economy choice. Other providers must never see it.
+#[tokio::test]
+async fn kimi_sends_implicit_prompt_cache_options() {
+    let sse = "\
+data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n\
+data: [DONE]\n\n";
+    let (port, captured, _raw, handle) = mock_server(sse, 200);
+    let c = kimi_connector(port);
+    let mut stream = c
+        .stream_chat_with_messages("sys", &[user_message("hi")])
+        .await
+        .unwrap();
+    while stream.next().await.is_some() {}
+    handle.join().unwrap();
+
+    let body = captured.lock().unwrap().take().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        json["prompt_cache_options"],
+        serde_json::json!({"mode": "implicit", "ttl": "5m"}),
+        "kimi must pin implicit 5m caching, got: {body}"
+    );
+}
+
+/// The Kimi-only `prompt_cache_options` must never leak to any other
+/// OpenAI-compatible provider (unknown top-level field → 400).
+#[tokio::test]
+async fn non_kimi_omits_prompt_cache_options() {
+    let sse = "\
+data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n\
+data: [DONE]\n\n";
+    for (name, make) in [
+        ("groq", Box::new(|p: u16| connector(p)) as Box<dyn Fn(u16) -> Connector>),
+        ("deepseek", Box::new(deepseek_connector)),
+    ] {
+        let (port, captured, _raw, handle) = mock_server(sse, 200);
+        let c = make(port);
+        let mut stream = c
+            .stream_chat_with_messages("sys", &[user_message("hi")])
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        handle.join().unwrap();
+
+        let body = captured.lock().unwrap().take().unwrap();
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(
+            json.get("prompt_cache_options").is_none(),
+            "{name} must not receive kimi's prompt_cache_options: {json}"
+        );
+    }
 }
 
 /// Inline tool-call mode: the request must NOT carry the native `tools`

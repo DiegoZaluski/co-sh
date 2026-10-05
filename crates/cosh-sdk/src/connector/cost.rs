@@ -74,12 +74,12 @@ impl From<ConnectorError> for CostError {
 
 /// Cheap, OFFLINE check the TUI runs BEFORE deciding to render any cost
 /// row. Supported: `openrouter`, `zen`, `opencode-go`, `charm`, `xai`,
-/// `vercel` — every other cloud provider returns `false`.
+/// `vercel`, `kimi` — every other cloud provider returns `false`.
 #[must_use]
 pub fn supports_cost_reporting(provider: &str) -> bool {
     matches!(
         provider,
-        "openrouter" | "zen" | "opencode-go" | "charm" | "xai" | "vercel"
+        "openrouter" | "zen" | "opencode-go" | "charm" | "xai" | "vercel" | "kimi"
     )
 }
 
@@ -121,6 +121,7 @@ pub async fn provider_session_cost(
         "charm" => charm_cost(config, params, &api_key, session_reported_costs).await,
         "xai" => xai_cost(config, params, &api_key, session_reported_costs).await,
         "vercel" => vercel_cost(config, params, &api_key, session_reported_costs).await,
+        "kimi" => kimi_cost(config, params, &api_key, session_reported_costs).await,
         // `supports_cost_reporting` guarantees this arm is unreachable.
         _ => Err(CostError::CostNotSupported),
     }
@@ -320,6 +321,37 @@ async fn vercel_cost(
     })
 }
 
+// Kimi: per-request costs are not reported inside the response body (the
+// usage object carries token counters only), so the session figure is the
+// sum of what the harness captured — which stays empty/unpriced — and the
+// account balance comes from the documented billing endpoint
+// `GET /v1/users/me/balance` → `data.available_balance` (USD, docs:
+// platform.kimi.ai/docs/api/balance). The envelope (`code`/`data`/`status`)
+// is Moonshot-specific and read defensively: a missing `data` reports
+// CostUnavailable instead of a silently wrong 0.0 balance.
+async fn kimi_cost(
+    config: &ProviderConfig,
+    params: &Parameters,
+    api_key: &str,
+    session_reported_costs: &[f64],
+) -> Result<ProviderCost, CostError> {
+    let body = get_json(
+        config,
+        params,
+        &format!("{}/users/me/balance", base_url(config, params)),
+        api_key,
+    )
+    .await?;
+    let data = body
+        .get("data")
+        .ok_or_else(|| CostError::CostUnavailable("missing `data`".to_string()))?;
+    Ok(ProviderCost {
+        session_cost_usd: reported_sum(session_reported_costs),
+        balance_usd: f64_field(data, "available_balance"),
+        credit_balance: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,7 +363,15 @@ mod tests {
 
     #[test]
     fn support_matrix_matches_module_docs() {
-        for provider in ["openrouter", "zen", "opencode-go", "charm", "xai", "vercel"] {
+        for provider in [
+            "openrouter",
+            "zen",
+            "opencode-go",
+            "charm",
+            "xai",
+            "vercel",
+            "kimi",
+        ] {
             assert!(
                 supports_cost_reporting(provider),
                 "{provider} must report costs"

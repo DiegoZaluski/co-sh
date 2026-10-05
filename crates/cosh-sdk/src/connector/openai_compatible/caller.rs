@@ -45,6 +45,18 @@ struct StreamOptions {
     include_usage: bool,
 }
 
+/// Kimi's prompt-cache write policy (`prompt_cache_options`, docs:
+/// platform.kimi.ai/docs/guide/context-caching). `mode` is currently only
+/// `"implicit"` (the prefix is written automatically when it meets the hit
+/// conditions) and `ttl` selects the cache-write billing tier: `5m` (the
+/// default when the field is omitted) or `1h`. Sent ONLY for the `kimi`
+/// provider — OpenAI rejects unknown top-level fields with 400.
+#[derive(serde::Serialize)]
+struct PromptCacheOptions {
+    mode: &'static str,
+    ttl: &'static str,
+}
+
 #[derive(serde::Serialize)]
 struct ChatRequest {
     model: String,
@@ -89,6 +101,10 @@ struct ChatRequest {
     reasoning_effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<ThinkingToggle>,
+    /// Kimi's prompt-cache write policy (`prompt_cache_options`). Sent ONLY
+    /// for the `kimi` provider (see [`PromptCacheOptions`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_options: Option<PromptCacheOptions>,
     /// NVIDIA NIM hybrid-thinking opt-in — `chat_template_kwargs:
     /// {"thinking": true}`. NIM ignores `reasoning_effort` for its
     /// hybrid-thinking models (DeepSeek, Qwen, …) unless this is present;
@@ -753,6 +769,24 @@ fn build_chat_request(
     // Providers whose hybrid-thinking deployments ignore `reasoning_effort`
     // without an explicit toggle — scoped so no other OpenAI-compatible
     // backend ever receives the non-standard field.
+    // Kimi's prompt-cache write policy: `5m` is the server default and
+    // costs nothing extra, so it needs no explicit field. The `1h` TTL only
+    // pays off for sessions whose turns are spaced more than 5 minutes
+    // apart (the extra write fee nets positive from the second hit — docs:
+    // platform.kimi.ai/docs/guide/context-caching). The connector has no
+    // wall-clock knowledge of the caller's turn cadence, so it stays on the
+    // cheap default and lets cache hits renew it for free; pass
+    // `with_base_url`-style overrides through a proxy if a workload needs
+    // `1h`. Sent only for `kimi` — the field is a Kimi extension.
+    let prompt_cache_options = (provider == "kimi").then_some(PromptCacheOptions {
+        mode: "implicit",
+        ttl: "5m",
+    });
+    // Kimi K3 accepts the OpenAI-style top-level `reasoning_effort`
+    // (`low`/`high`/`max`) directly — no `thinking` toggle needed (docs:
+    // platform.kimi.ai/docs/guide/use-reasoning-effort). K2.x models take a
+    // `thinking` object instead; sending K3 a `thinking` field is
+    // explicitly warned against, so kimi stays out of the toggle set.
     let thinking = match provider {
         "deepseek" | "zai" if params.reasoning_effort.is_some() => Some(ThinkingToggle {
             kind: "enabled".to_string(),
@@ -807,6 +841,7 @@ fn build_chat_request(
         },
         reasoning_effort: params.reasoning_effort.clone(),
         thinking,
+        prompt_cache_options,
         chat_template_kwargs,
         user: params.user.clone(),
     }
@@ -1045,6 +1080,16 @@ pub async fn embed(
     if super::super::provider::is_bedrock(config.name) && params.base_url.is_none() {
         return Err(ConnectorError::NotImplemented(
             "embeddings for bedrock (the OpenAI-compatible endpoints carry no embedding API; use Titan via the Invoke API or a compatible proxy base URL)",
+        ));
+    }
+    // Kimi documents no embedding endpoint and no embedding models
+    // (platform.kimi.ai/docs/api/overview lists the operations; none is
+    // `/embeddings`, and /docs/models catalogs chat models only) — a
+    // request would fail at runtime with the confusing OpenAI default
+    // model, so gate it up front like the bedrock check above.
+    if config.name == "kimi" && params.base_url.is_none() {
+        return Err(ConnectorError::NotImplemented(
+            "embeddings for kimi (api.moonshot.ai documents no embedding endpoint; point with_base_url at a compatible proxy that serves one)",
         ));
     }
     let api_key = resolve_api_key(config, params, service)?;

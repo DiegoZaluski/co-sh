@@ -474,6 +474,23 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
             "glm-5.3-flash",
         ),
     ),
+    // Kimi (Moonshot AI): OpenAI-compatible endpoint documented at
+    // `platform.kimi.ai/docs/api/overview` — base URL `https://api.moonshot.ai/v1`,
+    // Bearer auth with the `MOONSHOT_API_KEY`. Current models: `kimi-k3`
+    // (1M context), `kimi-k2.7-code[-highspeed]` and `kimi-k2.6` (256k); the
+    // `moonshot-v1-*` and `kimi-k2` lines are discontinued. Key-only access:
+    // no OAuth flow is documented for the platform.
+    (
+        "kimi",
+        ProviderConfig::cloud(
+            "kimi",
+            Family::OpenAICompatible,
+            "https://api.moonshot.ai/v1",
+            // Current flagship: 1M context, always-thinking with top-level
+            // `reasoning_effort` (docs: platform.kimi.ai/docs/models).
+            "kimi-k3",
+        ),
+    ),
     // ── Local providers (configured by URL, no API key) ──────────────
     (
         "ollama",
@@ -560,6 +577,10 @@ const API_KEY_ENVS: &[(&str, &str)] = &[
     // compatible endpoint. IAM/SigV4 setups must export this token (or point
     // the connector at a proxy via `with_base_url`) — no SigV4 signing here.
     ("bedrock", "AWS_BEARER_TOKEN_BEDROCK"),
+    // Kimi (Moonshot AI): the documented credential for the OpenAI-compatible
+    // endpoint (platform.kimi.ai/docs/api/overview —
+    // `Authorization: Bearer $MOONSHOT_API_KEY`).
+    ("kimi", "MOONSHOT_API_KEY"),
 ];
 
 /// Secondary key sources for providers whose subscriptions share an account:
