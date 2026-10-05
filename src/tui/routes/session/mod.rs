@@ -1884,14 +1884,31 @@ impl SessionView {
                         } else {
                             &collapsed.output
                         };
-                        let lines =
-                            display.lines().count().max(1) as u16 + u16::from(collapsed.overflow);
+                        // Wrapped rows: the renderer folds long path lines at
+                        // the box's content width (same helper as render_glob),
+                        // so the estimate counts the visual rows the box
+                        // paints, not raw source lines.
+                        let rows = tool_render::tool_box_rows(
+                            display.lines(),
+                            None,
+                            tool_render::tool_box_content_w(max_w),
+                        );
+                        let lines = rows.max(1) + u16::from(collapsed.overflow);
                         // Internal box: top padding (1) + title + content +
                         // bottom padding (1) = lines + 3; +2 external margins.
                         lines + 5
                     } else if tool_render::tool_display(&t.tool) == "todo" {
                         let formatted = tool_render::format_todo_output(output);
-                        let lines = formatted.len().max(1) as u16;
+                        // Wrapped rows: the renderer folds long descriptions
+                        // at the box's content width (same helper as
+                        // render_todo), so the estimate counts the visual
+                        // rows the box paints, not raw source lines.
+                        let lines = tool_render::tool_box_rows(
+                            formatted.iter(),
+                            None,
+                            tool_render::tool_box_content_w(max_w),
+                        )
+                        .max(1);
                         lines + 4
                     } else if tool_render::tool_display(&t.tool) == "edit" {
                         // Same source as render_edit (shared helper) so the
@@ -1899,8 +1916,11 @@ impl SessionView {
                         // is PAINTED rows, not source lines: the split view
                         // (chat width ≥ 100) pairs consecutive `-`/`+` lines
                         // on one row, and sizing by raw line count left up to
-                        // ~2× the diff height as blank bottom padding.
-                        let diff_rows = tool_render::edit_box_rows(t, max_w);
+                        // ~2× the diff height as blank bottom padding. Long
+                        // content lines wrap at the body width (max_w - 2,
+                        // the same area the diff paints into), so wrapped
+                        // rows are counted too and none fold out of view.
+                        let diff_rows = tool_render::edit_box_rows(t, max_w.saturating_sub(2));
                         // line_h = diff_rows + 2 (top padding + body +
                         // bottom padding; no title — the diff shows the path
                         // itself) + 2 for external margins (top + bottom)
@@ -1911,14 +1931,20 @@ impl SessionView {
                         // short JSON receipt in `output`. Using `output` here
                         // underestimated the box by up to ~19 rows, so the walk
                         // started the next part inside the box and the cached
-                        // height clipped it.
-                        let display_lines = tool_render::write_box_lines(t).unwrap_or(0);
+                        // height clipped it. The count is WRAPPED rows at the
+                        // code panel's wrap budget (write_box_rows), so long
+                        // preview lines fold inside the box instead of
+                        // overrunning its reserved height.
+                        let display_lines = tool_render::write_box_rows(t, max_w).unwrap_or(0);
                         // Internal box: top padding (1) + title + content +
                         // bottom padding (1) = lines + 3; +2 external margins.
                         display_lines + 5
                     } else if tool_render::tool_display(&t.tool) == "read" {
                         // Read block: preview collapsed to a few lines, full
-                        // code when expanded (mirrors render_read).
+                        // code when expanded (mirrors render_read). The count
+                        // is WRAPPED rows at the code panel's wrap budget
+                        // (code_panel_rows), so long file lines fold inside
+                        // the box instead of overrunning its reserved height.
                         let id = t.tool_call_id.as_deref().unwrap_or("read");
                         let code = tool_render::read_block_text(t).unwrap_or_default();
                         let collapsed = crate::util::scroll::collapse_tool_output(&code, 10, 800);
@@ -1928,11 +1954,11 @@ impl SessionView {
                         } else {
                             &collapsed.output
                         };
-                        let lines =
-                            display.lines().count().max(1) as u16 + u16::from(collapsed.overflow);
+                        let rows = tool_render::code_panel_rows(display, max_w, usize::MAX).max(1)
+                            + u16::from(collapsed.overflow);
                         // Internal box: top padding (1) + title + content +
                         // bottom padding (1) = lines + 3; +2 external margins.
-                        lines + 5
+                        rows + 5
                     } else {
                         // bash (and write) block. When the tool is expanded, the full
                         // output is rendered, so the height must match render_shell.
@@ -1943,8 +1969,16 @@ impl SessionView {
                         } else {
                             &collapsed.output
                         };
-                        let lines =
-                            display.lines().count().max(1) as u16 + u16::from(collapsed.overflow);
+                        // Wrapped rows: the renderer folds long lines at the
+                        // box's content width (same helper as render_shell),
+                        // so the estimate counts the visual rows the box
+                        // paints, not raw source lines.
+                        let rows = tool_render::tool_box_rows(
+                            display.lines(),
+                            None,
+                            tool_render::tool_box_content_w(max_w),
+                        );
+                        let lines = rows.max(1) + u16::from(collapsed.overflow);
                         // Internal box: top padding (1) + title + content +
                         // bottom padding (1) = lines + 3; +2 external margins.
                         lines + 5

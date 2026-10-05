@@ -5844,6 +5844,170 @@ fn edit_diff_box_height_matches_painted_rows_in_split_view() {
     );
 }
 
+/// Regression: long content lines in the edit diff box WORD-WRAP at the box
+/// edge instead of being truncated. At chat width >= 100 the split view used
+/// to cut content at the panel edge — the tail of a long removed line was
+/// simply never painted. Every word of the line must stay visible across the
+/// pair's wrapped rows, and the estimate must match the render
+/// (`painted_rows` counts wrapped rows).
+#[test]
+fn edit_diff_wraps_long_lines_in_split_view() {
+    use super::tool_render::{ToolRenderCtx, ToolRenderState, dispatch_tool};
+
+    let theme = test_theme();
+    let config = test_config();
+    // >= 100 turns on DiffViewMode::Split in render_edit.
+    let max_w: u16 = 120;
+
+    // One removed line carrying 12 `word` tokens (60 columns) — wider than
+    // the split panel's content budget, so it must fold onto extra rows.
+    // File headers first: `edit_diff_content` gates on the unified-diff
+    // signature (`--- ` prefix).
+    let long_line = "word ".repeat(12).trim_end().to_string();
+    let diff = format!("--- a/foo\n+++ b/foo\n@@ -1,1 +1,1 @@\n-{long_line}\n+xyz\n");
+    let part = ToolPart {
+        tool: "fs_edit".into(),
+        input: serde_json::json!({"filePath": "src/main.rs"}),
+        output: Some(diff),
+        status: ToolStatus::Completed,
+        tool_call_id: Some("e-wrap-split".into()),
+        is_start: true,
+        is_streaming: false,
+        cached_line_count: None,
+        lsp_notes: None,
+    };
+
+    let est = SessionView::estimate_part_height(
+        &Part::Tool(part.clone()),
+        max_w,
+        &config,
+        &MessageRole::Assistant,
+        &ToolRenderState::new(),
+    );
+    let mut buf = Buffer::empty(Rect::new(0, 0, max_w + 3, 40));
+    let mut state = ToolRenderState::new();
+    let mut line_h = 0u16;
+    {
+        let mut ctx = ToolRenderCtx {
+            buf: &mut buf,
+            x: 0,
+            y: 0,
+            line_h: &mut line_h,
+            max_w,
+            state: &mut state,
+            theme: &theme,
+        };
+        dispatch_tool(&mut ctx, &part, 0);
+    }
+    let actual = line_h
+        + if SessionView::tool_is_block(&part) {
+            2
+        } else {
+            0
+        };
+    assert_eq!(
+        est, actual,
+        "estimate ({est}) != render real ({actual}): painted_rows must count wrapped rows"
+    );
+
+    // All 12 `word` tokens must be painted inside the LEFT panel (columns
+    // 2..60): a single row fits only 10 tokens, so reaching 12 proves the
+    // line folded onto extra rows instead of being cut at the panel edge.
+    // `w` appears in no gutter, header, hunk or right-panel text here.
+    let mut word_starts = 0;
+    for y in 0..line_h {
+        for x in 2..60 {
+            if buf.cell((x, y)).map(|c| c.symbol() == "w").unwrap_or(false) {
+                word_starts += 1;
+            }
+        }
+    }
+    assert_eq!(
+        word_starts, 12,
+        "every word of the long removed line must be painted (wrap, not truncate)"
+    );
+}
+
+/// Regression: the edit diff box's height estimate counts the rows a long
+/// line folds onto in the unified view (chat width < 100). The estimate used
+/// the diff's raw source lines, so a wrapped line painted rows the box never
+/// reserved — the folded text was clipped off the bottom of the box.
+#[test]
+fn edit_diff_box_height_counts_wrapped_rows_in_unified_view() {
+    use super::tool_render::{ToolRenderCtx, ToolRenderState, dispatch_tool};
+
+    let theme = test_theme();
+    let config = test_config();
+    // < 100 keeps render_edit on the unified view.
+    let max_w: u16 = 80;
+
+    // One removed line of 40 `word` tokens (200 columns): at the unified
+    // content budget (~74 columns) it folds onto 3 visual rows. File
+    // headers first: `edit_diff_content` gates on the unified-diff
+    // signature (`--- ` prefix).
+    let long_line = "word ".repeat(40).trim_end().to_string();
+    let diff = format!("--- a/foo\n+++ b/foo\n@@ -1,1 +1,1 @@\n-{long_line}\n+xyz\n");
+    let part = ToolPart {
+        tool: "fs_edit".into(),
+        input: serde_json::json!({"filePath": "src/main.rs"}),
+        output: Some(diff),
+        status: ToolStatus::Completed,
+        tool_call_id: Some("e-wrap-unified".into()),
+        is_start: true,
+        is_streaming: false,
+        cached_line_count: None,
+        lsp_notes: None,
+    };
+
+    let est = SessionView::estimate_part_height(
+        &Part::Tool(part.clone()),
+        max_w,
+        &config,
+        &MessageRole::Assistant,
+        &ToolRenderState::new(),
+    );
+    let mut buf = Buffer::empty(Rect::new(0, 0, max_w + 3, 40));
+    let mut state = ToolRenderState::new();
+    let mut line_h = 0u16;
+    {
+        let mut ctx = ToolRenderCtx {
+            buf: &mut buf,
+            x: 0,
+            y: 0,
+            line_h: &mut line_h,
+            max_w,
+            state: &mut state,
+            theme: &theme,
+        };
+        dispatch_tool(&mut ctx, &part, 0);
+    }
+    let actual = line_h
+        + if SessionView::tool_is_block(&part) {
+            2
+        } else {
+            0
+        };
+    assert_eq!(
+        est, actual,
+        "estimate ({est}) != render real ({actual}): the box must reserve rows for wrapped lines"
+    );
+
+    // All 40 `word` tokens must be painted: the estimate and the render
+    // agree on the wrapped rows, so nothing folds out of view.
+    let mut word_starts = 0;
+    for y in 0..line_h {
+        for x in 2..(max_w - 2) {
+            if buf.cell((x, y)).map(|c| c.symbol() == "w").unwrap_or(false) {
+                word_starts += 1;
+            }
+        }
+    }
+    assert_eq!(
+        word_starts, 40,
+        "every word of the long removed line must be painted inside the box"
+    );
+}
+
 /// Regression: the unified view indents its line-number gutter by the same
 /// leaf-colored padding column (LEAF_PAD) the split panels use — so at any
 /// chat width the line numbers land on the same column and both views'
@@ -7243,5 +7407,462 @@ fn render_cache_still_fills_when_render_fits_in_buffer() {
         view.msg_cache_h.first().copied().unwrap_or(0) > 0
             && view.msg_cache_cells.first().is_some_and(|c| c.is_some()),
         "a fully visible message that fits the buffer must be cached"
+    );
+}
+/// Regression: the bash output box must WRAP long output lines at the box
+/// edge instead of clipping them, and its height estimate must count the
+/// wrapped rows the renderer paints (lockstep via the shared row counter).
+#[test]
+fn bash_box_wraps_long_output_lines() {
+    use super::tool_render::{ToolRenderCtx, ToolRenderState, dispatch_tool};
+
+    let theme = test_theme();
+    let config = test_config();
+    let max_w: u16 = 60;
+
+    // One output line of 12 `word` tokens (59 columns) — wider than the
+    // box's content budget (`max_w - 3`), so it must fold onto extra rows.
+    let long_line = "word ".repeat(12).trim_end().to_string();
+    let part = ToolPart {
+        tool: "bash_run".into(),
+        input: serde_json::json!({"command": "echo hi"}),
+        output: Some(long_line),
+        status: ToolStatus::Completed,
+        tool_call_id: Some("b-wrap".into()),
+        is_start: true,
+        is_streaming: false,
+        cached_line_count: None,
+        lsp_notes: None,
+    };
+
+    let est = SessionView::estimate_part_height(
+        &Part::Tool(part.clone()),
+        max_w,
+        &config,
+        &MessageRole::Assistant,
+        &ToolRenderState::new(),
+    );
+    let mut buf = Buffer::empty(Rect::new(0, 0, max_w + 3, 40));
+    let mut state = ToolRenderState::new();
+    let mut line_h = 0u16;
+    {
+        let mut ctx = ToolRenderCtx {
+            buf: &mut buf,
+            x: 0,
+            y: 0,
+            line_h: &mut line_h,
+            max_w,
+            state: &mut state,
+            theme: &theme,
+        };
+        dispatch_tool(&mut ctx, &part, 0);
+    }
+    let actual = line_h
+        + if SessionView::tool_is_block(&part) {
+            2
+        } else {
+            0
+        };
+    assert_eq!(
+        est, actual,
+        "estimate ({est}) != render real ({actual}): the bash box must reserve the wrapped rows it paints"
+    );
+
+    // All 12 `word` tokens must be painted: one content row fits only ~11
+    // tokens at max_w=60, so reaching 12 proves the line folded onto extra
+    // rows instead of being cut at the box edge. `w` appears in no title or
+    // gutter text here (the command is `echo hi`).
+    let mut word_starts = 0;
+    for y in 0..line_h {
+        for x in 0..max_w + 3 {
+            if buf.cell((x, y)).map(|c| c.symbol() == "w").unwrap_or(false) {
+                word_starts += 1;
+            }
+        }
+    }
+    assert_eq!(
+        word_starts, 12,
+        "every word of the long output line must be painted (wrap, not truncate)"
+    );
+}
+
+/// Companion lockstep guard for the bash box: with output longer than the
+/// collapse preview the estimate must match the render in BOTH states —
+/// collapsed (10 preview lines plus the overflow hint row) and expanded
+/// (the full output) — because both sides consult the same
+/// ToolRenderState expansion id.
+#[test]
+fn bash_box_height_matches_render_when_collapsed_and_expanded() {
+    use super::tool_render::{ToolRenderCtx, ToolRenderState, dispatch_tool};
+
+    let theme = test_theme();
+    let config = test_config();
+    let max_w: u16 = 60;
+
+    let output = (0..15)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let part = ToolPart {
+        tool: "bash_run".into(),
+        input: serde_json::json!({"command": "seq 15"}),
+        output: Some(output),
+        status: ToolStatus::Completed,
+        tool_call_id: Some("b-collapse".into()),
+        is_start: true,
+        is_streaming: false,
+        cached_line_count: None,
+        lsp_notes: None,
+    };
+
+    for (name, expanded) in [("collapsed", false), ("expanded", true)] {
+        let mut state = ToolRenderState::new();
+        if expanded {
+            state.toggle_expanded("b-collapse");
+        }
+        let est = SessionView::estimate_part_height(
+            &Part::Tool(part.clone()),
+            max_w,
+            &config,
+            &MessageRole::Assistant,
+            &state,
+        );
+        let mut buf = Buffer::empty(Rect::new(0, 0, max_w + 3, 60));
+        let mut line_h = 0u16;
+        {
+            let mut ctx = ToolRenderCtx {
+                buf: &mut buf,
+                x: 0,
+                y: 0,
+                line_h: &mut line_h,
+                max_w,
+                state: &mut state,
+                theme: &theme,
+            };
+            dispatch_tool(&mut ctx, &part, 0);
+        }
+        let actual = line_h
+            + if SessionView::tool_is_block(&part) {
+                2
+            } else {
+                0
+            };
+        assert_eq!(
+            est, actual,
+            "case {name}: estimate ({est}) != render real ({actual})"
+        );
+    }
+}
+
+/// Regression: the glob box must wrap long path rows at the box edge (paths
+/// have no spaces, so the wrap breaks at character level) and its height
+/// estimate must count the wrapped rows the renderer paints.
+#[test]
+fn glob_box_wraps_long_path_lines() {
+    use super::tool_render::{ToolRenderCtx, ToolRenderState, dispatch_tool};
+
+    let theme = test_theme();
+    let config = test_config();
+    let max_w: u16 = 60;
+
+    // One path of 12 `word` segments (63 columns) — wider than the box's
+    // content budget (`max_w - 3`), so it must fold onto extra rows.
+    let long_path = format!("{}word.txt", "word/".repeat(11));
+    let part = ToolPart {
+        tool: "find_glob".into(),
+        input: serde_json::json!({"pattern": "src"}),
+        output: Some(serde_json::json!({"formatted": long_path}).to_string()),
+        status: ToolStatus::Completed,
+        tool_call_id: Some("g-wrap".into()),
+        is_start: true,
+        is_streaming: false,
+        cached_line_count: None,
+        lsp_notes: None,
+    };
+
+    let est = SessionView::estimate_part_height(
+        &Part::Tool(part.clone()),
+        max_w,
+        &config,
+        &MessageRole::Assistant,
+        &ToolRenderState::new(),
+    );
+    let mut buf = Buffer::empty(Rect::new(0, 0, max_w + 3, 40));
+    let mut state = ToolRenderState::new();
+    let mut line_h = 0u16;
+    {
+        let mut ctx = ToolRenderCtx {
+            buf: &mut buf,
+            x: 0,
+            y: 0,
+            line_h: &mut line_h,
+            max_w,
+            state: &mut state,
+            theme: &theme,
+        };
+        dispatch_tool(&mut ctx, &part, 0);
+    }
+    let actual = line_h
+        + if SessionView::tool_is_block(&part) {
+            2
+        } else {
+            0
+        };
+    assert_eq!(
+        est, actual,
+        "estimate ({est}) != render real ({actual}): the glob box must reserve the wrapped rows it paints"
+    );
+
+    // All 12 path segments must be painted: one content row fits only ~57
+    // columns at max_w=60, so reaching 12 segments proves the path folded
+    // onto extra rows instead of being cut at the box edge. `w` appears in
+    // no title text here (the label is `Glob "src"`).
+    let mut word_starts = 0;
+    for y in 0..line_h {
+        for x in 0..max_w + 3 {
+            if buf.cell((x, y)).map(|c| c.symbol() == "w").unwrap_or(false) {
+                word_starts += 1;
+            }
+        }
+    }
+    assert_eq!(
+        word_starts, 12,
+        "every segment of the long path must be painted (wrap, not truncate)"
+    );
+}
+
+/// Regression: the write box's code panel must wrap long content lines at
+/// the panel edge (after the line-number gutter) and the box height must be
+/// sized by the wrapped rows — previously the painter clipped long lines at
+/// the panel edge and the estimator counted raw source lines.
+#[test]
+fn write_box_wraps_long_content_lines() {
+    use super::tool_render::{ToolRenderCtx, ToolRenderState, dispatch_tool};
+
+    let theme = test_theme();
+    let config = test_config();
+    let max_w: u16 = 60;
+
+    // One content line of 12 `word` tokens (59 columns) — wider than the
+    // panel's wrap budget (`max_w - 3` box pad, minus the 2-column gutter
+    // and its space), so it must fold onto extra rows.
+    let long_line = "word ".repeat(12).trim_end().to_string();
+    let part = ToolPart {
+        tool: "fs_write".into(),
+        input: serde_json::json!({"filePath": "src/main.rs", "content": long_line}),
+        output: None,
+        status: ToolStatus::Completed,
+        tool_call_id: Some("w-wrap".into()),
+        is_start: true,
+        is_streaming: false,
+        cached_line_count: None,
+        lsp_notes: None,
+    };
+
+    let est = SessionView::estimate_part_height(
+        &Part::Tool(part.clone()),
+        max_w,
+        &config,
+        &MessageRole::Assistant,
+        &ToolRenderState::new(),
+    );
+    let mut buf = Buffer::empty(Rect::new(0, 0, max_w + 3, 40));
+    let mut state = ToolRenderState::new();
+    let mut line_h = 0u16;
+    {
+        let mut ctx = ToolRenderCtx {
+            buf: &mut buf,
+            x: 0,
+            y: 0,
+            line_h: &mut line_h,
+            max_w,
+            state: &mut state,
+            theme: &theme,
+        };
+        dispatch_tool(&mut ctx, &part, 0);
+    }
+    let actual = line_h
+        + if SessionView::tool_is_block(&part) {
+            2
+        } else {
+            0
+        };
+    assert_eq!(
+        est, actual,
+        "estimate ({est}) != render real ({actual}): the write box must reserve the wrapped rows it paints"
+    );
+
+    // All 12 `word` tokens must be painted inside the panel. `w` appears in
+    // no title text here (the title is `# Wrote src/main.rs` — capital W).
+    let mut word_starts = 0;
+    for y in 0..line_h {
+        for x in 0..max_w + 3 {
+            if buf.cell((x, y)).map(|c| c.symbol() == "w").unwrap_or(false) {
+                word_starts += 1;
+            }
+        }
+    }
+    assert_eq!(
+        word_starts, 12,
+        "every word of the long content line must be painted (wrap, not truncate)"
+    );
+}
+
+/// Regression: the read box's code panel must wrap long file lines at the
+/// panel edge and its height estimate must count the wrapped rows; folded
+/// chunks keep the gutter column-aligned (blank gutter on continuation rows).
+#[test]
+fn read_box_wraps_long_file_lines() {
+    use super::tool_render::{ToolRenderCtx, ToolRenderState, dispatch_tool};
+
+    let theme = test_theme();
+    let config = test_config();
+    let max_w: u16 = 60;
+
+    // fs_read-style hashline output whose body line is 12 `word` tokens
+    // (59 columns) — wider than the panel's wrap budget, so it must fold
+    // onto extra rows. `read_block_text` strips the `¶` header and the
+    // `N| ` prefix, so the box previews exactly the long line.
+    let long_line = "word ".repeat(12).trim_end().to_string();
+    let content = format!("¶src/main.rs#AB12\n1| {long_line}\n");
+    let part = ToolPart {
+        tool: "fs_read".into(),
+        input: serde_json::json!({"filePath": "src/main.rs"}),
+        output: Some(serde_json::json!([{"path": "src/main.rs", "content": content}]).to_string()),
+        status: ToolStatus::Completed,
+        tool_call_id: Some("r-wrap".into()),
+        is_start: true,
+        is_streaming: false,
+        cached_line_count: None,
+        lsp_notes: None,
+    };
+
+    let est = SessionView::estimate_part_height(
+        &Part::Tool(part.clone()),
+        max_w,
+        &config,
+        &MessageRole::Assistant,
+        &ToolRenderState::new(),
+    );
+    let mut buf = Buffer::empty(Rect::new(0, 0, max_w + 3, 40));
+    let mut state = ToolRenderState::new();
+    let mut line_h = 0u16;
+    {
+        let mut ctx = ToolRenderCtx {
+            buf: &mut buf,
+            x: 0,
+            y: 0,
+            line_h: &mut line_h,
+            max_w,
+            state: &mut state,
+            theme: &theme,
+        };
+        dispatch_tool(&mut ctx, &part, 0);
+    }
+    let actual = line_h
+        + if SessionView::tool_is_block(&part) {
+            2
+        } else {
+            0
+        };
+    assert_eq!(
+        est, actual,
+        "estimate ({est}) != render real ({actual}): the read box must reserve the wrapped rows it paints"
+    );
+
+    // All 12 `word` tokens must be painted inside the panel. `w` appears in
+    // no title or gutter text here (the title is `# Read src/main.rs`).
+    let mut word_starts = 0;
+    for y in 0..line_h {
+        for x in 0..max_w + 3 {
+            if buf.cell((x, y)).map(|c| c.symbol() == "w").unwrap_or(false) {
+                word_starts += 1;
+            }
+        }
+    }
+    assert_eq!(
+        word_starts, 12,
+        "every word of the long file line must be painted (wrap, not truncate)"
+    );
+}
+
+/// Regression: the todo box must wrap long item descriptions at the box
+/// edge and its height estimate must count the wrapped rows the renderer
+/// paints.
+#[test]
+fn todo_box_wraps_long_descriptions() {
+    use super::tool_render::{ToolRenderCtx, ToolRenderState, dispatch_tool};
+
+    let theme = test_theme();
+    let config = test_config();
+    let max_w: u16 = 60;
+
+    // One item whose description is 12 `word` tokens (59 columns) — with
+    // the `[●] ` prefix the row is wider than the box's content budget
+    // (`max_w - 3`), so it must fold onto extra rows.
+    let long_line = "word ".repeat(12).trim_end().to_string();
+    let part = ToolPart {
+        tool: "plan_todo_write".into(),
+        input: serde_json::json!({}),
+        output: Some(
+            serde_json::json!({"list": {"items": [
+                {"description": long_line, "status": "in_progress"}
+            ]}})
+            .to_string(),
+        ),
+        status: ToolStatus::Completed,
+        tool_call_id: Some("t-wrap".into()),
+        is_start: true,
+        is_streaming: false,
+        cached_line_count: None,
+        lsp_notes: None,
+    };
+
+    let est = SessionView::estimate_part_height(
+        &Part::Tool(part.clone()),
+        max_w,
+        &config,
+        &MessageRole::Assistant,
+        &ToolRenderState::new(),
+    );
+    let mut buf = Buffer::empty(Rect::new(0, 0, max_w + 3, 40));
+    let mut state = ToolRenderState::new();
+    let mut line_h = 0u16;
+    {
+        let mut ctx = ToolRenderCtx {
+            buf: &mut buf,
+            x: 0,
+            y: 0,
+            line_h: &mut line_h,
+            max_w,
+            state: &mut state,
+            theme: &theme,
+        };
+        dispatch_tool(&mut ctx, &part, 0);
+    }
+    let actual = line_h
+        + if SessionView::tool_is_block(&part) {
+            2
+        } else {
+            0
+        };
+    assert_eq!(
+        est, actual,
+        "estimate ({est}) != render real ({actual}): the todo box must reserve the wrapped rows it paints"
+    );
+
+    // All 12 `word` tokens must be painted. `w` appears in no title text
+    // here (the box title is `# Todos`).
+    let mut word_starts = 0;
+    for y in 0..line_h {
+        for x in 0..max_w + 3 {
+            if buf.cell((x, y)).map(|c| c.symbol() == "w").unwrap_or(false) {
+                word_starts += 1;
+            }
+        }
+    }
+    assert_eq!(
+        word_starts, 12,
+        "every word of the long description must be painted (wrap, not truncate)"
     );
 }
