@@ -8,7 +8,6 @@ use tokio::sync::mpsc;
 use super::App;
 use crate::component::agent_spinner_bass::AgentSpinnerBass;
 use crate::routes::session::queue_choice::QueueTarget;
-use crate::session_store::generate_session_id;
 use crate::types::SessionStatus;
 use cosh::harness::HarnessEvent;
 
@@ -221,16 +220,16 @@ impl App {
         }
 
         if self.state.current_session_id.is_none() {
-            let id = generate_session_id();
+            // Entry funnel: the fresh session must be locked at creation,
+            // not left claimable by another cosh process (see
+            // `claim_fresh_session_id` — the switch guard only refuses
+            // EXISTING claims, and a brand-new id has none).
+            let Some((id, now_ms)) = self.session_store.claim_fresh_session_id() else {
+                log::error!("could not claim a fresh session id: agent turn aborted");
+                return;
+            };
             let title: String = msg.chars().take(40).collect();
-            self.state.add_empty_session(
-                id.clone(),
-                title,
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64,
-            );
+            self.state.add_empty_session(id.clone(), title, now_ms);
             self.state.current_session_id = Some(id);
             // Fresh session: the header's cost widget starts clean — no
             // balance carried over from the previous session.
@@ -751,16 +750,15 @@ impl App {
         // Session bootstrap identical to the agent-loop path: the first
         // command still needs a session to live in.
         if self.state.current_session_id.is_none() {
-            let id = generate_session_id();
+            // Entry funnel (command-mode path): same rule as the agent-loop
+            // bootstrap — the fresh session must carry this process's
+            // open-lock from birth, or another cosh process could adopt it.
+            let Some((id, now_ms)) = self.session_store.claim_fresh_session_id() else {
+                log::error!("could not claim a fresh session id: command aborted");
+                return;
+            };
             let title: String = cmd.chars().take(40).collect();
-            self.state.add_empty_session(
-                id.clone(),
-                title,
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64,
-            );
+            self.state.add_empty_session(id.clone(), title, now_ms);
             self.state.current_session_id = Some(id);
             self.hypercredit_balance = None;
             self.state.right_panel =

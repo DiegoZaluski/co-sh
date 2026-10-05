@@ -2,7 +2,6 @@ use super::super::App;
 use crossterm::event::KeyCode;
 
 use super::super::message_prompt_text;
-use crate::session_store::generate_session_id;
 use crate::types::SessionStatus;
 use crate::ui::dialogs::DialogType;
 
@@ -170,12 +169,26 @@ impl App {
                 let parent_id = session.id.clone();
                 let mut forked = session.clone();
                 forked.messages.truncate(idx + 1);
-                forked.id = generate_session_id();
+                // Entry funnel: claim the fork's id (unique + exclusively
+                // locked for this process) instead of a bare
+                // generate_session_id — a raw timestamp has no
+                // file-existence check and no issuance record, so a
+                // same-millisecond collision could append fork events into
+                // a foreign history. The claim also takes the open-lock,
+                // keeping the fork all-or-nothing.
+                let Some((claimed_id, created_at)) = self.session_store.claim_fresh_session_id()
+                else {
+                    self.toast_state.show(crate::ui::toast::ToastOptions {
+                        title: Some("Fork".into()),
+                        message: "Could not create the branch: the id claim failed.".into(),
+                        variant: crate::ui::toast::ToastVariant::Error,
+                        duration_ms: 4000,
+                    });
+                    return;
+                };
+                forked.id = claimed_id;
                 forked.title = format!("{} (fork)", session.title);
-                forked.created_at = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64;
+                forked.created_at = created_at;
                 forked.title_generated = session.title_generated;
                 let kept_msg_ids: std::collections::HashSet<&str> =
                     forked.messages.iter().map(|m| m.id.as_str()).collect();
@@ -190,6 +203,10 @@ impl App {
                     .session_store
                     .fork_session(&parent_id, message_id, &forked)
                 {
+                    // The claim above is THIS process's lock: on a failed
+                    // fork it must be released, or the id stays claimed by
+                    // us until death (a leak — nothing was created).
+                    self.session_store.release_session_lock(&forked.id);
                     self.toast_state.show(ToastOptions {
                         title: Some("Fork".into()),
                         message: "Could not create the branch.".into(),
@@ -199,18 +216,9 @@ impl App {
                     return;
                 }
                 let new_id = forked.id.clone();
-                // Claim the fork's open-lock BEFORE it becomes selectable:
-                // the path stays all-or-nothing even in the (practically
-                // unreachable) case of an id collision with another process.
-                if !self.session_store.try_lock_session(&new_id) {
-                    self.toast_state.show(ToastOptions {
-                        title: Some("Fork".into()),
-                        message: "This session is already open in another cosh process.".into(),
-                        variant: ToastVariant::Warning,
-                        duration_ms: 4000,
-                    });
-                    return;
-                }
+                // The open-lock is already this process's (taken by the
+                // claim above, idempotent per process), so the fork becomes
+                // selectable without another acquisition step.
                 self.state.add_session(forked);
                 self.finalize_stale_compaction_lines();
                 // The fork branches the conversation: the panel starts clean

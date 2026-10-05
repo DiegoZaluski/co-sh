@@ -133,6 +133,14 @@ pub struct SessionStore {
     /// (including the background writer thread) sees the same claims; the
     /// mutex serializes the check-and-insert of the claim step.
     session_locks: Arc<Mutex<HashMap<String, std::fs::File>>>,
+    /// Every id THIS store ever minted for a fresh session. A released
+    /// claim hands the session over to OTHER processes, but must never let
+    /// this process re-mint the same id: without this set, two `/new`
+    /// commands inside one millisecond (the second running after the first
+    /// released its claim) would reuse the first session's id and silently
+    /// replace it in the LRU cache. Shared through the `Arc` so clones see
+    /// the same issuance history.
+    issued_ids: Arc<Mutex<HashSet<String>>>,
 }
 
 impl SessionStore {
@@ -154,6 +162,7 @@ impl SessionStore {
             notify: None,
             lock_wait: LOCK_WAIT_TIMEOUT,
             session_locks: Arc::new(Mutex::new(HashMap::new())),
+            issued_ids: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -176,6 +185,7 @@ impl SessionStore {
             notify: None,
             lock_wait: LOCK_WAIT_TIMEOUT,
             session_locks: Arc::new(Mutex::new(HashMap::new())),
+            issued_ids: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -1046,6 +1056,90 @@ impl SessionStore {
         }
     }
 
+    /// Claim a brand-new session id for this process: atomically unique
+    /// (never an existing file) AND exclusively locked against every OTHER
+    /// cosh process from the moment of creation.
+    ///
+    /// This is the entry funnel for every session-CREATION path (`/new`,
+    /// Home's "New session", the first-message and command-mode bootstraps).
+    /// A session that enters the app without claiming its open-lock here is
+    /// the exact regression this guards against: two processes could hold
+    /// the same session open because `switch_to_session` only refuses when
+    /// a lock ALREADY exists — a freshly created session has none, so a
+    /// second process listing the directory could claim it freely.
+    ///
+    /// Ids are millisecond timestamps, so two processes creating sessions
+    /// in the same millisecond collide: the claim retries with a `-N`
+    /// suffix under the same uniqueness+lock rule. Returns `None` only when
+    /// every candidate failed to lock (I/O trouble — no session is created
+    /// unlocked, by construction).
+    pub fn claim_fresh_session_id(&self) -> Option<(String, u64)> {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        self.claim_fresh_session_id_at(now_ms)
+    }
+
+    /// Testable core of [`Self::claim_fresh_session_id`]: the seed
+    /// timestamp is injected so a test can pin the exact candidates the
+    /// retry loop walks (the wall clock would tick between the test's
+    /// pre-claimed ids and the claim's own `now`, making exhaustion
+    /// untestable).
+    fn claim_fresh_session_id_at(&self, now_ms: u64) -> Option<(String, u64)> {
+        for attempt in 0..=5 {
+            let id = if attempt == 0 {
+                format!("{now_ms}")
+            } else {
+                format!("{now_ms}-{attempt}")
+            };
+            // Never adopt an id that already has a history file: appending
+            // to a foreign file would interleave two sessions' events.
+            // Nor one THIS process already holds: the per-process re-claim
+            // is idempotent, so without this check two claims in the same
+            // millisecond would return the same id and the second session
+            // would silently replace the first in the cache. (Single-UI-
+            // thread assumption: the contains-check and the claim's insert
+            // are two separate critical sections, but session creation is
+            // driven only from the UI thread, so no intra-process race.)
+            // Nor one this process EVER minted: a released claim hands the
+            // session to other processes, but re-minting the id here would
+            // collide with the just-created session still in the cache.
+            if self.file_path(&id).exists() {
+                continue;
+            }
+            if self
+                .session_locks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains_key(&id)
+            {
+                continue;
+            }
+            if self
+                .issued_ids
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains(&id)
+            {
+                continue;
+            }
+            if self.try_lock_session(&id) {
+                // Record the mint: this id must never be re-issued by this
+                // process, even after the claim is released (a release
+                // hands the session to OTHER processes, not back to the
+                // issuer's own next /new).
+                self.issued_ids
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(id.clone());
+                return Some((id, now_ms));
+            }
+        }
+        log::error!("could not claim a fresh session id: every candidate is locked");
+        None
+    }
+
     /// Release this process's claim on a session (no-op when not held).
     ///
     /// The lock FILE is left on disk on purpose: removing it would race with
@@ -1802,6 +1896,7 @@ mod tests {
             notify: None,
             lock_wait: LOCK_WAIT_TIMEOUT,
             session_locks: Arc::new(Mutex::new(HashMap::new())),
+            issued_ids: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -2871,6 +2966,151 @@ mod tests {
         );
     }
 
+    // ── Fresh-session claim (entry-funnel regression) ──────────────────────
+
+    /// REGRESSION (multi-process session adoption): a freshly created
+    /// session used to be selectable-but-unlocked, so a second cosh process
+    /// could adopt it through the sidebar switch while the creator kept
+    /// writing to it — two projections appending divergent histories to the
+    /// same JSONL. The claim must take the open-lock at CREATION time.
+    #[test]
+    fn fresh_session_claim_is_locked_against_a_foreign_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+
+        let (id, now_ms) = store
+            .claim_fresh_session_id()
+            .expect("a fresh session id must be claimable");
+
+        // The id is the millisecond timestamp the caller should use.
+        assert!(id.starts_with(&format!("{now_ms}")));
+
+        // A foreign process (independent store, same sessions dir) must be
+        // REFUSED from the moment of creation — that refusal is the whole
+        // point of the entry funnel.
+        let foreign = test_store(&dir);
+        assert!(
+            !foreign.try_lock_session(&id),
+            "a freshly claimed session must be locked against every other process"
+        );
+
+        // The creator's own claim is idempotent, and release frees the id.
+        assert!(store.try_lock_session(&id));
+        store.release_session_lock(&id);
+        assert!(
+            foreign.try_lock_session(&id),
+            "after the creator releases, another process may claim it"
+        );
+    }
+
+    /// Two claims in the same millisecond must never yield the same id:
+    /// ids are timestamps, so the claim must retry with a suffix (and never
+    /// adopt an id this process itself already holds — the per-process
+    /// re-claim is idempotent, which would otherwise mask the collision).
+    #[test]
+    fn fresh_session_claim_retries_when_the_timestamp_is_already_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let taken = format!("{now_ms}");
+        // Occupy BOTH the plain timestamp and the process's own claim map:
+        // file exists (a foreign history) AND an in-process claim for a
+        // suffix candidate.
+        let session = make_test_session(&taken, "Taken", vec![make_user_msg("m1", "hi")]);
+        store.save_session(&session);
+
+        let (id, _) = store.claim_fresh_session_id().unwrap();
+        assert_ne!(
+            id, taken,
+            "the claim must never adopt an id that already has a history file"
+        );
+        // And it must be a claimable, unique id — locking again is fine
+        // (same process), but the id differs from the taken one.
+        assert!(store.try_lock_session(&id));
+    }
+
+    /// Every claim leaves exactly one open-lock for its own id, and a
+    /// failed attempt (all candidates taken) returns None instead of
+    /// handing out an unlocked session — "no session" beats "shared session".
+    #[test]
+    fn fresh_session_claim_never_returns_an_unlocked_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+
+        // The seed is INJECTED so the candidates are pinned: the wall clock
+        // ticking between the pre-claims and the claim itself would hand
+        // the loop a fresh (free) millisecond and make exhaustion untestable.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        // Pre-claim the plain timestamp and every suffix the retry loop
+        // would try (a foreign process racing us at the same moment).
+        let foreign = test_store(&dir);
+        for candidate in [
+            format!("{now_ms}"),
+            format!("{now_ms}-1"),
+            format!("{now_ms}-2"),
+            format!("{now_ms}-3"),
+            format!("{now_ms}-4"),
+            format!("{now_ms}-5"),
+        ] {
+            let session =
+                make_test_session(&candidate, "Raced", vec![make_user_msg("m1", "hi")]);
+            store.save_session(&session);
+            assert!(foreign.try_lock_session(&candidate));
+        }
+
+        assert!(
+            store.claim_fresh_session_id_at(now_ms).is_none(),
+            "when every candidate is locked the claim must fail, never hand out an unlocked id"
+        );
+    }
+
+    /// REGRESSION (id re-mint after hand-off): with /new releasing the
+    /// previous claim, a second claim in the SAME millisecond used to
+    /// re-mint the just-released id — silently replacing the first session
+    /// in the LRU cache. A release hands the session to OTHER processes;
+    /// the issuer must never re-mint the id. The injected seed pins the
+    /// same millisecond, so this fails deterministically without the
+    /// `issued_ids` check (the wall-clock variants pass on slow CI).
+    #[test]
+    fn released_claim_never_lets_the_issuer_re_mint_the_same_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        // First claim in millisecond T: mints `T` and records it.
+        let (first, _) = store.claim_fresh_session_id_at(seed).unwrap();
+        assert_eq!(first, format!("{seed}"));
+
+        // The claim is handed off (what /new does when starting the next
+        // session): the LOCK is gone, but the issuance record stays.
+        store.release_session_lock(&first);
+
+        // Second claim in the SAME millisecond T: must NOT re-mint `T`.
+        let (second, _) = store
+            .claim_fresh_session_id_at(seed)
+            .expect("a suffixed candidate must be claimable in the same millisecond");
+        assert_ne!(
+            second, first,
+            "a released id must never be re-minted by the process that issued it"
+        );
+
+        // Cross-clone visibility: the writer thread's clone sees the same
+        // issuance history, so claiming through a clone also skips `T`.
+        let clone = store.clone();
+        let (third, _) = clone.claim_fresh_session_id_at(seed).unwrap();
+        assert_ne!(third, first, "clones share the issuance record");
+    }
+
     /// Multi-event collision: two stale writers each append a multi-delta
     /// block with the same starting id. Replay keeps the first block whole
     /// and skips every duplicate that follows it.
@@ -3657,6 +3897,7 @@ mod tests {
             notify: None,
             lock_wait: LOCK_WAIT_TIMEOUT,
             session_locks: Arc::new(Mutex::new(HashMap::new())),
+            issued_ids: Arc::new(Mutex::new(HashSet::new())),
         };
         std::fs::create_dir_all(base.join("proja")).ok();
 
@@ -3667,6 +3908,7 @@ mod tests {
             notify: None,
             lock_wait: LOCK_WAIT_TIMEOUT,
             session_locks: Arc::new(Mutex::new(HashMap::new())),
+            issued_ids: Arc::new(Mutex::new(HashSet::new())),
         };
         std::fs::create_dir_all(base.join("projb")).ok();
 

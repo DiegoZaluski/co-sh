@@ -151,6 +151,46 @@ impl App {
         }
     }
 
+    /// Persist the current session (when it holds real dialog) and RELEASE
+    /// its per-session open-lock — without touching `current_session_id`.
+    ///
+    /// The hand-off half of the open-lock lifecycle: a process must keep a
+    /// claim ONLY while the session is its selected one. Every path that
+    /// moves the app away from a session (switch, Home, /new) goes through
+    /// this so the lock is handed to the next process the moment the
+    /// session stops being ours — not when this process dies.
+    pub(super) fn persist_and_release_current_session(&mut self) {
+        if let Some(id) = self.state.current_session_id.clone() {
+            // Single lookup: persist only when the cached session holds
+            // real dialog.
+            if let Some(session) = self.state.session_cache.get(&id)
+                && crate::session_store::is_valid_session(session)
+            {
+                self.session_store.save_session_async(session);
+            }
+            self.session_store.release_session_lock(&id);
+        }
+    }
+
+    /// Leave the current session and return to Home: persist the session
+    /// when it holds real dialog, RELEASE its per-session open-lock, and
+    /// clear the header/panel state that belongs to a session.
+    ///
+    /// The release matters: without it the process keeps holding a session
+    /// it is not viewing, and any OTHER cosh process trying to open that
+    /// session is refused with "already open in another process" even
+    /// though nothing here is using it. The lifecycle of the open-lock
+    /// mirrors `switch_to_session`: held while the session is this
+    /// process's selected one, released the moment it stops being one.
+    pub(super) fn return_to_home(&mut self) {
+        self.persist_and_release_current_session();
+        self.state.current_session_id = None;
+        // Back to Home: the header widget is gone, so its state must not
+        // survive into the next session.
+        self.hypercredit_balance = None;
+        self.state.right_panel = crate::routes::session::right_panel::types::RightPanelState::new();
+    }
+
     /// Switch to a session, refusing the switch when it is already open in
     /// another cosh process (toast warning). The shared tail of every
     /// sidebar keyboard/mouse switch: the guarded [`AppState::
@@ -203,12 +243,28 @@ impl App {
     /// Home's "New session" (keyboard + mouse) and the `/new` slash command.
     /// Selecting the session flips the app into Session mode.
     pub(crate) fn start_new_session(&mut self) {
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        let id = format!("{now_ms}");
+        // Entry funnel: claim the id (unique + exclusively locked for this
+        // process) BEFORE the session becomes selectable. A created-but-
+        // unlocked session let a second cosh process adopt it via the
+        // sidebar switch — the per-session open-lock only refuses when a
+        // claim already exists, so a fresh session had none to refuse.
+        let Some((id, now_ms)) = self.session_store.claim_fresh_session_id() else {
+            self.toast_state.show(crate::ui::toast::ToastOptions {
+                title: Some("New session".into()),
+                message: "Could not create the session: the id claim failed.".into(),
+                variant: crate::ui::toast::ToastVariant::Error,
+                duration_ms: 4000,
+            });
+            return;
+        };
         let title = format_session_timestamp(now_ms);
+        // Hand off the PREVIOUS session's open-lock before the new one
+        // becomes current: a process keeps a claim only while the session
+        // is its selected one. Without this, a process that opened session
+        // X and then ran /new kept holding X's lock until it died — every
+        // other cosh process trying to open X was refused with "already
+        // open in another process" while nothing here was using it.
+        self.persist_and_release_current_session();
         self.state.add_empty_session(id.clone(), title, now_ms);
         self.state.current_session_id = Some(id);
         // Fresh session: the header's cost widget starts clean — no

@@ -287,6 +287,149 @@ async fn slash_new_creates_and_selects_a_fresh_session() {
     );
 }
 
+/// REGRESSION (multi-process session adoption — "single-entry vanished"):
+/// a freshly created session used to be selectable but UNLOCKED, so a
+/// second cosh process could adopt it through the sidebar switch while the
+/// creator kept appending to the same JSONL. The entry funnel must take the
+/// per-session open-lock at CREATION time: `/new` (the shared path behind
+/// Home's "New session" and the first-message bootstrap) must leave the new
+/// session claimed by THIS process and refused to a foreign one.
+#[tokio::test]
+async fn slash_new_claims_the_fresh_session_lock_against_a_foreign_process() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.run_slash_command(&crate::ui::slash_menu::SlashCommand {
+        name: "new".into(),
+        desc: String::new(),
+    });
+    let session_id = app
+        .state
+        .current_session_id
+        .clone()
+        .expect("a session was selected");
+
+    // A foreign cosh process (independent store, same data dir) must be
+    // REFUSED: the claim exists from the moment of creation.
+    let foreign = crate::session_store::SessionStore::new();
+    assert!(
+        !foreign.try_lock_session(&session_id),
+        "a session created via /new must be locked against every other process \
+         (the multi-process adoption regression)"
+    );
+
+    // Esc back to Home must RELEASE the claim — the process no longer
+    // holds the session, and keeping the lock would make every other
+    // process's attempt fail spuriously.
+    app.return_to_home();
+    assert!(app.state.current_session_id.is_none());
+    assert!(
+        foreign.try_lock_session(&session_id),
+        "returning to Home must release the open-lock for other processes"
+    );
+}
+
+/// REGRESSION (stale open-lock on /new): a process that CLAIMED a session
+/// (sidebar switch) and then started a NEW session used to keep holding the
+/// old session's lock until the process died — every other cosh process
+/// trying to open that session was refused with "already open in another
+/// process" while nothing here was using it. A claim must be handed off the
+/// moment the session stops being this process's selected one: /new (and
+/// every other leave-the-session path) releases the previous claim.
+#[tokio::test]
+async fn slash_new_hands_off_the_previous_session_lock() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+
+    // Claim a session the way a sidebar switch does: /new first (which
+    // claims its id), then record the id.
+    app.run_slash_command(&crate::ui::slash_menu::SlashCommand {
+        name: "new".into(),
+        desc: String::new(),
+    });
+    let previous_id = app
+        .state
+        .current_session_id
+        .clone()
+        .expect("a session was selected");
+    let foreign = crate::session_store::SessionStore::new();
+    assert!(
+        !foreign.try_lock_session(&previous_id),
+        "precondition: the current session is locked by this process"
+    );
+
+    // Start a NEW session while still holding the previous one's claim.
+    app.run_slash_command(&crate::ui::slash_menu::SlashCommand {
+        name: "new".into(),
+        desc: String::new(),
+    });
+    let new_id = app
+        .state
+        .current_session_id
+        .clone()
+        .expect("a new session was selected");
+    assert_ne!(
+        new_id, previous_id,
+        "/new must select a different session"
+    );
+
+    // The reported bug: the previous session's lock stayed with this
+    // process after /new. It must be handed off NOW, not at process exit.
+    assert!(
+        foreign.try_lock_session(&previous_id),
+        "starting a new session must release the previous session's \
+         open-lock (it stayed held until process death)"
+    );
+}
+
+/// The `/new` id must never collide with an EXISTING session: ids are
+/// millisecond timestamps, and a collision used to replace the old session
+/// in the LRU cache. The claim now retries with a suffix. Alongside
+/// uniqueness, the lock lifecycle is pinned: the CURRENT session is locked
+/// by this process, and every PREVIOUS one has had its claim handed off by
+/// the `/new` that superseded it.
+#[tokio::test]
+async fn slash_new_id_is_unique_per_claim() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    let mut ids = std::collections::HashSet::new();
+    let mut superseded: Vec<String> = Vec::new();
+    for _ in 0..3 {
+        app.run_slash_command(&crate::ui::slash_menu::SlashCommand {
+            name: "new".into(),
+            desc: String::new(),
+        });
+        let id = app
+            .state
+            .current_session_id
+            .clone()
+            .expect("a session was selected");
+        assert!(
+            ids.insert(id.clone()),
+            "two /new sessions in the same millisecond must not share an id"
+        );
+        // The CURRENT session carries this process's open-lock.
+        let foreign = crate::session_store::SessionStore::new();
+        assert!(
+            !foreign.try_lock_session(&id),
+            "the current session must carry this process's open-lock"
+        );
+        // Every PREVIOUS session's claim was handed off by this /new —
+        // a fresh foreign process can claim it right now.
+        for prev in &superseded {
+            let released = crate::session_store::SessionStore::new();
+            assert!(
+                released.try_lock_session(prev),
+                "a superseded session's open-lock must be handed off when \
+                 /new starts the next session, not held until process death"
+            );
+        }
+        superseded.push(id);
+    }
+}
+
 /// REGRESSION: `/new` must start the fresh session with a CLEAN right
 /// panel. The panel lives on AppState (not inside the Session model), so
 /// without the reset in `start_new_session` the old session's todos,

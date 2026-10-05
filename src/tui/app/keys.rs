@@ -1416,12 +1416,32 @@ impl App {
                     if matches!(self.mode(), AppMode::Session) {
                         #[cfg(feature = "home")]
                         {
-                            self.state.current_session_id = None;
-                            // Back to Home: the header widget is gone, so its
-                            // state must not survive into the next session.
-                            self.hypercredit_balance = None;
-                            self.state.right_panel =
-                                crate::routes::session::right_panel::types::RightPanelState::new();
+                            // Idle-gated like every other leave-the-session
+                            // path (the Working branch above already
+                            // returned; `Retry` falls through here with a
+                            // loop still winding down — leaving NOW would
+                            // release its open-lock while it may still
+                            // write). Staying keeps the claim with the
+                            // still-alive loop; the next Esc, once Idle,
+                            // hands it off.
+                            if self.state.status != crate::types::SessionStatus::Idle {
+                                use crate::ui::toast::{ToastOptions, ToastVariant};
+                                self.toast_state.show(ToastOptions {
+                                    title: Some("Back to Home".into()),
+                                    message:
+                                        "The agent is winding down — wait a moment and press Esc again."
+                                            .into(),
+                                    variant: ToastVariant::Warning,
+                                    duration_ms: 2500,
+                                });
+                                return Ok(false);
+                            }
+                            // Persist the session and RELEASE its open-lock
+                            // before going Home: the process keeps no claim
+                            // on a session it is not viewing (a leftover
+                            // claim would make every other cosh process's
+                            // attempt to open it fail spuriously).
+                            self.return_to_home();
                         }
                         #[cfg(not(feature = "home"))]
                         {
