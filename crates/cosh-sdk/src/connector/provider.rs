@@ -381,6 +381,25 @@ const PROVIDERS: &[(&str, ProviderConfig)] = &[
         "azure",
         ProviderConfig::cloud("azure", Family::OpenAICompatible, "", "gpt-4o"),
     ),
+    // Amazon Bedrock through its official OpenAI-compatible endpoint. The
+    // registry URL only pins the DEFAULT region — the live base URL is
+    // resolved per request by [`bedrock_base_url`] from the standard AWS
+    // environment variables (`AWS_REGION` / `AWS_DEFAULT_REGION`), and an
+    // explicit `params.base_url` always wins. Auth rides the shared
+    // `Authorization: Bearer` path with the Bedrock API key
+    // (`AWS_BEARER_TOKEN_BEDROCK`) — the SigV4/IAM setup needs the
+    // token-bearing env export or an explicit base URL.
+    (
+        "bedrock",
+        ProviderConfig::cloud(
+            "bedrock",
+            Family::OpenAICompatible,
+            "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1",
+            // Documented Chat Completions model on bedrock-runtime (the
+            // endpoint's own docs use it as the example).
+            "openai.gpt-oss-120b-1:0",
+        ),
+    ),
     // Non-OpenAI cloud providers
     // gemini-3.6-flash: stable v1 default — older models (1.5-flash, 2.5-flash)
     // return 404 on v1 and 2.0-flash is rate-limited on free tiers.
@@ -537,6 +556,10 @@ const API_KEY_ENVS: &[(&str, &str)] = &[
     ("charm", "CHARM_API_KEY"),
     ("zen", "OPENCODE_API_KEY"),
     ("opencode-go", "OPENCODE_GO_API_KEY"),
+    // AWS's Bedrock bearer token: the API-key auth mode of the OpenAI-
+    // compatible endpoint. IAM/SigV4 setups must export this token (or point
+    // the connector at a proxy via `with_base_url`) — no SigV4 signing here.
+    ("bedrock", "AWS_BEARER_TOKEN_BEDROCK"),
 ];
 
 /// Secondary key sources for providers whose subscriptions share an account:
@@ -660,6 +683,73 @@ pub fn get_provider_env_var(provider: &str) -> Option<&'static str> {
         .iter()
         .find(|(key, _)| *key == provider)
         .map(|(_, var)| *var)
+}
+
+/// Whether the provider is `bedrock` — the one registry entry whose base
+/// URL is region-templated and whose endpoint family lacks the OpenAI-
+/// compatible `GET /models` and embedding surfaces (see the gates in
+/// `connector::openai_compatible::caller`).
+pub(crate) fn is_bedrock(provider: &str) -> bool {
+    provider == "bedrock"
+}
+
+/// Validate an AWS region name against the region grammar
+/// (`^[a-z]{2,4}(-[a-z]+)*-[0-9]+$` — us-east-1, eu-west-2, us-gov-west-1,
+/// cn-north-1, and the EU sovereign cloud's four-letter eusc-de-east-1, …).
+///
+/// The validation is a SECURITY gate, not cosmetic: the region is spliced
+/// into the endpoint HOST, and the `Authorization: Bearer` header rides that
+/// host. `AWS_REGION` is ambient state set by dotfiles, CI configs and repo
+/// `.env` loaders — an unvalidated value like `evil.com/x#` would silently
+/// redirect the bearer token to a foreign origin. Anything that does not
+/// parse as a region falls back to the registry default (a connection error
+/// in the user's real region beats silent token exfiltration).
+fn is_valid_aws_region(region: &str) -> bool {
+    static REGION_SHAPE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    REGION_SHAPE
+        .get_or_init(|| regex::Regex::new(r"^[a-z]{2,4}(-[a-z]+)*-[0-9]+$").expect("static regex"))
+        .is_match(region)
+}
+
+/// Resolve the live base URL for the `bedrock` provider from the standard AWS
+/// region environment variables. The registry entry only pins a default
+/// region (`us-east-1`); real workloads run in the user's own region, which
+/// AWS signals through `AWS_REGION` / `AWS_DEFAULT_REGION`.
+///
+/// Returns the provider's registry URL unchanged for every other provider —
+/// and for bedrock when no VALID region variable is exported or when the
+/// ambient region IS the registry default (an unregistered provider name
+/// yields an empty URL — unreachable through [`Connector::new`], which
+/// rejects unknown names). An explicit `params.base_url` (connector
+/// `with_base_url`) always wins over this resolution; the helper exists so
+/// the *default* path follows the ambient AWS configuration instead of
+/// silently calling the wrong region.
+#[must_use]
+pub fn resolved_provider_base_url(provider: &str) -> std::borrow::Cow<'static, str> {
+    let Some(config) = get_provider(provider) else {
+        return std::borrow::Cow::Borrowed("");
+    };
+    if !is_bedrock(provider) {
+        return std::borrow::Cow::Borrowed(config.base_url);
+    }
+    // First VALID region among the two variables. A PRESENT but blank or
+    // invalid `AWS_REGION` must not shadow a valid `AWS_DEFAULT_REGION`
+    // (the same placeholder rule the API-key resolution applies).
+    let region = ["AWS_REGION", "AWS_DEFAULT_REGION"].iter().find_map(|var| {
+        std::env::var(var)
+            .ok()
+            .map(|r| r.trim().to_string())
+            .filter(|r| !r.is_empty() && is_valid_aws_region(r))
+    });
+    match region {
+        // The registry URL is region-templated (`bedrock-runtime.{region}.
+        // amazonaws.com` with `us-east-1` pinned); re-point it to the ambient
+        // region by name substitution. `us-east-1` itself needs no rewrite.
+        Some(region) if region != "us-east-1" && config.base_url.contains("us-east-1") => {
+            std::borrow::Cow::Owned(config.base_url.replace("us-east-1", &region))
+        }
+        _ => std::borrow::Cow::Borrowed(config.base_url),
+    }
 }
 
 /// Return all known providers with their API key environment variable names.

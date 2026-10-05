@@ -9,3 +9,5 @@ pub(crate) mod openai;
 pub(crate) mod provider;
 pub(crate) mod retry;
 pub(crate) mod streaming;
+
+mod bedrock;

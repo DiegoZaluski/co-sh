@@ -187,6 +187,76 @@ fn is_transient_error_type(err: &ApiErrorDetail) -> bool {
     )
 }
 
+/// Resolve the request's base URL. An explicit `params.base_url` (connector
+/// `with_base_url`) always wins; the fallback goes through
+/// [`resolved_provider_base_url`](super::super::provider::resolved_provider_base_url)
+/// instead of reading the registry URL directly so the `bedrock` provider can
+/// re-point its endpoint to the ambient AWS region (`AWS_REGION` /
+/// `AWS_DEFAULT_REGION`) — every other provider's registry URL is returned
+/// verbatim.
+fn resolve_base_url(
+    params: &Parameters,
+    config: &ProviderConfig,
+) -> std::borrow::Cow<'static, str> {
+    if let Some(explicit) = params.base_url.as_deref() {
+        return std::borrow::Cow::Owned(explicit.to_owned());
+    }
+    super::super::provider::resolved_provider_base_url(config.name)
+}
+
+/// Classify a JSON error body from either the OpenAI shape (`{"error":
+/// {"message": ..., "type": ...}}`) or the AWS shape the Bedrock endpoints
+/// return (`{"__type":"ThrottlingException","message":"..."}`, sometimes with
+/// an `"Output"` wrapper). Returns `None` when the body is not an error
+/// shape at all — the caller then reports the raw deserialization failure.
+fn classify_error_body(body: &str) -> Option<ConnectorError> {
+    // OpenAI shape first (the family's native contract).
+    if let Ok(api_err) = serde_json::from_str::<ApiErrorResponse>(body) {
+        let transient = is_transient_error_type(&api_err.error);
+        let err = ConnectorError::classify_http(200, api_err.error.message);
+        return Some(if transient { err.mark_transient() } else { err });
+    }
+    // AWS shape: `{"__type": "ThrottlingException", "message": "..."}` —
+    // flat or wrapped in `"Output"`. `__type` may also carry the namespace
+    // prefix (`com.amazonaws.bedrock#ThrottlingException`).
+    //
+    // FAMILY-WIDE, not bedrock-scoped: the caller routes every
+    // empty-choices SSE frame and every deserialization failure through
+    // here regardless of provider, so any backend whose error body carries
+    // a top-level `code` string also classifies through this branch. No
+    // known OpenAI-compatible error frame does, but the shape is accepted
+    // deliberately — classification beats a raw parse failure either way.
+    let aws: serde_json::Value = serde_json::from_str(body).ok()?;
+    let aws_err = aws.get("Output").unwrap_or(&aws);
+    let kind = aws_err
+        .get("__type")
+        .or_else(|| aws_err.get("code"))
+        .and_then(serde_json::Value::as_str)?;
+    let kind = kind.rsplit(['#', ':']).next().unwrap_or(kind);
+    let message = aws_err
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(kind);
+    // Throttling and service-side failures are the AWS analogues of the
+    // transient types above — safe to retry; everything else (auth,
+    // validation, access) is deterministic. The non-suffix spellings
+    // (`ServiceUnavailable`) occur on AWS endpoints that name the condition
+    // without the `Exception` suffix.
+    let transient = matches!(
+        kind,
+        "ThrottlingException"
+            | "TooManyRequestsException"
+            | "TooManyRequests"
+            | "ServiceUnavailableException"
+            | "ServiceUnavailable"
+            | "InternalServerException"
+            | "InternalServerError"
+            | "InternalFailure"
+    );
+    let err = ConnectorError::classify_http(200, message.to_string());
+    Some(if transient { err.mark_transient() } else { err })
+}
+
 //  SSE streaming types
 
 #[derive(serde::Deserialize)]
@@ -511,14 +581,11 @@ fn process_sse_response(
                         // keep-alive frame. Errors surface immediately;
                         // anything else is kept only via `last_raw`.
                         if ccr.choices.is_empty() {
-                            if let Ok(api_err) = serde_json::from_str::<ApiErrorResponse>(&data) {
-                                let transient = is_transient_error_type(&api_err.error);
-                                let err = ConnectorError::classify_http(200, api_err.error.message);
-                                yield Err(if transient {
-                                    err.mark_transient()
-                                } else {
-                                    err
-                                });
+                            // OpenAI-shaped AND AWS-shaped (Bedrock) error
+                            // bodies both classify here — including the AWS
+                            // transient kinds (ThrottlingException, …).
+                            if let Some(err) = classify_error_body(&data) {
+                                yield Err(err);
                                 return;
                             }
                             // Usage-only frame (include_usage): surface it
@@ -646,15 +713,12 @@ fn process_sse_response(
                         }
                     }
                     Err(e) => {
-                        if let Ok(api_err) = serde_json::from_str::<ApiErrorResponse>(&data) {
-                            let transient = is_transient_error_type(&api_err.error);
-                            let err =
-                                ConnectorError::classify_http(200, api_err.error.message);
-                            yield Err(if transient {
-                                err.mark_transient()
-                            } else {
-                                err
-                            });
+                        // A parse failure is also the shape of an AWS error
+                        // body (`{"__type":...}` does not match the OpenAI
+                        // response schema) — classify before reporting the
+                        // raw deserialization error.
+                        if let Some(err) = classify_error_body(&data) {
+                            yield Err(err);
                             return;
                         }
                         yield Err(ConnectorError::Deserialization(format!(
@@ -789,8 +853,7 @@ pub async fn chat(
 
     let messages = build_messages(prompt, system_prompt);
     let request = build_chat_request(model, messages, params, false, config.name);
-    let base_url = params.base_url.as_deref().unwrap_or(config.base_url);
-    let url = format!("{base_url}/chat/completions");
+    let url = format!("{}/chat/completions", resolve_base_url(params, config));
 
     let auth = api_key.as_ref().map(|key| format!("Bearer {key}"));
     let mut headers: Vec<(&str, String)> = Vec::new();
@@ -805,10 +868,11 @@ pub async fn chat(
     let chat_response: ChatResponse = match serde_json::from_str(&response_text) {
         Ok(r) => r,
         Err(e) => {
-            if let Ok(api_err) = serde_json::from_str::<ApiErrorResponse>(&response_text) {
-                let transient = is_transient_error_type(&api_err.error);
-                let err = ConnectorError::classify_http(200, api_err.error.message);
-                return Err(if transient { err.mark_transient() } else { err });
+            // The 200-with-error-body path: OpenAI-shaped and AWS-shaped
+            // (Bedrock) error bodies are classified here, including the AWS
+            // transient kinds (ThrottlingException, …).
+            if let Some(err) = classify_error_body(&response_text) {
+                return Err(err);
             }
             return Err(ConnectorError::Deserialization(format!(
                 "{e}. Raw response: {response_text}"
@@ -850,8 +914,7 @@ pub async fn chat_stream(
 
     let messages = build_messages(prompt, system_prompt);
     let request = build_chat_request(model, messages, params, true, config.name);
-    let base_url = params.base_url.as_deref().unwrap_or(config.base_url);
-    let url = format!("{base_url}/chat/completions");
+    let url = format!("{}/chat/completions", resolve_base_url(params, config));
 
     let auth = api_key.as_ref().map(|key| format!("Bearer {key}"));
     log::debug!("chat_stream: sending request to {url}");
@@ -923,8 +986,7 @@ pub async fn chat_stream_with_messages(
     let all_messages = build_full_messages(system, messages);
     let all_messages = strip_internal_fields(&all_messages);
     let request = build_chat_request(model, all_messages, params, true, config.name);
-    let base_url = params.base_url.as_deref().unwrap_or(config.base_url);
-    let url = format!("{base_url}/chat/completions");
+    let url = format!("{}/chat/completions", resolve_base_url(params, config));
 
     let auth = api_key.as_ref().map(|key| format!("Bearer {key}"));
     log::debug!("chat_stream_with_messages: sending request to {url}");
@@ -980,6 +1042,11 @@ pub async fn embed(
     input: &str,
     service: Option<&str>,
 ) -> Result<Vec<f32>, ConnectorError> {
+    if super::super::provider::is_bedrock(config.name) && params.base_url.is_none() {
+        return Err(ConnectorError::NotImplemented(
+            "embeddings for bedrock (the OpenAI-compatible endpoints carry no embedding API; use Titan via the Invoke API or a compatible proxy base URL)",
+        ));
+    }
     let api_key = resolve_api_key(config, params, service)?;
     let model = params
         .model
@@ -990,8 +1057,7 @@ pub async fn embed(
         model,
         input: input.to_string(),
     };
-    let base_url = params.base_url.as_deref().unwrap_or(config.base_url);
-    let url = format!("{base_url}/embeddings");
+    let url = format!("{}/embeddings", resolve_base_url(params, config));
 
     let auth = api_key.as_ref().map(|key| format!("Bearer {key}"));
     let mut headers: Vec<(&str, String)> = Vec::new();
@@ -1025,15 +1091,27 @@ struct ListModelsResponse {
 ///
 /// Resolves the API key, sends a GET to `{base_url}/models`, and parses
 /// the OpenAI-compatible JSON response into a [`LsOutput`].
+///
+/// The `bedrock-runtime` endpoint does NOT implement the OpenAI-compatible
+/// `GET /models` operation (AWS documents `ListFoundationModels` /
+/// `ListInferenceProfiles` instead); only the `bedrock-mantle` compatibility
+/// endpoint serves the model catalog. A Bedrock `list_models` therefore
+/// fails up front unless the user pointed an explicit base URL at Mantle
+/// (`https://bedrock-mantle.{region}.api.aws/v1`) — the gate mirrors the
+/// embedding one.
 pub async fn list_models(
     config: &ProviderConfig,
     params: &Parameters,
     service: Option<&str>,
 ) -> Result<LsOutput, ConnectorError> {
+    if super::super::provider::is_bedrock(config.name) && params.base_url.is_none() {
+        return Err(ConnectorError::NotImplemented(
+            "model listing for bedrock-runtime (the endpoint has no GET /models; point with_base_url at https://bedrock-mantle.{region}.api.aws/v1 for the catalog)",
+        ));
+    }
     let api_key = resolve_api_key(config, params, service)?;
 
-    let base_url = params.base_url.as_deref().unwrap_or(config.base_url);
-    let url = format!("{base_url}/models");
+    let url = format!("{}/models", resolve_base_url(params, config));
 
     let auth = api_key.as_ref().map(|key| format!("Bearer {key}"));
     let mut headers: Vec<(&str, String)> = Vec::new();
