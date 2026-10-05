@@ -1354,6 +1354,7 @@ mod tests {
         ContextItem::User {
             id,
             original: text.into(),
+            synthetic: false,
         }
     }
 

@@ -3685,6 +3685,12 @@ impl Harness {
         let mut current_input = String::new();
         let mut iteration = 0u64;
 
+        // Whether ANY tool ran this turn. A turn with zero tool dispatches
+        // is a pure text exchange — the request was answerable directly, so
+        // the final text is complete by construction and the termination
+        // checkup has nothing to audit (see the natural-stop gate below).
+        let mut tools_ran = false;
+
         // Immediate LSP snapshot: the TUI's footer/tags must reflect the
         // engine state from the first moment of the turn, not only after the
         // first full cycle completes.
@@ -4713,6 +4719,7 @@ impl Harness {
                     // Scope dispatch_fut tightly so its &mut self borrow is
                     // released BEFORE we match on the result below.
                     let dispatch_out = {
+                        tools_ran = true;
                         let dispatch_fut = self.dispatch_next();
                         tokio::pin!(dispatch_fut);
 
@@ -5009,6 +5016,21 @@ impl Harness {
                     // An empty final response is a degenerate review input
                     // for the decision model — treat it as a plain stop.
                     && !assistant_response.is_empty()
+                    // A cycle with no tool dispatches is a pure text
+                    // exchange: the request was answerable directly, so the
+                    // final text is complete by construction and there is
+                    // nothing to audit. Running the model here vetoes
+                    // exactly the answers it cannot see the point of (a
+                    // measured probe — `crates/cosh-onnx/tests/eval/
+                    // shape_probe.rs` — showed every request-blind verdict
+                    // on a direct answer reads `running`).
+                    //
+                    // The flag is set only at the `dispatch_next` funnel, so
+                    // a cycle whose tool calls were all REFUSED (hook deny,
+                    // permission deny) also lands here unaudited —
+                    // intentional: an explicit user refusal is user-directed
+                    // work, and user intent is never reviewed by the model.
+                    && tools_ran
                 {
                     let verdict = checkup.review_termination(&assistant_response);
                     // Observability: every natural-stop review lands in

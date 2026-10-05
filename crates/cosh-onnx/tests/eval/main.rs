@@ -2,3 +2,4 @@
 //! unit tests (they drive real checkpoints).
 
 mod loop_termination;
+mod shape_probe;

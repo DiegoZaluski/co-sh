@@ -2019,6 +2019,7 @@ mod tests {
         ContextItem::User {
             id,
             original: text.to_string(),
+            synthetic: false,
         }
     }
 

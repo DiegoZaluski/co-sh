@@ -21,29 +21,7 @@ use crate::daemon::ipc_error::Ipc;
 
 use super::protocol::{self, DecideParams, DecideResult, Kind, code, method};
 
-use crate::harness::checkup::{Checkup, TerminationDecision, TerminationVerdict};
-
-/// The question id inside the schema — the same id the loop-termination
-/// evaluation scores, carried over from the in-process adapter unchanged.
-const QID: &str = "loop_terminated";
-
-/// The `loop_terminated` question, verbatim from the eval: two options
-/// because `temperature_by_options` calibrates `choice:2` explicitly.
-fn loop_questions() -> serde_json::Map<String, serde_json::Value> {
-    let mut questions = serde_json::Map::new();
-    questions.insert(
-        QID.to_string(),
-        json!({
-            "type": "choice",
-            "instructions": "An agent produced the text in `message` while working on a task. Did the agent's loop finish with this text, or is the agent about to keep working?",
-            "criteria": {
-                "terminated": "the task is complete and the loop ended: a summary of what was done, nothing left to do",
-                "running": "the loop is still going: the agent will read or write files, run commands, or start the next step",
-            }
-        }),
-    );
-    questions
-}
+use crate::harness::checkup::{Checkup, QID, TerminationDecision, TerminationVerdict, loop_questions};
 
 /// A `Checkup` that decides through the shared daemon.
 pub struct IpcCheckup {

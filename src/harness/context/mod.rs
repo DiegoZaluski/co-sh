@@ -64,6 +64,11 @@ pub struct ContextItemRange {
     pub end_id: u64,
 }
 
+/// The maximum number of user turns [`ContextManager::turn_user_thread`]
+/// returns: the FIRST turn (the original intent) and the LAST turns (the
+/// most recent instructions) are kept, the middle is dropped first.
+const TURN_THREAD_MAX_TURNS: usize = 4;
+
 /// A single conversation item in display order. **One item = one message** in
 /// [`ContextManager::build_messages`], so message positions are preserved by
 /// construction. The TUI session store persists item additions/replacements
@@ -73,7 +78,20 @@ pub struct ContextItemRange {
 pub enum ContextItem {
     /// A user prompt. **Protected**: its original text stays verbatim until
     /// the LLM compaction folds it into the general summary.
-    User { id: u64, original: String },
+    ///
+    /// `synthetic` marks PROVENANCE: `false` is a turn the user actually
+    /// typed; `true` is a turn the harness injected on the user's behalf —
+    /// currently the `[automated notification]` background sub-agent
+    /// completions (`add_synthetic_user`). Consumers that need the USER'S
+    /// intent (e.g. the termination checkup's request thread) filter
+    /// synthetic turns out; the model-visible rendering is identical either
+    /// way. Defaults for contexts persisted before this field existed.
+    User {
+        id: u64,
+        original: String,
+        #[serde(default)]
+        synthetic: bool,
+    },
     /// An assistant text output.
     Assistant {
         id: u64,
@@ -671,7 +689,77 @@ impl ContextManager {
         self.push_item(ContextItem::User {
             id,
             original: text.to_string(),
+            synthetic: false,
         });
+    }
+
+    /// Add a SYNTHETIC user prompt: a turn the harness injects on the user's
+    /// behalf (currently the `[automated notification]` background sub-agent
+    /// completions). Identical to [`Self::add_user`] in every model-visible
+    /// way; the only difference is provenance (`ContextItem::User::synthetic`),
+    /// so consumers that need the USER'S OWN intent can filter these out.
+    pub fn add_synthetic_user(&mut self, text: &str) {
+        let id = self.next_id();
+        self.push_item(ContextItem::User {
+            id,
+            original: text.to_string(),
+            synthetic: true,
+        });
+    }
+
+    /// The user-typed turns of the CURRENT loop cycle, oldest first, VISIBLE
+    /// only — the provenance-filtered thread the termination checkup reviews
+    /// against. The cycle starts after the last [`ContextItem::Closure`]
+    /// (the previous loop ended there) or [`ContextItem::Compaction`] (the
+    /// history was folded there); without either boundary the whole timeline
+    /// is one cycle. Synthetic turns (harness-injected notifications) and
+    /// hidden items are excluded; error items never carry user text.
+    ///
+    /// Returns at most [`TURN_THREAD_MAX_TURNS`]: the FIRST turn (the
+    /// original intent) and the LAST turn (the most recent instruction) are
+    /// always kept, the middle is truncated first — the two ends carry the
+    /// discrimination the checkup needs.
+    pub fn turn_user_thread(&self) -> Vec<String> {
+        // The cycle boundary: the LAST visible Closure/Compaction item. A
+        // prior cycle's requests are not this cycle's task — a request from
+        // an unrelated task 40 minutes ago must never sit next to the
+        // current one inside the decision state.
+        let cycle_start = self
+            .items
+            .iter()
+            .rposition(|item| {
+                !self.is_hidden(item)
+                    && matches!(item, ContextItem::Closure { .. } | ContextItem::Compaction { .. })
+            })
+            .map_or(0, |idx| idx + 1);
+        let visible: Vec<&str> = self
+            .items
+            .iter()
+            .enumerate()
+            .skip(cycle_start)
+            .filter(|(_, item)| !self.is_hidden(item))
+            .filter_map(|(_, item)| match item {
+                ContextItem::User { original, synthetic: false, .. } => Some(original.as_str()),
+                _ => None,
+            })
+            .collect();
+        match visible.len() {
+            // Up to the cap, the whole thread goes through untouched.
+            0..=TURN_THREAD_MAX_TURNS => visible.into_iter().map(str::to_string).collect(),
+            // Over the cap: keep the FIRST turn (the original intent) and
+            // the LAST MAX-1 turns (the most recent instructions) — never
+            // the middle, and never a duplicate of the first.
+            n => {
+                let mut kept: Vec<String> = Vec::with_capacity(TURN_THREAD_MAX_TURNS);
+                kept.push(visible[0].to_string());
+                kept.extend(
+                    visible[n - (TURN_THREAD_MAX_TURNS - 1)..]
+                        .iter()
+                        .map(|s| s.to_string()),
+                );
+                kept
+            }
+        }
     }
 
     /// Add an assistant text output. When `closable` is true the text is a

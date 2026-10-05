@@ -1586,7 +1586,11 @@ mod tests {
         // Expected rows are built from the catalog by id (never hardcoded
         // indices): the `onnx` feature inserts the checkup item mid-list.
         let cat = |id: &str| SettingsRow::Category(catalog_index(id));
-        let cfg_rows = |rows: Vec<SettingsRow>| {
+        // The `mut` is only exercised under the `onnx` feature (the cfg'd
+        // block inserts the checkup rows); the attribute keeps the
+        // non-onnx build warning-free.
+        #[cfg_attr(not(feature = "onnx"), allow(unused_mut))]
+        let cfg_rows = |mut rows: Vec<SettingsRow>| {
             #[cfg(feature = "onnx")]
             // The checkup trio sits right after the PostToolUse item's
             // whole sub-list (catalog order: summarization, pre, post,

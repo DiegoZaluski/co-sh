@@ -110,6 +110,7 @@ pub(crate) fn realistic_context(rounds: usize) -> cosh::harness::context::Contex
         items.push(ContextItem::User {
             id: next_id,
             original: format!("question number {r} about module {r}"),
+            synthetic: false,
         });
         next_id += 1;
         items.push(ContextItem::Assistant {

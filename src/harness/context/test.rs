@@ -1454,3 +1454,80 @@ fn push_fenced_never_breaks_out_on_embedded_backtick_runs() {
     push_fenced(&mut plain, "json", "{}");
     assert_eq!(plain, "```json\n{}\n```\n");
 }
+
+// ── turn_user_thread ──────────────────────────────────────────────────────
+
+#[test]
+fn turn_user_thread_returns_user_turns_oldest_first_within_cap() {
+    let mut mgr = cm(10_000);
+    mgr.add_user("first request");
+    mgr.add_assistant("working", false);
+    mgr.add_user("second request");
+    mgr.add_synthetic_user("background sub-agent finished task X"); // never visible
+    mgr.add_assistant("still working", false);
+    mgr.add_user("third request");
+    assert_eq!(
+        mgr.turn_user_thread(),
+        vec!["first request", "second request", "third request"]
+    );
+}
+
+#[test]
+fn turn_user_thread_cap_keeps_first_and_last_never_duplicates() {
+    let mut mgr = cm(10_000);
+    for i in 0..6 {
+        mgr.add_user(&format!("request {i}"));
+        mgr.add_assistant("ack", false);
+    }
+    // Six turns over the cap of 4: the FIRST (original intent) plus the
+    // LAST three — the boundary arm that used to duplicate turn 0 must not.
+    let thread = mgr.turn_user_thread();
+    assert_eq!(thread.len(), 4);
+    assert_eq!(thread[0], "request 0", "original intent is always kept");
+    assert_eq!(
+        thread[1..],
+        ["request 3", "request 4", "request 5"],
+        "the most recent instructions follow, no duplication"
+    );
+}
+
+#[test]
+fn turn_user_thread_exact_cap_is_untouched() {
+    let mut mgr = cm(10_000);
+    for i in 0..4 {
+        mgr.add_user(&format!("request {i}"));
+        mgr.add_assistant("ack", false);
+    }
+    // Exactly AT the cap the whole thread passes through in order — the
+    // first turn must not appear twice (the 0..=cap arm, not the tail arm).
+    assert_eq!(
+        mgr.turn_user_thread(),
+        vec!["request 0", "request 1", "request 2", "request 3"]
+    );
+}
+
+#[test]
+fn turn_user_thread_starts_after_the_last_cycle_boundary() {
+    let mut mgr = cm(10_000);
+    // Prior cycle: answered and closed.
+    mgr.add_user("old unrelated request");
+    mgr.add_assistant("old answer", true);
+    mgr.close_loop();
+    // Current cycle.
+    mgr.add_user("current request");
+    mgr.add_assistant("working", false);
+    assert_eq!(
+        mgr.turn_user_thread(),
+        vec!["current request"],
+        "a closed prior cycle's requests never leak into the current thread"
+    );
+
+    // Same boundary for a compaction checkpoint: pre-checkpoint history is
+    // folded away, only post-compaction requests remain.
+    let mut mgr = cm(10_000);
+    mgr.add_user("pre-compaction request");
+    mgr.add_assistant("done earlier", true);
+    assert!(mgr.apply_llm_summary("## Objective\n- summarized".into()));
+    mgr.add_user("post-compaction request");
+    assert_eq!(mgr.turn_user_thread(), vec!["post-compaction request"]);
+}

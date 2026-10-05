@@ -2012,14 +2012,21 @@ async fn pump_terminal_events(
 
 #[tokio::test]
 async fn checkup_veto_continues_a_premature_natural_completion() {
-    // Stream 1: a final-sounding text turn (stop reason) that the model
-    // judges NOT terminated → the loop must continue. Stream 2: a turn the
-    // model judges terminated → `Done`.
+    // Stream 1: a tool call (the cycle does real work — the checkup only
+    // reviews turns where a tool ran). Stream 2: a final-sounding text turn
+    // that the model judges NOT terminated → the loop must continue.
+    // Stream 3: a turn the model judges terminated → `Done`.
     let mut h = Harness::new_test()
+        .with_test_tool(
+            "test_tool",
+            serde_json::json!({"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]}),
+        )
         .with_mock_streams(vec![
+            Ok(vec![r#"{"name": "test_tool", "arguments": {"x": "test"}}"#]),
             Ok(vec!["Looks", " done"]),
             Ok(vec!["Actually finished", " now"]),
         ])
+        .with_mock_finish_reason(Some("stop"))
         .with_mock_finish_reason(Some("stop"))
         .with_mock_finish_reason(Some("stop"))
         .with_checkup(StubCheckup::with_verdicts(vec![
@@ -2088,6 +2095,53 @@ async fn checkup_low_confidence_verdict_does_not_veto() {
             .count(),
         1,
         "exactly one Done (no veto), events={events:?}"
+    );
+}
+
+#[tokio::test]
+async fn checkup_never_reviews_a_tool_free_text_cycle() {
+    // The deterministic gate: a cycle with NO tool dispatch is a pure text
+    // exchange — the request was answerable directly, so the final text is
+    // complete by construction. The checkup must not even be CONSULTED (the
+    // stub's verdicts stay unconsumed and no veto/Toast can fire), and the
+    // loop ends on the single text turn. This is the fix for the direct-
+    // answer false veto ("2+2 é 4" read as running).
+    let mut h = Harness::new_test()
+        .with_mock_stream(Ok(vec!["2+2 é 4"]))
+        .with_mock_finish_reason(Some("stop"))
+        // A stubbornly "running"-saying checkup: even it cannot veto here.
+        .with_checkup(StubCheckup::with_verdicts(vec![not_terminated(0.99)]))
+        .with_checkup_min_confidence(0.5);
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stop_signal = Arc::new(AtomicBool::new(false));
+    let handle = tokio::spawn(async move {
+        h.run_agent_loop("Quando é 2+2?", tx, answer_rx, perm_rx, stop_signal)
+            .await;
+    });
+    let events = pump_terminal_events(rx).await;
+    handle.abort();
+
+    assert!(
+        matches!(events.last(), Some(HarnessEvent::Done { context, .. }) if !context.items.is_empty()),
+        "the direct answer must end the loop, got {:?}",
+        events.last()
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, HarnessEvent::Done { .. }))
+            .count(),
+        1,
+        "exactly one Done — no continuation, events={events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, HarnessEvent::Toast { .. })),
+        "no veto happened, so no Toast, events={events:?}"
     );
 }
 

@@ -167,6 +167,7 @@ mod tests {
                 ContextItem::User {
                     id: 1,
                     original: "the prompt".into(),
+                    synthetic: false,
                 },
                 ContextItem::Assistant {
                     id: 2,

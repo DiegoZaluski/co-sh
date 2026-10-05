@@ -7,6 +7,20 @@
 //! `stop_agent_loop` tool, Esc, hook halts) and infrastructure failures
 //! never pass through here — there is no ambiguity to audit.
 //!
+//! The state the model reviews is deliberately MINIMAL — the final text
+//! alone (`{"message": …}`), verbatim the shape the `loop_terminated`
+//! evaluation scores. A measured probe (`crates/cosh-onnx/tests/eval/
+//! shape_probe.rs`) tested richer shapes — the user request prepended,
+//! concatenated, two-field — and every one made the published checkpoints
+//! FLIP closing summaries to `running` (the request reads as "work in
+//! progress"): the enrichment shipped a false veto. The direct-answer
+//! failure mode ("2+2 é 4" read as running) is the checkpoint's
+//! out-of-distribution blind spot, not a context problem — it is fixed
+//! deterministically at the call site (a cycle with no tool calls is a pure
+//! text exchange; there is nothing to audit). [`ContextManager::
+//! turn_user_thread`] stays as the seam a future request-aware checkpoint
+//! will need.
+//!
 //! The trait compiles **always**, so harness tests stub it without the ONNX
 //! runtime; the concrete adapter lives behind `#[cfg(feature = "onnx")]`.
 //!
@@ -68,10 +82,46 @@ impl TerminationVerdict {
     }
 }
 
-/// The ONNX adapter: builds the `loop_terminated` question (the
-/// `type`/`instructions`/`criteria` shape from
-/// `crates/cosh-onnx/tests/eval/loop_termination.rs`) and drives the
-/// resident [`cosh_onnx::DecisionModel`].
+/// The question id inside the schema — the same id the loop-termination
+/// evaluation scores, so benchmark numbers map 1:1 onto this consumer.
+///
+/// Shared at module level so the in-process adapter and the daemon client
+/// read the same id from ONE place. Consumers live behind
+/// `#[cfg(feature = "onnx")]`; without the feature this is dead by
+/// construction, which is allowed rather than duplicated.
+#[cfg_attr(not(feature = "onnx"), allow(dead_code))]
+pub(crate) const QID: &str = "loop_terminated";
+
+/// The `loop_terminated` question, verbatim from the eval (`crates/cosh-onnx/
+/// tests/eval/loop_termination.rs`), shared by the in-process adapter and the
+/// daemon client so both paths read the same question. Two options because
+/// `temperature_by_options` calibrates `choice:2` explicitly.
+///
+/// VERBATIM is load-bearing: the benchmark numbers map 1:1 onto this consumer
+/// only while the question — and the bare `{"message"}` state it reads — stay
+/// identical. The shape probe showed ANY enrichment (request prepended,
+/// criteria reworded) flips the published checkpoints' closing summaries to
+/// `running`, so the wording stays frozen until a checkpoint trained on the
+/// richer state ships.
+#[cfg_attr(not(feature = "onnx"), allow(dead_code))]
+pub(crate) fn loop_questions() -> serde_json::Map<String, serde_json::Value> {
+    let mut questions = serde_json::Map::new();
+    questions.insert(
+        QID.to_string(),
+        serde_json::json!({
+            "type": "choice",
+            "instructions": "An agent produced the text in `message` while working on a task. Did the agent's loop finish with this text, or is the agent about to keep working?",
+            "criteria": {
+                "terminated": "the task is complete and the loop ended: a summary of what was done, nothing left to do",
+                "running": "the loop is still going: the agent will read or write files, run commands, or start the next step",
+            }
+        }),
+    );
+    questions
+}
+
+/// The ONNX adapter: drives the resident [`cosh_onnx::DecisionModel`] with
+/// the shared `loop_terminated` question over the bare `{"message"}` state.
 #[cfg(feature = "onnx")]
 pub use onnx_adapter::OnnxCheckup;
 
@@ -80,33 +130,11 @@ mod onnx_adapter {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
-    use serde_json::{Map, Value, json};
+    use serde_json::json;
 
     use cosh_onnx::{DecisionModel, LoadOptions, ModelKind, Prediction};
 
-    use super::{Checkup, TerminationDecision, TerminationVerdict};
-
-    /// The question id inside the schema — the same id the loop-termination
-    /// evaluation scores, so benchmark numbers map 1:1 onto this consumer.
-    const QID: &str = "loop_terminated";
-
-    /// The `loop_terminated` question, verbatim from the eval: two options
-    /// because `temperature_by_options` calibrates `choice:2` explicitly.
-    fn loop_questions() -> Map<String, Value> {
-        let mut questions = Map::new();
-        questions.insert(
-            QID.to_string(),
-            json!({
-                "type": "choice",
-                "instructions": "An agent produced the text in `message` while working on a task. Did the agent's loop finish with this text, or is the agent about to keep working?",
-                "criteria": {
-                    "terminated": "the task is complete and the loop ended: a summary of what was done, nothing left to do",
-                    "running": "the loop is still going: the agent will read or write files, run commands, or start the next step",
-                }
-            }),
-        );
-        questions
-    }
+    use super::{Checkup, QID, TerminationDecision, TerminationVerdict, loop_questions};
 
     /// The process-wide resident decision model. The harness is assembled
     /// per turn, so a load inside the assembly would mmap the ~1.3 GB graph
@@ -248,6 +276,44 @@ mod onnx_adapter {
                 decision,
                 confidence: prediction.answer_confidence(QID).unwrap_or(0.0),
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The benchmark↔consumer 1:1 mapping is load-bearing: the eval scores
+    /// the model on EXACTLY the question this consumer sends, so a wording
+    /// change on either side silently invalidates the benchmark numbers.
+    /// The eval is a separate crate (`cosh-onnx`) that cannot import this
+    /// one, so drift is caught mechanically by scanning its source for the
+    /// exact strings this module sends.
+    #[test]
+    fn question_matches_the_eval_verbatim() {
+        let questions = loop_questions();
+        let question = &questions[QID];
+        let instructions = question["instructions"].as_str().unwrap();
+        let terminated = question["criteria"]["terminated"].as_str().unwrap();
+        let running = question["criteria"]["running"].as_str().unwrap();
+
+        let eval = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/crates/cosh-onnx/tests/eval/loop_termination.rs"
+        ))
+        .expect("the eval source is part of this workspace");
+        for (what, needle) in [
+            ("question id", QID),
+            ("instructions", instructions),
+            ("'terminated' criterion", terminated),
+            ("'running' criterion", running),
+        ] {
+            assert!(
+                eval.contains(needle),
+                "the eval's {what} drifted from the consumer's question — \
+                 the benchmark no longer scores what the checkup asks"
+            );
         }
     }
 }

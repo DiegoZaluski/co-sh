@@ -1333,6 +1333,7 @@ mod tests {
         state.items[0] = ContextItem::User {
             id: 1,
             original: "changed source".repeat(2_000),
+            synthetic: false,
         };
         manager.restore_state(&state);
         assert!(!manager.map_reduce_source_valid());
