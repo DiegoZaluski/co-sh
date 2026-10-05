@@ -9,6 +9,7 @@ use cosh_tui::core::types::MouseEvent;
 
 use crate::component::search_bar::SearchBar;
 use crate::theme::{Theme, rgba_color};
+use crate::util::draw::draw_text_line;
 use crate::util::list_selection::ListSelection;
 use cosh::setup::Setup;
 
@@ -195,12 +196,12 @@ impl AddProviderView {
         let row_x = area.x + (area.width.saturating_sub(max_w as u16)) / 2;
 
         // Title pinned to top
-        draw_col(
+        draw_text_line(
             buf,
+            "ADD Provider",
             row_x,
             area.y,
-            area.right(),
-            "ADD Provider",
+            area.right() - row_x,
             Style::default().fg(muted),
         );
 
@@ -233,12 +234,12 @@ impl AddProviderView {
                 "No matching providers"
             };
             let msg_x = area.x + (area.width.saturating_sub(empty_msg.len() as u16)) / 2;
-            draw_col(
+            draw_text_line(
                 buf,
+                empty_msg,
                 msg_x,
                 list_start_y,
-                area.right(),
-                empty_msg,
+                area.right() - msg_x,
                 Style::default().fg(muted),
             );
             return;
@@ -269,55 +270,40 @@ impl AddProviderView {
             // Fixed columns: symbol, name, `(local)` tag and hint. The tag
             // column stays reserved even on cloud rows so the hint column
             // never shifts between rows.
-            draw_col(
+            draw_text_line(
                 buf,
+                symbol,
                 sym_x,
                 y,
-                area.right(),
-                symbol,
+                area.right() - sym_x,
                 Style::default().fg(sym_color),
             );
-            draw_col(
+            draw_text_line(
                 buf,
+                entry.name,
                 name_x,
                 y,
-                area.right(),
-                entry.name,
+                area.right() - name_x,
                 Style::default().fg(row_color),
             );
             if entry.local {
-                draw_col(
+                draw_text_line(
                     buf,
+                    "(local)",
                     tag_x,
                     y,
-                    area.right(),
-                    "(local)",
+                    area.right() - tag_x,
                     Style::default().fg(muted),
                 );
             }
-            draw_col(
+            draw_text_line(
                 buf,
+                &format!("({})", entry.hint),
                 hint_x,
                 y,
-                area.right(),
-                &format!("({})", entry.hint),
+                area.right() - hint_x,
                 Style::default().fg(muted),
             );
-        }
-    }
-}
-
-/// Write `text` starting at (`x`, `y`), clipped at `right` — one aligned
-/// column of the provider list (also used by the title and empty message).
-fn draw_col(buf: &mut Buffer, x: u16, y: u16, right: u16, text: &str, style: Style) {
-    for (i, ch) in text.chars().enumerate() {
-        let cx = x + i as u16;
-        if cx >= right {
-            break;
-        }
-        if let Some(cell) = buf.cell_mut((cx, y)) {
-            cell.set_char(ch);
-            cell.set_style(style);
         }
     }
 }

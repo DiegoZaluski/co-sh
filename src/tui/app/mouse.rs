@@ -851,20 +851,29 @@ impl App {
             return Ok(true);
         }
 
-        // Provider picker (ADD Provider route) hover owns its non-release
-        // events too — same contract as the model picker above: the regular
-        // dispatch below runs only on release, so without this path the
-        // provider highlight could never follow the mouse.
+        // Flat-list route pickers (Internal Tools, ADD Provider) own their
+        // non-release hover events too — same contract as the model picker
+        // above: the regular dispatch below runs only on release, so without
+        // this path the row highlight could never follow the mouse.
         if matches!(
             event_type,
             MouseEventType::Move | MouseEventType::Drag | MouseEventType::Down
-        ) && matches!(self.mode(), AppMode::AddProvider)
-            && !self.dialog.visible()
+        ) && !self.dialog.visible()
+            && matches!(self.mode(), AppMode::InternalTools | AppMode::AddProvider)
         {
-            let area = self.add_provider_mouse_area();
             // The bool result is intentionally discarded: a Move that misses
             // the list simply keeps the current selection.
-            let _ = self.add_provider_view.follow_hover(&mouse, area);
+            let _ = match self.mode() {
+                AppMode::InternalTools => {
+                    let area = self.internal_tools_mouse_area();
+                    self.internal_tools_view.follow_hover(&mouse, area)
+                }
+                AppMode::AddProvider => {
+                    let area = self.add_provider_mouse_area();
+                    self.add_provider_view.follow_hover(&mouse, area)
+                }
+                _ => false,
+            };
             return Ok(true);
         }
 
@@ -1609,14 +1618,7 @@ impl App {
 
         // 8b. Internal Tools view — mouse click on a tool row toggles it
         if matches!(self.mode(), AppMode::InternalTools) && !self.dialog.visible() {
-            let area = self.terminal_size();
-            let main_area = self.main_content_area(area);
-            let tools_area = Rect::new(
-                main_area.x,
-                area.y + 1,
-                main_area.width,
-                main_area.height.saturating_sub(4),
-            );
+            let tools_area = self.internal_tools_mouse_area();
             if let Some(clicked_idx) = self.internal_tools_view.handle_mouse(&mouse, tools_area) {
                 self.internal_tools_view.selection.selected_index = clicked_idx;
                 self.internal_tools_view.toggle_current();
@@ -1674,6 +1676,20 @@ impl App {
             area.y + 1,
             main_area.width,
             main_area.height.saturating_sub(3),
+        )
+    }
+
+    /// Hit-test area of the Internal Tools route — the same shared-geometry
+    /// contract as [`Self::add_provider_mouse_area`]: one rect for hover and
+    /// click so both agree with what the render drew.
+    fn internal_tools_mouse_area(&self) -> Rect {
+        let area = self.terminal_size();
+        let main_area = self.main_content_area(area);
+        Rect::new(
+            main_area.x,
+            area.y + 1,
+            main_area.width,
+            main_area.height.saturating_sub(4),
         )
     }
 

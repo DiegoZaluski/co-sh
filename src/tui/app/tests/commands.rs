@@ -786,3 +786,73 @@ async fn providers_hover_moves_selection_and_release_click_opens_dialog() {
         "the release click must open the provider credential dialog"
     );
 }
+
+/// `/tools` hover-follow (same contract `/providers` got): a Move over a
+/// tool row moves the highlight WITHOUT toggling it, and only the release
+/// click executes the toggle. Exercises the full App dispatch so the hover
+/// arm and the click path cannot drift apart.
+#[tokio::test]
+async fn tools_hover_moves_selection_and_release_click_toggles() {
+    use crossterm::event::{
+        KeyModifiers, MouseButton as CBtn, MouseEvent as CMouse, MouseEventKind as CKind,
+    };
+
+    use super::super::AppMode;
+
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.set_test_size(100, 40);
+    app.run_slash_command(&slash_cmd("tools"));
+    assert!(matches!(app.mode(), AppMode::InternalTools));
+    let before = app.internal_tools_view.selection.selected_index;
+
+    // Render once so the view captures the list geometry (list_start_y),
+    // then hover the SECOND row through the real App dispatch.
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 40)).unwrap();
+    terminal.draw(|f| app.render(f, 0.0)).unwrap();
+
+    let row_y = app.internal_tools_view.list_start_y + 1;
+    app.handle_mouse_event(CMouse {
+        kind: CKind::Moved,
+        column: 40,
+        row: row_y,
+        modifiers: KeyModifiers::NONE,
+    })
+    .expect("hover handled");
+    assert_eq!(
+        app.internal_tools_view.selection.selected_index,
+        before + 1,
+        "hover must follow the mouse to the second row"
+    );
+    assert!(
+        !app.internal_tools_view.changed,
+        "a Move must never toggle the hovered tool"
+    );
+
+    // Release click on the same row executes the selection: the tool under
+    // the highlight is toggled (added to the disabled set).
+    app.handle_mouse_event(CMouse {
+        kind: CKind::Down(CBtn::Left),
+        column: 40,
+        row: row_y,
+        modifiers: KeyModifiers::NONE,
+    })
+    .expect("press handled");
+    app.handle_mouse_event(CMouse {
+        kind: CKind::Up(CBtn::Left),
+        column: 40,
+        row: row_y,
+        modifiers: KeyModifiers::NONE,
+    })
+    .expect("release handled");
+    assert!(
+        app.internal_tools_view.changed,
+        "the release click must toggle the highlighted tool"
+    );
+    assert_eq!(
+        app.internal_tools_view.disabled.len(),
+        1,
+        "exactly the hovered tool must end up disabled"
+    );
+}
