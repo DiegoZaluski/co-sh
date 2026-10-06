@@ -152,7 +152,7 @@ const AUTOMATION: SettingsSection = SettingsSection {
         SettingsItem {
             id: "checkup_min_confidence",
             label: "Checkup min confidence",
-            description: "Confidence floor for a veto: 0 always continues, 1 never does (default 60%)",
+            description: "Confidence floor for a veto: 0 always continues, 1 never does (default 75%)",
             kind: SettingKind::Choice(ChoiceInput::CheckupMinConfidence),
         },
     ],

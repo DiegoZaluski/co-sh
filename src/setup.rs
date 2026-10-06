@@ -462,10 +462,15 @@ pub struct TerminationDecision {
     pub enabled: bool,
     /// Consumer floor for the calibrated `answer_confidence`: a
     /// `NotTerminated` verdict only continues the loop at or above it.
-    /// The 0.6 default is the top edge of the optimal plateau measured
-    /// by the confidence-floor sweep over the loop-termination corpus
-    /// (missed_stops=1, false_continues=3 across floors 0.00–0.60;
-    /// higher floors lose their optimum fast: 0.65 → 2 missed stops).
+    /// The 0.75 default is the measured optimum edge of the
+    /// confidence-floor sweep over the loop-termination corpus
+    /// (`confidence_floor_sweep` in
+    /// crates/cosh-onnx/tests/eval/loop_termination.rs): it keeps the
+    /// sweep's best score (23/24 correct) on the zero-false-continue
+    /// edge — no legitimate ending is vetoed, the single error is one
+    /// missed stop. Lower floors trade that for false continues
+    /// (0.70 → 1, 0.60 → 3); 0.80+ starts missing real stops in bulk
+    /// (5 at 0.80, 7 at 0.85).
     pub min_confidence: f64,
 }
 
@@ -473,7 +478,7 @@ impl Default for TerminationDecision {
     fn default() -> Self {
         Self {
             enabled: true,
-            min_confidence: 0.6,
+            min_confidence: 0.75,
         }
     }
 }
@@ -1430,7 +1435,7 @@ mod tests {
         // Legacy file without the section → audit on (default-ON), default floor.
         let legacy: Setup = serde_json::from_str("{}").unwrap();
         assert!(legacy.decision.termination.enabled);
-        assert!((legacy.decision.termination.min_confidence - 0.6).abs() < f64::EPSILON);
+        assert!((legacy.decision.termination.min_confidence - 0.75).abs() < f64::EPSILON);
         assert!(matches!(
             legacy.decision.model,
             super::DecisionModel::English

@@ -584,3 +584,78 @@ fn confidence_floor_sweep() {
         );
     }
 }
+
+/// Completion-prefix probe: the harness now instructs the agent (one line in
+/// `INSTRUCTIONS_BUILD`) to OPEN the final response with an explicit
+/// completion phrase ("All done", "Work finished"). This probe measures the
+/// effect on the published checkpoint: every `terminated` loop example is
+/// re-scored with the prefix prepended. Success = the four baseline misses
+/// flip to `terminated` WITHOUT any previously-correct example flipping the
+/// other way. Gated like the evals above:
+///
+/// ```text
+/// LAYA_EVAL_MODEL_DIR=/path/to/checkpoint \
+/// cargo test -p cosh-onnx --test eval completion_prefix_probe -- --nocapture
+/// ```
+#[test]
+fn completion_prefix_probe() {
+    let Some(model_dir) = std::env::var("LAYA_EVAL_MODEL_DIR")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        eprintln!("skipping completion_prefix_probe: set LAYA_EVAL_MODEL_DIR");
+        return;
+    };
+    let onnx_path = match std::env::var("LAYA_EVAL_ONNX") {
+        Ok(p) if !p.is_empty() => p,
+        _ => format!("{model_dir}/laya.onnx"),
+    };
+    let model = load(
+        ModelKind::Custom {
+            repo: model_dir.clone(),
+            subfolder: None,
+        },
+        &LoadOptions {
+            onnx_path: Some(onnx_path),
+            hooks_concurrent: Some(false),
+            ..LoadOptions::default()
+        },
+    )
+    .unwrap_or_else(|e| panic!("failed to load {model_dir}: {e}"));
+
+    let qs = loop_questions();
+    println!("\n=== completion-prefix probe: {model_dir} ===");
+    let mut terminated_hits = 0usize;
+    let mut total = 0usize;
+    for example in EXAMPLES.iter().filter(|e| !e.control && e.terminated) {
+        let bare = json!({"message": example.message});
+        let prefixed = json!({"message": format!("All done. {}", example.message)});
+        let bare_said = model
+            .decide(&bare, &qs, None, None, None)
+            .unwrap_or_else(|e| panic!("decide failed (bare): {e}"))["answers"]
+            ["loop_terminated"]["choice"]
+            .as_str()
+            .unwrap_or("<none>")
+            .to_string();
+        let prefixed_result = model
+            .decide(&prefixed, &qs, None, None, None)
+            .unwrap_or_else(|e| panic!("decide failed (prefixed): {e}"));
+        let prefixed_said = prefixed_result["answers"]["loop_terminated"]["choice"]
+            .as_str()
+            .unwrap_or("<none>")
+            .to_string();
+        let prefixed_conf = prefixed_result["answers"]["loop_terminated"]
+            ["answer_confidence"]
+            .as_f64()
+            .unwrap_or(0.0);
+        total += 1;
+        terminated_hits += usize::from(prefixed_said == "terminated");
+        println!(
+            "  [{}→{}] conf={prefixed_conf:.3} — {:?}",
+            bare_said, prefixed_said, example.message
+        );
+    }
+    println!(
+        "terminated recall with prefix: {terminated_hits}/{total} (baseline: see the eval above)"
+    );
+}

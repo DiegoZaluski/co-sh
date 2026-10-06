@@ -210,7 +210,7 @@ model runs there. They remain part of the file schema for binaries built with
 | Field | Default | What it controls |
 |---|---:|---|
 | `termination.enabled` | `true` | Enables the local model's termination review. |
-| `termination.min_confidence` | `0.6` | Confidence floor for a “not finished” verdict to continue the loop. Range `0..=1`. |
+| `termination.min_confidence` | `0.75` | Confidence floor for a “not finished” verdict to continue the loop. Range `0..=1`. Measured optimum edge of the confidence-floor sweep over the loop-termination corpus: no legitimate ending is vetoed, the single corpus error is one missed stop. |
 | `model` | `english` | Checkpoint kind: `english`, `multilingual`, or `typed_decisions`; the TUI displays the last one as `typed-decisions`. |
 | `hub.repo` | `Zaluski/laya-onnx` | Model-weight mirror repository. |
 | `hub.pinned_repo` | `""` | Repository to which the recorded revision belongs. |

@@ -94,6 +94,7 @@ pub const INSTRUCTIONS_BUILD: &str = concat!(
     "- Avoid unnecessary narration or descriptions of obvious actions.\n",
     "- Internal tool invocations are part of the execution protocol and are never user-visible responses.\n",
     "- When the current user request has been fully completed and no further action is required, invoke `stop_agent_loop`.\n",
+    "- When the work is fully complete, say so explicitly: open the final response with a completion phrase such as `All done` or `Work finished`, followed by a brief, direct summary of what was done — do not pad the report with leftover ideas.\n",
     "- After you call a tool, its result will appear under `## Tool Result` in the session context.\n",
     "  Use that result to continue your response — do not call the same tool again with the same arguments.\n",
     "  After an edit tool (fs_edit, fs_edit_lines, fs_ast_edit), the result carries the\n",
@@ -799,7 +800,15 @@ impl Harness {
             approved_paths: HashSet::new(),
             fallbacks: Vec::new(),
             checkup: None,
-            checkup_min_confidence: 0.6,
+            // Measured, not conventional: the confidence-floor sweep over the
+            // `loop_termination` corpus (`confidence_floor_sweep` in
+            // crates/cosh-onnx/tests/eval/loop_termination.rs) — 0.75 keeps
+            // the sweep's optimum (23/24 correct) on the zero-false-continue
+            // edge: no legitimate ending is vetoed, the single error is one
+            // missed stop. Lower floors trade that for false continues
+            // (0.70 → 1, 0.60 → 3); 0.80+ starts missing real stops in bulk
+            // (5 at 0.80, 7 at 0.85).
+            checkup_min_confidence: 0.75,
             summarization_models: Vec::new(),
             summarization_connector: None,
             summarization_window: None,
@@ -5085,10 +5094,19 @@ impl Harness {
                                 .to_string(),
                             variant: ToastVariant::Info,
                         });
-                        current_input = "Your previous response read as final, but the \
-                             task does not appear complete. Continue exactly where \
-                             you left off and finish the remaining work."
-                            .to_string();
+                        // The injected turn is deliberately a bare
+                        // `continue`: the veto disagrees with the model's
+                        // own stop, so the loop must hand the decision
+                        // BACK to the model, not argue with it. Any
+                        // coaching ("finish the remaining work") confirms
+                        // a running state the model can never disprove —
+                        // it would keep producing summaries and the
+                        // checkup would keep vetoing them, the worst-case
+                        // infinite loop. A bare `continue` lets the next
+                        // response either stand by its completion (the
+                        // checkup audits a final summary again) or
+                        // dispatch actual work.
+                        current_input = "continue".to_string();
                         continue;
                     }
                 }
@@ -5843,7 +5861,15 @@ impl Harness {
             approved_paths: HashSet::new(),
             fallbacks: Vec::new(),
             checkup: None,
-            checkup_min_confidence: 0.6,
+            // Measured, not conventional: the confidence-floor sweep over the
+            // `loop_termination` corpus (`confidence_floor_sweep` in
+            // crates/cosh-onnx/tests/eval/loop_termination.rs) — 0.75 keeps
+            // the sweep's optimum (23/24 correct) on the zero-false-continue
+            // edge: no legitimate ending is vetoed, the single error is one
+            // missed stop. Lower floors trade that for false continues
+            // (0.70 → 1, 0.60 → 3); 0.80+ starts missing real stops in bulk
+            // (5 at 0.80, 7 at 0.85).
+            checkup_min_confidence: 0.75,
             summarization_models: Vec::new(),
             summarization_connector: None,
             summarization_window: None,

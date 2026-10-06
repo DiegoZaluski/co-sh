@@ -16,6 +16,18 @@
 //! enrichment shapes above were rejected on these numbers, and the doc
 //! comments in `src/harness/checkup.rs` cite this probe as evidence. Re-run
 //! it when a request-aware checkpoint ships (its result may flip).
+//!
+//! SECOND NEGATIVE RESULT (paired-eval follow-up): candidates I/J (the
+//! surface-form criteria — "explicit closure or past-tense account") won the
+//! probe matrix (I: 7/8 vs baseline 5/8) but LOST on the full
+//! `loop_termination` corpus: I dropped all/loop 0.8333→0.7500
+//! (label/terminated 0.7143→0.5714), J reached 0.7917
+//! (label/terminated 0.6429) — both below the 0.80 production gate. A tiny
+//! probe matrix is too small to rank wordings: it promoted exactly the
+//! wording the corpus rejects. The paired change (eval + checkup consumer)
+//! was reverted; the criteria stay frozen at the benchmark-locked wording
+//! until a checkpoint trained on a changed question ships. The candidate
+//! shapes and the extra labelled pairs are kept below for future probes.
 
 use std::collections::HashMap;
 
@@ -57,6 +69,36 @@ const PAIRS: &[Pair] = &[
         request: "The build is failing; find the root cause and fix it.",
         response: "Reading the stack trace... the failure seems to come from the parser.",
         terminated: false,
+    },
+    // PRODUCTION FALSE-POSITIVE CLASS: a closing summary that also lists
+    // what REMAINS (non-blocking leftovers). The laya.log vetoes hit exactly
+    // this shape — the summary is complete, but the words "remaining" and
+    // "later" read as unfinished work.
+    Pair {
+        request: "Revise o commit 973446 e corrija os problemas encontrados.",
+        response: "Revisão concluída. Corrigi o guarda obsoleto do SessionStream com um CAS de fase, reativei o teste de prova e reescrevi a documentação do contrato. A suíte completa passou: 609 testes, clippy no baseline. Sobram apenas melhorias não-bloqueantes, já registradas para um commit futuro.",
+        terminated: true,
+    },
+    // ADVERSARIAL for the past-tense wording: past-tense narration that is
+    // NOT a stop — the tense alone must never mean "terminated".
+    Pair {
+        request: "Configure o ambiente de build do projeto.",
+        response: "Instalei as dependências e gerei o lockfile. Agora vou compilar o binário para validar a configuração.",
+        terminated: false,
+    },
+    // Past-tense with an explicit remaining step: the strongest trap for any
+    // wording that keys on "what was done" — the done-part is real but the
+    // loop keeps going.
+    Pair {
+        request: "Rode a suíte de testes completa.",
+        response: "Rodei os testes de unidade; os de integração ainda precisam rodar antes do relatório final.",
+        terminated: false,
+    },
+    // English closing summary (the consumer's most common language).
+    Pair {
+        request: "Fix the flaky test and update the changelog.",
+        response: "Done. Fixed the flaky test by pinning the clock, updated the changelog, and ran the full suite: 609 passed, 0 failed. No remaining work.",
+        terminated: true,
     },
 ];
 
@@ -101,6 +143,24 @@ const CRITERIA_DIRECT: (&str, &str) = (
 const CRITERIA_QA: (&str, &str) = (
     "the exchange is closed: the response fully settles what was asked or reports the work as done, nothing left to do",
     "the exchange is open: the response announces or implies further work — reading or writing files, running commands, starting the next step",
+);
+
+/// SURFACE-FORM criteria (candidate I): terminated keys on what legitimate
+/// stops TEXTUALLY look like — an explicit closure marker, or a past-tense
+/// account of what was done, where, and why. Running keeps its original
+/// forward-looking anchor so only the missed side is reworded.
+const CRITERIA_SURFACE: (&str, &str) = (
+    "the loop ended with this text: it explicitly closes the work, or it reports in the past tense what was done, where it was done, and why — with no next step named",
+    "the loop is still going: the agent will read or write files, run commands, or start the next step",
+);
+
+/// SURFACE-FORM criteria, BOTH sides (candidate J): running is also rewritten
+/// to key on the surface forms of continuations — future/progressive
+/// announcements, named next steps, or anything stated as still pending —
+/// so the decision contrasts closed accounts against open ones.
+const CRITERIA_SURFACE_BOTH: (&str, &str) = (
+    "the loop ended with this text: it explicitly closes the work, or it reports in the past tense what was done, where it was done, and why — with no next step named",
+    "the loop is still going: the text announces future work (\"will\", \"going to\", \"now I will\"), names a next step, or states anything as still pending or remaining to do",
 );
 
 fn shapes() -> Vec<Shape> {
@@ -173,6 +233,30 @@ fn shapes() -> Vec<Shape> {
             }),
             instructions: INSTR_TWO_FIELD,
             criteria: CRITERIA_QA,
+        },
+        // CANDIDATE (the "mini prompt" idea): state untouched, the terminated
+        // criterion rewritten to describe EXACTLY what legitimate stops look
+        // like — explicit closure wording or a past-tense account of what was
+        // done, where, and why — while running keeps its forward-looking
+        // anchor. The hypothesis: a tiny model keys on surface form
+        // (tense/closure markers), not on "task completeness", so naming the
+        // surface form in the criterion should raise the recall of real
+        // summaries without lifting next-step announcements.
+        Shape {
+            name: "I. bare message + surface-form criteria (past-tense/closure)",
+            build: |p| json!({ "message": p.response }),
+            instructions: INSTR_MESSAGE,
+            criteria: CRITERIA_SURFACE,
+        },
+        // A sharper variant: the running criterion ALSO rewritten to point at
+        // the surface forms of continuations (future/progressive announcements,
+        // named next steps, anything still pending), so both sides of the
+        // decision are form-based rather than intent-based.
+        Shape {
+            name: "J. bare message + surface-form criteria (both sides)",
+            build: |p| json!({ "message": p.response }),
+            instructions: INSTR_MESSAGE,
+            criteria: CRITERIA_SURFACE_BOTH,
         },
     ]
 }
