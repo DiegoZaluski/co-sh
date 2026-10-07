@@ -5,7 +5,7 @@ use cosh_tui::core::renderables::markdown::MarkdownRenderable;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 
 use crate::theme::{Theme, blend, contrast_fg, rgba_color};
 use crate::util::text_region::{TextRegion, text_from_cell_row};
@@ -2973,14 +2973,26 @@ mod tests {
             let mut buf = Buffer::empty(Rect::new(0, 0, w, est as u16 + 2));
             let md = MarkdownRenderable::new(Some(body.clone()));
             md.render_self(&mut buf, Rect::new(0, 0, w, est as u16));
-            let painted = (0..est)
-                .filter(|&y| {
-                    (0..w).any(|x| buf.cell((x, y as u16)).is_some_and(|c| c.symbol() != " "))
+            // Occupied = any glyph OR any non-default background (language-
+            // less fences paint their top/bottom padding as blank rows with
+            // the code background — invisible to a symbol-only scan but very
+            // much part of the painted layout the estimate must match).
+            let occupied = |y: u16| {
+                (0..w).any(|x| {
+                    buf.cell((x, y)).is_some_and(|c| {
+                        c.symbol() != " " || c.bg != Color::Reset
+                    })
                 })
-                .count();
+            };
+            let painted = (0..est).filter(|&y| occupied(y as u16)).count();
             assert_eq!(
                 est, painted,
                 "estimate must match painted layout for fenced body at w={w}"
+            );
+            // No phantom row BELOW the estimated layout either.
+            assert!(
+                !((est as u16)..(est as u16 + 2)).any(occupied),
+                "no rows painted beyond the estimate at w={w}"
             );
         }
     }
