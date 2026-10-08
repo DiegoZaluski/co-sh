@@ -1297,17 +1297,23 @@ pub(crate) fn spawn_bash_pty_cfg(
 
                 // PTY hung up (child exited).
                 if poll_fds[0].revents & (libc::POLLHUP | libc::POLLERR) != 0 {
-                    // Drain any remaining data before breaking.
-                    match reader.read(&mut buf) {
-                        Ok(0) | Err(_) => {}
-                        Ok(n) => {
-                            let _ = tx.send(Ok(SpawnOutput {
-                                stdout: buf[..n].to_vec(),
-                                stderr: vec![],
-                                exit_code: None,
-                                signal: None,
-                                truncated: n == BUFFER_SIZE,
-                            }));
+                    // Drain any remaining data before breaking. POLLHUP can
+                    // race with buffered kernel data (poll reports HUP while
+                    // data is still readable — Linux permits both), and one
+                    // read is not guaranteed to consume the whole buffer, so
+                    // loop until EOF; Ok(0) ends the drain.
+                    loop {
+                        match reader.read(&mut buf) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => {
+                                let _ = tx.send(Ok(SpawnOutput {
+                                    stdout: buf[..n].to_vec(),
+                                    stderr: vec![],
+                                    exit_code: None,
+                                    signal: None,
+                                    truncated: n == BUFFER_SIZE,
+                                }));
+                            }
                         }
                     }
                     break;

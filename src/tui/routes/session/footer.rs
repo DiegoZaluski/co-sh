@@ -211,7 +211,10 @@ mod tests {
         let line: String = (area.x..area.right())
             .filter_map(|x| buf.cell((x, area.y)).map(|cell| cell.symbol()))
             .collect();
-        assert!(line.contains("v0.1.1 → v0.1.2"), "line: {line}");
+        assert!(
+            line.contains(concat!("v", env!("CARGO_PKG_VERSION"), " → v0.1.2")),
+            "line: {line}"
+        );
 
         // The hitbox covers exactly the `v0.1.2` glyphs.
         let hitbox = hitbox.expect("button hitbox drawn");

@@ -2708,11 +2708,12 @@ fn test_code_block_bottom_padding_not_overlapped() {
         view.actual_total_height, view.cached_total_height
     );
 
-    // Sanity-check the drawn rows: code lines at rows 0-1, then the
-    // reply right after the block's real content (the fence's PHANTOM
-    // trailing blank is no longer reserved) plus the inter-message gap:
-    // reply at row 3. If the block overlapped the reply, it would start
-    // at row 2.
+    // Sanity-check the drawn rows: the language-less fence paints a blank
+    // top-padding row (invisible to a glyph scan) at row 0, code lines at
+    // rows 1-2, then the bottom padding + inter-message gap (also blank),
+    // and the reply right after the block's real content — the fence's
+    // PHANTOM trailing blank is no longer reserved — so the reply lands at
+    // row 4. If the block overlapped the reply, it would start at row 3.
     let mut reply_rows = Vec::new();
     for row in 0..12 {
         let has = (5..85).any(|cx| {
@@ -2725,7 +2726,7 @@ fn test_code_block_bottom_padding_not_overlapped() {
     }
     assert_eq!(
         reply_rows,
-        vec![0, 1, 3],
+        vec![1, 2, 4],
         "unexpected glyph layout: the reply must follow the fence's painted \
          rows with only the inter-message gap between them"
     );

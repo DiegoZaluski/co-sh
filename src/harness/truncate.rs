@@ -210,7 +210,13 @@ fn write_middle_log(middle: &str) -> Option<PathBuf> {
     let dir = scratch_log_dir();
     std::fs::create_dir_all(&dir).ok()?;
     let path = dir.join(format!("{:016x}.log", xxh64(middle.as_bytes(), 0)));
-    std::fs::write(&path, middle).ok()?;
+    // Content-addressed name shared by every cosh process on the machine
+    // (dedup by design). Write to a temp name and rename so a concurrent
+    // reader never observes a half-written (or empty) file — `fs::write`
+    // truncates first, so a racing reader could read an empty log.
+    let tmp = dir.join(format!("{:016x}.{}.tmp", xxh64(middle.as_bytes(), 0), std::process::id()));
+    std::fs::write(&tmp, middle).ok()?;
+    std::fs::rename(&tmp, &path).ok()?;
     Some(path)
 }
 

@@ -371,9 +371,36 @@ mod tests {
     /// assert on the DRAIN side (`take_ready_notifications`) — parallel
     /// tests would drain each other's notifications. Serialize every test
     /// that touches the registry behind one lock.
-    fn registry_lock() -> std::sync::MutexGuard<'static, ()> {
+    ///
+    /// The guard also RESETS the registry when dropped: a test that leaves a
+    /// `Running` task behind (e.g. the prune fixture) would otherwise wedge
+    /// every later `run_agent_loop` test in the same process — the loop's
+    /// busy-guard waits for outstanding background tasks before `Done`, and
+    /// a leaked `Running` entry never completes.
+    fn registry_lock() -> RegistryGuard<'static> {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock().unwrap_or_else(|p| p.into_inner())
+        let guard = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        RegistryGuard { guard }
+    }
+
+    /// RAII wrapper around [`registry_lock`]'s mutex: resetting the registry
+    /// when the guard drops guarantees a test cannot leak registry entries
+    /// (notably a `Running` task) into later tests in the same process — the
+    /// `run_agent_loop` busy-guard waits for outstanding background tasks
+    /// before `Done`, so a leaked `Running` entry wedges every later
+    /// agent-loop test until the 5s event timeout.
+    struct RegistryGuard<'a> {
+        /// Held for the guard's lifetime; never dereferenced directly — its
+        /// purpose is to keep the registry serialized until the test ends.
+        #[allow(dead_code)]
+        guard: std::sync::MutexGuard<'a, ()>,
+    }
+
+    impl Drop for RegistryGuard<'_> {
+        fn drop(&mut self) {
+            *registry().lock().unwrap_or_else(|p| p.into_inner()) =
+                RegistryState::default();
+        }
     }
 
     #[test]

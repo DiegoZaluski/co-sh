@@ -1113,27 +1113,6 @@ impl Tools for CoshTools {
                         output.push_str(&text);
                     }
 
-                    // Flush the unfinished tail BEFORE the exit-code/signal
-                    // annotations: a command whose last line lacks `\n` and
-                    // exits non-zero must read `...tail\nexit code: N`, not
-                    // `exit code: N...tail`.
-                    if !carry.is_empty() {
-                        let text = cosh_tools::bash::strip_ansi(&carry);
-                        carry.clear();
-                        if !text.is_empty() {
-                            if let Some(ref tx) = self.event_tx {
-                                let _ = tx.send(HarnessEvent::ToolOutput {
-                                    tool: "bash_run".to_string(),
-                                    output: text.clone(),
-                                    finished: false,
-                                    agent: None,
-                                    call_ref: None,
-                                });
-                            }
-                            output.push_str(&text);
-                        }
-                    }
-
                     // Append non-zero exit code
                     if let Some(code) = chunk.exit_code
                         && code != 0
@@ -1150,6 +1129,34 @@ impl Tools for CoshTools {
                             output.push('\n');
                         }
                         let _ = write!(output, "signal: {sig}");
+                    }
+                }
+
+                // Flush the unfinished tail (a final line without `\n`, or a
+                // multi-byte char / escape sequence split across the last
+                // chunks) once, AFTER the stream ends — before the
+                // exit-code/signal annotations: a command whose last line
+                // lacks `\n` and exits non-zero must read
+                // `...tail\nexit code: N`, not `exit code: N...tail`.
+                // Flushing inside the per-chunk loop would discard the carry
+                // after every chunk, so a partial line (and any partially
+                // received UTF-8 char in it) would be stripped alone — the
+                // vte parser drops an incomplete UTF-8 lead and the next
+                // chunk's continuation bytes turn into U+FFFD garbage.
+                if !carry.is_empty() {
+                    let text = cosh_tools::bash::strip_ansi(&carry);
+                    carry.clear();
+                    if !text.is_empty() {
+                        if let Some(ref tx) = self.event_tx {
+                            let _ = tx.send(HarnessEvent::ToolOutput {
+                                tool: "bash_run".to_string(),
+                                output: text.clone(),
+                                finished: false,
+                                agent: None,
+                                call_ref: None,
+                            });
+                        }
+                        output.push_str(&text);
                     }
                 }
 

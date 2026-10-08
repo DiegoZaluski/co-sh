@@ -235,6 +235,13 @@ async fn global_model_loads_applies_and_overwrites() {
         r#"{"model": {"provider": "nvidia", "model": "deepseek-ai/deepseek-v4-pro", "reasoning": "high"}}"#,
     )
     .unwrap();
+    // Startup only restores a CONCRETE selection whose provider still has a
+    // usable credential (the keyless restore would show a footer provider
+    // that cannot authenticate). Seed the env fallback so the check passes
+    // deterministically — on machines without the key in the OS keyring the
+    // test must not depend on the developer's live credential state.
+    // SAFETY: HOME_LOCK serializes env mutation across these tests.
+    unsafe { std::env::set_var("NVIDIA_API_KEY", "test-key") };
 
     let mut app = App::new("/tmp".to_string());
     assert_eq!(
@@ -287,6 +294,9 @@ async fn global_model_loads_applies_and_overwrites() {
     );
     assert_eq!(on_disk["model"]["provider"], "xai");
     assert_eq!(on_disk["model"]["reasoning"], "medium");
+    // SAFETY: restore the machine's state for the other tests (HOME_LOCK is
+    // still held).
+    unsafe { std::env::remove_var("NVIDIA_API_KEY") };
 }
 
 /// An `auto` selection is recorded as a model with an empty provider — the
