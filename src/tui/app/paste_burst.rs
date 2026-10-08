@@ -250,6 +250,18 @@ impl PasteBurstState {
 }
 
 impl App {
+    /// Whether a plain text key landed within the paste-burst window
+    /// (`BURST_WINDOW` of the last text character). The Ctrl+Alt+L handler
+    /// uses this to tell an AltGr CHARACTER from the chord: on ABNT layouts
+    /// `l` arrives encoded as Char+CTRL|ALT, exactly like the shortcut, but
+    /// a real user cannot hit a chord within 80 ms of typing text — only a
+    /// paste (or AltGr burst) can.
+    pub(super) fn paste_burst_text_recent(&self) -> bool {
+        self.paste_burst
+            .last_text_key_at
+            .is_some_and(|t| is_recent(t, Instant::now()))
+    }
+
     /// True when the chat prompt is the keyboard owner: no modal dialog,
     /// form, panel or mode-specific input is intercepting keys.
     ///

@@ -45,6 +45,12 @@ impl BackgroundStatus {
 struct BackgroundTask {
     id: String,
     agent: String,
+    /// Routing identity of the `subagent_call` that spawned this task (the
+    /// per-call ref the TUI bound the window with at `ToolCall` time). The
+    /// completion notification carries it back so the report lands in ITS
+    /// window — two parallel same-CLI spawns share the agent name but never
+    /// the ref.
+    call_ref: Option<String>,
     /// Head of the prompt the task was spawned with — context for the model
     /// when it lists several tasks at once.
     input_preview: String,
@@ -106,13 +112,14 @@ fn now_ms() -> u64 {
 /// finished ones whose notification is still undelivered (pruning would
 /// silently drop the push). Only fully-delivered finished tasks are reclaim
 /// candidates.
-pub fn register(agent: &str, input_preview: &str) -> String {
+pub fn register(agent: &str, input_preview: &str, call_ref: Option<String>) -> String {
     let mut state = registry().lock().unwrap_or_else(|p| p.into_inner());
     state.next_id += 1;
     let id = format!("bg-{}", state.next_id);
     state.tasks.push(BackgroundTask {
         id: id.clone(),
         agent: agent.to_string(),
+        call_ref,
         input_preview: truncate_head(input_preview, INPUT_PREVIEW_CHARS),
         status: BackgroundStatus::Running,
         started_ms: now_ms(),
@@ -239,7 +246,9 @@ fn entry_json(task: &BackgroundTask) -> serde_json::Value {
 /// start of each iteration (nested agents must not drain — a notification
 /// would otherwise be injected into the sub-agent's context instead of the
 /// main agent's). Empty when nothing finished since the last drain.
-pub fn take_ready_notifications() -> Vec<String> {
+/// Each ready note pairs with its task's spawn-time `call_ref` so the TUI
+/// can route the completion to the EXACT window that call opened.
+pub fn take_ready_notifications() -> Vec<(String, Option<String>)> {
     let mut state = registry().lock().unwrap_or_else(|p| p.into_inner());
     let mut notes = Vec::new();
     for task in &mut state.tasks {
@@ -247,7 +256,7 @@ pub fn take_ready_notifications() -> Vec<String> {
             continue;
         }
         task.notified = true;
-        notes.push(notification_text(task));
+        notes.push((notification_text(task), task.call_ref.clone()));
     }
     notes
 }
@@ -370,8 +379,8 @@ mod tests {
     #[test]
     fn register_assigns_unique_monotonic_ids() {
         let _guard = registry_lock();
-        let a = register("agent-a", "first prompt");
-        let b = register("agent-a", "second prompt");
+        let a = register("agent-a", "first prompt", None);
+        let b = register("agent-a", "second prompt", None);
         assert_ne!(a, b);
         assert!(a.starts_with("bg-"));
         assert!(b.starts_with("bg-"));
@@ -380,10 +389,14 @@ mod tests {
     #[test]
     fn completed_task_reports_and_notifies_once() {
         let _guard = registry_lock();
-        let id = register("agent-b", "do the thing");
+        let id = register("agent-b", "do the thing", None);
         // While running: visible as running, no notification.
         assert!(status_report(Some(&id)).contains("\"running\""));
-        assert!(!take_ready_notifications().iter().any(|n| n.contains(&id)));
+        assert!(
+            !take_ready_notifications()
+                .iter()
+                .any(|(n, _)| n.contains(&id))
+        );
 
         complete(&id, Some("the final report".to_string()), None);
         let json = status_report(Some(&id));
@@ -393,11 +406,15 @@ mod tests {
         // Push: exactly one notification for this task, then never again.
         let notes = take_ready_notifications();
         assert_eq!(
-            notes.iter().filter(|n| n.contains(&id)).count(),
+            notes.iter().filter(|(n, _)| n.contains(&id)).count(),
             1,
             "one completion notification expected, got {notes:?}"
         );
-        assert!(!take_ready_notifications().iter().any(|n| n.contains(&id)));
+        assert!(
+            !take_ready_notifications()
+                .iter()
+                .any(|(n, _)| n.contains(&id))
+        );
         // Poll still answers after the notification was drained.
         assert!(status_report(Some(&id)).contains("the final report"));
     }
@@ -405,7 +422,7 @@ mod tests {
     #[test]
     fn failed_task_keeps_partial_output_and_error() {
         let _guard = registry_lock();
-        let id = register("agent-c", "risky task");
+        let id = register("agent-c", "risky task", None);
         complete(
             &id,
             Some("partial work".to_string()),
@@ -417,9 +434,9 @@ mod tests {
         assert!(json.contains("connector exploded"));
 
         let notes = take_ready_notifications();
-        let note = notes
+        let (note, _) = notes
             .iter()
-            .find(|n| n.contains(&id))
+            .find(|(n, _)| n.contains(&id))
             .expect("failed task must notify");
         assert!(note.contains("[automated notification]"));
         assert!(note.contains("failed: connector exploded"));
@@ -440,7 +457,7 @@ mod tests {
     #[test]
     fn list_includes_task_with_input_preview() {
         let _guard = registry_lock();
-        let id = register("agent-d", "preview me please");
+        let id = register("agent-d", "preview me please", None);
         let list = status_report(None);
         assert!(list.contains(&id));
         assert!(list.contains("preview me please"));
@@ -453,14 +470,14 @@ mod tests {
         // interleave one RUNNING and one FINISHED-but-undelivered task.
         // Both must survive a prune; the oldest delivered task must not.
         for _ in 0..MAX_TASKS {
-            let id = register("agent-prune", "filler");
+            let id = register("agent-prune", "filler", None);
             complete(&id, Some("done".to_string()), None);
             let _ = take_ready_notifications(); // mark delivered
         }
-        let running = register("agent-prune", "still running");
-        let undelivered = register("agent-prune", "finished but not drained");
+        let running = register("agent-prune", "still running", None);
+        let undelivered = register("agent-prune", "finished but not drained", None);
         complete(&undelivered, Some("late report".to_string()), None);
-        register("agent-prune", "trigger the prune");
+        register("agent-prune", "trigger the prune", None);
 
         let list = status_report(None);
         assert!(list.contains(&running), "running task must survive prune");
@@ -478,7 +495,7 @@ mod tests {
     fn busy_guard_reports_running_task_for_agent() {
         let _guard = registry_lock();
         assert_eq!(running_task_for("agent-busy"), None, "no task yet");
-        let id = register("agent-busy", "occupy the agent");
+        let id = register("agent-busy", "occupy the agent", None);
         assert_eq!(running_task_for("agent-busy"), Some(id.clone()));
         // Other agents are unaffected.
         assert_eq!(running_task_for("agent-other"), None);

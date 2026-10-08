@@ -44,59 +44,13 @@ async fn toggled_mode_persists_and_restores_for_new_sessions() {
     assert_eq!(legacy.state.mode, Mode::Build);
 }
 
-/// Alt+← / Alt+→ (NextAgent/PrevAgent keymap bindings) must switch the
-/// right-panel focus across agent queues — the ONLY way to reach a
-/// queue whose windows are hidden for lack of space.
-#[tokio::test]
-async fn alt_arrows_switch_agent_queue_through_keymap() {
-    use crate::routes::session::right_panel::types::{PanelFocus, RightPanelState};
-
-    let _home = HOME_LOCK.lock();
-    let mut app = App::new("/tmp".to_string());
-    app.state.add_empty_session("t".into(), "t".into(), 0);
-    app.state.current_session_id = Some("t".into());
-    let mut panel = RightPanelState::new();
-    for agent in ["kilo", "opencode"] {
-        panel.start_pty(format!("subagent: {agent}"), None);
-        panel.complete_last_pty(format!("{agent} report\n"));
-    }
-    panel.panel_focus = Some(PanelFocus::Agent("opencode".to_string()));
-    app.state.right_panel = panel;
-
-    // Alt+← → previous queue (kilo).
-    app.process_key_event(mod_key(KeyCode::Left, KeyModifiers::ALT))
-        .unwrap();
-    assert_eq!(
-        app.state.right_panel.panel_focus,
-        Some(PanelFocus::Agent("kilo".to_string())),
-        "Alt+Left must cycle to the previous agent queue"
-    );
-
-    // Alt+→ → back to opencode.
-    app.process_key_event(mod_key(KeyCode::Right, KeyModifiers::ALT))
-        .unwrap();
-    assert_eq!(
-        app.state.right_panel.panel_focus,
-        Some(PanelFocus::Agent("opencode".to_string()))
-    );
-
-    // Terminals that attach extra modifier bits to Alt+arrows must
-    // still cycle (the exact-match keymap lookup misses those).
-    let extra = KeyModifiers::ALT | KeyModifiers::SHIFT;
-    app.process_key_event(mod_key(KeyCode::Left, extra))
-        .unwrap();
-    assert_eq!(
-        app.state.right_panel.panel_focus,
-        Some(PanelFocus::Agent("kilo".to_string())),
-        "Alt+Left with stray modifiers must still cycle queues"
-    );
-}
-
-/// Documents WHY Alt+arrows can never switch queues on terminals that
-/// strip the ALT modifier from arrow encodings (`\x1b[D`, `\x1bOD`):
-/// crossterm then reports a PLAIN Left/Right, which — while an agent
-/// queue is focused — steps THAT queue's history instead. The bytes are
-/// indistinguishable from a real plain arrow press.
+/// Documents WHY plain arrow keys can never switch agent queues on
+/// terminals that strip the ALT modifier from arrow encodings (`\x1b[D`,
+/// `\x1bOD`): crossterm then reports a PLAIN Left/Right, which — while an
+/// agent queue is focused — steps THAT queue's history instead. The bytes
+/// are indistinguishable from a real plain arrow press. (Alt+← / Alt+→
+/// queue-switching was removed: subagents are presented as ONE list, not
+/// per-CLI groups — Shift+B / Shift+N remain the queue switchers.)
 #[tokio::test]
 async fn plain_left_arrow_with_agent_focus_steps_queue_not_switch() {
     use crate::routes::session::right_panel::types::{PanelFocus, RightPanelState};
@@ -552,5 +506,70 @@ async fn function_keys_f1_to_f4_switch_the_panel_owner() {
     assert_eq!(
         app.state.right_panel.maximized_section, None,
         "F4 must bring the mixed view back"
+    );
+}
+
+/// REGRESSION: with the agent IDLE, Esc over an expanded subagent block
+/// must FOLD it into the list — not fall through to the cancel path and
+/// LEAVE the session. The fold used to run without consuming the key, so
+/// it only "worked" while the model was running (the Working branch
+/// swallowed the fall-through); idle, the same keypress reached the
+/// leave-to-Home path and exited the session the user was looking at.
+#[tokio::test]
+async fn esc_over_expanded_subagent_folds_and_stays_in_session_when_idle() {
+    use super::super::AppMode;
+    use crate::routes::session::right_panel::types::{RightPanelState, SectionKind, SectionLayout};
+
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    app.set_test_size(140, 40);
+    let mut panel = RightPanelState::new();
+    panel.start_pty("subagent: kilo".into(), None);
+    panel.complete_last_pty("kilo report\n".into());
+    // Expanded view (a click/F-key opened it): the list is NOT active, so
+    // the next Esc has a fold to perform.
+    panel.subagent_list_mode = Some(false);
+    // A Subagent section band the cursor sits inside — section layouts are
+    // normally recorded by the renderer; a synthetic band keeps this test
+    // key-only.
+    panel.section_layouts.push(SectionLayout {
+        kind: SectionKind::Subagent,
+        top: 10,
+        bottom: 30,
+        content_top: 11,
+    });
+    app.state.right_panel = panel;
+    // Cursor over the subagent section inside the right panel.
+    app.last_mouse_x = 140 - crate::routes::session::right_panel::RIGHT_PANEL_WIDTH;
+    app.last_mouse_y = 12;
+
+    // First Esc: folds the expanded subagent into the list AND stays in
+    // the session (the agent is idle — this used to exit instead).
+    app.process_key_event(mod_key(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(
+        app.state.right_panel.subagent_list_mode,
+        Some(true),
+        "Esc over the expanded subagent block must fold it into the list"
+    );
+    assert!(
+        matches!(app.mode(), AppMode::Session),
+        "the folding Esc must NOT leave the session while the agent is idle"
+    );
+    assert!(
+        app.state.right_panel.panel_focus.is_none(),
+        "the folding Esc must also release the panel slot focus"
+    );
+
+    // Second Esc: the list is now active (nothing to fold), so Esc keeps
+    // its normal meaning — leave the session (agent still idle).
+    app.process_key_event(mod_key(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+    assert!(
+        !matches!(app.mode(), AppMode::Session),
+        "with the list active, Esc falls through to the leave-to-Home path"
     );
 }

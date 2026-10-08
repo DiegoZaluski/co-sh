@@ -23,6 +23,10 @@ use ratatui::buffer::{Buffer, Cell};
 use crate::types::{Part, Session, ToolStatus};
 use crate::util::text_region::{TextRegion, extract_text_in_region};
 
+use crate::component::spinner::SpinnerState;
+
+use cosh_tools::subagent::SubAgent;
+
 use cosh_tools::subagent::events::{
     PlanEntry, PlanEntryStatus, SubagentEvent, ToolCallStatus, ToolKind,
 };
@@ -34,6 +38,12 @@ use cosh_tools::subagent::events::{
 /// entries remain visible in the chat transcript's tool boxes.
 const REHYDRATE_BASH_KEEP: usize = 1;
 const REHYDRATE_SUBAGENT_KEEP_PER_AGENT: usize = 3;
+
+/// One persisted subagent call collected during rehydration:
+/// (agent CLI, `"→ cosh:"` input line, task description, review flag,
+/// output text, whether the call failed). A named record — the raw tuple
+/// it replaced tripped `clippy::type_complexity` at six fields.
+type RehydratedSubagent = (String, Option<String>, Option<String>, bool, String, bool);
 
 /// Minimum gap between subagent layout rebuilds (heights + rendered body
 /// cells). During streaming, chunks arrive far more often than the eye can
@@ -204,42 +214,71 @@ pub(crate) fn activity_block_height(text: &str, wrap_w: u16) -> u16 {
     estimate_height(text, wrap_w).max(1)
 }
 
-/// Split a subagent PTY output into the optional main-agent input line
-/// (`→ cosh: ...`, prepended by `app/events.rs` when the tool call carries an
-/// `input`) and the remaining subagent body. When the output was truncated
-/// (tail-only retention) the prefix may be gone — then everything is body.
+/// Split a subagent PTY output into the optional main-agent input block
+/// (every LEADING `→ cosh: ...` line — the FULL prompt is echoed verbatim,
+/// one marker per line, by `app/events.rs` when the tool call carries an
+/// `input`) and the remaining subagent body. A marker-less line ENDS the
+/// input block (a stray body line can never be swallowed). When the output
+/// was truncated (tail-only retention) the prefix may be gone — then
+/// everything is body.
 pub(crate) fn split_subagent_output(output: &str) -> (Option<&str>, &str) {
     if !output.starts_with("→ cosh:") {
         return (None, output);
     }
-    match output.find('\n') {
-        Some(i) => (Some(&output[..i]), &output[i + 1..]),
-        None => (Some(output), ""),
+    let mut consumed = 0usize;
+    for line in output.split_inclusive('\n') {
+        if line.starts_with("→ cosh:") {
+            consumed += line.len();
+        } else {
+            break;
+        }
     }
+    let (input, body) = output.split_at(consumed);
+    let input = input.strip_suffix('\n').unwrap_or(input);
+    (Some(input), body)
 }
 
-/// The ONE-LINE input echo shown under a subagent window's header
-/// (`→ cosh: …`). A multi-line prompt is collapsed to its first line and
-/// capped: the window is a live mini-chat whose stream must not be buried
-/// under a static multi-row echo of the prompt (the FULL prompt stays
-/// visible in the chat's tool part — the echo is a pointer, not a copy).
+/// The FULL input echo prepended to a subagent window's output (`→ cosh: …`
+/// on EVERY line). The prompt is echoed VERBATIM — never collapsed, never
+/// truncated: it is part of the chat flow (prompt, then the subagent's
+/// answer), exactly like a normal conversation, and the user scrolls to
+/// read long prompts. The marker is repeated per line so tail truncation
+/// can never orphan a marker-less prompt line into the body.
 /// `None` when there is nothing to show (no input, or empty after trim).
 ///
 /// Both the live path (`ToolCall` in `app/events.rs`) and the rehydration
 /// path (`rehydrate_from_session`) must build the echo through THIS helper,
 /// so a restored window renders exactly like the original live run.
+///
+/// The `→ cosh: ` prefix is a STORAGE marker only: it is what
+/// [`split_subagent_output`] keys on to split prompt from body. The
+/// renderer strips it via [`subagent_prompt_text`] — the window shows the
+/// user's question as DIRECT text (the list row already names the agent
+/// CLI; the decoration is visual noise).
 pub(crate) fn subagent_input_line(input: &str) -> Option<String> {
-    const MAX_ECHO_CHARS: usize = 120;
-    let first = input.lines().next()?.trim();
-    if first.is_empty() {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
         return None;
     }
-    let mut line = first.to_string();
-    if line.chars().count() > MAX_ECHO_CHARS {
-        line = line.chars().take(MAX_ECHO_CHARS).collect();
-        line.push('…');
+    let mut echo = String::new();
+    for line in trimmed.lines() {
+        echo.push_str("→ cosh: ");
+        echo.push_str(line);
+        echo.push('\n');
     }
-    Some(format!("→ cosh: {line}\n"))
+    Some(echo)
+}
+
+/// The DISPLAY text of a subagent window's input: the storage marker
+/// `→ cosh: ` stripped from EVERY line, leaving the user's prompt as
+/// direct (multi-line) text. Both the renderer and the height math must
+/// pass the echo through THIS helper so their wrap counts stay in lockstep.
+pub(crate) fn subagent_prompt_text(input_line: &str) -> String {
+    input_line
+        .lines()
+        .map(|line| line.strip_prefix("→ cosh: ").unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Filter control characters (keeping `\n`) so raw bytes can never reach
@@ -635,6 +674,23 @@ pub struct PtySession {
     /// color. Consumed at completion (live) or rehydration (persisted);
     /// the header itself is stripped at render time, never shown.
     pub(crate) severity: Option<cosh_tools::subagent::severity::Severity>,
+    /// Task description for the subagent LIST entry (`<agent> <description>
+    /// <tool> <spinner>`): the `description` the main agent passed to
+    /// `subagent_call`, or the inferred `code-review-NN` label for a
+    /// review call that omitted it. `None` for bash sessions and for
+    /// persisted calls that predate the argument.
+    pub(crate) description: Option<String>,
+    /// Whether this subagent task was flagged CODE REVIEW — the TUI-side
+    /// record of the review decision, used to reconstruct the inferred
+    /// `code-review-NN` numbering for the list entries.
+    pub(crate) code_review: bool,
+    /// Per-call routing identity (the `ToolCall` event's `call_ref`): binds
+    /// THIS window to the EXACT dispatching call. Streams, reports and
+    /// completion notifications carry the same ref back and route HERE —
+    /// two parallel spawns of the same agent CLI share the agent name but
+    /// never the ref, so input1 can never pair with output2. `None` for
+    /// bash sessions and rehydrated ones (no live routing).
+    pub(crate) call_ref: Option<String>,
 }
 
 impl PtySession {
@@ -650,7 +706,58 @@ impl PtySession {
             spilled_path: None,
             subagent_activity: SubagentActivity::default(),
             severity: None,
+            description: None,
+            code_review: false,
+            call_ref: None,
         }
+    }
+
+    /// The right-panel LIST entry text of this subagent session:
+    /// `<agent> <description> <tool> <spinner>` — the CLI name, the task
+    /// description the main agent passed (inferred `code-review-NN` for
+    /// review tasks), the tool the subagent is currently running and the
+    /// spinner glyph. Finished entries freeze their last tool label; the
+    /// spinner slot becomes the terminal marker instead.
+    ///
+    /// The tool label comes from the LAST timeline tool entry (`detail` if
+    /// present, else the title — the same preference `activity_lines` uses).
+    #[must_use]
+    pub fn list_entry_text(&self, spinner: char) -> String {
+        let agent = self.subagent_agent().unwrap_or("internal");
+        let agent = if agent.is_empty() { "internal" } else { agent };
+        let tool = self
+            .subagent_activity
+            .timeline
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                SubagentTimelineEntry::Tool(call) => {
+                    Some(call.detail.clone().unwrap_or_else(|| call.title.clone()))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| "starting…".to_string());
+        let marker: String = match (self.is_finished(), &self.status) {
+            (true, PtyStatus::Failed) => "✗".to_string(),
+            (true, _) => "✓".to_string(),
+            (false, _) => spinner.to_string(),
+        };
+        format!("{agent} {} {tool} {marker}", self.description_text())
+    }
+
+    /// The task description for the list entry: the RESOLVED value stored
+    /// at spawn time (explicit description, or the inferred `code-review-NN`
+    /// label for a review call that omitted one). The neutral fallback only
+    /// covers sessions created before the description plumbing existed —
+    /// "code-review" would MISLABEL a pre-argument non-review call.
+    #[must_use]
+    pub fn description_text(&self) -> String {
+        self.description
+            .as_deref()
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+            .unwrap_or("—")
+            .to_string()
     }
 
     /// The agent CLI of a subagent session (`command` is `subagent: {agent}`).
@@ -1171,8 +1278,8 @@ pub struct RightPanelState {
     pub subagent_scroll_y: i32,
 
     // ── Subagent markdown layout cache ────────────────────────────
-    /// Cached per-session STATIC content rows (command header + optional
-    /// one-line input echo + markdown body rows) for the subagent section,
+    /// Cached per-session STATIC content rows (optional FULL-prompt input
+    /// echo + markdown body rows) for the subagent section,
     /// keyed to `subagent_layout_gen` and the wrap width. Rebuilt only when
     /// output or width changes — `estimate_height` (a pulldown_cmark parse)
     /// is too expensive to run on every frame. The LIVE activity rows are
@@ -1244,6 +1351,32 @@ pub struct RightPanelState {
     pub bash_history_mode: bool,
     /// Per-agent-CLI navigation state for the subagent section.
     agent_navs: HashMap<String, AgentNav>,
+    /// Subagent LIST mode preference (`None` = automatic: the list is the
+    /// default view once >= 2 subagents exist, single subagents always
+    /// render as the classic expanded window). `Some(true)` forces the
+    /// list, `Some(false)` forces the expanded windows (a clicked row).
+    pub(crate) subagent_list_mode: Option<bool>,
+    /// Selected row of the subagent list (position in the flat
+    /// chronological listing), when the list is active.
+    pub(crate) subagent_list_selected: Option<usize>,
+    /// Set by selection-changing actions so the next list render scrolls
+    /// the selected row into view. Wheel scrolling does NOT set it — the
+    /// viewport may deliberately drift away from the selection.
+    pub(crate) subagent_list_follow_pending: bool,
+    /// Scroll offset of the subagent list (list-mode only, rows).
+    pub(crate) subagent_list_scroll: i32,
+    /// Screen bands of each list entry from the last render
+    /// (`session index in pty_sessions`, top, bottom exclusive) — maps
+    /// clicks/hovers to list entries. An entry may span SEVERAL rows
+    /// (wrapped description), so bottom - top is its full row span.
+    pub(crate) subagent_list_layouts: Vec<(usize, i32, i32)>,
+    /// Flat `(content row, text)` of every wrapped list row from the last
+    /// render — the selection-region builder mirrors EXACTLY what the
+    /// renderer drew (same wrap, same spinner frame).
+    pub(crate) subagent_list_region_rows: Vec<(i32, String)>,
+    /// Shared spinner animation of the list rows (one frame per row is
+    /// enough — the rows animate in lockstep, like the F-keys' hint row).
+    subagent_list_spinner: SpinnerState,
     /// Subagent sessions displayed this frame (indices into
     /// `pty_sessions`), resolved by [`Self::resolve_visible_subagents`]
     /// at the start of every render. All subagent render consumers iterate
@@ -1370,6 +1503,13 @@ impl RightPanelState {
             user_hidden: false,
             bash_history_mode: false,
             agent_navs: HashMap::new(),
+            subagent_list_mode: None,
+            subagent_list_selected: None,
+            subagent_list_follow_pending: false,
+            subagent_list_scroll: 0,
+            subagent_list_layouts: Vec::new(),
+            subagent_list_region_rows: Vec::new(),
+            subagent_list_spinner: SpinnerState::new(),
             visible_subagents: Vec::new(),
             subagent_window_layouts: Vec::new(),
             maximized_section: None,
@@ -1420,6 +1560,17 @@ impl RightPanelState {
     /// steps one entry back from the current selection (manual navigation
     /// is never overridden by auto-follow).
     pub fn panel_left(&mut self) {
+        // EXPANDED subagent view (a clicked row): ← walks the subagent
+        // entries WITHOUT folding back to the list — the spec's "navigate
+        // list items without leaving expanded mode". In the automatic LIST
+        // mode (and every other focus) the pre-existing queue-stepping
+        // below applies unchanged.
+        if matches!(self.panel_focus, Some(PanelFocus::Agent(_)))
+            && self.subagent_list_mode == Some(false)
+        {
+            self.subagent_list_step(-1);
+            return;
+        }
         match self.panel_focus.clone() {
             Some(PanelFocus::Bash) if !self.bash_history_mode => {
                 self.bash_history_mode = true;
@@ -1447,6 +1598,14 @@ impl RightPanelState {
     /// → on the focused slot. Bash returns to live; an agent queue steps
     /// forward, and reaching the newest entry re-arms auto-follow.
     pub fn panel_right(&mut self) {
+        // EXPANDED subagent view (a clicked row): → walks the subagent
+        // entries WITHOUT folding back to the list (the ← mirror above).
+        if matches!(self.panel_focus, Some(PanelFocus::Agent(_)))
+            && self.subagent_list_mode == Some(false)
+        {
+            self.subagent_list_step(1);
+            return;
+        }
         match self.panel_focus.clone() {
             Some(PanelFocus::Bash) if self.bash_history_mode => {
                 self.bash_history_mode = false;
@@ -1478,13 +1637,14 @@ impl RightPanelState {
         }
     }
 
-    /// Alt+← / Alt+→ (and Shift+B/N) switch the keyboard focus across agent
-    /// queues (alphabetical order, wrapping). Switching also hands the
+    /// Shift+B / Shift+N switch the keyboard focus across agent queues
+    /// (alphabetical order, wrapping). Switching also hands the
     /// DISPLAY to the newly focused queue: its NEWEST entry takes over
     /// immediately (nav reset → auto-follow), replacing whatever was on
     /// screen. This is how HIDDEN queues — those with no window on screen,
     /// unreachable by plain ←/→ which navigate only the focused queue — are
-    /// reached. Works from any panel focus.
+    /// reached. Works from any panel focus. (Alt+← / Alt+→ were removed:
+    /// subagents are presented as ONE list, not per-CLI groups.)
     pub fn cycle_agent_queue(&mut self, dir: i32) -> bool {
         let mut agents: Vec<String> = self
             .pty_sessions
@@ -1569,34 +1729,321 @@ impl RightPanelState {
         window_count.saturating_sub(1) as i32
     }
 
+    /// Whether the subagent section currently renders as a LIST: forced
+    /// `Some(true)`, or automatic when >= 2 subagent sessions exist (a
+    /// single subagent always renders expanded — the classic window view).
+    pub(crate) fn subagent_list_active(&self) -> bool {
+        self.subagent_list_mode
+            .unwrap_or_else(|| self.pty_sessions.iter().filter(|s| s.is_subagent()).count() >= 2)
+    }
+
+    /// The chronological subagent list entries: `(pty_sessions index, is
+    /// selected)`, oldest first (matches the chat flow — the newest work
+    /// is at the bottom, next to the live edge).
+    pub(crate) fn subagent_list_entries(&self) -> Vec<(usize, bool)> {
+        let selected = self.subagent_list_selected;
+        self.pty_sessions
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.is_subagent())
+            .enumerate()
+            .map(|(pos, (idx, _))| (idx, Some(pos) == selected))
+            .collect()
+    }
+
+    /// Select the previous list row (wrapping), scrolling it into view.
+    pub(crate) fn subagent_list_select_prev(&mut self) {
+        let count = self.pty_sessions.iter().filter(|s| s.is_subagent()).count();
+        if count == 0 {
+            return;
+        }
+        let cur = self.subagent_list_selected.unwrap_or(count - 1);
+        self.subagent_list_selected = Some((cur + count - 1) % count);
+        self.subagent_list_follow_pending = true;
+        self.bump_gen_for_layout();
+    }
+
+    /// Select the next list row (wrapping), scrolling it into view.
+    pub(crate) fn subagent_list_select_next(&mut self) {
+        let count = self.pty_sessions.iter().filter(|s| s.is_subagent()).count();
+        if count == 0 {
+            return;
+        }
+        let cur = self.subagent_list_selected.unwrap_or(0);
+        self.subagent_list_selected = Some((cur + 1) % count);
+        self.subagent_list_follow_pending = true;
+        self.bump_gen_for_layout();
+    }
+
+    /// Expand the SELECTED list row: leave list mode and display that
+    /// session as the classic full window (the pre-list behavior — an
+    /// expanded subagent looks exactly like the single synchronous one).
+    /// Returns whether a row was expanded.
+    pub(crate) fn subagent_list_expand_selected(&mut self) -> bool {
+        let Some(pos) = self.subagent_list_selected else {
+            return false;
+        };
+        let Some(&idx) = self.subagent_session_indices().get(pos) else {
+            return false;
+        };
+        // Pin the queue to the chosen entry so `resolve_visible_subagents`
+        // keeps exactly this window on display, and move the panel focus
+        // along: the expanded window belongs to that agent's queue.
+        if let Some(agent) = self.pty_sessions[idx].subagent_agent().map(str::to_string) {
+            self.panel_focus = Some(PanelFocus::Agent(agent.clone()));
+            let queue = self.agent_queue(&agent);
+            if let Some(pos) = queue.iter().position(|&q| q == idx) {
+                let nav = self.agent_navs.entry(agent).or_default();
+                nav.index = Some(pos);
+                nav.last_nav = Some(Instant::now());
+            }
+        }
+        self.subagent_list_mode = Some(false);
+        self.bump_gen_for_layout();
+        true
+    }
+
+    /// The `pty_sessions` indices of every subagent session, in list order
+    /// (chronological, oldest first).
+    pub(crate) fn subagent_session_indices(&self) -> Vec<usize> {
+        self.pty_sessions
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.is_subagent())
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// The list's drawn rows as `(content row, text)`, recorded by the
+    /// renderer each frame — the selection-region builder mirrors EXACTLY
+    /// what was drawn (same wrap, same spinner frame).
+    pub(crate) fn subagent_list_row_texts(&self) -> Vec<(i32, String)> {
+        self.subagent_list_region_rows.clone()
+    }
+
+    /// Total CONTENT rows of the list: every entry wrapped to `wrap_w`
+    /// columns (the same wrap the renderer applies — a long description
+    /// WRAPS instead of pushing the tool name and spinner off-screen).
+    pub(crate) fn subagent_list_total_rows(&self, wrap_w: u16) -> i32 {
+        let spin = self.subagent_list_spinner_char();
+        self.subagent_list_entries()
+            .iter()
+            .map(|&(idx, _)| {
+                wrap_chars(&self.pty_sessions[idx].list_entry_text(spin), wrap_w).len() as i32
+            })
+            .sum()
+    }
+
+    /// Advance the list spinner's animation state (called once per frame
+    /// while the list renders at least one RUNNING entry).
+    pub(crate) fn subagent_list_tick(&mut self) {
+        self.subagent_list_spinner.advance();
+    }
+
+    /// The list's current spinner frame.
+    pub(crate) fn subagent_list_spinner_char(&self) -> char {
+        self.subagent_list_spinner.current_char()
+    }
+
+    /// ← / → navigate the subagent list items. In list mode this only moves
+    /// the selection; in EXPANDED mode it switches the displayed subagent to
+    /// the previous/next entry WITHOUT folding back to the list (the new
+    /// entry's queue is re-pinned so `resolve_visible_subagents` keeps it on
+    /// display). Returns whether anything changed.
+    pub(crate) fn subagent_list_step(&mut self, dir: i32) -> bool {
+        let before = self.subagent_list_selected;
+        if dir < 0 {
+            self.subagent_list_select_prev();
+        } else {
+            self.subagent_list_select_next();
+        }
+        if self.subagent_list_selected == before {
+            return false;
+        }
+        if !self.subagent_list_active()
+            && let Some(pos) = self.subagent_list_selected
+            && let Some(&idx) = self.subagent_session_indices().get(pos)
+            && let Some(agent) = self.pty_sessions[idx].subagent_agent().map(str::to_string)
+        {
+            self.panel_focus = Some(PanelFocus::Agent(agent.clone()));
+            let queue = self.agent_queue(&agent);
+            if let Some(p) = queue.iter().position(|&q| q == idx) {
+                let nav = self.agent_navs.entry(agent).or_default();
+                nav.index = Some(p);
+                nav.last_nav = Some(Instant::now());
+            }
+            self.bump_gen_for_layout();
+        }
+        true
+    }
+
+    /// Click on the subagent list: select the row under `y` and expand it
+    /// (the classic single-subagent window view). Returns whether the click
+    /// hit a row — otherwise the caller proceeds with drag selection.
+    pub(crate) fn subagent_list_click_at(&mut self, y: u16) -> bool {
+        if !self.subagent_list_active() {
+            return false;
+        }
+        let ys = i32::from(y);
+        let Some(&(idx, _, _)) = self
+            .subagent_list_layouts
+            .iter()
+            .find(|&&(_, top, bottom)| ys >= top && ys < bottom)
+        else {
+            return false;
+        };
+        self.subagent_list_selected = self
+            .subagent_session_indices()
+            .iter()
+            .position(|&i| i == idx);
+        self.subagent_list_expand_selected()
+    }
+
+    /// Return from an expanded subagent to the list (Ctrl+Alt+L, or Esc
+    /// with the panel focused on the subagent section). No-op when the
+    /// list is already active — the caller decides whether Esc falls
+    /// through to its other meanings.
+    pub(crate) fn subagent_list_open(&mut self) -> bool {
+        if self.subagent_list_active() {
+            return false;
+        }
+        self.subagent_list_mode = Some(true);
+        // Seed the selection on the RUNNING session (the work in flight —
+        // exactly what the expanded view was showing); the newest entry
+        // when nothing runs. `subagent_list_selected` counts POSITIONS
+        // among subagent sessions (the `subagent_list_entries` index
+        // space), never raw `pty_sessions` indices — a bash session
+        // before the last subagent would otherwise desync the selection.
+        let indices = self.subagent_session_indices();
+        self.subagent_list_selected = indices
+            .iter()
+            .rev()
+            .position(|&idx| !self.pty_sessions[idx].is_finished())
+            .map(|back| indices.len() - 1 - back);
+        if self.subagent_list_selected.is_none() {
+            self.subagent_list_selected = indices.len().checked_sub(1);
+        }
+        self.subagent_list_follow_pending = true;
+        self.subagent_list_scroll = 0;
+        self.bump_gen_for_layout();
+        true
+    }
+
+    /// Clamp list selection/scroll when the list shrinks (entries finish
+    /// but are never removed — the count only grows — this is a safety
+    /// net for rehydration trimming).
+    pub(crate) fn subagent_list_clamp(&mut self) {
+        let count = self.pty_sessions.iter().filter(|s| s.is_subagent()).count();
+        if count == 0 {
+            self.subagent_list_selected = None;
+            self.subagent_list_scroll = 0;
+            self.subagent_list_mode = None;
+        } else if let Some(sel) = self.subagent_list_selected
+            && sel >= count
+        {
+            self.subagent_list_selected = Some(count - 1);
+        }
+    }
+
+    /// Record the list-entry metadata of a JUST-STARTED subagent session:
+    /// the task description (explicit, or the inferred `code-review-NN`
+    /// label for a review call that omitted one) and the review flag.
+    /// Called from the live `ToolCall` path right after `start_pty` targets
+    /// the new session; a no-op when no matching running session exists.
+    pub(crate) fn set_last_subagent_meta(
+        &mut self,
+        agent: &str,
+        description: Option<&str>,
+        code_review: bool,
+    ) {
+        // The inferred label's sequence number counts this session's prior
+        // review calls WITHOUT an explicit description — the same rule the
+        // harness's inference uses, so both agree on the numbering. Those
+        // prior sessions carry their INFERRED label in `description`
+        // (`code-review-NN`), so matching on `description.is_none()` alone
+        // would collapse every subsequent review to `code-review-01`;
+        // match the inferred-label shape instead.
+        let inferred = if code_review {
+            let n = self
+                .pty_sessions
+                .iter()
+                .filter(|s| {
+                    s.is_subagent()
+                        && s.code_review
+                        && s.description
+                            .as_deref()
+                            .is_none_or(|d| d.starts_with("code-review-"))
+                })
+                .count()
+                + 1;
+            Some(SubAgent::inferred_review_label(n))
+        } else {
+            None
+        };
+        let resolved = description
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+            .map(str::to_string)
+            .or(inferred);
+        if let Some(session) = self
+            .pty_sessions
+            .iter_mut()
+            .rev()
+            .find(|s| s.is_subagent() && Self::is_window_of(s, agent))
+        {
+            session.description = resolved;
+            session.code_review = code_review;
+        }
+    }
+
+    /// Move the list selection to the row under screen row `y` WITHOUT
+    /// expanding it — the same hover-follow contract as the model picker
+    /// and the internal-tools list. Returns whether the pointer hit a row.
+    pub(crate) fn subagent_list_hover_at(&mut self, y: u16) -> bool {
+        if !self.subagent_list_active() {
+            return false;
+        }
+        let ys = i32::from(y);
+        let hit = self
+            .subagent_list_layouts
+            .iter()
+            .find(|&&(_, top, bottom)| ys >= top && ys < bottom)
+            .map(|&(idx, _, _)| idx);
+        let Some(idx) = hit else {
+            return false;
+        };
+        let pos = self
+            .pty_sessions
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.is_subagent())
+            .position(|(i, _)| i == idx);
+        if let Some(pos) = pos
+            && self.subagent_list_selected != Some(pos)
+        {
+            self.subagent_list_selected = Some(pos);
+            self.bump_gen_for_layout();
+        }
+        pos.is_some()
+    }
+
     /// Resolve which subagent sessions are DISPLAYED this frame and store
     /// them in `visible_subagents` (display order: chronological).
     ///
-    /// Candidates ranked best-first. Focused/pinned windows keep their top
-    /// priority ONLY while their session is alive: a finished one ranks
-    /// below every RUNNING session, so live work never hides behind stale
-    /// focus/pin when display space is scarce (it still outranks finished
-    /// live entries, so navigation keeps its window whenever space allows):
-    ///   0. The FOCUSED queue's current window (its selected entry while
-    ///      navigating, otherwise its newest) and PINNED queues' windows,
-    ///      while their sessions are RUNNING. Pinned queues come most
-    ///      recently navigated first; when space must be reclaimed among
-    ///      pinned windows of the SAME class, the ones with the OLDEST
-    ///      navigation activity are hidden first (a RUNNING pinned window
-    ///      always outranks a FINISHED one regardless of recency).
-    ///   1. Live RUNNING sessions (not superseded), newest first.
-    ///   2. FOCUSED/pinned windows whose session already FINISHED.
-    ///   3. Live finished sessions (not superseded), newest first.
-    ///
-    /// A pin suppresses only its queue's FINISHED entries: a live RUNNING
-    /// session of a pinned queue still ranks normally, so new work is never
-    /// omitted because of a stale pin on an old, no-longer-running window.
-    ///
-    /// Windows are included greedily while they fit `budget_rows`; the
-    /// top-ranked window is always kept (scrolling internally when it alone
-    /// exceeds the budget). Superseded sessions never enter the default
+    /// EXPANDED mode is EXCLUSIVE: exactly ONE window occupies the
+    /// subagent section, sharing the panel only with the OTHER sections
+    /// (TODO, bash). A click or ←/→ navigation focuses an agent queue,
+    /// and THAT queue's current window — its pinned entry, else its
+    /// newest — is shown ALONE: even while other subagents run, and even
+    /// after it finished. Expansion is a deep-dive into the chosen
+    /// session; the LIST mode is where the others stay visible. Without
+    /// an agent focus (the automatic single-session view) the same
+    /// one-window rule picks the top-ranked candidate: RUNNING beats
+    /// FINISHED, newest first. The chosen window scrolls internally when
+    /// it alone exceeds the budget (`_budget_rows` survives only for
+    /// call-site compatibility). Superseded sessions never enter the
     /// display — they are reachable only via navigation.
-    pub(crate) fn resolve_visible_subagents(&mut self, wrap_w: u16, budget_rows: i32) {
+    pub(crate) fn resolve_visible_subagents(&mut self, _wrap_w: u16, _budget_rows: i32) {
         // ONE pass over the sessions builds every per-queue view used
         // below (absolute index list + pinned state), instead of the
         // O(N) `queue_*` scans per candidate.
@@ -1606,8 +2053,8 @@ impl RightPanelState {
                 queues.entry(agent.to_string()).or_default().push(i);
             }
         }
-        // The focused queue's window leads the ranking so a queue switch
-        // always swaps the displayed content, even under tight budgets.
+        // The focused queue's window: its selected entry while navigating,
+        // otherwise its newest.
         let focused_window: Option<usize> = match &self.panel_focus {
             Some(PanelFocus::Agent(agent)) => {
                 let queue = queues.get(agent.as_str());
@@ -1618,6 +2065,29 @@ impl RightPanelState {
             }
             _ => None,
         };
+
+        // EXCLUSIVE expanded view: a click or manual navigation put an
+        // agent queue in focus — ITS window occupies the section alone.
+        // Finished or running, it is what the user asked to look at; the
+        // other subagents remain in the list (fold) and never reclaim the
+        // area mid-inspection.
+        if !self.subagent_list_active()
+            && let Some(idx) = focused_window
+        {
+            self.ensure_outputs_loaded(&[idx]);
+            self.visible_subagents = vec![idx];
+            return;
+        }
+
+        // No agent focus (the automatic single-session view): rank
+        // candidates best-first and display ONLY the top one. A
+        // focused/pinned window keeps its top priority ONLY while its
+        // session is alive — a finished one ranks below every RUNNING
+        // session, so live work is what shows once the focus is gone:
+        //   0. FOCUSED/pinned windows while their sessions are RUNNING.
+        //   1. Live RUNNING sessions (not superseded), newest first.
+        //   2. FOCUSED/pinned windows whose session already FINISHED.
+        //   3. Live finished sessions (not superseded), newest first.
         let is_pinned = |agent: &str,
                          navs: &HashMap<String, AgentNav>,
                          queues: &HashMap<String, Vec<usize>>| {
@@ -1625,12 +2095,7 @@ impl RightPanelState {
                 .and_then(|n| n.index)
                 .is_some_and(|i| i + 1 < queues.get(agent).map_or(0, Vec::len))
         };
-
-        // (rank class, tiebreak, session idx). A focused/pinned window only
-        // outranks live work while its session is RUNNING; once finished it
-        // drops to class 2 (above finished live entries, below every
-        // running one) so it is displayed whenever space remains but never
-        // steals space from an in-flight subagent.
+        // (rank class, tiebreak, session idx).
         let focus_pin_class = |idx: usize| {
             if self.pty_sessions[idx].is_finished() {
                 2
@@ -1644,10 +2109,9 @@ impl RightPanelState {
             ranked.push((class, u64::MAX, idx));
         }
 
-        // 1. Pinned queues — most recent manual navigation first. A pinned
-        //    queue contributes exactly ONE window: its selected entry (its
-        //    live RUNNING sessions are NOT suppressed — see the live loop
-        //    below). The focused queue is already represented above.
+        // Pinned queues — most recent manual navigation first. A pinned
+        // queue contributes exactly ONE candidate: its selected entry. The
+        // focused queue is already represented above.
         let focused_agent = match &self.panel_focus {
             Some(PanelFocus::Agent(a)) => Some(a.as_str()),
             _ => None,
@@ -1673,7 +2137,7 @@ impl RightPanelState {
             ranked.push((class, 0, idx));
         }
 
-        // 2 + 3. Live candidates, newest first (higher pty index = newer).
+        // Live candidates, newest first (higher pty index = newer).
         for (idx, s) in self.pty_sessions.iter().enumerate().rev() {
             if s.superseded || !s.is_subagent() {
                 continue;
@@ -1695,32 +2159,15 @@ impl RightPanelState {
         }
         ranked.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
 
-        // Focused/pinned windows WILL be displayed (when space allows) —
-        // load them so their heights are accurate for the fit (spilled live
-        // candidates stay unloaded; they fit as header-only and scroll
-        // internally if chosen).
-        let pinned_idx: Vec<usize> = ranked
-            .iter()
-            .filter(|(class, _, _)| *class == 0 || *class == 2)
-            .map(|&(_, _, i)| i)
-            .collect();
-        self.ensure_outputs_loaded(&pinned_idx);
-
-        // Greedy fit against the available budget. Every window AFTER the
-        // first adds its 1-row separator margin (margins exist only
-        // BETWEEN windows — see [`Self::subagent_window_margins`]).
-        let rows = self.subagent_section_rows_for_display(wrap_w);
-        let mut chosen: Vec<usize> = Vec::new();
-        let mut used: i32 = 0;
-        for &(_, _, idx) in &ranked {
-            let need = i32::from(rows.get(idx).copied().unwrap_or(1)) + !chosen.is_empty() as i32;
-            if used + need <= budget_rows || chosen.is_empty() {
-                chosen.push(idx);
-                used += need;
-            }
-        }
-        chosen.sort_unstable();
-        self.visible_subagents = chosen;
+        // ONE window only — the top-ranked candidate (expanded
+        // exclusivity; the multi-window sharing this function used to do
+        // is gone along with the per-agent grouping).
+        let Some(&(_, _, top)) = ranked.first() else {
+            self.visible_subagents.clear();
+            return;
+        };
+        self.ensure_outputs_loaded(&[top]);
+        self.visible_subagents = vec![top];
     }
 
     /// Agent CLIs whose queue is currently pinned away from live.
@@ -1771,6 +2218,9 @@ impl RightPanelState {
         self.section_layouts.clear();
         // Stale window bands must never map a click to an agent queue.
         self.subagent_window_layouts.clear();
+        // Stale list rows must never map a click/hover to an entry either.
+        self.subagent_list_layouts.clear();
+        self.subagent_list_region_rows.clear();
         // Stale header buttons must never map a click to a section either.
         self.header_buttons.clear();
     }
@@ -1876,6 +2326,11 @@ impl RightPanelState {
         match kind {
             SectionKind::Todo => self.todo_scroll_y,
             SectionKind::Bash => self.bash_scroll_y,
+            // The subagent section has TWO scroll spaces: the LIST's own
+            // offset (wrapped rows) and the expanded windows' content
+            // offset. Drag-selection maps screen rows back through THIS
+            // accessor, so it must agree with whichever view is rendered.
+            SectionKind::Subagent if self.subagent_list_active() => self.subagent_list_scroll,
             SectionKind::Subagent => self.subagent_scroll_y,
         }
     }
@@ -1923,6 +2378,33 @@ impl RightPanelState {
     /// re-arms it. A no-op scroll (already at the clamp) changes nothing, so
     /// wheel-up against the top never kills the live view either.
     fn scroll_section_by(&mut self, kind: SectionKind, delta: i32) {
+        // The subagent LIST scrolls its own offset in WRAPPED content rows
+        // (a long description breaks onto continuation rows), not one row
+        // per entry and not the expanded windows' content offset.
+        if kind == SectionKind::Subagent && self.subagent_list_active() {
+            let cur = self.subagent_list_scroll;
+            let next = self.subagent_list_scroll.saturating_add(delta).max(0);
+            if next == cur {
+                return;
+            }
+            if delta < 0 {
+                self.user_scrolled_away = true;
+            } else {
+                // Scrolling toward newer content: reaching the TRUE bottom
+                // (wrapped total − band height, the renderer's clamp)
+                // re-arms follow.
+                let total = self.subagent_list_total_rows(self.subagent_wrap_w);
+                let band = self
+                    .section_layout(SectionKind::Subagent)
+                    .map(|l| (l.bottom - l.top).saturating_sub(3))
+                    .filter(|&h| h > 0)
+                    .unwrap_or(1);
+                let max = (total - band).max(0);
+                self.user_scrolled_away = next < max;
+            }
+            self.subagent_list_scroll = next;
+            return;
+        }
         let cur = self.section_scroll(kind);
         let next = match kind {
             SectionKind::Todo => self.todo_scroll_y.saturating_add(delta).max(0),
@@ -2155,6 +2637,13 @@ impl RightPanelState {
         let total = match kind {
             SectionKind::Todo => self.todos.len() as i32,
             SectionKind::Bash => self.bash_buffer(self.bash_wrap_w).len() as i32,
+            // The subagent section has TWO content totals: the LIST's
+            // wrapped-row count and the expanded windows' markdown-row sum.
+            // Drag auto-scroll clamps against THIS, so it must agree with
+            // whichever view is rendered (same rule as `section_scroll`).
+            SectionKind::Subagent if self.subagent_list_active() => {
+                self.subagent_list_total_rows(self.subagent_wrap_w)
+            }
             SectionKind::Subagent => {
                 let wrap_w = self.subagent_wrap_w.max(1);
                 let rows = self.subagent_section_rows_for_display(wrap_w);
@@ -2292,6 +2781,17 @@ impl RightPanelState {
     }
 
     /// Start a new PTY session for a bash command.
+    /// Bind the NEWEST PTY session to a call's routing identity. Called
+    /// right after `start_pty` for a `subagent_call` (the ToolCall handler
+    /// created the window): every stream, report and notification carrying
+    /// this `call_ref` routes to THIS window — the exact input↔output
+    /// pairing that the agent-name fallback could cross-pair.
+    pub fn bind_last_pty_call_ref(&mut self, call_ref: Option<String>) {
+        if let Some(session) = self.pty_sessions.last_mut() {
+            session.call_ref = call_ref;
+        }
+    }
+
     pub fn start_pty(&mut self, command: String, workdir: Option<String>) {
         self.next_pty_id += 1;
         let id = format!("pty-{}", self.next_pty_id);
@@ -2504,11 +3004,45 @@ impl RightPanelState {
     /// `None` keeps the default last-Running behavior (bash sessions and
     /// the single-window callers rely on it).
     pub fn update_last_pty_for_agent(&mut self, output: String, agent: Option<&str>) {
+        self.update_last_pty_routed(output, None, agent);
+    }
+
+    /// `update_last_pty_for_agent` with EXACT per-call routing: a `call_ref`
+    /// (bound at `ToolCall` time) identifies ONE session — the stream lands
+    /// in ITS window even when a sibling call of the same agent CLI is also
+    /// Running. Falls back to the agent hint (and then the last-Running
+    /// default for untargeted bash events) when the ref matches nothing.
+    pub fn update_last_pty_routed(
+        &mut self,
+        output: String,
+        call_ref: Option<&str>,
+        agent: Option<&str>,
+    ) {
         let mut found_kind = None;
-        if let Some(session) = self.pty_sessions.iter_mut().rev().find(|s| match agent {
-            Some(agent) => matches!(s.status, PtyStatus::Running) && Self::is_window_of(s, agent),
-            None => matches!(s.status, PtyStatus::Running),
-        }) {
+        // EXACT per-call routing first: a ref identifies ONE window at ANY
+        // status (a late chunk after completion still belongs to ITS
+        // window; bash windows are never bound, so a subagent ref can
+        // never hit one).
+        let ref_match = call_ref.and_then(|r| {
+            self.pty_sessions
+                .iter()
+                .rposition(|s| s.call_ref.as_deref() == Some(r))
+        });
+        // A ref that matches nothing (pre-ref emitters, a dropped session)
+        // falls back to the agent hint, then the last-Running default —
+        // the same contract the `_for_agent` variants implement.
+        let fallback_match = if ref_match.is_none() {
+            self.pty_sessions.iter().rposition(|s| match agent {
+                Some(agent) => {
+                    matches!(s.status, PtyStatus::Running) && Self::is_window_of(s, agent)
+                }
+                None => matches!(s.status, PtyStatus::Running),
+            })
+        } else {
+            None
+        };
+        if let Some(idx) = ref_match.or(fallback_match) {
+            let session = &mut self.pty_sessions[idx];
             found_kind = if session.command.starts_with("subagent:") {
                 Some(SectionKind::Subagent)
             } else {
@@ -2568,11 +3102,56 @@ impl RightPanelState {
     /// (`subagent_notification_agent`); `None` keeps the default
     /// last-Running choice (single-window callers, the internal path).
     pub fn complete_last_pty_for_agent(&mut self, final_output: String, agent: Option<&str>) {
+        self.complete_last_pty_routed(final_output, None, agent);
+    }
+
+    /// `complete_last_pty_for_agent` with EXACT per-call routing (see
+    /// `update_last_pty_routed`): the report of a `subagent_call` lands in
+    /// the window BOUND to that call — never in a sibling's, even when two
+    /// parallel spawns share the agent CLI.
+    pub fn complete_last_pty_routed(
+        &mut self,
+        final_output: String,
+        call_ref: Option<&str>,
+        agent: Option<&str>,
+    ) {
         let mut final_output = final_output;
-        if let Some(session) = self.pty_sessions.iter_mut().rev().find(|s| match agent {
-            Some(agent) => matches!(s.status, PtyStatus::Running) && Self::is_window_of(s, agent),
-            None => matches!(s.status, PtyStatus::Running),
-        }) {
+        // EXACT per-call routing first (see `update_last_pty_routed`): the
+        // report lands in the window BOUND to the call — at any status —
+        // never in a sibling's. A ref that matches nothing falls back to
+        // the agent hint, then the last-Running default.
+        let ref_match = call_ref.and_then(|r| {
+            self.pty_sessions
+                .iter()
+                .rposition(|s| s.call_ref.as_deref() == Some(r))
+        });
+        let fallback_match = if ref_match.is_none() {
+            self.pty_sessions.iter().rposition(|s| match agent {
+                Some(agent) => {
+                    matches!(s.status, PtyStatus::Running) && Self::is_window_of(s, agent)
+                }
+                None => matches!(s.status, PtyStatus::Running),
+            })
+        } else {
+            None
+        };
+        if let Some(idx) = ref_match.or(fallback_match) {
+            let session = &mut self.pty_sessions[idx];
+            // LINEAR CHAT: the final report REPLACES the streamed output
+            // below, but the echoed main-agent prompt is part of the
+            // conversation (prompt, then the answer) and must SURVIVE the
+            // replacement — capture the input block from the live output
+            // and re-prepend it, or the user could never scroll up to read
+            // what was asked once the window completes. Captured BEFORE any
+            // replacement (and only for subagent windows — bash outputs are
+            // never split). Same for the failure path below.
+            let echoed_input: Option<String> = if session.is_subagent() {
+                split_subagent_output(&session.output)
+                    .0
+                    .map(|block| format!("{block}\n"))
+            } else {
+                None
+            };
             if session.is_subagent() {
                 // The tool result of a `subagent_call` arrives JSON-wrapped
                 // (`SubAgentCallOutput`) — classification happens through the
@@ -2608,6 +3187,9 @@ impl RightPanelState {
                 let (severity, _) = cosh_tools::subagent::severity::extract_severity(&final_output);
                 session.severity = severity;
             }
+            if let Some(echo) = echoed_input {
+                final_output.insert_str(0, &echo);
+            }
             Self::truncate_output(&mut final_output);
             session.output = final_output;
             session.status = PtyStatus::Completed;
@@ -2626,12 +3208,59 @@ impl RightPanelState {
     /// keeps the legacy last-Running-ANY behavior — the main-agent tool
     /// paths must NOT use it (see `fail_last_bash_pty`).
     pub fn fail_last_pty_for_agent(&mut self, error: String, agent: Option<&str>) {
+        self.fail_last_pty_routed(error, None, agent);
+    }
+
+    /// `fail_last_pty_for_agent` with EXACT per-call routing (see
+    /// `complete_last_pty_routed`): the failure lands in the window BOUND
+    /// to that call — never in a sibling's, even when two parallel spawns
+    /// share the agent CLI.
+    pub fn fail_last_pty_routed(
+        &mut self,
+        error: String,
+        call_ref: Option<&str>,
+        agent: Option<&str>,
+    ) {
         let mut error = error;
-        Self::truncate_output(&mut error);
-        if let Some(session) = self.pty_sessions.iter_mut().rev().find(|s| match agent {
-            Some(agent) => matches!(s.status, PtyStatus::Running) && Self::is_window_of(s, agent),
-            None => matches!(s.status, PtyStatus::Running),
-        }) {
+        // Ref match first (any status — a late failure still belongs to
+        // ITS window), then the agent-hint fallback, then last-Running.
+        let ref_match = call_ref.and_then(|r| {
+            self.pty_sessions
+                .iter()
+                .rposition(|s| s.call_ref.as_deref() == Some(r))
+        });
+        let fallback_match = if ref_match.is_none() {
+            self.pty_sessions.iter().rposition(|s| match agent {
+                Some(agent) => {
+                    matches!(s.status, PtyStatus::Running) && Self::is_window_of(s, agent)
+                }
+                None => matches!(s.status, PtyStatus::Running),
+            })
+        } else {
+            None
+        };
+        if let Some(idx) = ref_match.or(fallback_match) {
+            let session = &mut self.pty_sessions[idx];
+            // LINEAR CHAT (same contract as the completion path): the
+            // error text REPLACES the streamed output, but the echoed
+            // main-agent prompt must SURVIVE so the user can still scroll
+            // up to read what was asked. Captured before the replace and
+            // re-prepended. `truncate_output` bounds the TOTAL (echo +
+            // error): the echo sits at the head and truncation keeps the
+            // tail, so an error alone larger than the budget can still
+            // clip the prompt — the same 60k budget the echo occupied
+            // while streaming, no regression, but no echo priority.
+            let echoed_input: Option<String> = if session.is_subagent() {
+                split_subagent_output(&session.output)
+                    .0
+                    .map(|block| format!("{block}\n"))
+            } else {
+                None
+            };
+            if let Some(echo) = echoed_input {
+                error.insert_str(0, &echo);
+            }
+            Self::truncate_output(&mut error);
             session.output = error;
             session.status = PtyStatus::Failed;
             session.subagent_activity = SubagentActivity::default();
@@ -2667,14 +3296,41 @@ impl RightPanelState {
     /// Returns whether the event was applied AND changed visible state —
     /// the caller auto-follows the scroll only then (a dropped event or a
     /// no-op event such as a duplicate `Usage` must not yank the viewport).
-    pub(crate) fn update_subagent_activity(&mut self, event: &SubagentEvent) -> bool {
+    pub(crate) fn update_subagent_activity(
+        &mut self,
+        event: &SubagentEvent,
+        call_ref: Option<&str>,
+    ) -> bool {
         let mut changed = false;
-        if let Some(session) = self
-            .pty_sessions
-            .iter_mut()
-            .rev()
-            .find(|s| matches!(s.status, PtyStatus::Running) && s.is_subagent())
-        {
+        // EXACT per-call routing first: the mini-chat timeline (thoughts,
+        // tool rows, plans) belongs to ONE call's window — parallel
+        // sub-agents must never interleave each other's activity.
+        let ref_target = call_ref.and_then(|r| {
+            self.pty_sessions
+                .iter()
+                .rposition(|s| s.is_subagent() && s.call_ref.as_deref() == Some(r))
+        });
+        let target = match ref_target {
+            Some(idx) => {
+                // The ref matched ITS window: apply only while it is still
+                // Running. A completed/failed window must NOT spill the
+                // event into a sibling's via the fallback below (the exact
+                // cross-pairing shape this routing eliminates) — drop it.
+                if matches!(self.pty_sessions[idx].status, PtyStatus::Running) {
+                    Some(idx)
+                } else {
+                    None
+                }
+            }
+            // The ref matched nothing at all (pre-ref emitters, rehydrated
+            // sessions): fall back to the last Running subagent.
+            None => self
+                .pty_sessions
+                .iter()
+                .rposition(|s| matches!(s.status, PtyStatus::Running) && s.is_subagent()),
+        };
+        if let Some(idx) = target {
+            let session = &mut self.pty_sessions[idx];
             changed = session.subagent_activity.apply(event);
             self.pty_gen = self.pty_gen.wrapping_add(1);
         }
@@ -2729,8 +3385,8 @@ impl RightPanelState {
 
         // ── PTY sessions: collect bash + subagent calls chronologically ──
         let mut bashes: Vec<(String, String, bool)> = Vec::new();
-        // (agent, "→ cosh:" input line, output, failed)
-        let mut subs: Vec<(String, Option<String>, String, bool)> = Vec::new();
+        // (agent, "→ cosh:" input line, description, code_review, output, failed)
+        let mut subs: Vec<RehydratedSubagent> = Vec::new();
         for msg in &session.messages {
             for part in &msg.parts {
                 let Part::Tool(tp) = part else { continue };
@@ -2760,7 +3416,25 @@ impl RightPanelState {
                             .get("input")
                             .and_then(|v| v.as_str())
                             .map(str::to_string);
-                        subs.push((agent, input, subagent_display_output(output), failed));
+                        let description = tp
+                            .input
+                            .get("description")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                            .filter(|d| !d.trim().is_empty());
+                        let code_review = tp
+                            .input
+                            .get("code_review")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        subs.push((
+                            agent,
+                            input,
+                            description,
+                            code_review,
+                            subagent_display_output(output),
+                            failed,
+                        ));
                     }
                     _ => {}
                 }
@@ -2773,13 +3447,13 @@ impl RightPanelState {
         if bashes.len() > REHYDRATE_BASH_KEEP {
             bashes.drain(..bashes.len() - REHYDRATE_BASH_KEEP);
         }
-        let kept_subs: Vec<(String, Option<String>, String, bool)> = subs
+        let kept_subs: Vec<RehydratedSubagent> = subs
             .iter()
             .enumerate()
             .filter(|(i, (agent, ..))| {
                 subs[i + 1..]
                     .iter()
-                    .filter(|(a, ..): &&(String, Option<String>, String, bool)| a == agent)
+                    .filter(|(a, ..): &&RehydratedSubagent| a == agent)
                     .count()
                     < REHYDRATE_SUBAGENT_KEEP_PER_AGENT
             })
@@ -2787,15 +3461,27 @@ impl RightPanelState {
             .collect();
 
         for (command, output, failed) in bashes {
-            self.replay_pty(command, None, output, failed);
+            self.replay_pty(command, None, None, false, output, failed);
         }
-        for (agent, input, output, failed) in kept_subs {
+        for (agent, input, description, code_review, output, failed) in kept_subs {
             let command = format!("subagent: {agent}");
-            // Same contract as the live path (events): the echo is the ONE-LINE
-            // collapsed input (empty/absent input → no line at all).
+            // Same contract as the live path (events): the echo is the FULL
+            // verbatim prompt, one marker line per prompt line (empty/absent
+            // input → no echo at all).
             let input_line = input.as_deref().and_then(subagent_input_line);
-            self.replay_pty(command, input_line, output, failed);
+            self.replay_pty(
+                command,
+                input_line,
+                description,
+                code_review,
+                output,
+                failed,
+            );
         }
+        // The restored selection/scroll (kept from the pre-swap state) must
+        // land inside the TRIMMED list: a long history session may restore
+        // far fewer entries than the live panel had.
+        self.subagent_list_clamp();
     }
 
     /// Append one restored PTY session through the live `start_pty` path
@@ -2805,13 +3491,43 @@ impl RightPanelState {
         &mut self,
         command: String,
         input_line: Option<String>,
+        description: Option<String>,
+        code_review: bool,
         output: String,
         failed: bool,
     ) {
         self.start_pty(command, None);
+        // A review call that omitted `description` was labeled with the
+        // INFERRED `code-review-NN` in the live session; the persisted input
+        // carries no description, so the label must be reconstructed here or
+        // the restored entry would show the neutral "—" fallback (the
+        // `code_review` flag exists exactly for this reconstruction). Counted
+        // BEFORE the fresh session is touched (the `last_mut` borrow below
+        // excludes it): chronological position among this session's restored
+        // review calls WITHOUT an explicit description — the same rule the
+        // live inference and `set_last_subagent_meta` use.
+        let inferred = if code_review {
+            let len = self.pty_sessions.len();
+            let prior = self.pty_sessions[..len]
+                .iter()
+                .take(len.saturating_sub(1))
+                .filter(|s| {
+                    s.is_subagent()
+                        && s.code_review
+                        && s.description
+                            .as_deref()
+                            .is_none_or(|d| d.starts_with("code-review-"))
+                })
+                .count();
+            Some(SubAgent::inferred_review_label(prior))
+        } else {
+            None
+        };
         let Some(session) = self.pty_sessions.last_mut() else {
             return;
         };
+        session.description = description.or(inferred);
+        session.code_review = code_review;
         // Rehydrated review reports declare their outcome in a leading
         // `<!-- severity: ... -->` header, exactly like the live path's
         // `complete_last_pty`; consume it so a restored window keeps its
@@ -2933,19 +3649,38 @@ impl RightPanelState {
                     continue;
                 }
                 let (input, body) = split_subagent_output(&pty.output);
-                // Command header AND input line wrap like any text: long
-                // ones occupy multiple visual rows (the renderer splits
-                // them the same way).
-                let mut rows: u16 = wrap_count(&pty.command, wrap_w);
-                if let Some(input) = input {
-                    rows = rows.saturating_add(wrap_count(input, wrap_w));
-                }
+                // CLEAN view: the command header is NOT rendered anymore
+                // (the list row already names the agent CLI), so the
+                // height math counts only the input echo and the body —
+                // exactly what the renderer draws. The input line wraps
+                // like any text: a long one occupies multiple visual rows
+                // (the display strips the `→ cosh: ` storage marker via
+                // `subagent_prompt_text` — same text the renderer wraps).
+                // Input echo + body = the DISPLAYED rows (the placeholder
+                // floor of 1 keeps a just-started window visible before
+                // any output arrives — applied LAST, as a floor, so it
+                // never stacks on top of real content).
+                let input_rows = input
+                    .map(|input| wrap_count(&subagent_prompt_text(input), wrap_w))
+                    .unwrap_or(0);
+                // CHAT SEPARATOR: the renderer draws one blank row between
+                // the echoed prompt and the body whenever BOTH exist — a
+                // gap with nothing after it would reserve an unpainted
+                // row (the fuzz invariant), so it is conditional on the
+                // body the same way on both sides of the lockstep.
                 // The severity header is consumed (tints the box, never
                 // shown): the height math counts the DISPLAYED body.
                 let clean = sanitize_subagent_text(subagent_visible_body(body));
-                if !clean.trim().is_empty() {
-                    rows = rows.saturating_add(estimate_height(&clean, wrap_w));
-                }
+                let body_rows = if !clean.trim().is_empty() {
+                    estimate_height(&clean, wrap_w)
+                } else {
+                    0
+                };
+                let input_gap = u16::from(input_rows > 0 && body_rows > 0);
+                let rows: u16 = input_rows
+                    .saturating_add(input_gap)
+                    .saturating_add(body_rows)
+                    .max(1);
                 self.subagent_rows_cache.push(rows);
             }
             self.subagent_rows_cache_w = wrap_w;
@@ -3195,6 +3930,71 @@ mod tests {
         assert_eq!(state.pty_sessions[1].output, "oco findings.");
     }
 
+    /// LINEAR CHAT REGRESSION: the final report REPLACES the streamed
+    /// output on completion, but the echoed main-agent prompt must
+    /// SURVIVE — the window stays a linear chat (prompt, then the answer)
+    /// and the user can still scroll up to read what was asked. The echo
+    /// used to be evicted by the `session.output = final_output`
+    /// replacement, leaving the report with no visible question above it.
+    #[test]
+    fn complete_last_pty_for_agent_preserves_the_echoed_input() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: kilo".to_string(), None);
+        // Live path: the full multi-line prompt is echoed into the window.
+        let echo = subagent_input_line("review the last commit\nbe thorough").expect("echo");
+        state.update_last_pty_for_agent(echo, Some("kilo"));
+        state.update_last_pty_for_agent("streaming thoughts\n".to_string(), Some("kilo"));
+
+        state.complete_last_pty_for_agent("Final report body.\n".to_string(), Some("kilo"));
+
+        assert!(matches!(state.pty_sessions[0].status, PtyStatus::Completed));
+        // The prompt block sits ABOVE the report — exactly as echoed.
+        assert!(
+            state.pty_sessions[0]
+                .output
+                .starts_with("→ cosh: review the last commit\n→ cosh: be thorough\n"),
+            "echoed prompt must survive the completion replacement"
+        );
+        assert!(
+            state.pty_sessions[0]
+                .output
+                .ends_with("Final report body.\n"),
+            "the report follows the prompt in the linear chat flow"
+        );
+        // And the SPLIT agrees: input block first, then the body.
+        let (input, body) = split_subagent_output(&state.pty_sessions[0].output);
+        assert_eq!(
+            input,
+            Some("→ cosh: review the last commit\n→ cosh: be thorough")
+        );
+        assert_eq!(body, "Final report body.\n");
+    }
+
+    /// LINEAR CHAT REGRESSION (failure path): a failed subagent window
+    /// keeps the echoed main-agent prompt too — the error text replaces
+    /// the streamed output but must NOT evict the question above it.
+    #[test]
+    fn fail_last_pty_for_agent_preserves_the_echoed_input() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: kilo".to_string(), None);
+        let echo = subagent_input_line("do the thing").expect("echo");
+        state.update_last_pty_for_agent(echo, Some("kilo"));
+
+        state.fail_last_pty_for_agent("connection reset\n".to_string(), Some("kilo"));
+
+        assert!(matches!(state.pty_sessions[0].status, PtyStatus::Failed));
+        assert!(
+            state.pty_sessions[0]
+                .output
+                .starts_with("→ cosh: do the thing\n"),
+            "echoed prompt must survive the failure replacement"
+        );
+        assert!(
+            state.pty_sessions[0].output.ends_with("connection reset\n"),
+            "the error follows the prompt in the linear chat flow"
+        );
+    }
+
     /// REGRESSION (failed-notification leak): the FAILED wrapper variant
     /// (`Last available output:` marker, free-form reason before it) must
     /// be stripped to its body exactly like the completed one — it used to
@@ -3215,6 +4015,209 @@ mod tests {
             state.pty_sessions[0].output, "partial thoughts",
             "the failed wrapper must not leak into the panel"
         );
+    }
+
+    // ==== PER-CALL ROUTING (the cross-pairing fix) ====
+    // Routing identity: two parallel `subagent_call`s of the SAME agent CLI
+    // share the agent hint but each carries a unique `call_ref`, bound to
+    // its window at `ToolCall` time. Every stream/report/notification
+    // carrying that ref must land in ITS window — never a sibling's.
+
+    /// Two parallel spawns of the same CLI: streams and completions route
+    /// by call_ref, so input1 pairs with output1 and input2 with output2.
+    #[test]
+    fn parallel_same_cli_calls_route_by_call_ref() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: kilo".to_string(), None);
+        state.bind_last_pty_call_ref(Some("call-1".to_string()));
+        state.start_pty("subagent: kilo".to_string(), None);
+        state.bind_last_pty_call_ref(Some("call-2".to_string()));
+
+        // Interleaved live streams: ref-1 traffic must hit window 0 even
+        // though window 1 is the newest Running one (the old router's
+        // guess), and vice versa.
+        let echo1 = subagent_input_line("first task").expect("echo");
+        let echo2 = subagent_input_line("second task").expect("echo");
+        state.update_last_pty_routed(echo1, Some("call-1"), Some("kilo"));
+        state.update_last_pty_routed(echo2, Some("call-2"), Some("kilo"));
+        state.update_last_pty_routed("stream A\n".to_string(), Some("call-1"), Some("kilo"));
+        state.update_last_pty_routed("stream B\n".to_string(), Some("call-2"), Some("kilo"));
+
+        state.complete_last_pty_routed("report one\n".to_string(), Some("call-2"), Some("kilo"));
+        state.complete_last_pty_routed("report zero\n".to_string(), Some("call-1"), Some("kilo"));
+
+        // Window 0 (call-1): its OWN input, then its OWN report. The report
+        // REPLACES the streamed output (the linear-chat contract: the
+        // echoed prompt survives, the live stream does not — its content
+        // is folded into the final report the sub-agent produced).
+        let (input, body) = split_subagent_output(&state.pty_sessions[0].output);
+        assert_eq!(input, Some("→ cosh: first task"));
+        assert!(
+            body.contains("report zero"),
+            "window 0 must hold call-1's report, got {body:?}"
+        );
+        assert!(
+            !state.pty_sessions[0].output.contains("second task")
+                && !state.pty_sessions[0].output.contains("report one")
+                && !state.pty_sessions[0].output.contains("stream B"),
+            "sibling traffic must never land in window 0"
+        );
+        // Window 1 (call-2): idem, mirrored.
+        let (input, body) = split_subagent_output(&state.pty_sessions[1].output);
+        assert_eq!(input, Some("→ cosh: second task"));
+        assert!(
+            body.contains("report one"),
+            "window 1 must hold call-2's report, got {body:?}"
+        );
+        assert!(
+            !state.pty_sessions[1].output.contains("first task")
+                && !state.pty_sessions[1].output.contains("stream A"),
+            "sibling traffic must never land in window 1"
+        );
+    }
+
+    /// A call_ref routes regardless of session status (a late chunk after
+    /// the sibling completed still lands in ITS window), and an UNBOUND
+    /// ref falls back to the agent hint — pre-ref emitters keep working.
+    #[test]
+    fn call_ref_routing_falls_back_to_agent_hint_when_unmatched() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: kilo".to_string(), None);
+        state.bind_last_pty_call_ref(Some("call-1".to_string()));
+        state.update_last_pty_routed("→ cosh: bound\n".to_string(), Some("call-1"), Some("kilo"));
+
+        // A ref no window carries: the agent-hint fallback routes it to the
+        // Running kilo window (pre-ref sources stay functional).
+        state.update_last_pty_routed(
+            "legacy stream\n".to_string(),
+            Some("call-999"),
+            Some("kilo"),
+        );
+        assert!(
+            state.pty_sessions[0].output.contains("legacy stream"),
+            "unmatched ref must fall back to the agent hint"
+        );
+
+        // Ref-based routing ignores status: the window is Completed, yet
+        // ITS ref still targets it.
+        state.complete_last_pty_routed("done\n".to_string(), Some("call-1"), Some("kilo"));
+        state.update_last_pty_routed("late\n".to_string(), Some("call-1"), Some("kilo"));
+        assert!(
+            state.pty_sessions[0].output.contains("late"),
+            "a bound ref routes to its window regardless of status"
+        );
+    }
+
+    /// Background completion notifications carry the spawning call's ref:
+    /// the report lands in THAT call's window, not the last-Running one.
+    #[test]
+    fn background_notification_routes_to_its_call_window() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: gemini".to_string(), None);
+        state.bind_last_pty_call_ref(Some("call-7".to_string()));
+        state.start_pty("subagent: gemini".to_string(), None);
+        state.bind_last_pty_call_ref(Some("call-8".to_string()));
+        state.update_last_pty_routed(
+            "→ cosh: second spawn\n".to_string(),
+            Some("call-8"),
+            Some("gemini"),
+        );
+
+        // A completion note from the FIRST call (window 0) — the parsed
+        // agent hint is identical for both; only the ref disambiguates.
+        let note = "[automated notification] Background sub-agent bg-1                     (agent=gemini) completed:\nfirst report";
+        state.complete_last_pty_routed(note.to_string(), Some("call-7"), None);
+
+        assert!(
+            state.pty_sessions[0].output.contains("first report"),
+            "the notification must land in the window bound to call-7"
+        );
+        assert!(
+            !state.pty_sessions[1].output.contains("first report"),
+            "the sibling window (call-8) must not absorb the note"
+        );
+        assert!(matches!(state.pty_sessions[0].status, PtyStatus::Completed));
+    }
+
+    /// Live sub-agent activity (mini-chat timeline) routes by call_ref:
+    /// parallel sub-agents must never interleave each other's tool rows.
+    #[test]
+    fn subagent_activity_routes_by_call_ref() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: kilo".to_string(), None);
+        state.bind_last_pty_call_ref(Some("call-1".to_string()));
+        state.start_pty("subagent: kilo".to_string(), None);
+        state.bind_last_pty_call_ref(Some("call-2".to_string()));
+
+        // Interleaved: ref-1's tool row must land in window 0.
+        assert!(
+            state.update_subagent_activity(&tool_call_event("c1", "Reading a"), Some("call-1"))
+        );
+        assert!(
+            state.update_subagent_activity(&tool_call_event("c2", "Reading b"), Some("call-2"))
+        );
+        assert_eq!(
+            state.pty_sessions[0].subagent_activity.timeline.len(),
+            1,
+            "window 0 holds ONLY call-1's activity"
+        );
+        assert_eq!(
+            state.pty_sessions[1].subagent_activity.timeline.len(),
+            1,
+            "window 1 holds ONLY call-2's activity"
+        );
+
+        // None (pre-ref emitters) falls back to the last Running subagent.
+        assert!(state.update_subagent_activity(&tool_call_event("c3", "Reading c"), None));
+        assert_eq!(
+            state.pty_sessions[1].subagent_activity.timeline.len(),
+            2,
+            "the fallback targets the newest Running window"
+        );
+    }
+
+    /// A typed event whose ref matches a COMPLETED window is DROPPED — it
+    /// must never spill into a sibling's Running window via the fallback
+    /// (the review's routing-consistency hardening).
+    #[test]
+    fn subagent_activity_event_for_completed_ref_window_is_dropped() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: kilo".to_string(), None);
+        state.bind_last_pty_call_ref(Some("call-1".to_string()));
+        state.start_pty("subagent: kilo".to_string(), None);
+        state.bind_last_pty_call_ref(Some("call-2".to_string()));
+
+        // call-1's window completes; a straggler typed event for it arrives.
+        state.complete_last_pty_routed("done\n".to_string(), Some("call-1"), Some("kilo"));
+        assert!(
+            !state.update_subagent_activity(&tool_call_event("c1", "Reading a"), Some("call-1"))
+        );
+        // The sibling's timeline stays EMPTY — no spill.
+        assert!(state.pty_sessions[1].subagent_activity.timeline.is_empty());
+        // The completed window's timeline stays empty too.
+        assert!(state.pty_sessions[0].subagent_activity.timeline.is_empty());
+    }
+
+    /// CHAT SEPARATOR: exactly one row between the echoed prompt and the
+    /// body when BOTH exist (render and height math agree); no gap row
+    /// when the body is empty (an unpainted gap would break the fuzz
+    /// invariant).
+    #[test]
+    fn subagent_rows_count_one_gap_only_between_input_and_body() {
+        let mut state = RightPanelState::new();
+        state.subagent_rebuild_interval = Duration::ZERO;
+        state.start_pty("subagent: kilo".to_string(), None);
+
+        // Input + body: input row + gap row + body row.
+        state.complete_last_pty("→ cosh: prompt\nbody line\n".to_string());
+        assert_eq!(state.subagent_section_rows(40), &[3], "input + gap + body");
+
+        // Input only (no body yet): NO gap — nothing after it to separate.
+        let mut state2 = RightPanelState::new();
+        state2.subagent_rebuild_interval = Duration::ZERO;
+        state2.start_pty("subagent: kilo".to_string(), None);
+        state2.complete_last_pty("→ cosh: prompt\n".to_string());
+        assert_eq!(state2.subagent_section_rows(40), &[1], "input only, no gap");
     }
 
     /// The agent hint resolves from the notification wrapper (both status
@@ -3441,21 +4444,24 @@ mod tests {
         let mut state = RightPanelState::new();
         state.start_pty("subagent: opencode".to_string(), None);
 
-        state.update_subagent_activity(&tool_call_event("c1", "Reading a"));
-        state.update_subagent_activity(&tool_call_event("c2", "Reading b"));
+        state.update_subagent_activity(&tool_call_event("c1", "Reading a"), None);
+        state.update_subagent_activity(&tool_call_event("c2", "Reading b"), None);
         // An update patches the matching call in place (matched from the
         // most recent announcement).
-        state.update_subagent_activity(&SubagentEvent::ToolCallUpdate {
-            id: "c1".to_string(),
-            status: Some(ToolCallStatus::Completed),
-            title: None,
-            raw_output: None,
-            content: ToolOutputBlock {
-                text: "file contents".to_string(),
-                skipped: 0,
-                diff: None,
+        state.update_subagent_activity(
+            &SubagentEvent::ToolCallUpdate {
+                id: "c1".to_string(),
+                status: Some(ToolCallStatus::Completed),
+                title: None,
+                raw_output: None,
+                content: ToolOutputBlock {
+                    text: "file contents".to_string(),
+                    skipped: 0,
+                    diff: None,
+                },
             },
-        });
+            None,
+        );
 
         let activity = &state.pty_sessions[0].subagent_activity;
         let tools: Vec<&SubagentToolCall> = activity
@@ -3491,28 +4497,43 @@ mod tests {
         let mut state = RightPanelState::new();
         state.start_pty("subagent: opencode".to_string(), None);
 
-        state.update_subagent_activity(&SubagentEvent::Thought {
-            text: "thinking ".to_string(),
-        });
-        state.update_subagent_activity(&SubagentEvent::Thought {
-            text: "hard".to_string(),
-        });
-        state.update_subagent_activity(&SubagentEvent::Plan {
-            entries: vec![PlanEntry {
-                content: "step".to_string(),
-                priority: PlanEntryPriority::High,
-                status: PlanEntryStatus::InProgress,
-            }],
-        });
-        state.update_subagent_activity(&SubagentEvent::Usage {
-            context_window: 8192,
-            tokens_in_context: 2048,
-        });
+        state.update_subagent_activity(
+            &SubagentEvent::Thought {
+                text: "thinking ".to_string(),
+            },
+            None,
+        );
+        state.update_subagent_activity(
+            &SubagentEvent::Thought {
+                text: "hard".to_string(),
+            },
+            None,
+        );
+        state.update_subagent_activity(
+            &SubagentEvent::Plan {
+                entries: vec![PlanEntry {
+                    content: "step".to_string(),
+                    priority: PlanEntryPriority::High,
+                    status: PlanEntryStatus::InProgress,
+                }],
+            },
+            None,
+        );
+        state.update_subagent_activity(
+            &SubagentEvent::Usage {
+                context_window: 8192,
+                tokens_in_context: 2048,
+            },
+            None,
+        );
         // Message text is part of the timeline now (the mini-chat shows the
         // agent speaking); a chunk after the plan opens a NEW entry.
-        state.update_subagent_activity(&SubagentEvent::Message {
-            text: "visible in the timeline".to_string(),
-        });
+        state.update_subagent_activity(
+            &SubagentEvent::Message {
+                text: "visible in the timeline".to_string(),
+            },
+            None,
+        );
 
         let activity = &state.pty_sessions[0].subagent_activity;
         assert_eq!(activity.timeline.len(), 3);
@@ -3535,7 +4556,7 @@ mod tests {
     fn subagent_activity_resets_when_the_session_completes() {
         let mut state = RightPanelState::new();
         state.start_pty("subagent: opencode".to_string(), None);
-        state.update_subagent_activity(&tool_call_event("c1", "Reading a"));
+        state.update_subagent_activity(&tool_call_event("c1", "Reading a"), None);
 
         state.complete_last_pty("final report".to_string());
 
@@ -3608,19 +4629,19 @@ mod tests {
         let mut state = RightPanelState::new();
         // A running BASH session must not absorb sub-agent events.
         state.start_pty("cargo test".to_string(), None);
-        assert!(!state.update_subagent_activity(&tool_call_event("c1", "Reading a")));
+        assert!(!state.update_subagent_activity(&tool_call_event("c1", "Reading a"), None));
         assert!(state.pty_sessions[0].subagent_activity.timeline.is_empty());
 
         // A finished subagent window (history entry) must not either.
         state.complete_last_pty(String::new());
         state.start_pty("subagent: opencode".to_string(), None);
         state.complete_last_pty("done".to_string());
-        assert!(!state.update_subagent_activity(&tool_call_event("c2", "Reading b")));
+        assert!(!state.update_subagent_activity(&tool_call_event("c2", "Reading b"), None));
         assert!(state.pty_sessions[1].subagent_activity.timeline.is_empty());
 
         // Events with no running subagent target are simply dropped (and
         // report `false`, so the caller must not auto-follow them).
-        assert!(!state.update_subagent_activity(&tool_call_event("c3", "Reading c")));
+        assert!(!state.update_subagent_activity(&tool_call_event("c3", "Reading c"), None));
     }
 
     #[test]
@@ -3631,9 +4652,12 @@ mod tests {
         // 8000-byte cap, so only the bounded tail survives (chunks coalesce
         // into one growing transcript entry).
         for i in 0..600 {
-            state.update_subagent_activity(&SubagentEvent::Thought {
-                text: format!("thought-{i:06} "),
-            });
+            state.update_subagent_activity(
+                &SubagentEvent::Thought {
+                    text: format!("thought-{i:06} "),
+                },
+                None,
+            );
         }
         let activity = &state.pty_sessions[0].subagent_activity;
         // ONE coalesced entry, not 500 of them.
@@ -3656,10 +4680,13 @@ mod tests {
         // even when it opens a NEW entry (the previous last entry is a tool
         // call, so coalescing does not apply) — ACP does not bound
         // `ContentBlock::Text`.
-        state.update_subagent_activity(&tool_call_event("c1", "Reading a"));
-        state.update_subagent_activity(&SubagentEvent::Message {
-            text: "x".repeat(SUBAGENT_TEXT_ENTRY_BYTES + 5_000),
-        });
+        state.update_subagent_activity(&tool_call_event("c1", "Reading a"), None);
+        state.update_subagent_activity(
+            &SubagentEvent::Message {
+                text: "x".repeat(SUBAGENT_TEXT_ENTRY_BYTES + 5_000),
+            },
+            None,
+        );
         let activity = &state.pty_sessions[0].subagent_activity;
         assert_eq!(activity.timeline.len(), 2);
         let message = match &activity.timeline[1] {
@@ -3668,12 +4695,18 @@ mod tests {
         };
         assert!(message.len() <= SUBAGENT_TEXT_ENTRY_BYTES);
         // Same guarantee for a Thought chunk that opens a new entry.
-        state.update_subagent_activity(&SubagentEvent::Message {
-            text: "again".to_string(),
-        });
-        state.update_subagent_activity(&SubagentEvent::Thought {
-            text: "y".repeat(SUBAGENT_TEXT_ENTRY_BYTES + 5_000),
-        });
+        state.update_subagent_activity(
+            &SubagentEvent::Message {
+                text: "again".to_string(),
+            },
+            None,
+        );
+        state.update_subagent_activity(
+            &SubagentEvent::Thought {
+                text: "y".repeat(SUBAGENT_TEXT_ENTRY_BYTES + 5_000),
+            },
+            None,
+        );
         let activity = &state.pty_sessions[0].subagent_activity;
         let thought = match activity.timeline.last() {
             Some(SubagentTimelineEntry::Thought { text }) => text.clone(),
@@ -3689,16 +4722,22 @@ mod tests {
         // Alternate entries so every chunk opens a NEW timeline entry
         // (chunks only coalesce into a matching last entry).
         for i in 0..(SUBAGENT_TIMELINE_MAX_ENTRIES + 10) {
-            state.update_subagent_activity(&SubagentEvent::Message {
-                text: format!("msg-{i:04}"),
-            });
-            state.update_subagent_activity(&SubagentEvent::ToolCall {
-                id: format!("c{i}"),
-                title: "call".to_string(),
-                kind: ToolKind::Read,
-                status: ToolCallStatus::InProgress,
-                raw_input: None,
-            });
+            state.update_subagent_activity(
+                &SubagentEvent::Message {
+                    text: format!("msg-{i:04}"),
+                },
+                None,
+            );
+            state.update_subagent_activity(
+                &SubagentEvent::ToolCall {
+                    id: format!("c{i}"),
+                    title: "call".to_string(),
+                    kind: ToolKind::Read,
+                    status: ToolCallStatus::InProgress,
+                    raw_input: None,
+                },
+                None,
+            );
         }
         let activity = &state.pty_sessions[0].subagent_activity;
         assert_eq!(activity.timeline.len(), SUBAGENT_TIMELINE_MAX_ENTRIES);
@@ -3753,6 +4792,8 @@ mod tests {
         state.replay_pty(
             "subagent: opencode".to_string(),
             Some("→ cosh: review\n".to_string()),
+            None,
+            false,
             "<!-- severity: yellow -->\nminor issues".to_string(),
             false,
         );
@@ -3765,6 +4806,8 @@ mod tests {
         state.replay_pty(
             "subagent: opencode".to_string(),
             None,
+            None,
+            false,
             "<!-- severity: green -->\nok".to_string(),
             true,
         );
@@ -3976,7 +5019,7 @@ mod tests {
     fn running_session_height_includes_activity_rows() {
         let mut state = RightPanelState::new();
         state.start_pty("subagent: opencode".to_string(), None);
-        state.update_subagent_activity(&tool_call_event("c1", "Reading a"));
+        state.update_subagent_activity(&tool_call_event("c1", "Reading a"), None);
         state.update_last_pty("streaming report".to_string());
 
         let wrap_w = state.subagent_wrap_w.max(40);
@@ -4512,8 +5555,10 @@ mod tests {
         assert!(state.bash_buffer(40).len() < buf.len());
     }
 
-    /// The subagent rows account for wrapped command-header and input
-    /// lines, so the box never clips a window whose input is long.
+    /// The subagent rows account for the wrapped input line, so the box
+    /// never clips a window whose input is long. (The command header is
+    /// NOT rendered anymore — the list row already names the agent CLI —
+    /// and the `→ cosh: ` storage marker is stripped from the display.)
     #[test]
     fn subagent_rows_include_wrapped_header_and_input() {
         let mut state = RightPanelState::new();
@@ -4522,10 +5567,11 @@ mod tests {
         let long_input = format!("→ cosh: {}\n", "x".repeat(50));
         state.update_last_pty(long_input); // no body yet
 
-        // Width 20: 18-char header → 1 row; input = "→ cosh: " prefix row
-        // + the oversized x-run hard-broken into 20/20/10 → 4 rows.
-        assert_eq!(state.subagent_section_rows(20), &[1 + 4]);
-        assert_eq!(state.subagent_section_rows(80), &[2]);
+        // Width 20: the DISPLAY text (marker stripped) is a 50-char
+        // x-run → hard-broken 20/20/10 → 3 rows; no header row.
+        assert_eq!(state.subagent_section_rows(20), &[3]);
+        // Width 80: the 50-char run fits on one row.
+        assert_eq!(state.subagent_section_rows(80), &[1]);
     }
 
     /// Output is truncated to `MAX_PTY_OUTPUT_CHARS`, keeping the TAIL (the
@@ -4619,9 +5665,10 @@ mod tests {
             state.resolve_visible_subagents(38, 1000);
             state.visible_subagents.clone()
         };
-        // Live shows the newest opencode + the kilo session (plenty of space).
-        assert_eq!(visible.len(), 2);
-        assert_eq!(visible, vec![1, 2]);
+        // Expanded mode is EXCLUSIVE: ONE window — the newest entry
+        // (opencode v2, newest among the finished candidates). The kilo
+        // session stays visible in the LIST, not beside the window.
+        assert_eq!(visible, vec![2]);
 
         // ← on the opencode queue reaches the superseded report.
         state.panel_focus = Some(PanelFocus::Agent("opencode".to_string()));
@@ -4670,9 +5717,12 @@ mod tests {
         assert!(state.pinned_session("kilo").is_none());
     }
 
-    /// REGRESSION: a queue's pin must never hide its live RUNNING sessions —
-    /// they rank as normal live candidates and are displayed alongside the
-    /// pinned window; only finished entries yield to the pin.
+    /// REGRESSION: expanded mode is EXCLUSIVE — exactly ONE window. The
+    /// pinned window IS the display; a newly spawned RUNNING session of
+    /// the SAME queue stays in the list (it is reachable by → /
+    /// Ctrl+Alt+L) and must NOT squeeze in beside the pinned window. (The
+    /// pin still survives: the pinned entry keeps its place, exactly what
+    /// the user selected.)
     #[test]
     fn pinned_queue_still_displays_its_running_sessions() {
         // s0 stays RUNNING; s1 runs to completion.
@@ -4689,8 +5739,8 @@ mod tests {
         assert!(state.queue_is_pinned("kilo"));
 
         // A new kilo session spawns (running): the pin survives (its target
-        // is not superseded) and the new RUNNING session is displayed
-        // alongside the pinned window instead of being omitted.
+        // is not superseded) and the pinned window REMAINS the only one on
+        // display — the new session waits in the list.
         state.start_pty("subagent: kilo".to_string(), None);
         state.update_last_pty("v2 streaming".to_string());
         assert!(state.queue_is_pinned("kilo"), "running pin target survives");
@@ -4700,22 +5750,30 @@ mod tests {
         state.resolve_visible_subagents(38, 1000);
         assert_eq!(
             state.visible_subagents,
-            vec![0, 2],
-            "pinned window + new RUNNING session, nothing omitted"
+            vec![0],
+            "expanded exclusivity: the pinned window alone, new session stays in the list"
+        );
+        assert_eq!(
+            state.pinned_session("kilo"),
+            Some(0),
+            "the pin itself is untouched by the new spawn"
         );
     }
 
-    /// REGRESSION: a FINISHED window held by FOCUS must never steal the
-    /// display space of a RUNNING subagent. The stale window is demoted
-    /// below every running session (but still above finished live entries,
-    /// so navigation keeps its window whenever space allows).
+    /// Expanded mode is EXCLUSIVE — exactly ONE window. A FINISHED window
+    /// held by FOCUS keeps the section to itself: running sessions stay
+    /// in the LIST and do not reclaim the area the user is inspecting.
+    /// (The old budget-demotion rule made sense when several windows
+    /// shared the section; with exclusivity there is nothing to yield.)
     #[test]
     fn finished_focused_window_yields_space_to_running() {
         let mut state = RightPanelState::new();
         state.start_pty("subagent: kilo".to_string(), None);
         state.complete_last_pty("kilo report\n".to_string());
-        // The user clicked/navigated onto kilo's (now finished) window.
+        // The user clicked/navigated onto kilo's (now finished) window:
+        // expanded view (list folded), kilo in focus.
         state.panel_focus = Some(PanelFocus::Agent("kilo".to_string()));
+        state.subagent_list_mode = Some(false);
 
         // A different CLI's subagent starts RUNNING while the finished
         // kilo window keeps the focus.
@@ -4724,13 +5782,11 @@ mod tests {
 
         state.subagent_rebuild_interval = Duration::ZERO;
         state.text_regions_w = 38;
-        // Budget fits exactly ONE window (a second would need its 1-row
-        // separator margin on top of its content rows).
         state.resolve_visible_subagents(38, 1);
         assert_eq!(
             state.visible_subagents,
-            vec![1],
-            "the RUNNING subagent must win the scarce space over the finished focused window"
+            vec![0],
+            "expanded exclusivity: the focused window (finished or not) alone; the running one stays in the list"
         );
     }
 
@@ -4758,19 +5814,21 @@ mod tests {
         assert_eq!(
             state.visible_subagents,
             vec![2],
-            "the RUNNING subagent outranks the stale pin on a finished entry"
+            "expanded exclusivity: the pinned (finished) window alone; the running one stays in the list"
         );
     }
 
-    /// The stale window is only DEMOTED, never dropped: with enough space
-    /// both the finished focused window and the RUNNING session are
-    /// displayed (display order stays chronological).
+    /// Expanded mode is EXCLUSIVE even when space is plentiful: a huge
+    /// budget must NOT bring a second window back — exactly one subagent
+    /// occupies the section, the rest stay in the list.
     #[test]
-    fn finished_focused_window_still_shows_when_space_allows() {
+    fn expanded_mode_never_shows_two_windows_even_with_plenty_of_space() {
         let mut state = RightPanelState::new();
         state.start_pty("subagent: kilo".to_string(), None);
         state.complete_last_pty("kilo report\n".to_string());
+        // Expanded view (a click folded the list), kilo in focus.
         state.panel_focus = Some(PanelFocus::Agent("kilo".to_string()));
+        state.subagent_list_mode = Some(false);
         state.start_pty("subagent: opencode".to_string(), None);
         state.update_last_pty("opencode streaming\n".to_string());
 
@@ -4779,8 +5837,8 @@ mod tests {
         state.resolve_visible_subagents(38, 100);
         assert_eq!(
             state.visible_subagents,
-            vec![0, 1],
-            "finished focused window survives whenever it fits"
+            vec![0],
+            "exactly ONE window even when two would fit: the focused one"
         );
     }
 
@@ -4843,7 +5901,7 @@ mod tests {
         assert_eq!(kept, "subagent: d", "most recently navigated wins");
     }
 
-    /// Alt+← / Alt+→ cycle focus across agent queues — including HIDDEN
+    /// Shift+B / Shift+N cycle focus across agent queues — including HIDDEN
     /// queues that have no window to click — without ever mixing entries
     /// from different CLIs into one queue's navigation.
     #[test]
@@ -4859,7 +5917,7 @@ mod tests {
         assert_eq!(
             state.panel_focus,
             Some(PanelFocus::Agent("kilo".to_string())),
-            "Alt+← reaches the other queue"
+            "Shift+B reaches the other queue"
         );
         assert!(state.cycle_agent_queue(1));
         assert_eq!(
@@ -4884,7 +5942,7 @@ mod tests {
         );
     }
 
-    /// REGRESSION: switching queues (Shift+B/N / Alt+arrows) must hand the
+    /// REGRESSION: switching queues (Shift+B/N) must hand the
     /// DISPLAY to the newly focused queue — its NEWEST entry takes the
     /// visible window immediately, replacing the previous queue's window,
     /// even when only one window fits.
@@ -4987,9 +6045,10 @@ mod tests {
         );
     }
 
-    /// The first "→ cosh:" line of a subagent output is the main agent's
-    /// input; everything after it is the subagent body. Outputs without the
-    /// prefix (e.g. after tail truncation) are all body.
+    /// The leading `→ cosh:` lines of a subagent output are the main
+    /// agent's FULL input block (the prompt is echoed verbatim, one marker
+    /// per line); everything after the first marker-less line is the body.
+    /// Outputs without the prefix (e.g. after tail truncation) are all body.
     #[test]
     fn split_subagent_output_extracts_input_line() {
         assert_eq!(
@@ -5004,31 +6063,46 @@ mod tests {
             split_subagent_output("→ cosh: hi"),
             (Some("→ cosh: hi"), "")
         );
+        // FULL-prompt echo: EVERY leading marker line belongs to the input
+        // block; the first marker-less line ends it (never swallowed).
+        let out = "→ cosh: line a\n→ cosh: line b\n→ cosh: line c\nbody\n";
+        assert_eq!(
+            split_subagent_output(out),
+            (
+                Some("→ cosh: line a\n→ cosh: line b\n→ cosh: line c"),
+                "body\n"
+            )
+        );
+        // A blank line (marker-less) also ends the block.
+        let out = "→ cosh: a\n\nbody\n";
+        assert_eq!(split_subagent_output(out), (Some("→ cosh: a"), "\nbody\n"));
     }
 
-    /// REGRESSION (buried stream): a multi-line subagent prompt used to be
-    /// echoed in full into the PTY output; only its FIRST line counted as
-    /// the input line, and the remaining lines leaked into the markdown
-    /// BODY — a static block BELOW the live timeline that the auto-follow
-    /// kept pinned on screen, hiding the stream until the user scrolled
-    /// up. The echo must be exactly ONE line (collapsed + capped); the full
-    /// prompt lives in the chat's tool part.
+    /// The FULL prompt is echoed VERBATIM — never collapsed, never
+    /// truncated: the window is a linear chat (prompt, then the answer)
+    /// and the user SCROLLS to read long prompts. No `…` may ever appear.
     #[test]
-    fn subagent_input_line_echo_is_one_line() {
+    fn subagent_input_line_echo_is_verbatim() {
         let multiline = "review the last commit\nbe thorough\ncheck tests too";
         let echo = subagent_input_line(multiline).unwrap();
-        assert!(echo.starts_with("→ cosh: review the last commit\n"));
-        assert_eq!(echo.lines().count(), 1, "echo must be a single line");
-        assert!(!echo.contains("be thorough"), "extra lines must be dropped");
-        // Absent or blank input → no echo line at all (same as before).
+        // One marker per prompt line, content preserved exactly.
+        assert_eq!(
+            echo,
+            "→ cosh: review the last commit\n→ cosh: be thorough\n→ cosh: check tests too\n"
+        );
+        // Absent or blank input → no echo at all (same as before).
         assert!(subagent_input_line("").is_none());
         assert!(subagent_input_line("\n  \n").is_none());
-        // A long single-line prompt is capped (no unbounded wrap row).
+        // A long single-line prompt is NOT capped: the full 300 chars are
+        // echoed (they wrap; the section scrolls).
         let long = "x".repeat(300);
-        let capped = subagent_input_line(&long).unwrap();
-        // All counts in CHARS: 120 cap + "→ cosh: " prefix + '…' + '\n'.
-        assert!(capped.chars().count() <= 120 + "→ cosh: ".chars().count() + 2);
-        assert!(capped.ends_with("…\n"));
+        let echo = subagent_input_line(&long).unwrap();
+        assert_eq!(
+            echo.chars().count(),
+            300 + "→ cosh: ".chars().count() + 1,
+            "no `…` truncation"
+        );
+        assert!(!echo.contains('…'));
     }
 
     /// REGRESSION (oscillating viewport): the live activity rows used to be
@@ -5047,7 +6121,7 @@ mod tests {
         // An activity event grows the timeline; the static cache may NOT
         // rebuild within the interval, but the combined rows must reflect
         // the new timeline row immediately.
-        state.update_subagent_activity(&tool_call_event("c1", "Reading a"));
+        state.update_subagent_activity(&tool_call_event("c1", "Reading a"), None);
         let rows_after = state.subagent_section_rows(30).to_vec();
         assert_eq!(
             rows_after[0],
@@ -5084,10 +6158,13 @@ mod tests {
             "→ cosh: review this\n# Title\n\n```rust\nfn main() { println!(\"hi\"); }\n```\n",
         );
         assert_eq!(input, Some("→ cosh: review this"));
+        // CLEAN view: NO command header. The input displays as direct
+        // prompt text (marker stripped), then ONE separator row (the chat
+        // gap — input and body both present), then the markdown body.
         let expected = 1 + 1 + estimate_height(&sanitize_subagent_text(body), w);
         assert_eq!(
             rows[0], expected,
-            "header + input line + markdown body rows"
+            "input line + gap + markdown body rows (no header)"
         );
         // The fence's painted layout keeps its inner content rows but NOT
         // a phantom trailing blank: estimate == painted by contract.
@@ -5143,7 +6220,7 @@ mod tests {
 
         let rows = state.subagent_section_rows(30).to_vec();
         let layout_gen_snapshot = state.subagent_layout_gen;
-        assert_eq!(rows, vec![2], "header + 1 body row");
+        assert_eq!(rows, vec![1], "plain body row (no header, no input)");
 
         // New output arrives within the interval: no rebuild (stale rows).
         state.update_last_pty(

@@ -62,7 +62,7 @@ pub mod sandbox;
 pub mod severity;
 pub mod types;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use crate::ToolDescription;
@@ -94,6 +94,11 @@ pub struct SubAgent {
     /// Last input message sent to a sub-agent in this session, reused when
     /// a call omits `input`.
     last_input: Mutex<Option<String>>,
+    /// Sequence numbers of INFERRED code-review descriptions
+    /// ([`Self::resolve_description`]): keeps `code-review-01`,
+    /// `code-review-02`, ... unique across the session so parallel review
+    /// subagents stay distinguishable in the right-panel list.
+    inferred_reviews: Mutex<HashSet<usize>>,
     /// Last ACP session id per agent name (Phase 4): the session each
     /// harness returned from `session/new`, resumed by the next call with
     /// `continue_session` (the default) so the sub-agent keeps its context
@@ -125,6 +130,16 @@ impl Default for SubAgent {
 }
 
 impl SubAgent {
+    /// The inferred description label for the Nth code-review subagent
+    /// (`code-review-01`, `code-review-02`, ...): the label a review call
+    /// shows in the right-panel list when it omitted `description` (the
+    /// harness numbers its own inferences; the TUI reconstructs the label
+    /// for persisted windows from the queue position).
+    #[must_use]
+    pub fn inferred_review_label(n: usize) -> String {
+        format!("code-review-{n:02}")
+    }
+
     /// Create a new `SubAgent` with a tool description tailored to
     /// only the ACP agent harnesses that are actually installed in PATH.
     /// Detection runs once per process (cached by `detect_installed()`).
@@ -134,6 +149,7 @@ impl SubAgent {
             description_call: Self::build_tool_description(""),
             note: String::new(),
             last_input: Mutex::new(None),
+            inferred_reviews: Mutex::new(HashSet::new()),
             last_session: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -262,6 +278,10 @@ impl SubAgent {
                         "type": "string",
                         "description": "The message to send to the sub-agent as input. Optional: if omitted (or empty), the last message sent to a sub-agent in this session is reused automatically, so a failed call can be retried without re-writing the prompt. If no sub-agent has been called yet, an error is returned.",
                     },
+                    "description": {
+                        "type": "string",
+                        "description": "Short task description for the subagent list entry in the right panel (`agent description tool spinner`). Use 1 to 3 words. For code review subagents, the task description is optional but recommended; for other tasks, it is required.",
+                    },
                     "code_review": {
                         "type": "boolean",
                         "description": "Set to true when the task is a CODE REVIEW. The sub-agent's final report then starts with a `<!-- severity: green|yellow|red -->` header consumed by the client: it tints the sub-agent box (green = at most cosmetic details, yellow = minor issues / bad practice, red = something critical found). Ignored for non-review tasks. Optional, defaults to false.",
@@ -278,6 +298,47 @@ impl SubAgent {
                 "required": [],
             },
         })
+    }
+
+    /// Resolve the effective task description for a subagent list entry.
+    ///
+    /// Non-empty `description` values pass through. When omitted (or empty)
+    /// a CODE REVIEW call infers `"{agent} code-review-{n}"` — `n` is the
+    /// count of already-inferred descriptions this session, so parallel or
+    /// sequential review subagents stay distinguishable. Non-review calls
+    /// get an error: without a description the right-panel list entry
+    /// carries no information about what the subagent is doing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a non-code-review call omits the description.
+    #[allow(clippy::unwrap_used)]
+    pub fn resolve_description(
+        &self,
+        description: Option<String>,
+        code_review: bool,
+    ) -> Result<String, String> {
+        if let Some(text) = description {
+            let text = text.trim().to_string();
+            if !text.is_empty() {
+                return Ok(text);
+            }
+        }
+        if code_review {
+            // Count only INFERRED descriptions, so explicitly named review
+            // subagents do not advance the sequence. The agent name is NOT
+            // part of the inferred text: the list entry prepends it.
+            let n = self.inferred_reviews.lock().unwrap().len() + 1;
+            self.inferred_reviews.lock().unwrap().insert(n);
+            Ok(Self::inferred_review_label(n))
+        } else {
+            Err(
+                "subagent_call requires a 'description' argument for non-code-review \
+                 tasks: a short summary of the work the sub-agent is doing (shown in \
+                 the right-panel subagent list)."
+                    .to_string(),
+            )
+        }
     }
 
     /// Resolve the effective input message for a sub-agent call.

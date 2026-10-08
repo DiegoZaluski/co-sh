@@ -845,6 +845,10 @@ impl App {
             let _ = event_tx.send(HarnessEvent::ToolCall {
                 tool: "bash_run".to_string(),
                 input: serde_json::json!({ "command": command }),
+                // Command mode runs OUTSIDE the agent loop's dispatch:
+                // no per-call routing identity exists (no parallel
+                // sub-agents here) — the TUI keeps its default pairing.
+                call_ref: None,
             });
 
             let mut tools = cosh::harness::CoshTools::new(&cwd);
@@ -869,12 +873,16 @@ impl App {
             match result {
                 Ok(output) => {
                     let _ = event_tx.send(HarnessEvent::ToolResult {
+                        call_ref: None,
                         output: output.clone(),
                     });
                     context.add_hidden_command_execution(&call_id, &command, &output);
                 }
                 Err(err) => {
-                    let _ = event_tx.send(HarnessEvent::ToolError { error: err.clone() });
+                    let _ = event_tx.send(HarnessEvent::ToolError {
+                        error: err.clone(),
+                        call_ref: None,
+                    });
                     context.add_hidden_command_execution(&call_id, &command, &err);
                 }
             }

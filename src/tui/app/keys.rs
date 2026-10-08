@@ -157,7 +157,33 @@ impl App {
             // Escape also unfocuses the right panel slot — WITHOUT
             // consuming the key: Esc keeps its normal meanings
             // (interrupt generation, cancel, close dialogs) even
-            // while a panel slot is focused.
+            // while a panel slot is focused. When the mouse cursor sits
+            // over the subagent section of the right panel, Esc FIRST
+            // folds an expanded subagent back into the list — the slower
+            // alternative to Ctrl+Alt+L (it depends on the cursor being
+            // over the subagent block; the F-key works from anywhere).
+            // The fold CONSUMES the Esc (and runs only with no modal box
+            // open — a visible box owns Esc first, like everywhere else):
+            // otherwise, with the agent Idle, the same keypress would fall
+            // through to the cancel path and LEAVE the session — the fold
+            // would only ever "work" while the model was running (the
+            // Working branch below already returned, swallowing the fall-
+            // through). Fold + leave in one Esc is never intended.
+            if key.code == KeyCode::Esc
+                && !self.modal_box_open()
+                && self.is_in_right_panel(self.last_mouse_x)
+                && self.state.right_panel.section_at(self.last_mouse_y)
+                    == Some(crate::routes::session::right_panel::types::SectionKind::Subagent)
+                && self.state.right_panel.subagent_list_open()
+            {
+                // Parity with the pre-consume flow: the fold used to fall
+                // through to the unfocus line below, which a consumed Esc
+                // now skips — so the slot focus is released HERE, exactly
+                // once, when the fold actually happened.
+                self.state.right_panel.panel_focus = None;
+                return Ok(false);
+            }
+
             if key.code == KeyCode::Esc && self.state.right_panel.panel_focus.is_some() {
                 self.state.right_panel.panel_focus = None;
             }
@@ -654,18 +680,6 @@ impl App {
             }
 
             let action = self.keymap.lookup(key.code, key.modifiers).cloned();
-            // Some terminals deliver Alt+arrows with extra modifier bits,
-            // which the exact-match lookup above misses. Normalize those to
-            // the queue-cycling actions so switching never silently dies.
-            let action = action.or_else(|| match key.code {
-                KeyCode::Left if key.modifiers.contains(KeyModifiers::ALT) => {
-                    Some(crate::keymap::Action::PrevAgent)
-                }
-                KeyCode::Right if key.modifiers.contains(KeyModifiers::ALT) => {
-                    Some(crate::keymap::Action::NextAgent)
-                }
-                _ => None,
-            });
 
             // Home mode: navigation keys (skip when dialog is visible)
             #[cfg(feature = "home")]
@@ -1263,17 +1277,6 @@ impl App {
                 ) => {
                     // TBD
                 }
-                Some(crate::keymap::Action::NextAgent | crate::keymap::Action::PrevAgent) => {
-                    // Cycle the right-panel keyboard focus across agent
-                    // queues — the only way to reach a queue whose
-                    // windows are hidden for lack of space.
-                    let dir = if matches!(action, Some(crate::keymap::Action::PrevAgent)) {
-                        -1
-                    } else {
-                        1
-                    };
-                    self.state.right_panel.cycle_agent_queue(dir);
-                }
                 Some(crate::keymap::Action::SendMessage | crate::keymap::Action::Confirm) => {
                     if let Some(dialog) = self.dialog.current()
                         && matches!(dialog.dialog_type, DialogType::Confirm { .. })
@@ -1616,7 +1619,11 @@ impl App {
                             KeyCode::Left => {
                                 if self.state.right_panel.panel_focus.is_some() {
                                     // Focused panel slot: bash toggles history
-                                    // mode, an agent queue steps back one entry.
+                                    // mode, an agent queue steps back one entry
+                                    // (in the EXPANDED subagent view this walks
+                                    // the displayed windows without folding
+                                    // back to the list — see
+                                    // `panel_left`'s list-mode handling).
                                     self.state.right_panel.panel_left();
                                 } else if key.modifiers.contains(KeyModifiers::CONTROL) {
                                     self.prompt_view.cursor_word_left();
@@ -1633,7 +1640,10 @@ impl App {
                             KeyCode::Right => {
                                 if self.state.right_panel.panel_focus.is_some() {
                                     // Focused panel slot: bash returns to live,
-                                    // an agent queue steps forward (live at newest).
+                                    // an agent queue steps forward (live at
+                                    // newest) — in the EXPANDED subagent view
+                                    // this walks the displayed windows without
+                                    // folding back to the list.
                                     self.state.right_panel.panel_right();
                                 } else if key.modifiers.contains(KeyModifiers::CONTROL) {
                                     self.prompt_view.cursor_word_right();
@@ -1696,10 +1706,10 @@ impl App {
                                 }
                             }
                             // Shift+B / Shift+N cycle agent queues while the
-                            // right panel owns the keyboard — an alternative
-                            // to Alt+arrows whose SHIFT modifier survives
-                            // every terminal encoding (crossterm derives it
-                            // from the uppercase letter). Without panel
+                            // right panel owns the keyboard — their SHIFT
+                            // modifier survives every terminal encoding
+                            // (crossterm derives it from the uppercase
+                            // letter). Without panel
                             // focus the guards fail and the letters fall
                             // through to normal typing below.
                             KeyCode::Char('B')
@@ -1716,6 +1726,36 @@ impl App {
                             }
                             KeyCode::Char(ch) => {
                                 self.prompt_view.note_activity();
+
+                                // Ctrl+Alt+L: fold an expanded subagent back
+                                // into the subagent list. Raw-matched here
+                                // (NOT via the keymap) so an AltGr CHARACTER
+                                // keeps flowing into the typing path below:
+                                // on Windows consoles AltGr arrives encoded
+                                // exactly as Char+CTRL|ALT, and during a
+                                // paste burst (text within BURST_WINDOW) this
+                                // chord IS that character, never the
+                                // shortcut — a human cannot hit a chord
+                                // within 80 ms of typing text.
+                                if ch == 'l'
+                                    && key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::ALT)
+                                    && !self.paste_burst_text_recent()
+                                {
+                                    // Only fold when an EXPANDED view exists:
+                                    // with the list already showing (or zero
+                                    // subagents) the chord must not latch
+                                    // `subagent_list_mode = Some(true)` — that
+                                    // would force the FIRST future subagent
+                                    // into a one-row list instead of the
+                                    // documented expanded window. The chord is
+                                    // still consumed: like every other
+                                    // Ctrl-chord here, typing `l` underneath
+                                    // would be the worse surprise.
+                                    if self.state.right_panel.subagent_list_mode == Some(false) {
+                                        self.state.right_panel.subagent_list_open();
+                                    }
+                                    return Ok(false);
+                                }
 
                                 // Ctrl+J is the universal newline (^J = \n) — works in every terminal
                                 if ch == 'j' && key.modifiers.contains(KeyModifiers::CONTROL) {

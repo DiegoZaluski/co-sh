@@ -137,6 +137,7 @@ async fn probe_real_session() {
     // ── Agent starts working: ToolCall → active spinner → per-frame redraws ──
     app.event_tx
         .send(HarnessEvent::ToolCall {
+            call_ref: None,
             tool: "bash_run".into(),
             input: serde_json::json!({"command": "cargo build --release"}),
         })
@@ -154,6 +155,7 @@ async fn probe_real_session() {
             .unwrap();
         app.event_tx
             .send(HarnessEvent::ToolOutput {
+                call_ref: None,
                 tool: "bash_run".into(),
                 output: format!("compiling crate {i}/500\n"),
                 finished: false,
@@ -180,6 +182,7 @@ async fn probe_real_session() {
     println!("[PROBE] --- subagent_call (right panel appears) ---");
     app.event_tx
         .send(HarnessEvent::ToolCall {
+            call_ref: None,
             tool: "subagent_call".into(),
             input: serde_json::json!({"agent": "explore", "input": "find hot paths"}),
         })
@@ -188,6 +191,7 @@ async fn probe_real_session() {
     for i in 0..10 {
         app.event_tx
             .send(HarnessEvent::ToolOutput {
+                call_ref: None,
                 tool: "subagent_call".into(),
                 output: "- reading src/**\n- found hot loop\n".repeat(5),
                 finished: false,
@@ -216,6 +220,7 @@ async fn probe_real_session() {
             .unwrap();
         app.event_tx
             .send(HarnessEvent::ToolOutput {
+                call_ref: None,
                 tool: "subagent_call".into(),
                 output: "- exploring more\n".repeat(6),
                 finished: false,

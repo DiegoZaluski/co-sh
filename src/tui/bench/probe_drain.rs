@@ -90,6 +90,7 @@ async fn probe_drain_costs() {
     // A running tool part exists so ToolOutput paths take the real branch.
     app.event_tx
         .send(HarnessEvent::ToolCall {
+            call_ref: None,
             tool: "bash_run".into(),
             input: serde_json::json!({"command": "cargo test"}),
         })
@@ -124,6 +125,7 @@ async fn probe_drain_costs() {
             &mut app,
             &format!("ToolOutput(bash) #{i}"),
             HarnessEvent::ToolOutput {
+                call_ref: None,
                 tool: "bash_run".into(),
                 output: bash_chunk.clone(),
                 finished: false,
@@ -134,6 +136,7 @@ async fn probe_drain_costs() {
             &mut app,
             &format!("ToolOutput(subagent) #{i}"),
             HarnessEvent::ToolOutput {
+                call_ref: None,
                 tool: "subagent_call".into(),
                 output: sub_chunk.clone(),
                 finished: false,
@@ -157,6 +160,7 @@ async fn probe_drain_costs() {
         &mut app,
         "ToolResult(1200-line file)",
         HarnessEvent::ToolResult {
+            call_ref: None,
             output: big_rust_file(1200),
         },
     );
