@@ -1079,7 +1079,18 @@ impl SubagentActivity {
     /// after them belongs to a later turn, where a fresh entry is the
     /// correct layout for both sub-agent flavors.
     ///
-    /// Returns `true` (the chunk always changes visible text).
+    /// A whitespace-only chunk NEVER opens a fresh entry — it may only
+    /// merge into an existing matching one. This is the same rule the
+    /// chat's `Token` handler applies ("leading whitespace before any text
+    /// must never open a blank bubble"): providers emit stray blank chunks
+    /// BEFORE the reasoning starts, and the invisible entry opened by one
+    /// let the backscan merge capture the answer's text INTO that
+    /// pre-reasoning row — the conclusion then displayed ABOVE the thought
+    /// that actually preceded it (the "answer above reasoning" order bug).
+    ///
+    /// Returns whether VISIBLE text changed: `false` for a whitespace-only
+    /// chunk with no matching open entry, so the caller does not yank the
+    /// viewport on an invisible no-op.
     fn coalesce_stream_chunk(&mut self, text: &str, thought: bool) -> bool {
         for entry in self.timeline.iter_mut().rev() {
             match entry {
@@ -1098,6 +1109,16 @@ impl SubagentActivity {
                 // The opposite stream kind: keep scanning back.
                 _ => {}
             }
+        }
+        // Whitespace-only chunks never OPEN an entry: an invisible blank row
+        // would sit before the reasoning it precedes and (via the backscan
+        // merge above) capture the answer text into it, inverting the
+        // displayed order. A newline-carrying whitespace delta must still
+        // MERGE into an open entry — paragraph breaks mid-stream are real
+        // content (the chat keeps the same distinction). Nothing visible
+        // changed, so the caller must not auto-scroll for it.
+        if text.trim().is_empty() {
+            return false;
         }
         // A freshly started entry is bounded too: a single chunk may itself
         // exceed the cap (ACP does not bound `ContentBlock::Text`).
@@ -4642,6 +4663,94 @@ mod tests {
         // Events with no running subagent target are simply dropped (and
         // report `false`, so the caller must not auto-follow them).
         assert!(!state.update_subagent_activity(&tool_call_event("c3", "Reading c"), None));
+    }
+
+    /// REGRESSION (answer-above-reasoning ordering): providers emit stray
+    /// whitespace-only chunks BEFORE the reasoning starts. The timeline used
+    /// to open an invisible `Message` entry for the blank chunk, and the
+    /// backscan merge then captured the answer's text INTO it — the final
+    /// answer rendered ABOVE the thought that actually preceded it (the
+    /// internal sub-agent's `Token` stream forwards every chunk, blank ones
+    /// included; the chat filters them, the timeline did not).
+    #[test]
+    fn whitespace_chunk_never_opens_an_entry_before_the_reasoning() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: internal".to_string(), None);
+
+        // The provider's leading blank chunk (invisible noise).
+        assert!(
+            !state.update_subagent_activity(
+                &SubagentEvent::Message {
+                    text: "\n\n".to_string(),
+                },
+                None,
+            ),
+            "a whitespace-only chunk with nothing to merge into is a no-op"
+        );
+        assert!(state.pty_sessions[0].subagent_activity.timeline.is_empty());
+
+        // The sub-agent reasons, then writes the answer.
+        state.update_subagent_activity(
+            &SubagentEvent::Thought {
+                text: "pensando...".to_string(),
+            },
+            None,
+        );
+        state.update_subagent_activity(
+            &SubagentEvent::Message {
+                text: "resposta final".to_string(),
+            },
+            None,
+        );
+
+        let timeline = &state.pty_sessions[0].subagent_activity.timeline;
+        assert_eq!(
+            timeline.len(),
+            2,
+            "no entry may exist for the blank chunk: {timeline:?}"
+        );
+        assert!(
+            matches!(&timeline[0], SubagentTimelineEntry::Thought { text } if text == "pensando..."),
+            "the thought stays FIRST: {timeline:?}"
+        );
+        assert!(
+            matches!(
+                &timeline[1],
+                SubagentTimelineEntry::Message { text } if text == "resposta final"
+            ),
+            "the answer opens its OWN entry after the thought: {timeline:?}"
+        );
+    }
+
+    /// A newline-carrying whitespace delta still MERGES into an open entry:
+    /// paragraph breaks mid-stream are real content (the chat keeps the
+    /// same distinction) — only the entry OPENING is suppressed.
+    #[test]
+    fn newline_whitespace_merges_into_an_open_entry() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: internal".to_string(), None);
+        state.update_subagent_activity(
+            &SubagentEvent::Message {
+                text: "linha um".to_string(),
+            },
+            None,
+        );
+        assert!(state.update_subagent_activity(
+            &SubagentEvent::Message {
+                text: "\n\nlinha dois".to_string(),
+            },
+            None,
+        ));
+        let timeline = &state.pty_sessions[0].subagent_activity.timeline;
+        assert_eq!(timeline.len(), 1);
+        assert!(
+            matches!(
+                &timeline[0],
+                SubagentTimelineEntry::Message { text }
+                    if text == "linha um\n\nlinha dois"
+            ),
+            "the paragraph break survives inside the merged entry: {timeline:?}"
+        );
     }
 
     #[test]
