@@ -18,6 +18,8 @@ pub mod bsh;
 pub mod test;
 pub mod types;
 
+mod liveness;
+
 use std::pin::Pin;
 use tokio_stream::Stream;
 
@@ -48,13 +50,19 @@ pub fn strip_ansi(bytes: &[u8]) -> String {
     text.replace("\r\n", "\n").replace('\r', "")
 }
 
-/// Default execution timeout in milliseconds: 10 minutes (600_000 ms).
+/// Default hard runtime cap in milliseconds: 30 minutes (1_800_000 ms).
 ///
-/// This is the timeout a `Bash` built with [`Bash::new`] runs with — the
-/// hang guard described in [`Bash::timeout`]. The value is interpolated into
-/// the `bash_run` tool description so the model knows the baseline it can
-/// extend per call via the optional `timeout_ms` argument.
-pub const DEFAULT_TIMEOUT_MS: u64 = 600_000;
+/// The cap is the last line of defense, not the primary hang guard — the
+/// liveness watchdog (see `bash/liveness.rs`) kills a command much earlier
+/// when it shows no output, no CPU time and no I/O progress for the
+/// quiescence window (120s), so legitimate long-running commands are never
+/// cut by this cap. A cap is still required because a CPU-burning busy loop
+/// is indistinguishable from real work from the outside.
+///
+/// The value is interpolated into the `bash_run` tool description so the
+/// model knows the baseline. It is wrapper configuration, not a call
+/// argument — the model cannot change it per call.
+pub const DEFAULT_MAX_RUNTIME_MS: u64 = 1_800_000;
 
 /// Shared-state wrapper for bash execution.
 ///
@@ -79,30 +87,30 @@ impl Default for Bash {
 impl Bash {
     /// Create a new `Bash` with default settings.
     ///
-    /// - `timeout`: [`DEFAULT_TIMEOUT_MS`] (10 minutes)
+    /// - `timeout`: [`DEFAULT_MAX_RUNTIME_MS`] (30 minutes, hard cap)
     /// - `env`: `None` (inherit parent process)
     /// - `pty`: `false` (piped stdout/stderr, not pseudo-terminal)
     /// - `cwd`: `""` (inherited from the parent process)
     #[must_use]
     pub fn new() -> Self {
         Self {
-            timeout: Some(DEFAULT_TIMEOUT_MS),
+            timeout: Some(DEFAULT_MAX_RUNTIME_MS),
             env: None,
             pty: false,
             cwd: String::new(),
-            description_run: Self::build_description_run(DEFAULT_TIMEOUT_MS),
+            description_run: Self::build_description_run(DEFAULT_MAX_RUNTIME_MS),
         }
     }
 
     /// Build the model-facing `bash_run` tool description for a configured
-    /// timeout.
+    /// hard runtime cap.
     ///
-    /// The timeout value is interpolated here, from the **instance field** —
-    /// not from [`DEFAULT_TIMEOUT_MS`] directly — so the text always states
-    /// the threshold that `run_with_timeout` actually enforces, even when a
-    /// caller overrides the default via [`Bash::timeout`]. This struct owns
-    /// the property: the harness never restates the value.
-    fn build_description_run(configured_ms: u64) -> ToolDescription {
+    /// The cap value is interpolated here, from the **instance field** —
+    /// not from [`DEFAULT_MAX_RUNTIME_MS`] directly — so the text always
+    /// states the cap that `run` actually enforces, even when a caller
+    /// overrides the default via [`Bash::timeout`]. This struct owns the
+    /// property: the harness never restates the value.
+    fn build_description_run(cap_ms: u64) -> ToolDescription {
         let description = format!(
             "Execute a bash command and return its output. \
              Outputs above the token budget are head/tail-truncated: the \
@@ -111,13 +119,15 @@ impl Bash {
              (offset/limit) or find_grep. \
              Environment variables and PTY mode are wrapper configuration, \
              not call arguments. \
-             The configured default timeout is {configured_ms} \
-             milliseconds ({} minutes); to extend it for a single call, pass \
-             the optional `timeout_ms` argument with an integer strictly \
-             greater than {configured_ms}. Values equal to or below \
-             the default are rejected — the argument can only raise the \
-             timeout, never lower it.",
-            configured_ms / 60_000
+             Commands run until completion; there is no timeout argument. \
+             The harness kills a command automatically when it stops making \
+             progress: if a command produces no output, no CPU time and no \
+             I/O for {} seconds it is presumed hung and killed. Long-running \
+             but active commands (builds, downloads) are never cut by that \
+             guard. A hard runtime cap of {cap_ms} milliseconds ({} minutes) \
+             applies regardless of progress.",
+            liveness::LivenessConfig::default_quiescent_secs(),
+            cap_ms / 60_000
         );
         serde_json::json!({
             "name": "bash_run",
@@ -131,15 +141,6 @@ impl Bash {
                             "The bash command to execute. Must not be an absolute path ",
                             "and must not match dangerous security patterns."
                         )
-                    },
-                    "timeout_ms": {
-                        "type": "integer",
-                        "description": concat!(
-                            "Optional. Extend the execution timeout for this call only, ",
-                            "in milliseconds. Must be an integer strictly greater than the ",
-                            "configured default (see the tool description); values equal to ",
-                            "or below the default are rejected. Does not change the default."
-                        )
                     }
                 },
                 "required": ["command"]
@@ -147,12 +148,17 @@ impl Bash {
         })
     }
 
-    /// Set the execution timeout in milliseconds.
+    /// Set the hard runtime cap in milliseconds.
     ///
-    /// When the timeout elapses, the child process is killed and the stream
-    /// yields a final item with `signal: Some(-1)` and `exit_code: None`.
-    /// The model-facing tool description is regenerated with the new value,
-    /// so it always states the threshold `run_with_timeout` enforces.
+    /// The cap is the last line of defense against commands that keep
+    /// making progress forever (e.g. a CPU-burning busy loop) — the primary
+    /// hang guard is the liveness watchdog, which kills a command that
+    /// shows no output, CPU or I/O progress for the quiescence window long
+    /// before this cap. When the cap elapses, the child process is killed
+    /// and the stream yields a `runtime cap: …` stderr item followed by a
+    /// final item with `signal: Some(-1)` and `exit_code: None`. The
+    /// model-facing tool description is regenerated with the new value, so
+    /// it always states the cap `run` enforces.
     #[must_use]
     pub fn timeout(mut self, ms: u64) -> Self {
         self.timeout = Some(ms);
@@ -200,41 +206,6 @@ impl Bash {
         &'a self,
         command: &'a str,
     ) -> Result<Pin<Box<dyn Stream<Item = SpawnOutput> + Send + 'a>>, BashError> {
-        self.run_with_timeout(command, None)
-    }
-
-    /// Execute a bash command with an optional per-call timeout override.
-    ///
-    /// `timeout_ms` extends the configured timeout for **this call only** —
-    /// it never changes the default held by `self`. It may only *raise* the
-    /// timeout: a value that is not strictly greater than the instance's
-    /// configured timeout is rejected with a [`BashError`] and nothing is
-    /// executed. `None` runs with the configured timeout.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`BashError`] if the command is an absolute path, matches a
-    /// dangerous security pattern, or `timeout_ms` fails to raise the
-    /// configured timeout.
-    pub fn run_with_timeout<'a>(
-        &'a self,
-        command: &'a str,
-        timeout_ms: Option<u64>,
-    ) -> Result<Pin<Box<dyn Stream<Item = SpawnOutput> + Send + 'a>>, BashError> {
-        let configured = self.timeout.unwrap_or(0);
-        if let Some(ms) = timeout_ms {
-            if ms <= configured {
-                return Err(BashError {
-                    text_err: Some(format!(
-                        "timeout_ms must be strictly greater than the configured timeout \
-                         ({configured} ms); the per-call argument can only raise the \
-                         timeout, never lower it"
-                    )),
-                    exec_err: None,
-                });
-            }
-            return bsh::run(Some(ms), &self.env, self.pty, command, &self.cwd);
-        }
         bsh::run(self.timeout, &self.env, self.pty, command, &self.cwd)
     }
 }
@@ -242,88 +213,59 @@ impl Bash {
 #[cfg(test)]
 mod timeout_default_tests {
     use super::Bash;
-    use super::DEFAULT_TIMEOUT_MS;
+    use super::DEFAULT_MAX_RUNTIME_MS;
 
-    /// `Bash::new()` ships the 10-minute default — the harness relies on it
-    /// (it no longer calls `.timeout(...)` itself).
+    /// `Bash::new()` ships the 30-minute hard cap — the harness relies on
+    /// it (it no longer calls `.timeout(...)` itself).
     #[test]
     fn new_uses_default_timeout() {
         let bash = Bash::new();
-        assert_eq!(bash.timeout, Some(DEFAULT_TIMEOUT_MS));
-        assert_eq!(DEFAULT_TIMEOUT_MS, 600_000);
+        assert_eq!(bash.timeout, Some(DEFAULT_MAX_RUNTIME_MS));
+        assert_eq!(DEFAULT_MAX_RUNTIME_MS, 1_800_000);
     }
 
-    /// The default is interpolated into the model-facing description so the
-    /// model knows the baseline the `timeout_ms` argument must exceed.
+    /// The cap is interpolated into the model-facing description, which
+    /// must NOT offer a per-call `timeout_ms` argument anymore: the
+    /// liveness watchdog handles hangs automatically.
     #[test]
-    fn description_interpolates_default_timeout() {
+    fn description_interpolates_cap_and_has_no_timeout_arg() {
         let desc = Bash::new().description_run;
         let text = desc["description"].as_str().unwrap();
         assert!(
-            text.contains("default timeout is 600000 milliseconds (10 minutes)"),
-            "description must state the default timeout, got: {text}"
+            text.contains("hard runtime cap of 1800000 milliseconds (30 minutes)"),
+            "description must state the hard cap, got: {text}"
         );
         assert!(
-            text.contains("strictly greater than 600000"),
-            "description must state the raise-only rule, got: {text}"
+            text.contains("no timeout argument") && text.contains("120 seconds"),
+            "description must describe the automatic hang guard, got: {text}"
         );
         let schema = &desc["inputSchema"];
-        assert_eq!(
-            schema["properties"]["timeout_ms"]["type"].as_str(),
-            Some("integer"),
-            "inputSchema must expose the optional timeout_ms argument"
+        assert!(
+            schema["properties"]["timeout_ms"].is_null(),
+            "timeout_ms must no longer be exposed to the model"
         );
         // `command` remains the only required argument.
         assert_eq!(
             schema["required"].as_array().unwrap(),
             &["command".to_string()],
-            "timeout_ms must stay optional"
         );
     }
 
     /// A dev-level builder override regenerates the description with the new
-    /// configured value: the text always states the threshold
-    /// `run_with_timeout` enforces — never just the constant's default.
+    /// configured cap: the text always states the cap `run` enforces —
+    /// never just the constant's default.
     #[test]
     fn builder_timeout_regenerates_description() {
-        let bash = Bash::new().timeout(1_800_000);
+        let bash = Bash::new().timeout(600_000);
         let text = bash.description_run["description"].as_str().unwrap();
         assert!(
-            text.contains("default timeout is 1800000 milliseconds (30 minutes)"),
-            "description must track the instance's configured timeout, got: {text}"
+            text.contains("hard runtime cap of 600000 milliseconds (10 minutes)"),
+            "description must track the instance's configured cap, got: {text}"
         );
         assert!(
-            !text.contains("600000"),
+            !text.contains("1800000"),
             "stale default must not remain after the override, got: {text}"
         );
-    }
-
-    /// A `timeout_ms` that fails to raise the configured timeout is rejected
-    /// before anything is spawned.
-    #[test]
-    fn run_with_timeout_rejects_lower_or_equal() {
-        let bash = Bash::new();
-        for ms in [0, DEFAULT_TIMEOUT_MS, DEFAULT_TIMEOUT_MS - 1] {
-            let err = match bash.run_with_timeout("echo hi", Some(ms)) {
-                Err(err) => err,
-                Ok(_) => panic!("must reject timeout_ms = {ms} <= configured"),
-            };
-            assert!(
-                err.text_err
-                    .as_deref()
-                    .unwrap_or_default()
-                    .contains("strictly greater"),
-                "expected raise-only error, got: {:?}",
-                err.text_err
-            );
-        }
-        // Valid overrides (strictly greater) pass validation and spawn.
-        assert!(
-            bash.run_with_timeout("echo hi", Some(DEFAULT_TIMEOUT_MS + 1))
-                .is_ok(),
-            "timeout_ms above the default must be accepted"
-        );
-        assert!(bash.run_with_timeout("echo hi", None).is_ok());
     }
 }
 

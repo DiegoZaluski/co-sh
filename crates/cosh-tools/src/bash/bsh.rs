@@ -32,6 +32,10 @@ use tokio::io::{Error, ErrorKind};
 use tokio_stream::Stream;
 use tokio_stream::StreamExt;
 
+use super::liveness::LivenessConfig;
+use super::liveness::LivenessState;
+use super::liveness::ORPHAN_ESCAPE_MESSAGE;
+use super::liveness::sample_tree;
 #[cfg(any(unix, windows))]
 use tokio::sync::mpsc;
 
@@ -80,6 +84,36 @@ pub fn critical_bash_patterns() -> &'static [Regex] {
 
 const BUFFER_SIZE: usize = 4096;
 
+/// Diagnostic emitted when the hard runtime cap kills a command.
+fn runtime_cap_message(ms: u64) -> String {
+    format!("runtime cap: killed the command after reaching the hard runtime cap of {ms} ms.")
+}
+
+/// How long the piped path drains in-flight output after the main child
+/// exited but orphaned descendants keep the pipes open.
+const ESCAPE_DRAIN_WINDOW: Duration = Duration::from_millis(300);
+
+/// Kill the child's whole process tree with SIGKILL (unix).
+///
+/// The piped path spawns bash as its own process group
+/// (`tokio::process::Command::process_group`) and the PTY path spawns it as
+/// a session leader (portable_pty's `setsid`), so a negative-pid signal
+/// reaches the entire tree — bash plus every descendant. This matters
+/// because a plain child kill leaks grandchildren that never touch the
+/// output pipes again: a leaked `yes >/dev/null` burns a core forever.
+#[cfg(unix)]
+fn kill_process_tree(pid: u32) {
+    #[allow(clippy::cast_possible_wrap)]
+    let negated = -(pid as libc::pid_t);
+    // SAFETY: kill(2) with a negative pid signals the process group; the
+    // only consequence of a stale pid is ESRCH.
+    unsafe {
+        if libc::kill(negated, libc::SIGKILL) != 0 {
+            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        }
+    }
+}
+
 /// How often the Unix PTY read loop wakes up to run the input-wait watchdog.
 #[cfg(unix)]
 const WATCHDOG_TICK_MS: libc::c_int = 250;
@@ -89,6 +123,12 @@ const WATCHDOG_TICK_MS: libc::c_int = 250;
 /// can never send — before the input-wait watchdog kills it.
 #[cfg(unix)]
 const WATCHDOG_RAW_MODE_GRACE: Duration = Duration::from_secs(2);
+
+/// How long the Unix PTY path keeps draining output after the main child
+/// exited but before concluding that orphaned descendants are holding the
+/// PTY slave open (which suppresses POLLHUP on the master).
+#[cfg(unix)]
+const DEAD_CHILD_DRAIN: Duration = Duration::from_millis(500);
 
 /// Diagnostic emitted on stderr when the input-wait watchdog kills a child.
 ///
@@ -628,6 +668,18 @@ pub(crate) fn spawn_bash(
     command: impl Into<String>,
     timeout_ms: Option<u64>,
 ) -> Pin<Box<dyn Stream<Item = Result<SpawnOutput, Error>> + Send>> {
+    spawn_bash_cfg(env, cwd, command, timeout_ms, LivenessConfig::default())
+}
+
+/// [`spawn_bash`] with an explicit liveness-watchdog configuration (tests
+/// use an aggressive config; production uses [`LivenessConfig::default`]).
+pub(crate) fn spawn_bash_cfg(
+    env: Option<Vec<(String, String)>>,
+    cwd: impl Into<String>,
+    command: impl Into<String>,
+    timeout_ms: Option<u64>,
+    liveness_config: LivenessConfig,
+) -> Pin<Box<dyn Stream<Item = Result<SpawnOutput, Error>> + Send>> {
     // Own `cwd`/`command` up front so the returned stream is 'static — it
     // must never borrow a caller's string, because `run()` passes an
     // auto-fixed command that is a local of its own frame.
@@ -668,6 +720,10 @@ pub(crate) fn spawn_bash(
         cmd.arg("-c").arg(command);
         cmd.stdin(Stdio::null());
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        // Own process group: every kill path below takes down the whole
+        // tree with one negative-pid signal instead of leaking grandchildren.
+        #[cfg(unix)]
+        cmd.process_group(0);
 
         let mut child = match cmd.spawn() {
             Ok(c) => c,
@@ -684,10 +740,24 @@ pub(crate) fn spawn_bash(
         let mut stdout_done = false;
         let mut stderr_done = false;
 
+        // Liveness watchdog state: kills the tree when it shows no output,
+        // no CPU growth and no I/O growth for the configured window, and
+        // escapes early when the child exits but orphaned descendants keep
+        // the pipes open (the reads below would otherwise never see EOF).
+        let mut liveness = LivenessState::new(child.id(), liveness_config);
+        let liveness_enabled = liveness.enabled();
+        let mut next_tick = tokio::time::Instant::now() + liveness_config.tick;
+        let mut output_since_tick = false;
+        let mut escaped = false;
+
         // Zero timeout: the command must not run at all. Kill it immediately
         // without reading any output, so the result is deterministic — the
         // child never gets a chance to write before the 0ms timer fires.
         if timeout_ms == Some(0) {
+            #[cfg(unix)]
+            if let Some(pid) = child.id() {
+                kill_process_tree(pid);
+            }
             let _ = child.kill().await;
             let _ = child.wait().await;
             yield Ok(SpawnOutput {
@@ -712,7 +782,18 @@ pub(crate) fn spawn_bash(
                         None => std::future::pending::<()>().await,
                     }
                 } => {
+                    #[cfg(unix)]
+                    if let Some(pid) = child.id() {
+                        kill_process_tree(pid);
+                    }
                     let _ = child.kill().await;
+                    yield Ok(SpawnOutput {
+                        stdout: vec![],
+                        stderr: runtime_cap_message(timeout_ms.unwrap_or_default()).into_bytes(),
+                        exit_code: None,
+                        signal: None,
+                        truncated: false,
+                    });
                     yield Ok(SpawnOutput {
                         stdout: vec![],
                         stderr: vec![],
@@ -723,11 +804,64 @@ pub(crate) fn spawn_bash(
                     return;
                 }
 
+                () = async {
+                    if liveness_enabled {
+                        tokio::time::sleep_until(next_tick).await
+                    } else {
+                        std::future::pending::<()>().await
+                    }
+                } => {
+                    next_tick += liveness_config.tick;
+
+                    // Escape first: if the main child already exited while
+                    // orphaned descendants keep the pipes open, the reads
+                    // below would never see EOF — end immediately and let
+                    // the post-loop drain + status return handle it.
+                    if matches!(child.try_wait(), Ok(Some(_))) {
+                        escaped = true;
+                        break;
+                    }
+
+                    if liveness.sample_due(std::time::Instant::now()) {
+                        let now = std::time::Instant::now();
+                        let had_output = std::mem::take(&mut output_since_tick);
+                        let sample = match liveness.child_pid() {
+                            Some(pid) => tokio::task::spawn_blocking(move || sample_tree(pid))
+                                .await
+                                .unwrap_or(None),
+                            None => None,
+                        };
+                        if let Some(message) = liveness.on_sample(now, sample, had_output) {
+                            #[cfg(unix)]
+                            if let Some(pid) = child.id() {
+                                kill_process_tree(pid);
+                            }
+                            let _ = child.kill().await;
+                            yield Ok(SpawnOutput {
+                                stdout: vec![],
+                                stderr: message.into_bytes(),
+                                exit_code: None,
+                                signal: None,
+                                truncated: false,
+                            });
+                            yield Ok(SpawnOutput {
+                                stdout: vec![],
+                                stderr: vec![],
+                                exit_code: None,
+                                signal: Some(-1_i32),
+                                truncated: false,
+                            });
+                            return;
+                        }
+                    }
+                }
+
                 result_stdout = stream_stdout.read(&mut buffer_stdout), if !stdout_done => {
                     match result_stdout {
                         Ok(0) => stdout_done = true,
                         Ok(n) => {
                             let stdout = buffer_stdout[..n].to_vec();
+                            output_since_tick = true;
                             yield Ok(SpawnOutput {
                                 stdout,
                                 stderr: vec![],
@@ -748,6 +882,7 @@ pub(crate) fn spawn_bash(
                         Ok(0) => stderr_done = true,
                         Ok(n) => {
                             let stderr = buffer_stderr[..n].to_vec();
+                            output_since_tick = true;
                             yield Ok(SpawnOutput {
                                 stdout: vec![],
                                 stderr,
@@ -764,6 +899,62 @@ pub(crate) fn spawn_bash(
                 }
             }
             if stdout_done && stderr_done { break; }
+        }
+
+        // Escape path: the main child exited but orphaned descendants may
+        // still hold the pipes. Drain in-flight output for a short window,
+        // then detach — dropping the read ends when the stream ends frees
+        // us, while the orphans keep running on their own.
+        if escaped {
+            let mut drained: Vec<SpawnOutput> = Vec::new();
+            let _ = tokio::time::timeout(ESCAPE_DRAIN_WINDOW, async {
+                while !stdout_done || !stderr_done {
+                    tokio::select! {
+                        result_stdout = stream_stdout.read(&mut buffer_stdout), if !stdout_done => {
+                            match result_stdout {
+                                Ok(0) => stdout_done = true,
+                                Ok(n) => drained.push(SpawnOutput {
+                                    stdout: buffer_stdout[..n].to_vec(),
+                                    stderr: vec![],
+                                    exit_code: None,
+                                    signal: None,
+                                    truncated: n == BUFFER_SIZE,
+                                }),
+                                Err(_) => stdout_done = true,
+                            }
+                        }
+                        result_stderr = stream_stderr.read(&mut buffer_stderr), if !stderr_done => {
+                            match result_stderr {
+                                Ok(0) => stderr_done = true,
+                                Ok(n) => drained.push(SpawnOutput {
+                                    stdout: vec![],
+                                    stderr: buffer_stderr[..n].to_vec(),
+                                    exit_code: None,
+                                    signal: None,
+                                    truncated: n == BUFFER_SIZE,
+                                }),
+                                Err(_) => stderr_done = true,
+                            }
+                        }
+                    }
+                }
+            })
+            .await;
+            for item in drained {
+                yield Ok(item);
+            }
+            // Diagnose only when the pipes really stayed open — a same-tick
+            // race (child exits just before EOF propagates) is a normal
+            // exit and needs no explanation.
+            if !(stdout_done && stderr_done) {
+                yield Ok(SpawnOutput {
+                    stdout: vec![],
+                    stderr: ORPHAN_ESCAPE_MESSAGE.as_bytes().to_vec(),
+                    exit_code: None,
+                    signal: None,
+                    truncated: false,
+                });
+            }
         }
 
         let status = match child.wait().await {
@@ -846,6 +1037,19 @@ pub(crate) fn spawn_bash_pty(
     cwd: &str,
     command: &str,
     timeout_ms: Option<u64>,
+) -> Pin<Box<dyn Stream<Item = Result<SpawnOutput, Error>> + Send>> {
+    spawn_bash_pty_cfg(env, cwd, command, timeout_ms, LivenessConfig::default())
+}
+
+/// [`spawn_bash_pty`] with an explicit liveness-watchdog configuration
+/// (tests use an aggressive config; production uses the default).
+#[cfg(unix)]
+pub(crate) fn spawn_bash_pty_cfg(
+    env: Option<Vec<(String, String)>>,
+    cwd: &str,
+    command: &str,
+    timeout_ms: Option<u64>,
+    liveness_config: LivenessConfig,
 ) -> Pin<Box<dyn Stream<Item = Result<SpawnOutput, Error>> + Send>> {
     let cwd = cwd.to_string();
     let command = command.to_string();
@@ -994,6 +1198,36 @@ pub(crate) fn spawn_bash_pty(
             // Input-wait watchdog state: timestamp of the first consecutive
             // observation of raw (non-canonical) terminal mode, if any.
             let mut watchdog_raw_since: Option<Instant> = None;
+            // Liveness watchdog: a dedicated sampling thread (see
+            // liveness.rs) — the poll loop must never block on process-table
+            // refreshes, which can take hundreds of milliseconds. It only
+            // reports output here, one of the progress signals.
+            let liveness = child.process_id().map(|pid| {
+                let mut killer = child.clone_killer();
+                let tx = tx.clone();
+                super::liveness::spawn_liveness_thread(
+                    pid,
+                    liveness_config,
+                    Box::new(move |message| {
+                        let _ = tx.send(Ok(SpawnOutput {
+                            stdout: vec![],
+                            stderr: message.as_bytes().to_vec(),
+                            exit_code: None,
+                            signal: None,
+                            truncated: false,
+                        }));
+                        // portable_pty spawns the child as a session leader
+                        // (setsid), so a negative-pid signal takes down the
+                        // whole tree, not just the shell.
+                        #[cfg(unix)]
+                        kill_process_tree(pid);
+                        let _ = killer.kill();
+                    }),
+                )
+            });
+            // Orphan-escape state: timestamp of the first observation of a
+            // dead main child whose PTY slave is still held by descendants.
+            let mut child_dead_since: Option<Instant> = None;
             loop {
                 // Watchdog tick or I/O readiness: poll's return value is
                 // not needed — revents below drive every event handler.
@@ -1037,6 +1271,9 @@ pub(crate) fn spawn_bash_pty(
                     match reader.read(&mut buf) {
                         Ok(0) => break,
                         Ok(n) => {
+                            if let Some(handle) = &liveness {
+                                handle.note_output();
+                            }
                             if tx
                                 .send(Ok(SpawnOutput {
                                     stdout: buf[..n].to_vec(),
@@ -1087,7 +1324,37 @@ pub(crate) fn spawn_bash_pty(
                 let child_alive = matches!(child.try_wait(), Ok(None));
                 if !child_alive {
                     watchdog_raw_since = None;
+                    // Orphan escape: the main child exited, but descendants
+                    // may still hold the PTY slave, which suppresses POLLHUP
+                    // on the master — the loop would never see EOF. Keep
+                    // draining output for a short window; if the hangup
+                    // still hasn't arrived, detach and return the status.
+                    match child_dead_since {
+                        None => child_dead_since = Some(Instant::now()),
+                        Some(since) => {
+                            if since.elapsed() >= DEAD_CHILD_DRAIN {
+                                let _ = tx.send(Ok(SpawnOutput {
+                                    stdout: vec![],
+                                    stderr: ORPHAN_ESCAPE_MESSAGE.as_bytes().to_vec(),
+                                    exit_code: None,
+                                    signal: None,
+                                    truncated: false,
+                                }));
+                                break;
+                            }
+                        }
+                    }
                 } else {
+                    child_dead_since = None;
+
+                    // Input-wait watchdog: a live child that keeps the terminal
+                    // in non-canonical (raw) mode is an interactive pager/editor/
+                    // TUI waiting for keystrokes. Those keystrokes would come
+                    // from /dev/tty, which the harness never writes to, so the
+                    // child can only be freed by killing it. Environment vars
+                    // cannot prevent this hang (the pager reads the TTY
+                    // directly). A brief raw-mode flip is normal (line editing,
+                    // `read -n`), hence the sustained-raw-mode grace window.
                     let mut termios: libc::termios = unsafe { std::mem::zeroed() };
                     let is_raw = unsafe { libc::tcgetattr(pty_fd, &mut termios) } == 0
                         && termios.c_lflag & libc::ICANON == 0;
@@ -1097,6 +1364,9 @@ pub(crate) fn spawn_bash_pty(
                         let since =
                             *watchdog_raw_since.get_or_insert_with(Instant::now);
                         if since.elapsed() >= WATCHDOG_RAW_MODE_GRACE {
+                            if let Some(pid) = child.process_id() {
+                                kill_process_tree(pid);
+                            }
                             let _ = child.kill();
                             let _ = tx.send(Ok(SpawnOutput {
                                 stdout: vec![],
@@ -1116,6 +1386,9 @@ pub(crate) fn spawn_bash_pty(
             unsafe { libc::close(pipe_rx); }
 
             if kill.load(Ordering::Relaxed) {
+                if let Some(pid) = child.process_id() {
+                    kill_process_tree(pid);
+                }
                 let _ = child.kill();
             }
 
@@ -1172,6 +1445,13 @@ pub(crate) fn spawn_bash_pty(
                     // SAFETY: pipe_tx is never used after this point.
                     unsafe { libc::close(pipe_tx); }
 
+                    yield Ok(SpawnOutput {
+                        stdout: vec![],
+                        stderr: runtime_cap_message(timeout_ms.unwrap_or_default()).into_bytes(),
+                        exit_code: None,
+                        signal: None,
+                        truncated: false,
+                    });
                     yield Ok(SpawnOutput {
                         stdout: vec![],
                         stderr: vec![],
@@ -1243,6 +1523,19 @@ pub(crate) fn spawn_bash_pty(
     cwd: &str,
     command: &str,
     timeout_ms: Option<u64>,
+) -> Pin<Box<dyn Stream<Item = Result<SpawnOutput, Error>> + Send>> {
+    spawn_bash_pty_cfg(env, cwd, command, timeout_ms, LivenessConfig::default())
+}
+
+/// [`spawn_bash_pty`] with an explicit liveness-watchdog configuration
+/// (tests use an aggressive config; production uses the default).
+#[cfg(windows)]
+pub(crate) fn spawn_bash_pty_cfg(
+    env: Option<Vec<(String, String)>>,
+    cwd: &str,
+    command: &str,
+    timeout_ms: Option<u64>,
+    liveness_config: LivenessConfig,
 ) -> Pin<Box<dyn Stream<Item = Result<SpawnOutput, Error>> + Send>> {
     let cwd = cwd.to_string();
     let command = command.to_string();
@@ -1331,6 +1624,9 @@ pub(crate) fn spawn_bash_pty(
         // Pre-clone the killer so the async side can terminate the child on
         // timeout while the watcher thread holds the blocking `wait()`.
         let mut killer = ChildKiller::clone_killer(&*child);
+        // Capture the pid before the child is moved into the watcher thread:
+        // the liveness watchdog samples this process tree.
+        let child_pid = child.process_id();
 
         // Reader thread: forwards chunks through an unbounded channel. An
         // empty Vec signals EOF/read-error. The thread may stay blocked in
@@ -1379,6 +1675,15 @@ pub(crate) fn spawn_bash_pty(
         // Chunks received during the post-exit drain window.
         let mut drained: Vec<Vec<u8>> = Vec::new();
 
+        // Liveness watchdog state: the watcher thread already reports child
+        // exit as a status (so the orphan case cannot hang this path); the
+        // watchdog here kills a live tree that shows no output, no CPU
+        // growth and no I/O growth for the configured window.
+        let mut liveness = LivenessState::new(child_pid, liveness_config);
+        let mut next_tick = tokio::time::Instant::now() + liveness_config.tick;
+        let mut output_since_tick = false;
+        let mut watchdog_fired = false;
+
         loop {
             tokio::select! {
                 biased;
@@ -1392,6 +1697,39 @@ pub(crate) fn spawn_bash_pty(
                     timed_out = true;
                     killer.kill().ok();
                     break;
+                }
+
+                () = async {
+                    tokio::time::sleep_until(next_tick).await
+                }, if !watchdog_fired => {
+                    next_tick += liveness_config.tick;
+                    if let Some(pid) = liveness.child_pid() {
+                        let sample = tokio::task::spawn_blocking(move || sample_tree(pid))
+                            .await
+                            .unwrap_or(None);
+                        let had_output = std::mem::take(&mut output_since_tick);
+                        if let Some(message) =
+                            liveness.on_sample(std::time::Instant::now(), sample, had_output)
+                        {
+                            watchdog_fired = true;
+                            killer.kill().ok();
+                            yield Ok(SpawnOutput {
+                                stdout: vec![],
+                                stderr: message.into_bytes(),
+                                exit_code: None,
+                                signal: None,
+                                truncated: false,
+                            });
+                            yield Ok(SpawnOutput {
+                                stdout: vec![],
+                                stderr: vec![],
+                                exit_code: None,
+                                signal: Some(-1_i32),
+                                truncated: false,
+                            });
+                            return;
+                        }
+                    }
                 }
 
                 status_msg = srx.recv() => {
@@ -1430,6 +1768,7 @@ pub(crate) fn spawn_bash_pty(
                                 let _ = writer.write_all(DSR_REPLY);
                                 let _ = writer.flush();
                             }
+                            output_since_tick = true;
                             yield Ok(SpawnOutput {
                                 stdout: data,
                                 stderr: vec![],
@@ -1457,6 +1796,13 @@ pub(crate) fn spawn_bash_pty(
         }
 
         if timed_out {
+            yield Ok(SpawnOutput {
+                stdout: vec![],
+                stderr: runtime_cap_message(timeout_ms.unwrap_or_default()).into_bytes(),
+                exit_code: None,
+                signal: None,
+                truncated: false,
+            });
             yield Ok(SpawnOutput {
                 stdout: vec![],
                 stderr: vec![],

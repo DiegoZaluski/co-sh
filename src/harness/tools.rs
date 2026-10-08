@@ -211,13 +211,11 @@ impl CoshTools {
             // (cargo, python, make, …) streams in real time instead of
             // arriving in one block-buffered dump at exit. The dispatch
             // strips ANSI escapes / CRLF per chunk (see `strip_ansi`).
-            // The timeout default is owned by the tool (`Bash::new`, 10
-            // minutes): it is the hang guard for a PTY child whose stdin is
-            // the slave side and nothing feeds it — a command that reads
-            // stdin (`cat`, `ssh`, a prompt) would otherwise block forever.
-            // The value is interpolated into the `bash_run` tool description,
-            // and the model can raise it per call via the optional
-            // `timeout_ms` argument (validated inside the tool).
+            // Hangs are handled inside the tool: the liveness watchdog kills
+            // a command that shows no output/CPU/I-O progress (a PTY child
+            // whose stdin is the slave side and nothing feeds it — `cat`,
+            // `ssh`, a prompt — would otherwise block forever), and the hard
+            // runtime cap (Bash::new default) bounds progress-making runs.
             bash: Bash::new().cwd(cwd).pty(true),
             fs,
             find: Find::new().cwd(cwd),
@@ -1012,19 +1010,17 @@ impl Tools for CoshTools {
             "bash_run" => {
                 let input: BashRunInput =
                     serde_json::from_value(args).map_err(|e| e.to_string())?;
-                // `timeout_ms` is optional and validated inside the tool: it
-                // may only raise the configured timeout for this call.
-                let stream = self
-                    .bash
-                    .run_with_timeout(&input.command, input.timeout_ms)
-                    .map_err(|e| {
-                        e.text_err.unwrap_or_else(|| {
-                            format!(
-                                "exec error (signal={:?})",
-                                e.exec_err.as_ref().map(|ee| ee.signal)
-                            )
-                        })
-                    })?;
+                // No per-call timeout: hangs are ended by the liveness
+                // watchdog and long active runs by the hard runtime cap,
+                // both enforced inside the tool.
+                let stream = self.bash.run(&input.command).map_err(|e| {
+                    e.text_err.unwrap_or_else(|| {
+                        format!(
+                            "exec error (signal={:?})",
+                            e.exec_err.as_ref().map(|ee| ee.signal)
+                        )
+                    })
+                })?;
                 tokio::pin!(stream);
 
                 let mut output = String::new();

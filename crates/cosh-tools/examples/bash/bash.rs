@@ -1,8 +1,8 @@
 //! Demonstrate `bash`: the streaming output contract — stdout/stderr chunks
 //! then a single exit-status item — plus environment variables, working
-//! directory, timeouts (with and without partial output), the security
-//! validation that rejects absolute paths and dangerous patterns, and PTY
-//! mode.
+//! directory, the hard runtime cap (with and without partial output), the
+//! security validation that rejects absolute paths and dangerous patterns,
+//! and PTY mode.
 //!
 //! Run with:
 //!
@@ -96,18 +96,23 @@ async fn main() {
     // 6. The working directory is where the command runs.
     show("cwd", &run_and_render(&bash, "cat notes.txt").await);
 
-    // 7. Timeout with partial output: the printed prefix survives, then a
-    //    final `signal: -1` item arrives.
+    // 7. Hard runtime cap with partial output: the printed prefix survives,
+    //    then a `runtime cap:` diagnostic and a final `signal: -1` item
+    //    arrive. (Hangs themselves are handled automatically by the
+    //    liveness watchdog — no timeout argument exists.)
     let bash_timed = Bash::new().cwd(dir.to_string_lossy()).timeout(300);
     show(
-        "timeout (partial output kept)",
+        "runtime cap (partial output kept)",
         &run_and_render(&bash_timed, "echo partial && sleep 10").await,
     );
 
-    // 8. A zero timeout kills before the child can write anything — exactly
+    // 8. A zero cap kills before the child can write anything — exactly
     //    one deterministic item, `signal: -1`.
     let bash_zero = Bash::new().cwd(dir.to_string_lossy()).timeout(0);
-    show("timeout 0", &run_and_render(&bash_zero, "echo never").await);
+    show(
+        "runtime cap 0",
+        &run_and_render(&bash_zero, "echo never").await,
+    );
 
     // 9. Security: an absolute command path is rejected before spawning.
     let err = match bash.run("/bin/echo hi") {

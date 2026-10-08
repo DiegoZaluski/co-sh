@@ -3,8 +3,8 @@
 `bsh` is the part of the module that actually talks to the operating system.
 While the [`Bash`](bash.md#the-bash-wrapper) wrapper holds configuration and is
 the public interface, this page documents the engine underneath: the
-spawning functions, the streaming and timeout mechanics, and the complete
-security pattern list.
+spawning functions, the streaming, the hang-detection mechanics, and the
+complete security pattern list.
 
 The engine exposes one public function and two internal spawners:
 
@@ -13,6 +13,7 @@ The engine exposes one public function and two internal spawners:
 | [`run(timeout_ms, env, pty, command, cwd)`](#run--the-free-function) | Validate, then stream the command; dispatches to a spawner. |
 | `spawn_bash(env, cwd, command, timeout_ms)` | The piped (non-PTY) spawner. |
 | `spawn_bash_pty(env, cwd, command, timeout_ms)` | The PTY spawner (Unix and Windows). |
+| `liveness.rs` — watchdog | Samples the child's process tree (CPU time, I/O counters, output) and kills it when no progress signal fires for the quiescence window. |
 
 Both spawners return `Pin<Box<dyn Stream<Item = Result<SpawnOutput,
 io::Error>>>>` — note the `Result` per item. `run` wraps whichever spawner
@@ -109,7 +110,7 @@ stdout/stderr. It streams with a `tokio::select!` loop reading up to
 
 Ordering and flags:
 
-- Reads are **biased** toward the timeout arm, so a deadline can preempt a
+- Reads are **biased** toward the cap/watchdog arms, so a kill can preempt a
   data read that is already available.
 - Each chunk is emitted as a `SpawnOutput` with the corresponding buffer set
   and `truncated: n == 4096`.
@@ -118,18 +119,37 @@ Ordering and flags:
   `signal` from `std::os::unix::process::ExitStatusExt::signal` (Unix), or
   `exit_code` only on non-Unix.
 
-### Timeout mechanics
+### Timeout mechanics (hard runtime cap)
 
-`timeout_ms = Some(ms)` arms a `sleep_until(now + ms)` deadline; when it fires
-the child is killed and the stream yields a final `signal: Some(-1)`,
+`timeout_ms = Some(ms)` is the **hard runtime cap** — the last line of
+defense, not the primary hang guard. It arms a `sleep_until(now + ms)`
+deadline; when it fires the child is killed, a `runtime cap: …` stderr item
+explains the kill, and the stream yields a final `signal: Some(-1)`,
 `exit_code: None`, empty-buffers item. The special case `Some(0)` never reads
 output — the child is spawned and killed immediately — so the result is
-exactly one deterministic timeout item. (The PTY path short-circuits even
+exactly one deterministic kill item. (The PTY path short-circuits even
 earlier, before spawning; see below.)
 
-With a nonzero timeout, output already read before the deadline is preserved —
-the timeout item always comes last, after any chunks the child managed to
-write.
+With a nonzero cap, output already read before the deadline is preserved —
+the cap items always come last, after any chunks the child managed to write.
+
+### Liveness watchdog (the primary hang guard)
+
+Every spawner arms the liveness watchdog from `bash/liveness.rs`. It samples
+the child's whole process tree (descendants included, via parent-link walk)
+for three progress signals — new output, growing accumulated CPU time,
+growing I/O counters — and kills the tree when **none** fires for 120
+seconds (`liveness watchdog: …` stderr item + final `signal: Some(-1)`
+item). Any signal resets the counter, so active long runs (builds,
+downloads) are never cut; a CPU-burning busy loop is the one thing it cannot
+detect — that is what the hard runtime cap above is for.
+
+A second, immediate escape covers the orphan case: when the main child has
+**exited** but orphaned descendants keep the output channel open (piped fd
+or PTY slave), the stream would never see EOF. The watchdog detects the dead
+child, drains in-flight output for a short window, emits an
+`orphaned child processes …` stderr item, and returns the command's own exit
+status without waiting for the quiescence window.
 
 ### Environment validation
 
@@ -162,7 +182,7 @@ from the piped path in several ways:
 
 ### Timeouts — platform split
 
-Because the reader blocks inside a blocking thread, the async timeout cannot
+Because the reader blocks inside a blocking thread, the async cap cannot
 just abort it; how the blocking side is interrupted differs per platform:
 
 **Unix — the self-pipe trick.** A `pipe2` created before the blocking task
@@ -172,7 +192,7 @@ unblocks the blocking `poll(2)`:
    async side.
 2. The blocking task's `poll(2)` watches **both** the PTY master fd and the
    pipe read end.
-3. When the async timeout fires, it sets a kill flag, writes one byte to the
+3. When the async cap fires, it sets a kill flag, writes one byte to the
    pipe write end, and closes it. `poll` wakes, the blocking task sees the
    pipe fd readable, breaks out, kills and reaps the child, then sends the
    final `signal: Some(-1)` item.
@@ -187,16 +207,17 @@ exits (the conhost side keeps the pipe handle open), so termination is driven
 by the child's status rather than by EOF:
 
 1. A watcher thread runs the blocking `child.wait()`; a pre-cloned
-   `ChildKiller` lets the async side kill the child on timeout
+   `ChildKiller` lets the async side kill the child on cap or watchdog kill
    (`TerminateProcess`).
 2. bash under ConPTY emits a DSR cursor query (`ESC[6n`) at startup and
    blocks until the terminal answers — the stream detects the sequence in
    the output and replies `ESC[1;1R` through the PTY writer.
 3. When the watcher reports the reaped child, the reader gets a short drain
    window for in-flight chunks, then the final status item is emitted and
-   the (still blocked) reader thread is detached. On timeout the final item
-   carries `signal: Some(-1)`; Windows has no signal concept, so a killed
-   child surfaces as a non-zero exit code in the normal-exit path.
+   the (still blocked) reader thread is detached. On a cap or watchdog kill
+   the final item carries `signal: Some(-1)`; Windows has no signal concept,
+   so a killed child surfaces as a non-zero exit code in the normal-exit
+   path.
 
 ---
 
@@ -206,9 +227,14 @@ by the child's status rather than by EOF:
   spawner; `Bash::run` hides the spawner selection and drops stream errors.
 - The piped path reads stdout/stderr in parallel in 4096-byte chunks and ends
   with one exit-status item; `exit_code` and `signal` are mutually exclusive.
-- Timeouts kill the child and emit a final `signal: -1` item; `0` never reads
-  output; partial output before the deadline is preserved.
+- Hangs end automatically: no output, CPU or I/O progress for 120s → the
+  liveness watchdog kills the tree with a `liveness watchdog: …` item; an
+  exited command whose orphans hold the output channel is detached
+  immediately. The hard runtime cap still bounds progress-making runs; both
+  kills emit a final `signal: -1` item; `0` never reads output; partial
+  output before a kill is preserved.
 - The PTY path multiplexes through a 24×80 pseudo-terminal with a blocking
-  reader bridged via a channel: Unix uses a self-pipe for timeouts and
-  strsignal→number mapping; Windows uses ConPTY, a DSR reply, a
-  child-status watcher, and a pre-cloned killer.
+  reader bridged via a channel: Unix uses a self-pipe for kills,
+  a dedicated liveness-sampling thread (so the poll loop never blocks on
+  process-table refreshes), and strsignal→number mapping; Windows uses
+  ConPTY, a DSR reply, a child-status watcher, and a pre-cloned killer.

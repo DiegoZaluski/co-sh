@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Automatic hang detection for the bash tool (`bash_run`). A liveness
+  watchdog samples the executed command's whole process tree — bash spawns
+  descendants, so the tree, not just the shell, is watched — for three
+  progress signals: new output, growing accumulated CPU time, and growing
+  I/O counters (disk, and network on Windows). A command that shows none of
+  the three for 120 seconds is presumed hung (waiting on a prompt, a lock or
+  a dead connection) and killed, with a `liveness watchdog: ...` diagnostic
+  on stderr. Any single progress signal resets the counter, so long-running
+  but active commands — builds, downloads, imports — are never cut, no
+  matter how long they run. An immediate escape complements the counter: a
+  command that has already exited but whose orphaned descendants keep the
+  output pipes/PTY open is detached at once and its own exit status is
+  returned. This also catches hangs the raw-mode PTY watchdog never saw:
+  canonical-mode prompts (`python input()`, `read -p`, password prompts).
+
+- Process-tree kill on unix: every kill path (liveness watchdog, input-wait
+  watchdog, hard runtime cap, zero timeout) now signals the child's whole
+  process group with SIGKILL — the piped path spawns bash in its own
+  process group and the PTY path already makes it a session leader —
+  instead of killing only the shell. The old behavior leaked CPU-burning
+  grandchildren that never touch the output pipes again (a leaked
+  `yes >/dev/null` spins a core forever). On Windows the kill remains
+  child-only (`TerminateProcess`).
+
+### Removed
+
+- The model-facing `timeout_ms` argument of `bash_run`. Hangs are now
+  detected automatically by the liveness watchdog, so the model no longer
+  predicts and extends timeouts; the per-call override and its raise-only
+  validation are gone from the schema and the tool description. A hard
+  runtime cap remains as wrapper configuration (`Bash::timeout`, default
+  raised from 10 to 30 minutes) as the last line of defense against
+  commands that keep making progress forever (a CPU-burning busy loop is
+  indistinguishable from real work); it emits a `runtime cap: ...`
+  diagnostic when it fires.
+
 ## [0.1.4] - 2026-10-05
 
 ### Added

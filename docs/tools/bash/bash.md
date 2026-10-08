@@ -5,12 +5,12 @@ the agent:
 
 | Tool | What it does |
 |---|---|
-| [`bash_run`](bsh.md) | Execute a command via `bash -c`, streaming stdout/stderr as they are produced, with a configurable timeout, environment, PTY mode, and working directory. |
+| [`bash_run`](bsh.md) | Execute a command via `bash -c`, streaming stdout/stderr as they are produced, with environment, PTY mode, and working directory configuration. Hangs are detected automatically (see the [liveness watchdog](#hang-detection-the-liveness-watchdog)). |
 
 It mirrors the `fs` / `find` design: a builder-style wrapper — [`Bash`](#the-bash-wrapper)
 — holds the execution configuration, and the operation is a thin method on it.
 The heavy lifting — spawning the child process, streaming output, enforcing
-timeouts, and the security validation — lives in the [`bsh`](bsh.md) executor
+the runtime cap, and the security validation — lives in the [`bsh`](bsh.md) executor
 engine. The [type reference](types.md) documents the input and output data
 structures.
 
@@ -31,7 +31,7 @@ use cosh_tools::bash::Bash;
 let bash = Bash::new()
     .cwd("/home/user/project")     // working directory
     .env(Some(vec![("RUST_BACKTRACE".into(), "1".into())]))
-    .timeout(10_000);              // ms; overrides the 10-minute default
+    .timeout(10_000);              // ms; hard runtime cap (default: 30 min)
 
 let mut stream = bash.run("cargo test")?;   // returns an async stream
 ```
@@ -48,7 +48,7 @@ The builder methods, and their defaults from `Bash::new()`:
 |---|---|---|
 | `cwd(path)` | Working directory for the child. | `""` — inherits the parent process's directory. |
 | `env(Some(vec![(k, v)]))` | Environment variables for the child. | `None` — inherit the parent environment. |
-| `timeout(ms)` | Kill the child after `ms` milliseconds. | [`DEFAULT_TIMEOUT_MS`](#the-bash-wrapper) — 10 minutes (600 000 ms). |
+| `timeout(ms)` | Hard runtime cap: kill the child after `ms` milliseconds even if it is still making progress. | [`DEFAULT_MAX_RUNTIME_MS`](#the-bash-wrapper) — 30 minutes (1 800 000 ms). |
 | `pty(true)` | Run the child in a pseudo-terminal (see below). | `false` — separate piped streams. |
 
 All four consume `self` and return it, so they chain; `Bash` implements
@@ -66,20 +66,17 @@ All four consume `self` and return it, so they chain; `Bash` implements
 
 `Bash` also carries a ready-to-serve MCP tool description in the public field
 `description_run` — a `ToolDescription` with `name: "bash_run"`, a description
-covering the security validation, the truncation behavior, and the timeout
-default (the [`DEFAULT_TIMEOUT_MS`](#the-bash-wrapper) value is interpolated
-into the text), plus an `inputSchema` with the `command` string and the
-optional per-call `timeout_ms` override.
+covering the security validation, the truncation behavior, the automatic hang
+detection and the hard runtime cap (the [`DEFAULT_MAX_RUNTIME_MS`](#the-bash-wrapper)
+value is interpolated into the text), plus an `inputSchema` with just the
+`command` string.
 
-> **The wrapper is configured once; per-call the tool takes `command` and an
-> optional `timeout_ms`.** The harness constructs a single `Bash` scoped to
-> the project root, and the `bash_run` tool's input is
-> `{ "command": "…", "timeout_ms": …? }` (see [`BashRunInput`](types.md)).
-> Timeout default, environment, and PTY mode are wrapper configuration, not
-> per-call arguments — with one exception: `timeout_ms` may **raise** the
-> configured timeout for that single call (it must be strictly greater than
-> the default; lower-or-equal values are rejected and the default itself is
-> never changed).
+> **The wrapper is configured once; per-call the tool takes only `command`.**
+> The harness constructs a single `Bash` scoped to the project root, and the
+> `bash_run` tool's input is `{ "command": "…" }` (see [`BashRunInput`](types.md)).
+> There is no per-call timeout argument: the liveness watchdog ends hung
+> commands automatically, and legitimate long-running commands are never cut
+> by a wall-clock timer the model would have to predict and extend.
 
 ---
 
@@ -106,13 +103,38 @@ Two invariants matter for reading the stream:
   result is easy to assemble: concatenate every chunk, then read the final
   status item.
 
-### Timeout
+### Hang detection: the liveness watchdog
 
-When `timeout(ms)` is set and the child outlives it:
+Commands are not governed by a wall-clock timeout the model must predict and
+extend. Instead a liveness watchdog watches the command's whole process tree
+for **progress**, where progress is any of:
 
-- the child is killed, and
-- the stream yields a **final** item with `signal: Some(-1)` and
-  `exit_code: None`, regardless of what the child printed before.
+- new output on stdout/stderr,
+- growing accumulated CPU time, or
+- growing I/O counters (disk; network on Windows).
+
+A tree that shows **none** of the three for 120 seconds is presumed hung
+(waiting on a prompt, a lock, or a dead connection) and killed. The stream
+carries a `liveness watchdog: …` stderr item explaining the kill, followed by
+the final `signal: Some(-1)` item. Because any progress signal resets the
+counter, long-running but active commands — builds, downloads, database
+imports — are never cut by this guard no matter how long they run.
+
+An immediate escape hatch complements the counter: if the main child has
+**exited** but orphaned descendants keep the output channel open (e.g.
+`sleep 30 &` holding the pipe), the watchdog does not wait for the window —
+it drains in-flight output, emits an `orphaned child processes …` stderr
+item and returns the command's own exit status right away.
+
+### Runtime cap (hard limit)
+
+The liveness watchdog cannot detect a command that keeps *burning CPU*
+forever (a busy loop is indistinguishable from real work), so a hard runtime
+cap remains as the last line of defense: when `timeout(ms)` is set and the
+child outlives it, the child is killed and the stream yields a
+`runtime cap: …` stderr item followed by a final item with
+`signal: Some(-1)` and `exit_code: None`, regardless of what the child
+printed before.
 
 Two special cases:
 
@@ -120,14 +142,14 @@ Two special cases:
   the result is deterministic: exactly one item, `signal: Some(-1)`, empty
   streams. The command never gets a chance to write.
 - **Partial output is preserved.** If the command printed something before the
-  deadline (e.g. `echo hello && sleep 10` with a short timeout), the output
-  chunks arrive first and the timeout item last. An agent can use the retained
-  prefix to diagnose *why* the command hung.
+  cap (e.g. `echo hello && sleep 10` with a short cap), the output chunks
+  arrive first and the cap items last. An agent can use the retained prefix
+  to diagnose *why* the command hung.
 
-> In contrast to `find`, a bash timeout is **not** partial-but-successful data:
-> the item is an explicit kill signal (`-1`). Treat any command that ends with
-> `signal: -1` as incomplete — if the output before it is meaningful, use it,
-> but never assume the command finished.
+> In contrast to `find`, a bash kill is **not** partial-but-successful data:
+> the final item is an explicit kill signal (`-1`). Treat any command that
+> ends with `signal: -1` as incomplete — if the output before it is
+> meaningful, use it, but never assume the command finished.
 
 ### Large output
 
@@ -177,10 +199,16 @@ mode (regardless of path), and only Yolo mode runs it without asking.
 
 ## Summary
 
-- Configure one `Bash`, call `run` — the tool input is a `command` plus an
-  optional per-call `timeout_ms` that can only raise the timeout.
+- Configure one `Bash`, call `run` — the tool input is just the `command`;
+  there is no per-call timeout argument.
+- Hangs are handled automatically: no output + no CPU + no I/O for 120s →
+  killed with a `liveness watchdog: …` diagnostic; an exited command whose
+  orphans hold the output is detached immediately.
+- A hard runtime cap (default 30 minutes, `timeout(ms)`) still bounds
+  progress-making runs; it ends the stream with a `runtime cap: …` item and
+  `signal: -1`.
 - The stream is chunks then one final status item; `exit_code` and `signal`
-  are mutually exclusive; a timeout ends the stream with `signal: -1`.
+  are mutually exclusive.
 - `pty: true` multiplexes stdout/stderr through a pseudo-terminal (stderr
   always empty, `\n` → `\r\n`).
 - Commands are validated before spawning: absolute paths and a fixed list of

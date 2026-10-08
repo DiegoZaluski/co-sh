@@ -23,6 +23,13 @@ libc = "0.2"
 tokio-stream = "0.1"
 agent-client-protocol = "2.2"
 
+# Per-process CPU time / I/O counters for the bash liveness watchdog
+# (`src/bash/liveness.rs`). Only the `system` feature (processes) is needed.
+[dependencies.sysinfo]
+version = "0.39"
+default-features = false
+features = ["system"]
+
 # Kernel-pinned filesystem sandboxing for the ACP sub-agent `fs/*` requests
 # (`openat` component walk with `O_NOFOLLOW`, see `subagent/acp.rs`).
 [target.'cfg(unix)'.dependencies]

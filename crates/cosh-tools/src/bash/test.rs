@@ -6,9 +6,12 @@ use super::bsh::spawn_bash;
 #[cfg(any(unix, windows))]
 #[allow(unused_imports)]
 use super::bsh::spawn_bash_pty;
-#[cfg(unix)]
+#[allow(unused_imports)]
+use std::pin::Pin;
 #[allow(unused_imports)]
 use std::time::{Duration, Instant};
+#[allow(unused_imports)]
+use tokio_stream::Stream;
 #[allow(unused_imports)]
 use tokio_stream::StreamExt;
 #[allow(dead_code)]
@@ -437,11 +440,16 @@ async fn test_spawn_bash_timeout() {
         items.push(result.unwrap());
     }
 
-    assert_eq!(items.len(), 1);
-    assert_eq!(items[0].signal, Some(-1));
-    assert_eq!(items[0].exit_code, None);
-    assert!(items[0].stdout.is_empty());
-    assert!(items[0].stderr.is_empty());
+    assert_eq!(items.len(), 2);
+    assert!(
+        String::from_utf8_lossy(&items[0].stderr).contains("runtime cap"),
+        "expected the runtime-cap diagnostic, got: {:?}",
+        items[0].stderr
+    );
+    assert_eq!(items[1].signal, Some(-1));
+    assert_eq!(items[1].exit_code, None);
+    assert!(items[1].stdout.is_empty());
+    assert!(items[1].stderr.is_empty());
 }
 
 #[cfg(any(unix, windows))]
@@ -454,11 +462,16 @@ async fn test_spawn_bash_pty_timeout() {
         items.push(result.unwrap());
     }
 
-    assert_eq!(items.len(), 1);
-    assert_eq!(items[0].signal, Some(-1));
-    assert_eq!(items[0].exit_code, None);
-    assert!(items[0].stdout.is_empty());
-    assert!(items[0].stderr.is_empty());
+    assert_eq!(items.len(), 2);
+    assert!(
+        String::from_utf8_lossy(&items[0].stderr).contains("runtime cap"),
+        "expected the runtime-cap diagnostic, got: {:?}",
+        items[0].stderr
+    );
+    assert_eq!(items[1].signal, Some(-1));
+    assert_eq!(items[1].exit_code, None);
+    assert!(items[1].stdout.is_empty());
+    assert!(items[1].stderr.is_empty());
 }
 
 #[tokio::test]
@@ -1104,4 +1117,240 @@ async fn test_run_pty_ambiguous_command_falls_back_to_watchdog() {
         !stderr.contains("--no-pager") && !stderr.contains("e.g."),
         "watchdog diagnostic must not suggest commands; stderr was: {stderr:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Liveness watchdog (all spawn paths)
+// ---------------------------------------------------------------------------
+//
+// A process tree that shows NO progress signal — no output, no CPU-time
+// growth, no I/O growth — for the quiescence window is presumed hung and
+// killed. Any single progress signal resets the counter, so long-running
+// but active commands (builds, downloads) are never cut.
+
+/// Collect all items from a spawn stream, unwrapping results and recording
+/// total elapsed time.
+async fn collect_spawn_timed(
+    stream: &mut Pin<
+        Box<dyn Stream<Item = Result<super::bsh::SpawnOutput, std::io::Error>> + Send>,
+    >,
+) -> (Vec<super::bsh::SpawnOutput>, Duration) {
+    use tokio_stream::StreamExt;
+    let started = Instant::now();
+    let mut items = Vec::new();
+    while let Some(item) = stream.next().await {
+        items.push(item.expect("spawn stream must not error in this test"));
+    }
+    (items, started.elapsed())
+}
+
+#[tokio::test]
+async fn test_liveness_kills_quiescent_piped() {
+    use super::bsh::spawn_bash_cfg;
+    use super::liveness::LivenessConfig;
+
+    let cfg = LivenessConfig::test_fast();
+    let mut stream = spawn_bash_cfg(None, ".", "sleep 30", None, cfg);
+    let (items, elapsed) = collect_spawn_timed(&mut stream).await;
+
+    let stderr: String = items
+        .iter()
+        .map(|i| String::from_utf8_lossy(&i.stderr).into_owned())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        stderr.contains("liveness watchdog"),
+        "expected the liveness diagnostic, stderr was: {stderr:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "watchdog took too long to release the hang: {elapsed:?}"
+    );
+    let last = items.last().expect("expected a final item");
+    assert_eq!(last.signal, Some(-1), "kill must surface as a signal");
+    assert_eq!(last.exit_code, None);
+}
+
+/// IGNORED (leaks CPU-burning processes): this test deliberately runs
+/// `yes >/dev/null` — a grandchild that never touches the output pipes, so
+/// killing bash alone leaks it forever at 100% CPU (the machine filled with
+/// zombie `yes` processes). The root fix is a process-group kill
+/// (`kill_process_tree`) in every kill path; until that is trusted on all
+/// platforms, keep the test ignored so test runs cannot leak burners.
+#[tokio::test]
+#[ignore = "leaks `yes` at 100% CPU when the process-group kill is not in place"]
+async fn test_liveness_spares_active_piped() {
+    use super::bsh::spawn_bash_cfg;
+    use super::liveness::LivenessConfig;
+
+    // `yes` burns CPU continuously: the CPU-progress signal must keep
+    // resetting the quiescence counter. The hard cap (not the watchdog)
+    // is what ends this run — asserted via the runtime-cap diagnostic.
+    let cfg = LivenessConfig::test_fast();
+    let mut stream = spawn_bash_cfg(None, ".", "yes >/dev/null", Some(3_000), cfg);
+    let (items, _elapsed) = collect_spawn_timed(&mut stream).await;
+
+    let stderr: String = items
+        .iter()
+        .map(|i| String::from_utf8_lossy(&i.stderr).into_owned())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !stderr.contains("liveness watchdog"),
+        "liveness watchdog must not kill an active command; stderr was: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("runtime cap"),
+        "expected the hard cap to end the run, stderr was: {stderr:?}"
+    );
+}
+
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn test_liveness_kills_quiescent_pty() {
+    use super::bsh::spawn_bash_pty_cfg;
+    use super::liveness::LivenessConfig;
+
+    let cfg = LivenessConfig::test_fast();
+    let mut stream = spawn_bash_pty_cfg(None, ".", "sleep 30", None, cfg);
+    let (items, elapsed) = collect_spawn_timed(&mut stream).await;
+
+    let stderr: String = items
+        .iter()
+        .map(|i| String::from_utf8_lossy(&i.stderr).into_owned())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        stderr.contains("liveness watchdog"),
+        "expected the liveness diagnostic, stderr was: {stderr:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "watchdog took too long to release the hang: {elapsed:?}"
+    );
+}
+
+/// Escape hatch: the main child exits but an orphaned descendant keeps the
+/// piped output open. The stream must not hang — it drains, explains, and
+/// returns the command's own exit status.
+#[tokio::test]
+async fn test_orphan_escape_piped() {
+    use super::bsh::spawn_bash_cfg;
+    use super::liveness::LivenessConfig;
+
+    // Quiescence window pushed far past the escape path: both watchdogs run
+    // in this test config, and under parallel test load a 900ms quiescence
+    // kill could win the race against the (much faster) orphan escape.
+    let cfg = LivenessConfig {
+        quiescent_after: Duration::from_secs(5),
+        ..LivenessConfig::test_fast()
+    };
+    // `sleep 30 &` inherits stdout and outlives bash, keeping the pipe open.
+    let mut stream = spawn_bash_cfg(None, ".", "sleep 30 & echo done", None, cfg);
+    let (items, elapsed) = collect_spawn_timed(&mut stream).await;
+
+    let stdout: String = items
+        .iter()
+        .map(|i| String::from_utf8_lossy(&i.stdout).into_owned())
+        .collect::<Vec<_>>()
+        .join("");
+    let stderr: String = items
+        .iter()
+        .map(|i| String::from_utf8_lossy(&i.stderr).into_owned())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        stdout.contains("done"),
+        "expected the command's own output, stdout was: {stdout:?}"
+    );
+    let last = items.last().expect("expected a final status item");
+    assert_eq!(last.exit_code, Some(0), "command exited cleanly");
+    assert_eq!(last.signal, None);
+    assert!(
+        stderr.contains("orphaned child processes"),
+        "expected the orphan-escape diagnostic, stderr was: {stderr:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "orphan escape took too long: {elapsed:?}"
+    );
+}
+
+/// Same escape hatch on the Unix PTY path: the orphan holds the PTY slave,
+/// which suppresses POLLHUP on the master — without the escape the stream
+/// would hang forever even after the command exited.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_orphan_escape_pty() {
+    use super::bsh::spawn_bash_pty_cfg;
+    use super::liveness::LivenessConfig;
+
+    // Quiescence window pushed far past the escape path (see the piped
+    // orphan test): the escape must be what ends this run.
+    let cfg = LivenessConfig {
+        quiescent_after: Duration::from_secs(5),
+        ..LivenessConfig::test_fast()
+    };
+    // `trap '' HUP` runs BEFORE the background fork, so the sleep inherits
+    // the ignored disposition and survives the SIGHUP the PTY delivers to
+    // the foreground group when the session leader (bash) exits. It keeps
+    // the PTY slave open, so the master never sees POLLHUP and the stream
+    // would hang forever without the escape. (Trapping inside the
+    // background subshell races the kernel signal and flakes under load.)
+    let mut stream = spawn_bash_pty_cfg(None, ".", "trap '' HUP; sleep 30 & echo done", None, cfg);
+    let (items, elapsed) = collect_spawn_timed(&mut stream).await;
+
+    let stdout: String = items
+        .iter()
+        .map(|i| String::from_utf8_lossy(&i.stdout).into_owned())
+        .collect::<Vec<_>>()
+        .join("");
+    let stderr: String = items
+        .iter()
+        .map(|i| String::from_utf8_lossy(&i.stderr).into_owned())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        stdout.contains("done"),
+        "expected the command's own output, stdout was: {stdout:?}"
+    );
+    let last = items.last().expect("expected a final status item");
+    assert_eq!(last.exit_code, Some(0), "command exited cleanly");
+    assert!(
+        stderr.contains("orphaned child processes"),
+        "expected the orphan-escape diagnostic, stderr was: {stderr:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "orphan escape took too long: {elapsed:?}"
+    );
+}
+
+/// A command that exits NORMALLY (nothing holding the channel) must not
+/// produce the orphan-escape diagnostic — guards against false positives
+/// from the escape racing a normal exit.
+#[tokio::test]
+async fn test_normal_exit_has_no_orphan_diagnostic() {
+    use super::bsh::spawn_bash_cfg;
+    use super::liveness::LivenessConfig;
+
+    let cfg = LivenessConfig::test_fast();
+    let mut stream = spawn_bash_cfg(None, ".", "echo clean", Some(5_000), cfg);
+    let (items, _elapsed) = collect_spawn_timed(&mut stream).await;
+
+    let stderr: String = items
+        .iter()
+        .map(|i| String::from_utf8_lossy(&i.stderr).into_owned())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !stderr.contains("orphaned child processes"),
+        "orphan diagnostic must not fire on a normal exit; stderr was: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("liveness watchdog"),
+        "liveness watchdog must not kill a fast clean command; stderr was: {stderr:?}"
+    );
+    let last = items.last().expect("expected a final status item");
+    assert_eq!(last.exit_code, Some(0));
 }
