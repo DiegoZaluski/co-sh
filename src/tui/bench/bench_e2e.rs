@@ -185,17 +185,20 @@ fn push_agent_round(app: &mut App, seed: usize) {
         .unwrap();
     app.event_tx
         .send(HarnessEvent::ToolCall {
+            call_ref: None,
             tool: "read".into(),
             input: serde_json::json!({"file": format!("src/mod_{seed}.rs")}),
         })
         .unwrap();
     app.event_tx
         .send(HarnessEvent::ToolResult {
+            call_ref: None,
             output: big_rust_file(1200),
         })
         .unwrap();
     app.event_tx
         .send(HarnessEvent::ToolCall {
+            call_ref: None,
             tool: "bash_run".into(),
             input: serde_json::json!({"command": "cargo test"}),
         })
@@ -203,6 +206,7 @@ fn push_agent_round(app: &mut App, seed: usize) {
     for _ in 0..10 {
         app.event_tx
             .send(HarnessEvent::ToolOutput {
+                call_ref: None,
                 tool: "bash_run".into(),
                 output: format!("{}\n", shell_out(40)),
                 finished: false,
@@ -212,11 +216,13 @@ fn push_agent_round(app: &mut App, seed: usize) {
     }
     app.event_tx
         .send(HarnessEvent::ToolResult {
+            call_ref: None,
             output: shell_out(300),
         })
         .unwrap();
     app.event_tx
         .send(HarnessEvent::ToolCall {
+            call_ref: None,
             tool: "subagent_call".into(),
             input: serde_json::json!({"agent": "explore", "input": "find hot paths"}),
         })
@@ -224,6 +230,7 @@ fn push_agent_round(app: &mut App, seed: usize) {
     for _ in 0..15 {
         app.event_tx
             .send(HarnessEvent::ToolOutput {
+                call_ref: None,
                 tool: "subagent_call".into(),
                 output: "- reading src/**\n- found hot loop in worker.rs\n- summarizing findings\n"
                     .repeat(8),
@@ -234,6 +241,7 @@ fn push_agent_round(app: &mut App, seed: usize) {
     }
     app.event_tx
         .send(HarnessEvent::ToolResult {
+            call_ref: None,
             output: "done exploring".into(),
         })
         .unwrap();

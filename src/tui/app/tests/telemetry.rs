@@ -96,10 +96,12 @@ async fn telemetry_tracks_tui_events_and_rendered_views() {
             text: " another chunk".into(),
         },
         HarnessEvent::ToolCall {
+            call_ref: None,
             tool: "bash_run".into(),
             input: serde_json::json!({}),
         },
         HarnessEvent::ToolError {
+            call_ref: None,
             error: "private tool failure".into(),
         },
         HarnessEvent::LlmCompaction {

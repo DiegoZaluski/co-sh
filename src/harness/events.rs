@@ -40,13 +40,32 @@ pub enum HarnessEvent {
     /// concatenate with the retried response).
     ClearAssistant,
     /// A complete tool call extracted from the LLM response.
-    ToolCall { tool: String, input: Value },
+    ToolCall {
+        tool: String,
+        input: Value,
+        /// Per-call routing identity: the provider's tool-call id (or a
+        /// synthetic one for inline calls). Streams carry the SAME ref
+        /// back, so the TUI can bind every sub-agent window to the EXACT
+        /// call that spawned it — parallel sub-agents (same or different
+        /// CLIs) each get their own window traffic. `None` only for
+        /// callers outside the agent loop's dispatch (command mode).
+        call_ref: Option<String>,
+    },
     /// Successful result of a dispatched tool call.
     /// Ordered sequentially — the Nth `ToolResult` matches the Nth `ToolCall`.
-    ToolResult { output: String },
+    ToolResult {
+        output: String,
+        /// The dispatching call's routing identity (see `ToolCall`): binds
+        /// a background spawn receipt to ITS call's window.
+        call_ref: Option<String>,
+    },
     /// A tool call that failed during dispatch.
     /// Ordered sequentially — the Nth `ToolError` matches the Nth `ToolCall`.
-    ToolError { error: String },
+    ToolError {
+        error: String,
+        /// The dispatching call's routing identity (see `ToolCall`).
+        call_ref: Option<String>,
+    },
     /// A reasoning block from the LLM.
     Reasoning { text: String },
     /// Snapshot of the language-server status for the TUI's prompt footer.
@@ -103,6 +122,12 @@ pub enum HarnessEvent {
         /// through their wrapper text) and whenever no routing hint is
         /// known: the TUI keeps its last-Running default.
         agent: Option<String>,
+        /// Per-call routing identity (see `ToolCall`): binds this stream/
+        /// report to the EXACT dispatching call. The TUI prefers this over
+        /// the `agent` hint — two parallel calls of the SAME agent CLI
+        /// share the hint but never the ref, so an output can never land
+        /// in a sibling's window (the input1↔output1 cross-pairing bug).
+        call_ref: Option<String>,
     },
     /// A typed progress event from a running ACP sub-agent
     /// ([`cosh_tools::subagent::events::SubagentEvent`]). Message-text
@@ -113,6 +138,11 @@ pub enum HarnessEvent {
     SubagentEvent {
         /// The tool call the event belongs to (always `subagent_call`).
         tool: String,
+        /// Per-call routing identity (see `ToolCall`): the live mini-chat
+        /// timeline (thoughts, tool rows, plans) belongs to ONE call's
+        /// window — without it, parallel sub-agents would interleave each
+        /// other's activity lines.
+        call_ref: Option<String>,
         /// The typed event.
         event: cosh_tools::subagent::events::SubagentEvent,
     },

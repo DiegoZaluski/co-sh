@@ -16,8 +16,8 @@ pub mod types;
 use todo::{render_todo_section, todo_section_height};
 use types::{
     PtySession, RightPanelState, SubagentActivityLine, SubagentBlockRenderer, SubagentBodyCache,
-    activity_lines, sanitize_subagent_text, split_subagent_output, subagent_visible_body,
-    wrap_chars,
+    activity_lines, sanitize_subagent_text, split_subagent_output, subagent_prompt_text,
+    subagent_visible_body, wrap_chars,
 };
 
 use std::collections::HashMap;
@@ -180,6 +180,18 @@ fn natural_section_height(
 /// after the last window), plus box overhead. Must be called AFTER
 /// [`RightPanelState::resolve_visible_subagents`].
 fn subagent_natural_height(state: &mut RightPanelState, wrap_w: u16) -> i32 {
+    // List mode: each entry contributes its WRAPPED row count (a long
+    // description breaks onto continuation rows — the tool name and spinner
+    // must never be pushed off-screen). No windows are resolved and no
+    // markdown rows are counted.
+    if state.subagent_list_active() {
+        state.visible_subagents.clear();
+        let total = state.subagent_list_total_rows(wrap_w);
+        if total == 0 {
+            return 0;
+        }
+        return BOX_OVERHEAD + total;
+    }
     let rows = state.subagent_section_rows_for_display(wrap_w);
     let total: i32 = state
         .visible_subagents
@@ -370,8 +382,10 @@ pub fn render_right_panel(
     // The subagent section owns its area and may BORROW leftover space
     // from the todo/bash areas (loans have no time guarantee — owners
     // reclaim whenever they need it). The budget below IS that space;
-    // window selection ranks focused > pinned > running > finished so
-    // the queue being navigated is never hidden by stale content.
+    // expanded mode is EXCLUSIVE — exactly ONE subagent window occupies
+    // the section (the focused queue's window, else the top-ranked
+    // candidate), so the budget only sizes that single window's internal
+    // scroll.
     let wrap_w = inner_w.saturating_sub(2);
     state.subagent_wrap_w = wrap_w;
     if state.maximized_section.is_some() {
@@ -709,14 +723,136 @@ fn render_bash_section(
     );
 }
 
+/// Render the subagent LIST (one entry per subagent session):
+/// `<agent> <description> <tool> <spinner>`, oldest first. Each entry is
+/// WRAPPED to the section width with cosh's standard `wrap_chars` word
+/// wrap — a long description breaks onto continuation rows so the tool
+/// name and spinner stay inside the visible area. The selected entry is
+/// highlighted (selection band + accent fg); running entries animate the
+/// shared braille spinner, finished ones carry ✓/✗ instead. Screen bands
+/// (one per ENTRY, spanning all its wrapped rows) are recorded so
+/// click/hover can resolve entries.
+#[allow(clippy::too_many_arguments)]
+fn render_subagent_list(
+    buf: &mut Buffer,
+    x: u16,
+    inner_y: u16,
+    max_w: u16,
+    inner_h: u16,
+    wrap_w: u16,
+    state: &mut RightPanelState,
+    theme: &Theme,
+) {
+    let entries = state.subagent_list_entries();
+    if entries.is_empty() {
+        return;
+    }
+    // Wrap every entry ONCE per frame; the same rows drive the drawn
+    // output, the height estimate (via `subagent_list_total_rows`) and the
+    // selection regions — three consumers can never disagree.
+    let spin = state.subagent_list_spinner_char();
+    let wrapped: Vec<Vec<String>> = entries
+        .iter()
+        .map(|&(idx, _)| wrap_chars(&state.pty_sessions[idx].list_entry_text(spin), wrap_w))
+        .collect();
+    let total: i32 = wrapped.iter().map(|rows| rows.len() as i32).sum();
+    let visible = i32::from(inner_h);
+    // Follow the selected ENTRY when a selection action requested it; the
+    // offset stays where the user left it otherwise (wheel scrolling).
+    if state.subagent_list_follow_pending {
+        state.subagent_list_follow_pending = false;
+        if let Some(sel) = state.subagent_list_selected {
+            let start: i32 = wrapped.iter().take(sel).map(|rows| rows.len() as i32).sum();
+            let span = wrapped.get(sel).map_or(1, |rows| rows.len() as i32).max(1);
+            if start < state.subagent_list_scroll {
+                state.subagent_list_scroll = start;
+            } else if start + span > state.subagent_list_scroll + visible {
+                state.subagent_list_scroll = start + span - visible;
+            }
+        }
+    }
+    // Clamp the offset every render (the content only grows, but the band
+    // can shrink) and clear the stale row bands before recording this
+    // frame's.
+    let max_scroll = (total - visible).max(0);
+    state.subagent_list_scroll = state.subagent_list_scroll.min(max_scroll).max(0);
+    state.subagent_list_layouts.clear();
+    state.subagent_list_region_rows.clear();
+    if state
+        .pty_sessions
+        .iter()
+        .any(|s| s.is_subagent() && !s.is_finished())
+    {
+        state.subagent_list_tick();
+    }
+
+    let normal = Style::default().fg(rgba_color(theme.text));
+    let muted = Style::default().fg(rgba_color(theme.text_muted));
+    let sel_bg = blend(theme.background_element, theme.primary, 0.18);
+
+    let mut row = 0i32;
+    for (&(sess_idx, selected), rows) in entries.iter().zip(&wrapped) {
+        let span = rows.len() as i32;
+        let entry_top = row;
+        row += span;
+        // Fully outside the visible band? Skip without touching the buffer.
+        if entry_top + span <= state.subagent_list_scroll
+            || entry_top >= state.subagent_list_scroll + visible
+        {
+            continue;
+        }
+        // The entry's VISIBLE slice (content rows clamped into the band):
+        // one selection band, one click/hover band, all in screen space.
+        let vis_start = entry_top.max(state.subagent_list_scroll);
+        let vis_end = (entry_top + span).min(state.subagent_list_scroll + visible);
+        let band_top = inner_y + (vis_start - state.subagent_list_scroll) as u16;
+        let band_h = (vis_end - vis_start) as u16;
+        // Selection band across ALL the entry's visible wrapped rows.
+        if selected {
+            let mut band = BoxRenderable::new();
+            band.set_background_color(Some(sel_bg.into()));
+            band.render_self(buf, Rect::new(x, band_top, max_w, band_h));
+        }
+        let session = &state.pty_sessions[sess_idx];
+        // Selected entries read in the accent color; finished ones dim.
+        let style = if selected {
+            normal.fg(rgba_color(theme.primary))
+        } else if session.is_finished() {
+            muted
+        } else {
+            normal
+        };
+        for (offset, seg) in rows.iter().enumerate() {
+            let content_row = entry_top + offset as i32;
+            if content_row < state.subagent_list_scroll
+                || content_row >= state.subagent_list_scroll + visible
+            {
+                continue;
+            }
+            let screen_y = inner_y + (content_row - state.subagent_list_scroll) as u16;
+            draw_text(buf, seg, x + 1, screen_y, wrap_w, style);
+            state
+                .subagent_list_region_rows
+                .push((content_row, seg.clone()));
+        }
+        state.subagent_list_layouts.push((
+            sess_idx,
+            i32::from(band_top),
+            i32::from(band_top) + i32::from(band_h),
+        ));
+    }
+}
+
 /// Render the resolved subagent windows as one scrollable markdown document.
 ///
-/// The visible set comes from [`RightPanelState::visible_subagents`]
-/// (dynamic windows: the focused queue's window first, then pinned
-/// queues, then running, then finished — superseded entries return only
-/// via ← navigation). Each session renders
-/// as: the command header line (normal text), the optional "→ cosh:"
-/// main-agent input line (normal text), then the subagent body as
+/// The visible set comes from [`RightPanelState::visible_subagents`] —
+/// EXACTLY ONE window in expanded mode (the focused queue's window — its
+/// pinned entry, else its newest — or, with no agent focus, the
+/// top-ranked candidate: running beats finished, newest first;
+/// superseded entries return only via ← navigation). The window shows
+/// ONLY content: the optional main-agent input (the user's prompt, direct
+/// text — the list row already names the agent CLI, so no `subagent: …`
+/// header and no `→ cosh:` decoration), then the body as
 /// **markdown** — the same renderer the chat uses for its content, so the
 /// report's headings/code/lists survive inside the box. Scrolling is in
 /// markdown layout rows (matching [`RightPanelState::subagent_section_rows`])
@@ -769,6 +905,28 @@ fn render_subagent_section(
         state.subagent_text_regions.clear();
     }
     if inner_h == 0 || wrap_w == 0 {
+        return;
+    }
+
+    // ── LIST mode: one row per subagent ──────────────────────────────
+    // Active when >= 2 subagent sessions exist (or the user forced it):
+    // `<agent> <description> <tool> <spinner>` per row instead of stacked
+    // windows. A row click expands it (classic single-window view);
+    // Ctrl+Alt+L returns here. Selection regions carry the row text so
+    // the entry stays copyable.
+    if state.subagent_list_active() {
+        render_subagent_list(buf, x, inner_y, max_w, inner_h, wrap_w, state, theme);
+        if rebuild_regions {
+            state.subagent_text_regions.clear();
+            for (row, text) in state.subagent_list_row_texts() {
+                state.subagent_text_regions.push(TextRegion::one_row(
+                    row,
+                    x + LEFT_PAD,
+                    x + LEFT_PAD + wrap_w,
+                    text,
+                ));
+            }
+        }
         return;
     }
 
@@ -884,13 +1042,14 @@ fn render_subagent_section(
     for (window, (sess_idx, session)) in sessions.iter().enumerate() {
         let sess_rows = i32::from(rows_all.get(*sess_idx).copied().unwrap_or(1));
         let (input_line, body) = split_subagent_output(&session.output);
-        // Header and input wrap like the rows math: split each into its
-        // visual rows so the body starts right below the last one.
-        let header_rows = wrap_chars(&session.command, wrap_w);
+        // CLEAN view: no `subagent: <cli>` command header (the list row
+        // already names the agent) and no `→ cosh:` decoration — the
+        // input echoes as DIRECT prompt text (the storage marker is
+        // stripped by `subagent_prompt_text`), then the body. The rows
+        // math (types.rs) counts exactly the same two blocks.
         let input_rows = input_line
-            .map(|input| wrap_chars(input, wrap_w))
+            .map(|input| wrap_chars(&subagent_prompt_text(input), wrap_w))
             .unwrap_or_default();
-        let head_h = header_rows.len() as i32;
         let input_h = input_rows.len() as i32;
         let sess_end = content_row + sess_rows;
         // The 1-row separator margin exists only BELOW non-last windows —
@@ -935,31 +1094,40 @@ fn render_subagent_section(
             }
         }
 
-        // Command header + main-agent input, wrapped; the same visual rows
-        // feed the selection text regions (rebuilt only when content or
-        // width changed).
-        for (rows, row_offset) in [(&header_rows, 0), (&input_rows, head_h)] {
-            draw_wrapped_rows(
-                buf,
+        // Main-agent input echoed as DIRECT prompt text, wrapped; the same
+        // visual rows feed the selection text regions (rebuilt only when
+        // content or width changed). No command header — the list row
+        // already names the agent CLI.
+        draw_wrapped_rows(
+            buf,
+            x + LEFT_PAD,
+            inner_y,
+            &input_rows,
+            content_row,
+            scroll_y,
+            content_bottom,
+            wrap_w,
+            text_style,
+        );
+        if rebuild_regions {
+            push_region_rows(
+                &mut state.subagent_text_regions,
+                &input_rows,
+                content_row,
                 x + LEFT_PAD,
-                inner_y,
-                rows,
-                content_row + row_offset,
-                scroll_y,
-                content_bottom,
                 wrap_w,
-                text_style,
             );
-            if rebuild_regions {
-                push_region_rows(
-                    &mut state.subagent_text_regions,
-                    rows,
-                    content_row + row_offset,
-                    x + LEFT_PAD,
-                    wrap_w,
-                );
-            }
         }
+        // CHAT SEPARATOR: one blank row between the echoed prompt and what
+        // follows (activity, then the body) — the input and the output must
+        // never read as glued text. Conditional on the body the SAME way
+        // the height math (types.rs) conditions it: a gap with nothing
+        // after it would reserve an unpainted row, so it exists only when
+        // there is body content to separate from.
+        let has_visible_body = !sanitize_subagent_text(subagent_visible_body(body))
+            .trim()
+            .is_empty();
+        let input_gap = i32::from(input_h > 0 && has_visible_body);
         // Live activity (Phase 3b.2): tool calls, plan, thought — the same
         // lines the height math counted for RUNNING sessions. Finished
         // windows have none (activity is cleared on completion), so this
@@ -975,13 +1143,13 @@ fn render_subagent_section(
                 .map(|l| l.visual_rows(wrap_w))
                 .fold(0u16, u16::saturating_add),
         );
-        let body_start = content_row + head_h + input_h + activity_h;
+        let body_start = content_row + input_h + input_gap + activity_h;
         draw_activity_lines(
             buf,
             x + LEFT_PAD,
             inner_y,
             &activity,
-            content_row + head_h + input_h,
+            content_row + input_h + input_gap,
             scroll_y,
             content_bottom,
             wrap_w,
@@ -1009,7 +1177,7 @@ fn render_subagent_section(
         // rebuilds can push body_h ≤ 0 for a frame — the guard skips the
         // body blit until the cache catches up. Self-healing by design;
         // do NOT clamp the body into the window here, the row math owns it.
-        let body_h = sess_rows - head_h - input_h - activity_h;
+        let body_h = sess_rows - input_h - input_gap - activity_h;
         if body_h > 0 && body_start < content_bottom && sess_end > scroll_y {
             // The severity header is consumed (it tinted the window above)
             // and is never shown as report text. Failed windows keep the
@@ -1684,12 +1852,18 @@ mod tests {
         // The internal bridge's stream shape: reasoning and message deltas
         // alternate within one response.
         for i in 0..10 {
-            state.update_subagent_activity(&SubagentEvent::Thought {
-                text: format!("pensando no passo {i} "),
-            });
-            state.update_subagent_activity(&SubagentEvent::Message {
-                text: format!("ponto {i}; "),
-            });
+            state.update_subagent_activity(
+                &SubagentEvent::Thought {
+                    text: format!("pensando no passo {i} "),
+                },
+                None,
+            );
+            state.update_subagent_activity(
+                &SubagentEvent::Message {
+                    text: format!("ponto {i}; "),
+                },
+                None,
+            );
         }
         let activity = state.pty_sessions[0].subagent_activity.clone();
         // Two entries total: one Thought run, one Message run.
@@ -1751,9 +1925,12 @@ mod tests {
         let mut state = RightPanelState::new();
         state.subagent_rebuild_interval = std::time::Duration::ZERO;
         state.start_pty("subagent: ".to_string(), None);
-        state.update_subagent_activity(&SubagentEvent::Message {
-            text: "linha unica".to_string(),
-        });
+        state.update_subagent_activity(
+            &SubagentEvent::Message {
+                text: "linha unica".to_string(),
+            },
+            None,
+        );
 
         let wrap_w = 40u16;
         let rows = state.subagent_section_rows_for_display(wrap_w);
@@ -1805,8 +1982,10 @@ mod tests {
 
     /// The subagent body is rendered as markdown (like the chat content):
     /// heading text appears without the `#` markers, `**` emphasis is
-    /// consumed by the renderer, and the header + input lines survive as
-    /// plain text.
+    /// consumed by the renderer, and the input line survives as plain
+    /// text. CLEAN view: no `subagent: …` header and no `→ cosh:` storage
+    /// marker — the prompt echoes as DIRECT text (the list row already
+    /// names the agent CLI).
     #[test]
     fn subagent_section_renders_markdown_body() {
         let mut state = RightPanelState::new();
@@ -1823,8 +2002,18 @@ mod tests {
             .map(|y| row_text(&buf, y))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(all.contains("subagent: opencode"), "command header missing");
-        assert!(all.contains("→ cosh: review this"), "input line missing");
+        assert!(
+            !all.contains("subagent: opencode"),
+            "command header must be gone (list names the agent): {all:?}"
+        );
+        assert!(
+            all.contains("review this"),
+            "the prompt echoes as DIRECT text: {all:?}"
+        );
+        assert!(
+            !all.contains("→ cosh:"),
+            "storage marker leaked to the display: {all:?}"
+        );
         assert!(all.contains("Title"), "heading text missing: {all:?}");
         assert!(
             !all.contains("# Title"),
@@ -1870,24 +2059,35 @@ mod tests {
         state.subagent_rebuild_interval = std::time::Duration::ZERO;
         state.start_pty("subagent: kilo".to_string(), None);
         let tail = "word ".repeat(30); // 150 chars
-        state.update_last_pty(format!("→ cosh: {tail}\n"));
+        state.update_last_pty(
+            crate::routes::session::right_panel::types::subagent_input_line(&tail).expect("echo"),
+        );
 
         let mut buf = Buffer::empty(Rect::new(0, 0, 50, 30));
         render_subagent_section(&mut buf, 0, 0, 50, 30, &mut state, &theme, true);
 
-        // The input spans rows below the header; its LAST wrapped segment
-        // must be present somewhere in the buffer.
+        // CLEAN view: no `subagent: kilo` header and no `→ cosh:` storage
+        // marker — the prompt echoes as DIRECT text; its LAST wrapped
+        // segment must be present somewhere in the buffer.
         let all: String = (0..30)
             .map(|y| row_text(&buf, y))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(all.contains("→ cosh:"), "input start missing");
+        assert!(!all.contains("→ cosh:"), "storage marker leaked: {all:?}");
+        assert!(!all.contains("subagent: kilo"), "header leaked: {all:?}");
         assert!(
             all.contains("word"),
             "wrapped input segments missing: {all:?}"
         );
-        // Rows math agrees: header(1) + input(⌈151/48⌉=4) + 0 body ≥ 5.
-        assert_eq!(state.subagent_section_rows(48), &[5]);
+        // Rows math agrees: the DISPLAY text (marker stripped) wraps into
+        // exactly the rows the height math counts — no header row on top.
+        let echo =
+            crate::routes::session::right_panel::types::subagent_input_line(&tail).expect("echo");
+        let display = subagent_prompt_text(&echo);
+        assert_eq!(
+            state.subagent_section_rows(48),
+            &[wrap_chars(&display, 48).len() as u16]
+        );
     }
 
     /// REGRESSION: every subagent window has its OWN 1-row bottom margin —
@@ -1985,6 +2185,9 @@ mod tests {
         let theme = test_theme();
         let mut state = RightPanelState::new();
         state.subagent_rebuild_interval = std::time::Duration::ZERO;
+        // Two subagent sessions would default to LIST mode; this test pins
+        // the EXPANDED window tinting.
+        state.subagent_list_mode = Some(false);
         // First window: red verdict (short body → header + 1 body row, so
         // both windows sit at the same known rows). Second: no header.
         state.start_pty("subagent: kilo".to_string(), None);
@@ -2188,7 +2391,7 @@ mod tests {
 
         let wrap_w = 48u16;
         for (frame, event) in events.iter().enumerate() {
-            state.update_subagent_activity(event);
+            state.update_subagent_activity(event, None);
             // The app auto-follows on every visible change.
             if !state.is_scrolled_up() {
                 state.scroll_to_bottom();
@@ -2301,7 +2504,7 @@ mod tests {
 
         let wrap_w = 48u16;
         for (frame, event) in events.iter().enumerate() {
-            state.update_subagent_activity(event);
+            state.update_subagent_activity(event, None);
             if !state.is_scrolled_up() {
                 state.scroll_to_bottom();
             }
@@ -2359,13 +2562,16 @@ mod tests {
         state.start_pty("subagent: opencode".to_string(), None);
         // The detail is long enough that wrap_chars MUST break it onto
         // several rows at the panel's wrap width.
-        state.update_subagent_activity(&SubagentEvent::ToolCall {
-            id: "c1".to_string(),
-            title: "src/tui/routes/session/tool_render.rs".to_string(),
-            kind: ToolKind::Edit,
-            status: ToolCallStatus::InProgress,
-            raw_input: None,
-        });
+        state.update_subagent_activity(
+            &SubagentEvent::ToolCall {
+                id: "c1".to_string(),
+                title: "src/tui/routes/session/tool_render.rs".to_string(),
+                kind: ToolKind::Edit,
+                status: ToolCallStatus::InProgress,
+                raw_input: None,
+            },
+            None,
+        );
 
         let wrap_w = 30u16;
         let session = state.pty_sessions.last().expect("pty session");
@@ -2608,7 +2814,7 @@ mod tests {
             }
 
             for (frame, event) in events.iter().enumerate() {
-                state.update_subagent_activity(event);
+                state.update_subagent_activity(event, None);
                 if !state.is_scrolled_up() {
                     state.scroll_to_bottom();
                 }
@@ -2781,7 +2987,7 @@ mod tests {
                     },
                     other => panic!("unexpected captured kind {other}"),
                 };
-                state.update_subagent_activity(&event);
+                state.update_subagent_activity(&event, None);
                 if !state.is_scrolled_up() {
                     state.scroll_to_bottom();
                 }
@@ -2932,7 +3138,7 @@ mod tests {
                 if stream == 1 {
                     state.pty_sessions.swap(1, 2);
                 }
-                state.update_subagent_activity(&event);
+                state.update_subagent_activity(&event, None);
                 if stream == 1 {
                     state.pty_sessions.swap(1, 2);
                 }
@@ -3473,7 +3679,8 @@ mod tests {
         // Bash: 3 buffer lines -> natural 6 (3 overhead + 3).
         state.start_pty("ls".to_string(), None);
         state.complete_last_pty("f1\nf2\n".to_string());
-        // Subagent: header + input + 8 body lines -> natural 13.
+        // Subagent: input + 8 body lines -> natural 12 (3 overhead + 9;
+        // CLEAN view: no command header row).
         state.start_pty("subagent: kilo".to_string(), None);
         state.complete_last_pty(
             "\u{2192} cosh: task\n".to_string()
@@ -3496,7 +3703,7 @@ mod tests {
         let band_h = sub.bottom - sub.top;
         assert_eq!(
             band_h, 13,
-            "section height must equal its natural height (3 overhead + 10 content; a lone window carries no margin)"
+            "section height must equal its natural height (3 overhead + 10 content: input + gap + body, no command header; a lone window carries no margin)"
         );
 
         // Painted check inside the band: only TOP_GAP+TOP_PAD above and the
@@ -3620,6 +3827,9 @@ mod tests {
         let theme = test_theme();
         let mut state = RightPanelState::new();
         state.subagent_rebuild_interval = std::time::Duration::ZERO;
+        // Two subagent sessions would default to LIST mode; this test pins
+        // the EXPANDED window tinting.
+        state.subagent_list_mode = Some(false);
         state.text_regions_w = 38;
         // First window carries a red verdict; last one carries none.
         state.start_pty("subagent: kilo".to_string(), None);
@@ -3847,7 +4057,10 @@ mod tests {
         render_right_panel(&mut buf, area, &mut state, &theme, 120);
         let text: String = (0..30).map(|y| row_text(&buf, y)).collect();
         assert!(text.contains("task one"), "todo is back");
-        assert!(text.contains("subagent:"), "subagent is back");
+        assert!(
+            text.contains("report"),
+            "subagent is back (its CONTENT — no `subagent:` header is rendered)"
+        );
         assert!(text.contains("out"), "bash is back");
     }
 
@@ -4194,7 +4407,10 @@ mod tests {
         buf = Buffer::empty(area);
         render_right_panel(&mut buf, area, &mut state, &theme, 120);
         let text: String = (0..30).map(|y| row_text(&buf, y)).collect();
-        assert!(text.contains("subagent:"), "subagent now owns the panel");
+        assert!(
+            text.contains("report"),
+            "subagent now owns the panel (its CONTENT — no `subagent:` header is rendered)"
+        );
         assert!(!text.contains("bash line"), "bash was dethroned");
     }
 

@@ -130,6 +130,7 @@ impl StreamBatcher {
             output: format!("{}\n", batch.join("\n")),
             finished: false,
             agent: None,
+            call_ref: None,
         });
         self.last_flush = Instant::now();
     }
@@ -157,6 +158,13 @@ pub struct CoshTools {
     pending_images: Mutex<Option<Vec<cosh_sdk::connector::ImageBlock>>>,
     /// Optional event sender for streaming tool output.
     event_tx: Option<tokio::sync::mpsc::UnboundedSender<HarnessEvent>>,
+    /// Per-call routing identity of the tool call currently being
+    /// dispatched (pushed in by the agent loop right before `dispatch`):
+    /// the sub-agent arm stamps it on every stream/report event so the TUI
+    /// pairs a window's input echo with ITS OWN traffic — two parallel
+    /// spawns of the same agent CLI share the agent name but never this
+    /// ref (the input1↔output1 cross-pairing bug).
+    active_call_ref: std::sync::Mutex<Option<String>>,
     /// Shared stop flag for interruptible tools (Phase 5): the agent loop's
     /// `stop_signal` reaches a running `subagent_call` through this, turning
     /// an ESC into a spec-conformant ACP `session/cancel` — the only way a
@@ -234,6 +242,7 @@ impl CoshTools {
             computer: Computer::new(),
             pending_images: Mutex::new(None),
             event_tx: None,
+            active_call_ref: std::sync::Mutex::new(None),
             stop_signal: None,
             #[cfg(feature = "embed")]
             local_base_urls: std::collections::HashMap::new(),
@@ -309,6 +318,15 @@ impl CoshTools {
     }
 
     /// Set the event sender for streaming tool output.
+    /// Routing identity of the call being dispatched (see the field docs).
+    /// Called by the agent loop immediately before `dispatch`.
+    pub fn set_active_call_ref(&self, call_ref: Option<String>) {
+        *self
+            .active_call_ref
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = call_ref;
+    }
+
     pub fn set_event_tx(&mut self, tx: tokio::sync::mpsc::UnboundedSender<HarnessEvent>) {
         self.event_tx = Some(tx);
     }
@@ -390,6 +408,22 @@ impl CoshTools {
     #[allow(clippy::unwrap_used)]
     pub fn resolve_subagent_input(&self, input: Option<String>) -> Result<String, String> {
         self.subagent.resolve_input(input)
+    }
+
+    /// Resolve the right-panel list-entry description for an INTERNAL
+    /// sub-agent call (see [`SubAgent::resolve_description`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns the sub-agent layer's error for a missing description on a
+    /// non-code-review task.
+    #[allow(clippy::result_large_err)]
+    pub fn resolve_subagent_description(
+        &self,
+        description: Option<String>,
+        code_review: bool,
+    ) -> Result<String, String> {
+        self.subagent.resolve_description(description, code_review)
     }
 
     /// Set the list of RAG databases for the `recall_search` dispatch.
@@ -1058,6 +1092,7 @@ impl Tools for CoshTools {
                                     output: text.clone(),
                                     finished: false,
                                     agent: None,
+                                    call_ref: None,
                                 });
                             }
                             output.push_str(&text);
@@ -1076,6 +1111,7 @@ impl Tools for CoshTools {
                                 output: text.clone(),
                                 finished: false,
                                 agent: None,
+                                call_ref: None,
                             });
                         }
                         output.push_str(&text);
@@ -1095,6 +1131,7 @@ impl Tools for CoshTools {
                                     output: text.clone(),
                                     finished: false,
                                     agent: None,
+                                    call_ref: None,
                                 });
                             }
                             output.push_str(&text);
@@ -1503,6 +1540,16 @@ impl Tools for CoshTools {
             }
 
             "subagent_call" => {
+                // Snapshot the per-call routing identity ONCE: every event
+                // this call emits (spawn receipt, live SubagentEvents, the
+                // final report) carries it, so the TUI pairs the window's
+                // input echo with THIS call's stream and report — never a
+                // sibling's, even for two parallel spawns of the same CLI.
+                let call_ref = self
+                    .active_call_ref
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .clone();
                 let input: SubAgentCallInput =
                     serde_json::from_value(args).map_err(|e| e.to_string())?;
                 // The harness routes `subagent_call` calls with a missing or
@@ -1535,6 +1582,13 @@ impl Tools for CoshTools {
                 // review turn's report gets the header ENFORCED below.
                 let is_review =
                     cosh_tools::subagent::severity::is_review_task(&call_input, input.code_review);
+                // Right-panel list entry description: explicit values pass
+                // through; a code-review call may omit it (the harness infers
+                // `code-review-NN`), non-review calls must carry one. The
+                // RESOLVED value is display-only — the TUI derives the entry
+                // from the raw input — so this call exists to VALIDATE.
+                self.subagent
+                    .resolve_description(input.description.clone(), is_review)?;
                 let call_input = cosh_tools::subagent::severity::with_severity_contract(
                     &call_input,
                     input.code_review,
@@ -1569,7 +1623,8 @@ impl Tools for CoshTools {
                              continue_session: false for an independent session."
                         ));
                     }
-                    let task_id = super::background::register(&agent, &call_input);
+                    let task_id =
+                        super::background::register(&agent, &call_input, call_ref.clone());
                     let recorder = self.subagent.session_recorder();
                     let event_tx_bg = self.event_tx.clone();
                     let cwd = self.project_root().clone();
@@ -1584,6 +1639,7 @@ impl Tools for CoshTools {
                     // the caller, which returns the spawn receipt below.
                     let bg_agent = agent.clone();
                     let bg_task_id = task_id.clone();
+                    let bg_call_ref = call_ref.clone();
                     super::background::spawn_detached(async move {
                         // Panic safety net: a panic (or runtime cancellation)
                         // inside the turn body must not leave the task
@@ -1599,6 +1655,7 @@ impl Tools for CoshTools {
                         // arms below still use them for bookkeeping.
                         let body_tx = event_tx_bg.clone();
                         let body_agent = bg_agent.clone();
+                        let body_call_ref = bg_call_ref.clone();
                         let turn_body = tokio::spawn(async move {
                             // Forward typed events while the turn runs; the
                             // loop ends when `acp::call` returns and drops
@@ -1608,6 +1665,7 @@ impl Tools for CoshTools {
                                     if let Some(ref tx) = body_tx {
                                         let _ = tx.send(HarnessEvent::SubagentEvent {
                                             tool: "subagent_call".to_string(),
+                                            call_ref: body_call_ref.clone(),
                                             event,
                                         });
                                     }
@@ -1661,6 +1719,7 @@ impl Tools for CoshTools {
                                         output: output.clone(),
                                         finished: true,
                                         agent: Some(bg_agent.clone()),
+                                        call_ref: bg_call_ref.clone(),
                                     });
                                 }
                                 super::background::complete(&bg_task_id, Some(output), None);
@@ -1773,6 +1832,7 @@ impl Tools for CoshTools {
                                     // appear twice.
                                     let _ = tx.send(HarnessEvent::SubagentEvent {
                                         tool: "subagent_call".to_string(),
+                                        call_ref: call_ref.clone(),
                                         event,
                                     });
                                 }
@@ -1818,6 +1878,7 @@ impl Tools for CoshTools {
                         output: accumulated.clone(),
                         finished: true,
                         agent: Some(stored_agent.clone()),
+                        call_ref: call_ref.clone(),
                     });
                 }
 

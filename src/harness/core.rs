@@ -584,6 +584,14 @@ pub struct Harness {
     /// To stop the agent loop.
     pub(crate) stop: bool,
     tool_issuer: VecDeque<ToolCallData>,
+    /// Routing identity of the call currently being dispatched: set at the
+    /// top of [`Self::dispatch_next`] (the SAME per-call ref the
+    /// `ToolCall` event carries), read by the sub-agent dispatch arms to
+    /// stamp every stream/report event. Cleared after the dispatch returns.
+    /// Parallel sub-agent calls (same CLI or different) each hold a UNIQUE
+    /// ref, so the TUI can pair a window's input echo with ITS OWN stream
+    /// and report — the last-Running-window guess could cross-pair them.
+    active_call_ref: Option<String>,
     /// True when this harness is an INTERNAL SUB-AGENT (a nested harness
     /// built by [`Self::run_internal_subagent`]). Gates the two behaviors a
     /// nested loop must not have (Claude Code non-interactive nesting rules):
@@ -787,6 +795,7 @@ impl Harness {
             pending_thinking_blocks: Vec::new(),
             stop: false,
             tool_issuer: VecDeque::new(),
+            active_call_ref: None,
             nested: false,
             tool_call_synthetic: 0,
             context_manager: ContextManager::new(MAX_CONTEXT_TOKENS),
@@ -3928,18 +3937,21 @@ impl Harness {
                 background::take_ready_notifications()
             };
             if !background_notes.is_empty() {
-                for note in background_notes {
+                for (note, note_call_ref) in background_notes {
                     // The notification rides the EXISTING event variant the
                     // TUI already renders as a chat line (its match is
                     // exhaustive over the enum, so a new variant would
                     // break the TUI build) — the model-facing injection is
                     // the `add_user` below, marked `[automated
-                    // notification]` Claude-Code-style.
+                    // notification]` Claude-Code-style. The note's spawn
+                    // `call_ref` routes the completion to the EXACT window
+                    // that call opened (parallel same-CLI spawns).
                     let _ = tx.send(HarnessEvent::ToolOutput {
                         tool: "subagent_status".to_string(),
                         output: note.clone(),
                         finished: true,
                         agent: None,
+                        call_ref: note_call_ref,
                     });
                     self.context_manager.add_user(&note);
                 }
@@ -4257,11 +4269,30 @@ impl Harness {
                     .front()
                     .map(|tc| tc.thought_signature.clone());
 
-                if let Some((ref _call_id, ref name, ref args)) = info {
+                // Per-call routing identity (same rule the history uses
+                // below): the provider id, or a synthetic one for inline
+                // calls. The synthetic branch uses the harness's MONOTONIC
+                // counter — `iteration` only advances in the outer loop,
+                // while this inner loop dispatches every tool call of ONE
+                // response, so two parallel inline `subagent_call`s must
+                // never share a ref (that would re-cross-pair exactly the
+                // streams this routing separates). The `ToolCall` event,
+                // the dispatch slot and every result/error emission of
+                // THIS call share the ref, so the TUI can bind a
+                // sub-agent window to the EXACT call that spawned it.
+                let dispatch_call_ref: Option<String> = info.as_ref().map(|(id, _, _)| {
+                    if id.is_empty() {
+                        format!("call_{:016x}", self.context_manager_pending_id())
+                    } else {
+                        id.clone()
+                    }
+                });
+                if let Some((_, ref name, ref args)) = info {
                     // log::debug!("run_agent_loop DISPATCH tool={name}");
                     let _ = tx.send(HarnessEvent::ToolCall {
                         tool: name.clone(),
                         input: args.clone(),
+                        call_ref: dispatch_call_ref.clone(),
                     });
                 }
 
@@ -4290,7 +4321,10 @@ impl Harness {
                             let questions = match normalized {
                                 Ok(qs) => qs,
                                 Err(e) => {
-                                    let _ = tx.send(HarnessEvent::ToolError { error: e });
+                                    let _ = tx.send(HarnessEvent::ToolError {
+                                        error: e,
+                                        call_ref: dispatch_call_ref.clone(),
+                                    });
                                     continue;
                                 }
                             };
@@ -4319,12 +4353,8 @@ impl Harness {
                                     let json = serde_json::to_string(&output)
                                         .unwrap_or_else(|_| "{}".to_string());
                                     // Save to structured history (native tool format)
-                                    if let Some((ref call_id, ref name, ref args)) = info {
-                                        let tool_id = if call_id.is_empty() {
-                                            format!("call_{:016x}", iteration)
-                                        } else {
-                                            call_id.clone()
-                                        };
+                                    if let Some((_, ref name, ref args)) = info {
+                                        let tool_id = dispatch_call_ref.clone().unwrap_or_default();
                                         self.push_tool_history(
                                             &tool_id,
                                             name,
@@ -4336,10 +4366,16 @@ impl Harness {
                                         tool_interactions
                                             .push(format!("{name}\u{0}{args}\u{0}{json}"));
                                     }
-                                    let _ = tx.send(HarnessEvent::ToolResult { output: json });
+                                    let _ = tx.send(HarnessEvent::ToolResult {
+                                        output: json,
+                                        call_ref: dispatch_call_ref.clone(),
+                                    });
                                 }
                                 Some(Err(e)) => {
-                                    let _ = tx.send(HarnessEvent::ToolError { error: e });
+                                    let _ = tx.send(HarnessEvent::ToolError {
+                                        error: e,
+                                        call_ref: dispatch_call_ref.clone(),
+                                    });
                                 }
                                 None => {
                                     // `None` here means either the channel was
@@ -4354,12 +4390,16 @@ impl Harness {
                                     let _ = tx.send(HarnessEvent::ToolError {
                                         error: "Internal error: question channel closed"
                                             .to_string(),
+                                        call_ref: dispatch_call_ref.clone(),
                                     });
                                 }
                             }
                         }
                         Err(e) => {
-                            let _ = tx.send(HarnessEvent::ToolError { error: e });
+                            let _ = tx.send(HarnessEvent::ToolError {
+                                error: e,
+                                call_ref: dispatch_call_ref.clone(),
+                            });
                         }
                     }
                 } else {
@@ -4419,12 +4459,8 @@ impl Harness {
                         // same rationale as the guardrail-deny path below: a
                         // call that never gets a visible answer gets re-issued,
                         // burning MAX_TOOL_RETRIES lives on the same mistake.
-                        if let Some((ref call_id, ref name, ref args)) = info {
-                            let tool_id = if call_id.is_empty() {
-                                format!("call_{:016x}", iteration)
-                            } else {
-                                call_id.clone()
-                            };
+                        if let Some((_, ref name, ref args)) = info {
+                            let tool_id = dispatch_call_ref.clone().unwrap_or_default();
                             self.push_tool_history(
                                 &tool_id,
                                 name,
@@ -4435,7 +4471,10 @@ impl Harness {
                             tool_interactions.push(format!("{name}\u{0}{args}\u{0}{reason}"));
                         }
                         self.correction_memory.push(&reason);
-                        let _ = tx.send(HarnessEvent::ToolError { error: reason });
+                        let _ = tx.send(HarnessEvent::ToolError {
+                            error: reason,
+                            call_ref: dispatch_call_ref.clone(),
+                        });
                         // Halt stops the entire turn
                         if hr.halt {
                             let msg = "Turn halted by hook".to_string();
@@ -4501,12 +4540,8 @@ impl Harness {
                             );
                             self.tool_issuer.pop_front();
                             self.tool_failure_count += 1;
-                            if let Some((ref call_id, ref name, ref args)) = info {
-                                let tool_id = if call_id.is_empty() {
-                                    format!("call_{:016x}", iteration)
-                                } else {
-                                    call_id.clone()
-                                };
+                            if let Some((_, ref name, ref args)) = info {
+                                let tool_id = dispatch_call_ref.clone().unwrap_or_default();
                                 self.push_tool_history(
                                     &tool_id,
                                     name,
@@ -4521,7 +4556,10 @@ impl Harness {
                                 tool_interactions.push(format!("{name}\u{0}{args}\u{0}{reason}"));
                             }
                             self.correction_memory.push(&reason);
-                            let _ = tx.send(HarnessEvent::ToolError { error: reason });
+                            let _ = tx.send(HarnessEvent::ToolError {
+                                error: reason,
+                                call_ref: dispatch_call_ref.clone(),
+                            });
                             // The denial just became this iteration's tool
                             // interaction — run the loop detector HERE, before
                             // the `continue` skips the end-of-iteration check:
@@ -4690,14 +4728,10 @@ impl Harness {
                                                 // Record the denial in history so the model
                                                 // sees its own tool call + the "denied" result
                                                 // as a proper conversation turn.
-                                                if let Some((ref call_id, ref name, ref args)) =
-                                                    info
-                                                {
-                                                    let tool_id = if call_id.is_empty() {
-                                                        format!("call_{:016x}", iteration)
-                                                    } else {
-                                                        call_id.clone()
-                                                    };
+                                                if let Some((_, ref name, ref args)) = info {
+                                                    let tool_id = dispatch_call_ref
+                                                        .clone()
+                                                        .unwrap_or_default();
                                                     self.push_tool_history(
                                                         &tool_id,
                                                         name,
@@ -4707,8 +4741,10 @@ impl Harness {
                                                     );
                                                 }
                                                 self.correction_memory.push(&msg);
-                                                let _ =
-                                                    tx.send(HarnessEvent::ToolError { error: msg });
+                                                let _ = tx.send(HarnessEvent::ToolError {
+                                                    error: msg,
+                                                    call_ref: dispatch_call_ref.clone(),
+                                                });
                                                 continue;
                                             }
                                         }
@@ -4720,6 +4756,7 @@ impl Harness {
                                         let _ = tx.send(HarnessEvent::ToolError {
                                             error: "Internal error: permission channel closed"
                                                 .to_string(),
+                                            call_ref: dispatch_call_ref.clone(),
                                         });
                                         continue;
                                     }
@@ -4743,6 +4780,18 @@ impl Harness {
                     // released BEFORE we match on the result below.
                     let dispatch_out = {
                         tools_ran = true;
+                        // Per-call routing identity: the SAME ref the
+                        // `ToolCall` event above carried. Every stream the
+                        // dispatch emits (sub-agent mini-chat, reports,
+                        // receipts) is stamped with it, so the TUI pairs a
+                        // window's input with ITS OWN traffic even when
+                        // several sub-agents run in parallel.
+                        self.active_call_ref = dispatch_call_ref.clone();
+                        // The Tier-1 dispatcher (CoshTools) reads the SAME
+                        // identity to stamp its sub-agent streams/reports.
+                        if let Some(cosh) = self.cosh_tools.as_ref() {
+                            cosh.set_active_call_ref(dispatch_call_ref.clone());
+                        }
                         let dispatch_fut = self.dispatch_next();
                         tokio::pin!(dispatch_fut);
 
@@ -4765,6 +4814,10 @@ impl Harness {
                         }
                         // dispatch_fut dropped here → &mut self released
                     };
+                    // The dispatch is over — every stream it emitted carries
+                    // the ref; drop it so a LATER non-dispatch emission can
+                    // never inherit a stale identity.
+                    self.active_call_ref = None;
 
                     // If this was AllowOnce, remove the approved paths from the
                     // allowlist in BOTH success and error cases — we never want
@@ -4844,13 +4897,8 @@ impl Harness {
                             self.tool_failure_count = 0;
                             log::debug!("run_agent_loop dispatch_next OK len={}", output.len());
                             // Record the tool call + result in native history
-                            if let Some((ref call_id, ref name, ref args)) = info {
-                                let tool_id = if call_id.is_empty() {
-                                    // Generate a synthetic ID for inline tool calls
-                                    format!("call_{:016x}", iteration)
-                                } else {
-                                    call_id.clone()
-                                };
+                            if let Some((_, ref name, ref args)) = info {
+                                let tool_id = dispatch_call_ref.clone().unwrap_or_default();
                                 self.push_tool_history(
                                     &tool_id,
                                     name,
@@ -4861,17 +4909,16 @@ impl Harness {
                                 // Loop-detection signature part.
                                 tool_interactions.push(format!("{name}\u{0}{args}\u{0}{output}"));
                             }
-                            let _ = tx.send(HarnessEvent::ToolResult { output });
+                            let _ = tx.send(HarnessEvent::ToolResult {
+                                output,
+                                call_ref: dispatch_call_ref.clone(),
+                            });
                         }
                         DispatchOut::Err(e) => {
                             // Record the error in history so the model sees
                             // its tool call + the error as a proper turn.
-                            if let Some((ref call_id, ref name, ref args)) = info {
-                                let tool_id = if call_id.is_empty() {
-                                    format!("call_{:016x}", iteration)
-                                } else {
-                                    call_id.clone()
-                                };
+                            if let Some((_, ref name, ref args)) = info {
+                                let tool_id = dispatch_call_ref.clone().unwrap_or_default();
                                 self.push_tool_history(
                                     &tool_id,
                                     name,
@@ -4898,7 +4945,10 @@ impl Harness {
                             // current anchor) so the block stays lean.
                             let head: Vec<&str> = e.lines().take(3).collect();
                             self.correction_memory.push(&head.join("\n"));
-                            let _ = tx.send(HarnessEvent::ToolError { error: e });
+                            let _ = tx.send(HarnessEvent::ToolError {
+                                error: e,
+                                call_ref: dispatch_call_ref.clone(),
+                            });
                             if self.tool_failure_count >= MAX_TOOL_RETRIES {
                                 let msg = format!(
                                     "{MAX_TOOL_RETRIES} consecutive tool call \
@@ -5136,12 +5186,13 @@ impl Harness {
                         background::take_ready_notifications()
                     };
                     if !notes.is_empty() {
-                        for note in notes {
+                        for (note, note_call_ref) in notes {
                             let _ = tx.send(HarnessEvent::ToolOutput {
                                 tool: "subagent_status".to_string(),
                                 output: note.clone(),
                                 finished: true,
                                 agent: None,
+                                call_ref: note_call_ref,
                             });
                             self.context_manager.add_user(&note);
                         }
@@ -5341,6 +5392,19 @@ impl Harness {
                 // `run_internal_subagent`.
                 let is_review =
                     cosh_tools::subagent::severity::is_review_task(&call_input, input.code_review);
+                // Right-panel list entry description (same contract as the
+                // external path): explicit values pass through; a code-review
+                // call may omit it (inferred `code-review-NN`), non-review
+                // calls must carry one. The RESOLVED value is display-only —
+                // the TUI derives the entry from the raw input — so this
+                // call exists to VALIDATE.
+                if let Some(tools) = self.cosh_tools.as_ref() {
+                    // The issuer slot was ALREADY popped above ("Pop BEFORE
+                    // any fallible step"): a validation failure here must
+                    // NOT pop again, or the next queued tool call would be
+                    // silently dropped.
+                    tools.resolve_subagent_description(input.description.clone(), is_review)?;
+                }
                 let call_input = cosh_tools::subagent::severity::with_severity_contract(
                     &call_input,
                     input.code_review,
@@ -5350,11 +5414,16 @@ impl Harness {
                 // `running` when the acknowledgment below reaches the
                 // model, then return the spawn receipt immediately. The
                 // foreground path is untouched (task_id = None).
-                let task_id = input
-                    .run_in_background
-                    .then(|| background::register("internal", &call_input));
+                let task_id = input.run_in_background.then(|| {
+                    background::register("internal", &call_input, self.active_call_ref.clone())
+                });
                 return self
-                    .run_internal_subagent(call_input, is_review, task_id)
+                    .run_internal_subagent(
+                        call_input,
+                        is_review,
+                        task_id,
+                        self.active_call_ref.clone(),
+                    )
                     .await;
             }
         }
@@ -5527,6 +5596,7 @@ impl Harness {
         input: String,
         is_review: bool,
         task_id: Option<String>,
+        call_ref: Option<String>,
     ) -> Result<String, String> {
         // The sub-agent cannot ask the user questions, capture the live
         // terminal, or stop the loop on its own (it must end with a written
@@ -5561,6 +5631,11 @@ impl Harness {
         // Clone used only inside the completion-recording thread: the
         // original stays owned by the caller for the spawn receipt below.
         let bg_task_id = task_id.clone();
+        // Per-call routing identity: stamps the nested loop's mirrored
+        // SubagentEvents AND the final report so the TUI pairs them with
+        // THIS internal call's window (parallel internal calls never
+        // cross-pair).
+        let internal_call_ref = call_ref.clone();
 
         std::thread::spawn(move || {
             use std::panic::AssertUnwindSafe;
@@ -5629,6 +5704,9 @@ impl Harness {
                     let (nested_tx, mut nested_rx) =
                         tokio::sync::mpsc::unbounded_channel::<super::events::HarnessEvent>();
                     let bridge_tx = parent_tx.clone();
+                    // The bridge task owns its own copy: `internal_call_ref`
+                    // stays available for the final report emission below.
+                    let bridge_call_ref = internal_call_ref.clone();
                     let last_error = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
                     let err_capture = last_error.clone();
                     let bridge = tokio::spawn(async move {
@@ -5646,7 +5724,9 @@ impl Harness {
                                     super::events::HarnessEvent::Reasoning { text } => {
                                         vec![InternalEventBridge::thought(text)]
                                     }
-                                    super::events::HarnessEvent::ToolCall { tool, input } => {
+                                    super::events::HarnessEvent::ToolCall {
+                                        tool, input, ..
+                                    } => {
                                         let mut events = vec![internal.tool_call(&tool, &input)];
                                         if tool == "plan_todo_write"
                                             && let Some(plan) =
@@ -5656,10 +5736,10 @@ impl Harness {
                                         }
                                         events
                                     }
-                                    super::events::HarnessEvent::ToolResult { output } => {
+                                    super::events::HarnessEvent::ToolResult { output, .. } => {
                                         internal.tool_result(&output).into_iter().collect()
                                     }
-                                    super::events::HarnessEvent::ToolError { error } => {
+                                    super::events::HarnessEvent::ToolError { error, .. } => {
                                         internal.tool_error(&error).into_iter().collect()
                                     }
                                     super::events::HarnessEvent::ContextInfo { info } => {
@@ -5678,6 +5758,7 @@ impl Harness {
                                 for event in subagent_events {
                                     let _ = tx.send(super::events::HarnessEvent::SubagentEvent {
                                         tool: "subagent_call".to_string(),
+                                        call_ref: bridge_call_ref.clone(),
                                         event,
                                     });
                                 }
@@ -5737,6 +5818,7 @@ impl Harness {
                                     // literal `internal` name routes through
                                     // `is_window_of`.
                                     agent: Some("internal".to_string()),
+                                    call_ref: internal_call_ref.clone(),
                                 });
                             }
                             Ok(report)
@@ -5848,6 +5930,7 @@ impl Harness {
             pending_thinking_blocks: Vec::new(),
             stop: false,
             tool_issuer: VecDeque::new(),
+            active_call_ref: None,
             nested: false,
             tool_call_synthetic: 0,
             context_manager: ContextManager::new(MAX_CONTEXT_TOKENS),

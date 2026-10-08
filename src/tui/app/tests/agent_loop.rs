@@ -163,12 +163,14 @@ async fn mid_stream_reset_never_eats_the_previous_iteration_transcript() {
     // Iteration 1 completes with a tool call + result.
     app.event_tx
         .send(HarnessEvent::ToolCall {
+            call_ref: None,
             tool: "fs_edit".into(),
             input: serde_json::json!({"path": "a.rs"}),
         })
         .ok();
     app.event_tx
         .send(HarnessEvent::ToolResult {
+            call_ref: None,
             output: "--- a.rs\n+++ a.rs".into(),
         })
         .ok();
@@ -590,6 +592,7 @@ async fn spinner_label_follows_agent_activity() {
     // A web search starts → searching.
     app.event_tx
         .send(HarnessEvent::ToolCall {
+            call_ref: None,
             tool: "web_search".into(),
             input: serde_json::json!({"query": "x"}),
         })
@@ -604,11 +607,13 @@ async fn spinner_label_follows_agent_activity() {
     // The search finishes; a recall tool starts → recalling.
     app.event_tx
         .send(HarnessEvent::ToolResult {
+            call_ref: None,
             output: "hits".into(),
         })
         .ok();
     app.event_tx
         .send(HarnessEvent::ToolCall {
+            call_ref: None,
             tool: "recall_search".into(),
             input: serde_json::json!({"query": "y"}),
         })
@@ -623,6 +628,7 @@ async fn spinner_label_follows_agent_activity() {
     // Recall done → back to the default working state.
     app.event_tx
         .send(HarnessEvent::ToolResult {
+            call_ref: None,
             output: "found".into(),
         })
         .ok();
@@ -636,6 +642,7 @@ async fn spinner_label_follows_agent_activity() {
     // Unknown tools keep the default state (no spurious label churn).
     app.event_tx
         .send(HarnessEvent::ToolCall {
+            call_ref: None,
             tool: "fs_edit".into(),
             input: serde_json::json!({"path": "a.rs"}),
         })

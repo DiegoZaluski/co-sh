@@ -277,6 +277,13 @@ impl App {
                     if self.state.right_panel.header_click(x, y) {
                         return Ok(true);
                     }
+                    // List mode: a click on a list row selects AND expands
+                    // it (classic single-window view) instead of starting a
+                    // drag selection; a click outside any row falls through
+                    // to the normal focus/selection flow.
+                    if self.state.right_panel.subagent_list_click_at(y) {
+                        return Ok(true);
+                    }
                     self.state.right_panel.focus_at(y);
                     self.state.right_panel.begin_selection(x, y);
                     return Ok(true);
@@ -913,6 +920,10 @@ impl App {
                         // clear any leftover chat highlight.
                         self.session_view.clear_hover();
                         self.hovered_queue_row = None;
+                        // Subagent LIST: cursor movement follows the selection
+                        // (the same hover-follow contract as the model picker
+                        // and the internal-tools list).
+                        self.state.right_panel.subagent_list_hover_at(y);
                     } else {
                         let session_area = self.session_viewport_area();
                         self.session_view.update_hover(

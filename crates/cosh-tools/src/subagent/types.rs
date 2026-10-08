@@ -55,6 +55,13 @@ pub struct SubAgentCallInput {
     /// internal agent never persists state across calls).
     #[serde(default = "default_true")]
     pub continue_session: bool,
+    /// Short task description shown in the subagent list entry of the
+    /// right panel (`<agent> <description> <tool> <spinner>`).
+    ///
+    /// Required (non-empty) for non-code-review tasks; optional for
+    /// code-review subagents, where the harness infers one
+    /// (`<agent> code-review-NN`) when omitted.
+    pub description: Option<String>,
     /// Run the sub-agent in the BACKGROUND (default `false`).
     ///
     /// `true`: the harness spawns the sub-agent without blocking, returns a

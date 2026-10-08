@@ -303,7 +303,7 @@ async fn repeated_guardrail_denials_become_visible_turns_and_trip_loop_detection
     let denial_errors = events
         .iter()
         .filter_map(|e| match e {
-            HarnessEvent::ToolError { error } => Some(error.as_str()),
+            HarnessEvent::ToolError { error, .. } => Some(error.as_str()),
             _ => None,
         })
         .filter(|msg| msg.contains("`app`/`pid`/`surface` + `selector`"))

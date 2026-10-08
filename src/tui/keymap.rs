@@ -25,8 +25,6 @@ pub enum Action {
     Confirm,
     Cancel,
     Interrupt,
-    NextAgent,
-    PrevAgent,
     HistoryUp,
     HistoryDown,
     NextSession,
@@ -61,7 +59,7 @@ pub struct KeyMap {
 
 impl KeyMap {
     pub fn default_vim() -> Self {
-        use KeyCode::{Char, Down, Enter, Esc, Left, PageDown, PageUp, Right, Tab, Up};
+        use KeyCode::{Char, Down, Enter, Esc, PageDown, PageUp, Tab, Up};
 
         Self {
             bindings: vec![
@@ -196,20 +194,6 @@ impl KeyMap {
                     KeyBinding {
                         key: Char('r'),
                         modifiers: KeyModifiers::CONTROL,
-                    },
-                ),
-                (
-                    Action::PrevAgent,
-                    KeyBinding {
-                        key: Left,
-                        modifiers: KeyModifiers::ALT,
-                    },
-                ),
-                (
-                    Action::NextAgent,
-                    KeyBinding {
-                        key: Right,
-                        modifiers: KeyModifiers::ALT,
                     },
                 ),
                 (

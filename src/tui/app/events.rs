@@ -438,7 +438,11 @@ impl App {
                     }
                 }
 
-                HarnessEvent::ToolCall { tool, input } => {
+                HarnessEvent::ToolCall {
+                    tool,
+                    input,
+                    call_ref,
+                } => {
                     // Telemetry aggregate: allowlisted/normalized tool name.
                     self.telemetry_tool_call(&tool);
                     // The spinner label follows the tool now running; the
@@ -464,12 +468,35 @@ impl App {
                         // ← navigation). Different agents coexist.
                         let cmd = format!("subagent: {agent}");
                         self.state.right_panel.start_pty(cmd, None);
-                        // Show the input message as the first line of the dialogue,
-                        // visually prefixed to indicate it came from the main agent.
-                        // The echo is ALWAYS one line (multi-line prompts are
-                        // collapsed — the full text lives in the chat's tool
-                        // part); otherwise a long prompt would bury the live
-                        // mini-chat stream under a static multi-row block.
+                        // WINDOW BINDING (the cross-pairing fix): this
+                        // call_ref is the routing identity every stream,
+                        // report and notification of THIS call carries back.
+                        // The echo below lands in the window bound HERE —
+                        // two parallel spawns of the same CLI each bind
+                        // their own window, so input1 can never pair with
+                        // output2.
+                        self.state
+                            .right_panel
+                            .bind_last_pty_call_ref(call_ref.clone());
+                        // List-entry metadata: the task description (required
+                        // for non-review calls — validated at dispatch — and
+                        // inferred as `code-review-NN` for a review call that
+                        // omitted it) plus the review flag.
+                        self.state.right_panel.set_last_subagent_meta(
+                            agent,
+                            input.get("description").and_then(|v| v.as_str()),
+                            input
+                                .get("code_review")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false),
+                        );
+                        // Show the input message as the first lines of the
+                        // dialogue, visually prefixed to indicate it came
+                        // from the main agent. The echo is the FULL prompt
+                        // (verbatim, one marker line per prompt line): it
+                        // is part of the linear chat flow — prompt, then
+                        // the subagent's answer — and the section scrolls,
+                        // so a long prompt never buries anything.
                         if let Some(line) =
                             crate::routes::session::right_panel::types::subagent_input_line(msg)
                         {
@@ -582,7 +609,7 @@ impl App {
                     }
                 }
 
-                HarnessEvent::ToolResult { output } => {
+                HarnessEvent::ToolResult { output, call_ref } => {
                     // The tool is done — back to the default working state
                     // (the model's next response or tool call re-narrows it).
                     // Before the session borrow: `current_session_mut` below
@@ -683,9 +710,16 @@ impl App {
                         continue;
                     }
                     if completed_tool_name.as_deref() == Some("subagent_call") {
-                        self.state
-                            .right_panel
-                            .complete_last_pty_for_agent(output.clone(), agent_hint.as_deref());
+                        // Per-call routing when the ref is present: the
+                        // completion closes the window BOUND to the call —
+                        // never a sibling's (two parallel spawns share the
+                        // hint, never the ref). The routed variant falls
+                        // back to the hint when the ref matches nothing.
+                        self.state.right_panel.complete_last_pty_routed(
+                            output.clone(),
+                            call_ref.as_deref(),
+                            agent_hint.as_deref(),
+                        );
                         if let Some(todos) = todo_update {
                             self.state.right_panel.set_todos(todos);
                         }
@@ -711,7 +745,7 @@ impl App {
                     }
                 }
 
-                HarnessEvent::ToolError { error } => {
+                HarnessEvent::ToolError { error, call_ref } => {
                     // Telemetry aggregate: fingerprint-only representation,
                     // raw message discarded inside the accumulator.
                     self.telemetry_tool_error(&error);
@@ -757,10 +791,17 @@ impl App {
                         // The hint is only set for `subagent_call`:
                         // `Some("")` matches the blank-CLI internal window
                         // directly (is_window_of); a named agent routes to
-                        // its own window. Both are exact matches.
-                        self.state
-                            .right_panel
-                            .fail_last_pty_for_agent(error.clone(), Some(hint));
+                        // its own window. Both are exact matches. With the
+                        // ref present the routed variant targets the window
+                        // BOUND to the failed call instead. The BASH branch
+                        // below stays REF-FREE: bash windows are never
+                        // bound, so a ref there could only leak into a
+                        // subagent window through the fallback.
+                        self.state.right_panel.fail_last_pty_routed(
+                            error.clone(),
+                            call_ref.as_deref(),
+                            Some(hint),
+                        );
                     } else {
                         // Any other tool's failure (or no Running part at
                         // all): BASH-scoped — a main-agent tool error must
@@ -773,6 +814,7 @@ impl App {
                     output,
                     finished,
                     agent,
+                    call_ref,
                 } => {
                     // Streaming find results (glob/grep matches) are appended to
                     // the running tool part so the chat shows a live counter.
@@ -827,6 +869,11 @@ impl App {
                         _ => None,
                     };
                     let hint_ref = routing_hint.as_deref();
+                    // Per-call routing wins over the agent hint: the ref
+                    // identifies the EXACT call (two parallel same-CLI
+                    // spawns share the hint but never the ref), so its
+                    // stream/report can never land in a sibling's window.
+                    let call_ref_str = call_ref.as_deref();
                     // A notification is NEVER a live chunk: appending it
                     // through `update_last_pty` would double-parse it (the
                     // completion below classifies the same text again) and
@@ -838,25 +885,31 @@ impl App {
                     // from the panel entirely (the injected user turn still
                     // renders it in the chat).
                     if tool == "subagent_status" {
-                        if finished && let Some(hint) = routing_hint {
-                            self.state
-                                .right_panel
-                                .complete_last_pty_for_agent(output.clone(), Some(&hint));
+                        if finished {
+                            self.state.right_panel.complete_last_pty_routed(
+                                output.clone(),
+                                call_ref_str,
+                                hint_ref,
+                            );
                         }
                         continue;
                     }
                     if tool == "subagent_call" {
-                        self.state
-                            .right_panel
-                            .update_last_pty_for_agent(output.clone(), hint_ref);
+                        self.state.right_panel.update_last_pty_routed(
+                            output.clone(),
+                            call_ref_str,
+                            hint_ref,
+                        );
                         // Auto-follow if user is at the bottom
                         if !self.state.right_panel.is_scrolled_up() {
                             self.state.right_panel.scroll_to_bottom();
                         }
                         if finished {
-                            self.state
-                                .right_panel
-                                .complete_last_pty_for_agent(output.clone(), hint_ref);
+                            self.state.right_panel.complete_last_pty_routed(
+                                output.clone(),
+                                call_ref_str,
+                                hint_ref,
+                            );
                         }
                     } else {
                         // Bash (and any other streaming tool): BASH-scoped —
@@ -889,8 +942,13 @@ impl App {
                 // ignored; typed events carry no session id, so concurrent
                 // subagents of the SAME agent CLI interleave into one window
                 // (a pre-existing harness limitation).
-                HarnessEvent::SubagentEvent { event, .. } => {
-                    if self.state.right_panel.update_subagent_activity(&event)
+                HarnessEvent::SubagentEvent {
+                    call_ref, event, ..
+                } => {
+                    if self
+                        .state
+                        .right_panel
+                        .update_subagent_activity(&event, call_ref.as_deref())
                         && !self.state.right_panel.is_scrolled_up()
                     {
                         self.state.right_panel.scroll_to_bottom();
@@ -1302,7 +1360,10 @@ impl App {
                         // delivery lane); popping blindly here would retire
                         // the FOLLOWING message instead.
                         if let Some(queues) = queues
-                            && queues.next_request.front().is_some_and(|head| *head == text)
+                            && queues
+                                .next_request
+                                .front()
+                                .is_some_and(|head| *head == text)
                         {
                             queues.next_request.pop_front();
                         }
