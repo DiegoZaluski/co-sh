@@ -7,24 +7,25 @@ use ratatui::layout::Rect;
 
 /// Border glyphs for the shared side-rail wall used by inline dialogs and
 /// the prompt. The rails sit on the terminal background; the wall fill is
-/// painted separately one column inside each rail.
+/// painted separately one column inside each rail. Rails use the light
+/// `│` (same centered geometry as the heavy `┃`, thinner stroke).
 const fn border_chars() -> BorderCharacters {
     BorderCharacters {
         top_left: ' ',
         top_right: ' ',
         bottom_left: ' ',
-        bottom_right: '\u{2579}',
+        bottom_right: '╵',
         horizontal: ' ',
-        vertical: '┃',
+        vertical: '│',
         top_t: ' ',
         bottom_t: ' ',
-        left_t: '┃',
+        left_t: '│',
         right_t: ' ',
         cross: ' ',
     }
 }
 
-/// Render the shared wall: a `┃` rail on each side and a background area
+/// Render the shared wall: a `│` rail on each side and a background area
 /// that stops before both rails.
 pub(crate) fn render(buf: &mut Buffer, area: Rect, border_color: RGBA, background_color: RGBA) {
     let mut border_box = BoxRenderable::new();

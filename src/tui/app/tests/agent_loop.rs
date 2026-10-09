@@ -561,19 +561,19 @@ async fn spinner_label_follows_agent_activity() {
 
     // No loop yet: the tracked state defaults to Working, no spinner lives.
     assert_eq!(app.agent_activity, crate::types::AgentActivity::Working);
-    assert!(app.agent_spinner_bass.is_none());
+    assert!(app.agent_spinner.is_none());
 
     // Simulate loop start (what `start_agent_loop` does — keep in sync with
     // the spinner init in `agent_loop.rs`, which cannot run in a test since
     // it spawns the real harness thread): fresh spinner with the default
     // label, animation state untouched by later label changes.
     app.agent_activity = crate::types::AgentActivity::Working;
-    app.agent_spinner_bass = Some(crate::component::agent_spinner_bass::AgentSpinnerBass::new(
+    app.agent_spinner = Some(crate::component::agent_spinner::AgentSpinner::new(
         crate::types::AgentActivity::Working.label(),
         &app.theme,
     ));
     for _ in 0..40 {
-        app.agent_spinner_bass.as_mut().unwrap().advance();
+        app.agent_spinner.as_mut().unwrap().advance();
     }
 
     // Reasoning streams → pondering.
@@ -585,7 +585,7 @@ async fn spinner_label_follows_agent_activity() {
     app.poll_events();
     assert_eq!(app.agent_activity, crate::types::AgentActivity::Pondering);
     assert_eq!(
-        app.agent_spinner_bass.as_ref().unwrap().label_for_test(),
+        app.agent_spinner.as_ref().unwrap().label_for_test(),
         "pondering"
     );
 
@@ -600,7 +600,7 @@ async fn spinner_label_follows_agent_activity() {
     app.poll_events();
     assert_eq!(app.agent_activity, crate::types::AgentActivity::Searching);
     assert_eq!(
-        app.agent_spinner_bass.as_ref().unwrap().label_for_test(),
+        app.agent_spinner.as_ref().unwrap().label_for_test(),
         "searching"
     );
 
@@ -621,7 +621,7 @@ async fn spinner_label_follows_agent_activity() {
     app.poll_events();
     assert_eq!(app.agent_activity, crate::types::AgentActivity::Recalling);
     assert_eq!(
-        app.agent_spinner_bass.as_ref().unwrap().label_for_test(),
+        app.agent_spinner.as_ref().unwrap().label_for_test(),
         "recalling"
     );
 
@@ -635,7 +635,7 @@ async fn spinner_label_follows_agent_activity() {
     app.poll_events();
     assert_eq!(app.agent_activity, crate::types::AgentActivity::Working);
     assert_eq!(
-        app.agent_spinner_bass.as_ref().unwrap().label_for_test(),
+        app.agent_spinner.as_ref().unwrap().label_for_test(),
         "working"
     );
 
@@ -661,5 +661,5 @@ async fn spinner_label_follows_agent_activity() {
 
     // The label churn must never restart the spinner's animation: the birth
     // phase completed before the first event and must still be complete.
-    assert!(app.agent_spinner_bass.as_ref().unwrap().is_initialized());
+    assert!(app.agent_spinner.as_ref().unwrap().is_initialized());
 }

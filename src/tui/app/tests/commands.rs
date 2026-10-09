@@ -650,8 +650,16 @@ async fn slash_menu_scrolls_so_the_selection_stays_visible() {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     let mut buf = Buffer::empty(Rect::new(0, 0, 80, 24));
+    let unique_agents = app.state.unique_agents();
+    let agent_colors = crate::types::AgentColors::from_theme(&app.theme);
+    let mode_color = crate::component::prompt::agent_mode_color(
+        &app.theme,
+        &agent_colors,
+        &unique_agents,
+        app.state.mode,
+    );
     app.slash_menu
-        .render(&mut buf, Rect::new(30, 20, 50, 4), &app.theme);
+        .render(&mut buf, Rect::new(30, 20, 50, 4), &app.theme, mode_color);
 
     // Every row of the menu must be scanned: the selected command's name
     // must be drawn somewhere in the buffer.

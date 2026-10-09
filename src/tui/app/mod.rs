@@ -15,7 +15,6 @@ use cosh::harness::HarnessEvent;
 use cosh_tui::core::lib::rgba::RGBA;
 
 use crate::component::agent_spinner::AgentSpinner;
-use crate::component::agent_spinner_bass::AgentSpinnerBass;
 use crate::component::prompt::PromptView;
 use crate::component::sparkle::SparkleState;
 use crate::config::{LlmConfig, TuiConfig};
@@ -370,7 +369,7 @@ pub struct App {
     /// by `routes::session::delete` when it stops a deleted session's loop.
     pub(crate) stream_msg_id: Option<(String, String)>,
     terminal_focused: bool,
-    pub(crate) agent_spinner_bass: Option<AgentSpinnerBass>,
+    pub(crate) agent_spinner: Option<AgentSpinner>,
     /// What the running agent loop is doing right now (drives the spinner
     /// label). Set at loop start, narrowed by the event intake as harness
     /// events arrive, and re-derived at the NEXT loop start (loop end only
@@ -798,7 +797,7 @@ impl App {
             llm_config,
             stop_signal: Arc::new(AtomicBool::new(false)),
             terminal_focused: true,
-            agent_spinner_bass: None,
+            agent_spinner: None,
             agent_activity: crate::types::AgentActivity::Working,
             context_info: None,
             left_panel: Mode::default(),
@@ -882,7 +881,7 @@ impl App {
         self.theme = self.themed(t);
         self.config.theme_gen += 1;
         // Update the active spinner's colours to reflect the new theme
-        if let Some(spinner) = &mut self.agent_spinner_bass {
+        if let Some(spinner) = &mut self.agent_spinner {
             spinner.update_theme(&self.theme);
         }
         if let Some(spinner) = &mut self.prompt_correction_spinner {
@@ -900,7 +899,7 @@ impl App {
             return;
         }
         self.agent_activity = activity;
-        if let Some(spinner) = &mut self.agent_spinner_bass {
+        if let Some(spinner) = &mut self.agent_spinner {
             spinner.set_activity(activity);
         }
     }
@@ -1521,7 +1520,7 @@ impl App {
             0
         };
         let agent_spinner_active = matches!(self.state.status, SessionStatus::Working)
-            && self.agent_spinner_bass.is_some();
+            && self.agent_spinner.is_some();
         let correction_spinner_active = self.prompt_correction_active && !agent_spinner_active;
         let spinner_h = u16::from(
             (agent_spinner_active || correction_spinner_active) && !self.question_dialog.visible,

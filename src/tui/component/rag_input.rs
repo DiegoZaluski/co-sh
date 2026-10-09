@@ -251,11 +251,11 @@ impl RagInput {
         for row in 0..total_rows {
             let ry = y + row;
             if let Some(cell) = buf.cell_mut((x, ry)) {
-                cell.set_char('\u{2503}');
+                cell.set_char('│');
                 cell.set_style(Style::default().fg(border_color).bg(bg));
             }
             if let Some(cell) = buf.cell_mut((right_x, ry)) {
-                cell.set_char('\u{2503}');
+                cell.set_char('│');
                 cell.set_style(Style::default().fg(border_color).bg(bg));
             }
             for dx in 1..right_x.saturating_sub(x) {

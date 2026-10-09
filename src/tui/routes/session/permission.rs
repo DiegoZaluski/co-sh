@@ -167,7 +167,7 @@ impl PermissionDialog {
 
                 // Active row highlight (matches question dialog style). The
                 // band stops one column short of the right edge so the right
-                // `┃` border stays visible on the highlighted row.
+                // `│` border stays visible on the highlighted row.
                 if is_selected {
                     for cx in area.x + 1..area.x + area.width.saturating_sub(1) {
                         if let Some(cell) = buf.cell_mut((cx, y_pos)) {

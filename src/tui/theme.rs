@@ -150,6 +150,16 @@ pub struct Theme {
     pub queue_next_loop: RGBA,
     /// Background color of a "next request" pending-queue row.
     pub queue_next_request: RGBA,
+    /// Foreground of the static (non-animated) session logo — the LOGO_CHAT
+    /// drawn above the prompt on an empty session when `/anim` is off. The
+    /// home-screen logo keeps using `primary`; this slot exists so a theme
+    /// can dim the session mark independently (e.g. a near-background
+    /// watermark).
+    pub session_logo: RGBA,
+    /// Build-mode chrome override (`None` = the agent "build" color). Set by
+    /// themes that want the rails, caps, label and spinners in Build mode in
+    /// a dedicated tone instead of the per-agent color.
+    pub mode_build: Option<RGBA>,
     pub thinking_opacity: f64,
 }
 
@@ -391,37 +401,53 @@ fn full_theme(
         syntax_punctuation: RGBA::from_hex(sp),
         queue_next_loop: RGBA::from_hex("#00000000"),
         queue_next_request: RGBA::from_hex("#00000000"),
+        // Static session logo defaults to the primary color (previous
+        // behavior); themes override below for a dedicated look.
+        session_logo: RGBA::from_hex(pr),
+        mode_build: None,
         thinking_opacity: 0.6,
     }
 }
 
 fn cosh() -> Theme {
     let mut t = full_theme(
-        "#07070A", "#000000", "#11111C", "#777DA7", "#8B93C2", "#1E2030", "#E8F0FF", "#777DE7",
-        "#8B93C2", "#E8F0FF", "#5CB87A", "#D4A742", "#D4575A", "#5FD4CB", "#5CB87A", "#D4575A",
-        "#4A4D5E", "#8B93C2", "#66BB6A", "#EF5350", "#0A1A0A", "#1A0A0A", "#07070A", "#4A4D5E",
-        "#0A1A0A", "#1A0A0A", "#E8F0FF", "#FF7EDB", "#B388FF", "#FF9DE6", "#FFD1F0", "#9D8CFF",
-        "#FFC94D", "#FFFFFF", "#6E5FA8", "#FF7EDB", "#64F0DC", "#FF7EDB", "#FFD1F0", "#F2EAFF",
-        "#565A78", "#82AAFF", "#9D8CFF", "#FFC94D", "#64F0DC", "#FF7EDB", "#C792EA", "#8B93C2",
+        "#07070A", "#000000", "#11111C", "#7F7F9F", "#9999B4", "#1E2030", "#E8F0FF", "#A1A1BD",
+        "#9999B4", "#E8F0FF", "#5CB87A", "#D4A742", "#D4575A", "#5FD4CB", "#5CB87A", "#D4575A",
+        "#4A4D5E", "#9999B4", "#66BB6A", "#EF5350", "#0A1A0A", "#1A0A0A", "#07070A", "#4A4D5E",
+        "#0A1A0A", "#1A0A0A", "#E8F0FF", "#FF7EDB", "#B0B0D7", "#FF9DE6", "#FFD1F0", "#B3B3D8",
+        "#FFC94D", "#FFFFFF", "#707097", "#FF7EDB", "#64F0DC", "#FF7EDB", "#FFD1F0", "#F2EAFF",
+        "#565A78", "#82AAFF", "#9D8CFF", "#FFC94D", "#64F0DC", "#FF7EDB", "#AAAAD2", "#8B93C2",
         "#E8F0FF",
     );
-    // Vivid markdown accents: pink headings/bullets, violet links and bars,
-    // amber emphasis, teal enumeration — a livelier take on the indigo base.
+    // Muted accents: amber emphasis, teal enumeration; the old purple
+    // family is now slate on the session-logo hue (240°), almost neutral —
+    // primary, borders, links, keyword, function and type included.
+    // Headings and unordered-list bullets stay out of the pink family: a
+    // muted slate just above the disabled shade (text_muted #474955) so
+    // `#`/`##` titles and the `•` markers read as structural, not accents.
+    t.markdown_heading = RGBA::from_hex("#5F6278");
+    t.markdown_list_item = RGBA::from_hex("#5F6278");
     t.markdown_horizontal_rule = RGBA::from_hex("#1A1A1A");
-    t.markdown_table_border = RGBA::from_hex("#8A7BD6");
+    t.markdown_table_border = RGBA::from_hex("#9090C1");
     t.markdown_table_header = RGBA::from_hex("#FF9DE6");
     t.markdown_code_block = RGBA::from_hex("#F2EAFF");
     t.syntax_comment = RGBA::from_hex("#565A78");
-    t.syntax_keyword = RGBA::from_hex("#9D8CFF");
-    t.syntax_function = RGBA::from_hex("#82AAFF");
+    t.syntax_keyword = RGBA::from_hex("#B3B3D8");
+    t.syntax_function = RGBA::from_hex("#B1B1D0");
     t.syntax_string = RGBA::from_hex("#FFC94D");
     t.syntax_number = RGBA::from_hex("#FF7EDB");
-    t.syntax_type = RGBA::from_hex("#C792EA");
+    t.syntax_type = RGBA::from_hex("#AAAAD2");
     t.syntax_operator = RGBA::from_hex("#64F0DC");
     // Prompt/input-box fill matches the markdown code-block background: the
     // palette derives that from `background` (`bg*9/10 + 8` per channel,
     // markdown/styles.rs) — #07070A → #0E0E11.
     t.background_element = RGBA::from_hex("#0E0E11");
+    // Static session logo as a near-background watermark: almost
+    // `background` (#07070A), diverging just enough to be noticed.
+    t.session_logo = RGBA::from_hex("#12121A");
+    // Build-mode chrome in the disabled tone (#474955): cosh-only, every
+    // other theme keeps the per-agent "build" color.
+    t.mode_build = Some(RGBA::from_hex("#474955"));
     t.queue_next_loop = RGBA::from_hex("#3A3116");
     t.queue_next_request = RGBA::from_hex("#123A38");
     t
@@ -549,6 +575,8 @@ fn orng() -> Theme {
         syntax_punctuation: RGBA::from_hex("#eeeeee"),
         queue_next_loop: RGBA::from_hex("#3A1C0C"),
         queue_next_request: RGBA::from_hex("#0C2A2E"),
+        session_logo: RGBA::from_hex("#FF6B30"),
+        mode_build: None,
         thinking_opacity: 0.6,
     }
 }

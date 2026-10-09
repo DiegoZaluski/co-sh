@@ -121,7 +121,7 @@ impl App {
         // streaming text and no active tool spinner otherwise reached the
         // idle path, dropping the beam animation to ~5 fps.
         let agent_spinner_live = self.state.status == crate::types::SessionStatus::Working
-            && self.agent_spinner_bass.is_some();
+            && self.agent_spinner.is_some();
         live = live || agent_spinner_live;
         live = live || (self.prompt_correction_active && !agent_spinner_live);
         live = live || self.rag_spinner_active();
@@ -590,7 +590,7 @@ impl App {
             // Both spinners share the row above the prompt. The correction
             // indicator yields to the agent loop rather than replacing it.
             let agent_spinner_active = self.state.status == crate::types::SessionStatus::Working
-                && self.agent_spinner_bass.is_some();
+                && self.agent_spinner.is_some();
             let correction_spinner_active = self.prompt_correction_active && !agent_spinner_active;
             let spinner_h = u16::from(
                 is_session
@@ -781,7 +781,7 @@ impl App {
 
                     // The correction spinner occupies this row only while the
                     // agent-loop spinner is absent.
-                    if agent_spinner_active && let Some(spinner) = &mut self.agent_spinner_bass {
+                    if agent_spinner_active && let Some(spinner) = &mut self.agent_spinner {
                         for _ in 0..animation_ticks {
                             spinner.advance();
                         }
@@ -804,7 +804,7 @@ impl App {
                         &unique_agents,
                         self.state.mode,
                     );
-                    if let Some(spinner) = &mut self.agent_spinner_bass {
+                    if let Some(spinner) = &mut self.agent_spinner {
                         spinner.set_mode_color(cap_color);
                     }
                     self.session_view.render(
@@ -881,7 +881,7 @@ impl App {
                         && !self.permission_dialog.visible
                         && !self.queue_choice_dialog.visible
                     {
-                        if agent_spinner_active && let Some(spinner) = &self.agent_spinner_bass {
+                        if agent_spinner_active && let Some(spinner) = &self.agent_spinner {
                             spinner.render(buf, spinner_area.x + 1, spinner_area.y);
                         } else if correction_spinner_active
                             && let Some(spinner) = &self.prompt_correction_spinner
@@ -909,6 +909,8 @@ impl App {
                         // Static LOGO_CHAT replaces the animation when /anim is off,
                         // centered above the prompt input. Skipped on short
                         // terminals where the layout dropped the logo block.
+                        // Painted with the theme's session-logo slot (a dim
+                        // watermark on cosh), never the home-screen treatment.
                         if is_empty_session
                             && !self.anim_enabled
                             && let Some(logo_start_y) = logo_start_y
@@ -922,7 +924,7 @@ impl App {
                                     logo_start_y + i as u16,
                                     line.trim_end(),
                                     Style::default()
-                                        .fg(rgba_color(self.theme.primary))
+                                        .fg(rgba_color(self.theme.session_logo))
                                         .bg(rgba_color(self.theme.background)),
                                 );
                             }
@@ -989,7 +991,18 @@ impl App {
             // "Quit cosh?" confirm) always paint on top of it — the menu is
             // inline chrome, the dialog is a modal overlay that owns the
             // whole input surface while visible (sovereign keys + mouse).
-            self.slash_menu.render(buf, prompt_area, &self.theme);
+            // Its borders and selection follow the current harness mode's
+            // color, like the prompt's own rails.
+            let unique_agents = self.state.unique_agents();
+            let agent_colors = crate::types::AgentColors::from_theme(&self.theme);
+            let mode_color = crate::component::prompt::agent_mode_color(
+                &self.theme,
+                &agent_colors,
+                &unique_agents,
+                self.state.mode,
+            );
+            self.slash_menu
+                .render(buf, prompt_area, &self.theme, mode_color);
             // Hover state for the API-key dialog's Login button, resolved
             // against the tracked pointer — the button's rect is pure
             // geometry (`api_key_login_button_area`), so this reads the SAME
@@ -1052,9 +1065,9 @@ impl App {
     /// (`graphemes_with_width`), control characters stripped first.
     pub(super) fn pending_queue_layout(queues: &PendingQueues, width: u16) -> Vec<PendingQueueRow> {
         let text_w = match Self::pending_cap_width(width) {
-            // ┃ + 2 pad + text + gap + cap + ┃
+            // │ + 2 pad + text + gap + cap + │
             Some(cap_w) => width.saturating_sub(cap_w + 5),
-            None => width.saturating_sub(6), // ┃ + 2 pad left, 2 pad right + ┃
+            None => width.saturating_sub(6), // │ + 2 pad left, 2 pad right + │
         } as usize;
         let one_line = |text: &str| -> String {
             let clean: String = text.chars().filter(|c| !c.is_control()).collect();
@@ -1215,7 +1228,7 @@ impl App {
                 cap_color,
             );
             // Mode-colored end cap (~20% of the band, right-aligned before
-            // the right `┃`): fills every row of the message's band so it
+            // the right `│`): fills every row of the message's band so it
             // reads as one solid block, and carries the queue label
             // (NEXT / CLOSURE) bold on the band's middle row. The cap keeps
             // its mode color even while the band is hovered — it is the
@@ -1249,13 +1262,13 @@ impl App {
         }
     }
 
-    /// Draw one pending-message line: the app's standard `┃` left and right
+    /// Draw one pending-message line: the app's standard `│` left and right
     /// borders in the current harness mode's color (the same hue the prompt's
     /// mode indicator paints with, so the strip's side rails connect
     /// visually with the prompt box) on the neutral panel background, the
     /// queue color as the background of the rest of the
     /// row (starting right after the border, at `x + 1`, so it never covers
-    /// the `┃` glyph), and the (already wrapped) message text starting 3
+    /// the `│` glyph), and the (already wrapped) message text starting 3
     /// columns in — like a normal user message, so queued rows stay visually
     /// consistent with the chat. The queue identity is carried by the
     /// background color only; no marker glyph is used on these rows.
@@ -1275,24 +1288,24 @@ impl App {
         }
         let fg = crate::theme::contrast_color(bg);
         let bg_color = rgba_color(bg);
-        // Side rails (┃) in the mode color on the neutral panel background —
+        // Side rails (│) in the mode color on the neutral panel background —
         // the same hue the prompt box's own side borders use, so the queue
         // strip's rails connect visually with the prompt above. The
         // queue-colored band starts at `x + 1`, right after the left rail,
         // so the background never covers the glyph.
         if let Some(cell) = buf.cell_mut((x, y)) {
-            cell.set_char('┃');
+            cell.set_char('│');
             cell.set_style(
                 Style::default()
                     .fg(rgba_color(border))
                     .bg(rgba_color(panel)),
             );
         }
-        // Matching right border (┃), mirroring the prompt box's symmetric
+        // Matching right border (│), mirroring the prompt box's symmetric
         // chrome (left: true, right: true): it terminates the row on the
         // terminal background.
         if let Some(cell) = buf.cell_mut((x + width - 1, y)) {
-            cell.set_char('┃');
+            cell.set_char('│');
             cell.set_style(
                 Style::default()
                     .fg(rgba_color(border))
@@ -1300,7 +1313,7 @@ impl App {
             );
         }
         // Queue-colored background for the rest of the row — the band stops
-        // one column short of the right edge so the right `┃` sits on the
+        // one column short of the right edge so the right `│` sits on the
         // terminal background (same trick as the prompt's `bg_area`).
         let band_style = Style::default().bg(bg_color);
         for cx in x + 1..x + width - 1 {
@@ -1309,8 +1322,8 @@ impl App {
                 cell.set_style(band_style);
             }
         }
-        // Message text starts 3 columns in (┃ + 2 pad) and stops 3 short of
-        // the right edge (2 pad + ┃), symmetric like the prompt box;
+        // Message text starts 3 columns in (│ + 2 pad) and stops 3 short of
+        // the right edge (2 pad + │), symmetric like the prompt box;
         // `text` is pre-truncated and pre-filtered by `pending_queue_layout`.
         let text_x = x + 3;
         let text_right = x + width - 3;
