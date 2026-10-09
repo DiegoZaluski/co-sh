@@ -347,6 +347,25 @@ impl App {
                 return Ok(false);
             }
 
+            // The /agents picker is a standalone modal like the dialogs
+            // above: while visible it owns the keyboard (multi-select marks
+            // must not leak into the prompt), so it is checked before the
+            // slash menu gate below. `handle_key` already closes the picker
+            // on Confirm/Cancel — here we only route the outcome.
+            if self.agents_picker.visible {
+                use crate::ui::agents_picker::AgentsPickerAction;
+                match self.agents_picker.handle_key(key.code, key.modifiers) {
+                    AgentsPickerAction::Confirmed(agents) => {
+                        self.open_agents_split(agents);
+                        return Ok(false);
+                    }
+                    AgentsPickerAction::Cancelled => return Ok(false),
+                    AgentsPickerAction::None => {}
+                    // Toggled/Consumed: the picker stays open over the prompt.
+                    _ => return Ok(false),
+                }
+            }
+
             // Check the per-queued-message actions dialog
             if self.is_queue_actions_dialog_visible()
                 && self.handle_queue_actions_dialog_key(key.code)
@@ -1117,6 +1136,30 @@ impl App {
                 return self.handle_slash_menu_key(key);
             }
 
+            // /agents split: Ctrl+0 (daemon) / Ctrl+1..Ctrl+9 move prompt
+            // focus to the numbered pane — the keyboard counterpart of
+            // clicking a pane. Checked before action lookup: Ctrl+digit
+            // never produces text input, so this cannot clobber the prompt,
+            // but the explicit return keeps the digits out of every other
+            // handler while the split owns them.
+            if self.agents_split.is_some()
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+                && let KeyCode::Char(ch) = key.code
+                && ch.is_ascii_digit()
+            {
+                let index = if ch == '0' {
+                    0
+                } else {
+                    (ch as u8 - b'1' + 1) as usize
+                };
+                if let Some(split) = &mut self.agents_split
+                    && index < split.panes.len()
+                {
+                    split.focused = index;
+                }
+                return Ok(false);
+            }
+
             // When the usage dashboard is open, Tab / Shift+Tab cycle the
             // period selector instead of toggling mode focus. (Shift+Tab
             // arrives as BackTab, which the keymap doesn't bind.)
@@ -1321,6 +1364,14 @@ impl App {
                     if msg.trim().is_empty() {
                         return Ok(false);
                     }
+                    // The /agents split intercepts the shared prompt: every
+                    // chosen pane receives the message as its own turn (the
+                    // focused pane is only where Esc/typing act, never a
+                    // per-send filter).
+                    if self.agents_split.is_some() {
+                        self.dispatch_to_agents_split(msg);
+                        return Ok(false);
+                    }
                     // An edited queued message outstanding? It goes back to
                     // its queue slot (never a direct provider input) and the
                     // queue chain resumes FIFO. Otherwise: normal send.
@@ -1359,6 +1410,30 @@ impl App {
                         self.clear_rag_pending_state();
                         self.dialog.pop();
                         return Ok(false);
+                    } else if self.agents_split.is_some() {
+                        // /agents split ESC semantics: the first ESC stops
+                        // ONLY the focused pane's turn (its own stop signal
+                        // — never the shared loop's); when the focused pane
+                        // is already idle, ESC leaves the split entirely.
+                        let focused_running = self
+                            .agents_split
+                            .as_ref()
+                            .and_then(|split| split.focused_pane())
+                            .is_some_and(|pane| pane.running);
+                        if focused_running {
+                            if let Some(split) = &mut self.agents_split {
+                                let focused = split.focused;
+                                if let Some(pane) = split.panes.get_mut(focused) {
+                                    if let Some(signal) = &pane.stop_signal {
+                                        signal.store(true, Ordering::Relaxed);
+                                    }
+                                    pane.running = false;
+                                }
+                            }
+                        } else {
+                            self.close_agents_split();
+                        }
+                        return Ok(false);
                     } else if self.state.status == crate::types::SessionStatus::Working {
                         self.stop_signal.store(true, Ordering::Relaxed);
                     }
@@ -1396,6 +1471,30 @@ impl App {
                         self.pending_delete = None;
                         self.clear_rag_pending_state();
                         self.dialog.pop();
+                        return Ok(false);
+                    } else if self.agents_split.is_some() {
+                        // Same split ESC semantics as Interrupt above: stop
+                        // the focused pane first, leave the split on the
+                        // second ESC. The queue-clear paths below must never
+                        // run while the split mode is active.
+                        let focused_running = self
+                            .agents_split
+                            .as_ref()
+                            .and_then(|split| split.focused_pane())
+                            .is_some_and(|pane| pane.running);
+                        if focused_running {
+                            if let Some(split) = &mut self.agents_split {
+                                let focused = split.focused;
+                                if let Some(pane) = split.panes.get_mut(focused) {
+                                    if let Some(signal) = &pane.stop_signal {
+                                        signal.store(true, Ordering::Relaxed);
+                                    }
+                                    pane.running = false;
+                                }
+                            }
+                        } else {
+                            self.close_agents_split();
+                        }
                         return Ok(false);
                     } else if self.state.status == crate::types::SessionStatus::Working {
                         self.stop_signal.store(true, Ordering::Relaxed);

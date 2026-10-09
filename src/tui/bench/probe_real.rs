@@ -112,6 +112,7 @@ async fn probe_real_session() {
         provider: None,
         model: None,
         reasoning: None,
+        agents_panes: None,
         ctx_ids: Default::default(),
         messages,
     });

@@ -77,6 +77,7 @@ async fn probe_drain_costs() {
             provider: None,
             model: None,
             reasoning: None,
+            agents_panes: None,
             ctx_ids: Default::default(),
             messages,
         });

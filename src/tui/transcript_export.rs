@@ -122,6 +122,7 @@ mod tests {
             provider: None,
             model: None,
             reasoning: None,
+            agents_panes: None,
             ctx_ids: HashMap::new(),
         }
     }

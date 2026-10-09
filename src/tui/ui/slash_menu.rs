@@ -69,6 +69,10 @@ impl SlashMenu {
                 desc: "Manage models".into(),
             },
             SlashCommand {
+                name: "agents".into(),
+                desc: "Split the chat into agent panes".into(),
+            },
+            SlashCommand {
                 name: "router".into(),
                 desc: "Open the fallback router".into(),
             },

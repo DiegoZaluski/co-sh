@@ -268,6 +268,39 @@ impl App {
 
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
+                // /agents split: a pane streamed a live event. The pane's
+                // own SubagentActivity does all the coalescing — the same
+                // state machine the right-panel sub-agent box uses.
+                HarnessEvent::AgentsPaneEvent { pane, event } => {
+                    if let Some(split) = self.agents_split.as_mut() {
+                        split.apply_event(pane, &event);
+                    }
+                }
+                // /agents split: a pane's turn ENDED. The final report is
+                // appended to the pane's activity so it is the last thing
+                // visible; the session id seeds the pane's next resume.
+                HarnessEvent::AgentsPaneDone {
+                    pane,
+                    output,
+                    stop_reason,
+                    session,
+                } => {
+                    use cosh_tools::subagent::events::SubagentEvent;
+                    if let Some(split) = self.agents_split.as_mut() {
+                        split.set_running(pane, false);
+                        split.set_stop_signal(pane, None);
+                        if let (Some(id), Some(p)) = (session, split.panes.get_mut(pane)) {
+                            // The session id seeds the pane's next resume.
+                            p.session_id = Some(id);
+                        }
+                        let marker = if stop_reason == "error" || stop_reason == "cancelled" {
+                            format!("\n\n[turn {stop_reason}] {output}")
+                        } else {
+                            output
+                        };
+                        split.apply_event(pane, &SubagentEvent::Message { text: marker });
+                    }
+                }
                 HarnessEvent::ContextItemRecorded {
                     item_id,
                     user,

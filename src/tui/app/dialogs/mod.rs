@@ -48,5 +48,10 @@ impl App {
             || self.queue_choice_dialog.visible
             || self.free_gateway_dialog.visible
             || self.router_view.acp_picker_open()
+            // The /agents picker: a standalone modal whose Esc must close
+            // ONLY the picker (the sovereign gate would otherwise interrupt
+            // a running loop invisibly behind it — the exact rule this
+            // method exists to protect).
+            || self.agents_picker.visible
     }
 }

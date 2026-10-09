@@ -146,6 +146,32 @@ pub enum HarnessEvent {
         /// The typed event.
         event: cosh_tools::subagent::events::SubagentEvent,
     },
+    /// One live event of the `/agents` split-pane mode. Each pane is an
+    /// independent ACP (or nested cosh) turn driven directly by the TUI —
+    /// outside the agent loop's `subagent_call` dispatch — so pane index
+    /// replaces `call_ref` as the routing identity: the pane's own event
+    /// channel is the multiplexer the harness tool path cannot provide.
+    AgentsPaneEvent {
+        /// Index into `App::agents_split`'s panes (0 = the `cosh` daemon).
+        pane: usize,
+        /// The typed event, the same shape the right-panel sub-agent box
+        /// renders.
+        event: cosh_tools::subagent::events::SubagentEvent,
+    },
+    /// A `/agents` pane turn ENDED. Carries the final report (the
+    /// `TurnClosure` contract: the last post-tool-call message), the stop
+    /// reason and the session id for the pane's next resume.
+    AgentsPaneDone {
+        /// Index into `App::agents_split`'s panes.
+        pane: usize,
+        /// The final report; an errored turn carries the error text instead.
+        output: String,
+        /// `end_turn`, `cancelled`, or a spawn-failure marker.
+        stop_reason: String,
+        /// The ACP session id to resume on the pane's next prompt (external
+        /// agents only; the nested cosh daemon has no resumable session).
+        session: Option<String>,
+    },
     /// Passive LSP findings collected by an fs operation after it touched a
     /// file. The model sees the same findings inline in the tool result; this
     /// event carries the user-facing rendering signal: the TUI shows errors

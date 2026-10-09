@@ -46,6 +46,7 @@ use crate::ui::dialogs::DialogState;
 use crate::ui::toast::ToastState;
 
 mod agent_loop;
+mod agents_dispatch;
 mod commands;
 mod compaction;
 mod dialogs;
@@ -288,6 +289,14 @@ pub struct App {
     /// spawned task itself exits without emitting a late `PromptCorrection`.
     prompt_correction_cancel: Arc<AtomicBool>,
     pub slash_menu: crate::ui::slash_menu::SlashMenu,
+    /// Multi-select dialog behind `/agents`: picks which agent CLIs receive
+    /// delegated work. Owns its own visibility (`visible` flag) and mark
+    /// state; `None` fields below mean the picker is not on screen.
+    pub agents_picker: crate::ui::agents_picker::AgentsPicker,
+    /// The `/agents` split-pane mode. `Some` while the chat area is divided
+    /// into one pane per chosen agent (pane 0 = the `cosh` daemon); the
+    /// normal single-agent session view renders untouched when `None`.
+    pub agents_split: Option<crate::routes::session::agents_split::AgentsSplitState>,
     pub should_quit: bool,
     pub tokio_handle: Handle,
     pub event_tx: mpsc::UnboundedSender<HarnessEvent>,
@@ -757,6 +766,8 @@ impl App {
             prompt_correction_task: None,
             prompt_correction_cancel: Arc::new(AtomicBool::new(false)),
             slash_menu: crate::ui::slash_menu::SlashMenu::new(),
+            agents_picker: crate::ui::agents_picker::AgentsPicker::new(),
+            agents_split: None,
             theme_dialog_original: None,
             model_dialog_original: None,
             reasoning_dialog_original: None,
@@ -1525,7 +1536,15 @@ impl App {
         } else {
             0
         };
-        let agent_spinner_active = matches!(self.state.status, SessionStatus::Working)
+        // Same predicate the renderer uses for the visible spinner row: the
+        // /agents split keeps the spinner alive while ANY pane streams, and
+        // the mouse geometry must match what was drawn (a 1-row drift here
+        // skews every hit-test below the panes).
+        let agent_spinner_active = (matches!(self.state.status, SessionStatus::Working)
+            || self
+                .agents_split
+                .as_ref()
+                .is_some_and(crate::routes::session::agents_split::AgentsSplitState::any_running))
             && self.agent_spinner.is_some();
         let correction_spinner_active = self.prompt_correction_active && !agent_spinner_active;
         let spinner_h = u16::from(
@@ -1633,10 +1652,16 @@ impl App {
         );
         let footer_y = main_area.bottom().saturating_sub(1);
 
-        let is_empty_session = self
-            .state
-            .current_session()
-            .is_none_or(|s| s.messages.is_empty());
+        // Same predicate the renderer uses: the /agents split suppresses the
+        // landing treatment (full-width prompt, no centered logo), so the
+        // mouse geometry must see the split too — a click on the rendered
+        // full-width prompt would otherwise land outside the phantom
+        // narrow rect and never focus the prompt.
+        let is_empty_session = self.agents_split.is_none()
+            && self
+                .state
+                .current_session()
+                .is_none_or(|s| s.messages.is_empty());
 
         let full_w = main_area.width.saturating_sub(4);
         let (prompt_area_x, prompt_area_w) = if is_empty_session {
@@ -1712,10 +1737,14 @@ impl App {
         }
         let footer_y = main_area.bottom().saturating_sub(1);
 
-        let is_empty_session = self
-            .state
-            .current_session()
-            .is_none_or(|s| s.messages.is_empty());
+        // Same predicate the renderer uses (see compute_prompt_area): the
+        // split suppresses the landing treatment, so the strip must anchor
+        // to the full-width prompt the split actually renders.
+        let is_empty_session = self.agents_split.is_none()
+            && self
+                .state
+                .current_session()
+                .is_none_or(|s| s.messages.is_empty());
         let full_w = main_area.width.saturating_sub(4);
         let prompt_area_w = if is_empty_session {
             std::cmp::max(

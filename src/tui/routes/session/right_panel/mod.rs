@@ -101,7 +101,7 @@ const SUBAGENT_BODY_CACHE_BUDGET: usize = 16 * 1024 * 1024;
 /// Stable key for the body cache across theme switches: the markdown palette
 /// derives from the text fg and the box bg, so a live theme change must
 /// invalidate the cached cells (which carry concrete colors).
-fn subagent_theme_key(theme: &Theme) -> u64 {
+pub(crate) fn subagent_theme_key(theme: &Theme) -> u64 {
     let (tr, tg, tb, _) = theme.text.to_ints();
     let (br, bg, bb, _) = theme.background_element.to_ints();
     u64::from_le_bytes([tr, tg, tb, br, bg, bb, 0, 0])

@@ -309,6 +309,7 @@ async fn bench_e2e_agent_loop() {
             provider: None,
             model: None,
             reasoning: None,
+            agents_panes: None,
             ctx_ids: Default::default(),
             messages,
         });

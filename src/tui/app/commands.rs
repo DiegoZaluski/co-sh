@@ -8,6 +8,78 @@ use crate::session_store::format_session_timestamp;
 use crate::ui::dialogs::DialogType;
 
 impl App {
+    /// Enter the `/agents` split-pane mode with the agents the picker
+    /// confirmed. Pane 0 is always the `cosh` daemon (the delegator); the
+    /// chosen ACP agents follow in the order they were marked. Opening the
+    /// split does NOT spawn any session — panes start idle and only receive
+    /// work when the shared prompt is submitted.
+    pub(super) fn open_agents_split(&mut self, agents: Vec<String>) {
+        self.set_agents_split(Some(agents));
+        self.prompt_view.focus();
+    }
+
+    /// Leave the `/agents` split-pane mode: any running pane turn is stopped
+    /// through its own stop signal (the pane's partial output stays visible
+    /// until the split is re-entered). The shared spinner is dropped with
+    /// the split: no pane can keep it alive once the panes are gone.
+    pub(super) fn close_agents_split(&mut self) {
+        self.set_agents_split(None);
+        self.prompt_view.focus();
+    }
+
+    /// The state-only core of open/close: signal-stop every pane of the
+    /// outgoing split, swap the pane set, persist it on the session and
+    /// reconcile the shared spinner. Does NOT touch prompt focus — the
+    /// focus is a USER-action concern (open/close from the picker or Esc),
+    /// never an automatic one (session switch, `/new`, app restore).
+    fn set_agents_split(&mut self, agents: Option<Vec<String>>) {
+        // A split being REPLACED must signal-stop every old pane first.
+        // A discarded stop signal is one nobody will ever set again — its
+        // turn would run to completion, un-stoppable, and its late events
+        // would land in the NEW panes at the same indexes.
+        if let Some(old) = &mut self.agents_split {
+            for pane in &mut old.panes {
+                if let Some(signal) = &pane.stop_signal {
+                    signal.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                pane.running = false;
+            }
+        }
+        self.agents_split =
+            agents
+                .clone()
+                .map(crate::routes::session::agents_split::AgentsSplitState::new);
+        self.persist_agents_panes(agents);
+        // Drop the split's spinner only when no NORMAL agent loop is still
+        // running behind it (the double-scenario): a Working loop keeps its
+        // indicator; an idle app must not inherit a stale spinner.
+        if self.agents_split.is_none()
+            && self.state.status != crate::types::SessionStatus::Working
+        {
+            self.agent_spinner = None;
+        }
+    }
+
+    /// Record the session's `/agents` pane set on the session model and
+    /// persist it through the store's normal diff pipeline (`diff_session`
+    /// emits a `MetadataDelta::Agents` only when the open set actually
+    /// changed). SYNCHRONOUS on purpose: open/close is often chained with
+    /// quitting the app, and the async writer's queue has no flush on the
+    /// quit path — a fire-and-forget save could never land, reopening the
+    /// session with the wrong mode. The job is one tiny metadata delta, so
+    /// blocking the frame is negligible. No session open (Home) → nothing.
+    fn persist_agents_panes(&mut self, panes: Option<Vec<String>>) {
+        let Some(session) = self.state.current_session_mut() else {
+            return;
+        };
+        if session.agents_panes == panes {
+            return;
+        }
+        session.agents_panes = panes;
+        let session = session.clone();
+        self.session_store.save_session(&session);
+    }
+
     /// Manual compaction has no running agent connector to inherit in auto
     /// mode, so resolve only the user's auto chain (never the literal "auto").
     pub(super) fn manual_summarization_models(&self) -> Vec<(String, String)> {
@@ -221,6 +293,23 @@ impl App {
         self.rehydrate_right_panel();
         self.session_view.hovered_msg_idx = None;
         self.title_generated = true;
+        // Restore the `/agents` split-pane mode the session was left in:
+        // the persisted pane set reopens the split with the SAME agents.
+        // The panes start IDLE (running turns are never durable) and the
+        // defensive stop covers the previous session's split if one was
+        // open across the switch. The STATE-only core is used here on
+        // purpose: focus belongs to the user's click/keypress that drove
+        // the switch (a sidebar switch must leave the prompt UNfocused),
+        // never to an automatic mode restore.
+        if let Some(panes) = self
+            .state
+            .current_session()
+            .and_then(|s| s.agents_panes.clone())
+        {
+            self.set_agents_split(Some(panes));
+        } else {
+            self.set_agents_split(None);
+        }
         // Same cleanup, now against the NEWLY selected session.
         self.finalize_stale_compaction_lines();
         true
@@ -267,6 +356,10 @@ impl App {
         self.persist_and_release_current_session();
         self.state.add_empty_session(id.clone(), title, now_ms);
         self.state.current_session_id = Some(id);
+        // A fresh session NEVER inherits the previous one's /agents split:
+        // its persisted pane set is `None`, so the mode closes here (the
+        // persist call is a no-op — the fresh session already records None).
+        self.close_agents_split();
         // Fresh session: the header's cost widget starts clean — no
         // balance carried over from the previous session.
         self.hypercredit_balance = None;
@@ -329,6 +422,26 @@ impl App {
             self.open_theme_dialog();
         } else if cmd.name == "models" {
             self.open_model_dialog();
+        } else if cmd.name == "agents" {
+            // Refuse while the normal agent loop is working (mirrors /new):
+            // the split would replace the live transcript mid-stream, and
+            // the submit path would fall into the queue-choice dialog
+            // instead of ever reaching the fan-out.
+            if self.state.status == crate::types::SessionStatus::Working {
+                use crate::ui::toast::{ToastOptions, ToastVariant};
+                self.toast_state.show(ToastOptions {
+                    title: Some("Agents".into()),
+                    message: "The agent is working — wait for it to finish.".into(),
+                    variant: ToastVariant::Warning,
+                    duration_ms: 4000,
+                });
+                self.slash_menu.visible = false;
+                return;
+            }
+            // Re-open from scratch: stale marks from a canceled picker must
+            // not leak into the next confirmation.
+            self.agents_picker.open();
+            self.prompt_view.clear_all();
         } else if cmd.name == "router" {
             // Same refresh the Home menu performs before opening the router:
             // fallbacks from the prefs cache; models come from the model

@@ -169,6 +169,7 @@ mod tests {
             provider: None,
             model: None,
             reasoning: None,
+            agents_panes: None,
             ctx_ids: Default::default(),
             messages: vec![],
         });

@@ -152,6 +152,13 @@ pub(crate) enum MetadataDelta {
         model: Option<String>,
         reasoning: Option<String>,
     },
+    /// The `/agents` split-pane mode left open on this session: `Some`
+    /// carries the chosen agent set (pane 0 = the cosh daemon) so reopening
+    /// the session restores the mode with the same panes; `None` records the
+    /// mode being closed. UI-only bookkeeping — never model-facing data.
+    Agents {
+        panes: Option<Vec<String>>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -308,6 +315,7 @@ impl BranchProjection {
                 provider: metadata.provider,
                 model: metadata.model,
                 reasoning: metadata.reasoning,
+                agents_panes: None,
                 ctx_ids: HashMap::new(),
             },
             cwd: metadata.cwd,
@@ -913,6 +921,9 @@ fn apply_metadata(state: &mut BranchProjection, change: &MetadataDelta) {
             state.session.model = model.clone();
             state.session.reasoning = reasoning.clone();
         }
+        MetadataDelta::Agents { panes } => {
+            state.session.agents_panes = panes.clone();
+        }
     }
 }
 
@@ -1186,6 +1197,7 @@ pub(crate) fn parse_jsonl(session_id: &str, contents: &str) -> ParsedHistory {
             provider: header.provider,
             model: header.model,
             reasoning: header.reasoning,
+            agents_panes: None,
             ctx_ids: HashMap::new(),
         };
         for stored in legacy_messages {

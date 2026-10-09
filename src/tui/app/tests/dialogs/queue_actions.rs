@@ -33,6 +33,7 @@ fn app_with_queues() -> App {
         provider: None,
         model: None,
         reasoning: None,
+        agents_panes: None,
         ctx_ids: Default::default(),
         messages: vec![],
     };
@@ -334,6 +335,7 @@ async fn edit_hint_is_dropped_when_submitting_from_another_session() {
         provider: None,
         model: None,
         reasoning: None,
+        agents_panes: None,
         ctx_ids: Default::default(),
         messages: vec![],
     };

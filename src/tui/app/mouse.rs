@@ -67,6 +67,69 @@ impl App {
 
         let mouse = MouseEvent::new(event_type, button, x, y, modifiers);
 
+        // ANY open dialog box owns the mouse before everything else: the
+        // exit confirm (ctrl+c), question/permission/queue-choice boxes all
+        // float above the session surface, and a click meant for one of them
+        // must never fall through to the /agents picker or a split pane
+        // behind it (that is how the exit box lost clicks to the panes).
+        // Clicks only return to the background when no box is open.
+        let dialog_box_open = self.dialog.visible()
+            || self.question_dialog.visible
+            || self.permission_dialog.visible
+            || self.queue_choice_dialog.visible
+            || self.free_gateway_dialog.visible;
+
+        // The /agents picker is a top-most modal: it owns clicks over its
+        // centered box (toggle the row, wheel to navigate) before the split
+        // panes, the slash menu or the transcript can react — but never
+        // before an open dialog box (see `dialog_box_open` above).
+        if !dialog_box_open && self.agents_picker.visible {
+            match self.agents_picker.handle_mouse(&mouse, self.terminal_size()) {
+                crate::ui::agents_picker::AgentsPickerAction::Confirmed(agents) => {
+                    self.open_agents_split(agents);
+                    return Ok(true);
+                }
+                crate::ui::agents_picker::AgentsPickerAction::Cancelled => return Ok(true),
+                crate::ui::agents_picker::AgentsPickerAction::None => {}
+                // Toggled/Consumed: the picker stays open over the prompt.
+                _ => return Ok(true),
+            }
+        }
+
+        // /agents split panes own clicks over their rects: a left click
+        // inside a pane moves prompt focus to it (the mouse counterpart of
+        // Ctrl+N), and scroll events are swallowed so a wheel over a pane
+        // never scrolls the transcript underneath. Checked before the slash
+        // menu and selection logic — the panes replace the transcript while
+        // the split mode is active — but AFTER any open dialog box: an exit
+        // confirm floating over the panes keeps its clicks.
+        if !dialog_box_open
+            && let Some(split) = &self.agents_split
+            && matches!(
+                event_type,
+                MouseEventType::Down | MouseEventType::Up | MouseEventType::ScrollUp | MouseEventType::ScrollDown
+            )
+        {
+            for (index, rect) in split.pane_rects.iter().enumerate() {
+                let inside = x >= rect.x
+                    && x < rect.x + rect.width
+                    && y >= rect.y
+                    && y < rect.y + rect.height;
+                if !inside {
+                    continue;
+                }
+                if matches!(event_type, MouseEventType::Down | MouseEventType::Up)
+                    && button == MouseButton::Left
+                    && let Some(split) = &mut self.agents_split
+                {
+                    split.focused = index;
+                }
+                // Click sets focus; scroll inside a pane is consumed so
+                // the transcript below never reacts to it.
+                return Ok(true);
+            }
+        }
+
         // The slash menu owns its visible rows for hover, click, and wheel
         // input. Route it before the generic session selection/scroll logic so
         // those events cannot leak through to the transcript or prompt.

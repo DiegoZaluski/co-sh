@@ -21,6 +21,12 @@ pub struct Session {
     /// Reasoning effort (`None` = model default) for the last model used in
     /// this session. Persisted by metadata deltas.
     pub reasoning: Option<String>,
+    /// The `/agents` split-pane mode left OPEN on this session: `Some(panes)`
+    /// carries the chosen agent set (pane 0 = the cosh daemon, always) so
+    /// reopening the session restores the mode with the SAME panes. Persisted
+    /// by metadata deltas; only the mode is durable — running turns never are.
+    #[serde(default)]
+    pub agents_panes: Option<Vec<String>>,
     /// Legacy display bookkeeping: message id → context-manager item ids.
     /// New history boundaries are recorded as explicit context deltas, so a
     /// display-only save cannot erase the semantic view identity. This field
@@ -395,6 +401,7 @@ mod tests {
             provider: None,
             model: None,
             reasoning: None,
+            agents_panes: None,
             ctx_ids: Default::default(),
             messages: vec![
                 Message {

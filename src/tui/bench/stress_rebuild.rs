@@ -100,6 +100,7 @@ fn setup(n_msgs: usize) -> (App, Terminal<TestBackend>) {
         provider: None,
         model: None,
         reasoning: None,
+        agents_panes: None,
         ctx_ids: Default::default(),
         messages,
     });

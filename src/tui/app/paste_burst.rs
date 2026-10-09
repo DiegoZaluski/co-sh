@@ -302,6 +302,10 @@ impl App {
             && !self.is_tool_call_dialog_visible()
             && !self.is_message_actions_dialog_visible()
             && !self.is_undo_dialog_visible()
+            // The /agents picker owns the keyboard while open: chars are
+            // consumed by it, so the burst shadow must not replay them into
+            // the prompt behind the modal at burst end.
+            && !self.agents_picker.visible
     }
 
     /// Classify a key for the in-flight paste burst. Returns `true` when the

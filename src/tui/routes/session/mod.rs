@@ -3,6 +3,8 @@ pub mod free_gateway_recommendation;
 pub mod streaming;
 pub mod tool_render;
 
+pub mod agents_split;
+
 pub mod delete;
 pub mod permission;
 pub mod question;

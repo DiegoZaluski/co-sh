@@ -120,7 +120,11 @@ impl App {
         // with the user scrolled away from the bottom (not sticky), no
         // streaming text and no active tool spinner otherwise reached the
         // idle path, dropping the beam animation to ~5 fps.
-        let agent_spinner_live = self.state.status == crate::types::SessionStatus::Working
+        let agent_spinner_live = (self.state.status == crate::types::SessionStatus::Working
+            || self
+                .agents_split
+                .as_ref()
+                .is_some_and(crate::routes::session::agents_split::AgentsSplitState::any_running))
             && self.agent_spinner.is_some();
         live = live || agent_spinner_live;
         live = live || (self.prompt_correction_active && !agent_spinner_live);
@@ -503,9 +507,12 @@ impl App {
                     || self.queue_choice_dialog.visible
                     || self.free_gateway_dialog.visible);
 
-            // Detect empty session — no messages yet (like OpenCode initial state)
+            // Detect empty session — no messages yet (like OpenCode initial state).
+            // The /agents split suppresses the landing treatment: the logo
+            // band above the prompt would paint straight over the panes.
             let is_empty_session = is_session
                 && !hide_prompt_and_spinner
+                && self.agents_split.is_none()
                 && self
                     .state
                     .current_session()
@@ -589,7 +596,15 @@ impl App {
 
             // Both spinners share the row above the prompt. The correction
             // indicator yields to the agent loop rather than replacing it.
-            let agent_spinner_active = self.state.status == crate::types::SessionStatus::Working
+            // The /agents split keeps the spinner alive while ANY pane
+            // streams (its turns live outside the shared session loop, so
+            // `status` alone cannot see them).
+            let agents_panes_running = self
+                .agents_split
+                .as_ref()
+                .is_some_and(crate::routes::session::agents_split::AgentsSplitState::any_running);
+            let agent_spinner_active = (self.state.status == crate::types::SessionStatus::Working
+                || agents_panes_running)
                 && self.agent_spinner.is_some();
             let correction_spinner_active = self.prompt_correction_active && !agent_spinner_active;
             let spinner_h = u16::from(
@@ -807,14 +822,30 @@ impl App {
                     if let Some(spinner) = &mut self.agent_spinner {
                         spinner.set_mode_color(cap_color);
                     }
-                    self.session_view.render(
-                        buf,
-                        session_area,
-                        &self.state,
-                        &self.theme,
-                        &self.config,
-                        delta_time,
-                    );
+                    if self.agents_split.is_some() {
+                        // The /agents split replaces the single transcript:
+                        // one pane per chosen agent renders its own sub-agent
+                        // activity stream; the shared prompt below is
+                        // untouched. Pane rects are recorded by the split's
+                        // render for the mouse hit-test.
+                        if let Some(split) = &mut self.agents_split {
+                            crate::routes::session::agents_split::render(
+                                buf,
+                                session_area,
+                                split,
+                                &self.theme,
+                            );
+                        }
+                    } else {
+                        self.session_view.render(
+                            buf,
+                            session_area,
+                            &self.state,
+                            &self.theme,
+                            &self.config,
+                            delta_time,
+                        );
+                    }
                     // Question/permission/queue-choice/recommendation dialogs
                     // rendered inline between messages and prompt (mutually exclusive).
                     if self.question_dialog.visible {
@@ -865,7 +896,10 @@ impl App {
                     // being pushed around when it appears/disappears (the
                     // spinner shrinks the session viewport by a row, which
                     // would drag a bottom-anchored pill upward).
-                    if hide_prompt_and_spinner {
+                    if hide_prompt_and_spinner || self.agents_split.is_some() {
+                        // The split replaces the transcript: a pill computed
+                        // from a session_view that did not render this frame
+                        // would be stale geometry painted over the panes.
                         self.session_view.clear_pill();
                     } else {
                         self.session_view.render_pill_overlay(
@@ -1024,6 +1058,10 @@ impl App {
                     });
             }
             self.dialog.render(buf, area, &self.theme, now);
+            // The /agents picker renders above every modal panel (a
+            // centered box like the registration forms) but below the
+            // toasts, which stay transient.
+            self.agents_picker.render(buf, area, &self.theme);
             // Toasts render last so transient feedback (copied, not saved,
             // unavailable clipboard) is never buried under a modal panel —
             // the centered registration forms cover the top-right toast
