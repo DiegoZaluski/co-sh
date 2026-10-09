@@ -663,3 +663,68 @@ async fn spinner_label_follows_agent_activity() {
     // phase completed before the first event and must still be complete.
     assert!(app.agent_spinner.as_ref().unwrap().is_initialized());
 }
+
+/// Noise deltas must not churn the spinner activity: whitespace-only tokens
+/// and empty reasoning chunks render nothing, so they keep the current state
+/// instead of restarting the status glyph at frame 0 (which froze the
+/// pondering animation mid-stream when providers interleave noise deltas).
+#[tokio::test]
+async fn spinner_activity_ignores_noise_deltas() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    use cosh::harness::HarnessEvent;
+
+    let mut app = App::new("/tmp".to_string());
+    let id = crate::session_store::generate_session_id();
+    app.state
+        .add_empty_session(id.clone(), "noise".into(), 0);
+    app.state.current_session_id = Some(id);
+    app.agent_activity = crate::types::AgentActivity::Working;
+    app.agent_spinner = Some(crate::component::agent_spinner::AgentSpinner::new(
+        crate::types::AgentActivity::Working.label(),
+        &app.theme,
+    ));
+    for _ in 0..40 {
+        app.agent_spinner.as_mut().unwrap().advance();
+    }
+
+    // Real reasoning narrows to pondering.
+    app.event_tx
+        .send(HarnessEvent::Reasoning {
+            text: "thinking".into(),
+        })
+        .ok();
+    app.poll_events();
+    assert_eq!(app.agent_activity, crate::types::AgentActivity::Pondering);
+
+    // A whitespace-only token renders nothing: pondering survives.
+    app.event_tx
+        .send(HarnessEvent::Token { text: " ".into() })
+        .ok();
+    app.poll_events();
+    assert_eq!(app.agent_activity, crate::types::AgentActivity::Pondering);
+    assert_eq!(
+        app.agent_spinner.as_ref().unwrap().label_for_test(),
+        "pondering"
+    );
+
+    // A real token restores the default working state.
+    app.event_tx
+        .send(HarnessEvent::Token {
+            text: "answer".into(),
+        })
+        .ok();
+    app.poll_events();
+    assert_eq!(app.agent_activity, crate::types::AgentActivity::Working);
+
+    // An empty reasoning delta renders nothing: working survives.
+    app.event_tx
+        .send(HarnessEvent::Reasoning { text: "  ".into() })
+        .ok();
+    app.poll_events();
+    assert_eq!(app.agent_activity, crate::types::AgentActivity::Working);
+    assert_eq!(
+        app.agent_spinner.as_ref().unwrap().label_for_test(),
+        "working"
+    );
+}

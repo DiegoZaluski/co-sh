@@ -365,10 +365,6 @@ impl App {
                     }
                 }
                 HarnessEvent::Token { text } => {
-                    // Streaming text means the model is generating a response:
-                    // the default spinner state (also restores it after a
-                    // reasoning segment).
-                    self.set_agent_activity(crate::types::AgentActivity::Working);
                     // Whitespace-only deltas are significant MID-STREAM when
                     // they carry a newline (paragraph/line breaks): Gemini's
                     // streamGenerateContent and several OpenAI-compatible
@@ -378,7 +374,10 @@ impl App {
                     // some providers show). Whitespace WITHOUT a newline
                     // stays noise (it renders identically bundled with the
                     // words around it), and a whitespace-only delta never
-                    // OPENS a bubble either.
+                    // OPENS a bubble either — so it must not churn the
+                    // spinner either: flipping Working→Pondering→Working on
+                    // noise deltas restarts the status glyph at frame 0 and
+                    // the pondering animation looks frozen mid-stream.
                     let whitespace_only = text.trim().is_empty();
                     if whitespace_only && !text.contains('\n') {
                         continue;
@@ -399,7 +398,8 @@ impl App {
                         // Leading whitespace before any text must never open
                         // a blank bubble — and the stream id goes back
                         // untouched: a break chunk must not disturb the
-                        // attempt's bookkeeping.
+                        // attempt's bookkeeping (nor the spinner: same
+                        // no-churn rule as the noise guard above).
                         self.stream_msg_id = taken_id;
                         continue;
                     }
@@ -436,6 +436,15 @@ impl App {
                             });
                         }
                     }
+                    // Streaming text means the model is generating a response:
+                    // the default spinner state (also restores it after a
+                    // reasoning segment). Set only after the delta actually
+                    // rendered — the noise guards above `continue` first, so
+                    // whitespace-only deltas never restart the status glyph
+                    // at frame 0 (which froze the pondering animation
+                    // mid-stream on providers that interleave noise tokens).
+                    // Placed after the session borrow ends (borrow checker).
+                    self.set_agent_activity(crate::types::AgentActivity::Working);
                 }
 
                 HarnessEvent::ToolCall {
@@ -974,11 +983,14 @@ impl App {
                 }
 
                 HarnessEvent::Reasoning { text } => {
-                    // A reasoning block is streaming: the model is thinking.
-                    self.set_agent_activity(crate::types::AgentActivity::Pondering);
+                    // Empty reasoning deltas carry no visible thinking yet —
+                    // flipping on them would churn the status glyph back to
+                    // frame 0 (same no-churn rule as the Token noise guard).
                     if text.trim().is_empty() {
                         continue;
                     }
+                    // A reasoning block is streaming: the model is thinking.
+                    self.set_agent_activity(crate::types::AgentActivity::Pondering);
                     let cur_session = self.state.current_session_id.clone();
                     let Some(session) = self.state.current_session_mut() else {
                         continue;
