@@ -23,7 +23,9 @@
 //! caller tick, so callers may tick as often as they like.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+#[cfg(unix)]
 use std::sync::Arc;
+#[cfg(unix)]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -135,11 +137,16 @@ pub(crate) const ORPHAN_ESCAPE_MESSAGE: &str = concat!(
 /// Dropping the handle signals the thread to stop; it exits within a tick
 /// slice. The caller sets the output flag whenever the child produces
 /// output — that is one of the progress signals.
+///
+/// Unix PTY path only: the piped path and the Windows ConPTY path sample
+/// inline in their async loops instead of a background thread.
+#[cfg(unix)]
 pub(crate) struct LivenessThreadHandle {
     stop: Arc<AtomicBool>,
     output_flag: Arc<AtomicBool>,
 }
 
+#[cfg(unix)]
 impl LivenessThreadHandle {
     /// Record that the child produced output since the last sample.
     pub(crate) fn note_output(&self) {
@@ -147,6 +154,7 @@ impl LivenessThreadHandle {
     }
 }
 
+#[cfg(unix)]
 impl Drop for LivenessThreadHandle {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
@@ -155,6 +163,7 @@ impl Drop for LivenessThreadHandle {
 
 /// Sampling cadence slice of the liveness thread: it wakes up at least
 /// this often so it can honor stop requests and the sampling interval.
+#[cfg(unix)]
 const LIVENESS_THREAD_SLICE: Duration = Duration::from_millis(250);
 
 /// Spawn a background thread that samples the process tree and kills it on
@@ -166,6 +175,9 @@ const LIVENESS_THREAD_SLICE: Duration = Duration::from_millis(250);
 /// inline). `on_kill` receives the diagnostic message and must terminate
 /// the child; the caller's loop then observes the death through its normal
 /// EOF/hangup path.
+///
+/// Unix PTY path only.
+#[cfg(unix)]
 pub(crate) fn spawn_liveness_thread(
     child_pid: u32,
     config: LivenessConfig,
@@ -198,6 +210,100 @@ pub(crate) fn spawn_liveness_thread(
         }
     });
     LivenessThreadHandle { stop, output_flag }
+}
+
+/// Terminate the whole process tree rooted at `pid`.
+///
+/// Windows counterpart of the Unix process-group kill (`kill_process_tree`
+/// in `bsh.rs`, `kill(-pgid, SIGKILL)`): Windows has no process groups, so
+/// the tree is walked explicitly from fresh process-table snapshots.
+///
+/// Two Windows realities shape this implementation:
+///
+/// 1. **Late forks.** Git Bash spawns `bin\bash.exe` → `usr\bin\bash.exe` →
+///    the command, and MSYS `fork()` is slow: a kill issued milliseconds
+///    after spawn lands mid-fork, so a single snapshot misses grandchildren
+///    that are born right afterwards.
+/// 2. **Dead parents.** Windows never reparents orphans: a grandchild whose
+///    parent is already dead keeps the stale parent pid. A walk rooted at a
+///    live pid therefore misses it.
+///
+/// So the kill tracks a `known` set seeded with the root: every pass takes a
+/// fresh snapshot, expands `known` to fixpoint over parent links (dead
+/// parents resolve fine - the links persist), and terminates every newly
+/// found process with a **single** `taskkill /F /PID …` invocation (one
+/// process spawn, not one per pid). Passes repeat with a settle delay until
+/// a pass finds nothing new (bounded). Callers always follow up with a
+/// direct kill of the root itself.
+///
+/// Without this, killing the shell alone orphans grandchildren that keep
+/// the stdout/stderr pipes open: the stream yields its kill items but the
+/// host process hangs until the orphan exits on its own (e.g. `sleep 30`
+/// holds the run for the full 30s), and CPU-burning orphans leak forever.
+///
+/// This is a blocking call (process-table scan plus a `taskkill` spawn);
+/// run it on a blocking thread from async contexts.
+#[cfg(windows)]
+pub(crate) fn kill_process_tree(pid: u32) {
+    use std::process::Stdio;
+
+    let mut known: HashSet<Pid> = HashSet::from([Pid::from_u32(pid)]);
+    let mut killed: HashSet<Pid> = HashSet::new();
+    for pass in 0..3 {
+        if pass > 0 {
+            // Let in-flight forks land so the next snapshot sees them.
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let mut system = System::new();
+        // Parent links come from the Toolhelp snapshot entry itself, so the
+        // minimal refresh kind suffices - no counters are needed to kill.
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing(),
+        );
+
+        let mut children: HashMap<Pid, Vec<Pid>> = HashMap::new();
+        for (process_pid, process) in system.processes() {
+            if let Some(parent) = process.parent() {
+                children.entry(parent).or_default().push(*process_pid);
+            }
+        }
+
+        // Expand `known` to fixpoint: the queue starts with everything ever
+        // known (parents may be dead - the links still resolve).
+        let mut queue: VecDeque<Pid> = known.iter().copied().collect();
+        while let Some(current) = queue.pop_front() {
+            if let Some(descendants) = children.get(&current) {
+                for descendant in descendants {
+                    if known.insert(*descendant) {
+                        queue.push_back(*descendant);
+                    }
+                }
+            }
+        }
+
+        let fresh: Vec<Pid> = known.difference(&killed).copied().collect();
+        if fresh.is_empty() {
+            break;
+        }
+        // One taskkill for the whole set: spawning it once per pid would
+        // cost ~100ms each and widen the fork race.
+        let mut cmd = std::process::Command::new("taskkill.exe");
+        cmd.arg("/F").stdin(Stdio::null());
+        cmd.stdout(Stdio::null()).stderr(Stdio::null());
+        for target in &fresh {
+            cmd.arg("/PID").arg(target.to_string());
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            // 0x08000000 == CREATE_NO_WINDOW: no console flash.
+            cmd.creation_flags(0x08000000);
+        }
+        let _ = cmd.status();
+        killed.extend(fresh);
+    }
 }
 
 /// Snapshot the whole process tree rooted at `pid`, aggregating cumulative
@@ -318,6 +424,11 @@ impl LivenessState {
         sample: Option<TreeSample>,
         had_output: bool,
     ) -> Option<String> {
+        // Record the sample time so `sample_due` throttles the expensive
+        // process-table scans to `sample_interval` - even for unreliable
+        // (None) samples, which still cost a full scan.
+        self.last_sample = Some(now);
+
         // An unreliable sample (tree vanished from the process table — a
         // transient) makes no decision and resets the clock: never count it
         // as progress and never count it as quiescence.
