@@ -1219,6 +1219,10 @@ impl App {
                         self.sidebar.select_prev(self.state.session_summaries.len());
                     } else if self.is_in_right_panel(self.last_mouse_x) {
                         self.state.right_panel.scroll_up_at(self.last_mouse_y, 3);
+                    } else if let Some(split) = self.agents_split.as_mut() {
+                        // /agents split: the keyboard scrolls the FOCUSED pane
+                        // (the same per-pane contract the wheel follows).
+                        split.scroll_focused_by(-3);
                     } else {
                         let vh = self.session_view.visible_height.max(1);
                         let delta = -(vh as f64 / 5.0);
@@ -1234,6 +1238,9 @@ impl App {
                         self.sidebar.select_next(self.state.session_summaries.len());
                     } else if self.is_in_right_panel(self.last_mouse_x) {
                         self.state.right_panel.scroll_down_at(self.last_mouse_y, 3);
+                    } else if let Some(split) = self.agents_split.as_mut() {
+                        // /agents split: the keyboard scrolls the FOCUSED pane.
+                        split.scroll_focused_by(3);
                     } else {
                         let vh = self.session_view.visible_height.max(1);
                         let delta = vh as f64 / 5.0;
@@ -1253,6 +1260,13 @@ impl App {
                         self.state
                             .right_panel
                             .scroll_up_at(self.last_mouse_y, vh / 2);
+                    } else if let Some(split) = self.agents_split.as_mut() {
+                        // /agents split: half the focused pane's own body per
+                        // page step (the pane IS the viewport here).
+                        let vh = split
+                            .focused_pane()
+                            .map_or(1, |p| p.body_height.max(1) as u32) as i32;
+                        split.scroll_focused_by(-vh / 2);
                     } else {
                         let vh = self.session_view.visible_height.max(1);
                         let delta = -(vh as f64 / 2.0);
@@ -1271,6 +1285,13 @@ impl App {
                         self.state
                             .right_panel
                             .scroll_down_at(self.last_mouse_y, vh / 2);
+                    } else if let Some(split) = self.agents_split.as_mut() {
+                        // /agents split: half the focused pane's own body per
+                        // page step (the pane IS the viewport here).
+                        let vh = split
+                            .focused_pane()
+                            .map_or(1, |p| p.body_height.max(1) as u32) as i32;
+                        split.scroll_focused_by(vh / 2);
                     } else {
                         let vh = self.session_view.visible_height.max(1);
                         let delta = vh as f64 / 2.0;
@@ -1576,6 +1597,9 @@ impl App {
                 Some(crate::keymap::Action::ScrollToTop) => {
                     if self.is_in_right_panel(self.last_mouse_x) {
                         self.state.right_panel.reset_scroll();
+                    } else if let Some(split) = self.agents_split.as_mut() {
+                        // /agents split: jump the FOCUSED pane only.
+                        split.scroll_focused_to_top();
                     } else {
                         self.session_view.scroll_to(0);
                     }
@@ -1583,6 +1607,9 @@ impl App {
                 Some(crate::keymap::Action::ScrollToBottom) => {
                     if self.is_in_right_panel(self.last_mouse_x) {
                         self.state.right_panel.scroll_to_bottom();
+                    } else if let Some(split) = self.agents_split.as_mut() {
+                        // /agents split: re-engage the focused pane's follow.
+                        split.scroll_focused_to_bottom();
                     } else {
                         self.session_view.scroll_to_bottom();
                     }

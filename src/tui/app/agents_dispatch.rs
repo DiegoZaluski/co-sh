@@ -40,35 +40,43 @@ const DAEMON_BLOCKED_TOOLS: &[&str] = &[
 ];
 
 impl App {
-    /// Fan a submitted prompt out to every pane of the active split. Each
-    /// pane starts its OWN turn (fresh context per turn, resumed session
-    /// for external ACP agents); the shared prompt is cleared by the caller
-    /// before this runs.
+    /// Send a submitted prompt to the FOCUSED pane of the active split.
+    /// The focus IS the routing decision: Ctrl+N / a click select which
+    /// agent receives the message (the delegator daemon pane included), so
+    /// a message never propagates to every pane at once. The pane starts
+    /// its own turn (fresh context per turn, resumed session for external
+    /// ACP agents); the shared prompt is cleared by the caller.
     pub(super) fn dispatch_to_agents_split(&mut self, msg: String) {
         let Some(split) = self.agents_split.as_ref() else {
             return;
         };
-        if split.any_running() {
+        let focused = split.focused;
+        if split
+            .focused_pane()
+            .is_some_and(|pane| pane.running)
+        {
             // Same gate the `/new` command applies to a working loop: a
-            // second fan-out while turns are live would interleave streams
-            // inside one pane. Esc stops the focused pane first.
+            // second dispatch while that pane's turn is live would
+            // interleave two streams inside one pane. Esc stops it first.
             self.toast_state.show(ToastOptions {
                 title: Some("Agents".into()),
-                message: "Agents are still working — Esc stops the focused one.".into(),
+                message: "The focused agent is still working — Esc stops it.".into(),
                 variant: ToastVariant::Warning,
                 duration_ms: 4000,
             });
             return;
         }
 
-        // Snapshot everything the spawned turns need BEFORE the mutable
-        // pane bookkeeping below: the per-pane agent names, resume ids and
-        // the daemon's connector config.
-        let panes: Vec<(String, Option<String>)> = split
+        // Snapshot everything the spawned turn needs BEFORE the mutable
+        // pane bookkeeping below: the agent name, resume id and the
+        // daemon's connector config.
+        let Some((agent, resume)) = split
             .panes
-            .iter()
+            .get(focused)
             .map(|pane| (pane.agent.clone(), pane.session_id.clone()))
-            .collect();
+        else {
+            return;
+        };
         let daemon_connector = self.daemon_connector();
         let fallbacks: Vec<(String, String)> = self
             .router_view
@@ -86,21 +94,15 @@ impl App {
         let local_base_urls = self.configured_local_base_urls();
         let skills_config = self.setup.skills.clone();
         let cwd = PathBuf::from(&self.state.working_directory);
-        let event_tx = self.event_tx.clone();
         let tokio_handle = self.tokio_handle.clone();
 
-        // Pane bookkeeping: one stop signal per pane (Esc stops ONLY the
-        // focused pane through it) and the shared-loop spinner so the
-        // "agent loop running" indicator keeps spinning while any pane
-        // streams.
-        let mut signals: Vec<Arc<AtomicBool>> = Vec::with_capacity(panes.len());
+        // Pane bookkeeping: the pane's own stop signal (Esc stops it through
+        // it) and the shared-loop spinner so the "agent loop running"
+        // indicator keeps spinning while the turn streams.
+        let signal = Arc::new(AtomicBool::new(false));
         if let Some(split) = self.agents_split.as_mut() {
-            for index in 0..split.panes.len() {
-                let signal = Arc::new(AtomicBool::new(false));
-                split.set_running(index, true);
-                split.set_stop_signal(index, Some(signal.clone()));
-                signals.push(signal);
-            }
+            split.set_running(focused, true);
+            split.set_stop_signal(focused, Some(signal.clone()));
         }
         self.agent_activity = crate::types::AgentActivity::Working;
         self.agent_spinner = Some(crate::component::agent_spinner::AgentSpinner::new(
@@ -108,82 +110,73 @@ impl App {
             &self.theme,
         ));
 
-        for (index, (agent, resume)) in panes.into_iter().enumerate() {
-            let event_tx = event_tx.clone();
-            let daemon_connector = daemon_connector.clone();
-            let cwd = cwd.clone();
-            if agent == DAEMON_LABEL {
-                // The delegator pane: a nested cosh harness on its own
-                // thread runtime (the harness is not Send-safe across the
-                // app's async context — same shape as the TUI's main agent
-                // loop thread).
-                let input = msg.clone();
-                let signal = signals[index].clone();
-                let skills_config = skills_config.clone();
-                let summarization_models = summarization_models.clone();
-                let local_base_urls = local_base_urls.clone();
-                let fallbacks = fallbacks.clone();
-                std::thread::spawn(move || {
-                    run_daemon_turn(
-                        index,
-                        input,
-                        signal,
-                        daemon_connector,
-                        fallbacks,
-                        summarization_models,
-                        local_base_urls,
-                        skills_config,
-                        event_tx,
-                    );
-                });
-            } else {
-                // External ACP pane: one tokio task, one channel, the same
-                // select! shape the prompt corrector drains with. The turn
-                // resumes the pane's stored session so the agent keeps its
-                // context across prompts.
-                let input = msg.clone();
-                let signal = signals[index].clone();
-                tokio_handle.spawn(async move {
-                    let (chunk_tx, mut chunk_rx) =
-                        tokio::sync::mpsc::unbounded_channel::<SubagentEvent>();
-                    let call =
-                        cosh_tools::subagent::acp::call(&agent, &input, resume, cwd.clone(), signal, chunk_tx);
-                    tokio::pin!(call);
-                    let mut chunks_open = true;
-                    let result = loop {
-                        if chunks_open {
-                            tokio::select! {
-                                result = &mut call => break result,
-                                chunk = chunk_rx.recv() => match chunk {
-                                    Some(event) => {
-                                        let _ = event_tx.send(HarnessEvent::AgentsPaneEvent {
-                                            pane: index,
-                                            event,
-                                        });
-                                    }
-                                    // The channel closes only when the call
-                                    // future is dropped (turn stopped): keep
-                                    // awaiting the future for its partial
-                                    // output + stop reason.
-                                    None => chunks_open = false,
-                                },
-                            }
-                        } else {
-                            break call.await;
+        let index = focused;
+        let event_tx = self.event_tx.clone();
+        if agent == DAEMON_LABEL {
+            // The delegator pane: a nested cosh harness on its own
+            // thread runtime (the harness is not Send-safe across the
+            // app's async context — same shape as the TUI's main agent
+            // loop thread).
+            let input = msg;
+            std::thread::spawn(move || {
+                run_daemon_turn(
+                    index,
+                    input,
+                    signal,
+                    daemon_connector,
+                    fallbacks,
+                    summarization_models,
+                    local_base_urls,
+                    skills_config,
+                    event_tx,
+                );
+            });
+        } else {
+            // External ACP pane: one tokio task, one channel, the same
+            // select! shape the prompt corrector drains with. The turn
+            // resumes the pane's stored session so the agent keeps its
+            // context across prompts.
+            let input = msg;
+            tokio_handle.spawn(async move {
+                let (chunk_tx, mut chunk_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<SubagentEvent>();
+                let call =
+                    cosh_tools::subagent::acp::call(&agent, &input, resume, cwd, signal, chunk_tx);
+                tokio::pin!(call);
+                let mut chunks_open = true;
+                let result = loop {
+                    if chunks_open {
+                        tokio::select! {
+                            result = &mut call => break result,
+                            chunk = chunk_rx.recv() => match chunk {
+                                Some(event) => {
+                                    let _ = event_tx.send(HarnessEvent::AgentsPaneEvent {
+                                        pane: index,
+                                        event,
+                                    });
+                                }
+                                // The channel closes only when the call
+                                // future is dropped (turn stopped): keep
+                                // awaiting the future for its partial
+                                // output + stop reason.
+                                None => chunks_open = false,
+                            },
                         }
-                    };
-                    let (output, stop_reason, session) = match result {
-                        Ok((output, stop_reason, session)) => (output, stop_reason, session),
-                        Err(error) => (error, "error".to_string(), None),
-                    };
-                    let _ = event_tx.send(HarnessEvent::AgentsPaneDone {
-                        pane: index,
-                        output,
-                        stop_reason,
-                        session,
-                    });
+                    } else {
+                        break call.await;
+                    }
+                };
+                let (output, stop_reason, session) = match result {
+                    Ok((output, stop_reason, session)) => (output, stop_reason, session),
+                    Err(error) => (error, "error".to_string(), None),
+                };
+                let _ = event_tx.send(HarnessEvent::AgentsPaneDone {
+                    pane: index,
+                    output,
+                    stop_reason,
+                    session,
                 });
-            }
+            });
         }
     }
 

@@ -34,6 +34,7 @@ use crate::routes::session::right_panel::types::{
     activity_lines, SubagentActivity, SubagentActivityLine, SubagentBlockRenderer,
 };
 use crate::theme::{Theme, blend, contrast_fg, rgba_color};
+use crate::util::text_region::{TextRegion, extract_text_in_region, text_from_cell_row};
 
 /// Display label of the daemon pane (agent index 0): the TUI's own agent.
 pub const DAEMON_LABEL: &str = "cosh";
@@ -79,6 +80,21 @@ pub struct AgentPane {
     pub stop_signal: Option<Arc<AtomicBool>>,
     /// Session id for a future `resume` flow.
     pub session_id: Option<String>,
+    /// Top of the visible window in content rows — the chat's `scroll_y`.
+    /// Re-clamped every render against the real content; sticky-bottom
+    /// follow is [`AgentPane::auto_follow`].
+    pub scroll_y: u16,
+    /// The chat's sticky-bottom contract: new content drags the view along
+    /// until the user scrolls away; scrolling back to the bottom re-engages
+    /// it. A new turn re-engages it unconditionally.
+    pub auto_follow: bool,
+    /// Scroll offset the LAST render actually used and the measured content/
+    /// body heights: the keyboard/wheel paths clamp against them without
+    /// re-laying-out, and the selection math converts screen rows to content
+    /// rows with the effective offset.
+    pub effective_scroll: u16,
+    pub content_height: u16,
+    pub body_height: u16,
 }
 
 impl AgentPane {
@@ -90,7 +106,46 @@ impl AgentPane {
             running: false,
             stop_signal: None,
             session_id: None,
+            scroll_y: 0,
+            auto_follow: true,
+            effective_scroll: 0,
+            content_height: 0,
+            body_height: 0,
         }
+    }
+
+    /// Scroll the pane by `rows` (negative = up) against the LAST measured
+    /// heights. Scrolling anywhere above the bottom un-pins follow; reaching
+    /// the bottom re-engages it (the chat's `sync_manual_scroll_state`).
+    /// Returns whether the offset moved.
+    pub fn scroll_by(&mut self, rows: i32) -> bool {
+        let max = self.content_height.saturating_sub(self.body_height);
+        let next = (i32::from(self.scroll_y) + rows).clamp(0, i32::from(max));
+        if next == i32::from(self.scroll_y) {
+            return false;
+        }
+        self.scroll_y = u16::try_from(next).unwrap_or(max);
+        self.auto_follow = self.scroll_y >= max;
+        true
+    }
+
+    /// Jump to the oldest content (un-pins follow).
+    pub fn scroll_to_top(&mut self) {
+        self.scroll_y = 0;
+        self.auto_follow = false;
+    }
+
+    /// Jump to the newest content (re-engages follow).
+    pub fn scroll_to_bottom(&mut self) {
+        self.auto_follow = true;
+    }
+
+    /// Content row under screen row `y` of this pane's body (body starts one
+    /// row below the pane top), using the LAST render's effective offset.
+    pub fn content_row_at(&self, rect: Rect, y: u16) -> i32 {
+        let body_top = i32::from(rect.y + 1);
+        let row = i32::from(y).saturating_sub(body_top);
+        row.saturating_add(i32::from(self.effective_scroll))
     }
 }
 
@@ -115,6 +170,20 @@ pub struct AgentsSplitState {
     /// `{pane_index}:{timeline_index}`. Lives on the split state (not the
     /// pane) so the pane model stays plain data.
     pub block_cache: HashMap<String, SubagentBlockRenderer>,
+    /// Copy-by-selection state (the chat's drag contract, one selection for
+    /// the whole split): the pane it started in, the screen-space anchor/
+    /// focus, and the content rows they map to.
+    pub selection_pane: Option<usize>,
+    pub drag_selection: Option<(u16, u16, u16, u16)>,
+    pub selection_anchor_content_y: i32,
+    pub selection_focus_content_y: i32,
+    /// Scroll the anchor was taken with — the extraction pairs it with the
+    /// CURRENT focus scroll so the selection survives scrolling mid-drag.
+    pub selection_mouse_down_scroll: u16,
+    /// Text regions of the LAST rendered frame, per pane (content-row
+    /// labeled) — the extraction source, rebuilt every frame like the right
+    /// panel's regions so it always matches what is painted.
+    pub pane_regions: Vec<Vec<TextRegion>>,
 }
 
 impl AgentsSplitState {
@@ -137,6 +206,12 @@ impl AgentsSplitState {
             pane_rects: Vec::new(),
             drafts,
             block_cache: HashMap::new(),
+            selection_pane: None,
+            drag_selection: None,
+            selection_anchor_content_y: 0,
+            selection_focus_content_y: 0,
+            selection_mouse_down_scroll: 0,
+            pane_regions: Vec::new(),
         }
     }
 
@@ -180,6 +255,147 @@ impl AgentsSplitState {
     #[must_use]
     pub fn focused_pane(&self) -> Option<&AgentPane> {
         self.panes.get(self.focused)
+    }
+
+    /// Scroll the FOCUSED pane by `rows` (negative = up), the keyboard
+    /// scroll path. Mirrors the chat's `scroll_by_raw` + accumulator reset
+    /// cadence: each keypress moves whole rows against the LAST measured
+    /// heights, no acceleration.
+    pub fn scroll_focused_by(&mut self, rows: i32) {
+        if let Some(pane) = self.panes.get_mut(self.focused) {
+            pane.scroll_by(rows);
+        }
+    }
+
+    /// Scroll the pane whose rect contains screen row `y` (the wheel path,
+    /// the right panel's `scroll_up_at` contract: the pane under the pointer
+    /// moves, the others stay put). `false` when no pane owns the row.
+    pub fn scroll_at(&mut self, y: u16, rows: i32) -> bool {
+        let Some(index) = self.pane_rects.iter().position(|r| y >= r.y && y < r.bottom()) else {
+            return false;
+        };
+        let Some(pane) = self.panes.get_mut(index) else {
+            return false;
+        };
+        pane.scroll_by(rows)
+    }
+
+    /// Jump the focused pane to the oldest / newest content.
+    pub fn scroll_focused_to_top(&mut self) {
+        if let Some(pane) = self.panes.get_mut(self.focused) {
+            pane.scroll_to_top();
+        }
+    }
+
+    pub fn scroll_focused_to_bottom(&mut self) {
+        if let Some(pane) = self.panes.get_mut(self.focused) {
+            pane.scroll_to_bottom();
+        }
+    }
+
+    /// Start a drag selection anchored at `(x, y)` inside pane `pane`
+    /// (content row already resolved by the caller). A selection lives in
+    /// ONE pane: moving into another pane's band keeps the anchor pane.
+    pub fn begin_selection(&mut self, pane: usize, x: u16, y: u16, content_y: i32) {
+        self.selection_pane = Some(pane);
+        self.selection_anchor_content_y = content_y;
+        self.selection_focus_content_y = content_y;
+        self.selection_mouse_down_scroll = self
+            .panes
+            .get(pane)
+            .map_or(0, |p| p.effective_scroll);
+        self.drag_selection = Some((x, y, x, y));
+    }
+
+    /// Extend the active drag selection to `(x, y)` in the anchor pane.
+    pub fn update_selection(&mut self, x: u16, y: u16, content_y: i32) {
+        if self.selection_pane.is_none() {
+            return;
+        }
+        self.selection_focus_content_y = content_y;
+        if let Some((sx, sy, _, _)) = self.drag_selection {
+            self.drag_selection = Some((sx, sy, x, y));
+        }
+    }
+
+    /// Extend the active drag selection to a SCREEN point, resolving the
+    /// content row through the anchor pane's recorded rect and render scroll
+    /// (the mouse dispatcher's entry point during a drag).
+    pub fn update_selection_at(&mut self, x: u16, y: u16) {
+        let Some(pane) = self.selection_pane else {
+            return;
+        };
+        let Some(rect) = self.pane_rects.get(pane).copied() else {
+            return;
+        };
+        let content_y = self
+            .panes
+            .get(pane)
+            .map_or(0, |p| p.content_row_at(rect, y));
+        self.update_selection(x, y, content_y);
+    }
+
+    /// Whether a drag selection is active.
+    #[must_use]
+    pub fn has_selection(&self) -> bool {
+        self.selection_pane.is_some() && self.drag_selection.is_some()
+    }
+
+    /// Whether the active selection covers a real RANGE (the pointer moved
+    /// since the anchor). A bare click anchors and releases on the same
+    /// point: the event layer distinguishes drag from click, and a click
+    /// must never copy the one character under it — same rule as the chat's
+    /// copy-on-drag-release.
+    #[must_use]
+    pub fn is_drag(&self) -> bool {
+        matches!(self.drag_selection, Some((sx, sy, fx, fy)) if sx != fx || sy != fy)
+    }
+
+    /// Drop the active selection without copying.
+    pub fn cancel_selection(&mut self) {
+        self.selection_pane = None;
+        self.drag_selection = None;
+        self.selection_anchor_content_y = 0;
+        self.selection_focus_content_y = 0;
+        self.selection_mouse_down_scroll = 0;
+    }
+
+    /// Extract the text spanned by the active selection out of the pane's
+    /// painted regions (the chat's flow-based algorithm, scoped to the
+    /// anchor pane so a drag never leaks across panes).
+    #[must_use]
+    pub fn extract_selected_text(&self) -> String {
+        let Some(pane) = self.selection_pane else {
+            return String::new();
+        };
+        let Some((sx, sy, fx, _fy)) = self.drag_selection else {
+            return String::new();
+        };
+        let Some(regions) = self.pane_regions.get(pane) else {
+            return String::new();
+        };
+        // The anchor used the scroll at mouse-down, the focus the current
+        // scroll, so the selection survives scrolling during the drag.
+        let content_anchor = i32::from(sy)
+            .saturating_sub(i32::from(self.pane_body_top(pane)))
+            .saturating_add(i32::from(self.selection_mouse_down_scroll));
+        let content_focus = self.selection_focus_content_y;
+        let start_content_y = content_anchor.min(content_focus);
+        let end_content_y = content_anchor.max(content_focus);
+        let (start_x, end_x) = if content_anchor <= content_focus {
+            (sx, fx)
+        } else {
+            (fx, sx)
+        };
+        extract_text_in_region(regions, start_content_y, end_content_y, start_x, end_x)
+    }
+
+    /// Screen row the pane's body starts at (below its header), from the
+    /// LAST recorded rect.
+    fn pane_body_top(&self, pane: usize) -> u16 {
+        self.pane_rects
+            .get(pane)
+            .map_or(0, |r| r.y + 1)
     }
 
     /// Whether any pane has a running sub-agent turn.
@@ -328,11 +544,20 @@ fn split_columns(x: u16, y: u16, total_w: u16, h: u16, count: usize) -> Vec<Rect
 pub fn render(buf: &mut Buffer, area: Rect, state: &mut AgentsSplitState, theme: &Theme) {
     let rects = compute_layout(state.pane_count(), area);
     state.pane_rects = rects.clone();
+    // Every pane gets a region slot for THIS frame: panes that do not
+    // render (degenerate rects) contribute an empty list, so extraction
+    // over them finds nothing instead of reading a stale frame's regions.
+    state.pane_regions.clear();
+    state.pane_regions.resize(state.pane_count(), Vec::new());
     let focused = state.focused;
-    // Split the borrows once: the per-pane loop needs `&mut panes[i]` and
-    // `&mut block_cache` simultaneously (the cache is keyed per pane).
+    // Split the borrows once: the per-pane loop needs `&mut panes[i]`,
+    // `&mut block_cache` and `&mut pane_regions[i]` simultaneously (the
+    // cache is keyed per pane, the regions per pane slot).
     let AgentsSplitState {
-        panes, block_cache, ..
+        panes,
+        block_cache,
+        pane_regions,
+        ..
     } = state;
     // Live-key collection, the right panel's cache-hygiene pattern
     // (`live_block_keys` + `retain`): every markdown block drawn THIS frame
@@ -354,9 +579,13 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &mut AgentsSplitState, theme:
             theme,
             block_cache,
             &mut live_keys,
+            &mut pane_regions[i],
         );
     }
     block_cache.retain(|key, _| live_keys.contains(key));
+    // Copy-by-selection highlight, painted LAST so it inverts the final
+    // cells (the right panel paints its highlight the same way).
+    highlight_selection(buf, state);
 }
 
 /// Paint one pane: element background, hotkey header (`[n] agent ●`) and
@@ -370,11 +599,12 @@ fn render_pane(
     rect: Rect,
     hotkey: Option<char>,
     pane_index: usize,
-    pane: &AgentPane,
+    pane: &mut AgentPane,
     focused: bool,
     theme: &Theme,
     block_cache: &mut HashMap<String, SubagentBlockRenderer>,
     live_keys: &mut HashSet<String>,
+    out_regions: &mut Vec<TextRegion>,
 ) {
     if rect.width == 0 || rect.height == 0 {
         return;
@@ -435,59 +665,94 @@ fn render_pane(
             rect.width.saturating_sub(1),
             Style::default().fg(rgba_color(theme.text_muted)),
         );
+        // The empty pane measures zero content: a stale scroll offset has
+        // nothing to hold on to.
+        pane.effective_scroll = 0;
+        pane.content_height = 0;
+        pane.body_height = body_h;
         return;
     }
 
-    // Tail scroll by BLOCKS: walk from the end accumulating each line's
-    // `visual_rows` until the pane body is full — the newest content stays,
-    // older blocks leave the view whole (same LRU feel as the chat).
-    let mut total: u16 = 0;
-    let mut start = lines.len();
-    for line in lines.iter().rev() {
-        let rows = line.visual_rows(wrap_w);
-        if total + rows > body_h && start < lines.len() {
-            break;
-        }
-        total = total.saturating_add(rows);
-        start -= 1;
-    }
+    // Content height in VISUAL rows — the scroll ceiling, computed from the
+    // same `visual_rows` the renderer consumes so they can never disagree.
+    let content_height: u16 = lines
+        .iter()
+        .map(|l| l.visual_rows(wrap_w))
+        .fold(0u16, u16::saturating_add);
+    let max_scroll = content_height.saturating_sub(body_h);
+    // Sticky bottom (the chat's follow contract): a following pane shows the
+    // newest rows; a scrolled-up pane keeps its offset, clamped to content.
+    let scroll_y = if pane.auto_follow {
+        max_scroll
+    } else {
+        pane.scroll_y.min(max_scroll)
+    };
+    pane.effective_scroll = scroll_y;
+    pane.content_height = content_height;
+    pane.body_height = body_h;
 
+    // Sliding window: walk the lines with their absolute content row, skip
+    // the ones fully above `scroll_y`, paint the ones intersecting the body
+    // (passing `skip` so a straddling block shows only its lower part) and
+    // label every painted visual row with its CONTENT row — the selection
+    // regions' coordinate system, exactly the right panel's contract.
     let theme_key = subagent_theme_key(theme);
     let tint = theme.background_element;
-    let mut row: u16 = 0;
-    for (idx, line) in lines[start..].iter().enumerate() {
-        let index = start + idx;
-        let h = usize::from(line.visual_rows(wrap_w));
-        let y = body_y + row;
-        if y >= rect.bottom() {
+    let mut regions: Vec<TextRegion> = Vec::new();
+    let mut content_row: u16 = 0;
+    for (index, line) in lines.iter().enumerate() {
+        let h = line.visual_rows(wrap_w);
+        let line_end = content_row.saturating_add(h);
+        if line_end <= scroll_y {
+            // Entirely above the window.
+            content_row = line_end;
+            continue;
+        }
+        if content_row >= scroll_y.saturating_add(body_h) {
             break;
         }
-        let max_rows = usize::from(rect.bottom() - y).min(h);
-        draw_activity_line(
-            buf,
-            line,
-            index,
-            pane_index,
-            rect.x + 1,
-            y,
-            wrap_w,
-            max_rows,
-            focused,
-            theme,
-            theme_key,
-            tint,
-            block_cache,
-            live_keys,
-        );
-        row += h as u16;
+        let skip = scroll_y.saturating_sub(content_row);
+        // A block straddling the window top has content_row < scroll_y: the
+        // screen position clamps to the body top and `skip` carries the
+        // scrolled-off part (saturating — the raw difference underflows).
+        let screen_y = body_y + content_row.saturating_sub(scroll_y);
+        let draw_rows = h
+            .saturating_sub(skip)
+            .min(rect.bottom().saturating_sub(screen_y));
+        if draw_rows > 0 {
+            draw_activity_line(
+                buf,
+                line,
+                index,
+                pane_index,
+                rect.x + 1,
+                screen_y,
+                wrap_w,
+                skip,
+                draw_rows as usize,
+                focused,
+                theme,
+                theme_key,
+                tint,
+                block_cache,
+                live_keys,
+                &mut regions,
+                content_row,
+            );
+        }
+        content_row = line_end;
     }
+    *out_regions = regions;
 }
 
 /// Paint ONE drawable activity line at absolute `(x, y)`, clipped to
-/// `max_rows`. Markdown blocks (`Message`/`Thought`) go through the pane's
-/// persistent `SubagentBlockRenderer` (chat-style incremental parsing,
-/// scratch-buffer blit — the exact pattern of the right panel's live
-/// window); Tool/Diff/Plan lines draw with the same marker/glyph styles.
+/// `draw_rows` with its first `skip` rows scrolled off. Markdown blocks
+/// (`Message`/`Thought`) go through the pane's persistent
+/// `SubagentBlockRenderer` (chat-style incremental parsing, scratch-buffer
+/// blit — the exact pattern of the right panel's live window); Tool/Diff/
+/// Plan lines draw with the same marker/glyph styles. Every painted visual
+/// row is reported as a `TextRegion` labeled with its CONTENT row, so
+/// copy-by-selection reads exactly what is on screen.
 #[allow(clippy::too_many_arguments)]
 fn draw_activity_line(
     buf: &mut Buffer,
@@ -497,13 +762,16 @@ fn draw_activity_line(
     x: u16,
     y: u16,
     wrap_w: u16,
-    max_rows: usize,
+    skip: u16,
+    draw_rows: usize,
     focused: bool,
     theme: &Theme,
     theme_key: u64,
     tint: RGBA,
     block_cache: &mut HashMap<String, SubagentBlockRenderer>,
     live_keys: &mut HashSet<String>,
+    regions: &mut Vec<TextRegion>,
+    content_row: u16,
 ) {
     let text_style = if focused {
         Style::default().fg(rgba_color(theme.text))
@@ -516,35 +784,50 @@ fn draw_activity_line(
 
     match line {
         SubagentActivityLine::Tool { rows, status, .. } => {
-            for (ri, seg) in rows.iter().take(max_rows).enumerate() {
-                let line_y = y + ri as u16;
+            let marker = match status {
+                ToolCallStatus::Completed => "✓",
+                ToolCallStatus::Failed => "✗",
+                ToolCallStatus::InProgress => "·",
+                _ => "·",
+            };
+            let marker_style = match status {
+                ToolCallStatus::Completed => marker_style_ok,
+                ToolCallStatus::Failed => marker_style_err,
+                _ => dimmed_style,
+            };
+            for di in 0..draw_rows {
+                let ri = skip as usize + di;
+                let Some(seg) = rows.get(ri) else { break };
+                let line_y = y + di as u16;
                 if ri == 0 {
-                    let marker = match status {
-                        ToolCallStatus::Completed => "✓",
-                        ToolCallStatus::Failed => "✗",
-                        ToolCallStatus::InProgress => "·",
-                        _ => "·",
-                    };
-                    let marker_style = match status {
-                        ToolCallStatus::Completed => marker_style_ok,
-                        ToolCallStatus::Failed => marker_style_err,
-                        _ => dimmed_style,
-                    };
                     draw_text(buf, marker, x, line_y, wrap_w, marker_style);
                 }
                 draw_text(buf, seg, x + 2, line_y, wrap_w.saturating_sub(2), text_style);
+                let region_text = if ri == 0 {
+                    format!("{marker} {seg}")
+                } else {
+                    format!("  {seg}")
+                };
+                regions.push(TextRegion::one_row(
+                    i32::from(content_row.saturating_add(ri as u16)),
+                    x,
+                    x + wrap_w,
+                    region_text,
+                ));
             }
         }
         SubagentActivityLine::Diff(rows) => {
-            for (ri, seg) in rows.iter().take(max_rows).enumerate() {
-                draw_text(
-                    buf,
-                    seg,
-                    x + 2,
-                    y + ri as u16,
-                    wrap_w.saturating_sub(2),
-                    dimmed_style,
-                );
+            for di in 0..draw_rows {
+                let ri = skip as usize + di;
+                let Some(seg) = rows.get(ri) else { break };
+                let line_y = y + di as u16;
+                draw_text(buf, seg, x + 2, line_y, wrap_w.saturating_sub(2), dimmed_style);
+                regions.push(TextRegion::one_row(
+                    i32::from(content_row.saturating_add(ri as u16)),
+                    x,
+                    x + wrap_w,
+                    format!("  {seg}"),
+                ));
             }
         }
         SubagentActivityLine::Plan { status, rows } => {
@@ -553,12 +836,25 @@ fn draw_activity_line(
                 PlanEntryStatus::InProgress => ("☐", text_style),
                 _ => ("☐", dimmed_style),
             };
-            for (ri, seg) in rows.iter().take(max_rows).enumerate() {
-                let line_y = y + ri as u16;
+            for di in 0..draw_rows {
+                let ri = skip as usize + di;
+                let Some(seg) = rows.get(ri) else { break };
+                let line_y = y + di as u16;
                 if ri == 0 {
                     draw_text(buf, glyph, x, line_y, wrap_w, style);
                 }
                 draw_text(buf, seg, x + 2, line_y, wrap_w.saturating_sub(2), style);
+                let region_text = if ri == 0 {
+                    format!("{glyph} {seg}")
+                } else {
+                    format!("  {seg}")
+                };
+                regions.push(TextRegion::one_row(
+                    i32::from(content_row.saturating_add(ri as u16)),
+                    x,
+                    x + wrap_w,
+                    region_text,
+                ));
             }
         }
         SubagentActivityLine::Message { text, .. } | SubagentActivityLine::Thought { text, .. } => {
@@ -606,23 +902,34 @@ fn draw_activity_line(
             }
             // `render_self` fills the whole area with the background first.
             entry.md.render_self(&mut entry.scratch, area);
-            // A block taller than the remaining pane body shows its TAIL:
-            // the newest lines sit at the bottom of the laid-out markdown
-            // (same tail-scroll feel as the chat), so the blit starts at
-            // `h - max_rows`, not at row 0.
-            let h = h_from(text, wrap_w) as usize;
-            let src_start = h.saturating_sub(max_rows);
-            for ri in 0..max_rows {
-                let sy = (src_start + ri) as u16;
+            // Blit the VISIBLE band of the block: rows `skip..skip+draw_rows`
+            // (the scroll window decides which band; at sticky bottom an
+            // oversized block naturally shows its tail). Every painted row
+            // becomes a content-row region sampled from the same cells, so
+            // extraction matches the display.
+            for di in 0..draw_rows {
+                let sy = (skip as usize + di) as u16;
                 for cx in 0..wrap_w {
                     let Some(src) = entry.scratch.cell((cx, sy)) else {
                         break;
                     };
-                    let Some(dst) = buf.cell_mut((x + cx, y + ri as u16)) else {
+                    let Some(dst) = buf.cell_mut((x + cx, y + di as u16)) else {
                         break;
                     };
                     dst.set_symbol(src.symbol());
                     dst.set_style(src.style());
+                }
+                let row_cells: Vec<ratatui::buffer::Cell> = (0..wrap_w)
+                    .map(|dx| entry.scratch.cell((dx, sy)).cloned().unwrap_or_default())
+                    .collect();
+                let trimmed = text_from_cell_row(&row_cells, wrap_w as usize);
+                if !trimmed.is_empty() {
+                    regions.push(TextRegion::one_row(
+                        i32::from(content_row.saturating_add(sy)),
+                        x,
+                        x + wrap_w,
+                        trimmed,
+                    ));
                 }
             }
         }
@@ -655,6 +962,88 @@ fn draw_char(buf: &mut Buffer, ch: char, x: u16, y: u16, style: Style) {
     if let Some(cell) = buf.cell_mut((x, y)) {
         cell.set_char(ch);
         cell.set_style(style);
+    }
+}
+
+/// Copy-by-selection highlight: invert the cells under the drag selection
+/// (the chat's flow-based algorithm, scoped to the ANCHOR pane so a drag
+/// never paints into a neighbour). The anchor is re-projected with the
+/// scroll it was taken at, the focus with the CURRENT scroll, so the visual
+/// band survives scrolling mid-drag — exactly the right panel's contract.
+/// Painted after the pane content so it inverts the final cells.
+fn highlight_selection(buf: &mut Buffer, state: &AgentsSplitState) {
+    let Some((sx, _sy, fx, _fy)) = state.drag_selection else {
+        return;
+    };
+    let Some(pane_index) = state.selection_pane else {
+        return;
+    };
+    let Some(rect) = state.pane_rects.get(pane_index) else {
+        return;
+    };
+    let Some(pane) = state.panes.get(pane_index) else {
+        return;
+    };
+    let body_top = i32::from(rect.y + 1);
+    let body_last = i32::from(rect.bottom().saturating_sub(1));
+    if body_last < body_top {
+        return;
+    }
+    // Body band: content starts one column in (the pane's left rail), the
+    // right edge excludes the pane's own padding column.
+    let min_x = rect.x.saturating_add(1);
+    let max_x = rect.right().saturating_sub(1);
+    let anchor_content = state.selection_anchor_content_y;
+    let focus_content = state.selection_focus_content_y;
+    let anchor_screen = anchor_content
+        .saturating_sub(i32::from(state.selection_mouse_down_scroll))
+        .saturating_add(body_top)
+        .clamp(body_top, body_last) as u16;
+    let focus_screen = focus_content
+        .saturating_sub(i32::from(pane.effective_scroll))
+        .saturating_add(body_top)
+        .clamp(body_top, body_last) as u16;
+    let start_y = anchor_screen.min(focus_screen);
+    let end_y = anchor_screen.max(focus_screen);
+    let (top_x, bottom_x) = if anchor_content <= focus_content {
+        (sx, fx)
+    } else {
+        (fx, sx)
+    };
+    let top_content = anchor_content.min(focus_content);
+    let bottom_content = anchor_content.max(focus_content);
+
+    for cy in start_y..=end_y {
+        // Content row under this screen row. Rows outside the true content
+        // span (selection clamped off-screen) are not part of it — skip.
+        let row_content = i32::from(cy)
+            .saturating_sub(body_top)
+            .saturating_add(i32::from(pane.effective_scroll));
+        if row_content < top_content || row_content > bottom_content {
+            continue;
+        }
+        let (lx1, lx2) = if row_content == top_content && row_content == bottom_content {
+            (top_x.min(bottom_x), top_x.max(bottom_x))
+        } else if row_content == top_content {
+            (top_x, max_x)
+        } else if row_content == bottom_content {
+            (min_x, bottom_x)
+        } else {
+            (min_x, max_x)
+        };
+        let lx1 = lx1.max(min_x);
+        let lx2 = lx2.min(max_x);
+        if lx1 > lx2 {
+            continue;
+        }
+        for cx in lx1..=lx2 {
+            if let Some(cell) = buf.cell_mut((cx, cy)) {
+                let fg = cell.fg;
+                let bg = cell.bg;
+                cell.set_fg(bg);
+                cell.set_bg(fg);
+            }
+        }
     }
 }
 

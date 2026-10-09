@@ -827,11 +827,21 @@ impl App {
                         // one pane per chosen agent renders its own sub-agent
                         // activity stream; the shared prompt below is
                         // untouched. Pane rects are recorded by the split's
-                        // render for the mouse hit-test.
+                        // render for the mouse hit-test. The split is inset
+                        // with the SAME lateral breathing room the prompt
+                        // has (`session_area.x + 2`, width − 4): the panes
+                        // keep a gap to the screen edge and align with the
+                        // prompt's rails instead of touching it.
                         if let Some(split) = &mut self.agents_split {
+                            let inset_area = Rect::new(
+                                session_area.x.saturating_add(2),
+                                session_area.y,
+                                session_area.width.saturating_sub(4),
+                                session_area.height,
+                            );
                             crate::routes::session::agents_split::render(
                                 buf,
-                                session_area,
+                                inset_area,
                                 split,
                                 &self.theme,
                             );

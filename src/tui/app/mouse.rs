@@ -96,37 +96,103 @@ impl App {
             }
         }
 
-        // /agents split panes own clicks over their rects: a left click
-        // inside a pane moves prompt focus to it (the mouse counterpart of
-        // Ctrl+N), and scroll events are swallowed so a wheel over a pane
-        // never scrolls the transcript underneath. Checked before the slash
-        // menu and selection logic — the panes replace the transcript while
-        // the split mode is active — but AFTER any open dialog box: an exit
-        // confirm floating over the panes keeps its clicks.
+        // /agents split panes own the mouse over their rects: a left press
+        // starts a copy-by-selection drag (the chat's contract) AND moves
+        // prompt focus to that pane, a release inside the pane copies the
+        // selection, and the wheel scrolls the pane under the pointer (the
+        // right panel's per-section scroll contract — the other panes stay
+        // put). Checked before the slash menu and selection logic — the
+        // panes replace the transcript while the split mode is active — but
+        // AFTER any open dialog box: an exit confirm floating over the
+        // panes keeps its clicks.
         if !dialog_box_open
-            && let Some(split) = &self.agents_split
             && matches!(
                 event_type,
                 MouseEventType::Down | MouseEventType::Up | MouseEventType::ScrollUp | MouseEventType::ScrollDown
             )
         {
-            for (index, rect) in split.pane_rects.iter().enumerate() {
-                let inside = x >= rect.x
-                    && x < rect.x + rect.width
-                    && y >= rect.y
-                    && y < rect.y + rect.height;
-                if !inside {
-                    continue;
+            // Resolve the target pane against the LAST frame's hit rects
+            // BEFORE any mutable access: the read-only probe borrows
+            // nothing, so the branches below can take `&mut` freely.
+            let target = self.agents_split.as_ref().and_then(|split| {
+                let index = split.pane_rects.iter().position(|rect| {
+                    x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height
+                })?;
+                let rect = *split.pane_rects.get(index)?;
+                Some((index, rect))
+            });
+            if let Some((index, rect)) = target {
+                match event_type {
+                    MouseEventType::ScrollUp | MouseEventType::ScrollDown => {
+                        // Three wheel rows per notch, the session's cadence.
+                        let delta = if matches!(event_type, MouseEventType::ScrollUp) {
+                            -3
+                        } else {
+                            3
+                        };
+                        if let Some(split) = &mut self.agents_split {
+                            split.scroll_at(y, delta);
+                        }
+                        return Ok(true);
+                    }
+                    MouseEventType::Down if button == MouseButton::Left => {
+                        if let Some(split) = &mut self.agents_split {
+                            split.focused = index;
+                            // A pane click always ends any in-flight
+                            // selection (it belongs to the anchor pane);
+                            // a NEW drag starts here with the content row
+                            // resolved through the pane's render scroll.
+                            if split.has_selection() {
+                                split.cancel_selection();
+                            }
+                            let content_y = split
+                                .panes
+                                .get(index)
+                                .map_or(0, |pane| pane.content_row_at(rect, y));
+                            split.begin_selection(index, x, y, content_y);
+                            // A pane click also hands keyboard focus to the
+                            // prompt (the session's behavior).
+                            self.prompt_view.focus();
+                            self.prompt_view.note_activity();
+                        }
+                        return Ok(true);
+                    }
+                    MouseEventType::Up if button == MouseButton::Left => {
+                        if let Some(split) = &mut self.agents_split {
+                            if split.has_selection() {
+                                // Copy only a REAL drag range (the chat's
+                                // rule: a bare click never copies the one
+                                // glyph under it); either way the selection
+                                // is consumed here.
+                                if split.is_drag() {
+                                    let text = split.extract_selected_text();
+                                    if !text.is_empty() {
+                                        crate::util::selection::copy_selection(
+                                            &text,
+                                            &mut self.toast_state,
+                                        );
+                                    }
+                                }
+                                split.cancel_selection();
+                                return Ok(true);
+                            }
+                            split.focused = index;
+                        }
+                        // A plain click (no drag range) fell through the
+                        // Down branch already; release just confirms focus.
+                        return Ok(true);
+                    }
+                    _ => {}
                 }
-                if matches!(event_type, MouseEventType::Down | MouseEventType::Up)
-                    && button == MouseButton::Left
-                    && let Some(split) = &mut self.agents_split
-                {
-                    split.focused = index;
-                }
-                // Click sets focus; scroll inside a pane is consumed so
-                // the transcript below never reacts to it.
-                return Ok(true);
+            } else if matches!(event_type, MouseEventType::Down)
+                && button == MouseButton::Left
+                && let Some(split) = &mut self.agents_split
+                && split.has_selection()
+            {
+                // A press OUTSIDE every pane disarms the pane selection:
+                // without this a stale anchor survives and a later drag
+                // starting on the prompt would extend the old band.
+                split.cancel_selection();
             }
         }
 
@@ -406,6 +472,19 @@ impl App {
                 if self.is_registration_form_open() && self.extend_form_selection_at(x, y) {
                     return Ok(true);
                 }
+                // Drag with a /agents pane selection active extends it, scoped
+                // to the ANCHOR pane (the content row is resolved through the
+                // pane's render scroll, so the band follows scrolling).
+                if self
+                    .agents_split
+                    .as_ref()
+                    .is_some_and(crate::routes::session::agents_split::AgentsSplitState::has_selection)
+                {
+                    if let Some(split) = &mut self.agents_split {
+                        split.update_selection_at(x, y);
+                    }
+                    return Ok(true);
+                }
                 // Drag with a question-dialog selection active extends it —
                 // but only while the pointer stays over the SAME copyable
                 // region the press anchored on (the dialog's extend ignores
@@ -629,6 +708,27 @@ impl App {
                         self.state.right_panel.cancel_selection();
                         if !text.is_empty() {
                             selection::copy_selection(&text, &mut self.toast_state);
+                        }
+                        return Ok(true);
+                    }
+
+                    // Auto-copy a /agents pane drag selection released OUTSIDE
+                    // its anchor pane (releases INSIDE the pane are consumed
+                    // by the pane branch above). The drag rule applies: a bare
+                    // click never copies, and the selection is always consumed.
+                    if self
+                        .agents_split
+                        .as_ref()
+                        .is_some_and(crate::routes::session::agents_split::AgentsSplitState::has_selection)
+                    {
+                        if let Some(split) = &mut self.agents_split {
+                            if split.is_drag() {
+                                let text = split.extract_selected_text();
+                                if !text.is_empty() {
+                                    selection::copy_selection(&text, &mut self.toast_state);
+                                }
+                            }
+                            split.cancel_selection();
                         }
                         return Ok(true);
                     }
