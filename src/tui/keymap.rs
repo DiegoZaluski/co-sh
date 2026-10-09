@@ -36,13 +36,13 @@ pub enum Action {
     /// of the /models picker offers.
     CycleReasoning,
     ClearQueue,
-    /// Maximize the Subagent section over the right panel (header hint F1).
+    /// Maximize the Subagent section over the right panel (corner hint f1).
     MaximizeSubagent,
-    /// Maximize the Bash section over the right panel (header hint F2).
+    /// Maximize the Bash section over the right panel (corner hint f2).
     MaximizeBash,
-    /// Maximize the TODO section over the right panel (header hint F3).
+    /// Maximize the TODO section over the right panel (corner hint f3).
     MaximizeTodo,
-    /// Bring the right panel's mixed view back (header hint F4).
+    /// Bring the right panel's mixed view back (corner hint f4).
     MaximizeMixedView,
 }
 

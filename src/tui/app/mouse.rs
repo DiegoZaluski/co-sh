@@ -272,8 +272,11 @@ impl App {
                     && should_show_right_panel(self.terminal_size().width, &self.state.right_panel)
                     && self.is_in_right_panel(x)
                 {
-                    // A header button click maximizes/restores a section and
+                    // A corner-hint click maximizes/restores a section and
                     // must NOT start a drag selection or focus a slot.
+                    // Remember the cursor too, so the hint lights even for
+                    // clicks without a prior move event.
+                    self.state.right_panel.set_hint_hover(x, y);
                     if self.state.right_panel.header_click(x, y) {
                         return Ok(true);
                     }
@@ -909,6 +912,7 @@ impl App {
                     if self.is_over_open_sidebar(x) {
                         self.session_view.clear_hover();
                         self.hovered_queue_row = None;
+                        self.state.right_panel.clear_hint_hover();
                     } else if matches!(self.mode(), AppMode::Session)
                         && should_show_right_panel(
                             self.terminal_size().width,
@@ -924,7 +928,12 @@ impl App {
                         // (the same hover-follow contract as the model picker
                         // and the internal-tools list).
                         self.state.right_panel.subagent_list_hover_at(y);
+                        // Corner hints (f1/f2/f3/f4) light white under the
+                        // cursor — hover focus, equal for every hint.
+                        self.state.right_panel.set_hint_hover(x, y);
                     } else {
+                        // The cursor left the right panel: no hint stays lit.
+                        self.state.right_panel.clear_hint_hover();
                         let session_area = self.session_viewport_area();
                         self.session_view.update_hover(
                             x,

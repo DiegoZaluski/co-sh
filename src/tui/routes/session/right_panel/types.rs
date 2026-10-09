@@ -1232,25 +1232,35 @@ impl SubagentActivity {
     }
 }
 
-/// Function-key hint of the mixed button — the bare "F4": no trailing
-/// space and no glyph beside it; the hit rect keeps one clearance column
-/// on each side of the hint.
-pub const HEADER_MIXED_HINT: &str = "F4";
+/// Function-key hint of the mixed button — the bare lowercase "f4",
+/// drawn italic inside the maximized box's top-right corner.
+pub const HEADER_MIXED_HINT: &str = "f4";
 
-/// Button labels for each section kind, as drawn in the panel header, in
-/// display order — Subagent FIRST — each carrying the function key that
-/// maximizes it AFTER the label.
+/// Button hints for each section kind, drawn italic lowercase in the
+/// top-right corner INSIDE each section's own box — Subagent FIRST.
+/// Each hint maximizes its section when clicked.
 pub const HEADER_SECTION_LABELS: [(SectionKind, &str); 3] = [
-    (SectionKind::Subagent, "Subagent F1"),
-    (SectionKind::Bash, "Bash F2"),
-    (SectionKind::Todo, "TODO F3"),
+    (SectionKind::Subagent, "f1"),
+    (SectionKind::Bash, "f2"),
+    (SectionKind::Todo, "f3"),
 ];
 
-/// One clickable region of the right panel's header row. `target: None` is
-/// the hint-only mixed button (back to the tiled multi-section view);
-/// `Some(kind)` maximizes that section over the whole panel. The mixed
-/// button is ALWAYS present while two or more sections exist — including
-/// while a section is maximized — so switching the owner costs one click.
+/// Lowercase hint drawn for `kind` — the single lookup shared by the button
+/// builder and the painter, so the two can never disagree on a label.
+pub fn hint_label(kind: SectionKind) -> &'static str {
+    HEADER_SECTION_LABELS
+        .iter()
+        .find(|(k, _)| *k == kind)
+        .map(|(_, label)| *label)
+        .unwrap_or("")
+}
+
+/// One clickable hint inside a section box's top-right corner.
+/// `target: None` is the hint-only mixed button (back to the tiled
+/// multi-section view); `Some(kind)` maximizes that section over the whole
+/// panel. In the mixed view each visible box carries its own hint; while
+/// maximized ONLY the mixed "f4" hint is shown in the maximized box and the
+/// section hints disappear.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HeaderButton {
     /// Section the button maximizes, or `None` for the mixed button.
@@ -1259,7 +1269,7 @@ pub struct HeaderButton {
     pub x0: u16,
     /// Last screen column of the button (exclusive).
     pub x1: u16,
-    /// Screen row the button occupies (the header row).
+    /// Screen row the button occupies (its own section box's top row).
     pub top: u16,
 }
 
@@ -1502,14 +1512,19 @@ pub struct RightPanelState {
     /// which AGENT queue a click targeted.
     pub(crate) subagent_window_layouts: Vec<(usize, i32, i32)>,
     /// Section currently maximized over the whole panel (`None` = the mixed
-    /// view). Set by clicking the section's header button, cleared by the
-    /// restore button, and auto-cleared when the maximized section loses its
+    /// view). Set by clicking the section's corner hint, cleared by the
+    /// mixed hint, and auto-cleared when the maximized section loses its
     /// content (a maximized panel must never render empty).
     pub maximized_section: Option<SectionKind>,
-    /// Clickable regions of the header row from the last render (consumed by
+    /// Clickable corner hints from the last render (consumed by
     /// `header_click`). Cleared with the section layouts when the panel is
     /// hidden.
     header_buttons: Vec<HeaderButton>,
+    /// Cursor position for corner-hint hover highlighting, from the last
+    /// mouse-move (or press) event. Hit-tested every frame against the
+    /// freshly built hint rects, so the hint under the cursor lights white.
+    /// `None` = the cursor is not over the panel (or never moved there).
+    pub(crate) hint_hover: Option<(u16, u16)>,
     /// Directory holding this state instance's spilled outputs. Unique per
     /// instance; removed on drop.
     spill_dir: PathBuf,
@@ -1630,6 +1645,7 @@ impl RightPanelState {
             subagent_window_layouts: Vec::new(),
             maximized_section: None,
             header_buttons: Vec::new(),
+            hint_hover: None,
             spill_dir: Self::fresh_spill_dir(),
             scroll_y: 0,
             content_height: 0,
@@ -2341,30 +2357,35 @@ impl RightPanelState {
         self.header_buttons.clear();
     }
 
-    /// The clickable header buttons of the last render (empty when the mixed
-    /// view shows fewer than two sections — the buttons only exist when there
+    /// The clickable corner hints of the last render (empty when the mixed
+    /// view shows fewer than two sections — the hints only exist when there
     /// is something to prioritize).
     pub fn header_buttons(&self) -> &[HeaderButton] {
         &self.header_buttons
     }
 
-    /// Hit-test the header row: maximize the clicked section, or (on the
-    /// mixed button) bring the mixed view back. Returns whether the click
-    /// landed on a button (otherwise the click belongs to other handlers).
-    pub fn header_click(&mut self, x: u16, y: u16) -> bool {
-        let Some(button) = self
-            .header_buttons
+    /// Hit-test corner-hint rects: the hint covering screen cell `(x, y)` —
+    /// shared by the click path, the hover path and the renderer so all
+    /// three agree on what counts as "on the hint".
+    pub(crate) fn hit_hint_at(buttons: &[HeaderButton], x: u16, y: u16) -> Option<HeaderButton> {
+        buttons
             .iter()
             .find(|b| y == b.top && x >= b.x0 && x < b.x1)
             .copied()
-        else {
+    }
+
+    /// Hit-test the corner hints: maximize the clicked section, or (on the
+    /// mixed hint) bring the mixed view back. Returns whether the click
+    /// landed on a hint (otherwise the click belongs to other handlers).
+    pub fn header_click(&mut self, x: u16, y: u16) -> bool {
+        let Some(button) = Self::hit_hint_at(&self.header_buttons, x, y) else {
             return false;
         };
         self.maximized_section = button.target;
         true
     }
 
-    /// Screen rect `(x0, x1 exclusive, top, bottom exclusive)` of the button
+    /// Screen rect `(x0, x1 exclusive, top, bottom exclusive)` of the hint
     /// that maximizes `kind` in the last render, for tests and hit-test callers.
     pub fn header_button_rect(&self, kind: SectionKind) -> Option<(u16, u16, u16, u16)> {
         self.header_buttons
@@ -2372,10 +2393,33 @@ impl RightPanelState {
             .find_map(|b| (b.target == Some(kind)).then_some((b.x0, b.x1, b.top, b.top + 1)))
     }
 
-    /// Register the header buttons rendered this frame (called by the renderer
-    /// after it has drawn the header row).
+    /// Register the corner hints rendered this frame (called by the renderer
+    /// after it has drawn the in-box hints).
     pub(crate) fn set_header_buttons(&mut self, buttons: Vec<HeaderButton>) {
         self.header_buttons = buttons;
+    }
+
+    /// Remember the cursor position so the corner hint under it lights white
+    /// on the next frame (hover focus, equal for every hint). Called by the
+    /// mouse-move dispatch while the cursor is over the right panel (and by
+    /// the press path, for clicks without a prior move).
+    pub(crate) fn set_hint_hover(&mut self, x: u16, y: u16) {
+        self.hint_hover = Some((x, y));
+    }
+
+    /// Forget the hover cursor (it left the panel): every hint returns to
+    /// the dim color.
+    pub(crate) fn clear_hint_hover(&mut self) {
+        self.hint_hover = None;
+    }
+
+    /// The corner hint under the remembered cursor, hit-tested against the
+    /// registered rects. The renderer registers the fresh rects BEFORE
+    /// resolving this each frame, so a layout shift under a still cursor can
+    /// never light the wrong cells.
+    pub(crate) fn hovered_hint(&self) -> Option<HeaderButton> {
+        let (x, y) = self.hint_hover?;
+        Self::hit_hint_at(&self.header_buttons, x, y)
     }
 
     /// Record the layout of one visible section (called by the renderer).

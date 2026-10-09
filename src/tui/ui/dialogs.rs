@@ -4578,9 +4578,9 @@ mod shortcuts_tests {
     }
 
     /// The right-panel section must end with the function-key owner
-    /// switches the header buttons advertise: F1 Subagent, F2 Bash, F3
+    /// switches the corner hints advertise: F1 Subagent, F2 Bash, F3
     /// TODO, F4 mixed — in that order, so the help teaches the same
-    /// mapping the button hints show.
+    /// mapping the hint labels show.
     #[test]
     fn right_panel_section_documents_the_function_key_owner_switches() {
         let rows = section_keys("Right panel");
