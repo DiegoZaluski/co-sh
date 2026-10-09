@@ -9,6 +9,7 @@ use ratatui::buffer::Buffer;
 use ratatui::style::Style;
 
 use crate::theme::{Theme, rgba_color};
+use crate::types::AgentActivity;
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -23,16 +24,18 @@ const BIRTH_DELAY_MAX: u32 = 20;
 const ELLIPSIS_ANIM_SPEED: u32 = 8;
 
 /// Cycle divider: cycling characters change every N frames.
-/// At 30 fps, 1 = every frame → lively scramble (~30 changes/sec).
-const CYCLE_STEP_DIVIDER: u32 = 1;
+/// At 30 fps, 4 = ~7.5 changes/sec — a calm readable scramble instead of
+/// a frantic flicker.
+const CYCLE_STEP_DIVIDER: u32 = 4;
 
 /// Number of distinct animation frames (the sequence loops).
 const PRERENDERED_FRAMES: usize = 10;
 
-/// Characters used in the scrambled animation.
+/// Characters used in the scrambled animation: the Elder Futhark runes
+/// plus solid block terminals in the same carved style.
 const AVAILABLE_RUNES: &[char] = &[
-    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f', 'A', 'B', 'C',
-    'D', 'E', 'F', '~', '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '+', '=',
+    'ᚠ', 'ᚢ', 'ᚦ', 'ᚨ', 'ᚱ', 'ᚲ', 'ᚷ', 'ᚹ', 'ᚺ', 'ᚾ', 'ᛁ', 'ᛃ', 'ᛇ', 'ᛈ', 'ᛉ', 'ᛊ', 'ᛏ',
+    'ᛒ', 'ᛖ', 'ᛗ', 'ᛚ', 'ᛜ', 'ᛞ', 'ᛟ', '▮', '▰', '◼',
 ];
 
 /// Ellipsis animation frames.
@@ -180,7 +183,7 @@ impl AgentSpinner {
 
     /// Advance the animation by one frame (call each render cycle).
     /// Cycling characters advance only every `CYCLE_STEP_DIVIDER` frames
-    /// for a comfortable visual pace (≈30 character changes/sec at 125 fps).
+    /// for a comfortable visual pace (≈7.5 character changes/sec at 30 fps).
     pub fn advance(&mut self) {
         let frame = self.frames_elapsed;
         self.frames_elapsed = self.frames_elapsed.saturating_add(1);
@@ -216,6 +219,25 @@ impl AgentSpinner {
         self.label_width = label.chars().count();
     }
 
+    /// Switch the label to the given agent activity, restarting the ellipsis
+    /// so the change reads at once. A repeated activity only refreshes the
+    /// label text, keeping the rune scramble running.
+    pub fn set_activity(&mut self, activity: AgentActivity) {
+        if self.label != activity.label() {
+            self.set_label(activity.label());
+            self.ellipsis_step = 0;
+        }
+    }
+
+    /// Update the rune colour for the active prompt mode without resetting
+    /// the animation state. The caller resolves the mode colour through the
+    /// prompt's shared mode-colour mapping; the whole scramble row takes it
+    /// as a solid tone.
+    pub fn set_mode_color(&mut self, color: RGBA) {
+        self.gradient_colors =
+            make_gradient_ramp(color, color, self.cycling_char_width);
+    }
+
     /// Update the theme colours (gradient and label colour) without
     /// resetting the animation state. This allows the spinner to
     /// immediately reflect theme changes while a loop is active.
@@ -241,6 +263,12 @@ impl AgentSpinner {
     /// Whether the birth animation is still playing.
     pub const fn is_initialized(&self) -> bool {
         self.initialized
+    }
+
+    /// Test-only view of the current label (the field is private).
+    #[cfg(test)]
+    pub(crate) fn label_for_test(&self) -> &str {
+        &self.label
     }
 
     // ── Rendering ──────────────────────────────────────────────────────

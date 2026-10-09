@@ -43,7 +43,7 @@ fn pending_queue_layout_truncates_long_messages() {
     };
 
     // Width 30 → cap width 9 → text width 30 − (9 + 5) = 16 display columns
-    // (┃ + 2 pad + text + gap + cap + ┃).
+    // (│ + 2 pad + text + gap + cap + │).
     let rows = App::pending_queue_layout(&queues, 30);
 
     // Every text line fits within the text width.
@@ -428,7 +428,7 @@ async fn scroll_to_bottom_pill_stays_put_when_the_spinner_appears() {
     use crossterm::event::{KeyModifiers, MouseEvent as CMouse, MouseEventKind as CKind};
     use ratatui::{Terminal, backend::TestBackend};
 
-    use crate::component::agent_spinner_bass::AgentSpinnerBass;
+    use crate::component::agent_spinner::AgentSpinner;
     use crate::types::{Message, MessageRole, Part, TextPart};
 
     let _home = HOME_LOCK.lock();
@@ -477,7 +477,7 @@ async fn scroll_to_bottom_pill_stays_put_when_the_spinner_appears() {
     // The agent loop starts: the spinner appears on the line above the
     // prompt, shrinking the transcript viewport by one row.
     app.state.status = crate::types::SessionStatus::Working;
-    app.agent_spinner_bass = Some(AgentSpinnerBass::new("Working", &app.theme));
+    app.agent_spinner = Some(AgentSpinner::new("Working", &app.theme));
     terminal.draw(|f| app.render(f, 0.016)).unwrap();
 
     let after = app
@@ -498,7 +498,6 @@ async fn prompt_correction_spinner_yields_to_the_agent_loop_spinner() {
     use ratatui::{Terminal, backend::TestBackend};
 
     use crate::component::agent_spinner::AgentSpinner;
-    use crate::component::agent_spinner_bass::AgentSpinnerBass;
 
     let _home = HOME_LOCK.lock();
     isolate_home();
@@ -538,7 +537,7 @@ async fn prompt_correction_spinner_yields_to_the_agent_loop_spinner() {
     );
 
     app.state.status = crate::types::SessionStatus::Working;
-    app.agent_spinner_bass = Some(AgentSpinnerBass::new("Working", &app.theme));
+    app.agent_spinner = Some(AgentSpinner::new("Working", &app.theme));
     terminal.draw(|frame| app.render(frame, 0.016)).unwrap();
     let rendered: String = terminal
         .backend()

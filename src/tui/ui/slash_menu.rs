@@ -276,7 +276,10 @@ impl SlashMenu {
     /// Render autocomplete menu inline above prompt (like `OpenCode`).
     /// `prompt_area`: where the prompt is rendered.
     /// Renders just above the prompt with scrollable items.
-    pub fn render(&self, buf: &mut Buffer, prompt_area: Rect, theme: &Theme) {
+    /// `mode_color` is the current harness mode's color (the same one the
+    /// prompt's rails and caps use): the menu's side borders and the
+    /// selected-row fill follow it so the menu reads as part of the prompt.
+    pub fn render(&self, buf: &mut Buffer, prompt_area: Rect, theme: &Theme, mode_color: RGBA) {
         if !self.visible {
             return;
         }
@@ -290,7 +293,7 @@ impl SlashMenu {
         let menu_width = prompt_area.width;
         // Keep the menu's normal rows on the same fill as the prompt box.
         let row_fill = rgba_color(theme.background_element);
-        let border_fg = rgba_color(theme.secondary);
+        let border_fg = rgba_color(mode_color);
         let command_column_width = idxs
             .iter()
             .map(|&i| format!("/{}", self.commands[i].name).chars().count())
@@ -314,13 +317,13 @@ impl SlashMenu {
                 let cmd = &self.commands[i];
                 let is_selected = i == self.selected;
                 let row_bg = if is_selected {
-                    rgba_color(theme.primary)
+                    rgba_color(mode_color)
                 } else {
                     row_fill
                 };
                 let cmd_text = format!("/{}", cmd.name);
                 let desc_text = format!(" {}", cmd.desc);
-                let selected_fg = selected_foreground_color(theme.primary, theme.background);
+                let selected_fg = selected_foreground_color(mode_color, theme.background);
                 let cmd_style = if is_selected {
                     Style::default().fg(selected_fg)
                 } else {
@@ -341,7 +344,7 @@ impl SlashMenu {
 
             // Draw left/right border lines with base background so the menu has a visible gap
             if let Some(cell) = buf.cell_mut((prompt_area.x, row_y)) {
-                cell.set_char('┃');
+                cell.set_char('│');
                 cell.set_style(
                     Style::default()
                         .fg(border_fg)
@@ -351,7 +354,7 @@ impl SlashMenu {
             if menu_width > 1
                 && let Some(cell) = buf.cell_mut((prompt_area.x + menu_width - 1, row_y))
             {
-                cell.set_char('┃');
+                cell.set_char('│');
                 cell.set_style(
                     Style::default()
                         .fg(border_fg)

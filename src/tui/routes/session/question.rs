@@ -3798,12 +3798,12 @@ mod tests {
             "question text at row 1:\n{}",
             rows[1]
         );
-        // Gap rows are empty except for the box's side borders (┃ … ┃).
+        // Gap rows are empty except for the box's side borders (│ … │).
         let border_only = |row: &str| {
             row.chars()
                 .filter(|c| !c.is_whitespace())
                 .collect::<String>()
-                == "┃┃"
+                == "││"
         };
         assert!(
             border_only(rows[2]),

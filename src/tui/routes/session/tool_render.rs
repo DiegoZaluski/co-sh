@@ -23,7 +23,7 @@ pub(crate) const fn blank_border_chars() -> BorderCharacters {
     }
 }
 
-/// Left-rail border: `┃` on the left side only, everything else blank —
+/// Left-rail border: `│` on the left side only, everything else blank —
 /// the chat/tool message gutter.
 pub(crate) const fn left_border_chars() -> BorderCharacters {
     BorderCharacters {
@@ -32,10 +32,10 @@ pub(crate) const fn left_border_chars() -> BorderCharacters {
         bottom_left: ' ',
         bottom_right: ' ',
         horizontal: ' ',
-        vertical: '┃',
+        vertical: '│',
         top_t: ' ',
         bottom_t: ' ',
-        left_t: '┃',
+        left_t: '│',
         right_t: ' ',
         cross: ' ',
     }
@@ -1070,7 +1070,7 @@ fn draw_overflow_hint(ctx: &mut ToolRenderCtx, x_off: u16, expanded: bool, rows:
 }
 
 /// Shared body of the Write/Read code boxes: background frame (with or
-/// without the left `┃` rail), muted `# <verb> <path>` title row, then the
+/// without the left `│` rail), muted `# <verb> <path>` title row, then the
 /// syntax-highlighted, line-numbered code block.
 fn draw_code_panel(
     ctx: &mut ToolRenderCtx,

@@ -2118,8 +2118,8 @@ impl SessionView {
         streaming: bool,
     ) {
         let mut border_box = BoxRenderable::new();
-        // The `┃` rails sit on the chat background like the prompt box: the
-        // panel band is painted separately, one column short of each rail.
+        // The `│` rails sit on the chat background like the prompt box:
+        // the panel band is painted separately, one column short of each rail.
         border_box.set_border_color(Some(agent_color.into()));
         border_box.set_border_sides(BorderSidesConfig {
             left: true,
@@ -2132,7 +2132,7 @@ impl SessionView {
 
         let mut bg_box = BoxRenderable::new();
         bg_box.set_background_color(Some(theme.background_panel.into()));
-        // The band stops one column short of the left/right edges so the `┃`
+        // The band stops one column short of the left/right edges so the `│`
         // rails sit on the chat background, mirroring the prompt box.
         let bg_area = Rect::new(
             area.x + 1,
@@ -2201,8 +2201,9 @@ impl SessionView {
 
         if is_error {
             let mut border_box = BoxRenderable::new();
-            // The `┃` rails sit on the chat background like the prompt box:
-            // the panel band is painted separately, one column short of each.
+            // The `│` rails sit on the chat background like the prompt
+            // box: the panel band is painted separately, one column short of
+            // each.
             border_box.set_border_color(Some(theme.error.into()));
             border_box.set_border_sides(BorderSidesConfig {
                 left: true,
@@ -2216,7 +2217,8 @@ impl SessionView {
             let mut bg_box = BoxRenderable::new();
             bg_box.set_background_color(Some(theme.background_panel.into()));
             // The band stops one column short of the left/right edges so the
-            // `┃` rails sit on the chat background, mirroring the prompt box.
+            // `│` rails sit on the chat background, mirroring the prompt
+            // box.
             let bg_area = Rect::new(
                 area.x + 1,
                 area.y,

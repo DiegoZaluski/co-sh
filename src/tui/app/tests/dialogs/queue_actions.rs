@@ -596,7 +596,7 @@ async fn queue_cap_paints_mode_color_and_labels() {
     let up = |c: u8| (f32::from(c) * 0.85 + 255.0 * 0.15).round() as u8;
     let band_bg = ratatui::style::Color::Rgb(up(r), up(g), up(b));
     // Cap width = max(60 * 20%, 9) = 12 columns, right-aligned before the
-    // right `┃` (column 61): columns 49..=60. Row 0 is a top pad row — the
+    // right `│` (column 61): columns 49..=60. Row 0 is a top pad row — the
     // cap fills it in the mode color.
     assert_eq!(
         buf[(50, 5)].style().bg,
@@ -614,7 +614,7 @@ async fn queue_cap_paints_mode_color_and_labels() {
         Some(cap_bg),
         "the cap must be a deeper chip on the lighter band"
     );
-    // The side `┃` rails paint in the mode color too (the same hue the
+    // The side `│` rails paint in the mode color too (the same hue the
     // prompt's side borders use), so the strip connects with the prompt.
     // The left rail sits at area.x (column 2), the right at column 61.
     assert_eq!(

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use super::App;
-use crate::component::agent_spinner_bass::AgentSpinnerBass;
+use crate::component::agent_spinner::AgentSpinner;
 use crate::routes::session::queue_choice::QueueTarget;
 use crate::types::SessionStatus;
 use cosh::harness::HarnessEvent;
@@ -277,7 +277,7 @@ impl App {
         // The loop starts in the generic state; the event intake narrows it
         // (pondering / searching / recalling) as harness events arrive.
         self.agent_activity = crate::types::AgentActivity::Working;
-        self.agent_spinner_bass = Some(AgentSpinnerBass::new(
+        self.agent_spinner = Some(AgentSpinner::new(
             crate::types::AgentActivity::Working.label(),
             &self.theme,
         ));
@@ -801,7 +801,7 @@ impl App {
         self.stop_signal.store(false, Ordering::Relaxed);
         self.state.status = SessionStatus::Working;
         self.agent_activity = crate::types::AgentActivity::for_tool("bash_run");
-        self.agent_spinner_bass = Some(AgentSpinnerBass::new(
+        self.agent_spinner = Some(AgentSpinner::new(
             crate::types::AgentActivity::for_tool("bash_run").label(),
             &self.theme,
         ));

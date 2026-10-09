@@ -48,15 +48,15 @@ const fn prompt_border_chars() -> BorderCharacters {
     BorderCharacters {
         top_left: ' ',
         top_right: ' ',
-        bottom_left: '\u{2579}',
-        // Mirrors `bottom_left`: the right `┃` terminates with the same
+        bottom_left: '╵',
+        // Mirrors `bottom_left`: the right `│` terminates with the same
         // up-stub on the cap row, keeping the box symmetric left/right.
-        bottom_right: '\u{2579}',
+        bottom_right: '╵',
         horizontal: ' ',
-        vertical: '\u{2503}',
+        vertical: '│',
         top_t: ' ',
         bottom_t: ' ',
-        left_t: '\u{2503}',
+        left_t: '│',
         right_t: ' ',
         cross: ' ',
     }
@@ -73,7 +73,11 @@ pub(crate) fn agent_mode_color(
     mode: cosh::harness::Mode,
 ) -> RGBA {
     match mode {
-        cosh::harness::Mode::Build => agent_colors.get("build", unique_agents),
+        // A theme-level override wins (cosh: disabled tone); otherwise the
+        // per-agent "build" color, as before.
+        cosh::harness::Mode::Build => theme
+            .mode_build
+            .unwrap_or_else(|| agent_colors.get("build", unique_agents)),
         cosh::harness::Mode::Ask => theme.info,
         cosh::harness::Mode::Yolo => theme.warning,
         cosh::harness::Mode::Command => theme.success,
@@ -1026,7 +1030,7 @@ impl PromptView {
         let text_start = input_area.y + 1;
         // Text width: left chrome (border + 2 padding = 3) and right chrome
         // (2 padding + border = 3) — symmetric now that the box has a right
-        // `┃` like the slash menu.
+        // `│` like the slash menu.
         let max_line_w = input_area.width.saturating_sub(6) as u16;
 
         // Pre-compute which visual lines overlap with pasted virtual-text placeholders.
@@ -1164,7 +1168,9 @@ impl PromptView {
         let row_muted_style = row_bg.fg(rgba_color(theme.text_muted));
 
         let agent_label = capitalize(agent_name);
-        let label_style = row_bg.fg(rgba_color(agent_color));
+        let label_style = row_bg
+            .fg(rgba_color(agent_color))
+            .add_modifier(Modifier::ITALIC);
         draw_text_line(buf, &agent_label, x_off, label_y, max_line_w, label_style);
 
         let mut cap_border_box = BoxRenderable::new();
@@ -1179,8 +1185,8 @@ impl PromptView {
         cap_border_box.render_self(buf, cap_area);
 
         let cap_fill_x = cap_area.x + 1;
-        // Stop one column early so the `▀` band never covers the right `╹`
-        // termination of the right border (mirrors the left `╹`).
+        // Stop one column early so the `▀` band never covers the right `╵`
+        // termination of the right border (mirrors the left `╵`).
         let cap_fill_right = cap_area.right().saturating_sub(1);
         // Only paint the blend band when the fill is a real color. On
         // transparent themes (`orng`; anywhere `background_element` has
