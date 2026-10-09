@@ -3,12 +3,13 @@ use std::time::Duration;
 use super::{App, CLIPBOARD_LOCK, HOME_LOCK, isolate_home};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-/// Windows consoles deliver a paste as PLAIN KEY EVENTS (one `Char` event per
-/// character plus one plain `Enter` per line break) because crossterm <= 0.29
-/// has no bracketed-paste support on Windows (crossterm-rs/crossterm#737;
-/// the hybrid VT-input PR #1030 is still unreleased). On Linux/macOS the same
-/// paste arrives as a single `Event::Paste` (handled in `app/events.rs`),
-/// which is why the split-send bug is Windows-only.
+/// Legacy Windows consoles deliver a paste as PLAIN KEY EVENTS (one `Char`
+/// event per character plus one plain `Enter` per line break) because stock
+/// crossterm 0.29 has no bracketed-paste support there
+/// (crossterm-rs/crossterm#737). Modern consoles (patched crossterm, VT-input
+/// hybrid PR #1030) deliver a single `Event::Paste` exactly like Linux/macOS
+/// (handled in `app/events.rs`) — these tests pin the legacy-stream fallback
+/// that still guards conhost without VT input.
 fn paste_key_events(text: &str) -> Vec<KeyEvent> {
     text.chars()
         .map(|ch| {
@@ -157,6 +158,95 @@ async fn windows_paste_burst_is_not_split_into_multiple_sends() {
         super::message_prompt_text(&session.messages[0]),
         pasted,
         "the sent message must carry the FULL pasted text (placeholder expanded back)"
+    );
+}
+
+/// REGRESSION (crossterm#962 interference): with bracketed paste requested on
+/// Windows, terminals deliver pasted `\n` as Enter WITH the CONTROL modifier.
+/// Those must absorb exactly like plain Enters — letting one fall through
+/// types a newline the shadow never mirrors, so the burst-end retraction
+/// drains the wrong span and mixes raw text with a bogus `[Pasted ~1 lines]`.
+/// (Bracketed paste is no longer requested on Windows in `terminal.rs`, but
+/// the coalescer stays immune to any terminal with the same quirk.)
+#[tokio::test]
+async fn ctrl_enter_line_breaks_absorb_inside_burst() {
+    let _home = HOME_LOCK.lock();
+    let mut app = app_with_session();
+
+    let line = "alpha bravo charlie delta echo foxtrot golf hotel india juliet";
+    let pasted = format!("{line}\n{line}\n{line}");
+
+    // The exact Windows stream under bracketed-paste interference: every
+    // line break carries CONTROL.
+    for ch in pasted.chars() {
+        let evt = if ch == '\n' {
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)
+        } else {
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)
+        };
+        app.process_key_event(evt).unwrap();
+    }
+    // No split-send, and the Ctrl+Enters were absorbed, never typed.
+    assert_eq!(
+        app.prompt_view.input,
+        pasted.replace('\n', ""),
+        "modified Enters must absorb like plain ones, got: {:?}",
+        app.prompt_view.input
+    );
+    assert!(
+        app.state
+            .current_session()
+            .is_none_or(|s| s.messages.is_empty()),
+        "paste line breaks must NEVER auto-send (the user did not press Enter)"
+    );
+
+    end_burst_window();
+    app.paste_burst_flush_if_due();
+
+    let line_count = pasted.matches('\n').count() + 1;
+    assert_eq!(
+        app.prompt_view.input,
+        format!("[Pasted ~{line_count} lines]"),
+        "absorbed Ctrl+Enters must replay with real line breaks and compress, got: {:?}",
+        app.prompt_view.input
+    );
+
+    // The real user Enter submits — the placeholder expands back on send.
+    app.process_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    let session = app.state.current_session().expect("session exists");
+    assert_eq!(session.messages.len(), 1);
+    assert_eq!(
+        super::message_prompt_text(&session.messages[0]),
+        pasted,
+        "the sent message must carry the FULL pasted text (placeholder expanded back)"
+    );
+}
+
+/// A modified Enter OUTSIDE any burst keeps its shortcut meaning: Shift+Enter
+/// after a human pause still inserts a newline instead of submitting.
+#[tokio::test]
+async fn modified_enter_outside_burst_still_inserts_newline() {
+    let _home = HOME_LOCK.lock();
+    let mut app = app_with_session();
+
+    for evt in paste_key_events("hello") {
+        app.process_key_event(evt).unwrap();
+    }
+    end_burst_window();
+    app.paste_burst_flush_if_due();
+    app.process_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT))
+        .unwrap();
+    assert_eq!(
+        app.prompt_view.input, "hello\n",
+        "Shift+Enter outside the burst must insert a newline, got: {:?}",
+        app.prompt_view.input
+    );
+    assert!(
+        app.state
+            .current_session()
+            .is_none_or(|s| s.messages.is_empty()),
+        "a newline shortcut must never submit"
     );
 }
 
@@ -641,5 +731,290 @@ async fn altgr_v_types_the_character_instead_of_pasting() {
     assert_eq!(
         app.prompt_view.input, "v",
         "AltGr+v is a text character: it types, it never pastes"
+    );
+}
+
+/// REGRESSION (Windows `[Pasted ~N lines]` never appearing): a long
+/// SINGLE-LINE paste (>150 chars, no line break) arrives as plain Char keys
+/// with no Enter at all, so the old replay gate (`shadow.contains('\n')`)
+/// never fired and the streamed paragraph stayed as raw text forever — while
+/// the SAME text on Linux/macOS arrives as one `Event::Paste` and compresses
+/// into the placeholder. The replay decision is now shared with
+/// `PromptView::handle_paste` (`paste_would_compress`), so the burst-end
+/// replay retracts the streamed run and compresses it exactly like Unix.
+#[tokio::test]
+async fn long_single_line_paste_compresses_into_placeholder() {
+    let _home = HOME_LOCK.lock();
+    let mut app = app_with_session();
+
+    // 200 chars, no newline: over PASTE_MIN_CHARS (150), one line.
+    let pasted: String = std::iter::repeat_n('x', 200).collect();
+    for evt in paste_key_events(&pasted) {
+        app.process_key_event(evt).unwrap();
+    }
+    // No Enter was ever absorbed, yet the run streamed visibly.
+    assert_eq!(
+        app.prompt_view.input, pasted,
+        "precondition: single-line run streams into the prompt"
+    );
+
+    end_burst_window();
+    app.paste_burst_flush_if_due();
+
+    assert_eq!(
+        app.prompt_view.input, "[Pasted ~1 lines]",
+        "a long single-line paste must compress, exactly like the Unix Event::Paste path"
+    );
+
+    // The real Enter submits — the placeholder expands back on send.
+    app.process_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    let session = app.state.current_session().expect("session exists");
+    assert_eq!(session.messages.len(), 1);
+    assert_eq!(
+        super::message_prompt_text(&session.messages[0]),
+        pasted,
+        "sent message must carry the FULL single-line paste (placeholder expanded back)"
+    );
+}
+
+/// REGRESSION (companion): a short single-line burst must STAY as typed —
+/// plain typing and held keys never compress, only runs long enough to meet
+/// the shared threshold do.
+#[tokio::test]
+async fn short_single_line_burst_stays_as_typed() {
+    let _home = HOME_LOCK.lock();
+    let mut app = app_with_session();
+
+    let pasted = "just a short sentence";
+    for evt in paste_key_events(pasted) {
+        app.process_key_event(evt).unwrap();
+    }
+    end_burst_window();
+    app.paste_burst_flush_if_due();
+    assert_eq!(
+        app.prompt_view.input, pasted,
+        "short single-line run stays as typed (no replay), got: {:?}",
+        app.prompt_view.input
+    );
+}
+
+/// REGRESSION (Windows paste into the middle of a draft): the burst-end
+/// replay used to retract only an end-of-input tail
+/// (`cursor == input.len()`), so a multi-line paste streamed mid-prompt
+/// never replayed — no placeholder AND its absorbed line breaks silently
+/// lost. The run now anchors at its start offset, so the span retracts from
+/// where it streamed and the placeholder lands mid-draft.
+#[tokio::test]
+async fn mid_prompt_multiline_paste_compresses_in_place() {
+    let _home = HOME_LOCK.lock();
+    let mut app = app_with_session();
+
+    // Draft "AB" with the cursor between them.
+    for evt in paste_key_events("AB") {
+        app.process_key_event(evt).unwrap();
+    }
+    end_burst_window();
+    app.paste_burst_flush_if_due();
+    assert_eq!(app.prompt_view.input, "AB");
+    app.process_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.prompt_view.cursor_pos, 1);
+
+    // Multi-line paste at the mid-prompt cursor.
+    let pasted = "line1\nline2\nline3";
+    for evt in paste_key_events(pasted) {
+        app.process_key_event(evt).unwrap();
+    }
+
+    end_burst_window();
+    app.paste_burst_flush_if_due();
+
+    assert_eq!(
+        app.prompt_view.input, "A[Pasted ~3 lines]B",
+        "mid-prompt paste must retract its span and compress in place, got: {:?}",
+        app.prompt_view.input
+    );
+
+    // Submit carries the full text with the paste expanded mid-draft.
+    app.process_key_event(KeyEvent::new(KeyCode::End, KeyModifiers::NONE))
+        .unwrap();
+    app.process_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    let session = app.state.current_session().expect("session exists");
+    assert_eq!(session.messages.len(), 1);
+    assert_eq!(
+        super::message_prompt_text(&session.messages[0]),
+        format!("A{pasted}B"),
+        "sent message must carry the draft with the paste expanded in place"
+    );
+}
+
+/// ELEGANCE (opencode parity): a clipboard paste trickling in slowly (VS Code
+/// PowerShell and friends inject word-by-word over seconds) must not stream
+/// visibly until the end. Once the armed stream content-matches the clipboard
+/// the whole paste lands atomically and the tail is swallowed — the
+/// placeholder appears after a handful of characters, exactly like the Unix
+/// `Event::Paste` path.
+///
+/// Windows-only: the anchor is `cfg!(windows)`-gated (Unix already pastes
+/// atomically; a clipboard round-trip has no place in its key path), and the
+/// clipboard dance needs a real system clipboard like the Ctrl+V test above.
+#[cfg(windows)]
+#[tokio::test]
+async fn anchored_trickle_paste_lands_atomically_without_streaming() {
+    let _home = HOME_LOCK.lock();
+    let _clipboard = CLIPBOARD_LOCK.lock();
+    if !crate::util::selection::clipboard_available() {
+        return;
+    }
+    let mut app = app_with_session();
+
+    let line = "alpha bravo charlie delta echo foxtrot golf hotel india juliet";
+    let pasted = format!("{line}\n{line}\n{line}");
+    assert!(
+        crate::util::selection::copy_to_clipboard(&pasted),
+        "precondition: clipboard write succeeds"
+    );
+
+    // Slow trickle: 25ms gaps keep the burst armed but stay readable —
+    // the old design streamed every one of these characters.
+    let mut fed = 0usize;
+    for evt in paste_key_events(&pasted) {
+        app.process_key_event(evt).unwrap();
+        fed += 1;
+        std::thread::sleep(Duration::from_millis(25));
+        if fed == 10 {
+            // Anchor engaged on content-match: the placeholder is already
+            // there with most of the stream still unsent.
+            assert_eq!(
+                app.prompt_view.input, "[Pasted ~3 lines]",
+                "the paste must land atomically mid-stream, got: {:?}",
+                app.prompt_view.input
+            );
+        }
+    }
+    // The swallowed tail never re-rendered.
+    assert_eq!(
+        app.prompt_view.input, "[Pasted ~3 lines]",
+        "swallowed keys must never reach the prompt, got: {:?}",
+        app.prompt_view.input
+    );
+    assert!(
+        app.state
+            .current_session()
+            .is_none_or(|s| s.messages.is_empty()),
+        "paste must not auto-send"
+    );
+
+    end_burst_window();
+    app.paste_burst_flush_if_due();
+    assert_eq!(app.prompt_view.input, "[Pasted ~3 lines]");
+
+    app.process_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    let session = app.state.current_session().expect("session exists");
+    assert_eq!(session.messages.len(), 1);
+    assert_eq!(
+        super::message_prompt_text(&session.messages[0]),
+        pasted,
+        "sent message must carry the FULL pasted text (placeholder expanded back)"
+    );
+}
+
+/// Anchor completion disarms the cadence: once the whole clipboard arrived,
+/// the paste is provably over, so the very next Enter submits instead of
+/// absorbing like the timed heuristic would.
+#[cfg(windows)]
+#[tokio::test]
+async fn anchored_completion_submits_on_the_next_enter() {
+    let _home = HOME_LOCK.lock();
+    let _clipboard = CLIPBOARD_LOCK.lock();
+    if !crate::util::selection::clipboard_available() {
+        return;
+    }
+    let mut app = app_with_session();
+
+    let line = "alpha bravo charlie delta echo foxtrot golf hotel india juliet";
+    let pasted = format!("{line}\n{line}\n{line}");
+    assert!(
+        crate::util::selection::copy_to_clipboard(&pasted),
+        "precondition: clipboard write succeeds"
+    );
+
+    for evt in paste_key_events(&pasted) {
+        app.process_key_event(evt).unwrap();
+    }
+    assert_eq!(app.prompt_view.input, "[Pasted ~3 lines]");
+
+    // No human gap: under the old timing rule this Enter would absorb as a
+    // paste newline. The completed anchor knows better — it submits.
+    app.process_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    let session = app.state.current_session().expect("session exists");
+    assert_eq!(
+        session.messages.len(),
+        1,
+        "the Enter right after a completed paste must send exactly ONE message"
+    );
+    assert_eq!(
+        super::message_prompt_text(&session.messages[0]),
+        pasted,
+        "sent message must carry the FULL pasted text (placeholder expanded back)"
+    );
+}
+
+/// Divergence rolls back to exactly what arrived: fast typing that merely
+/// starts like the clipboard must never conjure the rest of it.
+#[cfg(windows)]
+#[tokio::test]
+async fn anchor_divergence_rolls_back_to_typed_text() {
+    let _home = HOME_LOCK.lock();
+    let _clipboard = CLIPBOARD_LOCK.lock();
+    if !crate::util::selection::clipboard_available() {
+        return;
+    }
+    let mut app = app_with_session();
+
+    // Long single-line clipboard; the stream matches 8 chars, then swerves.
+    let clipboard: String = "abcdefgh".to_string() + &"k".repeat(200);
+    assert!(
+        crate::util::selection::copy_to_clipboard(&clipboard),
+        "precondition: clipboard write succeeds"
+    );
+
+    for evt in paste_key_events("abcdefgh") {
+        app.process_key_event(evt).unwrap();
+    }
+    assert_eq!(
+        app.prompt_view.input, "[Pasted ~1 lines]",
+        "precondition: anchor engaged on content-match, got: {:?}",
+        app.prompt_view.input
+    );
+
+    // 'Z' is not the clipboard's 9th character: roll back, type it for real.
+    app.process_key_event(KeyEvent::new(KeyCode::Char('Z'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(
+        app.prompt_view.input, "abcdefghZ",
+        "divergence must land exactly what arrived, got: {:?}",
+        app.prompt_view.input
+    );
+
+    for evt in paste_key_events("ij") {
+        app.process_key_event(evt).unwrap();
+    }
+    end_burst_window();
+    app.paste_burst_flush_if_due();
+    assert_eq!(
+        app.prompt_view.input, "abcdefghZij",
+        "short unconfirmed text stays as typed, got: {:?}",
+        app.prompt_view.input
+    );
+    assert!(
+        app.state
+            .current_session()
+            .is_none_or(|s| s.messages.is_empty()),
+        "nothing must send"
     );
 }
