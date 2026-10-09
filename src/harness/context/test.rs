@@ -797,7 +797,7 @@ fn cached_token_total_stays_in_sync_across_all_mutations() {
 
 #[test]
 fn from_window_resizes_a_real_discovered_window() {
-    let cm = ContextManager::from_window(Some(128_000));
+    let cm = ContextManager::from_window(Some(128_000), true);
     assert_eq!(
         cm.display_info().max_tokens,
         effective_context_window(128_000),
@@ -806,8 +806,18 @@ fn from_window_resizes_a_real_discovered_window() {
 }
 
 #[test]
+fn from_window_uses_the_full_window_when_effective_is_off() {
+    let cm = ContextManager::from_window(Some(1_000_000), false);
+    assert_eq!(
+        cm.display_info().max_tokens,
+        1_000_000,
+        "Effective off → the full discovered window is used as-is"
+    );
+}
+
+#[test]
 fn from_window_falls_back_to_the_default_without_discovery() {
-    let cm = ContextManager::from_window(None);
+    let cm = ContextManager::from_window(None, true);
     assert_eq!(
         cm.display_info().max_tokens,
         MAX_CONTEXT_TOKENS,
@@ -817,7 +827,7 @@ fn from_window_falls_back_to_the_default_without_discovery() {
 
 #[test]
 fn from_window_creates_a_valid_context_manager() {
-    let mut cm = ContextManager::from_window(Some(128_000));
+    let mut cm = ContextManager::from_window(Some(128_000), true);
     assert_eq!(cm.total_tokens(), 0, "New context manager should be empty");
     cm.add_user("test message");
     assert!(
@@ -842,12 +852,12 @@ fn assert_one_million_budget(max_tokens: usize) {
 #[test]
 fn a_one_million_model_never_lands_below_the_200k_band() {
     assert_one_million_budget(
-        ContextManager::from_window(Some(1_048_576))
+        ContextManager::from_window(Some(1_048_576), true)
             .display_info()
             .max_tokens,
     );
     assert_one_million_budget(
-        ContextManager::from_window(Some(1_000_000))
+        ContextManager::from_window(Some(1_000_000), true)
             .display_info()
             .max_tokens,
     );
@@ -859,8 +869,15 @@ fn provider_window_report_of_a_1m_model_lands_in_the_200k_band() {
     // Persistence is skipped under cfg(test), so this never touches the
     // real error catalog.
     let mut c = cm(MAX_CONTEXT_TOKENS);
-    c.record_provider_window(Some("gemini-3-pro"), 1_048_576);
+    c.record_provider_window(Some("gemini-3-pro"), 1_048_576, true);
     assert_one_million_budget(c.display_info().max_tokens);
+}
+
+#[test]
+fn provider_window_report_uses_the_full_window_when_effective_is_off() {
+    let mut c = cm(MAX_CONTEXT_TOKENS);
+    c.record_provider_window(Some("gemini-3-pro"), 1_048_576, false);
+    assert_eq!(c.display_info().max_tokens, 1_048_576);
 }
 
 /// REGRESSION (1M budget degraded to ~50k): pins the EXACT arithmetic of the
@@ -889,24 +906,24 @@ fn one_million_pipeline_band_is_pinned_with_the_degradation_signature() {
     );
     // The health contract: a real 1M discovery must stay in the 200k band.
     assert_one_million_budget(
-        ContextManager::from_window(Some(1_000_000))
+        ContextManager::from_window(Some(1_000_000), true)
             .display_info()
             .max_tokens,
     );
     assert_one_million_budget(
-        ContextManager::from_window(Some(1_048_576))
+        ContextManager::from_window(Some(1_048_576), true)
             .display_info()
             .max_tokens,
     );
     // A deterministic catalog hit of 1,048,576 (largest-window policy over
     // the gateway mirrors) must also land in the band.
     assert_one_million_budget(
-        ContextManager::from_window(Some(1_048_575))
+        ContextManager::from_window(Some(1_048_575), true)
             .display_info()
             .max_tokens,
     );
     assert_one_million_budget(
-        ContextManager::from_window(Some(1_049_000))
+        ContextManager::from_window(Some(1_049_000), true)
             .display_info()
             .max_tokens,
     );
@@ -915,7 +932,7 @@ fn one_million_pipeline_band_is_pinned_with_the_degradation_signature() {
 #[tokio::test]
 #[ignore = "hits the real discovery APIs (network) — run explicitly"]
 async fn with_discovered_context_resolves_a_known_model() {
-    let cm = ContextManager::with_discovered_context("openai/gpt-4o").await;
+    let cm = ContextManager::with_discovered_context("openai/gpt-4o", true).await;
     assert_eq!(
         cm.display_info().max_tokens,
         effective_context_window(128_000)

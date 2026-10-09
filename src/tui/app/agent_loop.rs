@@ -360,6 +360,10 @@ impl App {
         // check) when the wrapper is built below, inside the thread.
         let skills_config = self.setup.skills.clone();
 
+        // Effective-context toggle (Settings screen → setup.json). Cloned
+        // into the agent thread; sizes the budget at loop start.
+        let effective_context = self.setup.effective_context;
+
         // Decision-model checkup config (Settings screen → setup.json).
         // Cloned into the agent thread; the resident model loads at
         // harness assembly time (never hot), inside the thread, exactly
@@ -559,7 +563,8 @@ impl App {
                         .with_summarization_models(summarization_models)
                         .with_local_base_urls(local_base_urls)
                         .with_skills(skills_config.to_skills())
-                        .with_mcp_config(mcp_config);
+                        .with_mcp_config(mcp_config)
+                        .with_effective_context(effective_context);
 
                     // The decision-model audit seam (`harness::checkup`),
                     // attached over the SHARED decision daemon: the model

@@ -10,7 +10,7 @@ use cosh_sdk::connector::{
     ToolDefinition, resolve_reasoning_effort,
 };
 #[cfg(not(test))]
-use cosh_sdk::connector::{discover_context_window, effective_context_window};
+use cosh_sdk::connector::discover_context_window;
 use cosh_sdk::extract_action::{
     ExtractAction, Item, NativeToolCall, StreamAction, ToolCallData, ToolSchema,
 };
@@ -693,6 +693,9 @@ pub struct Harness {
     /// on fallback switches; `None` when discovery failed (unknown window →
     /// the split is sized against the token budget).
     discovered_window: Option<usize>,
+    /// Whether discovered windows are resized to the reduced sweet-spot
+    /// budget (`setup.effective_context`). `false` uses the full window.
+    effective_context: bool,
 
     /// When the persistent context-overflow toast was last shown, for the
     /// throttling cooldown (see [`Self::notify_context_overflow`]).
@@ -829,6 +832,7 @@ impl Harness {
             local_base_urls: std::collections::HashMap::new(),
             last_context_window: None,
             discovered_window: None,
+            effective_context: false,
             hook_runner: None,
             lsp: build_lsp(cwd),
             last_overflow_toast: None,
@@ -950,6 +954,14 @@ impl Harness {
     #[must_use]
     pub fn with_mcp_config(mut self, config: McpConfig) -> Self {
         self.mcp_config = config;
+        self
+    }
+
+    /// Whether discovered windows use the reduced sweet-spot budget,
+    /// populated from `Setup.effective_context` by the TUI.
+    #[must_use]
+    pub fn with_effective_context(mut self, effective: bool) -> Self {
+        self.effective_context = effective;
         self
     }
 
@@ -1698,7 +1710,9 @@ impl Harness {
         }
         self.last_context_window = Some(window);
         let model = self.connector.effective_model();
-        self.context_manager.record_provider_window(model, window);
+        let effective = self.effective_context;
+        self.context_manager
+            .record_provider_window(model, window, effective);
     }
 
     /// The user-triggered `/compact`: run the deterministic funnel across
@@ -3787,14 +3801,16 @@ impl Harness {
             if let Some(window) = discovered_context_window(self.connector.effective_model()).await
             {
                 self.discovered_window = Some(window);
-                // Size the budget to the model's EFFECTIVE window, not the raw
-                // advertised one — the advertised capacity is a poor estimate
-                // of what the model can actually reason over (the "sweet
-                // spot" sizing, see `effective_context_window`). The RAW
-                // window is kept above in `discovered_window`, where it still
-                // drives the hierarchical MapReduce contingency.
-                self.context_manager
-                    .set_max_tokens(effective_context_window(window));
+                // Size the budget to the model's EFFECTIVE window when the
+                // toggle is on, otherwise the full window — the advertised
+                // capacity is a poor estimate of what the model can actually
+                // reason over (the "sweet spot" sizing, see
+                // `effective_context_window`). The RAW window is kept above
+                // in `discovered_window`, where it still drives the
+                // hierarchical MapReduce contingency.
+                self.context_manager.set_max_tokens(
+                    ContextManager::resolve_window(window, self.effective_context),
+                );
             }
         }
 
@@ -4138,8 +4154,9 @@ impl Harness {
                                     // Same effective sizing as the loop start
                                     // (the raw window stays in
                                     // `discovered_window` for the split).
-                                    self.context_manager
-                                        .set_max_tokens(effective_context_window(window));
+                                    self.context_manager.set_max_tokens(
+                                        ContextManager::resolve_window(window, self.effective_context),
+                                    );
                                 }
                             }
                             self.tool_issuer.clear();
@@ -5173,7 +5190,9 @@ impl Harness {
                     log::debug!(
                         "run_agent_loop WAITING for background sub-agent tasks before Done"
                     );
-                    while background::has_running_tasks() && !stop_signal.load(Ordering::Relaxed) {
+                    while background::has_running_tasks()
+                        && !stop_signal.load(Ordering::Relaxed)
+                    {
                         tokio::time::sleep(Duration::from_millis(100)).await;
                     }
                     // Esc during the wait ends the turn normally: no
@@ -5962,6 +5981,7 @@ impl Harness {
             local_base_urls: std::collections::HashMap::new(),
             last_context_window: None,
             discovered_window: None,
+            effective_context: false,
             last_overflow_toast: None,
             hook_runner: None,
             lsp: None,

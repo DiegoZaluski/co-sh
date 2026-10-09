@@ -55,6 +55,11 @@ pub struct Setup {
     /// This flag is only the USER's choice — the effective consent still
     /// goes through `Telemetry::resolve` (env override + CI hard-off).
     pub telemetry: bool,
+    /// Whether discovered model windows are resized to the reduced
+    /// sweet-spot budget (`effective_context_window`). DEFAULT OFF: the
+    /// full discovered window is used as-is.
+    #[serde(default)]
+    pub effective_context: bool,
     /// Raw bytes of the file this struct was last loaded from (or last
     /// wrote), kept as JSON text. NOT serialized — this is the merge
     /// baseline for [`Setup::save`]: with several cosh processes sharing one
@@ -88,6 +93,7 @@ impl Default for Setup {
             mcp: McpConfig::default(),
             editor: String::new(),
             telemetry: true,
+            effective_context: false,
             disk_snapshot: None,
             lock_wait: Duration::from_millis(250),
         }
@@ -959,6 +965,9 @@ impl Setup {
         if self.telemetry != baseline.telemetry {
             merged.telemetry = self.telemetry;
         }
+        if self.effective_context != baseline.effective_context {
+            merged.effective_context = self.effective_context;
+        }
         merged
     }
 
@@ -1163,8 +1172,11 @@ mod tests {
         // field, empty file and corrupt file all resolve to ON. Users who
         // want out flip the Settings toggle or set COSH_TELEMETRY=off.
         assert!(parsed.telemetry);
+        // Effective context is DEFAULT-OFF: the full window is used.
+        assert!(!parsed.effective_context);
         let legacy: Setup = serde_json::from_str("{}").unwrap();
         assert!(legacy.telemetry);
+        assert!(!legacy.effective_context);
     }
 
     /// The telemetry consent flag round-trips and stays default-on: a legacy
@@ -1181,6 +1193,20 @@ mod tests {
         // A legacy file that never mentioned telemetry loads ON (opt-out).
         let legacy: Setup = serde_json::from_str(r#"{"appearance": {}}"#).unwrap();
         assert!(legacy.telemetry);
+    }
+
+    /// The effective-context toggle round-trips and stays default-off: a
+    /// legacy config without the key loads OFF (full window).
+    #[test]
+    fn effective_context_is_opt_in_and_roundtrips() {
+        let mut setup = Setup::default();
+        assert!(!setup.effective_context, "default is off");
+        setup.effective_context = true;
+        let json = serde_json::to_string(&setup).unwrap();
+        let loaded: Setup = serde_json::from_str(&json).unwrap();
+        assert!(loaded.effective_context);
+        let legacy: Setup = serde_json::from_str(r#"{"appearance": {}}"#).unwrap();
+        assert!(!legacy.effective_context);
     }
 
     /// Free-form duration parsing: bare minutes, unit suffixes, mixed

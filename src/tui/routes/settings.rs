@@ -78,6 +78,8 @@ enum SwitchAction {
     /// Flip the item's own persisted field and report
     /// [`SettingsAction::ToggleSaved`].
     Persist,
+    /// Flip `setup.effective_context` (full window vs reduced budget).
+    EffectiveContext,
 }
 
 #[derive(PartialEq, Eq)]
@@ -172,6 +174,12 @@ const MODELS_AND_CACHING: SettingsSection = SettingsSection {
             label: "OpenAI cache retention",
             description: "How long OpenAI may keep your prompt cache",
             kind: SettingKind::Choice(ChoiceInput::Cache("openai_cache_retention")),
+        },
+        SettingsItem {
+            id: "effective_context",
+            label: "Effective context",
+            description: "Use the reduced sweet-spot budget instead of the full model window",
+            kind: SettingKind::Switch(SwitchAction::EffectiveContext),
         },
     ],
 };
@@ -307,6 +315,7 @@ fn is_enabled(item: &SettingsItem, setup: &Setup) -> bool {
         SettingKind::HookList(event) => setup.hooks.is_event_enabled(event),
         SettingKind::Switch(SwitchAction::Lsp) => setup.lsp,
         SettingKind::Switch(SwitchAction::Telemetry) => setup.telemetry,
+        SettingKind::Switch(SwitchAction::EffectiveContext) => setup.effective_context,
         #[cfg(feature = "onnx")]
         // The checkup renders as a choice ("off" / "on · checkpoint") but
         // its ON/OFF state is the switch itself.
@@ -947,6 +956,11 @@ impl SettingsView {
                     }
                     SettingKind::Switch(SwitchAction::Persist) => {
                         setup.decision.termination.enabled = !setup.decision.termination.enabled;
+                        self.selection.clamp(selectable_rows(setup).len());
+                        return Some(SettingsAction::ToggleSaved);
+                    }
+                    SettingKind::Switch(SwitchAction::EffectiveContext) => {
+                        setup.effective_context = !setup.effective_context;
                         self.selection.clamp(selectable_rows(setup).len());
                         return Some(SettingsAction::ToggleSaved);
                     }
@@ -1629,6 +1643,7 @@ mod tests {
                 cat("post_tool_use_hooks"),
                 cat("anthropic_cache_ttl"),
                 cat("openai_cache_retention"),
+                cat("effective_context"),
                 cat("editor"),
                 cat("skill_dirs"),
                 cat("lsp"),
@@ -1662,6 +1677,7 @@ mod tests {
                 },
                 cat("anthropic_cache_ttl"),
                 cat("openai_cache_retention"),
+                cat("effective_context"),
                 cat("editor"),
                 cat("skill_dirs"),
                 cat("lsp"),
@@ -1810,6 +1826,47 @@ mod tests {
         );
         assert!(setup.lsp);
         assert!(is_enabled(item_at(catalog_index("lsp")), &setup));
+    }
+
+    /// The effective-context row is a standalone switch: activating it
+    /// flips `setup.effective_context` and reports `ToggleSaved` so the
+    /// caller persists it. Default off (full window).
+    #[test]
+    fn effective_context_toggle_round_trip() {
+        let mut setup = Setup::default();
+        assert!(!setup.effective_context);
+        let mut view = SettingsView::new();
+
+        let row = |setup: &Setup| {
+            selectable_rows(setup)
+                .iter()
+                .position(|r| {
+                    matches!(r, SettingsRow::Category(x) if *x == catalog_index("effective_context"))
+                })
+                .expect("effective_context category row exists")
+        };
+
+        view.selection.selected_index = row(&setup);
+        assert_eq!(
+            view.activate_selected(&mut setup),
+            Some(SettingsAction::ToggleSaved)
+        );
+        assert!(setup.effective_context);
+        assert!(is_enabled(
+            item_at(catalog_index("effective_context")),
+            &setup
+        ));
+
+        view.selection.selected_index = row(&setup);
+        assert_eq!(
+            view.activate_selected(&mut setup),
+            Some(SettingsAction::ToggleSaved)
+        );
+        assert!(!setup.effective_context);
+        assert!(!is_enabled(
+            item_at(catalog_index("effective_context")),
+            &setup
+        ));
     }
 
     #[test]

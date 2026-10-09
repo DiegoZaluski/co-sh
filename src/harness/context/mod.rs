@@ -568,18 +568,29 @@ impl ContextManager {
         }
     }
 
+    /// Resolve a discovered window to its budget: the EFFECTIVE value — the
+    /// "sweet spot" below the model's degradation zone (see
+    /// [`effective_context_window`]) — when `effective` is set, or the full
+    /// window as-is otherwise. Pure — no I/O.
+    pub fn resolve_window(window: usize, effective: bool) -> usize {
+        if effective {
+            effective_context_window(window)
+        } else {
+            window
+        }
+    }
+
     /// Build a manager from an ALREADY-RESOLVED window (or `None` when
     /// discovery failed). Pure — no I/O. A REAL discovered window is resized
-    /// to its EFFECTIVE value — the "sweet spot" budget that sits below the
-    /// model's degradation zone (see [`effective_context_window`]); the
-    /// fallback stays [`MAX_CONTEXT_TOKENS`] because the default is not a
-    /// real window. [`Self::with_discovered_context`] resolves the window
-    /// through discovery and delegates here.
-    pub fn from_window(discovered: Option<usize>) -> Self {
+    /// to its EFFECTIVE value when `effective` is set; the fallback stays
+    /// [`MAX_CONTEXT_TOKENS`] because the default is not a real window.
+    /// [`Self::with_discovered_context`] resolves the window through
+    /// discovery and delegates here.
+    pub fn from_window(discovered: Option<usize>, effective: bool) -> Self {
         let max_tokens = discovered
             // Only a REAL discovered window is resized to its effective value;
             // the default fallback stays untouched (it is not a real window).
-            .map(effective_context_window)
+            .map(|window| Self::resolve_window(window, effective))
             .unwrap_or(MAX_CONTEXT_TOKENS);
         Self::new(max_tokens)
     }
@@ -597,10 +608,13 @@ impl ContextManager {
     ///
     /// A new ContextManager with the effective discovered context window, or the
     /// default [`MAX_CONTEXT_TOKENS`] if discovery fails.
-    pub async fn with_discovered_context(model_name: &str) -> Self {
+    pub async fn with_discovered_context(model_name: &str, effective: bool) -> Self {
         // On-disk catalog caching under `~/.local/share/cosh/cache`, so repeated
         // launches reuse the downloaded models.dev / OpenRouter catalogs.
-        Self::from_window(discover_context_window(model_name, Some("cosh/cache")).await)
+        Self::from_window(
+            discover_context_window(model_name, Some("cosh/cache")).await,
+            effective,
+        )
     }
 
     /// Set the active model so token counts are estimated with the closest
@@ -640,14 +654,15 @@ impl ContextManager {
     ///
     /// A provider's overflow is its OWN report of the maximum input size, so it
     /// is treated exactly like a successful discovery: the budget is re-sized
-    /// to the EFFECTIVE value ([`effective_context_window`]), replacing the 100k
-    /// fallback, and the RAW window is persisted to the provider-error catalog
-    /// so future launches discover it before ever paying another overflow.
+    /// to the EFFECTIVE value ([`effective_context_window`]) when `effective`
+    /// is set (otherwise the full window), replacing the 100k fallback, and
+    /// the RAW window is persisted to the provider-error catalog so future
+    /// launches discover it before ever paying another overflow.
     ///
     /// Persistence is skipped under `cfg(test)`: tests run against the real
     /// `~/.local/share/cosh` data dir and must never write to it.
-    pub fn record_provider_window(&mut self, model: Option<&str>, window: usize) {
-        self.set_max_tokens(effective_context_window(window));
+    pub fn record_provider_window(&mut self, model: Option<&str>, window: usize, effective: bool) {
+        self.set_max_tokens(Self::resolve_window(window, effective));
         let Some(model) = model else {
             return;
         };

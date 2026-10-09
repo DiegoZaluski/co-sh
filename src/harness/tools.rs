@@ -1701,7 +1701,9 @@ impl Tools for CoshTools {
                                 // synchronous path: only a COMPLETED review
                                 // turn gets the header injected.
                                 let completed = stop_reason == "end_turn";
-                                let output = if is_review && completed && !output.trim().is_empty()
+                                let output = if is_review
+                                    && completed
+                                    && !output.trim().is_empty()
                                 {
                                     cosh_tools::subagent::severity::enforce_severity_header(
                                         &output, true,
@@ -1739,9 +1741,7 @@ impl Tools for CoshTools {
                                 super::background::complete(
                                     &bg_task_id,
                                     None,
-                                    Some(format!(
-                                        "background sub-agent task panicked: {join_error}"
-                                    )),
+                                    Some(format!("background sub-agent task panicked: {join_error}")),
                                 );
                             }
                         }
