@@ -5140,7 +5140,9 @@ impl Harness {
                     log::debug!(
                         "run_agent_loop WAITING for background sub-agent tasks before Done"
                     );
-                    while background::has_running_tasks() && !stop_signal.load(Ordering::Relaxed) {
+                    while background::has_running_tasks()
+                        && !stop_signal.load(Ordering::Relaxed)
+                    {
                         tokio::time::sleep(Duration::from_millis(100)).await;
                     }
                     // Esc during the wait ends the turn normally: no
