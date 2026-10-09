@@ -1,8 +1,9 @@
 //! Animated agent spinner — a Rust port of the Go `anim` package.
 //!
 //! Renders a row of scrambled characters with a theme-aware gradient,
-//! followed by a label and an animated ellipsis. The spinner has a
-//! staggered birth animation where columns appear one-by-one.
+//! followed by a label and an animated glyph reflecting the agent's current
+//! activity. The spinner has a staggered birth animation where columns
+//! appear one-by-one.
 
 use cosh_tui::core::lib::rgba::RGBA;
 use ratatui::buffer::Buffer;
@@ -19,9 +20,9 @@ const NUM_CYCLING_CHARS: usize = 8;
 /// Maximum birth delay in frames (~0.6 s at 30 fps).
 const BIRTH_DELAY_MAX: u32 = 20;
 
-/// Ellipsis animation speed: number of frames per ellipsis step.
+/// Status glyph animation speed: number of frames per glyph step.
 /// At 30 fps, 8 → ~3.75 steps/sec, quick but not distracting.
-const ELLIPSIS_ANIM_SPEED: u32 = 8;
+const STATUS_ANIM_SPEED: u32 = 8;
 
 /// Cycle divider: cycling characters change every N frames.
 /// At 30 fps, 4 = ~7.5 changes/sec — a calm readable scramble instead of
@@ -38,8 +39,24 @@ const AVAILABLE_RUNES: &[char] = &[
     'ᛒ', 'ᛖ', 'ᛗ', 'ᛚ', 'ᛜ', 'ᛞ', 'ᛟ', '▮', '▰', '◼',
 ];
 
-/// Ellipsis animation frames.
-const ELLIPSIS_FRAMES: &[&str] = &[".", "..", "...", ""];
+/// Status glyph sequences: the animation shown after the status text. Each
+/// agent activity continuously cycles its own sequence while active; the
+/// runic scramble is unaffected. Switching activity restarts the new
+/// sequence from its first glyph.
+const WORKING_FRAMES: &[&str] = &["·", "•", "●", "•", "·"];
+const PONDERING_FRAMES: &[&str] = &["+", "×", "+", "·", "·"];
+const SEARCHING_FRAMES: &[&str] = &["›", "»", "›"];
+const RECALLING_FRAMES: &[&str] = &["↶", "↺", "↶"];
+
+/// The glyph sequence owned by an agent activity.
+const fn activity_frames(activity: AgentActivity) -> &'static [&'static str] {
+    match activity {
+        AgentActivity::Working => WORKING_FRAMES,
+        AgentActivity::Pondering => PONDERING_FRAMES,
+        AgentActivity::Searching => SEARCHING_FRAMES,
+        AgentActivity::Recalling => RECALLING_FRAMES,
+    }
+}
 
 /// Initial character shown during the birth animation.
 const BIRTH_CHAR: char = '.';
@@ -94,12 +111,13 @@ fn seeded_rng(seed: u64) -> impl Iterator<Item = u64> {
 // ── AgentSpinner ───────────────────────────────────────────────────────────
 
 /// An animated spinner that cycles through scrambled characters with a
-/// theme-aware gradient, followed by a label and an animated ellipsis.
+/// theme-aware gradient, followed by a label and a per-status glyph animation.
 ///
 /// Features:
 /// - **Birth animation**: columns appear one-by-one with a staggered entrance
 /// - **Cycling characters**: scrambled runes with a smooth gradient
-/// - **Label + ellipsis**: text label with a cycling `...` animation
+/// - **Label + status glyph**: text label with its own cycling glyph sequence
+///   per agent activity (`working`, `pondering`, `searching`, `recalling`)
 /// - **Deterministic**: two identical spinners produce byte-identical frames
 pub struct AgentSpinner {
     /// Number of cycling characters.
@@ -114,13 +132,16 @@ pub struct AgentSpinner {
     step: u32,
     /// Total frames elapsed since the spinner was started / reset.
     frames_elapsed: u32,
-    /// Current ellipsis frame index.
-    ellipsis_step: u32,
+    /// Current status-glyph step (ticks at `STATUS_ANIM_SPEED`).
+    status_step: u32,
+    /// Glyph sequence of the current agent activity (see [`activity_frames`]):
+    /// each status cycles its own animation.
+    frames: &'static [&'static str],
     /// Whether the birth animation has finished.
     initialized: bool,
     /// Label text displayed after the cycling characters.
     label: String,
-    /// Colour used for the label and ellipsis.
+    /// Colour used for the label and status glyph.
     label_color: RGBA,
     /// Number of characters in the label.
     label_width: usize,
@@ -173,7 +194,11 @@ impl AgentSpinner {
             birth_steps,
             step: 0,
             frames_elapsed: 0,
-            ellipsis_step: 0,
+            status_step: 0,
+            // Spun up on the default (working) sequence; `set_activity`
+            // switches — and restarts — the sequence as the loop's activity
+            // changes.
+            frames: activity_frames(AgentActivity::Working),
             initialized: false,
             label: label.to_string(),
             label_color,
@@ -198,18 +223,22 @@ impl AgentSpinner {
             self.initialized = true;
         }
 
-        // Advance ellipsis (only after initialization and if there's a label)
+        // Advance the status glyphs (only after initialization and if there's
+        // a label): cycle the CURRENT activity's sequence.
         if self.initialized && self.label_width > 0 {
-            self.ellipsis_step =
-                (self.ellipsis_step + 1) % (ELLIPSIS_ANIM_SPEED * ELLIPSIS_FRAMES.len() as u32);
+            self.status_step =
+                (self.status_step + 1) % (STATUS_ANIM_SPEED * self.frames.len() as u32);
         }
     }
 
     /// Reset the spinner to its initial state, restarting the birth animation.
+    /// The label and glyph sequence are preserved — they describe the loop's
+    /// activity, which survives a reset; construct a fresh spinner for a new
+    /// activity (as `start_agent_loop` does).
     pub const fn reset(&mut self) {
         self.step = 0;
         self.frames_elapsed = 0;
-        self.ellipsis_step = 0;
+        self.status_step = 0;
         self.initialized = false;
     }
 
@@ -219,13 +248,17 @@ impl AgentSpinner {
         self.label_width = label.chars().count();
     }
 
-    /// Switch the label to the given agent activity, restarting the ellipsis
-    /// so the change reads at once. A repeated activity only refreshes the
-    /// label text, keeping the rune scramble running.
+    /// Switch the label to the given agent activity and start that status's
+    /// own glyph animation from its first frame. The runic scramble
+    /// (seed, birth stagger, frame clock) is untouched; a repeated activity
+    /// is a cheap no-op that keeps the current glyph cycle running.
     pub fn set_activity(&mut self, activity: AgentActivity) {
         if self.label != activity.label() {
             self.set_label(activity.label());
-            self.ellipsis_step = 0;
+            // Immediately switch to the new status's own glyph sequence,
+            // restarting it from the first glyph so the change reads at once.
+            self.frames = activity_frames(activity);
+            self.status_step = 0;
         }
     }
 
@@ -248,14 +281,19 @@ impl AgentSpinner {
         self.gradient_colors = make_gradient_ramp(gradient_a, gradient_b, self.cycling_char_width);
     }
 
-    /// Total width in terminal cells (cycling + gap + label + ellipsis).
+    /// Total width in terminal cells (cycling + gap + label + status glyph).
     pub fn width(&self) -> usize {
         let mut w = self.cycling_char_width;
         if self.label_width > 0 {
             w += 1; // gap
             w += self.label_width;
-            // Widest ellipsis frame
-            w += ELLIPSIS_FRAMES.iter().map(|f| f.len()).max().unwrap_or(0);
+            // Widest glyph of the current status's sequence
+            w += self
+                .frames
+                .iter()
+                .map(|f| f.chars().count())
+                .max()
+                .unwrap_or(0);
         }
         w
     }
@@ -269,6 +307,12 @@ impl AgentSpinner {
     #[cfg(test)]
     pub(crate) fn label_for_test(&self) -> &str {
         &self.label
+    }
+
+    #[cfg(test)]
+    pub(crate) fn status_frame(&self) -> &'static str {
+        let idx = (self.status_step / STATUS_ANIM_SPEED) as usize % self.frames.len();
+        self.frames[idx]
     }
 
     // ── Rendering ──────────────────────────────────────────────────────
@@ -325,18 +369,38 @@ impl AgentSpinner {
             }
         }
 
-        // 4. Animated ellipsis (only after birth animation is complete)
+        // 4. Status glyph animation (only after birth animation is complete).
+        // The slot is always padded to the widest frame of the CURRENT
+        // sequence: a narrower frame must clear stale cells instead of
+        // ghosting them.
         if self.initialized && self.label_width > 0 {
-            let ellipsis_idx =
-                (self.ellipsis_step / ELLIPSIS_ANIM_SPEED) as usize % ELLIPSIS_FRAMES.len();
-            let ellipsis_text = ELLIPSIS_FRAMES[ellipsis_idx];
-            let ellipsis_x = x + self.cycling_char_width as u16 + 1 + self.label_width as u16;
-            let ellipsis_style = Style::default().fg(rgba_color(self.label_color));
-            for (i, ch) in ellipsis_text.chars().enumerate() {
-                let cell_x = ellipsis_x + i as u16;
+            let glyph_idx = (self.status_step / STATUS_ANIM_SPEED) as usize % self.frames.len();
+            let glyph_text = self.frames[glyph_idx];
+            let glyph_max = self
+                .frames
+                .iter()
+                .map(|f| f.chars().count())
+                .max()
+                .unwrap_or(0);
+            let glyph_x = x
+                .saturating_add(self.cycling_char_width as u16)
+                .saturating_add(1)
+                .saturating_add(self.label_width as u16);
+            let glyph_style = Style::default().fg(rgba_color(self.label_color));
+            let mut written = 0usize;
+            for (i, ch) in glyph_text.chars().enumerate() {
+                let cell_x = glyph_x.saturating_add(i as u16);
                 if let Some(cell) = buf.cell_mut((cell_x, y)) {
                     cell.set_char(ch);
-                    cell.set_style(ellipsis_style);
+                    cell.set_style(glyph_style);
+                }
+                written += 1;
+            }
+            for i in written..glyph_max {
+                let cell_x = glyph_x.saturating_add(i as u16);
+                if let Some(cell) = buf.cell_mut((cell_x, y)) {
+                    cell.set_char(' ');
+                    cell.set_style(Style::default());
                 }
             }
         }

@@ -115,11 +115,17 @@ pub(crate) fn dialog_preview_text(text: &str) -> String {
 /// Zero the alpha of a theme's base background when transparent mode is on
 /// (the `/background` toggle). RGB channels are preserved so luminance
 /// derivations keep working and toggling off restores the exact registry
-/// color.
+/// color. The diff-panel fill (a cosh-only snapshot of `background`, see
+/// `Theme::diff_panel_background`) follows the same treatment so the diff
+/// box stays invisible in transparent mode too.
 fn apply_background_preference(mut t: Theme, transparent_background: bool) -> Theme {
     if transparent_background {
         let (r, g, b, _) = t.background.to_ints();
         t.background = RGBA::from_ints(r, g, b, 0);
+        if let Some(bg) = t.diff_panel_background {
+            let (r, g, b, _) = bg.to_ints();
+            t.diff_panel_background = Some(RGBA::from_ints(r, g, b, 0));
+        }
     }
     t
 }

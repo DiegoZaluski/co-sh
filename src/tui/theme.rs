@@ -121,6 +121,13 @@ pub struct Theme {
     pub diff_line_number: RGBA,
     pub diff_added_line_number_bg: RGBA,
     pub diff_removed_line_number_bg: RGBA,
+    /// Background of the box frame that wraps a rendered diff block (the
+    /// edit tool's unified/split diff body). `None` (every theme except
+    /// cosh) falls back to `background_panel` — the historical behavior.
+    /// cosh sets this to `background` so the diff box disappears into the
+    /// transcript background instead of showing as a black panel
+    /// (cosh's `background_panel` is pure `#000000`).
+    pub diff_panel_background: Option<RGBA>,
     pub markdown_text: RGBA,
     pub markdown_heading: RGBA,
     pub markdown_link: RGBA,
@@ -372,6 +379,9 @@ fn full_theme(
         diff_line_number: RGBA::from_hex(dln),
         diff_added_line_number_bg: RGBA::from_hex(dalb),
         diff_removed_line_number_bg: RGBA::from_hex(drlb),
+        // Every theme except cosh keeps the historical `background_panel`
+        // diff-box frame; cosh overrides below.
+        diff_panel_background: None,
         markdown_text: RGBA::from_hex(mt),
         markdown_heading: RGBA::from_hex(mh),
         markdown_link: RGBA::from_hex(ml),
@@ -450,6 +460,10 @@ fn cosh() -> Theme {
     t.mode_build = Some(RGBA::from_hex("#474955"));
     t.queue_next_loop = RGBA::from_hex("#3A3116");
     t.queue_next_request = RGBA::from_hex("#123A38");
+    // Diff blocks (unified and split) blend into the transcript: the box
+    // frame takes the chat `background` instead of `background_panel`
+    // (#000000). cosh-only — see `Theme::diff_panel_background`.
+    t.diff_panel_background = Some(t.background);
     t
 }
 
@@ -548,6 +562,7 @@ fn orng() -> Theme {
         diff_line_number: RGBA::from_hex("#808080"),
         diff_added_line_number_bg: RGBA::from_hex("#00000000"),
         diff_removed_line_number_bg: RGBA::from_hex("#00000000"),
+        diff_panel_background: None,
         markdown_text: RGBA::from_hex("#eeeeee"),
         markdown_heading: RGBA::from_hex("#EC5B2B"),
         markdown_link: RGBA::from_hex("#EC5B2B"),

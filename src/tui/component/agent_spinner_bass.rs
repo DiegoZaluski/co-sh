@@ -108,7 +108,7 @@ const STATUS_ANIM_SPEED: u32 = 8;
 /// equalizer pulse is unaffected. Switching activity restarts the new
 /// sequence from its first glyph.
 const WORKING_FRAMES: &[&str] = &["·", "•", "●", "•", "·"];
-const PONDERING_FRAMES: &[&str] = &["·", "+", "×", "+", "·"];
+const PONDERING_FRAMES: &[&str] = &["+", "×", "+", "·", "·"];
 const SEARCHING_FRAMES: &[&str] = &["›", "»", "›"];
 const RECALLING_FRAMES: &[&str] = &["↶", "↺", "↶"];
 

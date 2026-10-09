@@ -1196,7 +1196,13 @@ pub fn render_edit(ctx: &mut ToolRenderCtx, part: &ToolPart) {
         *ctx.line_h = area.height;
 
         let mut border_box = BoxRenderable::new();
-        border_box.set_background_color(Some(ctx.theme.background_panel.into()));
+        // Cosh-only override — see `Theme::diff_panel_background`.
+        border_box.set_background_color(Some(
+            ctx.theme
+                .diff_panel_background
+                .unwrap_or(ctx.theme.background_panel)
+                .into(),
+        ));
         border_box.set_border_color(Some(ctx.theme.background.into()));
         border_box.set_border_sides(BorderSidesConfig {
             left: false,
