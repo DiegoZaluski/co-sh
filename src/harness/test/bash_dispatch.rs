@@ -1,7 +1,5 @@
-use super::super::events::HarnessEvent;
 use super::super::tools::{CoshTools, Tools};
 use serde_json::json;
-use std::time::Duration;
 
 fn make_tools() -> CoshTools {
     CoshTools::new(".")

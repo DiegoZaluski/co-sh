@@ -295,12 +295,9 @@ pub(crate) fn kill_process_tree(pid: u32) {
         for target in &fresh {
             cmd.arg("/PID").arg(target.to_string());
         }
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            // 0x08000000 == CREATE_NO_WINDOW: no console flash.
-            cmd.creation_flags(0x08000000);
-        }
+        use std::os::windows::process::CommandExt;
+        // 0x08000000 == CREATE_NO_WINDOW: no console flash.
+        cmd.creation_flags(0x08000000);
         let _ = cmd.status();
         killed.extend(fresh);
     }

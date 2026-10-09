@@ -155,12 +155,12 @@ fn event_stream(handle: TurnHandle) -> ChatStream {
                         // only re-emitted when nothing streamed before it —
                         // the runtime dedups against the deltas).
                         for inner in events {
-                            if let Some(chunk) = event_stream_member(inner) {
-                                if tx.send(chunk).is_err() {
-                                    return Err(ConnectorError::Network(
-                                        "stream consumer dropped".into(),
-                                    ));
-                                }
+                            if let Some(chunk) = event_stream_member(inner)
+                                && tx.send(chunk).is_err()
+                            {
+                                return Err(ConnectorError::Network(
+                                    "stream consumer dropped".into(),
+                                ));
                             }
                         }
                         Ok(())

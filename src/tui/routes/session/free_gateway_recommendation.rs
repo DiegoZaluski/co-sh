@@ -1628,7 +1628,7 @@ mod tests {
     #[test]
     fn tabbed_offer_switches_tabs_without_touching_the_stream() {
         let mut d = FreeGatewayRecommendationDialog::new();
-        d.show_offers(&OFFERS);
+        d.show_offers(OFFERS);
         assert!(d.has_tabs(), "fixture: OFFERS must render a tab bar");
         assert_eq!(
             d.active_offer().unwrap().provider,
@@ -1676,7 +1676,7 @@ mod tests {
     #[test]
     fn tab_switch_drops_the_drag_selection() {
         let mut d = FreeGatewayRecommendationDialog::new();
-        d.show_offers(&OFFERS);
+        d.show_offers(OFFERS);
         d.stream_chars = d.content.stream_text.chars().count();
         d.phase = Phase::WaitingForResponse;
 
@@ -1725,7 +1725,7 @@ mod tests {
         use cosh_tui::core::types::{MouseButton, MouseEventType, MouseModifiers};
 
         let mut d = FreeGatewayRecommendationDialog::new();
-        d.show_offers(&OFFERS);
+        d.show_offers(OFFERS);
         d.stream_chars = 30; // mid-stream reveal
         d.phase = Phase::Streaming;
 
@@ -1760,7 +1760,7 @@ mod tests {
     #[test]
     fn the_question_row_is_hit_tested_at_footer_minus_five() {
         let mut d = FreeGatewayRecommendationDialog::new();
-        d.show_offers(&OFFERS);
+        d.show_offers(OFFERS);
         d.phase = Phase::WaitingForResponse;
 
         let area = Rect::new(0, 0, 80, 24);

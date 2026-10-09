@@ -16,6 +16,7 @@ use agent_client_protocol::schema::v1::{
     ContentBlock, InitializeRequest, NewSessionRequest, PromptRequest, ReadTextFileRequest,
     SessionNotification, SessionUpdate, TextContent, WriteTextFileRequest,
 };
+#[cfg(unix)]
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 

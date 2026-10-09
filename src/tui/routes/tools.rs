@@ -443,7 +443,7 @@ mod tests {
         view.render(&mut buf, Rect::new(0, 1, 100, term.height - 4), &theme);
 
         let max_w = max_row_width();
-        let row_x = 0 + (100u16.saturating_sub(max_w as u16)) / 2;
+        let row_x = (100u16.saturating_sub(max_w as u16)) / 2;
         let mouse_area = Rect::new(0, 1, 100, term.height - 4 + 1);
         let move_to = |x: u16, y: u16| {
             MouseEvent::new(

@@ -1683,8 +1683,10 @@ mod tests {
         let _env_guard = ENV_LOCK.lock();
         let _isolated = IsolatedConfig::new();
 
-        let mut setup = Setup::default();
-        setup.lsp = false;
+        let mut setup = Setup {
+            lsp: false,
+            ..Setup::default()
+        };
         setup.save();
         let reloaded = Setup::load();
         assert!(!reloaded.lsp);
@@ -1774,8 +1776,8 @@ mod tests {
             let merged = local.merged_over(&baseline, baseline.clone());
             let merged_json = serde_json::to_value(&merged).unwrap();
             assert_eq!(
-                merged_json.get(&field),
-                local_json.get(&field),
+                merged_json.get(field),
+                local_json.get(field),
                 "merged_over dropped the local change to `{field}` — \
                  add the field to the merge (a Setup field not handled by \
                  merged_over loses its local changes whenever a concurrent \

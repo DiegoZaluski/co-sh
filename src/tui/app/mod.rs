@@ -329,6 +329,7 @@ pub struct App {
     /// * `Some(NextLoop)` — the head would start the next loop: the
     ///   auto-start (including the deferred one at loop closure) waits,
     ///   while "next request" deliveries continue untouched.
+    ///
     /// `None` when no head edit is in flight. Cleared by
     /// [`App::enqueue_pending_message`] (the edited message returned to its
     /// slot), the ESC stop and the queue-clear paths.
@@ -1176,9 +1177,7 @@ impl App {
     /// `None` when no record resolved a price yet (no provider-reported cost
     /// and no catalog estimate) — a guessed `$0` is never reported.
     fn session_cost(&self) -> Option<f64> {
-        let Some(sid) = self.state.current_session_id.as_deref() else {
-            return None;
-        };
+        let sid = self.state.current_session_id.as_deref()?;
         // Runs on the render hot path (header, every frame): iterate by
         // reference instead of cloning the session's records into a Vec.
         Self::sum_cost_iter(self.usage_records.iter().filter(|r| r.session_id == sid))

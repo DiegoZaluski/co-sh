@@ -113,10 +113,9 @@ impl App {
             && !self.permission_dialog.visible
             && !self.queue_choice_dialog.visible
             && !self.free_gateway_dialog.visible
+            && let Some(blink) = blink_deadline(&self.prompt_view.cursor)
         {
-            if let Some(blink) = blink_deadline(&self.prompt_view.cursor) {
-                wait = wait.min(blink);
-            }
+            wait = wait.min(blink);
         }
         // Modal dialog stack cursors blink too.
         if let Some(d) = self.dialog.current()

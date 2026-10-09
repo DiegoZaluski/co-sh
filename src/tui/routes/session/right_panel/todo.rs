@@ -28,11 +28,6 @@ fn content_width(max_w: u16) -> u16 {
     max_w.saturating_sub(LEFT_PAD + CHECKBOX_W + 1)
 }
 
-/// Render the TODO section. Returns the number of lines used.
-///
-/// Item contents WRAP to the section width (continuation lines align under
-/// the content column); scrolling is line-based across the flattened rows.
-#[allow(clippy::too_many_arguments)]
 // ═══════════════════════ Completion strike-through animation ═════════════════
 
 /// Number of characters a completed item's label reveals crossed out at
@@ -59,6 +54,11 @@ fn strike_reveal_count(label: &str, frame: u64) -> Option<usize> {
     Some(reveal.min(chars))
 }
 
+/// Render the TODO section. Returns the number of lines used.
+///
+/// Item contents WRAP to the section width (continuation lines align under
+/// the content column); scrolling is line-based across the flattened rows.
+#[allow(clippy::too_many_arguments)]
 pub fn render_todo_section(
     buf: &mut Buffer,
     x: u16,

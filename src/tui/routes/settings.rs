@@ -588,30 +588,29 @@ fn build_layout(setup: &Setup, width: u16) -> Vec<LayoutLine> {
                     });
                     y += 1;
                 }
-                SettingKind::HookList(event) => {
+                SettingKind::HookList(event) if is_enabled(item, setup) => {
                     // The hook sub-list exists only while its category is
                     // enabled.
-                    if is_enabled(item, setup) {
+                    lines.push(LayoutLine {
+                        y,
+                        line: Line::Blank,
+                    }); // breathing room
+                    y += 1;
+                    for hook in 0..hook_entries(setup, event).len() {
                         lines.push(LayoutLine {
                             y,
-                            line: Line::Blank,
-                        }); // breathing room
-                        y += 1;
-                        for hook in 0..hook_entries(setup, event).len() {
-                            lines.push(LayoutLine {
-                                y,
-                                line: Line::Hook { event, hook },
-                            });
-                            y += 1;
-                        }
-                        // The add action reads as the last entry of the hook list.
-                        lines.push(LayoutLine {
-                            y,
-                            line: Line::AddHook { event },
+                            line: Line::Hook { event, hook },
                         });
                         y += 1;
                     }
+                    // The add action reads as the last entry of the hook list.
+                    lines.push(LayoutLine {
+                        y,
+                        line: Line::AddHook { event },
+                    });
+                    y += 1;
                 }
+                SettingKind::HookList(_) => {}
                 // Always visible, like an enabled hook list: one toggle row
                 // per registered server plus the Add action.
                 SettingKind::ServerList => {
@@ -841,7 +840,7 @@ impl SettingsView {
             .skip_while(|line| line.y < sel_line.y)
             .find(|line| matches!(line.line, Line::SectionBorder { top: false, .. }))
             .map_or(sel_line.y, |line| line.y);
-        if bottom_y.saturating_sub(top_y) + 1 <= window {
+        if bottom_y.saturating_sub(top_y) < window {
             // Whole block fits: pin its closing border to the last visible
             // row (0 while the content still fits without scrolling).
             bottom_y.saturating_sub(window - 1)

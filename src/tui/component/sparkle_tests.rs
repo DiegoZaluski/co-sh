@@ -96,7 +96,7 @@ fn armed_flourish_appears_only_on_blank_cells_and_is_deterministic() {
     assert_eq!(visible(&buf), visible(&again));
     // Stars use the braille dot table; the text cells are untouched.
     for (x, s) in &stars {
-        let is_dot = super::DOTS.iter().any(|d| *d == s.as_str());
+        let is_dot = super::DOTS.contains(&s.as_str());
         if *x >= 5 {
             assert!(is_dot, "x={x} s={s}");
         } else {
