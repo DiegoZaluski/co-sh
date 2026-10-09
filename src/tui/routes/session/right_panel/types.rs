@@ -139,12 +139,13 @@ impl SubagentActivityLine {
     }
 }
 
-/// The drawable activity lines of one running sub-agent session, in
+/// The drawable activity lines of one sub-agent session, in
 /// CHRONOLOGICAL order (mini-chat): transcript entries render in arrival
 /// order, so tool calls, thoughts and message text climb upward as new
-/// content arrives — the same flow as the main chat. Called ONLY for
-/// running sessions — activity is cleared on completion, so finished
-/// windows render nothing. Tool/plan/diff lines are pre-wrapped with
+/// content arrives — the same flow as the main chat. A RUNNING session
+/// grows the transcript live; a finished one keeps its SEALED transcript
+/// (`SubagentActivity::seal`) rendering permanently under the echoed
+/// prompt. Tool/plan/diff lines are pre-wrapped with
 /// [`wrap_chars`] (first row + `*Cont` rows); `Message`/`Thought` carry
 /// their whole markdown block plus its timeline `index` (cache key).
 pub(crate) fn activity_lines(
@@ -663,10 +664,11 @@ pub struct PtySession {
     pub spilled: bool,
     pub spilled_path: Option<PathBuf>,
     /// Live structured sub-agent activity (Phase 3a). Empty for bash
-    /// sessions and for finished/rehydrated subagent windows — only the
-    /// currently RUNNING subagent accumulates events, and the state is
-    /// cleared when the session completes (the final report renders from
-    /// the JSON envelope as before).
+    /// sessions; only the currently RUNNING subagent accumulates events.
+    /// On completion/failure the timeline is SEALED, not wiped
+    /// (`SubagentActivity::seal`) — reasoning and tool narration stay as
+    /// the window's permanent transcript; the final report body renders
+    /// below it from the tool-result text as before.
     pub(crate) subagent_activity: SubagentActivity,
     /// Review outcome declared by the report's `<!-- severity: ... -->`
     /// header (Phase 3b.1). `None` for bash sessions, non-review tasks and
@@ -691,6 +693,12 @@ pub struct PtySession {
     /// never the ref, so input1 can never pair with output2. `None` for
     /// bash sessions and rehydrated ones (no live routing).
     pub(crate) call_ref: Option<String>,
+    /// Cached activity-visual-row count at a wrap width: sealed transcripts
+    /// never change again, so recomputing their markdown row estimates for
+    /// every frame of every finished window would be a permanent cost for
+    /// content that cannot move. `None` = recompute (and cache). Invalidated
+    /// by every `apply` (a width change bypasses the cache entirely).
+    pub(crate) activity_rows_cache: Option<(u16, u16)>,
 }
 
 impl PtySession {
@@ -709,6 +717,7 @@ impl PtySession {
             description: None,
             code_review: false,
             call_ref: None,
+            activity_rows_cache: None,
         }
     }
 
@@ -793,11 +802,14 @@ pub(crate) enum SubagentTimelineEntry {
     Plan { entries: Vec<PlanEntry> },
 }
 
-/// Live structured activity of one running sub-agent session — the
-/// chronological transcript the sub-agent box renders as a mini chat.
-/// Display-only plumbing (Phase 3a): Phase 3b draws it inside the sub-agent
-/// box. Reset when the session completes; persisted sessions keep rendering
-/// from the final JSON envelope (3a.3).
+/// Live structured activity of one sub-agent session — the chronological
+/// transcript the sub-agent box renders as a mini chat. Display-only
+/// plumbing (Phase 3a): Phase 3b draws it inside the sub-agent box. A
+/// RUNNING session grows it live; on completion it is SEALED into the
+/// permanent transcript (see [`Self::seal`]) — reasoning, tool
+/// rows and narration survive, only the final report text is dropped (the
+/// window's markdown body below carries it). Persisted sessions keep
+/// rendering from the final JSON envelope (3a.3).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct SubagentActivity {
     /// Transcript entries in arrival order; the newest is the LAST entry.
@@ -1065,6 +1077,80 @@ impl SubagentActivity {
         }
     }
 
+    /// Seal the live timeline into the window's PERMANENT transcript:
+    /// completion and failure no longer wipe it. Wiping erased the
+    /// sub-agent's reasoning and tool narration the moment its report
+    /// arrived — exactly when the user tried to re-read them. The sealed
+    /// transcript keeps rendering under the echoed prompt, above the body,
+    /// on every finished window.
+    ///
+    /// `completed` picks the two per-path details:
+    /// - The final Message entry. On completion the report body rendered
+    ///   below usually IS that text (the `TurnClosure` contract — the
+    ///   report is the last message segment), so keeping it would print
+    ///   the answer twice: the entry is dropped WHEN its text is actually
+    ///   contained in `report_body`. A body that does not carry it keeps
+    ///   the entry — a background failure notification ("no output was
+    ///   produced"), a report truncated past the message, a turn that
+    ///   ended right after a tool call (the closure's `previous`
+    ///   fallback). On failure the body is the harness error and the
+    ///   transcript is all that remains of the sub-agent's work — every
+    ///   entry stays.
+    /// - Calls still `InProgress` never received their result update
+    ///   before the turn ended; they seal `Completed` on success (the
+    ///   result usually raced behind the report event — the harness pairs
+    ///   every call with a result) and `Failed` on failure — either way
+    ///   they stop spinning on a finished window. Plan entries keep their
+    ///   last status: one left InProgress at turn end reflects the
+    ///   sub-agent's own final state, and fabricating a Completed mark
+    ///   would misreport unfinished work.
+    pub(crate) fn seal(&mut self, completed: bool, report_body: Option<&str>) {
+        if completed
+            && let Some(pos) = self
+                .timeline
+                .iter()
+                .rposition(|e| matches!(e, SubagentTimelineEntry::Message { .. }))
+        {
+            // Same raw stream on both sides: the entry is the message's
+            // bounded TAIL, the body its full text, so containment holds on
+            // the normal path — and degrades to KEEPING the entry, never to
+            // losing content.
+            let in_body = match (&self.timeline[pos], report_body) {
+                (SubagentTimelineEntry::Message { text }, Some(body)) => {
+                    body.contains(text.trim())
+                }
+                _ => false,
+            };
+            if in_body {
+                self.timeline.remove(pos);
+            }
+        }
+        for entry in &mut self.timeline {
+            if let SubagentTimelineEntry::Tool(call) = entry
+                && call.status == ToolCallStatus::InProgress
+            {
+                call.status = if completed {
+                    ToolCallStatus::Completed
+                } else {
+                    ToolCallStatus::Failed
+                };
+            }
+        }
+    }
+
+    /// `seal(true, body)` at the completion path: the report body carries
+    /// the final message, so the transcript seals without it — unless the
+    /// body does not actually contain that text (see [`Self::seal`]).
+    pub(crate) fn seal_completed(&mut self, report_body: &str) {
+        self.seal(true, Some(report_body));
+    }
+
+    /// `seal(false, _)` at the failure path: the body is the harness
+    /// error, so the transcript seals in FULL.
+    pub(crate) fn seal_failed(&mut self) {
+        self.seal(false, None);
+    }
+
     /// Merge one streamed message/thought chunk into the timeline.
     ///
     /// The mini-chat contract (see [`Self::apply`]) says stream chunks
@@ -1307,6 +1393,14 @@ pub struct RightPanelState {
     /// deliberately NOT part of this cache (see `subagent_rows_combined`).
     subagent_rows_cache: Vec<u16>,
     subagent_rows_cache_w: u16,
+    /// Per-session static-build facts aligned with `subagent_rows_cache`:
+    /// `(has_input_echo, has_visible_body)`. The overlay recomputes the
+    /// input gap from these plus the live activity rows: the gap separates
+    /// the echoed prompt from WHATEVER follows it (transcript first, then
+    /// the body), and during a stream the body does not exist yet — the
+    /// static build counted no gap, the renderer still draws one in front
+    /// of the live activity, so the overlay must add the missing row.
+    subagent_rows_meta: Vec<(bool, bool)>,
     /// The rows CALLERS see: the static cache plus the live activity rows,
     /// which are recounted fresh on every call (outside the throttle) so the
     /// section height — and the scroll clamp derived from it — always
@@ -1497,6 +1591,7 @@ impl RightPanelState {
             subagent_scroll_y: 0,
             subagent_rows_cache: Vec::new(),
             subagent_rows_cache_w: 0,
+            subagent_rows_meta: Vec::new(),
             subagent_rows_combined: Vec::new(),
             subagent_layout_gen: 0,
             last_subagent_rebuild: Instant::now()
@@ -3208,14 +3303,42 @@ impl RightPanelState {
                 let (severity, _) = cosh_tools::subagent::severity::extract_severity(&final_output);
                 session.severity = severity;
             }
+            // SEAL ON THE TRANSITION ONLY: one subagent call's completion
+            // arrives TWICE — the streamed `ToolOutput { finished: true }`
+            // report AND the `ToolResult` JSON envelope, both routed by the
+            // same call_ref (background windows get the later notification
+            // on top). Sealing on every pass would delete one more
+            // narration Message each time; gating on the Running→finished
+            // transition makes the later passes the plain no-ops the
+            // ToolResult handler has always assumed they are (the output
+            // replacement itself is idempotent — the echo is re-split off
+            // the head before the re-prepend).
+            let was_running = matches!(session.status, PtyStatus::Running);
+            session.status = PtyStatus::Completed;
+            if was_running {
+                // SEALED TRANSCRIPT: the mini-chat (reasoning, tool rows,
+                // narration) becomes the window's permanent transcript
+                // instead of being wiped — wiping erased the reasoning
+                // exactly when the user tried to re-read it. The final
+                // Message entry goes ONLY when the report body actually
+                // carries that text (the TurnClosure contract — the body IS
+                // the last message segment); a body that does not (a
+                // background failure notification, a truncated report, the
+                // closure's fallback) keeps the entry instead of losing
+                // content. Sealed BEFORE the echo re-prepend and tail
+                // truncation: the containment reference is the sub-agent's
+                // own report, not the echoed prompt above it.
+                session.subagent_activity.seal_completed(&final_output);
+                session.activity_rows_cache = None;
+            }
             if let Some(echo) = echoed_input {
                 final_output.insert_str(0, &echo);
             }
             Self::truncate_output(&mut final_output);
             session.output = final_output;
-            session.status = PtyStatus::Completed;
-            session.subagent_activity = SubagentActivity::default();
-            self.pty_gen = self.pty_gen.wrapping_add(1);
+            if was_running {
+                self.pty_gen = self.pty_gen.wrapping_add(1);
+            }
         }
     }
 
@@ -3283,9 +3406,23 @@ impl RightPanelState {
             }
             Self::truncate_output(&mut error);
             session.output = error;
+            // SEAL ON THE TRANSITION ONLY (same double-fire contract as the
+            // completion path above): a ref-routed failure can re-hit an
+            // already-finished window; only the Running→Failed transition
+            // seals.
+            let was_running = matches!(session.status, PtyStatus::Running);
             session.status = PtyStatus::Failed;
-            session.subagent_activity = SubagentActivity::default();
-            self.pty_gen = self.pty_gen.wrapping_add(1);
+            if was_running {
+                // SEALED TRANSCRIPT (failure flavor): the body is the
+                // harness error, not the sub-agent's answer, so the
+                // transcript seals in FULL — reasoning, tool rows and
+                // narration are all that remains of the sub-agent's work,
+                // and every still-running call marks Failed instead of
+                // spinning forever on a finished window.
+                session.subagent_activity.seal_failed();
+                session.activity_rows_cache = None;
+                self.pty_gen = self.pty_gen.wrapping_add(1);
+            }
         }
     }
 
@@ -3353,6 +3490,11 @@ impl RightPanelState {
         if let Some(idx) = target {
             let session = &mut self.pty_sessions[idx];
             changed = session.subagent_activity.apply(event);
+            // A changed timeline invalidates the cached row count (the
+            // per-session cache only serves immutable sealed transcripts).
+            if changed {
+                session.activity_rows_cache = None;
+            }
             self.pty_gen = self.pty_gen.wrapping_add(1);
         }
         if changed {
@@ -3665,6 +3807,7 @@ impl RightPanelState {
             }
             self.subagent_layout_gen = self.pty_gen;
             self.subagent_rows_cache.clear();
+            self.subagent_rows_meta.clear();
             for pty in &self.pty_sessions {
                 if !pty.command.starts_with("subagent:") {
                     continue;
@@ -3702,24 +3845,61 @@ impl RightPanelState {
                     .saturating_add(input_gap)
                     .saturating_add(body_rows)
                     .max(1);
+                self.subagent_rows_meta.push((input_rows > 0, body_rows > 0));
                 self.subagent_rows_cache.push(rows);
             }
+            // The overlay consumes both vecs with parallel iterators: a
+            // future refactor that clears/pushes one without the other
+            // would misalign heights per-session with no signal — pin the
+            // lockstep the gap math depends on.
+            debug_assert_eq!(
+                self.subagent_rows_cache.len(),
+                self.subagent_rows_meta.len(),
+                "rows cache and its meta facts must stay index-aligned"
+            );
             self.subagent_rows_cache_w = wrap_w;
         }
         // Fresh overlay: static rows + THIS frame's live activity rows. The
         // combined vec is what every caller (layout fitting, scroll clamp,
-        // renderer) consumes.
+        // renderer) consumes. The activity counts for EVERY status now —
+        // completion seals the transcript into the permanent record instead
+        // of wiping it, and the renderer draws whatever the timeline holds;
+        // the old Running-only gate would desync height from paint. A
+        // RUNNING session recounts fresh every call (its timeline grows on
+        // every event, which invalidates the per-session cache); a SEALED
+        // one is immutable, so its cached count is served — recomputing
+        // markdown row estimates for every finished window, every frame,
+        // would be a permanent cost for content that cannot move.
         self.subagent_rows_combined.clear();
         let mut it = self.subagent_rows_cache.iter().copied();
-        for pty in &self.pty_sessions {
+        let mut meta = self.subagent_rows_meta.iter().copied();
+        for pty in &mut self.pty_sessions {
             if !pty.command.starts_with("subagent:") {
                 continue;
             }
-            let mut rows = it.next().unwrap_or(0);
-            if pty.status == PtyStatus::Running {
-                rows = rows.saturating_add(activity_visual_rows(&pty.subagent_activity, wrap_w));
-            }
-            self.subagent_rows_combined.push(rows);
+            let static_rows = it.next().unwrap_or(0);
+            let (has_input, has_body) = meta.next().unwrap_or((false, false));
+            let activity_rows = match pty.activity_rows_cache {
+                Some((w, rows)) if w == wrap_w => rows,
+                _ => {
+                    let rows = activity_visual_rows(&pty.subagent_activity, wrap_w);
+                    pty.activity_rows_cache = Some((wrap_w, rows));
+                    rows
+                }
+            };
+            // GAP LOCKSTEP: the renderer draws one blank row between the
+            // echoed prompt and WHATEVER follows it — transcript first, then
+            // the body. The static build already counted the gap when the
+            // body existed at build time; when it did NOT (nothing followed
+            // the prompt then) but live activity does now, the missing gap
+            // row is added here — outside the throttle, exactly like the
+            // activity rows, so height and paint stay in lockstep mid-stream
+            // (the internal sub-agent's report arrives only at the end: the
+            // body-only condition used to glue the prompt to the live
+            // mini-chat for the whole stream).
+            let stream_gap = u16::from(has_input && !has_body && activity_rows > 0);
+            self.subagent_rows_combined
+                .push(static_rows.saturating_add(stream_gap).saturating_add(activity_rows));
         }
         &self.subagent_rows_combined
     }
@@ -4241,6 +4421,36 @@ mod tests {
         assert_eq!(state2.subagent_section_rows(40), &[1], "input only, no gap");
     }
 
+    /// REGRESSION (mid-stream glue): the gap between the echoed prompt and
+    /// what follows it was conditioned on the BODY only, and the internal
+    /// sub-agent's report arrives only at the END of the turn — so for the
+    /// whole stream the prompt sat glued to the live mini-chat transcript,
+    /// and the blank row popped in only at completion. The gap separates
+    /// the prompt from WHATEVER follows: live activity first, then the body.
+    #[test]
+    fn subagent_rows_count_the_gap_between_input_and_live_activity() {
+        let mut state = RightPanelState::new();
+        state.subagent_rebuild_interval = Duration::ZERO;
+        state.start_pty("subagent: kilo".to_string(), None);
+        // Mid-stream: the prompt is echoed, the body does not exist yet, but
+        // the transcript is already growing.
+        state.update_last_pty("→ cosh: prompt\n".to_string());
+        state.update_subagent_activity(&tool_call_event("c1", "Reading a"), None);
+
+        assert_eq!(
+            state.subagent_section_rows(40),
+            &[3],
+            "input + gap + live activity row"
+        );
+
+        // Completion: the body arrives and the transcript seals — the gap
+        // stays exactly one row (now between input and activity; the body
+        // renders after the sealed transcript). No double gap.
+        state.complete_last_pty("final report\n".to_string());
+        let rows = state.subagent_section_rows(40);
+        assert_eq!(rows[0], 4, "input + gap + activity + body");
+    }
+
     /// The agent hint resolves from the notification wrapper (both status
     /// variants) and stays None for envelopes/plain text.
     #[test]
@@ -4573,31 +4783,179 @@ mod tests {
         assert_eq!(activity.usage, Some((8192, 2048)));
     }
 
+    /// SEALED TRANSCRIPT: completion no longer wipes the mini-chat. The
+    /// reasoning and the tool rows become the window's permanent transcript;
+    /// only the final Message entry goes (the report body below IS that
+    /// text — the TurnClosure contract — so keeping it would print the
+    /// answer twice), and a call still InProgress seals Completed instead
+    /// of spinning forever on a finished window. A NEW subagent session
+    /// still starts with an empty timeline.
     #[test]
-    fn subagent_activity_resets_when_the_session_completes() {
+    fn subagent_activity_seals_when_the_session_completes() {
         let mut state = RightPanelState::new();
         state.start_pty("subagent: opencode".to_string(), None);
         state.update_subagent_activity(&tool_call_event("c1", "Reading a"), None);
+        state.update_subagent_activity(
+            &SubagentEvent::Thought {
+                text: "thinking hard".to_string(),
+            },
+            None,
+        );
+        state.update_subagent_activity(
+            &SubagentEvent::Message {
+                text: "final report".to_string(),
+            },
+            None,
+        );
 
         state.complete_last_pty("final report".to_string());
 
-        assert!(state.pty_sessions[0].subagent_activity.timeline.is_empty());
         assert_eq!(state.pty_sessions[0].status, PtyStatus::Completed);
         // The report text is still the session's rendered output.
         assert_eq!(state.pty_sessions[0].output, "final report");
+        let timeline = &state.pty_sessions[0].subagent_activity.timeline;
+        assert_eq!(
+            timeline.len(),
+            2,
+            "the final Message goes (the body carries it), the rest seals: {timeline:?}"
+        );
+        assert!(
+            matches!(&timeline[0], SubagentTimelineEntry::Tool(call)
+                if call.id == "c1" && call.status == ToolCallStatus::Completed),
+            "the InProgress call seals Completed: {timeline:?}"
+        );
+        assert!(
+            matches!(&timeline[1], SubagentTimelineEntry::Thought { text } if text == "thinking hard"),
+            "the reasoning SURVIVES completion: {timeline:?}"
+        );
 
         // A NEW subagent session starts with empty activity again.
         state.start_pty("subagent: opencode".to_string(), None);
         assert!(state.pty_sessions[1].subagent_activity.timeline.is_empty());
     }
 
-    /// REGRESSION (user-visible): the severity header is consumed metadata —
-    /// it tints the box and must NEVER appear as report text. The final
-    /// review report streams through the mini-chat timeline, and its first
-    /// line is the (now mandatory) `<!-- severity: ... -->` header, so the
-    /// timeline used to display the raw comment while the report was being
-    /// written. `activity_lines` strips it with the same extractor the
-    /// rendered body uses.
+    /// SEALED TRANSCRIPT (failure flavor): the body is the harness error,
+    /// NOT the sub-agent's answer, so the transcript seals in FULL — the
+    /// final Message stays too — and a call still InProgress seals Failed.
+    #[test]
+    fn subagent_activity_seals_in_full_when_the_session_fails() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: opencode".to_string(), None);
+        state.update_subagent_activity(&tool_call_event("c1", "Reading a"), None);
+        state.update_subagent_activity(
+            &SubagentEvent::Thought {
+                text: "thinking hard".to_string(),
+            },
+            None,
+        );
+        state.update_subagent_activity(
+            &SubagentEvent::Message {
+                text: "partial answer".to_string(),
+            },
+            None,
+        );
+
+        state.fail_last_pty("connector died".to_string());
+
+        assert_eq!(state.pty_sessions[0].status, PtyStatus::Failed);
+        let timeline = &state.pty_sessions[0].subagent_activity.timeline;
+        assert_eq!(timeline.len(), 3, "a failed turn keeps EVERY entry");
+        assert!(
+            matches!(&timeline[0], SubagentTimelineEntry::Tool(call)
+                if call.id == "c1" && call.status == ToolCallStatus::Failed),
+            "the InProgress call seals Failed: {timeline:?}"
+        );
+        assert!(
+            matches!(&timeline[1], SubagentTimelineEntry::Thought { text } if text == "thinking hard")
+        );
+        assert!(
+            matches!(&timeline[2], SubagentTimelineEntry::Message { text } if text == "partial answer"),
+            "the last message stays: the body is the error, not the answer"
+        );
+    }
+
+    /// REGRESSION (double completion, C1): one subagent call's completion
+    /// arrives TWICE - the streamed `ToolOutput { finished: true }` report
+    /// AND the `ToolResult` JSON envelope, both routed by the same call_ref
+    /// (background windows get a notification on top). Sealing on every
+    /// pass used to delete one MORE narration Message each time; only the
+    /// Running->finished transition seals.
+    #[test]
+    fn completing_an_already_finished_window_is_a_seal_no_op() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: internal".to_string(), None);
+        state.update_subagent_activity(
+            &SubagentEvent::Message {
+                text: "narration before the last tool call".to_string(),
+            },
+            None,
+        );
+        state.update_subagent_activity(&tool_call_event("c1", "Reading a"), None);
+        state.update_subagent_activity(
+            &SubagentEvent::Message {
+                text: "final report".to_string(),
+            },
+            None,
+        );
+
+        state.complete_last_pty("final report".to_string());
+        let sealed = state.pty_sessions[0].subagent_activity.clone();
+
+        // The envelope pass re-hits the finished window: nothing may change.
+        state.complete_last_pty("final report".to_string());
+        assert_eq!(
+            state.pty_sessions[0].subagent_activity, sealed,
+            "a second completion must not eat another narration Message"
+        );
+        // Same for a failure re-hitting the completed window.
+        state.fail_last_pty("late error".to_string());
+        assert_eq!(
+            state.pty_sessions[0].subagent_activity, sealed,
+            "a late failure must not re-seal (or flip status) a finished window"
+        );
+    }
+
+    /// The dedup is CONTAINMENT-based: the final Message entry is dropped
+    /// only when the report body actually carries its text. A body that
+    /// does not (the TurnClosure fallback shape - a body that is not the
+    /// timeline's last message) keeps the entry instead of losing content.
+    #[test]
+    fn seal_keeps_the_final_message_when_the_body_does_not_carry_it() {
+        let mut activity = SubagentActivity::default();
+        activity.apply(&SubagentEvent::Message {
+            text: "earlier narration".to_string(),
+        });
+        // A tool call between the two messages forces separate entries
+        // (consecutive Message chunks coalesce into one growing entry).
+        activity.apply(&tool_call_event("c1", "Reading a"));
+        activity.apply(&SubagentEvent::Message {
+            text: "the real final message".to_string(),
+        });
+
+        // The body is something else entirely (closure fallback, truncated
+        // report): no dedup — every entry stays.
+        activity.seal(true, Some("a different body"));
+        assert_eq!(activity.timeline.len(), 3);
+        assert!(matches!(
+            &activity.timeline[2],
+            SubagentTimelineEntry::Message { text } if text == "the real final message"
+        ));
+
+        // The body IS the final message: it dedupes away (the narration and
+        // the tool row stay; the InProgress call sealed Completed on the
+        // pass above).
+        activity.seal(true, Some("the real final message"));
+        assert_eq!(activity.timeline.len(), 2);
+        assert!(matches!(
+            &activity.timeline[0],
+            SubagentTimelineEntry::Message { text } if text == "earlier narration"
+        ));
+        assert!(matches!(
+            &activity.timeline[1],
+            SubagentTimelineEntry::Tool(call) if call.status == ToolCallStatus::Completed
+        ));
+    }
+
     #[test]
     fn activity_lines_consume_the_severity_header_from_message_text() {
         let mut activity = SubagentActivity::default();
@@ -5136,10 +5494,16 @@ mod tests {
         // One activity row (the tool call) on top of header + body.
         assert!(rows_running >= 2);
 
-        // Completing the session clears the activity: height shrinks back.
+        // Completing the session SEALS the activity (the timeline becomes
+        // the window's permanent transcript): the height does not shrink,
+        // the tool row stays — only its InProgress spinner resolves to the
+        // plain Completed marker, at the same single-row cost.
         state.complete_last_pty("final".to_string());
         let rows_done = state.subagent_section_rows_for_display(wrap_w)[0];
-        assert!(rows_done < rows_running);
+        assert_eq!(
+            rows_done, rows_running,
+            "a sealed one-row tool call must not change the height"
+        );
     }
 
     // ── Rehydration from a persisted session ─────────────────────────
@@ -6238,13 +6602,15 @@ mod tests {
             "one new tool-call row must show up without a cache rebuild"
         );
 
-        // And shrink back the moment the activity is cleared (completion):
-        // height and renderer must agree with no stale residue.
+        // And the height STAYS across completion: the timeline seals (the
+        // tool row remains, InProgress -> Completed costs the same single
+        // row) instead of being wiped, so height and renderer keep agreeing
+        // with no jump and no phantom row.
         state.complete_last_pty("report\n".to_string());
         let rows_done = state.subagent_section_rows(30).to_vec();
         assert_eq!(
-            rows_done[0], rows_before[0],
-            "cleared activity must not keep phantom rows"
+            rows_done[0], rows_after[0],
+            "a sealed one-row tool call must not change the height"
         );
     }
 

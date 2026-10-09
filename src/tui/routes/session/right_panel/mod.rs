@@ -1118,20 +1118,17 @@ fn render_subagent_section(
                 wrap_w,
             );
         }
-        // CHAT SEPARATOR: one blank row between the echoed prompt and what
-        // follows (activity, then the body) — the input and the output must
-        // never read as glued text. Conditional on the body the SAME way
-        // the height math (types.rs) conditions it: a gap with nothing
-        // after it would reserve an unpainted row, so it exists only when
-        // there is body content to separate from.
+        // Whether the report body has visible content (the severity header
+        // alone does not count): feeds the gap condition below, alongside
+        // the live/sealed transcript rows.
         let has_visible_body = !sanitize_subagent_text(subagent_visible_body(body))
             .trim()
             .is_empty();
-        let input_gap = i32::from(input_h > 0 && has_visible_body);
         // Live activity (Phase 3b.2): tool calls, plan, thought — the same
-        // lines the height math counted for RUNNING sessions. Finished
-        // windows have none (activity is cleared on completion), so this
-        // contributes nothing for history entries.
+        // lines the height math counts (for EVERY status now). A finished
+        // window keeps its SEALED transcript (`SubagentActivity::seal`)
+        // rendering permanently; rehydrated history entries have an empty
+        // timeline, so this still contributes nothing for them.
         let activity = activity_lines(&session.subagent_activity, wrap_w);
         // The single height source is the shared `visual_rows` helper:
         // multi-row wrapped tool lines and markdown Message/Thought blocks
@@ -1143,6 +1140,16 @@ fn render_subagent_section(
                 .map(|l| l.visual_rows(wrap_w))
                 .fold(0u16, u16::saturating_add),
         );
+        // CHAT SEPARATOR: one blank row between the echoed prompt and what
+        // follows — activity first, then the body; the input and the output
+        // must never read as glued text. The follow-up can be the transcript
+        // ALONE (the internal sub-agent streams into the timeline and its
+        // report arrives only at the end — the body-only condition used to
+        // glue the prompt to the live mini-chat for the whole stream).
+        // Conditional the SAME way the height math (types.rs) conditions it:
+        // a gap with nothing after it would reserve an unpainted row, which
+        // the deterministic fuzz invariant forbids.
+        let input_gap = i32::from(input_h > 0 && (has_visible_body || activity_h > 0));
         let body_start = content_row + input_h + input_gap + activity_h;
         draw_activity_lines(
             buf,
