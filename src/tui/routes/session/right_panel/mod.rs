@@ -5,7 +5,7 @@ use cosh_tui::core::renderables::markdown::MarkdownRenderable;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 
 use crate::theme::{Theme, blend, contrast_fg, rgba_color};
 use crate::util::text_region::{TextRegion, text_from_cell_row};
@@ -1840,6 +1840,10 @@ fn highlight_section_selection(
 mod tests {
     use super::*;
     use crate::theme::ThemeRegistry;
+    // The bin target does not use `Color` (the live render goes through
+    // `rgba_color`), but the test assertions decode `Color::Rgb` values —
+    // scoped here so the production import stays warning-free.
+    use ratatui::style::Color;
 
     /// REGRESSION (user-visible "reasoning in columns"): the timeline's
     /// stream coalescing used to require the matching entry to be the
