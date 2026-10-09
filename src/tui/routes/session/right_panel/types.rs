@@ -1584,7 +1584,7 @@ pub struct RightPanelState {
 
 impl RightPanelState {
     pub fn new() -> Self {
-        let state = Self {
+        Self {
             todos: Vec::new(),
             todo_strike_frames: HashMap::new(),
             todo_seen_contents: HashSet::new(),
@@ -1650,8 +1650,7 @@ impl RightPanelState {
             scroll_y: 0,
             content_height: 0,
             visible_height: 0,
-        };
-        state
+        }
     }
 
     /// Unique spill directory for a new state instance:

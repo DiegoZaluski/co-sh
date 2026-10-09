@@ -1,21 +1,21 @@
-//! Split-view "panes" for the future `/agents` route: one pane per agent
-//! CLI (index 0 = the cosh daemon itself), laid out over the session area
-//! with a simple bin-packing heuristic.
+//! Split-view "panes" for the `/agents` route: one pane per agent CLI
+//! (index 0 = the cosh daemon itself), laid out over the session area with
+//! a simple bin-packing heuristic.
 //!
 //! This module owns ONLY the pane model + layout + painting. The prompt is
 //! a single shared input that lives outside this area (`compute_prompt_area`
 //! in `app/render.rs`), so dispatching a draft to a pane is not this
-//! module's concern — it only keeps the per-pane drafts so the future
-//! dispatcher can read the focused pane's target.
+//! module's concern — it only keeps the per-pane drafts so the dispatcher
+//! can read the focused pane's target.
 //!
 //! Layout heuristic (deliberately approximate — "fits nicely", not a perfect
-//! bin-packing): the daemon pane is a full-width horizontal strip on top
-//! (its height shrinks as the pane count grows), the remaining agents fill
-//! the rest as equal columns when each column stays readable (>= 24 cols),
-//! otherwise as two balanced rows (ceil/floor split, the top row slightly
-//! taller when the height is odd). The last row may end up narrower/taller
-//! than the others; what matters is that the panes tile the area with only
-//! 1-cell gaps and no holes.
+//! bin-packing): EVERY pane — the daemon included — is an equal participant
+//! in the area division: one row of equal columns while each column stays
+//! readable (>= 24 cols), otherwise two balanced rows (ceil/floor split, the
+//! top row slightly taller when the height is odd). Pane order is preserved,
+//! so the daemon keeps its grid position. The last row may end up
+//! narrower/taller than the others; what matters is that the panes tile the
+//! area with only 1-cell gaps and no holes.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicBool;
@@ -47,9 +47,13 @@ pub const DAEMON_HOTKEY: char = '0';
 /// to a second row (see the module-level heuristic description).
 const MIN_COLUMN_WIDTH: u16 = 24;
 
-/// Clamp bounds of the daemon strip's height.
-const DAEMON_MIN_HEIGHT: u16 = 3;
-const DAEMON_MAX_HEIGHT: u16 = 8;
+/// Drag auto-scroll (the chat's fourth scroll form), mirrored from the
+/// right panel: the pointer entering a pane's edge zone scrolls it, faster
+/// the deeper into the zone it sits.
+const AUTO_SCROLL_THRESHOLD: i32 = 3;
+const AUTO_SCROLL_SPEED_SLOW: f64 = 6.0;
+const AUTO_SCROLL_SPEED_MEDIUM: f64 = 36.0;
+const AUTO_SCROLL_SPEED_FAST: f64 = 72.0;
 
 /// Gap cells (1 column / 1 row) between neighbouring panes.
 const GAP: u16 = 1;
@@ -184,6 +188,13 @@ pub struct AgentsSplitState {
     /// labeled) — the extraction source, rebuilt every frame like the right
     /// panel's regions so it always matches what is painted.
     pub pane_regions: Vec<Vec<TextRegion>>,
+    /// Drag auto-scroll (the chat's fourth scroll form): armed while a drag
+    /// selection holds the pointer in a pane's edge zone. The speed is
+    /// re-derived on every drag move; `handle_auto_scroll` advances the
+    /// anchor pane's scroll per frame.
+    pub is_auto_scrolling: bool,
+    auto_scroll_accumulator: f64,
+    auto_scroll_speed: f64,
 }
 
 impl AgentsSplitState {
@@ -212,6 +223,9 @@ impl AgentsSplitState {
             selection_focus_content_y: 0,
             selection_mouse_down_scroll: 0,
             pane_regions: Vec::new(),
+            is_auto_scrolling: false,
+            auto_scroll_accumulator: 0.0,
+            auto_scroll_speed: 0.0,
         }
     }
 
@@ -358,6 +372,114 @@ impl AgentsSplitState {
         self.selection_anchor_content_y = 0;
         self.selection_focus_content_y = 0;
         self.selection_mouse_down_scroll = 0;
+        self.stop_auto_scroll();
+    }
+
+    /// Screen band of the anchor pane's body (below its header), from the
+    /// LAST recorded rects. The auto-scroll zone geometry.
+    fn selection_body_band(&self) -> Option<(i32, i32)> {
+        let pane = self.selection_pane?;
+        let rect = self.pane_rects.get(pane)?;
+        let top = i32::from(rect.y + 1); // below the header
+        let bottom = i32::from(rect.bottom());
+        (top < bottom).then_some((top, bottom))
+    }
+
+    /// Current scroll of the anchor pane (0 when none).
+    fn selection_scroll(&self) -> u16 {
+        self.selection_pane
+            .and_then(|pane| self.panes.get(pane))
+            .map_or(0, |p| p.scroll_y)
+    }
+
+    fn auto_scroll_direction(&self, y: u16) -> i32 {
+        let Some((top, bottom)) = self.selection_body_band() else {
+            return 0;
+        };
+        if i32::from(y) <= top + AUTO_SCROLL_THRESHOLD && self.selection_scroll() > 0 {
+            return -1;
+        }
+        if i32::from(y) >= bottom.saturating_sub(AUTO_SCROLL_THRESHOLD) {
+            return 1;
+        }
+        0
+    }
+
+    fn auto_scroll_speed_for(&self, y: u16) -> f64 {
+        let Some((top, bottom)) = self.selection_body_band() else {
+            return 0.0;
+        };
+        let rel = (i32::from(y)).clamp(top, bottom.saturating_sub(1)) - top;
+        let h = (bottom - top).max(1);
+        let min_dist = rel.min(h - rel);
+        if min_dist <= 1 {
+            AUTO_SCROLL_SPEED_FAST
+        } else if min_dist <= 2 {
+            AUTO_SCROLL_SPEED_MEDIUM
+        } else {
+            AUTO_SCROLL_SPEED_SLOW
+        }
+    }
+
+    /// Called on every drag move: arm auto-scroll when the pointer is near
+    /// the anchor pane's edge, or stop it otherwise (the right panel's
+    /// `update_auto_scroll` contract — the speed is re-derived on EVERY move
+    /// so pushing deeper into the edge zone accelerates).
+    pub fn update_auto_scroll(&mut self, y: u16) {
+        let dir = self.auto_scroll_direction(y);
+        if dir == 0 {
+            self.stop_auto_scroll();
+        } else {
+            if !self.is_auto_scrolling {
+                self.is_auto_scrolling = true;
+                self.auto_scroll_accumulator = 0.0;
+            }
+            self.auto_scroll_speed = self.auto_scroll_speed_for(y);
+        }
+    }
+
+    /// Advance drag auto-scroll by `delta_time` (once per render frame).
+    /// Clamps the anchor pane's scroll and stops at the content bounds.
+    pub fn handle_auto_scroll(&mut self, delta_time: f64) {
+        if !self.is_auto_scrolling {
+            return;
+        }
+        let Some(pane) = self.selection_pane else {
+            self.stop_auto_scroll();
+            return;
+        };
+        let dir = self
+            .drag_selection
+            .map_or(0, |(_, _, _, fy)| self.auto_scroll_direction(fy));
+        if dir == 0 {
+            self.stop_auto_scroll();
+            return;
+        }
+        self.auto_scroll_accumulator += self.auto_scroll_speed * delta_time * f64::from(dir);
+        let int_scroll = self.auto_scroll_accumulator.trunc() as i32;
+        if int_scroll == 0 {
+            return;
+        }
+        self.auto_scroll_accumulator -= int_scroll as f64;
+        if let Some(p) = self.panes.get_mut(pane)
+            && !p.scroll_by(int_scroll)
+        {
+            // Hit a content bound: the selection can no longer grow in
+            // this direction.
+            self.stop_auto_scroll();
+            return;
+        }
+        // Keep the focus content row tracking the moved content (the right
+        // panel's contract — the band follows the scrolled content).
+        self.selection_focus_content_y = self.selection_focus_content_y.saturating_add(int_scroll);
+    }
+
+    pub fn stop_auto_scroll(&mut self) {
+        if self.is_auto_scrolling {
+            self.is_auto_scrolling = false;
+            self.auto_scroll_accumulator = 0.0;
+            self.auto_scroll_speed = 0.0;
+        }
     }
 
     /// Extract the text spanned by the active selection out of the pane's
@@ -442,17 +564,20 @@ impl AgentsSplitState {
 
 /// Compute the pane rects for `pane_count` panes inside `area`.
 ///
-/// Heuristic (documented at module level; NOT a perfect bin-packing):
+/// Heuristic (documented at module level; NOT a perfect bin-packing): EVERY
+/// pane — the cosh daemon included — is an equal participant in the tiling,
+/// so the daemon's block comes out of the same area division as the agents'
+/// instead of a fixed strip:
 /// - 1 pane: the whole area.
-/// - `n >= 2`: pane 0 (daemon) is a full-width strip on top, height
-///   `clamp(area.height / n, 3, 8)` shrunk when the area cannot also fit the
-///   separator row plus one agent row. The remaining agents tile the rest:
-///   a single row of equal columns while every column stays >=
-///   [`MIN_COLUMN_WIDTH`] wide (with 1-column gaps), otherwise two balanced
-///   rows — `ceil(m/2)` panes on top, `floor(m/2)` below, and when the
+/// - `n >= 2`: a single row of equal columns while every column stays >=
+///   [`MIN_COLUMN_WIDTH`] wide (with 1-column gaps); otherwise two balanced
+///   rows — `ceil(n/2)` panes on top, `floor(n/2)` below, and when the
 ///   available height is odd the TOP row takes the extra row.
 /// - Gaps are exactly 1 cell (row/column) between panes; there are no
 ///   double borders.
+///
+/// Pane ORDER is preserved: pane 0 (the daemon) keeps its index position in
+/// the grid, so focus hotkeys and dispatch routing stay stable.
 ///
 /// Returns exactly `pane_count` rects (empty for 0), all inside `area` and
 /// pairwise non-overlapping. Degenerate areas may clamp panes to zero
@@ -466,51 +591,39 @@ pub fn compute_layout(pane_count: usize, area: Rect) -> Vec<Rect> {
         return vec![area];
     }
 
-    // ── Daemon strip (pane 0) ──
-    // Proportional to the pane count, clamped, and shrunk when the area is
-    // too small for strip + separator + at least one agent row.
-    let daemon_h = (area.height / pane_count as u16)
-        .clamp(DAEMON_MIN_HEIGHT, DAEMON_MAX_HEIGHT)
-        .min(area.height.saturating_sub(2).max(1));
-    let daemon = Rect::new(area.x, area.y, area.width, daemon_h);
-
-    let rest_y = area.y + daemon_h + GAP;
-    let rest_h = area.bottom().saturating_sub(rest_y);
-    let rest_w = area.width;
-
-    // ── Agent panes (1..n) below the strip ──
-    let agents = pane_count - 1;
-    let single_row = agents == 1 || {
-        let usable = rest_w.saturating_sub((agents - 1) as u16 * GAP);
-        usable / agents as u16 >= MIN_COLUMN_WIDTH
+    // Every pane is an equal participant: the single-row test uses the FULL
+    // pane count (the daemon is not subtracted), so its block is one of the
+    // equal cells rather than a special-cased strip.
+    let single_row = {
+        let usable = area.width.saturating_sub((pane_count - 1) as u16 * GAP);
+        usable / pane_count as u16 >= MIN_COLUMN_WIDTH
     };
 
-    let mut out = vec![daemon];
     if single_row {
-        out.extend(split_columns(area.x, rest_y, rest_w, rest_h, agents));
+        split_columns(area.x, area.y, area.width, area.height, pane_count)
     } else {
-        let top_count = agents.div_ceil(2);
-        let bottom_count = agents - top_count;
+        let top_count = pane_count.div_ceil(2);
+        let bottom_count = pane_count - top_count;
         // Balanced rows; the top row takes the extra row of an odd height.
         // Below 3 rows the separator cannot fit — split what is left.
-        let (top_h, bottom_h, row_gap) = if rest_h >= 2 * GAP + 2 {
-            let usable = rest_h - GAP;
+        let (top_h, bottom_h, row_gap) = if area.height >= 2 * GAP + 2 {
+            let usable = area.height - GAP;
             let top = usable.div_ceil(2);
             (top, usable - top, GAP)
         } else {
-            let top = rest_h.min(1);
-            (top, rest_h - top, 0)
+            let top = area.height.min(1);
+            (top, area.height - top, 0)
         };
-        out.extend(split_columns(area.x, rest_y, rest_w, top_h, top_count));
+        let mut out = split_columns(area.x, area.y, area.width, top_h, top_count);
         out.extend(split_columns(
             area.x,
-            rest_y + top_h + row_gap,
-            rest_w,
+            area.y + top_h + row_gap,
+            area.width,
             bottom_h,
             bottom_count,
         ));
+        out
     }
-    out
 }
 
 /// Split `[x, x + total_w)` into `count` equal columns separated by one
@@ -656,17 +769,9 @@ fn render_pane(
     }
     let lines = activity_lines(&pane.activity, wrap_w);
     if lines.is_empty() {
-        let hint = "idle — waiting for the next prompt";
-        draw_text(
-            buf,
-            hint,
-            rect.x + 1,
-            body_y,
-            rect.width.saturating_sub(1),
-            Style::default().fg(rgba_color(theme.text_muted)),
-        );
-        // The empty pane measures zero content: a stale scroll offset has
-        // nothing to hold on to.
+        // Empty pane: the background fill painted above is the whole body —
+        // no placeholder text (visual pollution). The zero-content
+        // measurement still lands so a stale scroll offset cannot survive.
         pane.effective_scroll = 0;
         pane.content_height = 0;
         pane.body_height = body_h;
@@ -682,11 +787,15 @@ fn render_pane(
     let max_scroll = content_height.saturating_sub(body_h);
     // Sticky bottom (the chat's follow contract): a following pane shows the
     // newest rows; a scrolled-up pane keeps its offset, clamped to content.
+    // The follow branch also WRITES BACK into `scroll_y`: without this the
+    // pane stays at 0 while it follows, and the next `scroll_by` would clamp
+    // against a stale origin (scrolling would visibly do nothing).
     let scroll_y = if pane.auto_follow {
         max_scroll
     } else {
         pane.scroll_y.min(max_scroll)
     };
+    pane.scroll_y = scroll_y;
     pane.effective_scroll = scroll_y;
     pane.content_height = content_height;
     pane.body_height = body_h;
@@ -1082,14 +1191,11 @@ mod tests {
         }
         if pane_count >= 2 {
             let daemon = rects[0];
-            assert_eq!(daemon.y, area.y, "pane 0 on top");
+            // Order preservation: the daemon keeps its grid slot (dispatch
+            // routing and hotkeys depend on the stable index).
+            assert_eq!(daemon.y, area.y, "pane 0 first in the grid");
             assert_eq!(daemon.x, area.x);
-            assert_eq!(daemon.width, area.width, "daemon is a full strip");
-            assert!(daemon.height < area.height, "daemon is not the whole area");
-            assert!(
-                (1..=DAEMON_MAX_HEIGHT).contains(&daemon.height),
-                "daemon height clamped: {daemon:?}"
-            );
+            assert!(daemon.area() < area.area(), "daemon is not the whole area");
         }
 
         // Cell coverage: every cell in at most one pane; the uncovered cells
@@ -1142,13 +1248,17 @@ mod tests {
     }
 
     #[test]
-    fn two_panes_split_into_strip_and_full_width_agent() {
+    fn two_panes_split_into_equal_cells() {
         let area = Rect::new(0, 0, 80, 24);
         let rects = compute_layout(2, area);
-        assert_eq!(rects[0].width, 80, "daemon strip full width");
-        assert_eq!(rects[1].width, 80, "lone agent keeps the full width");
-        assert_eq!(rects[1].y, rects[0].bottom() + GAP, "one gap row between");
-        assert_eq!(rects[1].bottom(), area.bottom(), "agent reaches the bottom");
+        // BOTH panes are equal participants: equal height, side by side.
+        assert_eq!(rects[0].height, rects[1].height, "equal row heights");
+        assert_eq!(
+            rects[0].width + rects[1].width + GAP,
+            80,
+            "columns tile with one gap"
+        );
+        assert_eq!(rects[1].right(), area.right(), "agent reaches the edge");
     }
 
     #[test]
@@ -1285,7 +1395,7 @@ mod tests {
     }
 
     #[test]
-    fn render_paints_headers_and_idle_hint() {
+    fn render_paints_pane_headers_without_a_placeholder() {
         let theme = test_theme();
         let mut state = AgentsSplitState::new(vec!["claude".into(), "kilo".into()]);
         let area = Rect::new(0, 0, 80, 24);
@@ -1304,10 +1414,6 @@ mod tests {
         assert!(all.contains("[1] claude"), "agent header: {all:?}");
         assert!(all.contains("[2] kilo"), "agent header: {all:?}");
         assert!(all.contains('○'), "idle panes show the hollow dot");
-        assert!(
-            all.contains("idle — waiting for the next prompt"),
-            "idle hint rendered: {all:?}"
-        );
     }
 
     #[test]
@@ -1315,9 +1421,11 @@ mod tests {
         let theme = test_theme();
         let mut state = AgentsSplitState::new(vec!["claude".into()]);
         state.set_running(1, true);
-        // More lines than the pane body can hold, so the TAIL scroll is
-        // actually exercised (the daemon strip is 8 rows at n=2, leaving a
-        // ~14-row agent body).
+        // More lines than the pane body can hold, so the tail scroll is
+        // actually exercised. The grid layout (the daemon is an equal
+        // participant now) leaves each pane ~23 rows of body, so the volume
+        // is sized against the measured content height, not a hardcoded
+        // strip.
         for i in 0..40 {
             state.apply_event(
                 1,
@@ -1329,6 +1437,16 @@ mod tests {
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
         render(&mut buf, area, &mut state, &theme);
+
+        // The effective window content rows the render measured.
+        let pane = &state.panes[1];
+        assert!(
+            pane.content_height > pane.body_height,
+            "test needs overflow: content={} body={}",
+            pane.content_height,
+            pane.body_height
+        );
+        let max_scroll = pane.content_height - pane.body_height;
 
         let all: String = (0..24)
             .map(|y| {
@@ -1343,9 +1461,18 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(all.contains('●'), "running pane shows the filled dot: {all:?}");
-        // Tail scroll: the FIRST lines scrolled off, the LAST stay visible.
+        // Tail scroll: the window top sits at content row `max_scroll`, so
+        // everything strictly above (up to `max_scroll - 1`) is off-screen
+        // and the first visible line is exactly `max_scroll`.
         assert!(!all.contains("line 0 "), "old lines scrolled off: {all:?}");
-        assert!(!all.contains("line 25 "), "old lines scrolled off: {all:?}");
+        assert!(
+            !all.contains(&format!("line {} ", max_scroll.saturating_sub(1))),
+            "everything below the window top is off-screen: {all:?}"
+        );
+        assert!(
+            all.contains(&format!("line {max_scroll} ")),
+            "the window top row is visible: {all:?}"
+        );
         assert!(
             all.contains("line 39 of the stream"),
             "newest line visible: {all:?}"

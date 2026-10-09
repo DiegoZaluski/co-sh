@@ -845,6 +845,10 @@ impl App {
                                 split,
                                 &self.theme,
                             );
+                            // Drag auto-scroll advances once per frame, right
+                            // after the panes laid out (the same placement the
+                            // right panel's auto-scroll uses).
+                            split.handle_auto_scroll(delta_time);
                         }
                     } else {
                         self.session_view.render(

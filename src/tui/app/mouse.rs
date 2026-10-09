@@ -150,10 +150,11 @@ impl App {
                                 .get(index)
                                 .map_or(0, |pane| pane.content_row_at(rect, y));
                             split.begin_selection(index, x, y, content_y);
-                            // A pane click also hands keyboard focus to the
-                            // prompt (the session's behavior).
-                            self.prompt_view.focus();
-                            self.prompt_view.note_activity();
+                            // Clicking a pane is the chat's click-on-content
+                            // contract: the prompt BLURS so the scroll keys
+                            // (arrows, vim j/k) drive the pane. Dispatch
+                            // routing stays on `split.focused`.
+                            self.prompt_view.blur();
                         }
                         return Ok(true);
                     }
@@ -474,7 +475,8 @@ impl App {
                 }
                 // Drag with a /agents pane selection active extends it, scoped
                 // to the ANCHOR pane (the content row is resolved through the
-                // pane's render scroll, so the band follows scrolling).
+                // pane's render scroll, so the band follows scrolling) and
+                // re-arms drag auto-scroll for the pointer's edge zone.
                 if self
                     .agents_split
                     .as_ref()
@@ -482,6 +484,7 @@ impl App {
                 {
                     if let Some(split) = &mut self.agents_split {
                         split.update_selection_at(x, y);
+                        split.update_auto_scroll(y);
                     }
                     return Ok(true);
                 }

@@ -1709,6 +1709,11 @@ impl App {
                                     }
                                 } else if self.is_in_right_panel(self.last_mouse_x) {
                                     self.state.right_panel.scroll_up_at(self.last_mouse_y, 3);
+                                } else if let Some(split) = self.agents_split.as_mut() {
+                                    // /agents split: arrows scroll the FOCUSED
+                                    // pane (the click-on-pane contract blurs
+                                    // the prompt so these keys reach here).
+                                    split.scroll_focused_by(-3);
                                 } else {
                                     let vh = self.session_view.visible_height.max(1);
                                     let delta = -(vh as f64 / 5.0);
@@ -1735,6 +1740,11 @@ impl App {
                                     }
                                 } else if self.is_in_right_panel(self.last_mouse_x) {
                                     self.state.right_panel.scroll_down_at(self.last_mouse_y, 3);
+                                } else if let Some(split) = self.agents_split.as_mut() {
+                                    // /agents split: arrows scroll the FOCUSED
+                                    // pane (the click-on-pane contract blurs
+                                    // the prompt so these keys reach here).
+                                    split.scroll_focused_by(3);
                                 } else {
                                     let vh = self.session_view.visible_height.max(1);
                                     let delta = vh as f64 / 5.0;
@@ -1787,12 +1797,30 @@ impl App {
                                 }
                             }
                             KeyCode::Home => {
-                                self.prompt_view.note_activity();
-                                self.prompt_view.cursor_pos = 0;
+                                // Split mode, prompt blurred (a pane click
+                                // blurred it): Home scrolls the FOCUSED pane
+                                // to its oldest content instead of moving an
+                                // invisible prompt cursor.
+                                if self.agents_split.is_some() && !self.prompt_view.is_focused {
+                                    if let Some(split) = self.agents_split.as_mut() {
+                                        split.scroll_focused_to_top();
+                                    }
+                                } else {
+                                    self.prompt_view.note_activity();
+                                    self.prompt_view.cursor_pos = 0;
+                                }
                             }
                             KeyCode::End => {
-                                self.prompt_view.note_activity();
-                                self.prompt_view.cursor_pos = self.prompt_view.input.len();
+                                // Same split contract: End jumps the focused
+                                // pane back to its newest content.
+                                if self.agents_split.is_some() && !self.prompt_view.is_focused {
+                                    if let Some(split) = self.agents_split.as_mut() {
+                                        split.scroll_focused_to_bottom();
+                                    }
+                                } else {
+                                    self.prompt_view.note_activity();
+                                    self.prompt_view.cursor_pos = self.prompt_view.input.len();
+                                }
                             }
                             KeyCode::Delete => {
                                 self.prompt_view.delete();
@@ -1803,6 +1831,15 @@ impl App {
                                     self.state
                                         .right_panel
                                         .scroll_up_at(self.last_mouse_y, vh / 2);
+                                } else if let Some(split) = self.agents_split.as_mut() {
+                                    // /agents split: half the focused pane's
+                                    // body per page step (the pane IS the
+                                    // viewport here).
+                                    let vh = split
+                                        .focused_pane()
+                                        .map_or(1, |p| p.body_height.max(1) as u32)
+                                        as i32;
+                                    split.scroll_focused_by(-vh / 2);
                                 } else {
                                     let vh = self.session_view.visible_height.max(1);
                                     let delta = -(vh as f64 / 2.0);
@@ -1816,6 +1853,15 @@ impl App {
                                     self.state
                                         .right_panel
                                         .scroll_down_at(self.last_mouse_y, vh / 2);
+                                } else if let Some(split) = self.agents_split.as_mut() {
+                                    // /agents split: half the focused pane's
+                                    // body per page step (the pane IS the
+                                    // viewport here).
+                                    let vh = split
+                                        .focused_pane()
+                                        .map_or(1, |p| p.body_height.max(1) as u32)
+                                        as i32;
+                                    split.scroll_focused_by(vh / 2);
                                 } else {
                                     let vh = self.session_view.visible_height.max(1);
                                     let delta = vh as f64 / 2.0;
@@ -1918,7 +1964,13 @@ impl App {
                                 // Vim-style scroll: j/k scroll the chat view only when
                                 // the prompt is NOT focused. When focused, all characters
                                 // type normally so the user can start messages with j/k.
+                                // /agents split: the FOCUSED pane is the viewport —
+                                // the same whole-row cadence the wheel uses.
                                 if (ch == 'j' || ch == 'k') && !self.prompt_view.is_focused {
+                                    if let Some(split) = self.agents_split.as_mut() {
+                                        split.scroll_focused_by(if ch == 'j' { 3 } else { -3 });
+                                        return Ok(false);
+                                    }
                                     let vh = self.session_view.visible_height.max(1);
                                     let delta = if ch == 'j' {
                                         vh as f64 / 5.0
@@ -1928,6 +1980,18 @@ impl App {
                                     self.session_view.scroll_by_raw(delta);
                                     self.session_view.reset_scroll_accumulator();
                                     return Ok(false);
+                                }
+
+                                // Split mode: a pane click blurs the prompt, so
+                                // the FIRST printable key re-focuses it before
+                                // typing — the cursor becomes visible again
+                                // and Esc acts on the prompt draft instead of
+                                // silently closing the split behind an
+                                // invisible edit. j/k above keeps its
+                                // vim-scroll contract while blurred (it
+                                // returns before reaching this point).
+                                if self.agents_split.is_some() && !self.prompt_view.is_focused {
+                                    self.prompt_view.focus();
                                 }
 
                                 // Insert character normally — recorded into
