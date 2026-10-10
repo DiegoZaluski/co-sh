@@ -25,6 +25,7 @@ use cosh_tui::core::lib::rgba::{ColorInput, RGBA};
 use cosh_tui::core::renderable::Renderable;
 use cosh_tui::core::renderables::markdown::MarkdownRenderable;
 use cosh_tools::subagent::events::{PlanEntryStatus, SubagentEvent, ToolCallStatus};
+use cosh_tools::subagent::palette::{display_name, palette_for};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -33,11 +34,24 @@ use crate::routes::session::right_panel::subagent_theme_key;
 use crate::routes::session::right_panel::types::{
     activity_lines, SubagentActivity, SubagentActivityLine, SubagentBlockRenderer,
 };
-use crate::theme::{Theme, blend, contrast_fg, rgba_color};
+use crate::theme::{Theme, blend, contrast_fg, luminance, rgba_color};
 use crate::util::text_region::{TextRegion, extract_text_in_region, text_from_cell_row};
 
 /// Display label of the daemon pane (agent index 0): the TUI's own agent.
 pub const DAEMON_LABEL: &str = "cosh";
+
+/// Minimum luminance distance between a brand color and the pane background
+/// for the name to keep the pure brand color. Below it the color would
+/// dissolve into the surface (white Codex on a near-white theme, dark
+/// opencode ink on a dark theme), so it lifts toward the readable
+/// contrast color instead.
+const BRAND_CONTRAST_FLOOR: f32 = 40.0;
+
+/// How far an UNFOCUSED pane's brand-colored name dims toward the element
+/// background — the same register the old muted header used, so the
+/// focused pane reads at a glance. The FOCUSED name keeps the pure brand
+/// color: the brand mark is the identity, not a highlight to be dimmed.
+const DIM_UNFOCUSED: f32 = 0.45;
 
 /// Hotkey of the daemon pane. The remaining panes take `1`..=`9` in picker
 /// order, so the daemon is always reachable with a single keypress.
@@ -57,17 +71,6 @@ const AUTO_SCROLL_SPEED_FAST: f64 = 72.0;
 
 /// Gap cells (1 column / 1 row) between neighbouring panes.
 const GAP: u16 = 1;
-
-/// Hotkey label of pane `index`: `'0'` for the daemon, `'1'..='9'` for the
-/// agents that follow. `None` past the nine numbered panes.
-#[must_use]
-pub fn pane_hotkey(index: usize) -> Option<char> {
-    match index {
-        0 => Some(DAEMON_HOTKEY),
-        1..=9 => Some((b'0' + index as u8) as char),
-        _ => None,
-    }
-}
 
 /// One agent pane: identity, live activity stream and lifecycle state.
 #[derive(Debug, Clone, Default)]
@@ -281,11 +284,18 @@ impl AgentsSplitState {
         }
     }
 
-    /// Scroll the pane whose rect contains screen row `y` (the wheel path,
-    /// the right panel's `scroll_up_at` contract: the pane under the pointer
-    /// moves, the others stay put). `false` when no pane owns the row.
-    pub fn scroll_at(&mut self, y: u16, rows: i32) -> bool {
-        let Some(index) = self.pane_rects.iter().position(|r| y >= r.y && y < r.bottom()) else {
+    /// Scroll the pane whose rect contains screen position (`x`, `y`) (the
+    /// wheel path, the right panel's `scroll_up_at` contract: the pane under
+    /// the pointer moves, the others stay put). `false` when no pane owns
+    /// the position. The grid layout places panes side by side sharing the
+    /// same row band, so the column must be part of the hit-test — a row-only
+    /// match lands every wheel on the FIRST pane of the row (the daemon).
+    pub fn scroll_at(&mut self, x: u16, y: u16, rows: i32) -> bool {
+        let Some(index) = self
+            .pane_rects
+            .iter()
+            .position(|r| x >= r.x && x < r.right() && y >= r.y && y < r.bottom())
+        else {
             return false;
         };
         let Some(pane) = self.panes.get_mut(index) else {
@@ -685,7 +695,6 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &mut AgentsSplitState, theme:
         render_pane(
             buf,
             rect,
-            pane_hotkey(i),
             i,
             pane,
             i == focused,
@@ -701,7 +710,7 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &mut AgentsSplitState, theme:
     highlight_selection(buf, state);
 }
 
-/// Paint one pane: element background, hotkey header (`[n] agent ●`) and
+/// Paint one pane: element background, the agent-name header and
 /// the tail of the activity stream (or the idle hint) — rendered through
 /// the right panel's REAL pipeline (`activity_lines` + `SubagentBlockRenderer`),
 /// so markdown blocks wrap, style and cache exactly like the sub-agent
@@ -710,7 +719,6 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &mut AgentsSplitState, theme:
 fn render_pane(
     buf: &mut Buffer,
     rect: Rect,
-    hotkey: Option<char>,
     pane_index: usize,
     pane: &mut AgentPane,
     focused: bool,
@@ -722,8 +730,10 @@ fn render_pane(
     if rect.width == 0 || rect.height == 0 {
         return;
     }
-    // Background fill (element color, like the right panel's boxes).
-    let bg = Style::default().bg(rgba_color(theme.background_element));
+    // Background fill: a whisper lighter than the base background — just
+    // enough to separate the pane from the transcript without a visible
+    // contrast edge. background (#07070A) → #0A0A0D.
+    let bg = Style::default().bg(rgba_color(RGBA::from_hex("#0A0A0D")));
     for y in rect.y..rect.bottom() {
         for x in rect.x..rect.right() {
             if let Some(cell) = buf.cell_mut((x, y)) {
@@ -733,30 +743,14 @@ fn render_pane(
         }
     }
 
-    // ── Header row ──
-    let key = hotkey.map_or('?', |c| c);
-    let dot = if pane.running { '●' } else { '○' };
-    let label = format!("[{key}] {} ", pane.agent);
-    let label_w = label.chars().count() as u16;
-    if focused {
-        // Highlighted header: accent-tinted band with readable contrast.
-        let band = blend(theme.background_element, theme.accent, 0.35);
-        let style = Style::default()
-            .fg(rgba_color(contrast_fg(band)))
-            .bg(rgba_color(band))
-            .add_modifier(Modifier::BOLD);
-        draw_text(buf, &label, rect.x, rect.y, rect.width, style);
-        draw_char(buf, dot, rect.x + label_w, rect.y, style);
-    } else {
-        let style = Style::default().fg(rgba_color(theme.text_muted));
-        draw_text(buf, &label, rect.x, rect.y, rect.width, style);
-        let dot_style = if pane.running {
-            Style::default().fg(rgba_color(theme.success))
-        } else {
-            style
-        };
-        draw_char(buf, dot, rect.x + label_w, rect.y, dot_style);
-    }
+    // ── Header row: the agent's name, one breathing column in ──
+    let name_x = rect.x.saturating_add(1);
+    let name_w = rect.width.saturating_sub(1);
+    // The BRAND casing ("OpenCode"), not the lowercase ACP id — the id
+    // stays the dispatch key; only the painted label changes. The palette
+    // lookup is case-insensitive, so the brand colors still resolve.
+    let label = display_name(&pane.agent).to_string();
+    draw_agent_name(buf, &label, name_x, rect.y, name_w, theme, focused);
 
     // ── Body: the right panel's drawable pipeline (markdown included) ──
     let body_y = rect.y + 1;
@@ -806,7 +800,9 @@ fn render_pane(
     // label every painted visual row with its CONTENT row — the selection
     // regions' coordinate system, exactly the right panel's contract.
     let theme_key = subagent_theme_key(theme);
-    let tint = theme.background_element;
+    // Same whisper-lighter background for markdown blocks so they merge
+    // with the pane instead of floating as distinct boxes.
+    let tint = RGBA::from_hex("#0A0A0D");
     let mut regions: Vec<TextRegion> = Vec::new();
     let mut content_row: u16 = 0;
     for (index, line) in lines.iter().enumerate() {
@@ -1051,6 +1047,79 @@ fn h_from(text: &str, wrap_w: u16) -> u16 {
     cosh_tui::core::renderables::markdown::estimate_height(text, wrap_w).max(1)
 }
 
+/// The pane header's agent name: bold, painted with the agent's OWN logo
+/// palette (`subagent::palette`) — gradient marks (Gemini's sparkle,
+/// Devin's tri-color) sweep their colors across the glyphs, single-color
+/// marks (Claude's terracotta, Kilo's acid yellow) paint solid. `cosh` and
+/// agents outside the catalog keep the theme's text colors: no invented
+/// brand for the TUI's own pane. An unfocused name dims toward the element
+/// background so the focused pane reads at a glance, and a brand color too
+/// close to the pane background lifts toward the readable contrast color
+/// instead of dissolving into it.
+fn draw_agent_name(
+    buf: &mut Buffer,
+    agent: &str,
+    x: u16,
+    y: u16,
+    max_w: u16,
+    theme: &Theme,
+    focused: bool,
+) {
+    let chars: Vec<char> = agent.chars().filter(|c| !c.is_control()).collect();
+    let count = chars.len();
+    let bg_lum = {
+        let (r, g, b, _) = theme.background_element.to_ints();
+        luminance(r, g, b)
+    };
+    // One catalog lookup per header, not per glyph: the palette (and the
+    // background contrast it is judged against) is fixed for the row.
+    let palette = palette_for(agent);
+    let contrast_fg_rgba = contrast_fg(theme.background_element);
+    for (i, ch) in chars.into_iter().enumerate() {
+        let Ok(i) = u16::try_from(i) else { break };
+        let Some(cx) = x.checked_add(i) else { break };
+        if cx >= x.saturating_add(max_w) {
+            break;
+        }
+        let style = match palette {
+            Some(palette) => {
+                // One sample per glyph column: `t` walks the mark's colors
+                // left to right (constant for single-color marks).
+                let t = if count <= 1 {
+                    0.0
+                } else {
+                    f32::from(i) / (count as f32 - 1.0)
+                };
+                let rgb = palette.sample(t);
+                let mut brand = RGBA::from_ints(rgb.r, rgb.g, rgb.b, 255);
+                let (br, bg_, bb, _) = brand.to_ints();
+                if (luminance(br, bg_, bb) - bg_lum).abs() < BRAND_CONTRAST_FLOOR {
+                    brand = blend(brand, contrast_fg_rgba, 0.6);
+                }
+                let fg = if focused {
+                    brand
+                } else {
+                    blend(theme.background_element, brand, DIM_UNFOCUSED)
+                };
+                Style::default().fg(rgba_color(fg))
+            }
+            None => {
+                let fg = if focused {
+                    theme.text
+                } else {
+                    theme.text_muted
+                };
+                Style::default().fg(rgba_color(fg))
+            }
+        }
+        .add_modifier(Modifier::BOLD);
+        if let Some(cell) = buf.cell_mut((cx, y)) {
+            cell.set_char(ch);
+            cell.set_style(style);
+        }
+    }
+}
+
 /// Draw `text` clipped to `max_w` columns, filtering control characters.
 fn draw_text(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: Style) {
     for (i, ch) in text.chars().filter(|c| !c.is_control()).enumerate() {
@@ -1063,14 +1132,6 @@ fn draw_text(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: St
             cell.set_char(ch);
             cell.set_style(style);
         }
-    }
-}
-
-/// Draw a single glyph (status dot, focus rail).
-fn draw_char(buf: &mut Buffer, ch: char, x: u16, y: u16, style: Style) {
-    if let Some(cell) = buf.cell_mut((x, y)) {
-        cell.set_char(ch);
-        cell.set_style(style);
     }
 }
 
@@ -1288,14 +1349,6 @@ mod tests {
     }
 
     #[test]
-    fn hotkey_labels_follow_pane_order() {
-        assert_eq!(pane_hotkey(0), Some('0'));
-        assert_eq!(pane_hotkey(1), Some('1'));
-        assert_eq!(pane_hotkey(9), Some('9'));
-        assert_eq!(pane_hotkey(10), None);
-    }
-
-    #[test]
     fn new_inserts_daemon_first_and_keeps_picker_order() {
         let state = AgentsSplitState::new(vec!["kilo".into(), "claude".into()]);
         assert_eq!(state.pane_count(), 3);
@@ -1410,14 +1463,164 @@ mod tests {
                 .collect::<String>()
         };
         let all: String = (0..24).map(row_text).collect::<Vec<_>>().join("\n");
-        assert!(all.contains("[0] cosh"), "daemon header: {all:?}");
-        assert!(all.contains("[1] claude"), "agent header: {all:?}");
-        assert!(all.contains("[2] kilo"), "agent header: {all:?}");
-        assert!(all.contains('○'), "idle panes show the hollow dot");
+        assert!(all.contains("cosh"), "daemon header: {all:?}");
+        assert!(all.contains("claude"), "agent header: {all:?}");
+        assert!(all.contains("kilo"), "agent header: {all:?}");
+        assert!(!all.contains('['), "no index labels: {all:?}");
+        assert!(
+            !all.contains('●') && !all.contains('○'),
+            "no status dots: {all:?}"
+        );
+    }
+
+    /// The header name sits one breathing column past the pane edge, is
+    /// bold, and carries the agent's OWN brand color: Claude focused paints
+    /// the terracotta (lifted only when the theme would dissolve it), the
+    /// cosh daemon keeps the theme's text color (no invented brand), and an
+    /// unfocused brand name dims toward the background.
+    #[test]
+    fn header_name_is_indented_bold_and_brand_colored() {
+        let theme = test_theme();
+        let mut state = AgentsSplitState::new(vec!["claude".into(), "kilo".into()]);
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut state, &theme);
+
+        let claude_rect = state.pane_rects[1];
+        let header_y = claude_rect.y;
+        let glyph_at = |x: u16| buf.cell((x, header_y)).map(|c| c.symbol().to_string());
+
+        // One column of breathing room, then the name.
+        assert_eq!(glyph_at(claude_rect.x).as_deref(), Some(" "));
+        assert_eq!(glyph_at(claude_rect.x + 1).as_deref(), Some("c"));
+
+        // Bold across the whole name.
+        for (i, ch) in "claude".chars().enumerate() {
+            let cell = buf
+                .cell((claude_rect.x + 1 + i as u16, header_y))
+                .unwrap_or_else(|| panic!("cell {i}"));
+            assert_eq!(cell.symbol(), ch.to_string());
+            assert!(
+                cell.modifier.contains(Modifier::BOLD),
+                "name glyph {ch} is bold"
+            );
+        }
+
+        // Focus Claude: the name takes the brand terracotta (or its
+        // contrast-lifted variant on a theme where the raw color would
+        // dissolve — the same formula the painter applies).
+        state.focus_next();
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut state, &theme);
+        let brand = RGBA::from_ints(0xD9, 0x77, 0x57, 255);
+        let bg_lum = {
+            let (r, g, b, _) = theme.background_element.to_ints();
+            luminance(r, g, b)
+        };
+        let (br, bg_, bb, _) = brand.to_ints();
+        let expected = if (luminance(br, bg_, bb) - bg_lum).abs() < BRAND_CONTRAST_FLOOR {
+            blend(brand, contrast_fg(theme.background_element), 0.6)
+        } else {
+            brand
+        };
+        let cell = buf
+            .cell((claude_rect.x + 1, header_y))
+            .expect("claude 'c' cell");
+        assert_eq!(
+            cell.style().fg,
+            Some(rgba_color(expected)),
+            "focused claude paints the brand color"
+        );
+
+        // The daemon (cosh, no brand in the catalog) is UNFOCUSED here and
+        // keeps the theme's muted text color — no invented brand.
+        let cosh_rect = state.pane_rects[0];
+        let cell = buf.cell((cosh_rect.x + 1, cosh_rect.y)).unwrap();
+        assert_eq!(
+            cell.style().fg,
+            Some(rgba_color(theme.text_muted)),
+            "unfocused cosh keeps the theme's muted text color"
+        );
+
+        // Focus back to the daemon: cosh focused paints the theme TEXT —
+        // the daemon never takes a brand color.
+        state.focus_hotkey('0');
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut state, &theme);
+        let cell = buf.cell((cosh_rect.x + 1, cosh_rect.y)).unwrap();
+        assert_eq!(
+            cell.style().fg,
+            Some(rgba_color(theme.text)),
+            "focused cosh keeps the theme text color, not a brand"
+        );
+
+        // Unfocused kilo dims toward the background, NOT pure brand.
+        let kilo_rect = state.pane_rects[2];
+        let cell = buf.cell((kilo_rect.x + 1, kilo_rect.y)).unwrap();
+        assert_ne!(
+            cell.style().fg,
+            Some(rgba_color(expected)),
+            "unfocused is dimmed"
+        );
+    }
+
+    /// A multi-stop gradient mark sweeps its colors across the glyphs: the
+    /// first and last glyph take the mark's endpoint colors (post
+    /// contrast-adjustment) and an interior glyph differs from both. This
+    /// pins the `t = i / (count - 1)` walk in `draw_agent_name` — the path
+    /// `palette.sample` only exercises indirectly elsewhere.
+    #[test]
+    fn gradient_mark_sweeps_across_the_glyphs() {
+        let theme = test_theme();
+        // "devin" carries the official tri-color logomark (blue → green →
+        // cyan-blue), so the name paints as a real sweep.
+        let mut state = AgentsSplitState::new(vec!["devin".into(), "kilo".into()]);
+        state.focus_next();
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut state, &theme);
+
+        let rect = state.pane_rects[1];
+        let header_y = rect.y;
+        let name = "devin";
+        let fgs: Vec<_> = (0..name.len())
+            .map(|i| {
+                buf.cell((rect.x + 1 + i as u16, header_y))
+                    .map(|c| c.style().fg)
+                    .unwrap()
+            })
+            .collect();
+
+        // The sweep really moves: not every glyph is the same color.
+        assert!(
+            fgs.iter().any(|fg| *fg != fgs[0]),
+            "gradient glyphs must vary: {fgs:?}"
+        );
+        // The walk starts at the palette's first stop — the raw primary
+        // (or its contrast-lifted variant, the same formula the painter
+        // applies; keep this assertion in sync with `draw_agent_name`).
+        let palette = palette_for("devin").expect("devin palette");
+        let brand = RGBA::from_ints(
+            palette.primary.r,
+            palette.primary.g,
+            palette.primary.b,
+            255,
+        );
+        let bg_lum = {
+            let (r, g, b, _) = theme.background_element.to_ints();
+            luminance(r, g, b)
+        };
+        let (br, bg_, bb, _) = brand.to_ints();
+        let expected = if (luminance(br, bg_, bb) - bg_lum).abs() < BRAND_CONTRAST_FLOOR {
+            blend(brand, contrast_fg(theme.background_element), 0.6)
+        } else {
+            brand
+        };
+        assert_eq!(fgs[0], Some(rgba_color(expected)), "first glyph = primary");
     }
 
     #[test]
-    fn render_running_pane_shows_the_filled_dot_and_activity_tail() {
+    fn render_running_pane_shows_the_activity_tail() {
         let theme = test_theme();
         let mut state = AgentsSplitState::new(vec!["claude".into()]);
         state.set_running(1, true);
@@ -1460,7 +1663,6 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(all.contains('●'), "running pane shows the filled dot: {all:?}");
         // Tail scroll: the window top sits at content row `max_scroll`, so
         // everything strictly above (up to `max_scroll - 1`) is off-screen
         // and the first visible line is exactly `max_scroll`.

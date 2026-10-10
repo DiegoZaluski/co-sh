@@ -131,7 +131,7 @@ impl App {
                             3
                         };
                         if let Some(split) = &mut self.agents_split {
-                            split.scroll_at(y, delta);
+                            split.scroll_at(x, y, delta);
                         }
                         return Ok(true);
                     }

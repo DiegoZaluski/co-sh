@@ -38,6 +38,10 @@
 //! | `codex` | `npx -y @agentclientprotocol/codex-acp@latest` (official adapter) |
 
 pub mod acp;
+/// Brand palettes of the supported ACP sub-agents, for the TUI to paint
+/// each agent with its own logo colors. Pure RGB triples, no TUI
+/// dependency — see [`palette`].
+pub mod palette;
 /// The turn's final-message accumulator: which streamed text is the report
 /// the caller receives (the ACP analogue of the internal harness's
 /// `ContextItem::Closure`). Market-standard contract: only the LAST message
