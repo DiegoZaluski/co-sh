@@ -1,16 +1,15 @@
+use std::time::SystemTime;
+
 use cosh_tui::core::types::{MouseButton, MouseEvent, MouseEventType};
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 
+use crate::component::cursor::{Cursor, CursorState};
 use crate::theme::{Theme, contrast_color, rgba_color};
 use crate::util::draw::draw_text_line_compact;
 use crate::util::list_selection::ListSelection;
-
-/// Rows visible at once inside the picker's box. The list scrolls through
-/// [`ListSelection`] when the registry grows past this.
-const MAX_ROWS: usize = 6;
 
 /// One row of the picker: a fixed listing entry plus the user's mark. The
 /// synthetic `cosh` daemon entry and every ACP harness share this shape so
@@ -26,7 +25,8 @@ pub struct AgentEntry {
     /// hint when `false`; the mark is still allowed (the router re-checks
     /// before spawning, so a stale detection must not lock the user out).
     pub installed: bool,
-    /// The user's multi-select mark. Toggleable; survives navigation.
+    /// The user's multi-select mark. Toggleable; survives navigation AND
+    /// filter edits (narrowing the list never discards a mark).
     pub selected: bool,
 }
 
@@ -50,12 +50,17 @@ pub enum AgentsPickerAction {
     Cancelled,
 }
 
-/// Central multi-select dialog for the future `/agents` command: pick which
-/// agent CLIs may receive delegated work.
+/// Central multi-select dialog for the `/agents` command: pick which agent
+/// CLIs may receive delegated work.
 ///
 /// The first entry is always the synthetic `cosh` daemon — the top-level
 /// agent that delegates to the ACP harnesses below it. The remaining entries
 /// mirror [`cosh_tools::subagent::acp::ACP_AGENTS`] in registry order.
+///
+/// Layout parity with `/models`: the box rows are title / Search input / gap
+/// / listing (dialog height = visible rows + 4) and the listing height
+/// follows the number of entries up to the terminal budget, so the box can
+/// grow instead of sitting at a fixed low height.
 ///
 /// Input contract (same split as [`crate::ui::slash_menu::SlashMenu`]): the
 /// App feeds raw key/mouse events through [`AgentsPicker::handle_key`] and
@@ -64,8 +69,18 @@ pub enum AgentsPickerAction {
 pub struct AgentsPicker {
     pub visible: bool,
     pub entries: Vec<AgentEntry>,
-    /// Cursor + scroll state; `selected_index` is what render highlights and
-    /// what Space/Enter toggle, so keyboard and mouse stay in lockstep.
+    /// The `/models`-style search input at the top of the box. Filters by
+    /// name or description, case-insensitive. Marks are NOT touched by the
+    /// filter — clearing it brings every mark back.
+    pub filter: String,
+    /// Blinking caret for the search input (same reusable component the
+    /// dialog filters use). The App syncs `terminal_focused` before
+    /// rendering, like it does for every dialog cursor.
+    pub cursor: Cursor,
+    /// Cursor + scroll state within the FILTERED listing. `selected_index`
+    /// is what render highlights and what Space toggles, so keyboard, mouse
+    /// and render stay in lockstep. Typing resets it to 0 (the filter
+    /// changing invalidates the previous position).
     pub selection: ListSelection,
 }
 
@@ -102,26 +117,50 @@ impl AgentsPicker {
         Self {
             visible: false,
             entries,
+            filter: String::new(),
+            cursor: Cursor::new(),
             selection: ListSelection::new(),
         }
     }
 
     pub fn open(&mut self) {
         self.visible = true;
-        self.selection.clamp(self.entries.len());
+        // A reopen always starts from a clean slate: no filter, cursor back
+        // at the top (the search caret shows right away).
+        self.filter.clear();
+        self.selection.selected_index = 0;
+        self.cursor.note_activity();
+        self.selection.clamp(self.filtered_indices().len());
     }
 
     pub fn close(&mut self) {
         self.visible = false;
         // Marks live only for the session the picker is open: Esc discards
         // and confirm hands them to the App via the action payload, so a
-        // reopen always starts from a clean slate.
+        // reopen always starts from a clean slate. The filter follows the
+        // same rule — it never leaks between opens.
         for entry in &mut self.entries {
             entry.selected = false;
         }
+        self.filter.clear();
+        self.selection.selected_index = 0;
     }
 
-    /// Names of the marked entries in listing order (`cosh` first).
+    /// Indices into `entries` that survive the current search filter, in
+    /// listing order. The single source of truth for the filtered view —
+    /// keyboard, mouse and render all read the same list so a click can
+    /// never land on a row the renderer did not draw.
+    fn filtered_indices(&self) -> Vec<usize> {
+        self.entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry_matches_filter(entry, &self.filter))
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// Names of the marked entries in listing order (`cosh` first). Marks
+    /// survive filter edits, so a narrowed view still confirms everything.
     #[must_use]
     pub fn selected_names(&self) -> Vec<String> {
         self.entries
@@ -132,14 +171,36 @@ impl AgentsPicker {
     }
 
     fn toggle_at_cursor(&mut self) -> AgentsPickerAction {
-        let index = self.selection.selected_index;
-        match self.entries.get_mut(index) {
-            Some(entry) => {
-                entry.selected = !entry.selected;
+        let filtered = self.filtered_indices();
+        match filtered.get(self.selection.selected_index) {
+            Some(&index) => {
+                self.entries[index].selected = !self.entries[index].selected;
                 AgentsPickerAction::Toggled
             }
+            // Nothing under the cursor (empty filter result): inert.
             None => AgentsPickerAction::Consumed,
         }
+    }
+
+    /// Add a character to the search filter — the same contract the /models
+    /// filter follows: an edit resets the selection to the top of the
+    /// narrowed list so the highlight always lands on a row that exists.
+    fn push_filter(&mut self, ch: char) {
+        self.filter.push(ch);
+        // The edit invalidates the previous position: restart from the top
+        // of the narrowed list (the same contract the /models filter uses),
+        // and clamp so the selection bookkeeping stays consistent with
+        // `pop_filter`/`open`.
+        self.selection.selected_index = 0;
+        self.selection.clamp(self.filtered_indices().len());
+        self.cursor.note_activity();
+    }
+
+    fn pop_filter(&mut self) {
+        self.filter.pop();
+        self.selection.selected_index = 0;
+        self.cursor.note_activity();
+        self.selection.clamp(self.filtered_indices().len());
     }
 
     /// Confirm and close, or refuse to confirm while nothing is marked.
@@ -158,22 +219,34 @@ impl AgentsPicker {
         }
     }
 
-    /// Keyboard entry point. Esc cancels and discards; Space toggles the
-    /// mark; Enter confirms (and ONLY confirms — it never flips a mark).
-    /// Movement reuses [`ListSelection`] so the scroll window follows the
-    /// cursor.
+    /// Keyboard entry point. Esc cancels and discards; printable characters
+    /// edit the search filter (Space excluded — Space toggles the mark); a
+    /// filter edit resets the cursor to the top of the narrowed list.
     pub fn handle_key(&mut self, key: KeyCode, modifiers: KeyModifiers) -> AgentsPickerAction {
         if !self.visible {
             return AgentsPickerAction::None;
         }
-        let total = self.entries.len();
+        let total = self.filtered_indices().len();
         match (key, modifiers) {
             (KeyCode::Esc, _) => {
                 self.close();
                 AgentsPickerAction::Cancelled
             }
             (KeyCode::Enter, _) => self.confirm(),
+            // Space must win over the generic Char arm: typing a space into
+            // the search would otherwise toggle rows invisibly (agent names
+            // never contain spaces, so the filter loses nothing).
             (KeyCode::Char(' '), _) => self.toggle_at_cursor(),
+            // Plain typing (SHIFT for uppercase included — crossterm marks
+            // shifted letters with SHIFT) lands in the search field.
+            (KeyCode::Char(ch), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                self.push_filter(ch);
+                AgentsPickerAction::Consumed
+            }
+            (KeyCode::Backspace, _) => {
+                self.pop_filter();
+                AgentsPickerAction::Consumed
+            }
             (KeyCode::Up, _) => {
                 self.selection.select_prev(total);
                 AgentsPickerAction::Consumed
@@ -195,29 +268,59 @@ impl AgentsPicker {
     }
 
     /// Mouse entry point over the same `area` passed to [`Self::render`]:
-    /// click toggles the row under the pointer, wheel moves the cursor. The
-    /// window math is shared with render via [`Self::row_window`], so a click
-    /// always lands on the row that is drawn.
+    /// a click on a row INSIDE the box toggles it, wheel moves the cursor,
+    /// and a click OFF the box dismisses the modal — the same outside-click
+    /// contract the other dialog boxes use. The window math is shared with
+    /// render via [`Self::row_window`], so a click can only ever land on a
+    /// row that is drawn.
     pub fn handle_mouse(&mut self, mouse: &MouseEvent, area: Rect) -> AgentsPickerAction {
         if !self.visible {
             return AgentsPickerAction::None;
         }
-        let Some(row) = self.row_at(mouse.y, area) else {
-            // Outside the list body: clicks OFF the box are still consumed —
-            // the picker is a modal, so a click behind it must never move
-            // split-pane focus or select transcript text. Wheel navigates
-            // from anywhere while the picker is open; Move stays None so
-            // the App's hover tracking keeps working around the modal.
+        let box_area = self.dialog_box(area);
+        let inside_box = mouse.x >= box_area.x
+            && mouse.x < box_area.x + box_area.width
+            && mouse.y >= box_area.y
+            && mouse.y < box_area.y + box_area.height;
+        let Some(row) = self.row_at(mouse.x, mouse.y, area) else {
             return match mouse.event_type {
+                // Wheel navigates from anywhere while the picker is open.
                 MouseEventType::ScrollUp => {
-                    self.selection.select_prev(self.entries.len());
+                    self.selection.select_prev(self.filtered_indices().len());
                     AgentsPickerAction::Consumed
                 }
                 MouseEventType::ScrollDown => {
-                    self.selection.select_next(self.entries.len());
+                    self.selection.select_next(self.filtered_indices().len());
                     AgentsPickerAction::Consumed
                 }
+                // Click OFF the box dismisses the picker (left button — the
+                // dismissal gate the other dialogs use; marks are discarded
+                // by close). The dismiss lands on the PRESS, which also
+                // anchors releases: an Up that lands outside can only be
+                // seen here when its press started INSIDE the box (an
+                // outside press already closed the picker, so the Up never
+                // reaches this arm) — a fat-finger overshoot release must
+                // not act as a dismiss click, the free-gateway dialog's
+                // drag-ownership rule.
+                MouseEventType::Down
+                    if !inside_box && mouse.button == MouseButton::Left =>
+                {
+                    self.close();
+                    AgentsPickerAction::Cancelled
+                }
+                MouseEventType::Up
+                    if !inside_box && mouse.button == MouseButton::Left =>
+                {
+                    // Release of a press that started inside the box:
+                    // inert, the picker stays open with its marks.
+                    AgentsPickerAction::Consumed
+                }
+                // Other buttons, and presses inside the box but not on a
+                // list row (title, search row, gap, bottom padding): inert,
+                // the picker stays open.
                 MouseEventType::Down | MouseEventType::Up => AgentsPickerAction::Consumed,
+                // Move stays None so the App's hover tracking keeps working
+                // around the modal.
                 _ => AgentsPickerAction::None,
             };
         };
@@ -232,11 +335,11 @@ impl AgentsPicker {
                 AgentsPickerAction::Consumed
             }
             MouseEventType::ScrollUp => {
-                self.selection.select_prev(self.entries.len());
+                self.selection.select_prev(self.filtered_indices().len());
                 AgentsPickerAction::Consumed
             }
             MouseEventType::ScrollDown => {
-                self.selection.select_next(self.entries.len());
+                self.selection.select_next(self.filtered_indices().len());
                 AgentsPickerAction::Consumed
             }
             MouseEventType::Up if mouse.button == MouseButton::Left => {
@@ -247,15 +350,20 @@ impl AgentsPicker {
         }
     }
 
-    /// The `(start, len)` slice of entries shown in the MAX_ROWS window,
-    /// scrolled so the cursor row stays visible. Render and mouse hit-testing
-    /// both call this — one source of truth, like the slash menu.
-    fn row_window(&self) -> (usize, usize) {
-        let len = MAX_ROWS.min(self.entries.len());
+    /// The `(start, len)` slice of the FILTERED listing shown in the visible
+    /// window, scrolled so the cursor row stays visible. The window size is
+    /// the box's dynamic row budget (same clamp as the /models dialog), so
+    /// the list only scrolls when the box is genuinely too small. Render and
+    /// mouse hit-testing both call this — one source of truth, like the
+    /// slash menu.
+    fn row_window(&self, area: Rect) -> (usize, usize) {
+        let visible = self.dialog_box(area).height.saturating_sub(4) as usize;
+        let total = self.filtered_indices().len();
+        let len = visible.min(total);
         if len == 0 {
             return (0, 0);
         }
-        let pos = self.selection.selected_index.min(self.entries.len() - 1);
+        let pos = self.selection.selected_index.min(total - 1);
         // Scroll only once the cursor falls past the last visible row, the
         // same rule the model list dialog uses.
         let start = if pos >= len { pos - len + 1 } else { 0 };
@@ -264,23 +372,40 @@ impl AgentsPicker {
 
     /// Centered dialog box for a full-screen `area` — the single source of
     /// geometry for render and mouse hit-testing, so a click can never land
-    /// on a row the renderer did not draw.
+    /// on a row the renderer did not draw. Sizing parity with /models:
+    /// width clamps at 50/30 and the height grows with the filtered listing
+    /// up to the terminal budget (visible rows + title + search + gap +
+    /// bottom padding), so a 9-entry registry no longer sits in a box sized
+    /// for 6.
     fn dialog_box(&self, area: Rect) -> Rect {
-        let width = 56.min(area.width.saturating_sub(2)).max(20);
-        // 1 padding + title + MAX_ROWS rows + 1 padding (borderless).
-        let height = (MAX_ROWS as u16 + 3).min(area.height.saturating_sub(2)).max(6);
-        let x = area.x + (area.width.saturating_sub(width)) / 2;
+        // Responsive width: the same anchors the model dialog uses.
+        let max_w = 50u16.min(area.width.saturating_sub(4));
+        let width = max_w.max(30).min(area.width.saturating_sub(2));
+
+        // Dynamic height: fit the whole filtered listing when the terminal
+        // allows it, otherwise clamp to the available budget like /models.
+        let max_visible_height = area.height.saturating_sub(4) as usize;
+        let total = self.filtered_indices().len();
+        let visible = max_visible_height.min(total.max(1)).max(1);
+        let height = (visible as u16) + 4;
+
+        let x = area.x + area.width.saturating_sub(width) / 2;
         let y = area.y + (area.height.saturating_sub(height)) / 2;
         Rect::new(x, y, width, height)
     }
 
-    /// Which list row (0-based within the visible window) sits at terminal
-    /// row `y`, if any. Rows are drawn between the title band and the
-    /// bottom padding row.
-    fn row_at(&self, y: u16, area: Rect) -> Option<usize> {
-        let (start, len) = self.row_window();
+    /// Which listing row (0-based within the visible window) sits at
+    /// terminal point (`x`, `y`), as an index within the FILTERED list. The
+    /// hit-test covers BOTH axes: a click beside the box on the same row
+    /// band must NOT toggle a row — only a cell the renderer actually drew
+    /// does. Rows are drawn between the gap row and the bottom padding row.
+    fn row_at(&self, x: u16, y: u16, area: Rect) -> Option<usize> {
+        let (start, len) = self.row_window(area);
         let box_area = self.dialog_box(area);
-        let list_top = box_area.y + 2; // padding + title
+        if x < box_area.x || x >= box_area.x + box_area.width {
+            return None; // beside the box on the same row band
+        }
+        let list_top = box_area.y + 3; // title + search + gap
         let list_bottom = box_area.y + box_area.height - 1; // bottom padding
         if y < list_top || y >= list_bottom {
             return None;
@@ -291,8 +416,9 @@ impl AgentsPicker {
 
     /// Render the centered dialog into `buf`. `area` is the FULL terminal
     /// area: the box is centered inside it, and mouse hit-testing in
-    /// [`Self::handle_mouse`] expects the same value.
-    pub fn render(&self, buf: &mut Buffer, area: Rect, theme: &Theme) {
+    /// [`Self::handle_mouse`] expects the same value. `now` drives the
+    /// search caret blink.
+    pub fn render(&self, buf: &mut Buffer, area: Rect, theme: &Theme, now: SystemTime) {
         if !self.visible {
             return;
         }
@@ -317,31 +443,105 @@ impl AgentsPicker {
             }
         }
 
+        // Title band: the dialogs' header contract — paddingLeft 4, bold
+        // title, and a muted "esc" tucked into the header's right edge (no
+        // shortcut billboard along the bottom — space/enter are the obvious
+        // actions).
+        let header_pad = 4;
+        let header_x = box_area.x + header_pad;
+        let header_w = box_area.width.saturating_sub(header_pad * 2);
         draw_text_line_compact(
             buf,
             "Select agents",
-            box_area.x + 2,
-            box_area.y + 1,
+            header_x,
+            box_area.y,
             box_area.width.saturating_sub(4),
             Style::default().fg(text).bg(fill).add_modifier(Modifier::BOLD),
         );
-        // The single contextual hint, in the dialogs' language: a muted
-        // "esc" tucked into the header's right edge (no shortcut billboard
-        // along the bottom — space/enter are the obvious actions).
         let esc_hint = "esc";
         draw_text_line_compact(
             buf,
             esc_hint,
-            box_area.x + box_area.width - 2 - esc_hint.len() as u16,
-            box_area.y + 1,
+            header_x + header_w.saturating_sub(esc_hint.len() as u16),
+            box_area.y,
             esc_hint.len() as u16,
             Style::default().fg(muted).bg(fill),
         );
 
-        let (start, len) = self.row_window();
+        // Search row — the exact component the /models dialog renders: a
+        // "Search" placeholder while the filter is empty, otherwise the
+        // filter text, with the shared blinking caret on top of either.
+        let cursor_state = self.cursor.current_state(now);
+        for cx in header_x..header_x + header_w {
+            if let Some(cell) = buf.cell_mut((cx, box_area.y + 1)) {
+                cell.set_char(' ');
+                cell.set_style(Style::default().bg(fill));
+            }
+        }
+        let search_x = header_x;
+        let search_w = header_w;
+        let caret = |cell: &mut ratatui::buffer::Cell| match cursor_state {
+            CursorState::On => {
+                cell.set_char('\u{2588}');
+                cell.set_style(Style::default().fg(rgba_color(theme.primary)).bg(fill));
+            }
+            CursorState::Off | CursorState::Blur => {
+                // Semi-transparent cursor with medium shade character
+                cell.set_char('\u{2592}');
+                cell.set_style(Style::default().fg(muted).bg(fill));
+            }
+        };
+        if self.filter.is_empty() {
+            draw_text_line_compact(
+                buf,
+                "Search",
+                search_x,
+                box_area.y + 1,
+                search_w,
+                Style::default().fg(muted).bg(fill),
+            );
+            // Caret parked over the first character of the placeholder.
+            if let Some(cell) = buf.cell_mut((search_x, box_area.y + 1)) {
+                caret(cell);
+            }
+        } else {
+            draw_text_line_compact(
+                buf,
+                self.filter.as_str(),
+                search_x,
+                box_area.y + 1,
+                search_w,
+                Style::default().fg(text).bg(fill),
+            );
+            // Blinking caret at the end of the filter text.
+            let caret_x = search_x + self.filter.chars().count() as u16;
+            if caret_x < search_x + search_w
+                && let Some(cell) = buf.cell_mut((caret_x, box_area.y + 1))
+            {
+                caret(cell);
+            }
+        }
+
+        // Gap row stays empty (the model dialog's gap row).
+
+        let (start, len) = self.row_window(area);
+        let filtered = self.filtered_indices();
+        if filtered.is_empty() {
+            let list_top = box_area.y + 3;
+            let list_x = box_area.x + 1;
+            draw_text_line_compact(
+                buf,
+                "No matching agents",
+                list_x,
+                list_top,
+                box_area.width.saturating_sub(2),
+                Style::default().fg(muted).bg(fill),
+            );
+            return;
+        }
         for row in 0..len {
-            let entry = &self.entries[start + row];
-            let yy = box_area.y + 2 + row as u16;
+            let entry = &self.entries[filtered[start + row]];
+            let yy = box_area.y + 3 + row as u16;
             let is_cursor = start + row == self.selection.selected_index;
 
             // Row treatment follows the theme/model dialogs: the CURSOR row
@@ -350,7 +550,7 @@ impl AgentsPicker {
             let (row_bg, fg) = if is_cursor {
                 (rgba_color(theme.primary), contrast_color(theme.primary))
             } else {
-                (fill, rgba_color(theme.text))
+                (fill, text)
             };
             for cx in box_area.x + 1..box_area.x + box_area.width - 1 {
                 if let Some(cell) = buf.cell_mut((cx, yy)) {
@@ -401,6 +601,18 @@ impl AgentsPicker {
     }
 }
 
+/// Whether an entry matches the picker's search filter: the filter matches
+/// either the agent name or its description, the same contract the /models
+/// filter uses (name or provider). Case-insensitive substring match.
+fn entry_matches_filter(entry: &AgentEntry, filter: &str) -> bool {
+    if filter.is_empty() {
+        return true;
+    }
+    let needle = filter.to_lowercase();
+    entry.name.to_lowercase().contains(&needle)
+        || entry.desc.to_lowercase().contains(&needle)
+}
+
 /// First sentence of a hint/description, for the muted list column: keeps
 /// long npm/curl instructions from overflowing the fixed dialog width.
 fn first_sentence(text: &str) -> String {
@@ -432,10 +644,28 @@ mod tests {
         )
     }
 
-    /// Same geometry the tests render into: full-screen area, box centered
-    /// at 56×(MAX_ROWS+4). Kept in sync with `render`'s sizing on purpose —
-    /// if the layout constants drift, these tests fail loudly instead of
-    /// hit-testing rows that no longer exist.
+    /// Restricted registry with controlled descriptions so filter tests are
+    /// deterministic regardless of the real install hints.
+    fn small_picker() -> AgentsPicker {
+        let mut picker = AgentsPicker::new();
+        let entry = |name: &str| AgentEntry {
+            name: name.to_string(),
+            // 'g'-free descriptions: name-first filtering ('g' → gemini +
+            // goose) must not be blurred by description noise.
+            desc: format!("{name} provider"),
+            install_hint: String::new(),
+            installed: true,
+            selected: false,
+        };
+        picker.entries = vec![entry("cosh"), entry("gemini"), entry("goose"), entry("kilo")];
+        picker.open();
+        picker
+    }
+
+    /// Same geometry the tests render into: full-screen area. Kept in sync
+    /// with `render`'s sizing on purpose — if the layout constants drift,
+    /// these tests fail loudly instead of hit-testing rows that no longer
+    /// exist.
     fn picker_area() -> Rect {
         Rect::new(0, 0, 100, 40)
     }
@@ -515,8 +745,9 @@ mod tests {
     fn mouse_click_toggles_the_clicked_row() {
         let mut picker = picker();
         let area = picker_area();
-        // Box top = (40 - 10) / 2 = 15; list rows start at +2 → y = 17, 18, …
-        let action = picker.handle_mouse(&mouse(MouseEventType::Up, 30, 18), area);
+        // Full registry: 9 entries → box height = 9+4 = 13, y = (40-13)/2 =
+        // 13; list rows start at +3 → y = 16, 17, … Click y = 17 → row 1.
+        let action = picker.handle_mouse(&mouse(MouseEventType::Up, 30, 17), area);
 
         assert_eq!(action, AgentsPickerAction::Toggled);
         assert!(picker.entries[1].selected);
@@ -541,15 +772,14 @@ mod tests {
     #[test]
     fn navigation_clamps_to_list_bounds() {
         let mut picker = picker();
-        let total = picker.entries.len();
+        let total = picker.filtered_indices().len();
         // Selecting far past the end clamps instead of panicking.
         picker.selection.selected_index = total + 5;
         picker.selection.clamp(total);
         assert_eq!(picker.selection.selected_index, total - 1);
 
-        // Empty list stays inert.
+        // Empty listing stays inert.
         picker.entries.clear();
-        picker.selection.clamp(0);
         assert_eq!(picker.handle_key(KeyCode::Down, KeyModifiers::NONE), AgentsPickerAction::Consumed);
         assert_eq!(picker.handle_key(KeyCode::Char(' '), KeyModifiers::NONE), AgentsPickerAction::Consumed);
     }
@@ -565,31 +795,42 @@ mod tests {
     }
 
     #[test]
-    fn render_draws_box_title_and_indicators() {
+    fn render_draws_box_title_search_and_indicators() {
         let mut picker = picker();
         picker.handle_key(KeyCode::Char(' '), KeyModifiers::NONE); // mark cosh
         let area = picker_area();
         let theme = ThemeRegistry::new().default_theme().clone();
         let mut buf = Buffer::empty(area);
-        picker.render(&mut buf, area, &theme);
+        picker.render(&mut buf, area, &theme, SystemTime::now());
 
-        // Box: 56×10 centered in 100×40 → y = 15. Title row = +1 = 16,
-        // first list row = +2 = 17.
+        // Full registry: 9 entries → box 50×13 centered in 100×40 →
+        // x = 25, y = 13. Title row = 13, search row = 14, first list
+        // row = 16.
         let title: String = (0..area.width)
-            .filter_map(|x| buf.cell((x, 16)).map(|c| c.symbol().to_string()))
+            .filter_map(|x| buf.cell((x, 13)).map(|c| c.symbol().to_string()))
             .collect();
         assert!(title.contains("Select agents"), "title row: {title}");
         // The dialogs' header hint: a muted "esc", not a shortcut billboard.
         assert!(title.contains("esc"), "esc hint on the header row: {title}");
 
+        let search_row: String = (0..area.width)
+            .filter_map(|x| buf.cell((x, 14)).map(|c| c.symbol().to_string()))
+            .collect();
+        // The placeholder shows as "earch": the blinking caret replaces the
+        // placeholder's first glyph, exactly like the /models dialog.
+        assert!(
+            search_row.contains("earch"),
+            "placeholder on the search row: {search_row}"
+        );
+
         let first_row: String = (0..area.width)
-            .filter_map(|x| buf.cell((x, 17)).map(|c| c.symbol().to_string()))
+            .filter_map(|x| buf.cell((x, 16)).map(|c| c.symbol().to_string()))
             .collect();
         assert!(first_row.contains('●'), "marked ● on cursor row: {first_row}");
         assert!(first_row.contains("cosh"), "agent name on cursor row: {first_row}");
 
         let second_row: String = (0..area.width)
-            .filter_map(|x| buf.cell((x, 18)).map(|c| c.symbol().to_string()))
+            .filter_map(|x| buf.cell((x, 17)).map(|c| c.symbol().to_string()))
             .collect();
         assert!(second_row.contains('○'), "unmarked ○ on the next row: {second_row}");
     }
@@ -603,5 +844,235 @@ mod tests {
             .iter()
             .enumerate()
             .all(|(i, entry)| entry.name == cosh_tools::subagent::acp::ACP_AGENTS[i].name));
+    }
+
+    #[test]
+    fn typing_edits_the_search_filter_and_narrows_the_list() {
+        let mut picker = small_picker();
+        assert_eq!(picker.handle_key(KeyCode::Char('g'), KeyModifiers::NONE), AgentsPickerAction::Consumed);
+        assert_eq!(picker.filter, "g");
+        // gemini + goose match by name (`provider` descriptions are g-free).
+        let filtered = picker.filtered_indices();
+        assert_eq!(filtered, vec![1, 2]); // gemini, goose
+        assert_eq!(picker.selection.selected_index, 0); // reset on filter edit
+
+        // Backspace reverts to the full listing.
+        picker.handle_key(KeyCode::Backspace, KeyModifiers::NONE);
+        assert!(picker.filter.is_empty());
+        assert_eq!(picker.filtered_indices().len(), 4);
+    }
+
+    #[test]
+    fn filter_edits_never_touch_marks() {
+        let mut picker = small_picker();
+        // Mark goose (it is entry index 2 → Down ×2, since cosh starts under
+        // the cursor), then narrow away and back: the mark survives because
+        // the filter only reorders the view.
+        for _ in 0..2 {
+            picker.handle_key(KeyCode::Down, KeyModifiers::NONE);
+        }
+        picker.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
+        picker.handle_key(KeyCode::Char('g'), KeyModifiers::NONE);
+        picker.handle_key(KeyCode::Backspace, KeyModifiers::NONE);
+
+        assert!(picker.entries
+            .iter()
+            .find(|entry| entry.name == "goose")
+            .is_some_and(|entry| entry.selected));
+    }
+
+    #[test]
+    fn space_toggles_instead_of_typing_into_the_search() {
+        let mut picker = small_picker();
+        assert_eq!(picker.handle_key(KeyCode::Char(' '), KeyModifiers::NONE), AgentsPickerAction::Toggled);
+        assert!(picker.filter.is_empty());
+        assert!(picker.entries[0].selected);
+    }
+
+    #[test]
+    fn uppercase_typing_reaches_the_filter() {
+        let mut picker = small_picker();
+        picker.handle_key(KeyCode::Char('G'), KeyModifiers::SHIFT);
+        assert_eq!(picker.filter, "G");
+        assert_eq!(picker.filtered_indices().len(), 2);
+    }
+
+    #[test]
+    fn box_grows_with_the_listing_not_fixed_low() {
+        let mut picker = small_picker();
+        let full = picker.dialog_box(picker_area());
+        // 4 entries → 4 visible rows → height 8 (rows + title + search +
+        // gap + padding).
+        assert_eq!(full.height, 8);
+        assert_eq!(full.width, 50, "models width clamp: 50 when the terminal allows");
+
+        // Narrow the listing and the box shrinks with it.
+        picker.handle_key(KeyCode::Char('g'), KeyModifiers::NONE);
+        let narrowed = picker.dialog_box(picker_area());
+        assert_eq!(narrowed.height, 6, "2 matches: height = 2 + 4");
+    }
+
+    #[test]
+    fn box_respects_the_terminal_height_clamp_like_models() {
+        let picker = picker(); // full registry: 9 entries
+        // 10-row terminal: the /models clamp gives ≤ 6 list rows → box 10.
+        let short = Rect::new(0, 0, 100, 10);
+        let box_rect = picker.dialog_box(short);
+        assert_eq!(box_rect.height, 10);
+        assert_eq!(box_rect.width, 50);
+        // Window shows at most the clamped budget.
+        let (start, len) = picker.row_window(short);
+        assert_eq!(len, 6);
+        assert_eq!(start, 0);
+    }
+
+    #[test]
+    fn filter_resets_between_opens() {
+        let mut picker = small_picker();
+        picker.handle_key(KeyCode::Char('g'), KeyModifiers::NONE);
+        picker.handle_key(KeyCode::Esc, KeyModifiers::NONE); // close
+        picker.open();
+        assert!(picker.filter.is_empty());
+        assert_eq!(picker.filtered_indices().len(), 4);
+        assert_eq!(picker.selection.selected_index, 0);
+    }
+
+    #[test]
+    fn click_on_a_padding_row_is_consumed_not_toggled() {
+        let mut picker = small_picker();
+        picker.handle_key(KeyCode::Char('g'), KeyModifiers::NONE);
+        let area = picker_area();
+        // 'g' matches gemini+goose → box = 50×6, y = (40-6)/2 = 17; list rows
+        // at 20..21, bottom pad 22. A click on the (empty) pad row must not
+        // toggle anything.
+        let action = picker.handle_mouse(&mouse(MouseEventType::Up, 30, 22), area);
+        assert_eq!(action, AgentsPickerAction::Consumed);
+        assert!(picker.selected_names().is_empty());
+    }
+
+    #[test]
+    fn click_outside_the_box_closes_the_picker() {
+        let mut picker = small_picker();
+        let area = picker_area();
+        // The common dialog contract (slash menu / dialogs): a left click
+        // OFF the box dismisses the modal. The dismiss lands on the PRESS.
+        let action = picker.handle_mouse(&mouse(MouseEventType::Down, 5, 5), area);
+        assert_eq!(action, AgentsPickerAction::Cancelled);
+        assert!(!picker.visible);
+    }
+
+    #[test]
+    fn release_outside_without_an_outside_press_stays_open() {
+        let mut picker = small_picker();
+        let area = picker_area();
+        // Anchoring falls out of the dismiss-on-press model: an Up outside
+        // the box with no outside press having closed first (e.g. a press
+        // that started inside) is an overshoot release, NOT a dismiss
+        // click.
+        let action = picker.handle_mouse(&mouse(MouseEventType::Up, 5, 5), area);
+        assert_eq!(action, AgentsPickerAction::Consumed);
+        assert!(picker.visible);
+    }
+
+    #[test]
+    fn click_beside_the_box_on_the_same_row_band_never_toggles() {
+        let mut picker = small_picker();
+        let area = picker_area();
+        // THE regression this run fixed: the hit-test used to scope by row
+        // band only, so a click BESIDE the box on the same y (here x = 80,
+        // well right of the 50-wide box centered at x = 25) toggled a row.
+        // The x-range check makes this an outside click → dismiss.
+        // 4 entries → box 50×8 centered: x = 25..75, y = 16..24.
+        let action = picker.handle_mouse(&mouse(MouseEventType::Down, 80, 20), area);
+        assert_eq!(action, AgentsPickerAction::Cancelled);
+        assert!(!picker.visible);
+        assert!(picker.selected_names().is_empty());
+        assert_eq!(picker.filtered_indices().len(), 4);
+    }
+
+    #[test]
+    fn press_inside_the_box_that_overshoots_on_release_stays_open() {
+        let mut picker = small_picker();
+        let area = picker_area();
+        // Drag-ownership rule (the free-gateway dialog's contract): a press
+        // INSIDE the box must not let its release act as a dismiss click
+        // when the pointer slips past the box edge mid-press — a fat-finger
+        // overshoot must not silently discard every mark.
+        // Down on a row (x = 30, y = 20 is the box's row band), release
+        // outside at x = 5.
+        picker.handle_mouse(&mouse(MouseEventType::Down, 30, 20), area);
+        let action = picker.handle_mouse(&mouse(MouseEventType::Up, 5, 20), area);
+        assert_eq!(action, AgentsPickerAction::Consumed);
+        assert!(picker.visible);
+    }
+
+    #[test]
+    fn right_button_outside_does_not_dismiss() {
+        let mut picker = small_picker();
+        let area = picker_area();
+        // Dismissal is a LEFT-button contract, like the other dialogs; a
+        // right/middle click off the box is inert (falls to the generic
+        // Down|Up → Consumed arm, so the modal stays open and the marks
+        // survive unchanged).
+        let mut right_click = mouse(MouseEventType::Down, 5, 5);
+        right_click.button = MouseButton::Right;
+        let action = picker.handle_mouse(&right_click, area);
+        assert_eq!(action, AgentsPickerAction::Consumed);
+        assert!(picker.visible);
+    }
+
+    #[test]
+    fn render_draws_the_search_caret_and_placeholder() {
+        let mut picker = small_picker();
+        let area = picker_area();
+        let theme = ThemeRegistry::new().default_theme().clone();
+        let mut buf = Buffer::empty(area);
+        picker.render(&mut buf, area, &theme, SystemTime::now());
+
+        // Empty filter: "Search" placeholder with the caret over its first
+        // character (box: 50×8, x = 25, y = 16 → search row y = 17). The
+        // caret literally REPLACES the placeholder's first glyph, like the
+        // /models dialog does.
+        let cell = buf.cell((25 + 4, 17)).unwrap();
+        let symbol = cell.symbol().to_string();
+        assert!(
+            symbol == "\u{2588}" || symbol == "\u{2592}",
+            "caret over the placeholder: {symbol}"
+        );
+
+        // Typed filter: the caret parks right after the text. The narrower
+        // listing shrinks the box (4 → 2 rows: height 8 → 6), so the search
+        // row is re-derived from the CURRENT geometry instead of hardcoded.
+        picker.handle_key(KeyCode::Char('g'), KeyModifiers::NONE);
+        let mut buf = Buffer::empty(area);
+        picker.render(&mut buf, area, &theme, SystemTime::now());
+        let search_row = picker.dialog_box(area).y + 1;
+        let text_row: String = (25..75)
+            .filter_map(|x| buf.cell((x, search_row)).map(|c| c.symbol().to_string()))
+            .collect();
+        let trimmed = text_row.trim_start();
+        assert!(
+            trimmed.starts_with('g') && trimmed.len() > 1,
+            "filter text + caret on the search row: {text_row:?}"
+        );
+    }
+
+    #[test]
+    fn no_matching_agents_row_renders_the_empty_message() {
+        let mut picker = small_picker();
+        for ch in "zzz".chars() {
+            picker.handle_key(KeyCode::Char(ch), KeyModifiers::NONE);
+        }
+        let area = picker_area();
+        let theme = ThemeRegistry::new().default_theme().clone();
+        let mut buf = Buffer::empty(area);
+        picker.render(&mut buf, area, &theme, SystemTime::now());
+
+        // Zero matches → box shrinks to 1 visible row; the empty message
+        // takes the list_top row (box y = 17 → list_top = 20).
+        let list_top: String = (0..area.width)
+            .filter_map(|x| buf.cell((x, 20)).map(|c| c.symbol().to_string()))
+            .collect();
+        assert!(list_top.contains("No matching agents"), "empty message row: {list_top}");
     }
 }

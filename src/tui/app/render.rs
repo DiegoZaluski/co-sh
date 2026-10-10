@@ -1074,8 +1074,11 @@ impl App {
             self.dialog.render(buf, area, &self.theme, now);
             // The /agents picker renders above every modal panel (a
             // centered box like the registration forms) but below the
-            // toasts, which stay transient.
-            self.agents_picker.render(buf, area, &self.theme);
+            // toasts, which stay transient. Its search caret uses the
+            // shared cursor component, so it gets the same focus sync the
+            // dialog cursors receive (blur ⇒ static dim caret).
+            self.agents_picker.cursor.terminal_focused = self.terminal_focused;
+            self.agents_picker.render(buf, area, &self.theme, now);
             // Toasts render last so transient feedback (copied, not saved,
             // unavailable clipboard) is never buried under a modal panel —
             // the centered registration forms cover the top-right toast
