@@ -15,7 +15,6 @@ use crate::left_panel::sessions::SessionsAction;
 use crate::left_panel::{LEFT_PANEL_WIDTH, MIN_WIDTH_FOR_LEFT_PANEL, Mode};
 use crate::routes::router::FocusTarget;
 use crate::routes::session::queue_choice::QueueTarget;
-use crate::routes::session::right_panel::should_show_right_panel;
 use crate::ui::dialogs::{DialogAction, DialogType};
 use crate::ui::toast::{ToastOptions, ToastVariant};
 use crate::util::selection;
@@ -398,10 +397,9 @@ impl App {
                 // Click in the visible right panel → focus that slot (bash
                 // toggle / a specific agent queue) and start a drag
                 // selection on the bash / subagent section under the cursor.
-                if matches!(self.mode(), AppMode::Session)
-                    && should_show_right_panel(self.terminal_size().width, &self.state.right_panel)
-                    && self.is_in_right_panel(x)
-                {
+                // `is_in_right_panel` carries the FULL visibility predicate
+                // (content/width/user-hidden + no `/agents` split).
+                if matches!(self.mode(), AppMode::Session) && self.is_in_right_panel(x) {
                     // A corner-hint click maximizes/restores a section and
                     // must NOT start a drag selection or focus a slot.
                     // Remember the cursor too, so the hint lights even for
@@ -1080,10 +1078,6 @@ impl App {
                         self.hovered_queue_row = None;
                         self.state.right_panel.clear_hint_hover();
                     } else if matches!(self.mode(), AppMode::Session)
-                        && should_show_right_panel(
-                            self.terminal_size().width,
-                            &self.state.right_panel,
-                        )
                         && self.is_in_right_panel(x)
                     {
                         // The cursor is over the right panel, not chat content:

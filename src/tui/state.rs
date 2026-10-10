@@ -176,6 +176,7 @@ impl AppState {
                 model: None,
                 reasoning: None,
                 agents_panes: None,
+                agents_mode_open: false,
                 ctx_ids: Default::default(),
             },
         );
@@ -336,6 +337,7 @@ impl AppState {
             model: None,
             reasoning: None,
             agents_panes: None,
+            agents_mode_open: false,
             ctx_ids: Default::default(),
             messages: vec![
                 Message {

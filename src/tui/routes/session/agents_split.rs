@@ -1,6 +1,6 @@
-//! Split-view "panes" for the `/agents` route: one pane per agent CLI
-//! (index 0 = the cosh daemon itself), laid out over the session area with
-//! a simple bin-packing heuristic.
+//! Split-view "panes" for the `/agents` route: one pane per agent the user
+//! picked (the `cosh` daemon pane only when explicitly marked), laid out
+//! over the session area with a simple bin-packing heuristic.
 //!
 //! This module owns ONLY the pane model + layout + painting. The prompt is
 //! a single shared input that lives outside this area (`compute_prompt_area`
@@ -13,7 +13,8 @@
 //! in the area division: one row of equal columns while each column stays
 //! readable (>= 24 cols), otherwise two balanced rows (ceil/floor split, the
 //! top row slightly taller when the height is odd). Pane order is preserved,
-//! so the daemon keeps its grid position. The last row may end up
+//! so marked agents keep the picker order; when the daemon is picked it
+//! keeps its grid position among them. The last row may end up
 //! narrower/taller than the others; what matters is that the panes tile the
 //! area with only 1-cell gaps and no holes.
 
@@ -37,7 +38,8 @@ use crate::routes::session::right_panel::types::{
 use crate::theme::{Theme, blend, contrast_fg, luminance, rgba_color};
 use crate::util::text_region::{TextRegion, extract_text_in_region, text_from_cell_row};
 
-/// Display label of the daemon pane (agent index 0): the TUI's own agent.
+/// Display label of the daemon pane when the picker marks it: the TUI's
+/// own agent. No pane carries it unless the user marked `cosh`.
 pub const DAEMON_LABEL: &str = "cosh";
 
 /// Minimum luminance distance between a brand color and the pane background
@@ -45,7 +47,7 @@ pub const DAEMON_LABEL: &str = "cosh";
 /// dissolve into the surface (white Codex on a near-white theme, dark
 /// opencode ink on a dark theme), so it lifts toward the readable
 /// contrast color instead.
-const BRAND_CONTRAST_FLOOR: f32 = 40.0;
+pub(crate) const BRAND_CONTRAST_FLOOR: f32 = 40.0;
 
 /// How far an UNFOCUSED pane's brand-colored name dims toward the element
 /// background — the same register the old muted header used, so the
@@ -121,6 +123,18 @@ impl AgentPane {
         }
     }
 
+    /// Build a pane from its persisted reference: the agent CLI plus, when
+    /// the pane already ran once, the ACP session id it RESUMES (the
+    /// `Bound` variant). A `Name` pane starts unbound — its first turn
+    /// creates a session, and the done-handler promotes the persisted
+    /// entry to `Bound`.
+    #[must_use]
+    pub fn from_ref(pane_ref: &crate::types::AgentPaneRef) -> Self {
+        let mut pane = Self::new(pane_ref.agent().to_string());
+        pane.session_id = pane_ref.session_id().map(str::to_string);
+        pane
+    }
+
     /// Scroll the pane by `rows` (negative = up) against the LAST measured
     /// heights. Scrolling anywhere above the bottom un-pins follow; reaching
     /// the bottom re-engages it (the chat's `sync_manual_scroll_state`).
@@ -159,10 +173,10 @@ impl AgentPane {
 /// State of the whole `/agents` split view.
 #[derive(Debug, Default)]
 pub struct AgentsSplitState {
-    /// One pane per agent. Index 0 is ALWAYS the cosh daemon pane; the rest
-    /// follow the picker's chosen order.
+    /// One pane per agent in picker order. The `cosh` daemon pane exists
+    /// only when the picker marked it, and only as an ordinary pane.
     pub panes: Vec<AgentPane>,
-    /// Focused pane index (default: the daemon).
+    /// Focused pane index (default: the first picked pane).
     pub focused: usize,
     /// Screen rects of the LAST rendered frame — the mouse dispatcher
     /// hit-tests these, exactly like `SessionView::pill_area`.
@@ -201,18 +215,18 @@ pub struct AgentsSplitState {
 }
 
 impl AgentsSplitState {
-    /// Build the pane set. The daemon (`cosh`) is inserted at index 0 unless
-    /// the caller already put it first; `drafts` stays aligned with `panes`.
+    /// Build the pane set from the user's split config, in the order they
+    /// setup. NO daemon insert: the `cosh` pane exists ONLY when the picker
+    /// marked it — the split is a plain reflection of the user's choice.
+    /// Each entry carries its persisted binding (`AgentPaneRef::Bound`
+    /// resumes its ACP session). `drafts` stays aligned with `panes`.
     #[must_use]
-    pub fn new(agents: Vec<String>) -> Self {
-        let mut panes: Vec<AgentPane> = agents
-            .into_iter()
-            .filter(|a| !a.is_empty())
-            .map(AgentPane::new)
+    pub fn new(agents: Vec<crate::types::AgentPaneRef>) -> Self {
+        let panes: Vec<AgentPane> = agents
+            .iter()
+            .filter(|r| !r.agent().is_empty())
+            .map(AgentPane::from_ref)
             .collect();
-        if panes.first().map(|p| p.agent.as_str()) != Some(DAEMON_LABEL) {
-            panes.insert(0, AgentPane::new(DAEMON_LABEL.to_string()));
-        }
         let drafts = vec![String::new(); panes.len()];
         Self {
             panes,
@@ -252,8 +266,9 @@ impl AgentsSplitState {
         }
     }
 
-    /// Focus the pane bound to hotkey `ch` (`'0'` = daemon, `'1'..='9'` =
-    /// the agents in picker order). Returns whether a pane matched.
+    /// Focus the pane bound to hotkey `ch` (`'0'` = the daemon pane WHEN
+    /// present, `'1'..='9'` = the panes in picker order). Returns whether a
+    /// pane matched.
     pub fn focus_hotkey(&mut self, ch: char) -> bool {
         let index = match ch {
             c if c == DAEMON_HOTKEY => 0,
@@ -537,11 +552,65 @@ impl AgentsSplitState {
     }
 
     /// Apply one sub-agent event to pane `pane`'s activity stream. Out-of
-    /// range panes are ignored (the daemon is a normal pane for events too).
+    /// range panes are ignored: every pane incl. daemon is ordinary here.
     pub fn apply_event(&mut self, pane: usize, event: &SubagentEvent) {
         if let Some(p) = self.panes.get_mut(pane) {
             p.activity.apply(event);
         }
+    }
+
+    /// Deliver the turn's terminal report to pane `pane` — the `AgentsPaneDone`
+    /// `output`, which is the SAME text the stream already played into the
+    /// pane's timeline (the `TurnClosure` contract: the report is the last
+    /// streamed message segment). Appending it as another `Message` event
+    /// would duplicate the answer: the coalescer's backscan merges the
+    /// marker into the existing Message entry and the pane reads
+    /// `...hoje?Tudo bem! Como posso ajudar hoje?`.
+    ///
+    /// The completion path instead applies the SAME deduplication the right
+    /// panel's seal uses (`SubagentActivity::seal`): the last Message entry
+    /// whose text is contained in the report is DROPPED (the report below
+    /// carries it), then the marker — the raw report on success, the
+    /// `[turn <reason>]` prefix on failure — is appended as the turn's
+    /// closing block. A report that does NOT contain the streamed tail (a
+    /// turn that ended right after a tool call and fell back to a previous
+    /// segment, a truncated report) keeps the entry: degrades to keeping,
+    /// never to losing content.
+    pub fn finish_turn(&mut self, pane: usize, output: &str, stop_reason: &str) {
+        let Some(p) = self.panes.get_mut(pane) else {
+            return;
+        };
+        let failed = stop_reason == "error" || stop_reason == "cancelled";
+        p.activity.seal(!failed, Some(output));
+        let marker = if failed {
+            format!("\n\n[turn {stop_reason}] {output}")
+        } else {
+            output.to_string()
+        };
+        p.activity
+            .apply(&SubagentEvent::Message { text: marker });
+    }
+
+    /// The list label of pane `pane` in the right panel's mirror entry:
+    /// `#k` (1-based occurrence) when THIS split runs the same agent CLI in
+    /// several panes — two `claude` instances must stay distinguishable in
+    /// the shared subagent list — and `None` for a lone instance (the agent
+    /// name alone is unambiguous there).
+    #[must_use]
+    pub fn pane_mirror_label(&self, pane: usize) -> Option<String> {
+        let agent = self.panes.get(pane)?.agent.as_str();
+        let same: Vec<usize> = self
+            .panes
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.agent == agent)
+            .map(|(i, _)| i)
+            .collect();
+        if same.len() <= 1 {
+            return None;
+        }
+        let k = same.iter().position(|&i| i == pane)? + 1;
+        Some(format!("#{k}"))
     }
 
     /// Set the running flag of pane `pane` (out-of-range panes ignored).
@@ -1067,55 +1136,63 @@ fn draw_agent_name(
 ) {
     let chars: Vec<char> = agent.chars().filter(|c| !c.is_control()).collect();
     let count = chars.len();
-    let bg_lum = {
-        let (r, g, b, _) = theme.background_element.to_ints();
-        luminance(r, g, b)
-    };
-    // One catalog lookup per header, not per glyph: the palette (and the
-    // background contrast it is judged against) is fixed for the row.
-    let palette = palette_for(agent);
-    let contrast_fg_rgba = contrast_fg(theme.background_element);
     for (i, ch) in chars.into_iter().enumerate() {
         let Ok(i) = u16::try_from(i) else { break };
         let Some(cx) = x.checked_add(i) else { break };
         if cx >= x.saturating_add(max_w) {
             break;
         }
-        let style = match palette {
-            Some(palette) => {
-                // One sample per glyph column: `t` walks the mark's colors
-                // left to right (constant for single-color marks).
-                let t = if count <= 1 {
-                    0.0
-                } else {
-                    f32::from(i) / (count as f32 - 1.0)
-                };
-                let rgb = palette.sample(t);
-                let mut brand = RGBA::from_ints(rgb.r, rgb.g, rgb.b, 255);
-                let (br, bg_, bb, _) = brand.to_ints();
-                if (luminance(br, bg_, bb) - bg_lum).abs() < BRAND_CONTRAST_FLOOR {
-                    brand = blend(brand, contrast_fg_rgba, 0.6);
-                }
-                let fg = if focused {
-                    brand
-                } else {
-                    blend(theme.background_element, brand, DIM_UNFOCUSED)
-                };
-                Style::default().fg(rgba_color(fg))
-            }
-            None => {
-                let fg = if focused {
-                    theme.text
-                } else {
-                    theme.text_muted
-                };
-                Style::default().fg(rgba_color(fg))
-            }
-        }
-        .add_modifier(Modifier::BOLD);
+        // One sample per glyph column: `t` walks the mark's colors left to
+        // right (constant for single-color marks).
+        let t = if count <= 1 {
+            0.0
+        } else {
+            f32::from(i) / (count as f32 - 1.0)
+        };
+        let style = brand_fg(agent, t, theme, focused).add_modifier(Modifier::BOLD);
         if let Some(cell) = buf.cell_mut((cx, y)) {
             cell.set_char(ch);
             cell.set_style(style);
+        }
+    }
+}
+
+/// The style of ONE glyph column of an agent's brand name, shared by the
+/// split-pane headers and the right panel's subagent list (the bound
+/// `/agents` agents get the same full-color logo there; normal subagents
+/// pass `None`'s palette branch and stay in the theme's own colors —
+/// opaque, never a half-brand tint).
+///
+/// A brand mark never dissolves into the surface: when the sampled color's
+/// luminance sits too close to the background's, it lifts toward the
+/// readable contrast color instead.
+pub(crate) fn brand_fg(agent: &str, t: f32, theme: &Theme, focused: bool) -> Style {
+    let bg_lum = {
+        let (r, g, b, _) = theme.background_element.to_ints();
+        luminance(r, g, b)
+    };
+    match palette_for(agent) {
+        Some(palette) => {
+            let rgb = palette.sample(t);
+            let mut brand = RGBA::from_ints(rgb.r, rgb.g, rgb.b, 255);
+            let (br, bg_, bb, _) = brand.to_ints();
+            if (luminance(br, bg_, bb) - bg_lum).abs() < BRAND_CONTRAST_FLOOR {
+                brand = blend(brand, contrast_fg(theme.background_element), 0.6);
+            }
+            let fg = if focused {
+                brand
+            } else {
+                blend(theme.background_element, brand, DIM_UNFOCUSED)
+            };
+            Style::default().fg(rgba_color(fg))
+        }
+        None => {
+            let fg = if focused {
+                theme.text
+            } else {
+                theme.text_muted
+            };
+            Style::default().fg(rgba_color(fg))
         }
     }
 }
@@ -1283,7 +1360,7 @@ mod tests {
             "gaps must stay small: {uncovered}/{total} uncovered, n={pane_count} {area:?}"
         );
         // And the covered cells exactly account for the pane rects.
-        let sum: u32 = rects.iter().map(|r| u32::from(r.area())).sum();
+        let sum: u32 = rects.iter().map(|r| r.area()).sum();
         assert_eq!(
             sum + uncovered as u32,
             total as u32,
@@ -1324,21 +1401,21 @@ mod tests {
 
     #[test]
     fn narrow_area_falls_back_to_two_rows() {
-        // 6 agents at 60 cols: per-column width would be ~9 < 24 → 2 rows.
+        // 7 panes at 60 cols: per-column width would be ~9 < 24 → 2 rows.
         let area = Rect::new(0, 0, 60, 20);
-        let rects = compute_layout(7, area); // daemon + 6 agents
-        let row_tops: Vec<u16> = rects[1..].iter().map(|r| r.y).collect();
+        let rects = compute_layout(7, area);
+        let row_tops: Vec<u16> = rects.iter().map(|r| r.y).collect();
         let distinct: Vec<u16> = {
             let mut v = row_tops.clone();
             v.sort_unstable();
             v.dedup();
             v
         };
-        assert_eq!(distinct.len(), 2, "two agent rows, tops {row_tops:?}");
-        // The top row carries ceil(6/2) = 3 panes, the bottom floor(6/2) = 3.
+        assert_eq!(distinct.len(), 2, "two pane rows, tops {row_tops:?}");
+        // ceil(7/2) = 4 panes on the top row, floor(7/2) = 3 on the bottom.
         assert_eq!(
             row_tops.iter().filter(|&&y| y == distinct[0]).count(),
-            3,
+            4,
             "top row = ceil(n/2)"
         );
         assert_eq!(
@@ -1349,29 +1426,39 @@ mod tests {
     }
 
     #[test]
-    fn new_inserts_daemon_first_and_keeps_picker_order() {
+    fn new_keeps_picker_order_and_never_injects_the_daemon() {
+        // Used to insert a forced `cosh` pane 0 — the Cosh Manager block
+        // then existed in /agents without the user ever picking cosh. The
+        // split must be a plain reflection of the picker's marks.
         let state = AgentsSplitState::new(vec!["kilo".into(), "claude".into()]);
-        assert_eq!(state.pane_count(), 3);
-        assert_eq!(state.panes[0].agent, "cosh");
-        assert_eq!(state.panes[1].agent, "kilo");
-        assert_eq!(state.panes[2].agent, "claude");
-        assert_eq!(state.drafts.len(), 3, "drafts aligned with panes");
+        assert_eq!(state.pane_count(), 2, "no daemon pane appears uninvited");
+        assert_eq!(state.panes[0].agent, "kilo");
+        assert_eq!(state.panes[1].agent, "claude");
+        assert_eq!(state.drafts.len(), 2, "drafts aligned with panes");
 
-        // Already-first daemon is not duplicated.
+        // An explicitly marked cosh keeps its marked position (first) and is
+        // NOT duplicated.
         let state = AgentsSplitState::new(vec![DAEMON_LABEL.into(), "claude".into()]);
         assert_eq!(state.pane_count(), 2);
         assert_eq!(state.panes[0].agent, "cosh");
+        assert_eq!(state.panes[1].agent, "claude");
     }
 
     #[test]
-    fn focus_hotkey_targets_daemon_and_agents() {
+    fn focus_hotkey_targets_panes_by_position() {
         let mut state = AgentsSplitState::new(vec!["claude".into(), "kilo".into()]);
-        assert!(state.focus_hotkey('2'));
-        assert_eq!(state.focused, 2);
+        // '1' targets pane 1 (kilo) — hotkeys index the pane LIST directly,
+        // no phantom daemon slot in between.
+        assert!(state.focus_hotkey('1'));
+        assert_eq!(state.focused, 1);
         assert_eq!(state.focused_pane().map(|p| p.agent.as_str()), Some("kilo"));
+        // '0' is the FIRST pane — the daemon only when the user marked it.
         assert!(state.focus_hotkey('0'));
         assert_eq!(state.focused, 0);
+        assert_eq!(state.focused_pane().map(|p| p.agent.as_str()), Some("claude"));
         // Out-of-range and unknown keys leave the focus alone.
+        assert!(!state.focus_hotkey('2'));
+        assert_eq!(state.focused, 0);
         assert!(!state.focus_hotkey('9'));
         assert_eq!(state.focused, 0);
         assert!(!state.focus_hotkey('x'));
@@ -1380,8 +1467,9 @@ mod tests {
 
     #[test]
     fn focus_next_prev_wrap_around() {
-        let mut state = AgentsSplitState::new(vec!["claude".into()]);
+        let mut state = AgentsSplitState::new(vec!["claude".into(), "kilo".into()]);
         assert_eq!(state.pane_count(), 2);
+        // Focused starts on pane 0.
         state.focus_next();
         assert_eq!(state.focused, 1);
         state.focus_next();
@@ -1394,32 +1482,32 @@ mod tests {
     fn apply_event_accumulates_message_chunks_in_the_right_pane() {
         let mut state = AgentsSplitState::new(vec!["claude".into(), "kilo".into()]);
         state.apply_event(
-            1,
+            0,
             &SubagentEvent::Message {
                 text: "hello ".to_string(),
             },
         );
         state.apply_event(
-            1,
+            0,
             &SubagentEvent::Message {
                 text: "world".to_string(),
             },
         );
         state.apply_event(
-            2,
+            7,
             &SubagentEvent::Message {
-                text: "other pane".to_string(),
+                text: "lost pane".to_string(),
             },
         );
 
-        // The daemon pane (0) stays empty; pane 1 coalesced its two chunks.
-        assert!(state.panes[0].activity.timeline.is_empty());
-        assert_eq!(state.panes[1].activity.timeline.len(), 1);
-        let SubagentTimelineEntry::Message { text } = &state.panes[1].activity.timeline[0] else {
+        // The neighbour pane (1) stays empty; pane 0 coalesced its two
+        // chunks and the out-of-range event was dropped.
+        assert!(state.panes[1].activity.timeline.is_empty());
+        assert_eq!(state.panes[0].activity.timeline.len(), 1);
+        let SubagentTimelineEntry::Message { text } = &state.panes[0].activity.timeline[0] else {
             panic!("expected a Message entry");
         };
         assert!(text.contains("hello") && text.contains("world"), "got {text:?}");
-        assert_eq!(state.panes[2].activity.timeline.len(), 1);
     }
 
     #[test]
@@ -1434,13 +1522,105 @@ mod tests {
         assert!(state.panes.iter().all(|p| p.activity.timeline.is_empty()));
     }
 
+    /// Regression: the terminal report must NOT duplicate the streamed
+    /// answer. `AgentsPaneDone.output` is the SAME text the stream already
+    /// played into the pane (the `TurnClosure` contract — the report is the
+    /// last streamed message segment); delivering it as another `Message`
+    /// event let the coalescer's backscan merge it into that same entry and
+    /// the pane read "…hoje?Tudo bem! Como posso ajudar hoje?". `finish_turn`
+    /// seals the streamed entry away (the same dedup the right panel's seal
+    /// applies) before appending the report, and a failure report keeps the
+    /// streamed narration (its body is the harness error, not the answer).
+    #[test]
+    fn finish_turn_does_not_duplicate_the_streamed_answer() {
+        let mut state = AgentsSplitState::new(vec!["kilo".into()]);
+        // The live stream: chunks coalesce into ONE Message entry.
+        state.apply_event(
+            0,
+            &SubagentEvent::Message {
+                text: "Tudo bem! Como\n".to_string(),
+            },
+        );
+        state.apply_event(
+            0,
+            &SubagentEvent::Message {
+                text: "posso ajudar hoje?".to_string(),
+            },
+        );
+        assert_eq!(state.panes[0].activity.timeline.len(), 1);
+
+        // The turn ends: the report IS that same text.
+        state.finish_turn(0, "Tudo bem! Como\nposso ajudar hoje?", "end_turn");
+
+        // The streamed entry was dropped (the report carries it) and the
+        // report landed ONCE — the timeline never contains a doubled
+        // answer.
+        let doubled = state
+            .panes[0]
+            .activity
+            .timeline
+            .iter()
+            .filter_map(|e| match e {
+                SubagentTimelineEntry::Message { text } => Some(text.clone()),
+                _ => None,
+            })
+            .any(|text| {
+                let count = text
+                    .match_indices("Como")
+                    .count();
+                count > 1
+            });
+        assert!(
+            !doubled,
+            "the answer must appear exactly once: {timeline:?}",
+            timeline = state.panes[0].activity.timeline
+        );
+        // The report is present as the closing block.
+        let last = state.panes[0].activity.timeline.last().cloned().unwrap();
+        let SubagentTimelineEntry::Message { text } = last else {
+            panic!("expected the report block");
+        };
+        assert!(
+            text.contains("posso ajudar hoje?"),
+            "the report landed in the pane: {text:?}"
+        );
+
+        // The failure path KEEPS the streamed narration (the body is the
+        // harness error, so nothing is deduplicated away).
+        let mut failed = AgentsSplitState::new(vec!["kilo".into()]);
+        failed.apply_event(
+            0,
+            &SubagentEvent::Message {
+                text: "partial answer".to_string(),
+            },
+        );
+        failed.finish_turn(0, "spawn failed", "error");
+        let texts: Vec<String> = failed.panes[0]
+            .activity
+            .timeline
+            .iter()
+            .filter_map(|e| match e {
+                SubagentTimelineEntry::Message { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|t| t.contains("partial answer")),
+            "failure keeps the streamed narration: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.contains("[turn error]")),
+            "the failure marker is labeled: {texts:?}"
+        );
+    }
+
     #[test]
     fn any_running_tracks_the_running_flag() {
         let mut state = AgentsSplitState::new(vec!["claude".into(), "kilo".into()]);
         assert!(!state.any_running());
-        state.set_running(2, true);
+        state.set_running(1, true);
         assert!(state.any_running());
-        state.set_running(2, false);
+        state.set_running(1, false);
         assert!(!state.any_running());
         // Out-of-range set_running is a no-op.
         state.set_running(9, true);
@@ -1455,7 +1635,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render(&mut buf, area, &mut state, &theme);
 
-        assert_eq!(state.pane_rects.len(), 3, "hit rects recorded for mouse");
+        assert_eq!(state.pane_rects.len(), 2, "hit rects recorded for mouse");
 
         let row_text = |y: u16| {
             (0..80)
@@ -1463,7 +1643,6 @@ mod tests {
                 .collect::<String>()
         };
         let all: String = (0..24).map(row_text).collect::<Vec<_>>().join("\n");
-        assert!(all.contains("cosh"), "daemon header: {all:?}");
         assert!(all.contains("claude"), "agent header: {all:?}");
         assert!(all.contains("kilo"), "agent header: {all:?}");
         assert!(!all.contains('['), "no index labels: {all:?}");
@@ -1486,7 +1665,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render(&mut buf, area, &mut state, &theme);
 
-        let claude_rect = state.pane_rects[1];
+        let claude_rect = state.pane_rects[0];
         let header_y = claude_rect.y;
         let glyph_at = |x: u16| buf.cell((x, header_y)).map(|c| c.symbol().to_string());
 
@@ -1506,9 +1685,10 @@ mod tests {
             );
         }
 
-        // Focus Claude: the name takes the brand terracotta (or its
-        // contrast-lifted variant on a theme where the raw color would
-        // dissolve — the same formula the painter applies).
+        // Focus kilo: claude's name dims toward the background (the focus
+        // highlight belongs to whoever owns it), or its contrast-lifted
+        // variant on a theme where the raw color would dissolve — the same
+        // formula the painter applies.
         state.focus_next();
         let mut buf = Buffer::empty(area);
         render(&mut buf, area, &mut state, &theme);
@@ -1526,36 +1706,34 @@ mod tests {
         let cell = buf
             .cell((claude_rect.x + 1, header_y))
             .expect("claude 'c' cell");
+        assert_ne!(
+            cell.style().fg,
+            Some(rgba_color(theme.text_muted)),
+            "claude keeps a brand-derived color, never the naked muted tone"
+        );
+        if expected != brand {
+            assert_eq!(
+                cell.style().fg,
+                Some(rgba_color(expected)),
+                "a contrast-threatened brand is lifted"
+            );
+        }
+
+        // Focus back to claude: the name takes the brand terracotta.
+        state.focus_hotkey('0');
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut state, &theme);
+        let cell = buf
+            .cell((claude_rect.x + 1, header_y))
+            .expect("claude 'c' cell");
         assert_eq!(
             cell.style().fg,
             Some(rgba_color(expected)),
             "focused claude paints the brand color"
         );
 
-        // The daemon (cosh, no brand in the catalog) is UNFOCUSED here and
-        // keeps the theme's muted text color — no invented brand.
-        let cosh_rect = state.pane_rects[0];
-        let cell = buf.cell((cosh_rect.x + 1, cosh_rect.y)).unwrap();
-        assert_eq!(
-            cell.style().fg,
-            Some(rgba_color(theme.text_muted)),
-            "unfocused cosh keeps the theme's muted text color"
-        );
-
-        // Focus back to the daemon: cosh focused paints the theme TEXT —
-        // the daemon never takes a brand color.
-        state.focus_hotkey('0');
-        let mut buf = Buffer::empty(area);
-        render(&mut buf, area, &mut state, &theme);
-        let cell = buf.cell((cosh_rect.x + 1, cosh_rect.y)).unwrap();
-        assert_eq!(
-            cell.style().fg,
-            Some(rgba_color(theme.text)),
-            "focused cosh keeps the theme text color, not a brand"
-        );
-
         // Unfocused kilo dims toward the background, NOT pure brand.
-        let kilo_rect = state.pane_rects[2];
+        let kilo_rect = state.pane_rects[1];
         let cell = buf.cell((kilo_rect.x + 1, kilo_rect.y)).unwrap();
         assert_ne!(
             cell.style().fg,
@@ -1574,7 +1752,7 @@ mod tests {
         let theme = test_theme();
         // "devin" carries the official tri-color logomark (blue → green →
         // cyan-blue), so the name paints as a real sweep.
-        let mut state = AgentsSplitState::new(vec!["devin".into(), "kilo".into()]);
+        let mut state = AgentsSplitState::new(vec!["kilo".into(), "devin".into()]);
         state.focus_next();
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
@@ -1623,15 +1801,14 @@ mod tests {
     fn render_running_pane_shows_the_activity_tail() {
         let theme = test_theme();
         let mut state = AgentsSplitState::new(vec!["claude".into()]);
-        state.set_running(1, true);
+        state.set_running(0, true);
         // More lines than the pane body can hold, so the tail scroll is
-        // actually exercised. The grid layout (the daemon is an equal
-        // participant now) leaves each pane ~23 rows of body, so the volume
-        // is sized against the measured content height, not a hardcoded
-        // strip.
+        // actually exercised. The grid layout gives the single picked pane
+        // the whole session area (~23 rows of body), so the volume is sized
+        // against the measured content height, not a hardcoded strip.
         for i in 0..40 {
             state.apply_event(
-                1,
+                0,
                 &SubagentEvent::Message {
                     text: format!("line {i} of the stream\n"),
                 },
@@ -1642,7 +1819,7 @@ mod tests {
         render(&mut buf, area, &mut state, &theme);
 
         // The effective window content rows the render measured.
-        let pane = &state.panes[1];
+        let pane = &state.panes[0];
         assert!(
             pane.content_height > pane.body_height,
             "test needs overflow: content={} body={}",

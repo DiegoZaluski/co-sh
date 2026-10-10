@@ -17,17 +17,72 @@ use crate::util::list_selection::ListSelection;
 #[derive(Clone, Debug)]
 pub struct AgentEntry {
     pub name: String,
-    pub desc: String,
-    /// Full static install hint from the registry. Shown (truncated) in the
-    /// muted description column when the entry is not installed.
-    pub install_hint: String,
-    /// All required binaries found in PATH. Rendered dim with the install
-    /// hint when `false`; the mark is still allowed (the router re-checks
-    /// before spawning, so a stale detection must not lock the user out).
+    /// All required binaries found in PATH. Rendered dim when `false`; the
+    /// mark is still allowed (the router re-checks before spawning, so a
+    /// stale detection must not lock the user out).
     pub installed: bool,
     /// The user's multi-select mark. Toggleable; survives navigation AND
     /// filter edits (narrowing the list never discards a mark).
     pub selected: bool,
+    /// How many instances of this CLI to spawn when the pick confirms —
+    /// typed digits land in THIS field while the row is marked, so "two
+    /// Claude panes" is a single pick. The string is the raw typed digits
+    /// (`""` = the `DEFAULT_INSTANCES` placeholder shown in italic); it is
+    /// parsed at confirm time.
+    pub instances: String,
+}
+
+/// The default instance count a pick carries when the user leaves the
+/// count input untouched: ONE instance — typing a count is an explicit
+/// multi-instance gesture, not the default.
+pub const DEFAULT_INSTANCES: usize = 1;
+
+/// The MAXIMUM instance count a pick may request — the pane-grid ceiling
+/// for ONE agent CLI. The single knob for the limit: the count input
+/// rejects any digit that would push the parsed count past it, the confirm
+/// parse clamps to it, and the persisted pre-mark path clamps too. Bump
+/// the constant to widen the limit; nothing else needs to change.
+pub const MAX_INSTANCES: usize = 9;
+
+/// Instances confirmed for ONE agent CLI: the pane grid receives `n`
+/// identical panes, each with its own independent session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentPick {
+    pub name: String,
+    /// How many panes of `name` to create (>= 1, sanity-clamped).
+    pub instances: usize,
+}
+
+impl AgentEntry {
+    /// The parsed instance count: the typed digits when valid, the DEFAULT
+    /// placeholder otherwise (empty input = one instance). The result never
+    /// exceeds `MAX_INSTANCES` — the count input already rejects
+    /// overflowing digits, so this clamp only guards persisted or
+    /// programmatic values typed under a SMALLER previous limit.
+    #[must_use]
+    pub fn parsed_instances(&self) -> usize {
+        match self.instances.parse::<usize>() {
+            Ok(n) if n >= 1 => n.min(crate::ui::agents_picker::MAX_INSTANCES),
+            _ => DEFAULT_INSTANCES,
+        }
+    }
+
+    /// The count input's display text: the typed digits when present, the
+    /// INFORMATIVE placeholder when untouched. The `[1-9]` bracket form is
+    /// the classic editable-slot glyph: brackets say "type here", the range
+    /// inside gives min AND max in one cluster (the min doubles as the
+    /// default — Enter on an untouched row confirms `DEFAULT_INSTANCES`,
+    /// so there is no "type 1" redundancy). Both bounds read from the
+    /// constants, so raising the ceiling re-labels every row with no
+    /// further change.
+    #[must_use]
+    pub fn instances_display(&self) -> String {
+        if self.instances.is_empty() {
+            format!("[{DEFAULT_INSTANCES}-{MAX_INSTANCES}]")
+        } else {
+            self.instances.clone()
+        }
+    }
 }
 
 /// What a key or mouse event asked the picker to do. The App routes on this
@@ -43,9 +98,9 @@ pub enum AgentsPickerAction {
     Consumed,
     /// A mark toggled under the cursor; the picker stays open.
     Toggled,
-    /// Enter confirmed. Carries the marked names in listing order, `cosh`
-    /// first.
-    Confirmed(Vec<String>),
+    /// Enter confirmed. Carries the marked agents WITH their instance
+    /// counts in listing order, `cosh` first when marked.
+    Confirmed(Vec<AgentPick>),
     /// Esc: close and discard the marks.
     Cancelled,
 }
@@ -70,8 +125,8 @@ pub struct AgentsPicker {
     pub visible: bool,
     pub entries: Vec<AgentEntry>,
     /// The `/models`-style search input at the top of the box. Filters by
-    /// name or description, case-insensitive. Marks are NOT touched by the
-    /// filter — clearing it brings every mark back.
+    /// agent name, case-insensitive. Marks are NOT touched by the filter,
+    /// clearing it brings every mark back.
     pub filter: String,
     /// Blinking caret for the search input (same reusable component the
     /// dialog filters use). The App syncs `terminal_focused` before
@@ -100,18 +155,16 @@ impl AgentsPicker {
         let installed = cosh_tools::subagent::acp::detect_installed();
         let mut entries = vec![AgentEntry {
             name: "cosh".to_string(),
-            desc: "cosh daemon — delegates to the agents below".to_string(),
-            install_hint: String::new(),
             installed: true,
             selected: false,
+            instances: String::new(),
         }];
         entries.extend(cosh_tools::subagent::acp::ACP_AGENTS.iter().map(|agent| {
             AgentEntry {
                 name: agent.name.to_string(),
-                desc: first_sentence(agent.install_hint),
-                install_hint: agent.install_hint.to_string(),
                 installed: installed.contains(&agent.name),
                 selected: false,
+                instances: String::new(),
             }
         }));
         Self {
@@ -170,6 +223,30 @@ impl AgentsPicker {
             .collect()
     }
 
+    /// The marked entries WITH their instance counts, in listing order —
+    /// the confirm payload. Each marked row expands to ONE pick; the split
+    /// grid is the one that multiplies it into `instances` panes.
+    #[must_use]
+    pub fn selected_picks(&self) -> Vec<AgentPick> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.selected)
+            .map(|entry| AgentPick {
+                name: entry.name.clone(),
+                instances: entry.parsed_instances(),
+            })
+            .collect()
+    }
+
+    /// The entry under the cursor, if any — the instance-count input's
+    /// target. EVERY row owns the qualifier digits (the count field is a
+    /// per-row input the user types into directly, marker or not): typing
+    /// digits on a row selects it with that count in one gesture.
+    fn entry_at_cursor(&self) -> Option<usize> {
+        let filtered = self.filtered_indices();
+        filtered.get(self.selection.selected_index).copied()
+    }
+
     fn toggle_at_cursor(&mut self) -> AgentsPickerAction {
         let filtered = self.filtered_indices();
         match filtered.get(self.selection.selected_index) {
@@ -213,15 +290,18 @@ impl AgentsPicker {
             // dialog refusing an empty selection.
             AgentsPickerAction::Consumed
         } else {
-            let names = self.selected_names();
+            let picks = self.selected_picks();
             self.close();
-            AgentsPickerAction::Confirmed(names)
+            AgentsPickerAction::Confirmed(picks)
         }
     }
 
     /// Keyboard entry point. Esc cancels and discards; printable characters
-    /// edit the search filter (Space excluded — Space toggles the mark); a
-    /// filter edit resets the cursor to the top of the narrowed list.
+    /// edit the search filter (Space excluded — Space toggles the mark) —
+    /// EXCEPT digits while the cursor sits on a MARKED row: those fill the
+    /// row's instance-count field ("how many panes of this CLI"), the
+    /// Backspace sibling that pops it. A filter edit resets the cursor to
+    /// the top of the narrowed list.
     pub fn handle_key(&mut self, key: KeyCode, modifiers: KeyModifiers) -> AgentsPickerAction {
         if !self.visible {
             return AgentsPickerAction::None;
@@ -237,13 +317,66 @@ impl AgentsPicker {
             // the search would otherwise toggle rows invisibly (agent names
             // never contain spaces, so the filter loses nothing).
             (KeyCode::Char(' '), _) => self.toggle_at_cursor(),
+            // Digits edit the instance count of the row UNDER THE CURSOR —
+            // marker or not (crossterm marks SHIFT with the modifier, and
+            // shift+digit is not a symbol the count cares about). Typing a
+            // count is itself the selection gesture: the row auto-marks so
+            // "claude, 2, Enter" is a complete pick without touching Space.
+            (KeyCode::Char(ch), KeyModifiers::NONE) if ch.is_ascii_digit() => {
+                if let Some(index) = self.entry_at_cursor() {
+                    let count = &mut self.entries[index].instances;
+                    // The count input enforces the MAX_INSTANCES ceiling.
+                    // Appending first: a digit that keeps the count inside
+                    // the ceiling extends the number ("2" -> "8"). A digit
+                    // that would OVERFLOW ("3" -> "32") is not discarded —
+                    // it REPLACES the field (the replace gesture). That is
+                    // what makes the count freely editable: "3" then "2"
+                    // reads 2 (down), "3" then "9" reads 9 (up to the
+                    // ceiling), instead of leaving the field stuck at its
+                    // old value forever. The ceiling still holds: the
+                    // replace digit itself must parse inside it ("9" with
+                    // the ceiling at 9 is accepted, never 99). Raising
+                    // MAX_INSTANCES automatically admits longer numbers
+                    // (the append path stays bounded by the ceiling's
+                    // digits); `count` only ever holds digits (this same
+                    // guard mints it), so the parses cannot fail.
+                    let candidate = format!("{count}{ch}");
+                    let parsed = candidate.parse::<usize>().ok();
+                    let replacement = ch.to_digit(10).map(|d| d as usize);
+                    if parsed.is_some_and(|n| n <= MAX_INSTANCES) {
+                        count.push(ch);
+                        self.entries[index].selected = true;
+                        self.cursor.note_activity();
+                    } else if replacement.is_some_and(|n| n <= MAX_INSTANCES) {
+                        *count = ch.to_string();
+                        self.entries[index].selected = true;
+                        self.cursor.note_activity();
+                    }
+                    // Both out of range (e.g. a lone "0" stays the default
+                    // placeholder): the keypress is a no-op — the field
+                    // keeps whatever the user had.
+                }
+                AgentsPickerAction::Consumed
+            }
             // Plain typing (SHIFT for uppercase included — crossterm marks
             // shifted letters with SHIFT) lands in the search field.
             (KeyCode::Char(ch), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
                 self.push_filter(ch);
                 AgentsPickerAction::Consumed
             }
+            // Backspace pops the row's count input FIRST (the field owns the
+            // key while it has content), THEN falls back to the filter.
             (KeyCode::Backspace, _) => {
+                // The row under the cursor owns Backspace FIRST (its count
+                // field pops while it has content — marker or not), THEN
+                // the filter (the classic search-erase).
+                if let Some(index) = self.entry_at_cursor()
+                    && !self.entries[index].instances.is_empty()
+                {
+                    self.entries[index].instances.pop();
+                    self.cursor.note_activity();
+                    return AgentsPickerAction::Consumed;
+                }
                 self.pop_filter();
                 AgentsPickerAction::Consumed
             }
@@ -572,7 +705,9 @@ impl AgentsPicker {
             }
 
             // The name column stays aligned regardless of the indicator
-            // glyph, so marked/unmarked rows don't jitter horizontally.
+            // glyph, so marked/unmarked rows don't jitter horizontally, and
+            // spans the rest of the row: only the agent name is shown today,
+            // the repo name is a future addition to this column.
             let name_style = if !entry.installed {
                 Style::default().fg(muted).bg(row_bg)
             } else if is_cursor {
@@ -580,47 +715,56 @@ impl AgentsPicker {
             } else {
                 Style::default().fg(text).bg(row_bg)
             };
-            draw_text_line_compact(buf, &entry.name, box_area.x + 4, yy, 14, name_style);
-
-            let desc = if entry.installed {
-                entry.desc.clone()
-            } else {
-                first_sentence(&entry.install_hint)
-            };
-            let desc_style = Style::default().fg(muted).bg(row_bg);
-            let desc_x = box_area.x + 19;
-            draw_text_line_compact(
-                buf,
-                &desc,
-                desc_x,
-                yy,
-                box_area.x + box_area.width - 2 - desc_x,
-                desc_style,
-            );
+            let name_x = box_area.x + 4;
+            // The instance-count column — the former install-hint slot,
+            // right-aligned against the border. EVERY row owns it: the
+            // count field is a per-row input the user types into directly
+            // (digits land on the row under the cursor and auto-mark it).
+            // The untouched rows show the `×[1-9]` placeholder — brackets
+            // mark the slot as TYPABLE, the range gives min AND max (the
+            // min doubles as the default: Enter without typing keeps 1) —
+            // in ITALIC muted, LIT UP when the cursor sits on the row so
+            // the typable slot announces itself where the user is looking.
+            // Typed digits paint in plain row text.
+            {
+                let counter = format!("×{}", entry.instances_display());
+                let count_len = counter.chars().count() as u16;
+                let count_x = box_area.x + box_area.width - 2 - count_len;
+                let count_style = if entry.instances.is_empty() {
+                    let placeholder_fg = if is_cursor { fg } else { muted };
+                    Style::default()
+                        .fg(placeholder_fg)
+                        .add_modifier(Modifier::ITALIC)
+                        .bg(row_bg)
+                } else if is_cursor {
+                    Style::default().fg(fg).bg(row_bg)
+                } else {
+                    Style::default().fg(text).bg(row_bg)
+                };
+                draw_text_line_compact(buf, &counter, count_x, yy, count_len, count_style);
+                draw_text_line_compact(
+                    buf,
+                    &entry.name,
+                    name_x,
+                    yy,
+                    count_x.saturating_sub(1 + name_x),
+                    name_style,
+                );
+            }
         }
     }
 }
 
 /// Whether an entry matches the picker's search filter: the filter matches
-/// either the agent name or its description, the same contract the /models
-/// filter uses (name or provider). Case-insensitive substring match.
+/// the agent name, the same contract the /models filter uses in spirit
+/// (visible text only — the rows carry nothing beyond the name, so matching
+/// an invisible column would produce confusing empty-looking results).
+/// Case-insensitive substring match.
 fn entry_matches_filter(entry: &AgentEntry, filter: &str) -> bool {
     if filter.is_empty() {
         return true;
     }
-    let needle = filter.to_lowercase();
-    entry.name.to_lowercase().contains(&needle)
-        || entry.desc.to_lowercase().contains(&needle)
-}
-
-/// First sentence of a hint/description, for the muted list column: keeps
-/// long npm/curl instructions from overflowing the fixed dialog width.
-fn first_sentence(text: &str) -> String {
-    let trimmed = text.trim();
-    match trimmed.find(". ") {
-        Some(idx) => trimmed[..idx].to_string(),
-        None => trimmed.to_string(),
-    }
+    entry.name.to_lowercase().contains(&filter.to_lowercase())
 }
 
 #[cfg(test)]
@@ -644,18 +788,15 @@ mod tests {
         )
     }
 
-    /// Restricted registry with controlled descriptions so filter tests are
-    /// deterministic regardless of the real install hints.
+    /// Restricted registry so filter tests are deterministic regardless of
+    /// the real agent registry contents.
     fn small_picker() -> AgentsPicker {
         let mut picker = AgentsPicker::new();
         let entry = |name: &str| AgentEntry {
             name: name.to_string(),
-            // 'g'-free descriptions: name-first filtering ('g' → gemini +
-            // goose) must not be blurred by description noise.
-            desc: format!("{name} provider"),
-            install_hint: String::new(),
             installed: true,
             selected: false,
+            instances: String::new(),
         };
         picker.entries = vec![entry("cosh"), entry("gemini"), entry("goose"), entry("kilo")];
         picker.open();
@@ -687,6 +828,148 @@ mod tests {
     }
 
     #[test]
+    fn digits_on_a_marked_row_fill_the_instance_field_not_the_filter() {
+        let mut marked = picker();
+        // Mark cosh (cursor row 0), then type digits.
+        marked.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
+        marked.handle_key(KeyCode::Char('2'), KeyModifiers::NONE);
+        // An over-ceiling digit is NOT discarded: "2" then "5" would read
+        // 25 > MAX_INSTANCES as an append, so the 5 REPLACES the field (the
+        // correction gesture) — and it must NOT leak into the filter either:
+        // the marked row owns the qualifier slot.
+        marked.handle_key(KeyCode::Char('5'), KeyModifiers::NONE);
+
+        assert_eq!(marked.entries[0].instances, "5", "5 replaced the stuck 2");
+        // The filter stayed clear: the digits were NOT search text.
+        assert!(marked.filter.is_empty());
+
+        // The confirm payload carries the parsed count and NEVER the
+        // default: parse happens at confirm time, not render time.
+        let action = marked.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(
+            action,
+            AgentsPickerAction::Confirmed(vec![AgentPick {
+                name: "cosh".to_string(),
+                instances: 5,
+            }])
+        );
+    }
+
+    #[test]
+    fn a_smaller_digit_after_a_larger_count_corrects_instead_of_sticking() {
+        // The bug this guards: "3" then "2" used to be discarded as an
+        // overflowing append (32 > ceiling), leaving the field stuck at 3
+        // forever. The replace gesture makes the count freely editable:
+        // typing a SMALLER digit corrects the field down.
+        let mut corrected = picker();
+        corrected.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
+        corrected.handle_key(KeyCode::Char('3'), KeyModifiers::NONE);
+        assert_eq!(corrected.entries[0].instances, "3");
+
+        corrected.handle_key(KeyCode::Char('2'), KeyModifiers::NONE);
+        assert_eq!(
+            corrected.entries[0].instances, "2",
+            "the smaller digit REPLACED the stuck count"
+        );
+        assert_eq!(corrected.entries[0].parsed_instances(), 2);
+
+        // And up again: "2" then "9" corrects to the ceiling.
+        corrected.handle_key(KeyCode::Char('9'), KeyModifiers::NONE);
+        assert_eq!(corrected.entries[0].instances, "9");
+        assert_eq!(corrected.entries[0].parsed_instances(), MAX_INSTANCES);
+    }
+
+    #[test]
+    fn digits_on_an_unmarked_row_edit_the_count_and_auto_mark() {
+        let mut picker = picker();
+        // Cursor on cosh but UNMARKED: the count field is a per-row input
+        // the user types into directly — a digit fills the field AND marks
+        // the row, making "claude, 2, Enter" a complete pick without
+        // touching Space. (The filter is search text for LETTERS only.)
+        picker.handle_key(KeyCode::Char('2'), KeyModifiers::NONE);
+
+        assert_eq!(picker.entries[0].instances, "2");
+        assert!(picker.entries[0].selected, "typing a count is the pick");
+        assert!(picker.filter.is_empty(), "digits never reach the filter");
+    }
+
+    #[test]
+    fn instance_count_untouched_confirms_the_default() {
+        let mut picker = picker();
+        picker.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
+        let action = picker.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        let AgentsPickerAction::Confirmed(picks) = action else {
+            panic!("expected a confirm");
+        };
+        assert_eq!(picks[0].instances, DEFAULT_INSTANCES);
+        // And the display shows the bracketed placeholder, not an empty
+        // cell: brackets mark the slot TYPABLE, the range gives min=1 (the
+        // default Enter keeps) and max=the ceiling.
+        assert_eq!(
+            picker.entries[0].instances_display(),
+            format!("[{DEFAULT_INSTANCES}-{MAX_INSTANCES}]"),
+            "the placeholder marks the field TYPABLE and shows the range"
+        );
+    }
+
+    #[test]
+    fn backspace_pops_the_instance_field_before_the_filter() {
+        let mut picker = picker();
+        picker.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
+        picker.handle_key(KeyCode::Char('2'), KeyModifiers::NONE);
+        assert_eq!(picker.entries[0].instances, "2");
+
+        // Spills into the field first (order 2 -> empty)…
+        picker.handle_key(KeyCode::Backspace, KeyModifiers::NONE);
+        assert!(picker.entries[0].instances.is_empty());
+        // …then keeps popping the empty field (no-op)…
+        picker.handle_key(KeyCode::Backspace, KeyModifiers::NONE);
+        assert!(picker.entries[0].instances.is_empty());
+        // …and only when the field is drained does Backspace reach the
+        // filter.
+        picker.handle_key(KeyCode::Char('k'), KeyModifiers::NONE);
+        picker.handle_key(KeyCode::Backspace, KeyModifiers::NONE);
+        assert!(picker.filter.is_empty(), "filter popped last");
+    }
+
+    #[test]
+    fn instance_count_never_exceeds_max_instances() {
+        // The MAX_INSTANCES ceiling is enforced PROGRESSIVELY at the input:
+        // with the limit at 9, "99" is unreachable ("9" then "9" reads 99 >
+        // 9) — the field can only ever hold a value the ceiling admits,
+        // never one the parse would have to clamp away.
+        let mut capped = picker();
+        capped.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
+        capped.handle_key(KeyCode::Char('9'), KeyModifiers::NONE);
+        assert_eq!(capped.entries[0].instances, "9", "9 IS the ceiling");
+        capped.handle_key(KeyCode::Char('9'), KeyModifiers::NONE);
+        assert_eq!(
+            capped.entries[0].instances, "9",
+            "99 exceeds the ceiling: the second digit was rejected"
+        );
+        assert_eq!(capped.entries[0].parsed_instances(), MAX_INSTANCES);
+
+        // Anything above the ceiling is rejected the same way — with the
+        // ceiling at 9 every single digit parses, so the guard shows on the
+        // second keystroke (9 then 4 would read 94 > 9).
+        capped.handle_key(KeyCode::Backspace, KeyModifiers::NONE);
+        capped.handle_key(KeyCode::Char('4'), KeyModifiers::NONE);
+        assert_eq!(capped.entries[0].instances, "4");
+        capped.handle_key(KeyCode::Char('4'), KeyModifiers::NONE);
+        assert_eq!(capped.entries[0].instances, "4", "44 exceeds the ceiling");
+
+        // A leading zero parses as 0 -> sanity-clamped to the default
+        // (the split never spawns zero panes of a picked agent).
+        let mut zero_picker = picker();
+        zero_picker.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
+        zero_picker.handle_key(KeyCode::Char('0'), KeyModifiers::NONE);
+        assert_eq!(
+            zero_picker.entries[0].parsed_instances(),
+            DEFAULT_INSTANCES
+        );
+    }
+
+    #[test]
     fn enter_confirms_marked_entries_and_closes() {
         let mut picker = picker();
         picker.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
@@ -694,7 +977,10 @@ mod tests {
 
         assert_eq!(
             action,
-            AgentsPickerAction::Confirmed(vec!["cosh".to_string()])
+            AgentsPickerAction::Confirmed(vec![AgentPick {
+                name: "cosh".to_string(),
+                instances: DEFAULT_INSTANCES,
+            }])
         );
         assert!(!picker.visible);
     }
@@ -724,7 +1010,10 @@ mod tests {
         picker.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
         assert_eq!(
             picker.handle_key(KeyCode::Enter, KeyModifiers::NONE),
-            AgentsPickerAction::Confirmed(vec!["cosh".to_string()])
+            AgentsPickerAction::Confirmed(vec![AgentPick {
+                name: "cosh".to_string(),
+                instances: DEFAULT_INSTANCES,
+            }])
         );
         assert!(!picker.visible);
     }
@@ -851,7 +1140,7 @@ mod tests {
         let mut picker = small_picker();
         assert_eq!(picker.handle_key(KeyCode::Char('g'), KeyModifiers::NONE), AgentsPickerAction::Consumed);
         assert_eq!(picker.filter, "g");
-        // gemini + goose match by name (`provider` descriptions are g-free).
+        // gemini + goose match by name; cosh and kilo do not.
         let filtered = picker.filtered_indices();
         assert_eq!(filtered, vec![1, 2]); // gemini, goose
         assert_eq!(picker.selection.selected_index, 0); // reset on filter edit

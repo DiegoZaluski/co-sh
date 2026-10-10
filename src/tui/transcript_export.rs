@@ -123,6 +123,7 @@ mod tests {
             model: None,
             reasoning: None,
             agents_panes: None,
+            agents_mode_open: false,
             ctx_ids: HashMap::new(),
         }
     }

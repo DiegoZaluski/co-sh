@@ -67,6 +67,25 @@ impl App {
                 return Ok(false);
             }
 
+            // /agents split: pane hotkeys are SOVEREIGN. `Ctrl+0..Ctrl+9`
+            // (and a plain `0..9` while the draft is empty) move prompt
+            // focus to the numbered pane. The gate sits ABOVE the modal
+            // boxes and the slash menu on purpose: with the /agents picker
+            // or the slash menu open, the key used to be swallowed there
+            // and the pane never switched (the picker's handle_key ignores
+            // ctrl-modified chars, so `Ctrl+2` did nothing visible while
+            // looking consumed). Agent names never contain digits and the
+            // picker filter matches names only, so the digits are dead
+            // keys to every modal below — the split may have them. ALT is
+            // excluded (AltGr), and the paste-burst gate above already
+            // absorbed burst digits, so the plain-digit fallback cannot
+            // corrupt a Windows-console paste. Unreachable pane indexes
+            // still CONSUME the key (same rule as the split gate below):
+            // nothing else owns Ctrl+digit.
+            if self.focus_pane_hotkey(&key) {
+                return Ok(false);
+            }
+
             // ESC clears a question-dialog copy selection BEFORE the loop
             // interrupt and the dialog dispatch: the question dialog's own
             // Esc is a semantic REJECT of the pending tool call (it dismisses
@@ -1136,30 +1155,6 @@ impl App {
                 return self.handle_slash_menu_key(key);
             }
 
-            // /agents split: Ctrl+0 (daemon) / Ctrl+1..Ctrl+9 move prompt
-            // focus to the numbered pane — the keyboard counterpart of
-            // clicking a pane. Checked before action lookup: Ctrl+digit
-            // never produces text input, so this cannot clobber the prompt,
-            // but the explicit return keeps the digits out of every other
-            // handler while the split owns them.
-            if self.agents_split.is_some()
-                && key.modifiers.contains(KeyModifiers::CONTROL)
-                && let KeyCode::Char(ch) = key.code
-                && ch.is_ascii_digit()
-            {
-                let index = if ch == '0' {
-                    0
-                } else {
-                    (ch as u8 - b'1' + 1) as usize
-                };
-                if let Some(split) = &mut self.agents_split
-                    && index < split.panes.len()
-                {
-                    split.focused = index;
-                }
-                return Ok(false);
-            }
-
             // When the usage dashboard is open, Tab / Shift+Tab cycle the
             // period selector instead of toggling mode focus. (Shift+Tab
             // arrives as BackTab, which the keymap doesn't bind.)
@@ -1452,7 +1447,12 @@ impl App {
                                 }
                             }
                         } else {
-                            self.close_agents_split();
+                            // Esc with everything idle PARKS the split (mode
+                            // closed, pane set + running state kept): a
+                            // running turn would keep streaming and a later
+                            // /agents re-attaches the same panes verbatim.
+                            // Nothing is destroyed here.
+                            self.park_agents_split();
                         }
                         return Ok(false);
                     } else if self.state.status == crate::types::SessionStatus::Working {
@@ -1514,7 +1514,10 @@ impl App {
                                 }
                             }
                         } else {
-                            self.close_agents_split();
+                            // Same park contract as the Interrupt ESC above:
+                            // an idle Esc leaves the mode without destroying
+                            // the pane set.
+                            self.park_agents_split();
                         }
                         return Ok(false);
                     } else if self.state.status == crate::types::SessionStatus::Working {
@@ -2014,6 +2017,55 @@ impl App {
             }
         }
         Ok(false)
+    }
+
+    /// Sovereign pane-hotkey dispatch for the `/agents` split (see the
+    /// gate above `process_key_event`'s modal chain). Consumes the key when
+    /// the split exists and the press is a digit hotkey: `Ctrl+0..Ctrl+9`
+    /// always, or a plain `0..9` while the draft is empty (the /agents
+    /// picker hid the keyboard, so digit typing had nowhere to live — the
+    /// pane jump restores the number keys' meaning there). Pane switching
+    /// is the ONLY action: the split mode never changes, the prompt draft
+    /// never changes, running turns keep running.
+    fn focus_pane_hotkey(&mut self, key: &KeyEvent) -> bool {
+        let KeyCode::Char(ch) = key.code else {
+            return false;
+        };
+        if !ch.is_ascii_digit() || self.agents_split.is_none() {
+            return false;
+        }
+        // Two accepted shapes: CONTROL with modifiers that carry no text
+        // (ALT excluded — CTRL+ALT is the AltGr character signature on
+        // Windows consoles, never a hotkey), or the raw unmodified digit
+        // while the prompt holds nothing AND no modal box is open. The
+        // plain fallback YIELDS to the /agents picker: with it open the
+        // digits are that dialog's count input / filter, so pane jumping
+        // stays on the Ctrl shape there. Every other MODAL that accepts
+        // plain text (model filter, rename, router number input, …)
+        // yields the same way — their digits are real input, not dead
+        // keys, so the fallback must never swallow them. The slash menu
+        // is NOT a text modal (it lists commands), so the fallback still
+        // fires with it open.
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL)
+            && !key.modifiers.contains(KeyModifiers::ALT);
+        let no_text_modal = !self.dialog.visible()
+            && !self.question_dialog.visible
+            && !self.permission_dialog.visible
+            && !self.queue_choice_dialog.visible
+            && !self.free_gateway_dialog.visible;
+        let plain_fallback = key.modifiers == KeyModifiers::NONE
+            && !self.agents_picker.visible
+            && no_text_modal
+            && self.prompt_view.input.trim().is_empty();
+        if !ctrl && !plain_fallback {
+            return false;
+        }
+        // Out-of-range digits consume without moving — the split may not
+        // own pane 7 today; something else might tomorrow.
+        if let Some(split) = self.agents_split.as_mut() {
+            split.focus_hotkey(ch);
+        }
+        true
     }
 
     /// Insert a newline at the prompt cursor (Shift/Ctrl/Alt+Enter, and the

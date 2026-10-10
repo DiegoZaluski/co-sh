@@ -294,9 +294,26 @@ pub struct App {
     /// state; `None` fields below mean the picker is not on screen.
     pub agents_picker: crate::ui::agents_picker::AgentsPicker,
     /// The `/agents` split-pane mode. `Some` while the chat area is divided
-    /// into one pane per chosen agent (pane 0 = the `cosh` daemon); the
-    /// normal single-agent session view renders untouched when `None`.
+    /// into one pane per chosen agent instance; the normal single-agent
+    /// session view renders untouched when `None`.
     pub agents_split: Option<crate::routes::session::agents_split::AgentsSplitState>,
+    /// Monotonic generation of the split slots: bumped on EVERY replacement,
+    /// supersede or teardown of a split (parked slot included). Dispatch
+    /// snapshots it into every pane event, so a turn cancelled by a slot
+    /// swap delivers its terminal `AgentsPaneDone` against a stale epoch and
+    /// the handler drops it — a stopped pane can never bind its OLD agent
+    /// session into a NEW pane (or a NEW session's metadata) that merely
+    /// shares the pane index. Park/attach do NOT bump: they keep the SAME
+    /// pane objects alive, so a running turn's events (and its Done) stay
+    /// valid across the round trip.
+    agents_pane_epoch: u64,
+    /// A split PARKED by an Esc leave (the `/agents` mode closed, the agent
+    /// set kept): running turns continue streaming into it and a later
+    /// `/agents` re-attaches it as-is — same panes, same drafts, same bound
+    /// sessions. Parking is session-scoped by construction: it is dropped
+    /// when the session changes (the pane set lives on in the session
+    /// metadata for a later rebuild).
+    pub parked_agents_split: Option<crate::routes::session::agents_split::AgentsSplitState>,
     pub should_quit: bool,
     pub tokio_handle: Handle,
     pub event_tx: mpsc::UnboundedSender<HarnessEvent>,
@@ -768,6 +785,8 @@ impl App {
             slash_menu: crate::ui::slash_menu::SlashMenu::new(),
             agents_picker: crate::ui::agents_picker::AgentsPicker::new(),
             agents_split: None,
+            parked_agents_split: None,
+            agents_pane_epoch: 0,
             theme_dialog_original: None,
             model_dialog_original: None,
             reasoning_dialog_original: None,
@@ -1091,7 +1110,7 @@ impl App {
             0
         };
         let right_panel_w = if matches!(self.mode(), AppMode::Session)
-            && (should_show_right_panel(area.width, &self.state.right_panel))
+            && self.right_panel_visible(area.width)
         {
             RIGHT_PANEL_WIDTH
         } else {
@@ -1544,7 +1563,15 @@ impl App {
             || self
                 .agents_split
                 .as_ref()
-                .is_some_and(crate::routes::session::agents_split::AgentsSplitState::any_running))
+                .is_some_and(crate::routes::session::agents_split::AgentsSplitState::any_running)
+            || self
+                .agents_split
+                .as_ref()
+                .is_none()
+                && self
+                    .parked_agents_split
+                    .as_ref()
+                    .is_some_and(crate::routes::session::agents_split::AgentsSplitState::any_running))
             && self.agent_spinner.is_some();
         let correction_spinner_active = self.prompt_correction_active && !agent_spinner_active;
         let spinner_h = u16::from(
@@ -1562,13 +1589,27 @@ impl App {
             session_bottom.saturating_sub(area.y + 1),
         )
     }
+    /// Whether the right panel occupies the screen right now: the shared
+    /// content/width/user-hidden predicate AND the `/agents` split not
+    /// owning the main area — the split replaces the transcript at full
+    /// width, so the panel must not overlay it (the bound agents surface
+    /// in the panel in the NORMAL mode, which is where the spec places
+    /// them). Render (via `session_main_area`) and every mouse hit-test
+    /// route through THIS predicate, so the drawn layout and the hit
+    /// geometry can never disagree about the panel's presence.
+    pub(crate) fn right_panel_visible(&self, terminal_width: u16) -> bool {
+        self.agents_split.is_none()
+            && should_show_right_panel(terminal_width, &self.state.right_panel)
+    }
+
     /// Check if a mouse x-coordinate is within the right panel area — and
     /// the panel is actually VISIBLE (content + width + not user-hidden via
-    /// Ctrl+P). When hidden, its band belongs to the chat, so scroll/click
-    /// events there must fall through to the chat instead of being swallowed.
+    /// Ctrl+P + no `/agents` split owning the main area). When hidden, its
+    /// band belongs to the chat, so scroll/click events there must fall
+    /// through to the chat instead of being swallowed.
     fn is_in_right_panel(&self, x: u16) -> bool {
         let terminal_size = self.terminal_size();
-        if !should_show_right_panel(terminal_size.width, &self.state.right_panel) {
+        if !self.right_panel_visible(terminal_size.width) {
             return false;
         }
         let right_panel_x = terminal_size
@@ -1637,7 +1678,7 @@ impl App {
         };
 
         let right_panel_w = if matches!(self.mode(), AppMode::Session)
-            && (should_show_right_panel(area.width, &self.state.right_panel))
+            && self.right_panel_visible(area.width)
         {
             RIGHT_PANEL_WIDTH
         } else {

@@ -113,10 +113,9 @@ impl App {
             && !self.permission_dialog.visible
             && !self.queue_choice_dialog.visible
             && !self.free_gateway_dialog.visible
+            && let Some(blink) = blink_deadline(&self.prompt_view.cursor)
         {
-            if let Some(blink) = blink_deadline(&self.prompt_view.cursor) {
-                wait = wait.min(blink);
-            }
+            wait = wait.min(blink);
         }
         // Modal dialog stack cursors blink too.
         if let Some(d) = self.dialog.current()
@@ -270,35 +269,94 @@ impl App {
             match event {
                 // /agents split: a pane streamed a live event. The pane's
                 // own SubagentActivity does all the coalescing — the same
-                // state machine the right-panel sub-agent box uses.
-                HarnessEvent::AgentsPaneEvent { pane, event } => {
-                    if let Some(split) = self.agents_split.as_mut() {
+                // state machine the right-panel sub-agent box uses. A split
+                // PARKED in the background (user left the mode with the
+                // turn running) is an equal sink: the stream follows the
+                // pane objects, not the screen.
+                HarnessEvent::AgentsPaneEvent {
+                    pane,
+                    epoch,
+                    event,
+                } => {
+                    // A stale epoch means the pane's set was replaced or
+                    // torn down while the turn was being cancelled: drop
+                    // the event (the replacement pane owns the index now).
+                    if epoch != self.agents_pane_epoch {
+                        continue;
+                    }
+                    let target = self
+                        .agents_split
+                        .as_mut()
+                        .or(self.parked_agents_split.as_mut());
+                    if let Some(split) = target {
                         split.apply_event(pane, &event);
                     }
+                    // The pane's mirror in the shared subagent list follows
+                    // the same stream (pane-index routed; see
+                    // `sync_agents_pane_mirrors`).
+                    self.sync_agents_pane_mirrors();
                 }
                 // /agents split: a pane's turn ENDED. The final report is
                 // appended to the pane's activity so it is the last thing
                 // visible; the session id seeds the pane's next resume.
                 HarnessEvent::AgentsPaneDone {
                     pane,
+                    epoch,
                     output,
                     stop_reason,
                     session,
                 } => {
-                    use cosh_tools::subagent::events::SubagentEvent;
-                    if let Some(split) = self.agents_split.as_mut() {
+                    // A stale epoch means the pane's set was replaced or
+                    // torn down while this turn was being cancelled: the
+                    // terminal report is the OLD pane's — it must never
+                    // seed a replacement pane's session id, seal the
+                    // retargeted mirror, or bind into the CURRENT
+                    // session's metadata under a same-named pane. Drop it.
+                    if epoch != self.agents_pane_epoch {
+                        continue;
+                    }
+                    // Take the session id up front: the pane bookkeeping and
+                    // the persistence below both want it, and the match-arm
+                    // binding owns the value (no Copy).
+                    let binding = session;
+                    // The mirror's finish classification, captured before
+                    // `output` moves into the marker below.
+                    let failed = stop_reason == "error" || stop_reason == "cancelled";
+                    let target = self
+                        .agents_split
+                        .as_mut()
+                        .or(self.parked_agents_split.as_mut());
+                    if let Some(split) = target {
                         split.set_running(pane, false);
                         split.set_stop_signal(pane, None);
-                        if let (Some(id), Some(p)) = (session, split.panes.get_mut(pane)) {
+                        if let (Some(id), Some(p)) = (binding.as_ref(), split.panes.get_mut(pane)) {
                             // The session id seeds the pane's next resume.
-                            p.session_id = Some(id);
+                            p.session_id = Some(id.clone());
                         }
-                        let marker = if stop_reason == "error" || stop_reason == "cancelled" {
-                            format!("\n\n[turn {stop_reason}] {output}")
-                        } else {
-                            output
-                        };
-                        split.apply_event(pane, &SubagentEvent::Message { text: marker });
+                        // The report closes the pane's turn THROUGH the
+                        // pane's own deduplication (`finish_turn`): the
+                        // stream already played the final message into the
+                        // timeline, and appending the report raw would let
+                        // the coalescer merge it into that same entry —
+                        // the "answer twice" bug.
+                        split.finish_turn(pane, &output, &stop_reason);
+                    }
+                    // The mirror seals: the final report becomes its window
+                    // body (the linear-chat contract), the transcript seals
+                    // and the list entry stops spinning. Runs even when the
+                    // split is gone (no pane to read from — the sync would
+                    // no-op; the binding below still persists).
+                    self.finish_agents_pane_mirror(pane, &output, failed);
+                    // Persist the binding for the NEXT open: a `Name` pane
+                    // promotes to `Bound { agent, session_id }` in the
+                    // session metadata, so a mode switch or app restart
+                    // resumes THIS agent context. (Only for the CURRENT
+                    // epoch: a set replaced or torn down mid-turn delivers
+                    // its terminal Done stale and was already dropped
+                    // above — its session id belongs to a pane set that no
+                    // longer exists.)
+                    if let Some(id) = binding {
+                        self.bind_agents_pane_session(pane, id);
                     }
                 }
                 HarnessEvent::ContextItemRecorded {

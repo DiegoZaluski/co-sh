@@ -1007,3 +1007,480 @@ async fn tools_hover_moves_selection_and_release_click_toggles() {
         "exactly the hovered tool must end up disabled"
     );
 }
+
+/// A `/agents` pane's FIRST done turn promotes its persisted entry from an
+/// unbound `Name` to `Bound { agent, session_id }`, so a reopened session
+/// resumes the same agent context. Both panes of the same CLI stay
+/// independent (call_ref-keyed binds resolve per pane, never per agent).
+#[tokio::test]
+async fn agents_pane_done_promotes_the_pane_binding_for_the_next_open() {
+    use crate::types::AgentPaneRef;
+    use cosh::harness::HarnessEvent;
+
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    // One session, split open with a fresh pick list: claude ×2, cosh last
+    // (the daemon pane exists ONLY because the user marked it).
+    let session_id = crate::session_store::generate_session_id();
+    app.state
+        .add_empty_session(session_id.clone(), "pane binding".into(), 0);
+    // add_empty_session registers the model but does NOT select it — the
+    // split persistence writes through the CURRENT session pointer.
+    app.state.current_session_id = Some(session_id);
+    app.open_agents_split(vec![
+        crate::ui::agents_picker::AgentPick {
+            name: "claude".into(),
+            instances: 2,
+        },
+        crate::ui::agents_picker::AgentPick {
+            name: "cosh".into(),
+            instances: 1,
+        },
+    ]);
+    {
+        let session = app.state.current_session().unwrap();
+        let panes = session.agents_panes.as_ref().unwrap();
+        assert_eq!(
+            panes,
+            &vec![
+                AgentPaneRef::Name("claude".into()),
+                AgentPaneRef::Name("claude".into()),
+                AgentPaneRef::Name("cosh".into()),
+            ],
+            "fresh picks persist as unbound Name entries"
+        );
+    }
+
+    // Pane 0's turn completes: the session id must land in the metadata
+    // for THAT pane only — pane 1 (the other claude instance) stays fresh,
+    // so both instances keep independent sessions.
+    app.event_tx
+        .send(HarnessEvent::AgentsPaneDone {
+            pane: 0,
+            epoch: app.agents_pane_epoch,
+            output: "report one".into(),
+            stop_reason: "end_turn".into(),
+            session: Some("sess-A".into()),
+        })
+        .ok();
+    app.poll_events();
+
+    let panes = app.state.current_session().unwrap().agents_panes.clone();
+    let panes = panes.expect("split stays open after a done");
+    assert_eq!(
+        panes[0],
+        AgentPaneRef::Bound {
+            agent: "claude".into(),
+            session_id: "sess-A".into(),
+        },
+        "the finished pane promotes to Bound"
+    );
+    assert_eq!(
+        panes[1],
+        AgentPaneRef::Name("claude".into()),
+        "the sibling claude instance stays unbound"
+    );
+    assert_eq!(panes[2], AgentPaneRef::Name("cosh".into()));
+
+    // Rebinding pane 0 to a NEW session (a later turn) overwrites — the
+    // binding tracks the pane's latest context, not its first.
+    app.event_tx
+        .send(HarnessEvent::AgentsPaneDone {
+            pane: 0,
+            epoch: app.agents_pane_epoch,
+            output: "report two".into(),
+            stop_reason: "end_turn".into(),
+            session: Some("sess-B".into()),
+        })
+        .ok();
+    app.poll_events();
+    app.event_tx
+        .send(HarnessEvent::AgentsPaneDone {
+            pane: 1,
+            epoch: app.agents_pane_epoch,
+            output: "report three".into(),
+            stop_reason: "end_turn".into(),
+            session: Some("sess-C".into()),
+        })
+        .ok();
+    app.poll_events();
+    let panes = app
+        .state
+        .current_session()
+        .unwrap()
+        .agents_panes
+        .clone()
+        .unwrap();
+    assert_eq!(
+        panes[0].session_id(),
+        Some("sess-B"),
+        "a later turn moves the binding forward"
+    );
+    assert_eq!(
+        panes[1].session_id(),
+        Some("sess-C"),
+        "each instance carries its OWN session id"
+    );
+
+    // The live panes mirror the binding for their next dispatch.
+    let split = app.agents_split.as_ref().unwrap();
+    assert_eq!(split.panes[0].session_id.as_deref(), Some("sess-B"));
+    assert_eq!(split.panes[1].session_id.as_deref(), Some("sess-C"));
+}
+
+/// Esc out of the `/agents` mode PARKS the split: the pane objects (streams,
+/// drafts, running flags) move to the background slot untouched, the
+/// metadata flips to `agents_mode_open: false` while KEEPING the pane set,
+/// and a later `/agents` re-attaches the same panes verbatim — a running
+/// turn survives the round trip.
+#[tokio::test]
+async fn parked_agents_split_survives_park_and_re_attach() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    let session_id = crate::session_store::generate_session_id();
+    app.state
+        .add_empty_session(session_id.clone(), "park".into(), 0);
+    app.state.current_session_id = Some(session_id);
+    app.open_agents_split(vec![crate::ui::agents_picker::AgentPick {
+        name: "claude".into(),
+        instances: 1,
+    }]);
+    assert!(app.agents_split.is_some());
+
+    // A turn starts streaming: events land in the live split while the
+    // mode is on screen.
+    use cosh::harness::HarnessEvent;
+    app.event_tx
+        .send(HarnessEvent::AgentsPaneEvent {
+            pane: 0,
+            epoch: app.agents_pane_epoch,
+            event: cosh_tools::subagent::events::SubagentEvent::Message {
+                text: "still streaming".into(),
+            },
+        })
+        .ok();
+    app.poll_events();
+    assert!(
+        !app.agents_split
+            .as_ref()
+            .unwrap()
+            .panes[0]
+            .activity
+            .timeline
+            .is_empty(),
+        "the live split consumed the stream"
+    );
+
+    // The user leaves the mode: park.
+    app.park_agents_split();
+    assert!(app.agents_split.is_none(), "the mode left the screen");
+    assert!(
+        app.parked_agents_split.is_some(),
+        "the split objects moved to the parked slot"
+    );
+    // More events land in the PARKED split (the stream follows the panes).
+    app.event_tx
+        .send(HarnessEvent::AgentsPaneEvent {
+            pane: 0,
+            epoch: app.agents_pane_epoch,
+            event: cosh_tools::subagent::events::SubagentEvent::Message {
+                text: "parked stream".into(),
+            },
+        })
+        .ok();
+    app.poll_events();
+    let parked_text = app
+        .parked_agents_split
+        .as_ref()
+        .unwrap()
+        .panes[0]
+        .activity
+        .timeline
+        .iter()
+        .filter_map(|e| match e {
+            crate::routes::session::right_panel::types::SubagentTimelineEntry::Message { text } => {
+                Some(text.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        parked_text.contains("parked stream"),
+        "the parked split keeps consuming the stream: {parked_text:?}"
+    );
+
+    // Metadata: mode closed + pane set retained for the pre-marked re-entry.
+    {
+        let session = app.state.current_session().unwrap();
+        assert!(!session.agents_mode_open, "the mode flag dropped");
+        assert!(
+            session.agents_panes.is_some(),
+            "the pane set (and bindings) survived the park"
+        );
+    }
+
+    // Re-entry: `/agents` re-attaches the SAME objects, verbatim.
+    assert!(
+        app.attach_parked_agents_split(),
+        "a parked split takes the screen back"
+    );
+    assert!(app.agents_split.is_some());
+    assert!(app.parked_agents_split.is_none());
+    let reattached_text = app
+        .agents_split
+        .as_ref()
+        .unwrap()
+        .panes[0]
+        .activity
+        .timeline
+        .iter()
+        .filter_map(|e| match e {
+            crate::routes::session::right_panel::types::SubagentTimelineEntry::Message { text } => {
+                Some(text.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        reattached_text.contains("parked stream"),
+        "the re-attached split carries the transcribed stream: {reattached_text:?}"
+    );
+    {
+        let session = app.state.current_session().unwrap();
+        assert!(session.agents_mode_open, "the mode flag restored");
+    }
+}
+
+/// A session switch NEVER grabs the screen back for a PARKED set: the new
+/// session's `agents_mode_open: false` rebuilds the manager into the
+/// parked slot (`/agents` re-attaches later), while `true` restores the
+/// split screen; a session with no set restores nothing. The UI slots are
+/// also emptied on switch: running turns of the OLD session stop.
+#[tokio::test]
+async fn session_switch_restores_the_mode_only_when_it_was_left_open() {
+    use crate::types::AgentPaneRef;
+
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+
+    // Session A: left OPEN → the switch takes the screen back. The ids are
+    // suffixed because `generate_session_id` is a bare millisecond
+    // timestamp: three rapid calls in one test can collide, and
+    // `add_empty_session` would silently overwrite the earlier cache entry.
+    let unique = |tag: &str| format!("{}-{tag}", crate::session_store::generate_session_id());
+    let a = unique("a");
+    app.state.add_empty_session(a.clone(), "open mode".into(), 0);
+    app.state.current_session_id = Some(a.clone());
+    app.open_agents_split(vec![crate::ui::agents_picker::AgentPick {
+        name: "kilo".into(),
+        instances: 1,
+    }]);
+
+    // Session B: parked pane set + flag false (written directly — the shape
+    // a session parked and quit carries on disk).
+    let b = unique("b");
+    app.state
+        .add_empty_session(b.clone(), "parked mode".into(), 0);
+    // add_empty_session registers the model without selecting it — aim the
+    // metadata write at B through the CURRENT session pointer.
+    app.state.current_session_id = Some(b.clone());
+    {
+        let session = app.state.current_session_mut().unwrap();
+        session.agents_panes = Some(vec![
+            AgentPaneRef::Bound {
+                agent: "claude".into(),
+                session_id: "sess-old".into(),
+            },
+            AgentPaneRef::Name("kilo".into()),
+        ]);
+        session.agents_mode_open = false;
+    }
+
+    // Session C: no agent state at all.
+    let c = unique("c");
+    app.state.add_empty_session(c.clone(), "no agents".into(), 0);
+
+    // Switch to B: NO split screen — the set rebuilds parked instead.
+    assert!(app.switch_session_locked(&b));
+    assert!(
+        app.agents_split.is_none(),
+        "a parked set never grabs the screen"
+    );
+    let parked = app.parked_agents_split.as_ref().expect("parked slot rebuilt");
+    assert_eq!(parked.panes.len(), 2);
+    // The binding rode along: the Bound entry seeds the pane's resume id.
+    assert_eq!(parked.panes[0].agent, "claude");
+    assert_eq!(parked.panes[0].session_id.as_deref(), Some("sess-old"));
+    assert_eq!(parked.panes[1].agent, "kilo");
+    assert!(parked.panes[1].session_id.is_none());
+    // ... and the pane set stays persisted (a rebuild must not wipe it).
+    assert!(app.state.current_session().unwrap().agents_panes.is_some());
+
+    // Switch to C: nothing agent-related anywhere.
+    assert!(app.switch_session_locked(&c));
+    assert!(app.agents_split.is_none());
+    assert!(app.parked_agents_split.is_none());
+    assert!(app.state.current_session().unwrap().agents_panes.is_none());
+
+    // Switch to A: the mode was left OPEN → the split takes the screen back.
+    assert!(app.switch_session_locked(&a));
+    let split = app.agents_split.as_ref().expect("open mode restored");
+    assert_eq!(split.panes.len(), 1);
+    assert_eq!(split.panes[0].agent, "kilo");
+    assert!(app.parked_agents_split.is_none());
+}
+
+/// A FRESH picker confirm supersedes a parked split of the same session:
+/// the replaced panes' stop signals fire (their turn can't stream into a
+/// pane of the new list), the parked slot empties.
+#[tokio::test]
+async fn fresh_confirm_supersedes_the_parked_split() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    let session_id = crate::session_store::generate_session_id();
+    app.state
+        .add_empty_session(session_id.clone(), "supersede".into(), 0);
+    app.state.current_session_id = Some(session_id);
+
+    // Park a split whose pane carries a stop signal (as a running turn
+    // would have armed).
+    app.open_agents_split(vec![crate::ui::agents_picker::AgentPick {
+        name: "claude".into(),
+        instances: 1,
+    }]);
+    app.agents_split.as_mut().unwrap().set_stop_signal(
+        0,
+        Some(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))),
+    );
+    app.park_agents_split();
+    let parked = app.parked_agents_split.as_ref().unwrap();
+    let signal = parked.panes[0].stop_signal.as_ref().unwrap().clone();
+    assert!(!signal.load(std::sync::atomic::Ordering::Relaxed));
+
+    // A new confirm replaces it.
+    app.open_agents_split(vec![crate::ui::agents_picker::AgentPick {
+        name: "kilo".into(),
+        instances: 1,
+    }]);
+    assert!(app.parked_agents_split.is_none(), "the parked set is dropped");
+    assert!(
+        signal.load(std::sync::atomic::Ordering::Relaxed),
+        "the parked turn's stop signal fired with it"
+    );
+}
+
+/// A `AgentsPaneDone` stamped with a STALE epoch is dropped wholesale: the
+/// pane's slot set was replaced or torn down while the turn was being
+/// cancelled, so its terminal report must never seed the replacement pane's
+/// session id, land in the new pane's transcript, or promote the binding in
+/// the CURRENT session's metadata under a same-named pane. A live-epoch
+/// Done right after still applies — the gate only filters stale deliveries.
+#[tokio::test]
+async fn stale_epoch_agents_pane_done_is_dropped() {
+    use crate::types::AgentPaneRef;
+    use cosh::harness::HarnessEvent;
+
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    let session_id = crate::session_store::generate_session_id();
+    app.state
+        .add_empty_session(session_id.clone(), "stale epoch".into(), 0);
+    app.state.current_session_id = Some(session_id);
+    app.open_agents_split(vec![crate::ui::agents_picker::AgentPick {
+        name: "claude".into(),
+        instances: 1,
+    }]);
+
+    // A turn from the OLD pane set lands AFTER a fresh confirm replaced the
+    // slots: re-opening the split bumped the epoch, so the Done's pre-bump
+    // stamp is stale.
+    let stale_epoch = app.agents_pane_epoch;
+    app.open_agents_split(vec![crate::ui::agents_picker::AgentPick {
+        name: "claude".into(),
+        instances: 1,
+    }]);
+    app.event_tx
+        .send(HarnessEvent::AgentsPaneDone {
+            pane: 0,
+            epoch: stale_epoch,
+            output: "stale report".into(),
+            stop_reason: "end_turn".into(),
+            session: Some("sess-old".into()),
+        })
+        .ok();
+    app.poll_events();
+    {
+        let panes = app
+            .state
+            .current_session()
+            .unwrap()
+            .agents_panes
+            .clone()
+            .unwrap();
+        assert_eq!(
+            panes[0],
+            AgentPaneRef::Name("claude".into()),
+            "a stale Done must not promote the pane binding"
+        );
+    }
+    {
+        let pane = &app.agents_split.as_ref().unwrap().panes[0];
+        assert!(
+            pane.session_id.is_none(),
+            "the replacement pane must not inherit the cancelled turn's session"
+        );
+        assert!(
+            !pane.activity.timeline.iter().any(|e| matches!(
+                e,
+                crate::routes::session::right_panel::types::SubagentTimelineEntry::Message {
+                    text
+                } if text.contains("stale report")
+            )),
+            "the stale report must not land in the new pane's transcript"
+        );
+    }
+
+    // Positive control: a CURRENT-epoch Done still applies in full.
+    app.event_tx
+        .send(HarnessEvent::AgentsPaneDone {
+            pane: 0,
+            epoch: app.agents_pane_epoch,
+            output: "live report".into(),
+            stop_reason: "end_turn".into(),
+            session: Some("sess-new".into()),
+        })
+        .ok();
+    app.poll_events();
+    let panes = app
+        .state
+        .current_session()
+        .unwrap()
+        .agents_panes
+        .clone()
+        .unwrap();
+    assert_eq!(
+        panes[0].session_id(),
+        Some("sess-new"),
+        "a live-epoch Done binds normally"
+    );
+    assert!(
+        app.agents_split.as_ref().unwrap().panes[0]
+            .activity
+            .timeline
+            .iter()
+            .any(|e| matches!(
+                e,
+                crate::routes::session::right_panel::types::SubagentTimelineEntry::Message {
+                    text
+                } if text.contains("live report")
+            )),
+        "the live report lands in the pane's transcript"
+    );
+}

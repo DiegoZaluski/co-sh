@@ -458,13 +458,17 @@ impl SessionStore {
             });
         }
         // The /agents split-pane mode: persisted like every other session
-        // metadata — a change in the OPEN pane set (or the mode leaving)
-        // emits one small delta; a display-only save with an unchanged set
-        // emits nothing.
-        if current.session.agents_panes != requested.agents_panes {
+        // metadata — a change in the pane set OR in whether the split
+        // SCREEN was left open emits one small delta (the flag distinguishes
+        // the restored screen from a parked set); a display-only save with
+        // nothing changed emits nothing.
+        if current.session.agents_panes != requested.agents_panes
+            || current.session.agents_mode_open != requested.agents_mode_open
+        {
             deltas.push(Delta::Metadata {
                 change: MetadataDelta::Agents {
                     panes: requested.agents_panes.clone(),
+                    mode_open: requested.agents_mode_open,
                 },
             });
         }
@@ -1851,6 +1855,7 @@ mod tests {
             model: None,
             reasoning: None,
             agents_panes: None,
+            agents_mode_open: false,
             ctx_ids: HashMap::new(),
         }
     }

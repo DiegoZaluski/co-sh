@@ -44,6 +44,130 @@ async fn toggled_mode_persists_and_restores_for_new_sessions() {
     assert_eq!(legacy.state.mode, Mode::Build);
 }
 
+/// Ctrl+digit pane hotkeys must work THROUGH the /agents picker and the
+/// slash menu: the modal boxes used to swallow `Ctrl+2` (their handlers
+/// ignore control-modified chars, so the key was consumed with no visible
+/// effect and — with the picker open — the user could not leave picker mode
+/// via pane jumps either). The hotkeys are sovereign: with the split open,
+/// `Ctrl+0..Ctrl+9` focus a pane and the picker's own marks stay untouched.
+#[tokio::test]
+async fn ctrl_digit_switches_pan_even_with_the_agents_picker_open() {
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    app.agents_split = Some(crate::routes::session::agents_split::AgentsSplitState::new(
+        vec!["cosh".into(), "claude".into(), "kilo".into()],
+    ));
+
+    // The picker is open on top of the split (the re-open flow): digits
+    // must still reach the split's panes.
+    app.agents_picker.open();
+    assert!(app.agents_picker.visible);
+
+    // Ctrl+2 → pane 2 (kilo). The split FOCUSES the pane; the mode never
+    // changes and the picker stays exactly as the user left it.
+    app.process_key_event(mod_key(KeyCode::Char('2'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(2));
+    assert!(app.agents_picker.visible, "the picker must stay open");
+    assert!(app.agents_picker.filter.is_empty(), "the filter must not eat the digit");
+    assert_eq!(
+        app.agents_picker.selected_names(),
+        Vec::<String>::new(),
+        "marks must not be touched by a pane hotkey"
+    );
+    assert!(app.agents_split.is_some(), "the split stays (mode never changes)");
+
+    // Ctrl+0 → the daemon pane, still through the open picker.
+    app.process_key_event(mod_key(KeyCode::Char('0'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(0));
+    assert!(app.agents_picker.visible);
+
+    // A digit the split does NOT own is consumed inertly: no pane moves,
+    // the picker is undisturbed.
+    app.process_key_event(mod_key(KeyCode::Char('7'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(0));
+    assert!(app.agents_picker.visible);
+}
+
+/// The slash menu gate, same sovereignty contract: `Ctrl+2` while the menu
+/// is filtered focuses the pane, never types into or closes the menu.
+#[tokio::test]
+async fn ctrl_digit_switches_pane_through_the_slash_menu() {
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    app.agents_split = Some(crate::routes::session::agents_split::AgentsSplitState::new(
+        vec!["cosh".into(), "claude".into(), "kilo".into()],
+    ));
+
+    app.slash_menu.visible = true;
+    app.process_key_event(mod_key(KeyCode::Char('1'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(1));
+    assert!(app.slash_menu.visible, "the menu stays open, unfiltered");
+    assert!(app.prompt_view.input.is_empty());
+}
+
+/// A PLAIN digit is a pane hotkey only while the prompt draft is empty —
+/// once the user texts, digits belong to the draft again (the fallback
+/// ownership rule the /agents picker regime relied on).
+#[tokio::test]
+async fn plain_digit_targets_the_pane_only_with_an_empty_draft() {
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    app.agents_split = Some(crate::routes::session::agents_split::AgentsSplitState::new(
+        vec!["cosh".into(), "claude".into(), "kilo".into()],
+    ));
+
+    // Empty draft: plain '2' jumps to pane 2.
+    app.process_key_event(mod_key(KeyCode::Char('2'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(2));
+    assert!(app.prompt_view.input.trim().is_empty(), "the pane jump never types");
+
+    // A second plain digit with the draft filled differentiates: it types.
+    app.prompt_view
+        .handle_paste("hel");
+    app.process_key_event(mod_key(KeyCode::Char('2'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(2));
+    // The draft keeps both the paste and the typed digit.
+    assert_eq!(app.prompt_view.input.trim(), "hel2");
+}
+
+/// Without the split (normal mode), digits are NEVER hotkeys: `Ctrl+2`
+/// is not bound in the keymap and plain typing interjects into the draft
+/// exactly as before.
+#[tokio::test]
+async fn digits_never_act_as_hotkeys_without_the_split() {
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    assert!(app.agents_split.is_none());
+
+    app.process_key_event(mod_key(KeyCode::Char('2'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert!(app.agents_split.is_none());
+
+    app.process_key_event(mod_key(KeyCode::Char('2'), KeyModifiers::NONE))
+        .unwrap();
+    // A plain digit with an empty draft and no split simply types (the
+    // digit lands in the prompt).
+    assert!(!app.prompt_view.input.trim().is_empty());
+}
+
 /// Documents WHY plain arrow keys can never switch agent queues on
 /// terminals that strip the ALT modifier from arrow encodings (`\x1b[D`,
 /// `\x1bOD`): crossterm then reports a PLAIN Left/Right, which — while an

@@ -699,6 +699,19 @@ pub struct PtySession {
     /// content that cannot move. `None` = recompute (and cache). Invalidated
     /// by every `apply` (a width change bypasses the cache entirely).
     pub(crate) activity_rows_cache: Option<(u16, u16)>,
+    /// This window is a `/agents` PANE MIRROR: it was opened by the
+    /// split-screen mode (pane `agents_pane`) to surface its agent in the
+    /// shared subagent list, not spawned by a `subagent_call`. Mirrors are
+    /// fed ONLY by the pane-sync (`RightPanelState::sync_agents_pane`,
+    /// pane-index routed — never the `call_ref`/last-Running paths, which
+    /// must not graft normal subagent traffic into them), they are never
+    /// superseded (each pane index is its own stable window), and they
+    /// render the agent's full-color brand logo in the list (the marker
+    /// that separates bound `/agents` agents from normal subagents).
+    pub(crate) bound: bool,
+    /// The split pane index this mirror follows (see `bound`). `None` for
+    /// every other window kind.
+    pub(crate) agents_pane: Option<usize>,
 }
 
 impl PtySession {
@@ -718,6 +731,8 @@ impl PtySession {
             code_review: false,
             call_ref: None,
             activity_rows_cache: None,
+            bound: false,
+            agents_pane: None,
         }
     }
 
@@ -759,13 +774,19 @@ impl PtySession {
     /// label for a review call that omitted one). The neutral fallback only
     /// covers sessions created before the description plumbing existed —
     /// "code-review" would MISLABEL a pre-argument non-review call.
+    ///
+    /// A BOUND pane mirror has no task description by design (its label is
+    /// the `#k` instance marker, set when the same CLI runs in several
+    /// panes): an EMPTY string instead of the "—" filler, so a lone mirror
+    /// reads `kilo <tool> <spinner>` instead of the noisy
+    /// `kilo — <tool> <spinner>`.
     #[must_use]
     pub fn description_text(&self) -> String {
         self.description
             .as_deref()
             .map(str::trim)
             .filter(|d| !d.is_empty())
-            .unwrap_or("—")
+            .unwrap_or(if self.bound { "" } else { "—" })
             .to_string()
     }
 
@@ -2966,7 +2987,11 @@ impl RightPanelState {
         if let Some(agent) = command.strip_prefix("subagent: ") {
             let prefix = format!("subagent: {agent}");
             for s in &mut self.pty_sessions {
-                if s.command == prefix && s.is_finished() {
+                // Pane mirrors are OUT: a `/agents` pane is a stable per-
+                // pane slot (its own routing identity), not a newer turn of
+                // this CLI's queue — a normal subagent spawn of the same
+                // agent must never evict it from the default display.
+                if s.command == prefix && s.is_finished() && !s.bound {
                     s.superseded = true;
                 }
             }
@@ -3001,6 +3026,197 @@ impl RightPanelState {
         // spilled to disk.
         self.pty_gen = self.pty_gen.wrapping_add(1);
         self.spill_old_outputs();
+    }
+
+    /// Open (or re-target) the MIRROR WINDOW of `/agents` pane `pane`: the
+    /// split-screen mode surfaces each of its agents in the shared subagent
+    /// list, so a pane owns one stable session here — `agents_pane`-keyed,
+    /// opened on demand, NEVER superseded (the pane index is the routing
+    /// identity; a normal subagent spawn of the same CLI must not steal it)
+    /// and invisible to the per-CLI supersede sweep (closed below). The
+    /// `bound` flag marks it for the full-color brand logo in the list.
+    pub(crate) fn open_agents_pane_window(&mut self, pane: usize, agent: &str) {
+        // Retarget on an agent change: a fresh picker confirm can put a
+        // DIFFERENT agent at a pane index the mirror already follows — the
+        // mirror is the pane's slot, so it follows the pane (the activity
+        // is overwritten by the next sync either way; the label must not
+        // lag behind a swap).
+        if let Some(session) = self
+            .pty_sessions
+            .iter_mut()
+            .find(|s| s.bound && s.agents_pane == Some(pane))
+        {
+            if session.subagent_agent() != Some(agent) {
+                session.command = format!("subagent: {agent}");
+                // The pane is a NEW agent's slot: drop the previous agent's
+                // report body and description so the list never shows a
+                // swapped pane still wearing its predecessor's transcript —
+                // the next sync rebuilds the activity from scratch. The
+                // status/severity reset too: a sealed `Completed`/`Failed`
+                // marker (or a review verdict tint) on an EMPTY body would
+                // read as "finished with no report" until the new agent's
+                // first turn closes; the fresh mirror state is Running,
+                // same as a brand-new pane.
+                session.output = String::new();
+                session.description = Some(String::new());
+                session.status = PtyStatus::Running;
+                session.severity = None;
+                session.activity_rows_cache = None;
+                self.pty_gen = self.pty_gen.wrapping_add(1);
+            }
+            return;
+        }
+        self.next_pty_id += 1;
+        let id = format!("pty-{}", self.next_pty_id);
+        let mut session = PtySession::new(id, format!("subagent: {agent}"), None);
+        session.bound = true;
+        session.agents_pane = Some(pane);
+        self.pty_sessions.push(session);
+        self.pty_gen = self.pty_gen.wrapping_add(1);
+        // The new pane mirror must not retroactively supersede finished
+        // NORMAL windows of the same CLI: the mirror is a stable per-pane
+        // slot, not a newer turn of that queue (this runs BEFORE the push
+        // order matters — see the sweep exclusion below, mirrored here by
+        // construction: mirrors never enter the normal supersede logic).
+        self.mark_activity(SectionKind::Subagent);
+    }
+
+    /// Sync one pane mirror with the pane's live state: apply the pane's
+    /// `SubagentActivity` timeline (message/thought chunks, tool calls,
+    /// plans — the SAME coalescing state machine both sides run) and copy
+    /// the running/finished flags. Pane-index routed, so the `call_ref` and
+    /// last-Running paths of normal subagent traffic can never reach a
+    /// mirror. `label` is the mirror's list description, owned by the
+    /// split (the `#k` instance tag when one agent CLI runs in several
+    /// panes).
+    pub(crate) fn sync_agents_pane(
+        &mut self,
+        pane: usize,
+        activity: &SubagentActivity,
+        running: bool,
+        label: Option<&str>,
+    ) {
+        self.sync_agents_pane_inner(pane, activity, running, label, None, false);
+    }
+
+    /// The DONE variant: the pane's turn ended, so the mirror takes the
+    /// final report as its window BODY (the same linear-chat contract the
+    /// normal completion path applies — timeline stays, the body carries
+    /// the report) and seals its transcript. `failed` seals the tool rows
+    /// as failed and marks the window `Failed`.
+    pub(crate) fn finish_agents_pane(
+        &mut self,
+        pane: usize,
+        activity: &SubagentActivity,
+        output: &str,
+        failed: bool,
+    ) {
+        self.sync_agents_pane_inner(pane, activity, false, None, Some(output), failed);
+    }
+
+    fn sync_agents_pane_inner(
+        &mut self,
+        pane: usize,
+        activity: &SubagentActivity,
+        running: bool,
+        label: Option<&str>,
+        final_output: Option<&str>,
+        failed: bool,
+    ) {
+        let Some(idx) = self
+            .pty_sessions
+            .iter()
+            .position(|s| s.bound && s.agents_pane == Some(pane))
+        else {
+            return;
+        };
+        let mut changed = false;
+        {
+            let session = &mut self.pty_sessions[idx];
+            if session.subagent_activity != *activity {
+                session.subagent_activity = activity.clone();
+                session.activity_rows_cache = None;
+                changed = true;
+            }
+            if let Some(label) = label
+                && session.description.as_deref() != Some(label)
+            {
+                session.description = Some(label.to_string());
+                changed = true;
+            }
+            if let Some(out) = final_output {
+                let mut out = out.to_string();
+                Self::truncate_output(&mut out);
+                if session.output != out {
+                    session.output = out;
+                    changed = true;
+                }
+            }
+            if running {
+                // (Re-)engage: the pane started or continues a turn. An
+                // already-Running mirror is a no-op (no gen churn).
+                if !matches!(session.status, PtyStatus::Running) {
+                    session.status = PtyStatus::Running;
+                    changed = true;
+                }
+            } else if final_output.is_some()
+                || matches!(session.status, PtyStatus::Running)
+            {
+                // The turn ENDED — through the Done event (the report body
+                // present) or an un-signaled stop (the pane's set was
+                // superseded mid-turn: seal the partial transcript with no
+                // body). An ALREADY finished mirror stays untouched: an
+                // idle-but-bound pane re-syncs on every open without
+                // re-sealing or flipping its marker.
+                session.status = if failed {
+                    PtyStatus::Failed
+                } else {
+                    PtyStatus::Completed
+                };
+                if failed {
+                    session.subagent_activity.seal_failed();
+                } else {
+                    session.subagent_activity.seal_completed(&session.output);
+                }
+                changed = true;
+            }
+        }
+        if changed {
+            self.pty_gen = self.pty_gen.wrapping_add(1);
+            self.mark_activity(SectionKind::Subagent);
+        }
+    }
+
+    /// Drop every pane mirror (the `/agents` mode left the session: Esc to
+    /// Home, session switch). Normal subagent windows are untouched.
+    pub(crate) fn drop_agents_pane_windows(&mut self) {
+        let before = self.pty_sessions.len();
+        self.pty_sessions
+            .retain(|s| !(s.bound && s.agents_pane.is_some()));
+        if self.pty_sessions.len() != before {
+            self.pty_gen = self.pty_gen.wrapping_add(1);
+            // Selection/pins index absolute positions — clamp defensively.
+            self.subagent_list_selected = None;
+            for nav in self.agent_navs.values_mut() {
+                nav.index = None;
+            }
+        }
+    }
+
+    /// Drop only the mirrors of panes at or beyond `count` — a fresh picker
+    /// confirm SHRANK the pane set, and stale mirrors of removed indexes
+    /// must not linger in the list (they would never sync again).
+    pub(crate) fn prune_agents_pane_beyond(&mut self, count: usize) {
+        let before = self.pty_sessions.len();
+        self.pty_sessions
+            .retain(|s| !(s.bound && s.agents_pane.is_some_and(|p| p >= count)));
+        if self.pty_sessions.len() != before {
+            self.pty_gen = self.pty_gen.wrapping_add(1);
+            self.subagent_list_selected = None;
+            for nav in self.agent_navs.values_mut() {
+                nav.index = None;
+            }
+        }
     }
 
     /// Number of sessions in one agent's queue.
@@ -3127,8 +3343,16 @@ impl RightPanelState {
     /// both spellings must match or an internal completion notification
     /// would never find its window (and the window would stay Running).
     fn is_window_of(session: &PtySession, agent: &str) -> bool {
-        let cli = session.subagent_agent();
-        cli == Some(agent) || (agent == "internal" && cli == Some(""))
+        // Pane mirrors are never normal subagent windows: the agent-hint
+        // fallback (and every caller of this predicate — meta, stream,
+        // completion, failure) must not graft `subagent_call` traffic into
+        // a `/agents` pane's mirror. Mirrors are fed exclusively through
+        // the pane-index sync.
+        !session.bound
+            && {
+                let cli = session.subagent_agent();
+                cli == Some(agent) || (agent == "internal" && cli == Some(""))
+            }
     }
 
     pub fn update_last_pty(&mut self, output: String) {
@@ -3195,7 +3419,7 @@ impl RightPanelState {
                 Some(agent) => {
                     matches!(s.status, PtyStatus::Running) && Self::is_window_of(s, agent)
                 }
-                None => matches!(s.status, PtyStatus::Running),
+                None => matches!(s.status, PtyStatus::Running) && !s.bound,
             })
         } else {
             None
@@ -3289,7 +3513,7 @@ impl RightPanelState {
                 Some(agent) => {
                     matches!(s.status, PtyStatus::Running) && Self::is_window_of(s, agent)
                 }
-                None => matches!(s.status, PtyStatus::Running),
+                None => matches!(s.status, PtyStatus::Running) && !s.bound,
             })
         } else {
             None
@@ -3421,7 +3645,7 @@ impl RightPanelState {
                 Some(agent) => {
                     matches!(s.status, PtyStatus::Running) && Self::is_window_of(s, agent)
                 }
-                None => matches!(s.status, PtyStatus::Running),
+                None => matches!(s.status, PtyStatus::Running) && !s.bound,
             })
         } else {
             None
@@ -3525,10 +3749,9 @@ impl RightPanelState {
             }
             // The ref matched nothing at all (pre-ref emitters, rehydrated
             // sessions): fall back to the last Running subagent.
-            None => self
-                .pty_sessions
-                .iter()
-                .rposition(|s| matches!(s.status, PtyStatus::Running) && s.is_subagent()),
+            None => self.pty_sessions.iter().rposition(|s| {
+                matches!(s.status, PtyStatus::Running) && s.is_subagent() && !s.bound
+            }),
         };
         if let Some(idx) = target {
             let session = &mut self.pty_sessions[idx];
@@ -5585,6 +5808,7 @@ mod tests {
             model: None,
             reasoning: None,
             agents_panes: None,
+            agents_mode_open: false,
             ctx_ids: Default::default(),
         }
     }
@@ -6924,5 +7148,173 @@ mod tests {
         // the end row contributes the glyph under its focus column.
         let text = state.extract_selected_text();
         assert_eq!(text, "line0\nline1\nline2\nline3\nl");
+    }
+
+    // ---- /agents pane mirrors (bound windows in the shared list) ----
+
+    /// A pane mirror opens ONCE per pane index (idempotent), retargets its
+    /// label when the pane's agent swaps, and is NEVER superseded by a
+    /// normal subagent spawn of the same CLI — the pane index is its own
+    /// stable routing identity.
+    #[test]
+    fn pane_mirrors_are_stable_per_index_and_immune_to_supersede() {
+        let mut state = RightPanelState::new();
+        state.open_agents_pane_window(0, "claude");
+        state.open_agents_pane_window(0, "claude");
+        assert_eq!(
+            state
+                .pty_sessions
+                .iter()
+                .filter(|s| s.bound && s.agents_pane == Some(0))
+                .count(),
+            1,
+            "re-opening the same pane must not stack mirrors"
+        );
+        // A normal spawn of the same CLI: the sweep must skip the mirror.
+        // The mirror is FINISHED here — exactly the shape the per-CLI
+        // supersede sweep targets — so without the `bound` guard it would
+        // be evicted from the default display by a normal turn.
+        state.finish_agents_pane(0, &SubagentActivity::default(), "pane report", false);
+        state.start_pty("subagent: claude".to_string(), None);
+        assert!(
+            !state.pty_sessions[0].superseded,
+            "a same-CLI subagent spawn never evicts a pane mirror"
+        );
+        // ... while the NEW normal window (already finished would be swept
+        // on the NEXT spawn) simply entered the queue untouched.
+        assert!(state.pty_sessions.len() == 2);
+    }
+
+    /// The sync is pane-index routed and carries the label; crossing into
+    /// finished seals the transcript (the list stops spinning).
+    #[test]
+    fn pane_mirror_sync_applies_activity_and_seals_on_finish() {
+        let mut state = RightPanelState::new();
+        state.open_agents_pane_window(1, "kilo");
+        let mut activity = SubagentActivity::default();
+        activity.apply(&SubagentEvent::Message {
+            text: "working".into(),
+        });
+        state.sync_agents_pane(1, &activity, true, Some("#2"));
+        let mirror = state
+            .pty_sessions
+            .iter()
+            .find(|s| s.bound && s.agents_pane == Some(1))
+            .unwrap();
+        assert!(matches!(mirror.status, PtyStatus::Running));
+        assert_eq!(mirror.description.as_deref(), Some("#2"));
+        assert_eq!(
+            mirror.subagent_activity.timeline.len(),
+            activity.timeline.len(),
+            "the mirror carries the pane's coalesced timeline"
+        );
+
+        // Finish: sealed, completed, and the report lands as the body.
+        state.finish_agents_pane(1, &activity, "final report", false);
+        let mirror = state
+            .pty_sessions
+            .iter()
+            .find(|s| s.bound && s.agents_pane == Some(1))
+            .unwrap();
+        assert!(mirror.is_finished());
+        assert!(matches!(mirror.status, PtyStatus::Completed));
+        assert_eq!(mirror.output, "final report");
+        // The seal froze the tool rows (none InProgress left) — the same
+        // contract the normal completion path applies.
+        assert!(mirror
+            .subagent_activity
+            .timeline
+            .iter()
+            .all(|e| !matches!(
+                e,
+                SubagentTimelineEntry::Tool(c) if c.status == ToolCallStatus::InProgress
+            )));
+
+        // An idle-but-bound pane re-syncs on every open WITHOUT flipping
+        // its marker or re-sealing: the mirror stays Completed, the
+        // transcript stays sealed, no gen churn.
+        let gen_before = state.pty_gen;
+        state.sync_agents_pane(1, &activity, false, Some("#2"));
+        let mirror = state
+            .pty_sessions
+            .iter()
+            .find(|s| s.bound && s.agents_pane == Some(1))
+            .unwrap();
+        assert!(matches!(mirror.status, PtyStatus::Completed));
+        assert_eq!(mirror.output, "final report");
+        assert_eq!(
+            state.pty_gen, gen_before,
+            "an idle re-sync churns nothing"
+        );
+
+        // A NEW turn re-engages the spinner (and only the Running status
+        // changed — the sealed transcript and report body stay).
+        state.sync_agents_pane(1, &activity, true, Some("#2"));
+        let mirror = state
+            .pty_sessions
+            .iter()
+            .find(|s| s.bound && s.agents_pane == Some(1))
+            .unwrap();
+        assert!(matches!(mirror.status, PtyStatus::Running));
+        assert_eq!(mirror.output, "final report");
+    }
+
+    /// Normal subagent traffic must never land in a mirror: the agent-hint
+    /// fallback (`is_window_of`) and the last-Running subagent fallback
+    /// both exclude `bound` windows.
+    #[test]
+    fn normal_subagent_routing_skips_pane_mirrors() {
+        let mut state = RightPanelState::new();
+        state.open_agents_pane_window(0, "claude");
+        // A normal RUNNING claude window to receive the traffic.
+        state.start_pty("subagent: claude".to_string(), None);
+        // Agent-hint targeted append/completion.
+        state.update_last_pty_for_agent("stream".into(), Some("claude"));
+        assert_eq!(state.pty_sessions.last().unwrap().output, "stream");
+        assert_eq!(state.pty_sessions[0].output, "", "the mirror stays clean");
+        // Last-Running subagent fallback (typed events without a ref).
+        let applied = state.update_subagent_activity(
+            &SubagentEvent::Message {
+                text: "chat".into(),
+            },
+            None,
+        );
+        assert!(applied, "the normal window received the event");
+        assert!(
+            state.pty_sessions[0].subagent_activity.timeline.is_empty(),
+            "the mirror never absorbs normal subagent activity"
+        );
+    }
+
+    /// Dropping/pruning removes ONLY mirrors: normal windows survive the
+    /// mode leaving, and a shrunken pane set prunes stale indexes.
+    #[test]
+    fn drop_and_prune_remove_only_mirrors() {
+        let mut state = RightPanelState::new();
+        state.open_agents_pane_window(0, "claude");
+        state.open_agents_pane_window(1, "kilo");
+        state.start_pty("echo hi".to_string(), None);
+        state.prune_agents_pane_beyond(1);
+        assert!(
+            state
+                .pty_sessions
+                .iter()
+                .any(|s| s.bound && s.agents_pane == Some(0)),
+            "pane 0's mirror survives"
+        );
+        assert!(
+            !state
+                .pty_sessions
+                .iter()
+                .any(|s| s.bound && s.agents_pane == Some(1)),
+            "pane 1's mirror pruned"
+        );
+        assert!(state.pty_sessions.iter().any(|s| !s.is_subagent()));
+        state.drop_agents_pane_windows();
+        assert!(
+            state.pty_sessions.iter().all(|s| !s.bound),
+            "no mirrors left, bash window untouched"
+        );
+        assert!(state.pty_sessions.iter().any(|s| !s.is_subagent()));
     }
 }

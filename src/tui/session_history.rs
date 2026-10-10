@@ -152,12 +152,22 @@ pub(crate) enum MetadataDelta {
         model: Option<String>,
         reasoning: Option<String>,
     },
-    /// The `/agents` split-pane mode left open on this session: `Some`
-    /// carries the chosen agent set (pane 0 = the cosh daemon) so reopening
-    /// the session restores the mode with the same panes; `None` records the
-    /// mode being closed. UI-only bookkeeping — never model-facing data.
+    /// The `/agents` split-pane mode left on this session: `Some` carries
+    /// the chosen pane set (cosh only when the user marked it) so reopening
+    /// the session restores the mode with the same panes — and, for panes
+    /// that already ran, the SAME agent sessions (`AgentPaneRef` is
+    /// serialized untagged: a bare name is byte-identical with the
+    /// pre-binding deltas, so old histories replay as fresh `Name` panes).
+    /// `None` records the mode being closed. `mode_open` distinguishes the
+    /// split SCREEN being left open (`true`) from a PARKED set (`false`,
+    /// pane list retained but the mode left the screen) — persisted only
+    /// with newer deltas; older payloads default to `false`, so a session
+    /// an old build left open reopens parked (one `/agents` re-attaches).
+    /// UI-only bookkeeping — never model-facing data.
     Agents {
-        panes: Option<Vec<String>>,
+        panes: Option<Vec<crate::types::AgentPaneRef>>,
+        #[serde(default)]
+        mode_open: bool,
     },
 }
 
@@ -316,6 +326,7 @@ impl BranchProjection {
                 model: metadata.model,
                 reasoning: metadata.reasoning,
                 agents_panes: None,
+                agents_mode_open: false,
                 ctx_ids: HashMap::new(),
             },
             cwd: metadata.cwd,
@@ -921,8 +932,9 @@ fn apply_metadata(state: &mut BranchProjection, change: &MetadataDelta) {
             state.session.model = model.clone();
             state.session.reasoning = reasoning.clone();
         }
-        MetadataDelta::Agents { panes } => {
+        MetadataDelta::Agents { panes, mode_open } => {
             state.session.agents_panes = panes.clone();
+            state.session.agents_mode_open = *mode_open;
         }
     }
 }
@@ -1198,6 +1210,7 @@ pub(crate) fn parse_jsonl(session_id: &str, contents: &str) -> ParsedHistory {
             model: header.model,
             reasoning: header.reasoning,
             agents_panes: None,
+            agents_mode_open: false,
             ctx_ids: HashMap::new(),
         };
         for stored in legacy_messages {

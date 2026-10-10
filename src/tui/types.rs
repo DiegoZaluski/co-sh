@@ -4,6 +4,56 @@ use cosh_tui::core::lib::rgba::RGBA;
 
 use crate::theme::Theme;
 
+/// One persisted pane of the `/agents` split: which agent CLI it runs and —
+/// once the pane completed a turn — WHICH ACP session to resume, so a
+/// reopened session (or app) continues the SAME agent context instead of
+/// forking a fresh one. Serialized untagged: `Name` is a bare JSON string,
+/// byte-identical with the pre-binding histories; `Bound` is a small object
+/// only newer writers emit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AgentPaneRef {
+    /// A freshly picked pane that never ran yet: just the agent name. The
+    /// next turn creates a new session and the pane promotes to `Bound`.
+    Name(String),
+    /// A pane with a durable agent context: `session_id` is the ACP session
+    /// id the pane resumes on its next dispatch (its independent instance —
+    /// two Claude panes carry two distinct ids).
+    Bound {
+        agent: String,
+        session_id: String,
+    },
+}
+
+impl AgentPaneRef {
+    /// The agent CLI this pane runs.
+    #[must_use]
+    pub fn agent(&self) -> &str {
+        match self {
+            Self::Name(agent) => agent,
+            Self::Bound { agent, .. } => agent,
+        }
+    }
+
+    /// The bound ACP session id, when the pane already ran once.
+    #[must_use]
+    pub fn session_id(&self) -> Option<&str> {
+        match self {
+            Self::Name(_) => None,
+            Self::Bound { session_id, .. } => Some(session_id),
+        }
+    }
+}
+
+/// Ergonomics for the common fresh-pick construction: a bare name becomes
+/// an unbound `Name` pane (`"claude".into()`), so call sites read exactly
+/// like the pre-binding string lists.
+impl From<&str> for AgentPaneRef {
+    fn from(agent: &str) -> Self {
+        Self::Name(agent.to_string())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: String,
@@ -22,11 +72,22 @@ pub struct Session {
     /// this session. Persisted by metadata deltas.
     pub reasoning: Option<String>,
     /// The `/agents` split-pane mode left OPEN on this session: `Some(panes)`
-    /// carries the chosen agent set (pane 0 = the cosh daemon, always) so
-    /// reopening the session restores the mode with the SAME panes. Persisted
-    /// by metadata deltas; only the mode is durable — running turns never are.
+    /// carries the chosen pane set (cosh only when the user marked it) so
+    /// reopening the session restores the mode with the SAME panes — and,
+    /// for panes that already ran, the SAME agent sessions (`AgentPaneRef` is
+    /// serialized untagged: a bare name is byte-identical with the
+    /// pre-binding histories, so old sessions load as fresh `Name` panes).
+    /// Persisted by metadata deltas; only the mode and bindings are durable —
+    /// running turns never are.
     #[serde(default)]
-    pub agents_panes: Option<Vec<String>>,
+    pub agents_panes: Option<Vec<crate::types::AgentPaneRef>>,
+    /// Whether the `/agents` split-screen MODE itself was left open — the
+    /// companion of `agents_panes`, which also persists while the mode is
+    /// closed (a parked split keeps its pane set + bindings for a later
+    /// re-entry, but only `true` here restores the SPLIT SCREEN). Persisted
+    /// with the session's regular saves.
+    #[serde(default)]
+    pub agents_mode_open: bool,
     /// Legacy display bookkeeping: message id → context-manager item ids.
     /// New history boundaries are recorded as explicit context deltas, so a
     /// display-only save cannot erase the semantic view identity. This field
@@ -402,6 +463,7 @@ mod tests {
             model: None,
             reasoning: None,
             agents_panes: None,
+            agents_mode_open: false,
             ctx_ids: Default::default(),
             messages: vec![
                 Message {
@@ -547,5 +609,72 @@ mod tests {
             Part::Reasoning(r) => assert_eq!(r.text, "R1R2"),
             other => panic!("expected single Reasoning, got {other:?}"),
         }
+    }
+
+    // ---- AgentPaneRef session binding ----
+
+    #[test]
+    fn legacy_pane_lists_deserialize_as_fresh_name_panes() {
+        // Old histories (and old MetadataDelta payloads) stored a pane set
+        // as plain strings. The untagged repr must still accept those
+        // bytes, byte-for-byte, and load them as unbound `Name` panes.
+        let legacy = r#"["cosh","claude"]"#;
+        let refs: Vec<AgentPaneRef> = serde_json::from_str(legacy).expect("legacy payload");
+        assert_eq!(refs[0].agent(), "cosh");
+        assert_eq!(refs[0].session_id(), None);
+        assert_eq!(refs[1].agent(), "claude");
+
+        // A full Session written by the pre-binding code reopens fine too.
+        let old_session = format!(
+            r#"{{"id":"s","title":"","messages":[],"created_at":0,"title_generated":false,
+                "provider":null,"model":null,"reasoning":null,"agents_panes":{legacy},"ctx_ids":{{}}}}"#
+        );
+        let session: Session = serde_json::from_str(&old_session).expect("legacy session");
+        let panes = session.agents_panes.expect("mode left open");
+        assert_eq!(panes.len(), 2);
+        assert!(matches!(panes[0], AgentPaneRef::Name(_)));
+    }
+
+    #[test]
+    fn bound_panes_round_trip_and_reject_string_shapes() {
+        let refs = vec![
+            AgentPaneRef::Name("claude".to_string()),
+            AgentPaneRef::Bound {
+                agent: "claude".to_string(),
+                session_id: "sess-42".to_string(),
+            },
+        ];
+        let json = serde_json::to_string(&refs).expect("serialize");
+        // The fresh pane serializes as a bare string (legacy-compatible
+        // writes); the bound one as its key/value object.
+        assert!(
+            json.contains(r#""claude","#),
+            "Name stays a bare string: {json:?}"
+        );
+        let back: Vec<AgentPaneRef> = serde_json::from_str(&json).expect("round trip");
+        assert_eq!(back, refs);
+        assert_eq!(back[1].session_id(), Some("sess-42"));
+
+        // An object WITHOUT the session id can never pass for `Bound` —
+        // and there is no string fallback inside it, so a malformed shape
+        // is data corruption, not a legacy list.
+        assert!(serde_json::from_str::<AgentPaneRef>(r#"{"agent":"claude"}"#).is_err());
+    }
+
+    #[test]
+    fn from_ref_seeds_the_session_id_only_for_bound_panes() {
+        let bound = AgentPaneRef::Bound {
+            agent: "kilo".to_string(),
+            session_id: "resume-me".to_string(),
+        };
+        let pane = crate::routes::session::agents_split::AgentPane::from_ref(&bound);
+        assert_eq!(pane.agent, "kilo");
+        assert_eq!(pane.session_id.as_deref(), Some("resume-me"));
+
+        // Fresh pick: unbound.
+        let fresh = AgentPaneRef::Name("kilo".to_string());
+        let pane = crate::routes::session::agents_split::AgentPane::from_ref(&fresh);
+        assert_eq!(pane.agent, "kilo");
+        assert!(pane.session_id.is_none());
     }
 }

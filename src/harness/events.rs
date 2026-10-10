@@ -151,19 +151,32 @@ pub enum HarnessEvent {
     /// outside the agent loop's `subagent_call` dispatch — so pane index
     /// replaces `call_ref` as the routing identity: the pane's own event
     /// channel is the multiplexer the harness tool path cannot provide.
+    /// `epoch` is the dispatch-time generation of the split slots (`App::
+    /// agents_pane_epoch`): a slot swap (fresh confirm, park, switch, close)
+    /// bumps it, and the handler drops every event of a STALE epoch — a
+    /// stopped turn's terminal delivery can never land in a replacement
+    /// pane that merely shares the index.
     AgentsPaneEvent {
         /// Index into `App::agents_split`'s panes (0 = the `cosh` daemon).
         pane: usize,
+        /// Dispatch-time split-slot generation (see the variant doc).
+        epoch: u64,
         /// The typed event, the same shape the right-panel sub-agent box
         /// renders.
         event: cosh_tools::subagent::events::SubagentEvent,
     },
     /// A `/agents` pane turn ENDED. Carries the final report (the
     /// `TurnClosure` contract: the last post-tool-call message), the stop
-    /// reason and the session id for the pane's next resume.
+    /// reason and the session id for the pane's next resume. `epoch` is the
+    /// dispatch-time split-slot generation: a stale Done (the pane's set
+    /// was replaced or torn down while the turn was being cancelled) is
+    /// dropped — its session id must never bind into a replacement pane or
+    /// a different session's metadata.
     AgentsPaneDone {
         /// Index into `App::agents_split`'s panes.
         pane: usize,
+        /// Dispatch-time split-slot generation (see the variant doc).
+        epoch: u64,
         /// The final report; an errored turn carries the error text instead.
         output: String,
         /// `end_turn`, `cancelled`, or a spawn-failure marker.

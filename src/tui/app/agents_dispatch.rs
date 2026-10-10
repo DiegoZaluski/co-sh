@@ -69,7 +69,9 @@ impl App {
 
         // Snapshot everything the spawned turn needs BEFORE the mutable
         // pane bookkeeping below: the agent name, resume id and the
-        // daemon's connector config.
+        // daemon's connector config (only when the focused pane IS the
+        // daemon — the connector resolution runs lazily so a split of
+        // ACP agents alone never computes it).
         let Some((agent, resume)) = split
             .panes
             .get(focused)
@@ -77,7 +79,12 @@ impl App {
         else {
             return;
         };
-        let daemon_connector = self.daemon_connector();
+        let is_daemon = agent == DAEMON_LABEL;
+        let daemon_connector = if is_daemon {
+            Some(self.daemon_connector())
+        } else {
+            None
+        };
         let fallbacks: Vec<(String, String)> = self
             .router_view
             .fallbacks
@@ -104,6 +111,9 @@ impl App {
             split.set_running(focused, true);
             split.set_stop_signal(focused, Some(signal.clone()));
         }
+        // The pane's mirror in the shared subagent list starts spinning too
+        // (same running flag, pane-index routed).
+        self.sync_agents_pane_mirrors();
         self.agent_activity = crate::types::AgentActivity::Working;
         self.agent_spinner = Some(crate::component::agent_spinner::AgentSpinner::new(
             crate::types::AgentActivity::Working.label(),
@@ -111,8 +121,13 @@ impl App {
         ));
 
         let index = focused;
+        // Dispatch-time split-slot generation: stamped into every event of
+        // THIS turn, so a slot swap while it runs (fresh confirm, switch,
+        // close) invalidates its terminal delivery — the handler drops
+        // stale-epoch events instead of binding them into a replacement.
+        let epoch = self.agents_pane_epoch;
         let event_tx = self.event_tx.clone();
-        if agent == DAEMON_LABEL {
+        if is_daemon {
             // The delegator pane: a nested cosh harness on its own
             // thread runtime (the harness is not Send-safe across the
             // app's async context — same shape as the TUI's main agent
@@ -121,9 +136,10 @@ impl App {
             std::thread::spawn(move || {
                 run_daemon_turn(
                     index,
+                    epoch,
                     input,
                     signal,
-                    daemon_connector,
+                    daemon_connector.expect("daemon pane carries its connector"),
                     fallbacks,
                     summarization_models,
                     local_base_urls,
@@ -152,6 +168,7 @@ impl App {
                                 Some(event) => {
                                     let _ = event_tx.send(HarnessEvent::AgentsPaneEvent {
                                         pane: index,
+                                        epoch,
                                         event,
                                     });
                                 }
@@ -172,6 +189,7 @@ impl App {
                 };
                 let _ = event_tx.send(HarnessEvent::AgentsPaneDone {
                     pane: index,
+                    epoch,
                     output,
                     stop_reason,
                     session,
@@ -214,6 +232,7 @@ impl App {
 #[allow(clippy::too_many_arguments)]
 fn run_daemon_turn(
     pane: usize,
+    epoch: u64,
     input: String,
     stop_signal: Arc<AtomicBool>,
     connector: Result<Connector, String>,
@@ -228,6 +247,7 @@ fn run_daemon_turn(
         Err(error) => {
             let _ = event_tx.send(HarnessEvent::AgentsPaneDone {
                 pane,
+                epoch,
                 output: error,
                 stop_reason: "error".to_string(),
                 session: None,
@@ -252,6 +272,7 @@ fn run_daemon_turn(
             Err(e) => {
                 let _ = event_tx.send(HarnessEvent::AgentsPaneDone {
                     pane,
+                    epoch,
                     output: format!("daemon runtime: {e}"),
                     stop_reason: "error".to_string(),
                     session: None,
@@ -320,7 +341,8 @@ fn run_daemon_turn(
                         _ => Vec::new(),
                     };
                     for event in events {
-                        let _ = bridge_tx.send(HarnessEvent::AgentsPaneEvent { pane, event });
+                        let _ =
+                            bridge_tx.send(HarnessEvent::AgentsPaneEvent { pane, epoch, event });
                     }
                 }
             });
@@ -346,6 +368,7 @@ fn run_daemon_turn(
             };
             let _ = event_tx.send(HarnessEvent::AgentsPaneDone {
                 pane,
+                epoch,
                 output,
                 stop_reason,
                 // The nested harness has no resumable ACP session.
@@ -359,6 +382,7 @@ fn run_daemon_turn(
         // nothing to stop).
         let _ = panic_tx.send(HarnessEvent::AgentsPaneDone {
             pane,
+            epoch,
             output: "the daemon turn panicked".to_string(),
             stop_reason: "error".to_string(),
             session: None,

@@ -7,6 +7,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 
+use crate::routes::session::agents_split::brand_fg;
 use crate::theme::{Theme, blend, contrast_fg, rgba_color};
 use crate::util::text_region::{TextRegion, text_from_cell_row};
 
@@ -791,7 +792,16 @@ fn render_subagent_list(
             band.render_self(buf, Rect::new(x, band_top, max_w, band_h));
         }
         let session = &state.pty_sessions[sess_idx];
-        // Selected entries read in the accent color; finished ones dim.
+        // A BOUND `/agents` pane mirror paints its agent name as the
+        // full-color brand logo (the same mark the split headers draw);
+        // normal subagents stay in the theme's own colors — opaque. The
+        // entry styles otherwise follow the shared rules: selected entries
+        // read in the accent color, finished ones dim.
+        let bound_agent = if session.bound {
+            session.subagent_agent().unwrap_or("").to_string()
+        } else {
+            String::new()
+        };
         let style = if selected {
             normal.fg(rgba_color(theme.primary))
         } else if session.is_finished() {
@@ -807,7 +817,44 @@ fn render_subagent_list(
                 continue;
             }
             let screen_y = inner_y + (content_row - state.subagent_list_scroll) as u16;
-            draw_text(buf, seg, x + 1, screen_y, wrap_w, style);
+            if offset == 0 && !bound_agent.is_empty() {
+                // The agent name leads the entry text: paint it glyph by
+                // glyph in the brand palette (`t` walks the mark, exactly
+                // the split header's sampling), then the rest of the row in
+                // the entry's own style. The painted span is the leading
+                // non-blank token capped at the name — a pathological wrap
+                // can never paint into the description.
+                let name_len = bound_agent.chars().count();
+                let token = seg
+                    .chars()
+                    .take_while(|c| !c.is_control() && !c.is_whitespace())
+                    .count()
+                    .min(name_len);
+                let dx = u16::try_from(token).unwrap_or(u16::MAX);
+                for (i, ch) in seg
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(token)
+                    .enumerate()
+                {
+                    let Ok(i) = u16::try_from(i) else {
+                        break;
+                    };
+                    let t = if name_len <= 1 {
+                        0.0
+                    } else {
+                        f32::from(i) / (name_len as f32 - 1.0)
+                    };
+                    if let Some(cell) = buf.cell_mut((x + 1 + i, screen_y)) {
+                        cell.set_char(ch);
+                        cell.set_style(brand_fg(&bound_agent, t, theme, true));
+                    }
+                }
+                let rest: String = seg.chars().skip(token).collect();
+                draw_text(buf, &rest, x + 1 + dx, screen_y, wrap_w.saturating_sub(dx), style);
+            } else {
+                draw_text(buf, seg, x + 1, screen_y, wrap_w, style);
+            }
             state
                 .subagent_list_region_rows
                 .push((content_row, seg.clone()));

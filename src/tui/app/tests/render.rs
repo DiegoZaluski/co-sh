@@ -225,6 +225,60 @@ async fn session_main_area_ignores_hidden_right_panel() {
     assert_eq!(sa2.main.width, 140);
 }
 
+/// The `/agents` split owns the WHOLE main area at full width — the right
+/// panel must NOT overlay it (the bound agents surface in the panel in the
+/// NORMAL mode, per spec). The split replaces the transcript, so a panel
+/// rendered beside it would double-show every bound agent and steal width
+/// from the panes. The mouse hit-test shares the same predicate, so the
+/// panel's band belongs to the panes for clicks while the split is open,
+/// and back to the panel the moment the mode closes.
+#[tokio::test]
+async fn agents_split_hides_the_right_panel() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    use ratatui::layout::Rect;
+
+    use crate::routes::session::right_panel::types::RightPanelState;
+
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    app.state.right_panel = RightPanelState::new();
+    // Content that WOULD show the panel in the normal mode.
+    app.state.right_panel.start_pty("echo hi".into(), None);
+    // The hit-test path reads the app's OWN terminal size — pin it.
+    app.set_test_size(140, 30);
+    let area = Rect::new(0, 0, 140, 30);
+
+    // Normal mode: wide terminal + content → the panel shows.
+    let sa = app.session_main_area(area);
+    assert_eq!(sa.right_panel_w, super::RIGHT_PANEL_WIDTH);
+    assert!(app.is_in_right_panel(140 - 1));
+
+    // `/agents` open: the split owns the main area, the panel is hidden
+    // (layout AND hit-test agree).
+    app.open_agents_split(vec![crate::ui::agents_picker::AgentPick {
+        name: "claude".into(),
+        instances: 1,
+    }]);
+    assert!(app.agents_split.is_some());
+    let sa = app.session_main_area(area);
+    assert_eq!(sa.right_panel_w, 0, "the split suppresses the panel");
+    assert_eq!(sa.main.width, 140, "the split gets the full width");
+    assert!(
+        !app.is_in_right_panel(140 - 1),
+        "the panel band belongs to the panes while the split is open"
+    );
+
+    // Back to the normal mode (park keeps the panes alive): the panel
+    // returns with the bound-agent mirrors still inside it.
+    app.park_agents_split();
+    assert!(app.agents_split.is_none());
+    let sa = app.session_main_area(area);
+    assert_eq!(sa.right_panel_w, super::RIGHT_PANEL_WIDTH);
+    assert!(app.is_in_right_panel(140 - 1));
+}
+
 /// The DEFINITIVE check for the Charm header bug: a real HarnessEvent::Usage
 /// carrying `remaining_credits` must (a) land in `hypercredit_balance` after
 /// `poll_events`, and (b) make the rendered header show the ◆ BALANCE — not
