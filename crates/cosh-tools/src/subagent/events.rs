@@ -195,6 +195,16 @@ pub struct ToolDiffSummary {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum SubagentEvent {
+    /// A chunk of the USER's own message text. Live v1 turns rarely echo
+    /// the prompt back; history REPLAY (`session/load`, see
+    /// [`acp::replay`](crate::subagent::acp::replay)) streams the retained
+    /// user messages through the same chunk variant, so a rehydrated
+    /// timeline shows both sides of the conversation instead of an
+    /// agent-only monologue.
+    UserMessage {
+        /// The streamed text chunk.
+        text: String,
+    },
     /// A chunk of the agent's response text (the stream the TUI already
     /// renders as the sub-agent's message).
     Message {
@@ -260,12 +270,17 @@ pub enum SubagentEvent {
 impl SubagentEvent {
     /// Map one ACP `session/update` into a display event.
     ///
-    /// Returns `None` for updates with no TUI representation (user chunks,
-    /// available-commands refreshes, config-option updates, unstable
-    /// variants); those are logged by the caller instead of silently
-    /// dropped.
+    /// Returns `None` for updates with no TUI representation (available-
+    /// commands refreshes, config-option updates, unstable variants); those
+    /// are logged by the caller instead of silently dropped. User message
+    /// chunks ARE mapped (the replayed history needs both sides), though a
+    /// live turn's own prompt echo is suppressed by the caller-side
+    /// `turn_only` filter in [`acp::replay`](super::acp).
     pub(crate) fn from_session_update(update: schema::SessionUpdate) -> Option<Self> {
         match update {
+            schema::SessionUpdate::UserMessageChunk(chunk) => {
+                chunk_text(chunk, "user message").map(|text| Self::UserMessage { text })
+            }
             schema::SessionUpdate::AgentMessageChunk(chunk) => {
                 chunk_text(chunk, "agent message").map(|text| Self::Message { text })
             }

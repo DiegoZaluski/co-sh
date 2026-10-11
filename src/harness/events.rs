@@ -185,6 +185,23 @@ pub enum HarnessEvent {
         /// agents only; the nested cosh daemon has no resumable session).
         session: Option<String>,
     },
+    /// A `/agents` pane's cold-restore REPLAY ended. The pane rehydrated
+    /// its timeline from the agent's own `session/load` history replay
+    /// (the `AgentsPaneEvent`s that preceded this one) — nothing was
+    /// prompted, nothing changed in the agent's context. `ok` is false
+    /// when the replay pass failed (stale id, harness without
+    /// `loadSession`, spawn failure): the pane keeps its (empty) live
+    /// timeline and shows the reason in the mirror.
+    AgentsPaneReplayed {
+        /// Index into `App::agents_split`'s panes.
+        pane: usize,
+        /// Dispatch-time split-slot generation (see the variant doc).
+        epoch: u64,
+        /// Whether the replay completed (false = the failure reason).
+        ok: bool,
+        /// The failure reason (empty on success).
+        error: String,
+    },
     /// Passive LSP findings collected by an fs operation after it touched a
     /// file. The model sees the same findings inline in the tool result; this
     /// event carries the user-facing rendering signal: the TUI shows errors

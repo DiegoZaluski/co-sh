@@ -1484,3 +1484,256 @@ async fn stale_epoch_agents_pane_done_is_dropped() {
         "the live report lands in the pane's transcript"
     );
 }
+
+/// The cold-restore trigger: a `Bound` pane whose live timeline is EMPTY
+/// (the post-reboot state — the process died with the app, only the ACP
+/// session id persisted) starts a rehydrate pass the moment the split
+/// takes the screen. `Name` panes, panes with content and panes already
+/// rehydrating are skipped.
+#[tokio::test]
+async fn reopening_the_split_rehydrates_bound_panes_with_empty_timelines() {
+    use cosh::harness::HarnessEvent;
+    use crate::types::AgentPaneRef;
+
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    let session_id = crate::session_store::generate_session_id();
+    app.state
+        .add_empty_session(session_id.clone(), "rehydrate".into(), 0);
+    app.state.current_session_id = Some(session_id);
+
+    // Persisted metadata: pane 0 bound to a session, pane 1 unbound.
+    app.state.current_session_mut().unwrap().agents_panes = Some(vec![
+        AgentPaneRef::Bound {
+            agent: "claude".into(),
+            session_id: "sess-old".into(),
+        },
+        AgentPaneRef::Name("kilo".into()),
+    ]);
+    app.state.current_session_mut().unwrap().agents_mode_open = true;
+
+    // Restore path (the same arm the session-switch rehydrate uses):
+    // rebuild the live split from the persisted pane set.
+    let panes = app
+        .state
+        .current_session()
+        .unwrap()
+        .agents_panes
+        .clone()
+        .unwrap();
+    app.agents_split = Some(crate::routes::session::agents_split::AgentsSplitState::new(
+        panes,
+    ));
+    app.trigger_agents_pane_replays();
+
+    // In tests the replay pass never spawns a harness — the flag marks
+    // the in-flight state the pass would stream through.
+    let split = app.agents_split.as_ref().unwrap();
+    assert!(
+        split.panes[0].rehydrating,
+        "the bound pane with an empty timeline starts its replay pass"
+    );
+    assert!(
+        !split.panes[1].rehydrating,
+        "an unbound Name pane has nothing to rehydrate"
+    );
+
+    // The replayed history lands through the SAME pane-event channel a
+    // live turn uses (pane-index + epoch routed) — user and agent sides.
+    let epoch = app.agents_pane_epoch;
+    app.event_tx
+        .send(HarnessEvent::AgentsPaneEvent {
+            pane: 0,
+            epoch,
+            event: cosh_tools::subagent::events::SubagentEvent::UserMessage {
+                text: "what changed today?".into(),
+            },
+        })
+        .ok();
+    app.event_tx
+        .send(HarnessEvent::AgentsPaneEvent {
+            pane: 0,
+            epoch,
+            event: cosh_tools::subagent::events::SubagentEvent::Message {
+                text: "the answer from yesterday".into(),
+            },
+        })
+        .ok();
+    // The terminal event clears the in-flight flag.
+    app.event_tx
+        .send(HarnessEvent::AgentsPaneReplayed {
+            pane: 0,
+            epoch,
+            ok: true,
+            error: String::new(),
+        })
+        .ok();
+    app.poll_events();
+
+    let pane = &app.agents_split.as_ref().unwrap().panes[0];
+    assert!(!pane.rehydrating, "the pass ended");
+    let texts: Vec<String> = pane
+        .activity
+        .timeline
+        .iter()
+        .map(|e| match e {
+            crate::routes::session::right_panel::types::SubagentTimelineEntry::Message { text }
+            | crate::routes::session::right_panel::types::SubagentTimelineEntry::UserMessage {
+                text,
+            } => text.clone(),
+            _ => String::new(),
+        })
+        .collect();
+    assert!(
+        texts.iter().any(|t| t.contains("what changed today?")),
+        "the replayed user turn lands in the timeline: {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t.contains("the answer from yesterday")),
+        "the replayed agent reply lands in the timeline: {texts:?}"
+    );
+    // The binding is UNTOUCHED by a replay: the pane still points at the
+    // persisted session id (no prompt happened, no new id came back).
+    let panes = app.state.current_session().unwrap().agents_panes.clone();
+    assert_eq!(
+        panes.unwrap()[0].session_id(),
+        Some("sess-old"),
+        "a replay never rebinds the pane's session"
+    );
+}
+
+/// A FAILED replay pass (stale id, harness without `loadSession`, spawn
+/// failure) clears the in-flight flag and surfaces the reason as a labeled
+/// marker in the pane — the pane stays usable and the NEXT prompt falls
+/// back to `session/new` through the normal turn path.
+#[tokio::test]
+async fn a_failed_replay_marks_the_pane_instead_of_silence() {
+    use cosh::harness::HarnessEvent;
+    use crate::types::AgentPaneRef;
+
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    let session_id = crate::session_store::generate_session_id();
+    app.state
+        .add_empty_session(session_id.clone(), "replay fail".into(), 0);
+    app.state.current_session_id = Some(session_id);
+    app.state.current_session_mut().unwrap().agents_panes = Some(vec![AgentPaneRef::Bound {
+        agent: "claude".into(),
+        session_id: "sess-gone".into(),
+    }]);
+    app.state.current_session_mut().unwrap().agents_mode_open = true;
+    let panes = app
+        .state
+        .current_session()
+        .unwrap()
+        .agents_panes
+        .clone()
+        .unwrap();
+    app.agents_split = Some(crate::routes::session::agents_split::AgentsSplitState::new(
+        panes,
+    ));
+    app.trigger_agents_pane_replays();
+    assert!(app.agents_split.as_ref().unwrap().panes[0].rehydrating);
+
+    let epoch = app.agents_pane_epoch;
+    app.event_tx
+        .send(HarnessEvent::AgentsPaneReplayed {
+            pane: 0,
+            epoch,
+            ok: false,
+            error: "ACP session/load failed: session gone".into(),
+        })
+        .ok();
+    app.poll_events();
+
+    let pane = &app.agents_split.as_ref().unwrap().panes[0];
+    assert!(!pane.rehydrating, "a failed pass also ends the wait");
+    let texts: Vec<String> = pane
+        .activity
+        .timeline
+        .iter()
+        .map(|e| match e {
+            crate::routes::session::right_panel::types::SubagentTimelineEntry::Message { text }
+            | crate::routes::session::right_panel::types::SubagentTimelineEntry::UserMessage {
+                text,
+            } => text.clone(),
+            _ => String::new(),
+        })
+        .collect();
+    assert!(
+        texts.iter().any(|t| t.contains("[replay failed]")),
+        "the failure is labeled in the pane: {texts:?}"
+    );
+    // The binding survives a failed pass: the id stays persisted (a later
+    // harness restart may resurrect the session; the next prompt's own
+    // resume-fallback self-heals a genuinely dead id).
+    let panes = app.state.current_session().unwrap().agents_panes.clone();
+    assert_eq!(
+        panes.unwrap()[0].session_id(),
+        Some("sess-gone"),
+        "a failed replay never rebinds the pane's session"
+    );
+}
+
+/// While a pane is rehydrating, a prompt aimed at it is refused with a
+/// toast: the pane's history is still arriving and a dispatch now would
+/// interleave with the replay stream (and resume from a half-replayed
+/// state). Another pane's prompt is unaffected.
+#[tokio::test]
+async fn a_prompt_to_a_rehydrating_pane_is_refused_with_a_toast() {
+    use crate::types::AgentPaneRef;
+
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    let session_id = crate::session_store::generate_session_id();
+    app.state
+        .add_empty_session(session_id.clone(), "rehydrating gate".into(), 0);
+    app.state.current_session_id = Some(session_id);
+    app.state.current_session_mut().unwrap().agents_panes = Some(vec![
+        AgentPaneRef::Bound {
+            agent: "claude".into(),
+            session_id: "sess-1".into(),
+        },
+        AgentPaneRef::Name("kilo".into()),
+    ]);
+    app.state.current_session_mut().unwrap().agents_mode_open = true;
+    let panes = app
+        .state
+        .current_session()
+        .unwrap()
+        .agents_panes
+        .clone()
+        .unwrap();
+    app.agents_split = Some(crate::routes::session::agents_split::AgentsSplitState::new(
+        panes,
+    ));
+    app.trigger_agents_pane_replays();
+
+    // Focus pane 0 (rehydrating): the dispatch is refused.
+    app.dispatch_to_agents_split("hello?".to_string());
+    assert!(
+        app.toast_state
+            .current
+            .as_ref()
+            .is_some_and(|t| t.message.contains("Restoring this agent's history")),
+        "the refusal toast tells the user to wait"
+    );
+    assert!(
+        !app.agents_split.as_ref().unwrap().panes[0].running,
+        "no turn started behind the gate"
+    );
+
+    // Focus pane 1 (idle, not rehydrating): the dispatch runs.
+    if let Some(split) = app.agents_split.as_mut() {
+        split.focused = 1;
+    }
+    app.toast_state.current = None;
+    app.dispatch_to_agents_split("go".to_string());
+    assert!(
+        app.agents_split.as_ref().unwrap().panes[1].running,
+        "an idle pane dispatches normally while a sibling rehydrates"
+    );
+}

@@ -650,6 +650,149 @@ pub async fn call(
     }
 }
 
+/// Rehydrate one stored ACP session: reconnect, `session/load` the stored
+/// id and stream the agent's retained conversation history back as typed
+/// [`SubagentEvent`]s — WITHOUT prompting.
+///
+/// This is the cold-restore path for a pane whose process died with the
+/// app (`/agents` split reopened after a reboot): the session id is the
+/// only thing persisted, so the transcript must come back FROM the agent.
+/// The v1 `session/load` request replays the entire conversation through
+/// `session/update` notifications (the same variants live turns stream —
+/// user/agent/thought chunks, tool calls, plans) before responding, so the
+/// mapped event stream reconstructs the visible timeline with no storage
+/// on cosh's side beyond the session id itself.
+///
+/// Unlike a live pane (which shows only agent narration — the user's
+/// prompt echoes locally through the pane input), replay's
+/// `user_message_chunk` updates ARE mapped, so the rehydrated timeline
+/// shows both sides of the conversation.
+///
+/// # Errors
+///
+/// Returns an error when the agent is unsupported, the harness cannot be
+/// launched, the handshake fails, or `session/load` fails (a stale id
+/// after the harness lost its sessions). The caller degrades gracefully:
+/// the pane rehydrates to its (empty) live state and the next prompt opens
+/// a fresh session.
+#[allow(clippy::unwrap_used)]
+pub async fn replay(
+    agent: &str,
+    session_id: String,
+    cwd: PathBuf,
+    chunk_tx: tokio::sync::mpsc::UnboundedSender<SubagentEvent>,
+) -> Result<(), String> {
+    validate_agent(agent)?;
+    let entry = ACP_AGENTS
+        .iter()
+        .find(|a| a.name == agent)
+        .ok_or_else(|| format!("unknown agent '{agent}'"))?;
+    let launcher = agent_launcher(entry)?
+        .with_debug(|line, direction| {
+            if matches!(direction, LineDirection::Stderr) {
+                log::debug!("subagent ACP stderr: {line}");
+            }
+        });
+
+    tokio::task::spawn_blocking(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("failed to build ACP runtime: {e}"))?
+            .block_on(run_replay_session(
+                launcher, session_id, cwd, chunk_tx,
+            ))
+    })
+    .await
+    .map_err(|e| format!("sub-agent task failed: {e}"))?
+}
+
+/// The rehydrate connection itself: initialize → authenticate (when
+/// advertised) → `session/load` → replay notifications, then disconnect.
+/// No `session/prompt` is ever sent — a rehydrate pass MUST NOT append to
+/// the agent's history. Unlike [`open_or_resume_session`] there is NO
+/// fallback: the stored id is the whole point of the call, and falling
+/// back to `session/new` would silently replace "the transcript is gone"
+/// with a fresh empty session (and a new id binding that loses the old
+/// context on the next prompt too).
+pub(crate) async fn run_replay_session<T>(
+    transport: T,
+    session_id: String,
+    cwd: PathBuf,
+    chunk_tx: tokio::sync::mpsc::UnboundedSender<SubagentEvent>,
+) -> Result<(), String>
+where
+    T: agent_client_protocol::ConnectTo<agent_client_protocol::Client> + 'static,
+{
+    Client
+        .builder()
+        .name("cosh")
+        .on_receive_notification(
+            async move |notification: SessionNotification, _cx| {
+                // Replay arrives as ordinary `session/update` notifications
+                // (the same variants a live turn streams), so the same
+                // mapping reconstructs the timeline. Message chunks feed
+                // NO closure here — a rehydrate pass returns no report.
+                if let Some(event) =
+                    SubagentEvent::from_session_update(notification.update)
+                {
+                    let _ = chunk_tx.send(event);
+                }
+                Ok(())
+            },
+            on_receive_notification!(),
+        )
+        .connect_with(transport, async move |connection: ConnectionTo<AcpRole>| {
+            // No `fs` capabilities: nothing here serves file requests —
+            // replay only ever sends notifications.
+            let capabilities = ClientCapabilities::new();
+            let init = connection
+                .send_request(
+                    InitializeRequest::new(ProtocolVersion::V1).client_capabilities(capabilities),
+                )
+                .block_task()
+                .await
+                .map_err(|e| acp_error(format!("ACP initialize failed: {e}")))?;
+
+            // Same auth contract as a turn: reuse the user's existing login
+            // so the load can access the session at all.
+            let mut auth_error = None;
+            for method in &init.auth_methods {
+                match connection
+                    .send_request(AuthenticateRequest::new(method.id().clone()))
+                    .block_task()
+                    .await
+                {
+                    Ok(_) => {
+                        auth_error = None;
+                        break;
+                    }
+                    Err(e) => {
+                        auth_error = Some(format!("ACP authenticate failed: {e}"));
+                    }
+                }
+            }
+            if let Some(e) = auth_error {
+                return Err(acp_error(e));
+            }
+
+            // The load MUST be honored: a `loadSession`-less harness cannot
+            // replay, and the caller decides how to degrade.
+            let loaded = connection
+                .send_request(LoadSessionRequest::new(
+                    SessionId::new(session_id),
+                    cwd,
+                ))
+                .block_task()
+                .await
+                .map_err(|e| acp_error(format!("ACP session/load failed: {e}")))?;
+            let _: LoadSessionResponse = loaded;
+            Ok(())
+        })
+        .await
+        .map_err(|e| format!("ACP connection failed: {e}"))
+}
+
 /// Whether the agent harness supports resuming sessions, read from the
 /// capabilities advertised at `initialize`. Both ACP mechanisms count:
 /// `sessionCapabilities.resume` (`session/resume`) and the older top-level

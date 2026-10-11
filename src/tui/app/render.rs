@@ -617,8 +617,20 @@ impl App {
                         .parked_agents_split
                         .as_ref()
                         .is_some_and(crate::routes::session::agents_split::AgentsSplitState::any_running));
+            // A rehydrating pane streams its replayed history too — same
+            // spinner-row contract, live or parked.
+            let agents_panes_rehydrating = self
+                .agents_split
+                .as_ref()
+                .is_some_and(crate::routes::session::agents_split::AgentsSplitState::any_rehydrating)
+                || (self.agents_split.is_none()
+                    && self
+                        .parked_agents_split
+                        .as_ref()
+                        .is_some_and(crate::routes::session::agents_split::AgentsSplitState::any_rehydrating));
             let agent_spinner_active = (self.state.status == crate::types::SessionStatus::Working
-                || agents_panes_running)
+                || agents_panes_running
+                || agents_panes_rehydrating)
                 && self.agent_spinner.is_some();
             let correction_spinner_active = self.prompt_correction_active && !agent_spinner_active;
             let spinner_h = u16::from(

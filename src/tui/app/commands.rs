@@ -117,6 +117,12 @@ impl App {
                 .current_session()
                 .and_then(|s| s.agents_panes.clone());
             self.save_agents_metadata(panes, true);
+            // A parked set rebuilt from metadata (session switch or app
+            // restart) carries bound panes with empty timelines — the
+            // rehydrate passes fire only now that the panes take the
+            // screen (a parked set is invisible; replaying into it would
+            // burn a harness boot for nothing).
+            self.trigger_agents_pane_replays();
             // The mirrors are already in place (the parked slot kept them
             // alive); one sync re-affirms their state for the re-open.
             self.sync_agents_pane_mirrors();
@@ -163,7 +169,10 @@ impl App {
             self.state.right_panel.sync_agents_pane(
                 pane,
                 &p.activity,
-                p.running,
+                // A rehydrating pane spins too: the mirror is the visible
+                // signal that the bound history is coming back (the pane
+                // itself may be empty until the replay lands).
+                p.running || p.rehydrating,
                 split.pane_mirror_label(pane).as_deref(),
             );
         }
@@ -187,6 +196,36 @@ impl App {
         self.state
             .right_panel
             .finish_agents_pane(pane, &p.activity, output, failed);
+    }
+
+    /// Fire cold-restore replay passes for every pane that needs one: a
+    /// `Bound` pane with an EMPTY live timeline (the post-reboot state —
+    /// the process died with the app, only the session id persisted).
+    /// Rehydration streams the agent's own `session/load` history back
+    /// into the pane (see `dispatch_agents_pane_replay`); a pane with
+    /// content already (live turn, prior replay) and unbound `Name` panes
+    /// are skipped.
+    pub(super) fn trigger_agents_pane_replays(&mut self) {
+        let needs = self
+            .agents_split
+            .as_ref()
+            .map(|split| {
+                split
+                    .panes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, p)| {
+                        p.session_id.is_some()
+                            && p.activity.timeline.is_empty()
+                            && !p.rehydrating
+                    })
+                    .map(|(i, _)| i)
+                    .collect::<Vec<usize>>()
+            })
+            .unwrap_or_default();
+        for pane in needs {
+            self.dispatch_agents_pane_replay(pane);
+        }
     }
 
     /// The state-only core of open/close: signal-stop every pane of the
@@ -245,6 +284,11 @@ impl App {
         // closes the mode: `close_agents_split` owns the mirror drop.
         if mode_open {
             self.sync_agents_pane_mirrors();
+            // A fresh confirm re-binds persisted sessions (the
+            // `Bound`-inherit above); panes whose process died with the
+            // app rehydrate their transcript from the agent's own replay
+            // here.
+            self.trigger_agents_pane_replays();
         }
         // Drop the split's spinner only when no NORMAL agent loop is still
         // running behind it (the double-scenario): a Working loop keeps its
@@ -622,6 +666,9 @@ impl App {
                     ),
                 );
                 self.save_agents_metadata(Some(panes), true);
+                // A session left with the mode open carries `Bound` panes
+                // whose timelines died with the process — rehydrate them.
+                self.trigger_agents_pane_replays();
             }
             Some((Some(panes), false)) => {
                 self.parked_agents_split = Some(

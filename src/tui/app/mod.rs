@@ -1558,7 +1558,8 @@ impl App {
         // Same predicate the renderer uses for the visible spinner row: the
         // /agents split keeps the spinner alive while ANY pane streams, and
         // the mouse geometry must match what was drawn (a 1-row drift here
-        // skews every hit-test below the panes).
+        // skews every hit-test below the panes). A rehydrating pane counts
+        // too — its replay streams through the same layout contract.
         let agent_spinner_active = (matches!(self.state.status, SessionStatus::Working)
             || self
                 .agents_split
@@ -1567,11 +1568,17 @@ impl App {
             || self
                 .agents_split
                 .as_ref()
-                .is_none()
+                .is_some_and(crate::routes::session::agents_split::AgentsSplitState::any_rehydrating)
+            || (self.agents_split.is_none()
                 && self
                     .parked_agents_split
                     .as_ref()
                     .is_some_and(crate::routes::session::agents_split::AgentsSplitState::any_running))
+            || (self.agents_split.is_none()
+                && self
+                    .parked_agents_split
+                    .as_ref()
+                    .is_some_and(crate::routes::session::agents_split::AgentsSplitState::any_rehydrating)))
             && self.agent_spinner.is_some();
         let correction_spinner_active = self.prompt_correction_active && !agent_spinner_active;
         let spinner_h = u16::from(

@@ -66,6 +66,22 @@ impl App {
             });
             return;
         }
+        if split
+            .focused_pane()
+            .is_some_and(|pane| pane.rehydrating)
+        {
+            // The pane's bound history is still arriving from the agent's
+            // `session/load` replay: a prompt now would interleave with
+            // the reconstruction stream (and resume the session from a
+            // half-replayed state). It is a one-pass, seconds-scale wait.
+            self.toast_state.show(ToastOptions {
+                title: Some("Agents".into()),
+                message: "Restoring this agent's history — try again in a moment.".into(),
+                variant: ToastVariant::Info,
+                duration_ms: 4000,
+            });
+            return;
+        }
 
         // Snapshot everything the spawned turn needs BEFORE the mutable
         // pane bookkeeping below: the agent name, resume id and the
@@ -196,6 +212,94 @@ impl App {
                 });
             });
         }
+    }
+
+    /// Cold-restore ONE pane's bound session: drive an ACP `session/load`
+    /// replay pass against a fresh harness connection and stream the
+    /// replayed history into the pane's timeline through the SAME
+    /// `AgentsPaneEvent` channel a live turn uses (epoch-stamped like any
+    /// other pane event). Nothing is prompted; the terminal
+    /// `AgentsPaneReplayed` clears the pane's `rehydrating` flag.
+    ///
+    /// Called from the split (re)open paths for a `Bound` pane whose
+    /// timeline is empty — the post-reboot state. A failed pass (harness
+    /// gone, no `loadSession` support) delivers `ok: false` and the pane
+    /// stays on its empty live timeline; the next prompt falls back to
+    /// `session/new` through the normal turn path.
+    pub(super) fn dispatch_agents_pane_replay(&mut self, pane: usize) {
+        let Some(session_id) = self
+            .agents_split
+            .as_ref()
+            .and_then(|split| split.panes.get(pane))
+            .map(|p| p.session_id.clone())
+            .flatten()
+        else {
+            return;
+        };
+        // Re-borrow mutably to set the in-flight flag (the read above is
+        // done — the session id snapshot moved out).
+        let agent = self
+            .agents_split
+            .as_mut()
+            .and_then(|split| split.panes.get_mut(pane))
+            .map(|p| {
+                p.rehydrating = true;
+                p.agent.clone()
+            });
+        let Some(agent) = agent else {
+            return;
+        };
+        let cwd = PathBuf::from(&self.state.working_directory);
+        let epoch = self.agents_pane_epoch;
+        let event_tx = self.event_tx.clone();
+        let tokio_handle = self.tokio_handle.clone();
+        // The mirror follows into the rehydrating spinner.
+        self.sync_agents_pane_mirrors();
+        // Tests never spawn real ACP harnesses: the replay pipeline is
+        // exercised by feeding `HarnessEvent`s straight into the app's
+        // event channel (the same way the pane lifecycle tests drive
+        // turns). The in-flight flag stays set until a synthetic
+        // `AgentsPaneReplayed` arrives — which is exactly what those
+        // tests assert on.
+        #[cfg(not(test))]
+        tokio_handle.spawn(async move {
+            let (chunk_tx, mut chunk_rx) =
+                tokio::sync::mpsc::unbounded_channel::<SubagentEvent>();
+            let pass = cosh_tools::subagent::acp::replay(&agent, session_id, cwd, chunk_tx);
+            tokio::pin!(pass);
+            let mut chunks_open = true;
+            let result = loop {
+                if chunks_open {
+                    tokio::select! {
+                        result = &mut pass => break result,
+                        chunk = chunk_rx.recv() => match chunk {
+                            Some(event) => {
+                                let _ = event_tx.send(HarnessEvent::AgentsPaneEvent {
+                                    pane,
+                                    epoch,
+                                    event,
+                                });
+                            }
+                            None => chunks_open = false,
+                        },
+                    }
+                } else {
+                    break pass.await;
+                }
+            };
+            let (ok, error) = match result {
+                Ok(()) => (true, String::new()),
+                Err(error) => (false, error),
+            };
+            let _ = event_tx.send(HarnessEvent::AgentsPaneReplayed {
+                pane,
+                epoch,
+                ok,
+                error,
+            });
+        });
+        #[cfg(test)]
+        let _ = (agent, session_id, cwd, epoch, event_tx, tokio_handle);
     }
 
     /// Connector for the daemon pane: the session's own route (provider +

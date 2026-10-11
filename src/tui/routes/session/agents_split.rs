@@ -31,6 +31,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 
+use crate::component::spinner::SpinnerState;
 use crate::routes::session::right_panel::subagent_theme_key;
 use crate::routes::session::right_panel::types::{
     activity_lines, SubagentActivity, SubagentActivityLine, SubagentBlockRenderer,
@@ -85,6 +86,17 @@ pub struct AgentPane {
     pub activity: SubagentActivity,
     /// Whether a sub-agent turn is currently running in this pane.
     pub running: bool,
+    /// A cold-restore replay pass is IN FLIGHT for this pane (its bound
+    /// session is being rehydrated through `session/load`). While set, a
+    /// user prompt is refused with a toast (the pane's history is still
+    /// arriving — a prompt would interleave with the replay stream), the
+    /// mirror keeps spinning, and the header paints just the simple
+    /// braille spinner at the pane's right edge. Cleared by the
+    /// `AgentsPaneReplayed` handler, success or failure.
+    pub rehydrating: bool,
+    /// Per-pane animation state for the header's braille spinner
+    /// (`component::spinner`).
+    pub rehydrate_spinner: SpinnerState,
     /// Cooperative stop flag handed to the future dispatch layer.
     pub stop_signal: Option<Arc<AtomicBool>>,
     /// Session id for a future `resume` flow.
@@ -115,6 +127,8 @@ impl AgentPane {
             running: false,
             stop_signal: None,
             session_id: None,
+            rehydrating: false,
+            rehydrate_spinner: SpinnerState::new(),
             scroll_y: 0,
             auto_follow: true,
             effective_scroll: 0,
@@ -551,6 +565,12 @@ impl AgentsSplitState {
         self.panes.iter().any(|p| p.running)
     }
 
+    /// Whether any pane is still rehydrating its replayed history.
+    #[must_use]
+    pub fn any_rehydrating(&self) -> bool {
+        self.panes.iter().any(|p| p.rehydrating)
+    }
+
     /// Apply one sub-agent event to pane `pane`'s activity stream. Out-of
     /// range panes are ignored: every pane incl. daemon is ordinary here.
     pub fn apply_event(&mut self, pane: usize, event: &SubagentEvent) {
@@ -820,6 +840,17 @@ fn render_pane(
     // lookup is case-insensitive, so the brand colors still resolve.
     let label = display_name(&pane.agent).to_string();
     draw_agent_name(buf, &label, name_x, rect.y, name_w, theme, focused);
+    if pane.rehydrating {
+        // The cold-restore state: the pane's bound history is streaming
+        // back from the agent's `session/load` replay. Just the simple
+        // braille spinner (`component::spinner`), one breathing column in
+        // from the pane's right edge — no label, no extra chrome.
+        pane.rehydrate_spinner.advance();
+        if let Some(cell) = buf.cell_mut((rect.right() - 1, rect.y)) {
+            cell.set_char(pane.rehydrate_spinner.current_char());
+            cell.set_style(Style::default().fg(rgba_color(theme.text_muted)));
+        }
+    }
 
     // ── Body: the right panel's drawable pipeline (markdown included) ──
     let body_y = rect.y + 1;
@@ -1031,10 +1062,14 @@ fn draw_activity_line(
                 ));
             }
         }
-        SubagentActivityLine::Message { text, .. } | SubagentActivityLine::Thought { text, .. } => {
+        SubagentActivityLine::Message { text, .. }
+        | SubagentActivityLine::UserMessage { text, .. }
+        | SubagentActivityLine::Thought { text, .. } => {
             // Persistent chat-style renderer per (pane, timeline) block —
             // `set_content` re-parses only the streamed tail. Thought is
-            // dimmed, exactly like the right panel's mini-chat.
+            // dimmed, exactly like the right panel's mini-chat; the
+            // replayed user block renders at full text color, exactly
+            // like the agent's message (no invented marking).
             let dimmed = matches!(line, SubagentActivityLine::Thought { .. });
             let fg = if dimmed { theme.text_muted } else { theme.text };
             let key = format!("{pane_index}:{index}");
@@ -1625,6 +1660,66 @@ mod tests {
         // Out-of-range set_running is a no-op.
         state.set_running(9, true);
         assert!(!state.any_running());
+    }
+
+    /// A rehydrating pane's header paints ONLY the simple braille spinner
+    /// (`component::spinner`) at the pane's right edge — no label, no extra
+    /// chrome — and consecutive renders advance the frame. A
+    /// non-rehydrating pane paints nothing.
+    #[test]
+    fn render_rehydrating_header_spins_alone() {
+        let theme = test_theme();
+        let mut state = AgentsSplitState::new(vec!["claude".into(), "kilo".into()]);
+        state.panes[0].rehydrating = true;
+        let area = Rect::new(0, 0, 80, 24);
+        let flat_text = |buf: &Buffer| {
+            (0..24)
+                .map(|y| {
+                    (0..80)
+                        .map(|x| {
+                            buf.cell((x, y))
+                                .map(|c| c.symbol().to_string())
+                                .unwrap_or_default()
+                        })
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut state, &theme);
+        let all: String = flat_text(&buf);
+        // The first frame's glyph sits in pane 0's header row.
+        assert!(
+            all.contains(crate::component::spinner::SPINNER_FRAMES[0]),
+            "the spinner glyph paints in the header: {all:?}"
+        );
+        // Nothing else was invented: no label, no status dot.
+        assert!(!all.contains("restoring"), "no label: {all:?}");
+        assert!(!all.contains('●') && !all.contains('○'), "no status dots: {all:?}");
+
+        // Two further renders consume the spinner's half-rate tick
+        // (`advance` moves the frame every other tick): the glyph changes.
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut state, &theme);
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut state, &theme);
+        let all2 = flat_text(&buf);
+        assert!(
+            !all2.contains(crate::component::spinner::SPINNER_FRAMES[0]),
+            "the frame advanced past glyph 0: {all2:?}"
+        );
+
+        // A settled pane paints no spinner at all.
+        state.panes[0].rehydrating = false;
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut state, &theme);
+        let all3 = flat_text(&buf);
+        assert!(
+            !all3.contains(crate::component::spinner::SPINNER_FRAMES[0]),
+            "no spinner when settled: {all3:?}"
+        );
     }
 
     #[test]

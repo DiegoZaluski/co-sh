@@ -15,6 +15,7 @@ use crate::types::{Part, Session, SessionStatus};
 use crate::ui::dialogs::DialogType;
 use cosh::harness::HarnessEvent;
 use cosh::harness::context::ContextManagerState;
+use cosh_tools::subagent::events::SubagentEvent;
 
 /// Process-wide sequence for live-created tool parts' `tool_call_id`s. The
 /// id is the identity per-box UI state (expand/collapse, LSP-notes toggle)
@@ -358,6 +359,39 @@ impl App {
                     if let Some(id) = binding {
                         self.bind_agents_pane_session(pane, id);
                     }
+                }
+                // /agents split: a pane's cold-restore REPLAY ended. The
+                // replay stream (if any) already landed through the event
+                // arm above; this terminal event clears the pane's
+                // rehydrating flag and re-syncs its mirror out of the
+                // spinner. A failed pass is surfaced on the pane itself —
+                // the transcript is empty and the pane input works as
+                // usual, so a toast would only shout at a degraded,
+                // self-healing state.
+                HarnessEvent::AgentsPaneReplayed {
+                    pane,
+                    epoch,
+                    ok,
+                    error,
+                } => {
+                    if epoch != self.agents_pane_epoch {
+                        continue;
+                    }
+                    let target = self
+                        .agents_split
+                        .as_mut()
+                        .or(self.parked_agents_split.as_mut());
+                    if let Some(split) = target {
+                        if let Some(p) = split.panes.get_mut(pane) {
+                            p.rehydrating = false;
+                            if !ok {
+                                p.activity.apply(&SubagentEvent::Message {
+                                    text: format!("[replay failed] {error}"),
+                                });
+                            }
+                        }
+                    }
+                    self.sync_agents_pane_mirrors();
                 }
                 HarnessEvent::ContextItemRecorded {
                     item_id,

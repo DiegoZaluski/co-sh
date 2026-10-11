@@ -8,7 +8,7 @@
 use super::SubAgent;
 use super::acp::{
     ACP_AGENTS, Agent, acp_error, agent_launcher, ensure_path_within, install_hint, run_session,
-    stop_reason_str, validate_agent,
+    run_replay_session, stop_reason_str, validate_agent,
 };
 use super::events::SubagentEvent;
 
@@ -643,9 +643,12 @@ async fn run_session_maps_session_updates_into_typed_events() {
                         ))
                     };
 
-                    // Unmapped: user chunks have no TUI representation.
+                    // The user's echoed prompt → SubagentEvent::UserMessage
+                    // (live it feeds the right panel only; a REPLAY pass
+                    // relies on exactly this mapping to rebuild both sides
+                    // of the conversation).
                     let _ = notify(SessionUpdate::UserMessageChunk(acp1::ContentChunk::new(
-                        ContentBlock::Text(TextContent::new("user-never-shown")),
+                        ContentBlock::Text(TextContent::new("user-echo")),
                     )));
                     // Thought chunk → SubagentEvent::Thought.
                     let _ = notify(SessionUpdate::AgentThoughtChunk(acp1::ContentChunk::new(
@@ -744,6 +747,9 @@ async fn run_session_maps_session_updates_into_typed_events() {
     assert_eq!(
         events,
         vec![
+            SubagentEvent::UserMessage {
+                text: "user-echo".to_string(),
+            },
             SubagentEvent::Thought {
                 text: "thinking hard".to_string(),
             },
@@ -1484,6 +1490,333 @@ fn extract_content_text_joins_texts_and_keeps_the_last_diff() {
     assert_eq!(diff.removed, 0);
 }
 
+// ── Session-load replay (cold restore) ────────────────────────────────
+
+/// Spawn an ACP fixture harness that advertises the given capabilities,
+/// logs every session-lifecycle request it receives, and — when it accepts
+/// a `session/load` — REPLAYS the given conversation as `session/update`
+/// notifications before responding (the v1 `session/load` contract).
+/// Returns the CLIENT side plus the agent task handle.
+fn spawn_replay_fixture(
+    capabilities: agent_client_protocol::schema::v1::AgentCapabilities,
+    log: RequestLog,
+    replay: &[agent_client_protocol::schema::v1::SessionUpdate],
+) -> (agent_client_protocol::Channel, tokio::task::JoinHandle<()>) {
+    use agent_client_protocol::schema::v1::{
+        InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse,
+        NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, SessionId,
+    };
+    use agent_client_protocol::{Agent as AgentRole, Responder};
+
+    let (client_side, agent_side) = agent_client_protocol::Channel::duplex();
+    let init_log = log.clone();
+    let new_log = log.clone();
+    let load_log = log.clone();
+    let prompt_log = log.clone();
+    let replay = replay.to_vec();
+    let agent_task = tokio::spawn(async move {
+        let _ = AgentRole
+            .builder()
+            .name("replay-fixture")
+            .on_receive_request(
+                async move |request: InitializeRequest,
+                            responder: Responder<InitializeResponse>,
+                            _cx| {
+                    init_log.lock().unwrap().push("init".to_string());
+                    responder.respond(
+                        InitializeResponse::new(request.protocol_version)
+                            .agent_capabilities(capabilities.clone()),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_request: NewSessionRequest,
+                            responder: Responder<NewSessionResponse>,
+                            _cx| {
+                    new_log.lock().unwrap().push("new".to_string());
+                    responder.respond(NewSessionResponse::new(SessionId::new("fresh-1")))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |request: LoadSessionRequest,
+                            responder: Responder<LoadSessionResponse>,
+                            cx| {
+                    load_log
+                        .lock()
+                        .unwrap()
+                        .push(format!("load:{}", request.session_id.0));
+                    // The load contract: replay ALL retained history via
+                    // `session/update` BEFORE the response lands.
+                    for update in &replay {
+                        let _ = cx.send_notification(SessionNotification::new(
+                            request.session_id.clone(),
+                            update.clone(),
+                        ));
+                    }
+                    responder.respond(LoadSessionResponse::new())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_request: PromptRequest,
+                            responder: Responder<PromptResponse>,
+                            _cx| {
+                    prompt_log.lock().unwrap().push("PROMPT".to_string());
+                    responder.respond(PromptResponse::new(
+                        agent_client_protocol::schema::v1::StopReason::EndTurn,
+                    ))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_to(agent_side)
+            .await;
+    });
+    (client_side, agent_task)
+}
+
+/// Drive one `run_replay_session` pass against a fixture channel,
+/// collecting every mapped event until the sender drops.
+async fn drive_replay(
+    client_side: agent_client_protocol::Channel,
+    session_id: &str,
+) -> (Result<(), String>, Vec<SubagentEvent>) {
+    let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel();
+    let pass = run_replay_session(
+        client_side,
+        session_id.to_string(),
+        std::env::temp_dir(),
+        chunk_tx,
+    );
+    let collector = async {
+        let mut events = Vec::new();
+        while let Some(event) = chunk_rx.recv().await {
+            events.push(event);
+        }
+        events
+    };
+    let (result, events) = tokio::join!(pass, collector);
+    (result, events)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn replay_loads_the_session_and_streams_the_history_without_prompting() {
+    use agent_client_protocol::schema::v1 as acp1;
+    use agent_client_protocol::schema::v1::{
+        AgentCapabilities, Content, ContentBlock, ToolCallContent, ToolCallUpdateFields,
+    };
+
+    let replay = vec![
+        // The user's retained prompt — a `user_message_chunk`.
+        SessionUpdate::UserMessageChunk(acp1::ContentChunk::new(ContentBlock::Text(
+            TextContent::new("hello agent"),
+        ))),
+        // An agent reply, then a tool call with its completing update —
+        // replay carries the SAME variants a live turn streams.
+        SessionUpdate::AgentMessageChunk(acp1::ContentChunk::new(ContentBlock::Text(
+            TextContent::new("working on it"),
+        ))),
+        SessionUpdate::ToolCall(
+            acp1::ToolCall::new("call-1", "Reading config").kind(acp1::ToolKind::Read),
+        ),
+        SessionUpdate::ToolCallUpdate(acp1::ToolCallUpdate::new(
+            "call-1",
+            ToolCallUpdateFields::new()
+                .status(acp1::ToolCallStatus::Completed)
+                .content(Some(vec![ToolCallContent::Content(Content::new(
+                    ContentBlock::Text(TextContent::new("port=8080")),
+                ))])),
+        )),
+        SessionUpdate::AgentMessageChunk(acp1::ContentChunk::new(ContentBlock::Text(
+            TextContent::new("all done"),
+        ))),
+    ];
+
+    let log: RequestLog = Arc::default();
+    let (client_side, agent_task) = spawn_replay_fixture(
+        AgentCapabilities::new().load_session(true),
+        log.clone(),
+        &replay,
+    );
+    let (result, events) = drive_replay(client_side, "sess-42").await;
+    agent_task.abort();
+
+    result.unwrap();
+    // The load targeted the STORED id, no `session/new` and — the core
+    // invariant — NO prompt was ever sent: a rehydrate pass must not
+    // append to the agent's history.
+    assert_eq!(
+        log.lock().unwrap().as_slice(),
+        ["init", "load:sess-42"],
+        "exactly initialize + session/load; no new, no prompt"
+    );
+    // The mapped events reconstruct the two-sided conversation.
+    use super::events::{ToolCallStatus, ToolKind};
+    assert_eq!(
+        events,
+        vec![
+            SubagentEvent::UserMessage {
+                text: "hello agent".to_string(),
+            },
+            SubagentEvent::Message {
+                text: "working on it".to_string(),
+            },
+            SubagentEvent::ToolCall {
+                id: "call-1".to_string(),
+                title: "Reading config".to_string(),
+                kind: ToolKind::Read,
+                status: ToolCallStatus::Pending,
+                raw_input: None,
+            },
+            SubagentEvent::ToolCallUpdate {
+                id: "call-1".to_string(),
+                status: Some(ToolCallStatus::Completed),
+                title: None,
+                raw_output: None,
+                content: super::events::extract_content_text(vec![
+                    ToolCallContent::Content(Content::new(ContentBlock::Text(
+                        TextContent::new("port=8080"),
+                    ))),
+                ]),
+            },
+            SubagentEvent::Message {
+                text: "all done".to_string(),
+            },
+        ],
+        "replay maps into the same typed stream a live turn produces"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn replay_fails_when_the_harness_does_not_advertise_load_session() {
+    use agent_client_protocol::schema::v1::{
+        AgentCapabilities, InitializeRequest, InitializeResponse, LoadSessionRequest,
+        LoadSessionResponse,
+    };
+    use agent_client_protocol::{Agent as AgentRole, Responder};
+
+    // A harness that accepts the connection but does NOT implement
+    // `session/load` (no `loadSession` capability): the unknown method
+    // comes back as a JSON-RPC error, and the pass must fail on it — NOT
+    // silently fall back to `session/new`, which would discard the user's
+    // history and rebind the pane to an empty context.
+    let (client_side, agent_side) = agent_client_protocol::Channel::duplex();
+    let agent_task = tokio::spawn(async move {
+        let _ = AgentRole
+            .builder()
+            .name("no-load-fixture")
+            .on_receive_request(
+                async move |request: InitializeRequest,
+                            responder: Responder<InitializeResponse>,
+                            _cx| {
+                    responder.respond(
+                        InitializeResponse::new(request.protocol_version)
+                            .agent_capabilities(AgentCapabilities::new()),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_request: LoadSessionRequest,
+                            responder: Responder<LoadSessionResponse>,
+                            _cx| {
+                    let _ = responder.respond_with_internal_error("method not found");
+                    Ok(())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_to(agent_side)
+            .await;
+    });
+    let (result, events) = drive_replay(client_side, "sess-9").await;
+    agent_task.abort();
+
+    let err = result.unwrap_err();
+    assert!(err.contains("session/load failed"), "{err}");
+    assert!(
+        events.is_empty(),
+        "a failed pass must not deliver a partial transcript"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn replay_of_a_stale_session_id_fails_instead_of_silently_resetting() {
+    use agent_client_protocol::schema::v1::{
+        AgentCapabilities, InitializeRequest, InitializeResponse, LoadSessionRequest,
+        LoadSessionResponse,
+    };
+    use agent_client_protocol::{Agent as AgentRole, Responder};
+
+    // The harness advertises `loadSession` but ERRORS on the id (it
+    // restarted and lost its sessions): the pass must fail — the caller
+    // degrades to an empty live pane, never to a fresh session binding.
+    let (client_side, agent_side) = agent_client_protocol::Channel::duplex();
+    let agent_task = tokio::spawn(async move {
+        let _ = AgentRole
+            .builder()
+            .name("stale-load-fixture")
+            .on_receive_request(
+                async move |request: InitializeRequest,
+                            responder: Responder<InitializeResponse>,
+                            _cx| {
+                    responder.respond(
+                        InitializeResponse::new(request.protocol_version)
+                            .agent_capabilities(AgentCapabilities::new().load_session(true)),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_request: LoadSessionRequest,
+                            responder: Responder<LoadSessionResponse>,
+                            _cx| {
+                    let _ = responder.respond_with_internal_error("session gone");
+                    Ok(())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_to(agent_side)
+            .await;
+    });
+    let (result, events) = drive_replay(client_side, "lost-1").await;
+    agent_task.abort();
+
+    assert!(result.unwrap_err().contains("session/load failed"));
+    assert!(events.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn replay_fails_when_initialize_fails() {
+    use agent_client_protocol::schema::v1::{InitializeRequest, InitializeResponse};
+    use agent_client_protocol::{Agent as AgentRole, Responder};
+
+    // A harness that cannot even be initialized (crashed binary wrapper,
+    // auth wall) fails the whole pass — no partial state.
+    let (client_side, agent_side) = agent_client_protocol::Channel::duplex();
+    let agent_task = tokio::spawn(async move {
+        let _ = AgentRole
+            .builder()
+            .name("init-fail-fixture")
+            .on_receive_request(
+                async move |_request: InitializeRequest,
+                            responder: Responder<InitializeResponse>,
+                            _cx| {
+                    let _ = responder.respond_with_internal_error("broken");
+                    Ok(())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_to(agent_side)
+            .await;
+    });
+    let (result, events) = drive_replay(client_side, "sess-1").await;
+    agent_task.abort();
+
+    assert!(result.unwrap_err().contains("ACP initialize failed"));
+    assert!(events.is_empty());
+}
+
 // ── Session resume (Phase 4) ──────────────────────────────────────────
 
 #[test]
@@ -2104,6 +2437,9 @@ async fn capture_real_opencode_stream_multi_tool() {
     let mut captured: Vec<serde_json::Value> = Vec::new();
     while let Some(event) = chunk_rx.recv().await {
         let shape = match &event {
+            SubagentEvent::UserMessage { text } => serde_json::json!({
+                "kind": "UserMessage", "text": text,
+            }),
             SubagentEvent::Message { text } => serde_json::json!({
                 "kind": "Message", "text": text,
             }),
@@ -2220,6 +2556,9 @@ async fn capture_real_opencode_stream() {
     let mut captured: Vec<serde_json::Value> = Vec::new();
     while let Some(event) = chunk_rx.recv().await {
         let shape = match &event {
+            SubagentEvent::UserMessage { text } => serde_json::json!({
+                "kind": "UserMessage", "text": text,
+            }),
             SubagentEvent::Message { text } => serde_json::json!({
                 "kind": "Message", "text": text,
             }),

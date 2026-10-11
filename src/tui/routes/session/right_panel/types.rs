@@ -89,6 +89,12 @@ pub(crate) enum SubagentActivityLine {
     Message { index: usize, text: String },
     /// One markdown block of the sub-agent's thinking (dimmed).
     Thought { index: usize, text: String },
+    /// One markdown block of the USER's own message — the replay echo,
+    /// rendered like any other message block. Only the history replay
+    /// produces these (see `cosh_tools::subagent::acp::replay`): a live
+    /// pane's prompt echoes through the pane input instead, so a live
+    /// timeline never carries one.
+    UserMessage { index: usize, text: String },
 }
 
 /// The short, lowercase tool marker shown before the title (user decision:
@@ -134,7 +140,10 @@ impl SubagentActivityLine {
                 u16::try_from(rows.len().max(1)).unwrap_or(u16::MAX)
             }
             SubagentActivityLine::Message { text, .. }
-            | SubagentActivityLine::Thought { text, .. } => activity_block_height(text, wrap_w),
+            | SubagentActivityLine::Thought { text, .. }
+            | SubagentActivityLine::UserMessage { text, .. } => {
+                activity_block_height(text, wrap_w)
+            }
         }
     }
 }
@@ -176,6 +185,19 @@ pub(crate) fn activity_lines(
                     continue;
                 }
                 out.push(SubagentActivityLine::Thought { index, text: clean });
+            }
+            SubagentTimelineEntry::UserMessage { text } => {
+                // The replayed user turn, rendered EXACTLY like any other
+                // message block — plain markdown, full text color, no
+                // invented prefix or tint (the pane mirrors how a direct
+                // message reads, not a separate visual dialect). A blank
+                // replayed message renders nothing (same empty-guard as
+                // the other blocks).
+                let clean = sanitize_subagent_text(text);
+                if clean.trim().is_empty() {
+                    continue;
+                }
+                out.push(SubagentActivityLine::UserMessage { index, text: clean });
             }
             SubagentTimelineEntry::Tool(call) => {
                 let name = tool_kind_name(call.kind);
@@ -815,6 +837,10 @@ pub(crate) enum SubagentTimelineEntry {
     Message { text: String },
     /// The sub-agent's thinking (rendered dimmed).
     Thought { text: String },
+    /// A chunk (or run) of the USER's own message — history replay only
+    /// (`SubagentEvent::UserMessage`): a live pane's prompt echoes through
+    /// the pane input, so a live timeline never carries one.
+    UserMessage { text: String },
     /// A tool call: announced at its arrival position, patched in place by
     /// `ToolCallUpdate` events with the same id.
     Tool(SubagentToolCall),
@@ -934,6 +960,21 @@ fn tool_input_detail(raw_input: &serde_json::Value) -> Option<String> {
     None
 }
 
+/// Which of the three chunk streams a coalescing chunk belongs to. The
+/// backscan merge (see [`SubagentActivity::coalesce_stream_chunk`]) stops
+/// at the OPPOSITE stream kind's open entry and at tool/plan turn
+/// boundaries; three kinds keep the agent narration, the dimmed reasoning
+/// and the replayed user turns in three separate growing rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StreamKind {
+    /// The sub-agent's message text.
+    Agent,
+    /// The sub-agent's thinking.
+    Thought,
+    /// The user's own message (history replay only).
+    User,
+}
+
 impl SubagentActivity {
     /// Apply one typed sub-agent event, mutating the live state in place
     /// (Phase 3a plumbing; Phase 3b renders the result).
@@ -949,8 +990,13 @@ impl SubagentActivity {
     /// only then (a no-op event such as `Mode` must not yank the viewport).
     pub(crate) fn apply(&mut self, event: &SubagentEvent) -> bool {
         match event {
-            SubagentEvent::Message { text } => self.coalesce_stream_chunk(text, false),
-            SubagentEvent::Thought { text } => self.coalesce_stream_chunk(text, true),
+            SubagentEvent::Message { text } => self.coalesce_stream_chunk(text, StreamKind::Agent),
+            SubagentEvent::Thought { text } => {
+                self.coalesce_stream_chunk(text, StreamKind::Thought)
+            }
+            SubagentEvent::UserMessage { text } => {
+                self.coalesce_stream_chunk(text, StreamKind::User)
+            }
             SubagentEvent::ToolCall {
                 id,
                 title,
@@ -1198,15 +1244,20 @@ impl SubagentActivity {
     /// Returns whether VISIBLE text changed: `false` for a whitespace-only
     /// chunk with no matching open entry, so the caller does not yank the
     /// viewport on an invisible no-op.
-    fn coalesce_stream_chunk(&mut self, text: &str, thought: bool) -> bool {
+    fn coalesce_stream_chunk(&mut self, text: &str, kind: StreamKind) -> bool {
         for entry in self.timeline.iter_mut().rev() {
             match entry {
-                SubagentTimelineEntry::Message { text: acc } if !thought => {
+                SubagentTimelineEntry::Message { text: acc } if kind == StreamKind::Agent => {
                     acc.push_str(text);
                     *acc = bounded_tail(acc, SUBAGENT_TEXT_ENTRY_BYTES);
                     return true;
                 }
-                SubagentTimelineEntry::Thought { text: acc } if thought => {
+                SubagentTimelineEntry::Thought { text: acc } if kind == StreamKind::Thought => {
+                    acc.push_str(text);
+                    *acc = bounded_tail(acc, SUBAGENT_TEXT_ENTRY_BYTES);
+                    return true;
+                }
+                SubagentTimelineEntry::UserMessage { text: acc } if kind == StreamKind::User => {
                     acc.push_str(text);
                     *acc = bounded_tail(acc, SUBAGENT_TEXT_ENTRY_BYTES);
                     return true;
@@ -1229,14 +1280,16 @@ impl SubagentActivity {
         }
         // A freshly started entry is bounded too: a single chunk may itself
         // exceed the cap (ACP does not bound `ContentBlock::Text`).
-        self.push_entry(if thought {
-            SubagentTimelineEntry::Thought {
+        self.push_entry(match kind {
+            StreamKind::Agent => SubagentTimelineEntry::Message {
                 text: bounded_tail(text, SUBAGENT_TEXT_ENTRY_BYTES),
-            }
-        } else {
-            SubagentTimelineEntry::Message {
+            },
+            StreamKind::Thought => SubagentTimelineEntry::Thought {
                 text: bounded_tail(text, SUBAGENT_TEXT_ENTRY_BYTES),
-            }
+            },
+            StreamKind::User => SubagentTimelineEntry::UserMessage {
+                text: bounded_tail(text, SUBAGENT_TEXT_ENTRY_BYTES),
+            },
         });
         true
     }
