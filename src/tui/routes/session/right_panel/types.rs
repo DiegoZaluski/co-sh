@@ -1365,6 +1365,28 @@ impl SubagentActivity {
             self.timeline.remove(0);
         }
     }
+
+    /// Open a turn with the caller's input text: a FRESH `UserMessage` (the
+    /// user's own prompt) or `AgentMessage` (another agent's `agents_call`
+    /// input) entry, NEVER coalesced into an older one. The backscan in
+    /// [`Self::coalesce_stream_chunk`] skips opposite-kind entries, so a
+    /// plain `apply` here would merge consecutive tool-less turns' inputs
+    /// into a single row ("foobar" for prompts "foo" then "bar") — the
+    /// turn boundary is exactly what coalescing must not cross. A later
+    /// chunk of the SAME turn still merges into this entry through the
+    /// normal `apply` path. Whitespace-only input opens nothing (the same
+    /// invisible-row guard `coalesce_stream_chunk` keeps).
+    pub(crate) fn open_turn_input(&mut self, text: &str, user: bool) {
+        if text.trim().is_empty() {
+            return;
+        }
+        let text = bounded_tail(text, SUBAGENT_TEXT_ENTRY_BYTES);
+        self.push_entry(if user {
+            SubagentTimelineEntry::UserMessage { text }
+        } else {
+            SubagentTimelineEntry::AgentMessage { text }
+        });
+    }
 }
 
 /// Function-key hint of the mixed button — the bare lowercase "f4",

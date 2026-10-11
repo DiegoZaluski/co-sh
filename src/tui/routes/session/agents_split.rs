@@ -578,6 +578,16 @@ impl AgentsSplitState {
         }
     }
 
+    /// Echo the turn's input into pane `pane`'s timeline as a FRESH entry —
+    /// the user's own prompt (`user = true`, the brand rail) or another
+    /// agent's `agents_call` input (the distinct rail). Out-of-range panes
+    /// are ignored, like [`Self::apply_event`].
+    pub fn echo_turn_input(&mut self, pane: usize, text: &str, user: bool) {
+        if let Some(p) = self.panes.get_mut(pane) {
+            p.activity.open_turn_input(text, user);
+        }
+    }
+
     /// Deliver the turn's terminal report to pane `pane` — the `AgentsPaneDone`
     /// `output`, which is the SAME text the stream already played into the
     /// pane's timeline (the `TurnClosure` contract: the report is the last

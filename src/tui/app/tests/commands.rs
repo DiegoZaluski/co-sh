@@ -1737,3 +1737,78 @@ async fn a_prompt_to_a_rehydrating_pane_is_refused_with_a_toast() {
         "an idle pane dispatches normally while a sibling rehydrates"
     );
 }
+
+/// A user prompt echoes into the pane's timeline as its own turn entry:
+/// without the echo the pane shows only the agent's output and the input
+/// surfaces only after a reboot's replay pass rebuilds it. A second turn
+/// opens a SECOND entry — consecutive tool-less turns must not coalesce
+/// into a single row.
+#[tokio::test]
+async fn a_user_prompt_echoes_into_the_pane_timeline() {
+    use crate::types::AgentPaneRef;
+    use cosh::harness::HarnessEvent;
+
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    let session_id = crate::session_store::generate_session_id();
+    app.state
+        .add_empty_session(session_id.clone(), "input echo".into(), 0);
+    app.state.current_session_id = Some(session_id);
+    app.state.current_session_mut().unwrap().agents_panes =
+        Some(vec![AgentPaneRef::Name("kilo".into())]);
+    let panes = app
+        .state
+        .current_session()
+        .unwrap()
+        .agents_panes
+        .clone()
+        .unwrap();
+    app.agents_split = Some(crate::routes::session::agents_split::AgentsSplitState::new(
+        panes,
+    ));
+
+    app.dispatch_to_agents_split("first question".to_string());
+    let pane = &app.agents_split.as_ref().unwrap().panes[0];
+    assert!(pane.running, "the turn started");
+    assert!(
+        pane.activity.timeline.iter().any(|e| matches!(
+            e,
+            crate::routes::session::right_panel::types::SubagentTimelineEntry::UserMessage { text }
+                if text.contains("first question")
+        )),
+        "the user's prompt is in the timeline: {:?}",
+        pane.activity.timeline
+    );
+
+    // The turn ends with a tool-less report; the next prompt must open a
+    // second entry, not merge into the first one.
+    let epoch = app.agents_pane_epoch;
+    app.event_tx
+        .send(HarnessEvent::AgentsPaneDone {
+            pane: 0,
+            epoch,
+            output: "first answer".into(),
+            stop_reason: "end_turn".into(),
+            session: None,
+        })
+        .ok();
+    app.poll_events();
+    app.dispatch_to_agents_split("second question".to_string());
+    let user_inputs: Vec<String> = app.agents_split.as_ref().unwrap().panes[0]
+        .activity
+        .timeline
+        .iter()
+        .filter_map(|e| match e {
+            crate::routes::session::right_panel::types::SubagentTimelineEntry::UserMessage {
+                text,
+            } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        user_inputs,
+        vec!["first question".to_string(), "second question".to_string()],
+        "each turn owns its input entry"
+    );
+}

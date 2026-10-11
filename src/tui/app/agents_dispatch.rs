@@ -150,10 +150,11 @@ impl App {
     /// entry point for BOTH senders: the user's submit (the focused pane,
     /// `from_agent = false`) and the `agents_call` queue service (an agent's
     /// input that waited for the pane to free, `from_agent = true`). The
-    /// agent's input is echoed into the pane's timeline with the
-    /// `AgentMessage` event (the distinct rail) right before the turn
-    /// starts, so the pane shows WHO is speaking even while the turn's
-    /// stream has yet to produce its first chunk.
+    /// turn's input echoes into the pane's timeline as a FRESH entry right
+    /// before the turn starts — the user's prompt with the brand rail,
+    /// another agent's input with the distinct rail — so the pane shows WHO
+    /// is speaking even while the turn's stream has yet to produce its
+    /// first chunk.
     fn dispatch_to_pane(&mut self, pane: usize, msg: String, from_agent: bool) {
         // Snapshot everything the spawned turn needs BEFORE any effect
         // below: the agent name, resume id and the daemon's connector
@@ -179,18 +180,17 @@ impl App {
         } else {
             None
         };
-        // The agent's input echoes into the pane's timeline with the
-        // `AgentMessage` event (the distinct rail) right before the turn
-        // starts, so the pane shows WHO is speaking even while the turn's
-        // stream has yet to produce its first chunk. After the guards
+        // The turn's input echoes into the pane's timeline as a FRESH
+        // entry right before the turn starts, so the pane shows WHO is
+        // speaking even while the turn's stream has yet to produce its
+        // first chunk: the user's own prompt with the brand rail, another
+        // agent's queued input with the distinct rail. After the guards
         // above — a refused turn must not write to the timeline either.
         // The echo goes wherever the pane lives (live or parked).
-        if from_agent
-            && let Some(split) =
-                either_split_mut(&mut self.agents_split, &mut self.parked_agents_split)
+        if let Some(split) = either_split_mut(&mut self.agents_split, &mut self.parked_agents_split)
         {
-            split.apply_event(pane, &SubagentEvent::AgentMessage { text: msg.clone() });
-        };
+            split.echo_turn_input(pane, &msg, !from_agent);
+        }
         let daemon_connector = if is_daemon {
             Some(self.daemon_connector())
         } else {
