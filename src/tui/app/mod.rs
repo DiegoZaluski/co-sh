@@ -309,8 +309,8 @@ pub struct App {
     agents_pane_epoch: u64,
     /// A split PARKED by an Esc leave (the `/agents` mode closed, the agent
     /// set kept): running turns continue streaming into it and a later
-    /// `/agents` re-attaches it as-is — same panes, same drafts, same bound
-    /// sessions. Parking is session-scoped by construction: it is dropped
+    /// `/agents` re-attaches it as-is — same panes, same timelines, same
+    /// bound sessions. Parking is session-scoped by construction: it is dropped
     /// when the session changes (the pane set lives on in the session
     /// metadata for a later rebuild).
     pub parked_agents_split: Option<crate::routes::session::agents_split::AgentsSplitState>,
@@ -1037,6 +1037,14 @@ impl App {
             // (no input -> no ticks). Ticking on the measured delta keeps
             // the lifetime exact at any frame rate.
             self.toast_state.tick(delta.as_millis() as u64);
+
+            // The /agents queue service: queued `agents_call` requests whose
+            // pane freed (or idled all along) dispatch here — the frame tick
+            // is the only guaranteed heartbeat, so a request can never wait
+            // on a pane event that never comes while every pane idles.
+            if self.agents_split.is_some() || self.parked_agents_split.is_some() {
+                self.serve_agents_pane_queues();
+            }
 
             // Refresh the footer's git branch at its own rate-limited cadence
             // (the tracker internally throttles disk reads to twice a second).

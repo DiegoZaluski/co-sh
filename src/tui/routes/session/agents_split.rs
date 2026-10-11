@@ -4,9 +4,8 @@
 //!
 //! This module owns ONLY the pane model + layout + painting. The prompt is
 //! a single shared input that lives outside this area (`compute_prompt_area`
-//! in `app/render.rs`), so dispatching a draft to a pane is not this
-//! module's concern — it only keeps the per-pane drafts so the dispatcher
-//! can read the focused pane's target.
+//! in `app/render.rs`), so routing a submission is not this module's
+//! concern — it only tracks which pane (if any) the prompt targets.
 //!
 //! Layout heuristic (deliberately approximate — "fits nicely", not a perfect
 //! bin-packing): EVERY pane — the daemon included — is an equal participant
@@ -56,9 +55,11 @@ pub(crate) const BRAND_CONTRAST_FLOOR: f32 = 40.0;
 /// color: the brand mark is the identity, not a highlight to be dimmed.
 const DIM_UNFOCUSED: f32 = 0.45;
 
-/// Hotkey of the daemon pane. The remaining panes take `1`..=`9` in picker
-/// order, so the daemon is always reachable with a single keypress.
-pub const DAEMON_HOTKEY: char = '0';
+/// Hotkey of the MAIN agent: it unfocuses every pane, so the shared
+/// prompt targets the normal-mode loop (running as manager while the
+/// split is open). The panes take `1`..=`9` in picker order (1-based),
+/// each reachable with a single keypress.
+const UNFOCUS_HOTKEY: char = '0';
 
 /// Minimum readable width of one agent column before the layout falls back
 /// to a second row (see the module-level heuristic description).
@@ -190,14 +191,15 @@ pub struct AgentsSplitState {
     /// One pane per agent in picker order. The `cosh` daemon pane exists
     /// only when the picker marked it, and only as an ordinary pane.
     pub panes: Vec<AgentPane>,
-    /// Focused pane index (default: the first picked pane).
-    pub focused: usize,
+    /// Focused pane index. `None` means NO pane holds the focus: the
+    /// shared prompt targets the MAIN agent (the same loop as the normal
+    /// mode, running as manager while the split is open). `Ctrl+0`
+    /// unfocuses; a pane hotkey or click focuses again. Fresh splits
+    /// start on the first picked pane.
+    pub focused: Option<usize>,
     /// Screen rects of the LAST rendered frame — the mouse dispatcher
     /// hit-tests these, exactly like `SessionView::pill_area`.
     pub pane_rects: Vec<Rect>,
-    /// Per-pane draft text, so the future dispatcher knows which pane a
-    /// submission targets. Starts simple; scrolling/history live elsewhere.
-    pub drafts: Vec<String>,
     /// Persistent chat-style markdown renderers for the panes' Message/
     /// Thought blocks — the SAME cache pattern the right panel's sub-agent
     /// window uses (`SubagentBlockRenderer` survives across frames so
@@ -233,7 +235,7 @@ impl AgentsSplitState {
     /// setup. NO daemon insert: the `cosh` pane exists ONLY when the picker
     /// marked it — the split is a plain reflection of the user's choice.
     /// Each entry carries its persisted binding (`AgentPaneRef::Bound`
-    /// resumes its ACP session). `drafts` stays aligned with `panes`.
+    /// resumes its ACP session).
     #[must_use]
     pub fn new(agents: Vec<crate::types::AgentPaneRef>) -> Self {
         let panes: Vec<AgentPane> = agents
@@ -241,12 +243,10 @@ impl AgentsSplitState {
             .filter(|r| !r.agent().is_empty())
             .map(AgentPane::from_ref)
             .collect();
-        let drafts = vec![String::new(); panes.len()];
         Self {
             panes,
-            focused: 0,
+            focused: Some(0),
             pane_rects: Vec::new(),
-            drafts,
             block_cache: HashMap::new(),
             selection_pane: None,
             drag_selection: None,
@@ -266,41 +266,33 @@ impl AgentsSplitState {
         self.panes.len()
     }
 
-    /// Move focus to the next pane, wrapping around.
-    pub fn focus_next(&mut self) {
-        if !self.panes.is_empty() {
-            self.focused = (self.focused + 1) % self.panes.len();
-        }
-    }
-
-    /// Move focus to the previous pane, wrapping around.
-    pub fn focus_prev(&mut self) {
-        if !self.panes.is_empty() {
-            self.focused = (self.focused + self.panes.len() - 1) % self.panes.len();
-        }
-    }
-
-    /// Focus the pane bound to hotkey `ch` (`'0'` = the daemon pane WHEN
-    /// present, `'1'..='9'` = the panes in picker order). Returns whether a
-    /// pane matched.
+    /// Focus the pane bound to hotkey `ch`: `'0'` UNFOCUSES every pane
+    /// (the shared prompt then targets the MAIN agent — the normal-mode
+    /// loop, running as manager while the split is open); `'1'..='9'`
+    /// focus the 1st..9th pane in picker order. Returns whether the key
+    /// matched (out-of-range digits leave the focus alone).
     pub fn focus_hotkey(&mut self, ch: char) -> bool {
+        if ch == UNFOCUS_HOTKEY {
+            self.focused = None;
+            return true;
+        }
         let index = match ch {
-            c if c == DAEMON_HOTKEY => 0,
-            '1'..='9' => usize::from(ch as u8 - b'0'),
+            '1'..='9' => usize::from(ch as u8 - b'1'),
             _ => return false,
         };
         if index < self.panes.len() {
-            self.focused = index;
+            self.focused = Some(index);
             true
         } else {
             false
         }
     }
 
-    /// The currently focused pane, if any.
+    /// The currently focused pane, if any (`None` when the main agent
+    /// holds the focus).
     #[must_use]
     pub fn focused_pane(&self) -> Option<&AgentPane> {
-        self.panes.get(self.focused)
+        self.focused.and_then(|i| self.panes.get(i))
     }
 
     /// Scroll the FOCUSED pane by `rows` (negative = up), the keyboard
@@ -308,7 +300,9 @@ impl AgentsSplitState {
     /// cadence: each keypress moves whole rows against the LAST measured
     /// heights, no acceleration.
     pub fn scroll_focused_by(&mut self, rows: i32) {
-        if let Some(pane) = self.panes.get_mut(self.focused) {
+        if let Some(i) = self.focused
+            && let Some(pane) = self.panes.get_mut(i)
+        {
             pane.scroll_by(rows);
         }
     }
@@ -334,14 +328,19 @@ impl AgentsSplitState {
     }
 
     /// Jump the focused pane to the oldest / newest content.
+    /// No-op while the main agent holds the focus.
     pub fn scroll_focused_to_top(&mut self) {
-        if let Some(pane) = self.panes.get_mut(self.focused) {
+        if let Some(i) = self.focused
+            && let Some(pane) = self.panes.get_mut(i)
+        {
             pane.scroll_to_top();
         }
     }
 
     pub fn scroll_focused_to_bottom(&mut self) {
-        if let Some(pane) = self.panes.get_mut(self.focused) {
+        if let Some(i) = self.focused
+            && let Some(pane) = self.panes.get_mut(i)
+        {
             pane.scroll_to_bottom();
         }
     }
@@ -633,6 +632,25 @@ impl AgentsSplitState {
         Some(format!("#{k}"))
     }
 
+    /// The registry id this pane is addressable under in `agents_call`: the
+    /// agent CLI name, or `name#k` when THIS split runs several panes of the
+    /// same CLI (the same disambiguation `pane_mirror_label` renders). The
+    /// manager pane itself is NOT addressable — it IS the main agent — so
+    /// its id is `None` and `"cosh"` never appears in the registry.
+    #[must_use]
+    pub fn pane_registry_id(&self, pane: usize) -> Option<String> {
+        if self.panes.get(pane)?.agent == DAEMON_LABEL {
+            return None;
+        }
+        match self.pane_mirror_label(pane) {
+            Some(suffix) => {
+                let agent = self.panes.get(pane)?.agent.clone();
+                Some(format!("{agent}{suffix}"))
+            }
+            None => Some(self.panes.get(pane)?.agent.clone()),
+        }
+    }
+
     /// Set the running flag of pane `pane` (out-of-range panes ignored).
     pub fn set_running(&mut self, pane: usize, running: bool) {
         if let Some(p) = self.panes.get_mut(pane) {
@@ -644,19 +662,6 @@ impl AgentsSplitState {
     pub fn set_stop_signal(&mut self, pane: usize, signal: Option<Arc<AtomicBool>>) {
         if let Some(p) = self.panes.get_mut(pane) {
             p.stop_signal = signal;
-        }
-    }
-
-    /// Draft text of pane `pane` (empty string when out of range).
-    #[must_use]
-    pub fn draft(&self, pane: usize) -> &str {
-        self.drafts.get(pane).map(String::as_str).unwrap_or("")
-    }
-
-    /// Replace the draft text of pane `pane` (out-of-range panes ignored).
-    pub fn set_draft(&mut self, pane: usize, text: String) {
-        if let Some(d) = self.drafts.get_mut(pane) {
-            *d = text;
         }
     }
 }
@@ -786,7 +791,7 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &mut AgentsSplitState, theme:
             rect,
             i,
             pane,
-            i == focused,
+            Some(i) == focused,
             theme,
             block_cache,
             &mut live_keys,
@@ -1068,15 +1073,19 @@ fn draw_activity_line(
         }
         SubagentActivityLine::Message { text, .. }
         | SubagentActivityLine::UserMessage { text, .. }
+        | SubagentActivityLine::AgentMessage { text, .. }
         | SubagentActivityLine::Thought { text, .. } => {
             // Persistent chat-style renderer per (pane, timeline) block —
             // `set_content` re-parses only the streamed tail. Thought is
             // dimmed, exactly like the right panel's mini-chat; the
             // replayed user block renders at full text color and wears the
             // prompt input's left `│` rail (painted after each blitted
-            // row, below).
+            // row, below); an `agents_call` input wears the SAME rail in
+            // the theme's secondary tone — the user sees WHO is speaking
+            // from the rail's color alone.
             let dimmed = matches!(line, SubagentActivityLine::Thought { .. });
             let is_user = matches!(line, SubagentActivityLine::UserMessage { .. });
+            let is_agent_input = matches!(line, SubagentActivityLine::AgentMessage { .. });
             let fg = if dimmed { theme.text_muted } else { theme.text };
             let key = format!("{pane_index}:{index}");
             // This block is drawn THIS frame: its cache entry is live (the
@@ -1139,7 +1148,7 @@ fn draw_activity_line(
                     .collect();
                 let trimmed = text_from_cell_row(&row_cells, wrap_w as usize);
                 if !trimmed.is_empty() {
-                    let region_text = if is_user {
+                    let region_text = if is_user || is_agent_input {
                         format!("│ {trimmed}")
                     } else {
                         trimmed
@@ -1151,13 +1160,20 @@ fn draw_activity_line(
                         region_text,
                     ));
                 }
-                if is_user {
-                    // The prompt input's left rail, in the pane agent's
-                    // brand color — the pane's echo of the chat's
-                    // user-message box, one glyph, no more chrome.
+                if is_user || is_agent_input {
+                    // The prompt input's left rail. The user's echo wears it
+                    // in the pane agent's brand color; an `agents_call`
+                    // input wears it in the theme's secondary tone — the
+                    // color alone tells the user WHO is speaking. One
+                    // glyph, no more chrome.
+                    let rail_style = if is_user {
+                        brand_fg(agent, 0.0, theme, focused)
+                    } else {
+                        Style::default().fg(rgba_color(theme.secondary))
+                    };
                     if let Some(rail) = buf.cell_mut((x - 1, y + di as u16)) {
                         rail.set_char('│');
-                        rail.set_style(brand_fg(agent, 0.0, theme, focused));
+                        rail.set_style(rail_style);
                     }
                 }
             }
@@ -1495,7 +1511,6 @@ mod tests {
         assert_eq!(state.pane_count(), 2, "no daemon pane appears uninvited");
         assert_eq!(state.panes[0].agent, "kilo");
         assert_eq!(state.panes[1].agent, "claude");
-        assert_eq!(state.drafts.len(), 2, "drafts aligned with panes");
 
         // An explicitly marked cosh keeps its marked position (first) and is
         // NOT duplicated.
@@ -1508,35 +1523,41 @@ mod tests {
     #[test]
     fn focus_hotkey_targets_panes_by_position() {
         let mut state = AgentsSplitState::new(vec!["claude".into(), "kilo".into()]);
-        // '1' targets pane 1 (kilo) — hotkeys index the pane LIST directly,
-        // no phantom daemon slot in between.
-        assert!(state.focus_hotkey('1'));
-        assert_eq!(state.focused, 1);
+        // '1' targets the first pane (claude), '2' the second (kilo) —
+        // hotkeys count panes 1-based; '0' is the main agent, never a pane.
+        assert!(state.focus_hotkey('2'));
+        assert_eq!(state.focused, Some(1));
         assert_eq!(state.focused_pane().map(|p| p.agent.as_str()), Some("kilo"));
-        // '0' is the FIRST pane — the daemon only when the user marked it.
-        assert!(state.focus_hotkey('0'));
-        assert_eq!(state.focused, 0);
+        assert!(state.focus_hotkey('1'));
+        assert_eq!(state.focused, Some(0));
         assert_eq!(state.focused_pane().map(|p| p.agent.as_str()), Some("claude"));
+        // '0' UNFOCUSES every pane: the shared prompt then targets the
+        // MAIN agent (the normal-mode loop as manager).
+        assert!(state.focus_hotkey('0'));
+        assert_eq!(state.focused, None);
+        assert!(state.focused_pane().is_none(), "no pane holds the focus");
+        // A pane hotkey focuses again from the unfocused state.
+        assert!(state.focus_hotkey('2'));
+        assert_eq!(state.focused, Some(1));
         // Out-of-range and unknown keys leave the focus alone.
-        assert!(!state.focus_hotkey('2'));
-        assert_eq!(state.focused, 0);
+        assert!(!state.focus_hotkey('3'));
+        assert_eq!(state.focused, Some(1));
         assert!(!state.focus_hotkey('9'));
-        assert_eq!(state.focused, 0);
+        assert_eq!(state.focused, Some(1));
         assert!(!state.focus_hotkey('x'));
-        assert_eq!(state.focused, 0);
+        assert_eq!(state.focused, Some(1));
     }
 
     #[test]
-    fn focus_next_prev_wrap_around() {
+    fn refocus_returns_to_the_first_pane() {
         let mut state = AgentsSplitState::new(vec!["claude".into(), "kilo".into()]);
-        assert_eq!(state.pane_count(), 2);
-        // Focused starts on pane 0.
-        state.focus_next();
-        assert_eq!(state.focused, 1);
-        state.focus_next();
-        assert_eq!(state.focused, 0, "wraps around");
-        state.focus_prev();
-        assert_eq!(state.focused, 1);
+        // Fresh splits start on the first pane; unfocusing and focusing
+        // again lands back on it.
+        assert_eq!(state.focused, Some(0));
+        assert!(state.focus_hotkey('0'));
+        assert_eq!(state.focused, None);
+        assert!(state.focus_hotkey('1'));
+        assert_eq!(state.focused, Some(0));
     }
 
     #[test]
@@ -1810,7 +1831,7 @@ mod tests {
         // highlight belongs to whoever owns it), or its contrast-lifted
         // variant on a theme where the raw color would dissolve — the same
         // formula the painter applies.
-        state.focus_next();
+        assert!(state.focus_hotkey('2'));
         let mut buf = Buffer::empty(area);
         render(&mut buf, area, &mut state, &theme);
         let brand = RGBA::from_ints(0xD9, 0x77, 0x57, 255);
@@ -1841,7 +1862,7 @@ mod tests {
         }
 
         // Focus back to claude: the name takes the brand terracotta.
-        state.focus_hotkey('0');
+        state.focus_hotkey('1');
         let mut buf = Buffer::empty(area);
         render(&mut buf, area, &mut state, &theme);
         let cell = buf
@@ -1874,7 +1895,7 @@ mod tests {
         // "devin" carries the official tri-color logomark (blue → green →
         // cyan-blue), so the name paints as a real sweep.
         let mut state = AgentsSplitState::new(vec!["kilo".into(), "devin".into()]);
-        state.focus_next();
+        assert!(state.focus_hotkey('2'));
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
         render(&mut buf, area, &mut state, &theme);

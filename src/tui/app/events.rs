@@ -6,6 +6,7 @@ use crossterm::event::{self, Event, KeyEventKind};
 use ratatui::style::Color;
 
 use super::{App, AppMode};
+use super::agents_dispatch::{either_split, either_split_mut};
 use crate::component::spinner_highlight::HighlightSpinner;
 use crate::notification;
 use crate::routes::session::delete::terminated_loop_save_target;
@@ -285,10 +286,8 @@ impl App {
                     if epoch != self.agents_pane_epoch {
                         continue;
                     }
-                    let target = self
-                        .agents_split
-                        .as_mut()
-                        .or(self.parked_agents_split.as_mut());
+                    let target =
+                        either_split_mut(&mut self.agents_split, &mut self.parked_agents_split);
                     if let Some(split) = target {
                         split.apply_event(pane, &event);
                     }
@@ -323,10 +322,8 @@ impl App {
                     // The mirror's finish classification, captured before
                     // `output` moves into the marker below.
                     let failed = stop_reason == "error" || stop_reason == "cancelled";
-                    let target = self
-                        .agents_split
-                        .as_mut()
-                        .or(self.parked_agents_split.as_mut());
+                    let target =
+                        either_split_mut(&mut self.agents_split, &mut self.parked_agents_split);
                     if let Some(split) = target {
                         split.set_running(pane, false);
                         split.set_stop_signal(pane, None);
@@ -341,6 +338,29 @@ impl App {
                         // the coalescer merge it into that same entry —
                         // the "answer twice" bug.
                         split.finish_turn(pane, &output, &stop_reason);
+                    }
+                    // The bridge's completion half: a pane turn the
+                    // `agents_call` registry was tracking resolves HERE,
+                    // keyed by the pane's registry id (the App never knows
+                    // request ids). Wait-mode callers unblock with the
+                    // report; background callers park it for their drain.
+                    // The pane id is computed from the live-or-parked split
+                    // BEFORE the mutable borrow below — a pane that left
+                    // the set resolves nothing (its requests were failed by
+                    // `set_panes` already).
+                    let registry_id = either_split(&self.agents_split, &self.parked_agents_split)
+                        .and_then(|split| split.pane_registry_id(pane));
+                    if let Some(id) = registry_id {
+                        let report = if failed {
+                            Err(output.clone())
+                        } else {
+                            Ok(output.clone())
+                        };
+                        cosh::harness::panes::complete_request(&id, report);
+                        // The pane just freed: the queue service may
+                        // dispatch its NEXT queued agent message in this
+                        // same frame.
+                        self.serve_agents_pane_queues();
                     }
                     // The mirror seals: the final report becomes its window
                     // body (the linear-chat contract), the transcript seals
@@ -377,18 +397,16 @@ impl App {
                     if epoch != self.agents_pane_epoch {
                         continue;
                     }
-                    let target = self
-                        .agents_split
-                        .as_mut()
-                        .or(self.parked_agents_split.as_mut());
-                    if let Some(split) = target {
-                        if let Some(p) = split.panes.get_mut(pane) {
-                            p.rehydrating = false;
-                            if !ok {
-                                p.activity.apply(&SubagentEvent::Message {
-                                    text: format!("[replay failed] {error}"),
-                                });
-                            }
+                    let target =
+                        either_split_mut(&mut self.agents_split, &mut self.parked_agents_split);
+                    if let Some(split) = target
+                        && let Some(p) = split.panes.get_mut(pane)
+                    {
+                        p.rehydrating = false;
+                        if !ok {
+                            p.activity.apply(&SubagentEvent::Message {
+                                text: format!("[replay failed] {error}"),
+                            });
                         }
                     }
                     self.sync_agents_pane_mirrors();

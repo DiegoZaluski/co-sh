@@ -136,7 +136,7 @@ impl App {
                     }
                     MouseEventType::Down if button == MouseButton::Left => {
                         if let Some(split) = &mut self.agents_split {
-                            split.focused = index;
+                            split.focused = Some(index);
                             // A pane click always ends any in-flight
                             // selection (it belongs to the anchor pane);
                             // a NEW drag starts here with the content row
@@ -176,7 +176,7 @@ impl App {
                                 split.cancel_selection();
                                 return Ok(true);
                             }
-                            split.focused = index;
+                            split.focused = Some(index);
                         }
                         // A plain click (no drag range) fell through the
                         // Down branch already; release just confirms focus.

@@ -164,6 +164,33 @@ pub const INSTRUCTIONS_SUBAGENT: &str = concat!(
     "- If a tool returns an error, consider a different approach instead of retrying the same call.\n"
 );
 
+/// Base instructions for the MANAGER loop (pane 0 of the `/agents` split):
+/// the main agent running as the session's coordinator while the split is
+/// open. It delegates work to the panes instead of building — its
+/// deliverable is coordination, not code.
+pub const INSTRUCTIONS_MANAGER: &str = concat!(
+    "## Identity\n",
+    "You are Cosh acting as the agent manager: the coordinator of the /agents panes bound to this session.\n\n",
+    "## Capabilities\n",
+    "- You coordinate the session's panes through the `agents_call` tool: send work to a pane, wait for or later receive its report.\n",
+    "- You have access to external tools for inspection and command execution, code execution, web search, and more.\n",
+    "- Tool invocation is defined entirely by each tool specification.\n",
+    "- The available tools and their specifications are listed below.\n\n",
+    "## Constraints\n",
+    "- Delegate the work: split the task across the panes and coordinate their reports — do not do the panes' work yourself.\n",
+    "- One instruction per `agents_call` call, with everything the pane needs to act WITHOUT asking you for more context.\n",
+    "- A pane may be busy with the user's turn or another request: your message WAITS its turn (queued, never interleaved). Prefer `run_in_background: true` for parallel work and collect the reports as automated notifications.\n",
+    "- Do not introduce yourself or volunteer information about your internal capabilities or available tools.\n",
+    "- Use a tool only when it is required to produce or verify the requested result.\n",
+    "- If the request can be completed correctly without using any tool, answer directly.\n",
+    "- Avoid unnecessary narration or descriptions of obvious actions.\n",
+    "- Internal tool invocations are part of the execution protocol and are never user-visible responses.\n",
+    "- Your ONLY deliverable is your final text response: the user sees nothing but that text, so ALWAYS end by writing the complete answer/report of what you did as a normal text message.\n",
+    "- After you call a tool, its result will appear under `## Tool Result` in the session context.\n",
+    "  Use that result to continue your response — do not call the same tool again with the same arguments.\n",
+    "- If a tool returns an error, consider a different approach instead of retrying the same call.\n"
+);
+
 /// Maximum consecutive tool-call failures before aborting the agent loop.
 const MAX_TOOL_RETRIES: usize = 10;
 
@@ -599,6 +626,14 @@ pub struct Harness {
     /// notifications are never drained — a sub-agent must not swallow a
     /// notification meant for the top-level agent's context.
     nested: bool,
+    /// Which loop this harness drives for the /agents pane bridge
+    /// ([`super::panes::MAIN`] for the normal chat loop,
+    /// [`super::panes::MANAGER`] for the split's pane-0 manager loop). Tags
+    /// every `agents_call` request so a background report is drained ONLY
+    /// by the loop that asked for it — the two loops never run
+    /// concurrently (the `/agents` gate refuses to open while the main
+    /// loop works), but a delivery can outlive its requester's turn.
+    panes_requester: &'static str,
     /// PreToolUse hooks runner (empty when no hooks are configured).
     hook_runner: Option<super::hooks::HookRunner>,
 
@@ -800,6 +835,7 @@ impl Harness {
             tool_issuer: VecDeque::new(),
             active_call_ref: None,
             nested: false,
+            panes_requester: super::panes::MAIN,
             tool_call_synthetic: 0,
             context_manager: ContextManager::new(MAX_CONTEXT_TOKENS),
             disabled_tools,
@@ -858,6 +894,14 @@ impl Harness {
             test_tools: Vec::new(),
         };
         harness.install_summary_annotator();
+        // The /agents pane tool is registered ONLY when panes exist: with
+        // no agents bound to the session the harness — and its header —
+        // stays byte-identical with the pre-feature one. No tool, no
+        // context block, no interpolated noise for something that does
+        // not exist.
+        if super::panes::has_panes() {
+            harness.harness_tools.push(super::panes::agents_call_tool());
+        }
         harness
     }
 
@@ -1067,6 +1111,17 @@ impl Harness {
     #[must_use]
     pub const fn as_nested(mut self) -> Self {
         self.nested = true;
+        self
+    }
+
+    /// Mark this harness as the MANAGER loop (the `/agents` split's pane 0):
+    /// its `agents_call` requests are tagged [`super::panes::MANAGER`] so a
+    /// background pane report is drained only by this loop — the main
+    /// chat loop must never inject a report the manager asked for, and
+    /// vice versa. Default is [`super::panes::MAIN`] (the normal loop).
+    #[must_use]
+    pub const fn as_manager(mut self) -> Self {
+        self.panes_requester = super::panes::MANAGER;
         self
     }
 
@@ -1315,6 +1370,17 @@ impl Harness {
                 }
             }
         }
+        // The /agents panes block rides at the END of the header (an
+        // appendix, never a prefix insertion — the providers' exact-prefix
+        // caches stay valid). Registered ONLY when panes exist: with no
+        // agents the header stays byte-identical with the pre-feature one,
+        // and nothing is interpolated for something that does not exist.
+        if super::panes::has_panes()
+            && let Some(block) = super::panes::context_block()
+        {
+            let _ = writeln!(out, "{block}");
+        }
+
         self.context_manager.set_last_tool_set(current);
 
         self.header_context = out;
@@ -1428,6 +1494,13 @@ impl Harness {
             "subagent_status" => Some(background::status_report(
                 tc.arguments.get("task_id").and_then(|v| v.as_str()),
             )),
+            // `agents_call` is an ASYNC harness tool: its `wait` mode awaits
+            // the pane's report (and `dispatch_next` races it against the
+            // stop signal), so it must NOT resolve here — returning `None`
+            // queues it into the tool issuer for the async dispatch arm.
+            // The explicit arm also keeps the catch-all below from
+            // swallowing the call with an empty result.
+            "agents_call" => None,
             _ => Some(String::new()),
         }
     }
@@ -3705,6 +3778,39 @@ impl Harness {
     /// messages are injected into the model context (see the docs of the
     /// public wrappers). The drain pops each entry right before injecting it,
     /// so a TUI-side delete/edit of a still-pending message is always honored.
+    /// Sleep-poll until `outstanding()` clears or stop is requested: the
+    /// shared pre-Done wait for pane reports and background tasks alike.
+    async fn wait_for_outstanding(stop_signal: &AtomicBool, outstanding: impl Fn() -> bool) {
+        while outstanding() && !stop_signal.load(Ordering::Relaxed) {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// Send pre-rendered completion notes as ToolOutput events + automated
+    /// user turns (shared tail of the pre-Done busy-guard waits). True
+    /// when anything was injected — the caller clears the steering text
+    /// and continues the loop so the model responds to them.
+    fn inject_completion_notes(
+        &mut self,
+        tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
+        notes: Vec<(String, String, Option<String>)>,
+    ) -> bool {
+        if notes.is_empty() {
+            return false;
+        }
+        for (tool, output, call_ref) in notes {
+            let _ = tx.send(super::events::HarnessEvent::ToolOutput {
+                tool,
+                output: output.clone(),
+                finished: true,
+                agent: None,
+                call_ref,
+            });
+            self.context_manager.add_user(&output);
+        }
+        true
+    }
+
     async fn run_agent_loop_inner(
         &mut self,
         input: &str,
@@ -3885,6 +3991,16 @@ impl Harness {
             () => {
                 if self.stop || stop_signal.load(Ordering::Relaxed) {
                     log::debug!("run_agent_loop STOPPED");
+                    // The dying requester's queued pane requests are dropped
+                    // and their waits resolved with the stop failure — an
+                    // `agents_call` enqueued by a turn that never gets to
+                    // see the answer must not sit in the queue for a
+                    // LATER turn to serve (the message was for THIS
+                    // conversation's flow). In-flight requests stay: the
+                    // pane finishes its turn normally and the delivery
+                    // parks for this requester's tag (a later turn of the
+                    // same loop drains it — the report is not lost).
+                    super::panes::cancel_requester(self.panes_requester);
                     self.context_manager.close_loop();
                     let context = self.context_manager.save_state();
                     let _ = tx.send(HarnessEvent::Stopped { context });
@@ -3933,6 +4049,38 @@ impl Harness {
                 current_input.clear();
             }
 
+            // /agents pane reports (background `agents_call` calls): drain
+            // THIS requester's finished deliveries next to the background
+            // sub-agent notes above — same contract, same shape. A delivery
+            // tagged for the OTHER requester stays parked: the manager loop
+            // must never inject a report the main loop asked for, and vice
+            // versa (the requester tag on each delivery routes it home).
+            // Nested loops never drain (the requester tag is MAIN for a
+            // nested harness and every delivery belongs to a real loop).
+            let pane_deliveries = if self.nested {
+                Vec::new()
+            } else {
+                super::panes::take_ready_deliveries(self.panes_requester)
+            };
+            if !pane_deliveries.is_empty() {
+                for delivery in pane_deliveries {
+                    let note = super::panes::delivery_note(&delivery);
+                    // Same channel the sub-agent completion notes ride: the
+                    // TUI renders it as a chat line, the model gets it as a
+                    // marked automated user turn.
+                    let _ = tx.send(HarnessEvent::ToolOutput {
+                        tool: "agents_call".to_string(),
+                        output: note.clone(),
+                        finished: true,
+                        agent: None,
+                        call_ref: None,
+                    });
+                    self.context_manager.add_user(&note);
+                }
+                // New instruction material: the next request must carry it.
+                current_input.clear();
+            }
+
             // Background sub-agent completions (push half of the feature):
             // drain the process-wide registry ONCE per iteration, at the top
             // of the turn-building phase, so a task that finished since the
@@ -3947,11 +4095,17 @@ impl Harness {
             // top-level loops ever run concurrently, a notification can land
             // in the other session's context — revisit then (e.g. an
             // owner-session tag on each task).
-            let background_notes = if self.nested {
-                Vec::new()
-            } else {
-                background::take_ready_notifications()
-            };
+            // The manager loop (the /agents split's pane 0) must not drain
+            // the TOP-LEVEL background registry either: those notifications
+            // belong to the main chat loop's context (the same rule a
+            // nested loop obeys — the requester tag keeps the streams
+            // separated).
+            let background_notes =
+                if self.nested || self.panes_requester != super::panes::MAIN {
+                    Vec::new()
+                } else {
+                    background::take_ready_notifications()
+                };
             if !background_notes.is_empty() {
                 for (note, note_call_ref) in background_notes {
                     // The notification rides the EXISTING event variant the
@@ -5178,6 +5332,38 @@ impl Harness {
                     }
                 }
                 // log::debug!("run_agent_loop DONE (no tools)");
+                // /agents pane requests still outstanding: the turn does
+                // NOT end while a queued or in-flight `agents_call` answer
+                // is missing — ending it would orphan the wait and lose
+                // the report (same nesting rule as the background
+                // sub-agents below). Wait for the completions; Esc
+                // interrupts the wait and ends the turn normally.
+                if !self.nested && super::panes::has_outstanding_requests(self.panes_requester) {
+                    log::debug!("run_agent_loop WAITING for /agents pane reports before Done");
+                    Self::wait_for_outstanding(&stop_signal, || {
+                        super::panes::has_outstanding_requests(self.panes_requester)
+                    })
+                    .await;
+                    if !stop_signal.load(Ordering::Relaxed) {
+                        let notes: Vec<(String, String, Option<String>)> =
+                            super::panes::take_ready_deliveries(self.panes_requester)
+                                .iter()
+                                .map(|delivery| {
+                                    (
+                                        "agents_call".to_string(),
+                                        super::panes::delivery_note(delivery),
+                                        None,
+                                    )
+                                })
+                                .collect();
+                        self.inject_completion_notes(&tx, notes);
+                        // New input (or just the resolved waits): the stale
+                        // steering text must not shadow it. The loop
+                        // continues so the model responds to it.
+                        current_input.clear();
+                        continue;
+                    }
+                }
                 // Background tasks still outstanding: the turn does NOT end
                 // while work it spawned is running (Claude Code's nesting
                 // rule — an interactive loop waits for its background
@@ -5190,31 +5376,22 @@ impl Harness {
                     log::debug!(
                         "run_agent_loop WAITING for background sub-agent tasks before Done"
                     );
-                    while background::has_running_tasks()
-                        && !stop_signal.load(Ordering::Relaxed)
-                    {
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                    }
+                    Self::wait_for_outstanding(&stop_signal, background::has_running_tasks).await;
                     // Esc during the wait ends the turn normally: no
                     // injection, fall through to the standard Done path
                     // below (never break without emitting Done — the TUI
                     // would stay in a "running" state).
-                    let notes = if stop_signal.load(Ordering::Relaxed) {
+                    let notes: Vec<(String, String, Option<String>)> = if stop_signal
+                        .load(Ordering::Relaxed)
+                    {
                         Vec::new()
                     } else {
                         background::take_ready_notifications()
+                            .into_iter()
+                            .map(|(note, call_ref)| ("subagent_status".to_string(), note, call_ref))
+                            .collect()
                     };
-                    if !notes.is_empty() {
-                        for (note, note_call_ref) in notes {
-                            let _ = tx.send(HarnessEvent::ToolOutput {
-                                tool: "subagent_status".to_string(),
-                                output: note.clone(),
-                                finished: true,
-                                agent: None,
-                                call_ref: note_call_ref,
-                            });
-                            self.context_manager.add_user(&note);
-                        }
+                    if self.inject_completion_notes(&tx, notes) {
                         // The injected completions are the new input; the
                         // stale steering text must not shadow them.
                         current_input.clear();
@@ -5373,12 +5550,13 @@ impl Harness {
                 .get("run_in_background")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            if run_in_background && self.nested {
+            if run_in_background && (self.nested || self.panes_requester != super::panes::MAIN) {
                 self.tool_issuer.pop_front();
                 return Err(
-                    "run_in_background is not available inside a sub-agent: background \
-                     spawns are disabled for nested agents — run the task in the \
-                     foreground (omit run_in_background) instead."
+                    "run_in_background is not available in this loop: background \
+                     sub-agent spawns are disabled here — the completion \
+                     notification would have nowhere coherent to land. Run the \
+                     task in the foreground (omit run_in_background) instead."
                         .to_string(),
                 );
             }
@@ -5445,6 +5623,71 @@ impl Harness {
                     )
                     .await;
             }
+        }
+
+        // The /agents pane tool (`agents_call`): enqueue the message in the
+        // pane registry and either await the pane's report (wait mode,
+        // raced against the stop signal so Esc unblocks the tool) or
+        // return the receipt immediately (background mode — the report
+        // arrives later as an automated notification in THIS loop's drain;
+        // the other loop never sees it). The queue itself IS the race
+        // handling: a pane busy with the user's turn (or an earlier
+        // request) receives the message after its current work — the
+        // registry holds it, the App dispatches it when the pane frees.
+        if tool_name == "agents_call" {
+            self.tool_issuer.pop_front();
+            let pane = args_map
+                .get("pane")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let input = args_map
+                .get("input")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if pane.is_empty() || input.trim().is_empty() {
+                return Err(
+                    "`agents_call` requires a non-empty `pane` and `input`.".to_string()
+                );
+            }
+            let background = args_map
+                .get("run_in_background")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let mode = if background {
+                super::panes::ReplyMode::Background
+            } else {
+                super::panes::ReplyMode::Wait
+            };
+            let handle = match super::panes::enqueue(&pane, &input, self.panes_requester, mode) {
+                Ok(handle) => handle,
+                Err(error) => return Err(error),
+            };
+            if let Some(rx) = handle.receiver {
+                // Wait mode: the report IS the tool result. Esc unblocks:
+                // the stop wait wins the race and the tool returns the stop
+                // error (the request is cancelled for THIS requester — a
+                // pane already working on it finishes its turn normally,
+                // the report simply is not delivered to a dead caller).
+                return tokio::select! {
+                    answer = rx => {
+                        answer.unwrap_or_else(
+                            |_| Err("the pane request was cancelled".to_string()),
+                        )
+                    }
+                    () = wait_for_stop_signal(self.stop_signal.clone()) => {
+                        super::panes::cancel_wait(&handle.request_id);
+                        Err("the agents_call wait was interrupted (stop requested)".to_string())
+                    }
+                };
+            }
+            return Ok(format!(
+                "Message sent to pane '{pane}' in the background (request {}). \
+                 Its report arrives as an [automated notification] when the pane's turn ends.",
+                handle.request_id
+            ));
         }
 
         // Test-only tools have no real dispatch implementation; return a
@@ -5951,6 +6194,7 @@ impl Harness {
             tool_issuer: VecDeque::new(),
             active_call_ref: None,
             nested: false,
+            panes_requester: super::panes::MAIN,
             tool_call_synthetic: 0,
             context_manager: ContextManager::new(MAX_CONTEXT_TOKENS),
             disabled_tools: HashSet::new(),

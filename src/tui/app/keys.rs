@@ -67,21 +67,25 @@ impl App {
                 return Ok(false);
             }
 
-            // /agents split: pane hotkeys are SOVEREIGN. `Ctrl+0..Ctrl+9`
-            // (and a plain `0..9` while the draft is empty) move prompt
-            // focus to the numbered pane. The gate sits ABOVE the modal
+            // /agents split: pane hotkeys are SOVEREIGN. `Ctrl+0` / `Alt+0`
+            // unfocus every pane (the shared prompt then targets the MAIN
+            // agent) and `Ctrl+1..Ctrl+9` / `Alt+1..Alt+9` move prompt
+            // focus to the numbered pane (1-based, picker order). The Alt
+            // shapes are exact aliases of the Ctrl ones — the reliable
+            // form where Ctrl+digits never arrive (no legacy encoding,
+            // or eaten by the emulator). The gate sits ABOVE the modal
             // boxes and the slash menu on purpose: with the /agents picker
             // or the slash menu open, the key used to be swallowed there
             // and the pane never switched (the picker's handle_key ignores
             // ctrl-modified chars, so `Ctrl+2` did nothing visible while
             // looking consumed). Agent names never contain digits and the
             // picker filter matches names only, so the digits are dead
-            // keys to every modal below — the split may have them. ALT is
-            // excluded (AltGr), and the paste-burst gate above already
-            // absorbed burst digits, so the plain-digit fallback cannot
-            // corrupt a Windows-console paste. Unreachable pane indexes
+            // keys to every modal below — the split may have them.
+            // CTRL+ALT is excluded (AltGr), and the paste-burst gate above
+            // already absorbed burst digits, so the plain-digit fallback
+            // cannot corrupt a Windows-console paste. Unreachable pane indexes
             // still CONSUME the key (same rule as the split gate below):
-            // nothing else owns Ctrl+digit.
+            // nothing else owns Ctrl/Alt+digit.
             if self.focus_pane_hotkey(&key) {
                 return Ok(false);
             }
@@ -1380,10 +1384,10 @@ impl App {
                     if msg.trim().is_empty() {
                         return Ok(false);
                     }
-                    // The /agents split intercepts the shared prompt: every
-                    // chosen pane receives the message as its own turn (the
-                    // focused pane is only where Esc/typing act, never a
-                    // per-send filter).
+                    // The /agents split intercepts the shared prompt: the
+                    // FOCUSED pane receives the message as its own turn —
+                    // or, when NO pane holds the focus (`Ctrl+0`), the MAIN
+                    // agent itself (the normal-mode loop as manager).
                     if self.agents_split.is_some() {
                         self.dispatch_to_agents_split(msg);
                         return Ok(false);
@@ -1429,22 +1433,38 @@ impl App {
                     } else if self.agents_split.is_some() {
                         // /agents split ESC semantics: the first ESC stops
                         // ONLY the focused pane's turn (its own stop signal
-                        // — never the shared loop's); when the focused pane
-                        // is already idle, ESC leaves the split entirely.
+                        // — never the shared loop's), or — when NO pane
+                        // holds the focus (`Ctrl+0`, the MAIN agent) — the
+                        // main loop itself; when everything targeted is
+                        // already idle, ESC leaves the split entirely.
+                        let main_focused = self
+                            .agents_split
+                            .as_ref()
+                            .is_some_and(|split| split.focused.is_none());
+                        if main_focused
+                            && matches!(
+                                self.state.status,
+                                crate::types::SessionStatus::Working
+                                    | crate::types::SessionStatus::Retry { .. }
+                            )
+                        {
+                            self.stop_signal.store(true, Ordering::Relaxed);
+                            return Ok(false);
+                        }
                         let focused_running = self
                             .agents_split
                             .as_ref()
                             .and_then(|split| split.focused_pane())
                             .is_some_and(|pane| pane.running);
                         if focused_running {
-                            if let Some(split) = &mut self.agents_split {
-                                let focused = split.focused;
-                                if let Some(pane) = split.panes.get_mut(focused) {
-                                    if let Some(signal) = &pane.stop_signal {
-                                        signal.store(true, Ordering::Relaxed);
-                                    }
-                                    pane.running = false;
+                            if let Some(split) = &mut self.agents_split
+                                && let Some(focused) = split.focused
+                                && let Some(pane) = split.panes.get_mut(focused)
+                            {
+                                if let Some(signal) = &pane.stop_signal {
+                                    signal.store(true, Ordering::Relaxed);
                                 }
+                                pane.running = false;
                             }
                         } else {
                             // Esc with everything idle PARKS the split (mode
@@ -1495,23 +1515,50 @@ impl App {
                         return Ok(false);
                     } else if self.agents_split.is_some() {
                         // Same split ESC semantics as Interrupt above: stop
-                        // the focused pane first, leave the split on the
+                        // the focused pane first (or the main loop when NO
+                        // pane holds the focus), leave the split on the
                         // second ESC. The queue-clear paths below must never
-                        // run while the split mode is active.
+                        // run while a PANE is the target — but a MAIN-target
+                        // cancel clears them exactly like the normal mode.
+                        let main_focused = self
+                            .agents_split
+                            .as_ref()
+                            .is_some_and(|split| split.focused.is_none());
+                        if main_focused
+                            && matches!(
+                                self.state.status,
+                                crate::types::SessionStatus::Working
+                                    | crate::types::SessionStatus::Retry { .. }
+                            )
+                        {
+                            self.stop_signal.store(true, Ordering::Relaxed);
+                            if let Some(id) = self.state.current_session_id.clone()
+                                && let Some(queues) = self.state.pending_queues.get_mut(&id)
+                            {
+                                queues.clear();
+                            }
+                            self.queued_input.clear();
+                            self.next_request_in_flight = false;
+                            self.queue_actions_deferred_start = false;
+                            self.edit_requeue_hint = None;
+                            self.edit_hold_queue = None;
+                            self.hovered_queue_row = None;
+                            return Ok(false);
+                        }
                         let focused_running = self
                             .agents_split
                             .as_ref()
                             .and_then(|split| split.focused_pane())
                             .is_some_and(|pane| pane.running);
                         if focused_running {
-                            if let Some(split) = &mut self.agents_split {
-                                let focused = split.focused;
-                                if let Some(pane) = split.panes.get_mut(focused) {
-                                    if let Some(signal) = &pane.stop_signal {
-                                        signal.store(true, Ordering::Relaxed);
-                                    }
-                                    pane.running = false;
+                            if let Some(split) = &mut self.agents_split
+                                && let Some(focused) = split.focused
+                                && let Some(pane) = split.panes.get_mut(focused)
+                            {
+                                if let Some(signal) = &pane.stop_signal {
+                                    signal.store(true, Ordering::Relaxed);
                                 }
+                                pane.running = false;
                             }
                         } else {
                             // Same park contract as the Interrupt ESC above:
@@ -2021,12 +2068,17 @@ impl App {
 
     /// Sovereign pane-hotkey dispatch for the `/agents` split (see the
     /// gate above `process_key_event`'s modal chain). Consumes the key when
-    /// the split exists and the press is a digit hotkey: `Ctrl+0..Ctrl+9`
-    /// always, or a plain `0..9` while the draft is empty (the /agents
-    /// picker hid the keyboard, so digit typing had nowhere to live — the
-    /// pane jump restores the number keys' meaning there). Pane switching
-    /// is the ONLY action: the split mode never changes, the prompt draft
-    /// never changes, running turns keep running.
+    /// the split exists and the press is a digit hotkey in one of three
+    /// shapes: `Ctrl+0` unfocuses every pane (the MAIN agent takes the
+    /// shared prompt) and `Ctrl+1..Ctrl+9` focus the numbered pane
+    /// (1-based, picker order); `Alt+0..Alt+9` are exact aliases of the
+    /// Ctrl shapes — the reliable form on terminals where Ctrl+digits
+    /// have no byte encoding or are eaten by the emulator (Ctrl+0 is
+    /// zoom-reset in several); or a plain `0..9` while the draft is empty
+    /// (the /agents picker hid the keyboard, so digit typing had nowhere
+    /// to live — the pane jump restores the number keys' meaning there).
+    /// Pane switching is the ONLY action: the split mode never changes,
+    /// the prompt draft never changes, running turns keep running.
     fn focus_pane_hotkey(&mut self, key: &KeyEvent) -> bool {
         let KeyCode::Char(ch) = key.code else {
             return false;
@@ -2034,13 +2086,18 @@ impl App {
         if !ch.is_ascii_digit() || self.agents_split.is_none() {
             return false;
         }
-        // Two accepted shapes: CONTROL with modifiers that carry no text
+        // Three accepted shapes: CONTROL with modifiers that carry no text
         // (ALT excluded — CTRL+ALT is the AltGr character signature on
-        // Windows consoles, never a hotkey), or the raw unmodified digit
+        // Windows consoles, never a hotkey), ALT alone as the EXACT alias
+        // of the Ctrl shapes (any extra modifier — CONTROL for AltGr,
+        // SHIFT/SUPER from shift-reporting terminals — disqualifies it, so
+        // only a bare Alt+digit jumps; this is the form that survives
+        // terminals where Ctrl+digits never arrive),
+        // or the raw unmodified digit
         // while the prompt holds nothing AND no modal box is open. The
         // plain fallback YIELDS to the /agents picker: with it open the
         // digits are that dialog's count input / filter, so pane jumping
-        // stays on the Ctrl shape there. Every other MODAL that accepts
+        // stays on the Ctrl/Alt shapes there. Every other MODAL that accepts
         // plain text (model filter, rename, router number input, …)
         // yields the same way — their digits are real input, not dead
         // keys, so the fallback must never swallow them. The slash menu
@@ -2048,6 +2105,7 @@ impl App {
         // fires with it open.
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL)
             && !key.modifiers.contains(KeyModifiers::ALT);
+        let alt = key.modifiers == KeyModifiers::ALT;
         let no_text_modal = !self.dialog.visible()
             && !self.question_dialog.visible
             && !self.permission_dialog.visible
@@ -2057,7 +2115,7 @@ impl App {
             && !self.agents_picker.visible
             && no_text_modal
             && self.prompt_view.input.trim().is_empty();
-        if !ctrl && !plain_fallback {
+        if !ctrl && !alt && !plain_fallback {
             return false;
         }
         // Out-of-range digits consume without moving — the split may not

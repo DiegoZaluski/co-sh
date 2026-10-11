@@ -350,6 +350,17 @@ impl App {
 
         let mut disabled_tools = self.internal_tools_view.disabled.clone();
 
+        // Manager mode: while the `/agents` split is OPEN, the MAIN agent
+        // is the session's coordinator (its unfocused `Ctrl+0` target): it
+        // runs with the manager instructions and the manager tool set —
+        // read tools plus `bash_run`, never the workspace-mutating tools.
+        // With the split parked or closed the loop is the plain
+        // normal-mode agent again.
+        let manager_mode = self.agents_split.is_some();
+        if manager_mode {
+            disabled_tools = super::agents_dispatch::manager_disabled_tools(&disabled_tools);
+        }
+
         // Registered MCP servers (Settings screen → setup.json). Cloned
         // into the agent thread; the boot `connect_all` isolates
         // per-server failures, so one bad server never blocks the turn.
@@ -565,6 +576,14 @@ impl App {
                         .with_skills(skills_config.to_skills())
                         .with_mcp_config(mcp_config)
                         .with_effective_context(effective_context);
+                    // Manager mode (the `/agents` split is open): the main
+                    // loop coordinates the panes through `agents_call`
+                    // instead of building — same instructions + tool set
+                    // as the pane-0 manager turn.
+                    if manager_mode {
+                        harness =
+                            harness.with_instructions(cosh::harness::core::INSTRUCTIONS_MANAGER);
+                    }
 
                     // The decision-model audit seam (`harness::checkup`),
                     // attached over the SHARED decision daemon: the model

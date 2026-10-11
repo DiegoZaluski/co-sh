@@ -16,10 +16,23 @@ pub(super) fn init_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stdout
     )?;
     // Enable keyboard enhancement on all platforms (Windows Terminal + Kitty protocol)
     // This allows detecting modifier+key combinations like Ctrl+Backspace.
+    //
+    // REPORT_ALL_KEYS_AS_ESCAPE_CODES rides in the SAME push (one push, one
+    // pop — the restore path below pops exactly once): without it, keys
+    // with no legacy byte encoding never arrive with their modifiers.
+    // `Ctrl+0` is the prime case — it has no ASCII control code, so plain
+    // terminals deliver a bare `0` (indistinguishable from typing) or the
+    // emulator eats it for zoom; with the full protocol, supporting
+    // terminals send `CSI 48;5u`, which crossterm parses as `Char('0')` +
+    // CONTROL and the /agents pane hotkeys work as documented. Terminals
+    // without Kitty-protocol support ignore the request and behave exactly
+    // as before (the plain-digit fallback in `focus_pane_hotkey` still
+    // applies while the draft is empty).
     let _ = crossterm::execute!(
         stdout,
         crossterm::event::PushKeyboardEnhancementFlags(
-            crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+            crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | crossterm::event::KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
         ),
     );
     let backend = CrosstermBackend::new(stdout);

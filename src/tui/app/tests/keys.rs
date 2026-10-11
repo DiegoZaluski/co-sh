@@ -49,7 +49,8 @@ async fn toggled_mode_persists_and_restores_for_new_sessions() {
 /// ignore control-modified chars, so the key was consumed with no visible
 /// effect and — with the picker open — the user could not leave picker mode
 /// via pane jumps either). The hotkeys are sovereign: with the split open,
-/// `Ctrl+0..Ctrl+9` focus a pane and the picker's own marks stay untouched.
+/// `Ctrl+0` unfocuses (the MAIN agent) and `Ctrl+1..Ctrl+9` focus a pane,
+/// while the picker's own marks stay untouched.
 #[tokio::test]
 async fn ctrl_digit_switches_pan_even_with_the_agents_picker_open() {
     let _home = HOME_LOCK.lock();
@@ -66,31 +67,39 @@ async fn ctrl_digit_switches_pan_even_with_the_agents_picker_open() {
     app.agents_picker.open();
     assert!(app.agents_picker.visible);
 
-    // Ctrl+2 → pane 2 (kilo). The split FOCUSES the pane; the mode never
-    // changes and the picker stays exactly as the user left it.
-    app.process_key_event(mod_key(KeyCode::Char('2'), KeyModifiers::CONTROL))
+    // Ctrl+3 → the third pane (kilo, 1-based). The split FOCUSES the
+    // pane; the mode never changes and the picker stays exactly as the
+    // user left it.
+    app.process_key_event(mod_key(KeyCode::Char('3'), KeyModifiers::CONTROL))
         .unwrap();
-    assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(2));
+    assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(Some(2)));
     assert!(app.agents_picker.visible, "the picker must stay open");
-    assert!(app.agents_picker.filter.is_empty(), "the filter must not eat the digit");
+    assert!(
+        app.agents_picker.filter.is_empty(),
+        "the filter must not eat the digit"
+    );
     assert_eq!(
         app.agents_picker.selected_names(),
         Vec::<String>::new(),
         "marks must not be touched by a pane hotkey"
     );
-    assert!(app.agents_split.is_some(), "the split stays (mode never changes)");
+    assert!(
+        app.agents_split.is_some(),
+        "the split stays (mode never changes)"
+    );
 
-    // Ctrl+0 → the daemon pane, still through the open picker.
+    // Ctrl+0 → UNFOCUSES every pane (the MAIN agent), still through the
+    // open picker.
     app.process_key_event(mod_key(KeyCode::Char('0'), KeyModifiers::CONTROL))
         .unwrap();
-    assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(0));
+    assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(None));
     assert!(app.agents_picker.visible);
 
     // A digit the split does NOT own is consumed inertly: no pane moves,
     // the picker is undisturbed.
     app.process_key_event(mod_key(KeyCode::Char('7'), KeyModifiers::CONTROL))
         .unwrap();
-    assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(0));
+    assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(None));
     assert!(app.agents_picker.visible);
 }
 
@@ -110,7 +119,7 @@ async fn ctrl_digit_switches_pane_through_the_slash_menu() {
     app.slash_menu.visible = true;
     app.process_key_event(mod_key(KeyCode::Char('1'), KeyModifiers::CONTROL))
         .unwrap();
-    assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(1));
+    assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(Some(0)));
     assert!(app.slash_menu.visible, "the menu stays open, unfiltered");
     assert!(app.prompt_view.input.is_empty());
 }
@@ -129,18 +138,20 @@ async fn plain_digit_targets_the_pane_only_with_an_empty_draft() {
         vec!["cosh".into(), "claude".into(), "kilo".into()],
     ));
 
-    // Empty draft: plain '2' jumps to pane 2.
+    // Empty draft: plain '2' jumps to the second pane (1-based).
     app.process_key_event(mod_key(KeyCode::Char('2'), KeyModifiers::NONE))
         .unwrap();
-    assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(2));
-    assert!(app.prompt_view.input.trim().is_empty(), "the pane jump never types");
+    assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(Some(1)));
+    assert!(
+        app.prompt_view.input.trim().is_empty(),
+        "the pane jump never types"
+    );
 
     // A second plain digit with the draft filled differentiates: it types.
-    app.prompt_view
-        .handle_paste("hel");
+    app.prompt_view.handle_paste("hel");
     app.process_key_event(mod_key(KeyCode::Char('2'), KeyModifiers::NONE))
         .unwrap();
-    assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(2));
+    assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(Some(1)));
     // The draft keeps both the paste and the typed digit.
     assert_eq!(app.prompt_view.input.trim(), "hel2");
 }
@@ -695,5 +706,308 @@ async fn esc_over_expanded_subagent_folds_and_stays_in_session_when_idle() {
     assert!(
         !matches!(app.mode(), AppMode::Session),
         "with the list active, Esc falls through to the leave-to-Home path"
+    );
+}
+
+/// `Ctrl+0` is the MAIN-agent hotkey: it unfocuses every /agents pane, so
+/// the shared prompt targets the normal-mode loop (running as manager
+/// while the split is open). This pins the CSI-u delivery shape
+/// (`Char('0')` + CONTROL — what kitty-protocol terminals send once the
+/// app negotiates `REPORT_ALL_KEYS_AS_ESCAPE_CODES`): the focus MUST
+/// clear even with a draft typed, and a pane hotkey must re-focus after.
+#[tokio::test]
+async fn ctrl_zero_unfocuses_every_pane_to_the_main_agent() {
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    app.agents_split = Some(crate::routes::session::agents_split::AgentsSplitState::new(
+        vec!["claude".into(), "kilo".into()],
+    ));
+
+    // Focus the second pane first (1-based), with a draft typed: the
+    // Ctrl shape never consults the draft.
+    app.process_key_event(mod_key(KeyCode::Char('2'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(Some(1)));
+    app.prompt_view.handle_paste("do the thing");
+
+    // Ctrl+0 clears the focus — the draft is untouched (it now belongs to
+    // the main agent's next turn).
+    app.process_key_event(mod_key(KeyCode::Char('0'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(None));
+    assert_eq!(app.prompt_view.input.trim(), "do the thing");
+
+    // A pane hotkey re-focuses from the unfocused state.
+    app.process_key_event(mod_key(KeyCode::Char('1'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(Some(0)));
+}
+
+/// Legacy terminals have no byte encoding for `Ctrl+0` — it arrives as a
+/// plain `0`. The plain-digit fallback must still unfocus while the draft
+/// is empty (picker closed, no modal): that is the ONLY shape those
+/// terminals can deliver.
+#[tokio::test]
+async fn plain_zero_unfocuses_with_an_empty_draft() {
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    app.agents_split = Some(crate::routes::session::agents_split::AgentsSplitState::new(
+        vec!["claude".into(), "kilo".into()],
+    ));
+    assert!(!app.agents_picker.visible);
+
+    // Plain '0' with an empty draft unfocuses (fresh splits start on the
+    // first pane).
+    assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(Some(0)));
+    app.process_key_event(mod_key(KeyCode::Char('0'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(None));
+    assert!(
+        app.prompt_view.input.trim().is_empty(),
+        "the unfocus never types"
+    );
+
+    // Plain '1' re-focuses the first pane (1-based).
+    app.process_key_event(mod_key(KeyCode::Char('1'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(Some(0)));
+}
+
+/// A plain `0` with a non-empty draft is TYPING, not a hotkey: the focus
+/// must not move and the digit lands in the prompt.
+#[tokio::test]
+async fn plain_zero_types_when_the_draft_is_not_empty() {
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    app.agents_split = Some(crate::routes::session::agents_split::AgentsSplitState::new(
+        vec!["claude".into(), "kilo".into()],
+    ));
+
+    app.prompt_view.handle_paste("hel");
+    app.process_key_event(mod_key(KeyCode::Char('0'), KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(Some(0)));
+    assert_eq!(app.prompt_view.input.trim(), "hel0");
+}
+
+/// `Ctrl+0` stays sovereign through the open /agents picker (like every
+/// other pane hotkey): it unfocuses without touching the picker's marks.
+#[tokio::test]
+async fn ctrl_zero_unfocuses_through_the_open_picker() {
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    app.agents_split = Some(crate::routes::session::agents_split::AgentsSplitState::new(
+        vec!["cosh".into(), "claude".into(), "kilo".into()],
+    ));
+    app.agents_picker.open();
+    assert!(app.agents_picker.visible);
+
+    app.process_key_event(mod_key(KeyCode::Char('0'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(None));
+    assert!(app.agents_picker.visible, "the picker must stay open");
+    assert!(
+        app.agents_picker.filter.is_empty(),
+        "the filter must not eat the digit"
+    );
+}
+
+/// ESC with NO pane focused targets the MAIN loop: while it runs, ESC
+/// stops it (the shared stop signal) and the split stays open — it must
+/// NOT park the mode out from under the running turn.
+#[tokio::test]
+async fn esc_with_main_focused_stops_the_loop_instead_of_parking() {
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    app.agents_split = Some(crate::routes::session::agents_split::AgentsSplitState::new(
+        vec!["claude".into(), "kilo".into()],
+    ));
+    app.process_key_event(mod_key(KeyCode::Char('0'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(None));
+    app.state.status = crate::types::SessionStatus::Working;
+
+    app.process_key_event(mod_key(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+
+    assert!(
+        app.stop_signal.load(std::sync::atomic::Ordering::Relaxed),
+        "ESC with the main agent focused must interrupt the main loop"
+    );
+    assert!(
+        app.agents_split.is_some(),
+        "the split must stay open — parking would hide the mode mid-turn"
+    );
+}
+
+/// ESC with NO pane focused and everything idle parks the split, exactly
+/// like the idle focused-pane path.
+#[tokio::test]
+async fn esc_with_main_focused_and_idle_parks_the_split() {
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    app.agents_split = Some(crate::routes::session::agents_split::AgentsSplitState::new(
+        vec!["claude".into(), "kilo".into()],
+    ));
+    app.process_key_event(mod_key(KeyCode::Char('0'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.state.status, crate::types::SessionStatus::Idle);
+
+    app.process_key_event(mod_key(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+
+    assert!(
+        app.agents_split.is_none(),
+        "idle ESC with the main agent focused leaves the mode"
+    );
+    assert!(
+        app.parked_agents_split.is_some(),
+        "the pane set parks (nothing is destroyed)"
+    );
+}
+
+/// `Alt+0..Alt+9` are exact aliases of the `Ctrl` pane hotkeys — the
+/// reliable form on terminals where Ctrl+digits have no byte encoding or
+/// are eaten by the emulator. `Alt+0` unfocuses (the MAIN agent),
+/// `Alt+1..` focus the numbered pane (1-based), never consulting the
+/// draft, the picker or the modals.
+#[tokio::test]
+async fn alt_digits_mirror_the_ctrl_pane_hotkeys() {
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    app.agents_split = Some(crate::routes::session::agents_split::AgentsSplitState::new(
+        vec!["claude".into(), "kilo".into()],
+    ));
+
+    // Alt+2 focuses the second pane even with a draft typed.
+    app.prompt_view.handle_paste("do the thing");
+    app.process_key_event(mod_key(KeyCode::Char('2'), KeyModifiers::ALT))
+        .unwrap();
+    assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(Some(1)));
+    assert_eq!(app.prompt_view.input.trim(), "do the thing");
+
+    // Alt+0 unfocuses to the main agent; the draft is untouched.
+    app.process_key_event(mod_key(KeyCode::Char('0'), KeyModifiers::ALT))
+        .unwrap();
+    assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(None));
+    assert_eq!(app.prompt_view.input.trim(), "do the thing");
+
+    // Alt+1 re-focuses the first pane from the unfocused state.
+    app.process_key_event(mod_key(KeyCode::Char('1'), KeyModifiers::ALT))
+        .unwrap();
+    assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(Some(0)));
+}
+
+/// The Alt hotkeys stay sovereign through the open /agents picker: the
+/// picker's marks and filter are untouched.
+#[tokio::test]
+async fn alt_digit_focuses_through_the_open_picker() {
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    app.agents_split = Some(crate::routes::session::agents_split::AgentsSplitState::new(
+        vec!["cosh".into(), "claude".into(), "kilo".into()],
+    ));
+    app.agents_picker.open();
+    assert!(app.agents_picker.visible);
+
+    app.process_key_event(mod_key(KeyCode::Char('3'), KeyModifiers::ALT))
+        .unwrap();
+    assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(Some(2)));
+    assert!(app.agents_picker.visible, "the picker must stay open");
+    assert!(
+        app.agents_picker.filter.is_empty(),
+        "the filter must not eat the digit"
+    );
+    assert_eq!(
+        app.agents_picker.selected_names(),
+        Vec::<String>::new(),
+        "marks must not be touched by a pane hotkey"
+    );
+}
+
+/// `Ctrl+Alt+digit` is the AltGr character signature on Windows consoles,
+/// never a hotkey: neither the Ctrl shape (ALT excluded) nor the Alt
+/// shape (CONTROL excluded) may fire — the focus stays put.
+#[tokio::test]
+async fn ctrl_alt_digit_is_not_a_pane_hotkey() {
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    app.agents_split = Some(crate::routes::session::agents_split::AgentsSplitState::new(
+        vec!["claude".into(), "kilo".into()],
+    ));
+
+    app.process_key_event(mod_key(
+        KeyCode::Char('2'),
+        KeyModifiers::CONTROL | KeyModifiers::ALT,
+    ))
+    .unwrap();
+    assert_eq!(
+        app.agents_split.as_ref().map(|s| s.focused),
+        Some(Some(0)),
+        "the AltGr shape must leave the focus alone"
+    );
+    app.process_key_event(mod_key(
+        KeyCode::Char('0'),
+        KeyModifiers::CONTROL | KeyModifiers::ALT,
+    ))
+    .unwrap();
+    assert_eq!(
+        app.agents_split.as_ref().map(|s| s.focused),
+        Some(Some(0)),
+        "the AltGr shape must never unfocus either"
+    );
+}
+
+/// The Alt alias is EXACT: `Alt+Shift+digit` (what shift-reporting
+/// terminals emit) must not jump panes — only a bare Alt+digit is a
+/// hotkey, so the combination falls through to normal handling with the
+/// focus untouched.
+#[tokio::test]
+async fn alt_shift_digit_is_not_a_pane_hotkey() {
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    app.agents_split = Some(crate::routes::session::agents_split::AgentsSplitState::new(
+        vec!["claude".into(), "kilo".into()],
+    ));
+
+    app.process_key_event(mod_key(
+        KeyCode::Char('2'),
+        KeyModifiers::ALT | KeyModifiers::SHIFT,
+    ))
+    .unwrap();
+    assert_eq!(
+        app.agents_split.as_ref().map(|s| s.focused),
+        Some(Some(0)),
+        "Alt+Shift+digit must leave the focus alone"
     );
 }

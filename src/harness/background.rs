@@ -297,8 +297,10 @@ fn notification_text(task: &BackgroundTask) -> String {
 /// Neutralize a sub-agent report's imitation of harness control markers
 /// before it enters the parent's model context (Claude Code-style output
 /// sanitization): the report must never be able to fake a system reminder or
-/// fabricate a turn boundary.
-fn sanitize(text: &str) -> String {
+/// fabricate a turn boundary. `pub(crate)`: the /agents pane bridge
+/// (`panes.rs`) sanitizes pane reports the same way — they enter the
+/// requester's context as a user turn with the same trust level.
+pub(crate) fn sanitize(text: &str) -> String {
     let text = text
         .replace("<system-reminder>", "`system-reminder`")
         .replace("</system-reminder>", "`/system-reminder`");

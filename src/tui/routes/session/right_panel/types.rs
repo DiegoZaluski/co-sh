@@ -95,6 +95,10 @@ pub(crate) enum SubagentActivityLine {
     /// pane's prompt echoes through the pane input instead, so a live
     /// timeline never carries one.
     UserMessage { index: usize, text: String },
+    /// One markdown block of an AGENT's input to the pane — a message
+    /// another agent sent through `agents_call`. Rendered like any other
+    /// message block; the RAIL distinguishes it from the user's echo.
+    AgentMessage { index: usize, text: String },
     /// One blank breathing row emitted right after a user message (the
     /// gap between the user's input and the agent's output). Derived at
     /// render time — never stored — and only when something FOLLOWS the
@@ -147,7 +151,8 @@ impl SubagentActivityLine {
             SubagentActivityLine::Gap => 1,
             SubagentActivityLine::Message { text, .. }
             | SubagentActivityLine::Thought { text, .. }
-            | SubagentActivityLine::UserMessage { text, .. } => {
+            | SubagentActivityLine::UserMessage { text, .. }
+            | SubagentActivityLine::AgentMessage { text, .. } => {
                 activity_block_height(text, wrap_w)
             }
         }
@@ -205,6 +210,17 @@ pub(crate) fn activity_lines(
                 }
                 out.push(SubagentActivityLine::UserMessage { index, text: clean });
             }
+            SubagentTimelineEntry::AgentMessage { text } => {
+                // An agent's input to the pane (`agents_call`): rendered like
+                // any other message block — the RAIL distinguishes it (a
+                // distinct tone from the user's), never a prefix or tint.
+                // Same empty-guard as the other blocks.
+                let clean = sanitize_subagent_text(text);
+                if clean.trim().is_empty() {
+                    continue;
+                }
+                out.push(SubagentActivityLine::AgentMessage { index, text: clean });
+            }
             SubagentTimelineEntry::Tool(call) => {
                 let name = tool_kind_name(call.kind);
                 let detail = call.detail.clone().unwrap_or_else(|| call.title.clone());
@@ -233,17 +249,21 @@ pub(crate) fn activity_lines(
             }
         }
     }
-    // The breathing row: one blank line after each user message that has
-    // visible content AFTER it — the gap between the user's input and the
-    // agent's output. A trailing user message gets NONE: a gap with
-    // nothing after it would reserve an unpainted row, which the
-    // deterministic fuzz invariant forbids.
+    // The breathing row: one blank line after each INPUT message (the
+    // user's echo or an agent's `agents_call` input) that has visible
+    // content AFTER it — the gap between the input and the pane's output.
+    // A trailing input gets NONE: a gap with nothing after it would
+    // reserve an unpainted row, which the deterministic fuzz invariant
+    // forbids.
     let mut gapped = Vec::with_capacity(out.len() + 4);
     let last = out.len().saturating_sub(1);
     for (i, line) in out.into_iter().enumerate() {
-        let is_user = matches!(line, SubagentActivityLine::UserMessage { .. });
+        let is_input = matches!(
+            line,
+            SubagentActivityLine::UserMessage { .. } | SubagentActivityLine::AgentMessage { .. }
+        );
         gapped.push(line);
-        if is_user && i < last {
+        if is_input && i < last {
             gapped.push(SubagentActivityLine::Gap);
         }
     }
@@ -861,6 +881,11 @@ pub(crate) enum SubagentTimelineEntry {
     /// (`SubagentEvent::UserMessage`): a live pane's prompt echoes through
     /// the pane input, so a live timeline never carries one.
     UserMessage { text: String },
+    /// A chunk (or run) of an AGENT's input to the pane — a message another
+    /// agent sent through `agents_call` (live-only, like `UserMessage`).
+    /// Rendered with the agent rail (a distinct tone from the user's) so
+    /// the user sees who is speaking.
+    AgentMessage { text: String },
     /// A tool call: announced at its arrival position, patched in place by
     /// `ToolCallUpdate` events with the same id.
     Tool(SubagentToolCall),
@@ -993,6 +1018,9 @@ pub(crate) enum StreamKind {
     Thought,
     /// The user's own message (history replay only).
     User,
+    /// An AGENT's input to the pane (`agents_call` — live only). Coalesces
+    /// like the other input streams; renders with the agent rail.
+    AgentInput,
 }
 
 impl SubagentActivity {
@@ -1016,6 +1044,9 @@ impl SubagentActivity {
             }
             SubagentEvent::UserMessage { text } => {
                 self.coalesce_stream_chunk(text, StreamKind::User)
+            }
+            SubagentEvent::AgentMessage { text } => {
+                self.coalesce_stream_chunk(text, StreamKind::AgentInput)
             }
             SubagentEvent::ToolCall {
                 id,
@@ -1282,6 +1313,13 @@ impl SubagentActivity {
                     *acc = bounded_tail(acc, SUBAGENT_TEXT_ENTRY_BYTES);
                     return true;
                 }
+                SubagentTimelineEntry::AgentMessage { text: acc }
+                    if kind == StreamKind::AgentInput =>
+                {
+                    acc.push_str(text);
+                    *acc = bounded_tail(acc, SUBAGENT_TEXT_ENTRY_BYTES);
+                    return true;
+                }
                 // Turn boundary: nothing older may absorb this chunk.
                 SubagentTimelineEntry::Tool(_) | SubagentTimelineEntry::Plan { .. } => break,
                 // The opposite stream kind: keep scanning back.
@@ -1308,6 +1346,9 @@ impl SubagentActivity {
                 text: bounded_tail(text, SUBAGENT_TEXT_ENTRY_BYTES),
             },
             StreamKind::User => SubagentTimelineEntry::UserMessage {
+                text: bounded_tail(text, SUBAGENT_TEXT_ENTRY_BYTES),
+            },
+            StreamKind::AgentInput => SubagentTimelineEntry::AgentMessage {
                 text: bounded_tail(text, SUBAGENT_TEXT_ENTRY_BYTES),
             },
         });

@@ -2440,6 +2440,9 @@ async fn capture_real_opencode_stream_multi_tool() {
             SubagentEvent::UserMessage { text } => serde_json::json!({
                 "kind": "UserMessage", "text": text,
             }),
+            SubagentEvent::AgentMessage { text } => serde_json::json!({
+                "kind": "AgentMessage", "text": text,
+            }),
             SubagentEvent::Message { text } => serde_json::json!({
                 "kind": "Message", "text": text,
             }),
@@ -2558,6 +2561,9 @@ async fn capture_real_opencode_stream() {
         let shape = match &event {
             SubagentEvent::UserMessage { text } => serde_json::json!({
                 "kind": "UserMessage", "text": text,
+            }),
+            SubagentEvent::AgentMessage { text } => serde_json::json!({
+                "kind": "AgentMessage", "text": text,
             }),
             SubagentEvent::Message { text } => serde_json::json!({
                 "kind": "Message", "text": text,

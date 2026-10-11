@@ -1728,7 +1728,7 @@ async fn a_prompt_to_a_rehydrating_pane_is_refused_with_a_toast() {
 
     // Focus pane 1 (idle, not rehydrating): the dispatch runs.
     if let Some(split) = app.agents_split.as_mut() {
-        split.focused = 1;
+        split.focused = Some(1);
     }
     app.toast_state.current = None;
     app.dispatch_to_agents_split("go".to_string());

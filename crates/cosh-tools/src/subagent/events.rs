@@ -205,6 +205,17 @@ pub enum SubagentEvent {
         /// The streamed text chunk.
         text: String,
     },
+    /// A chunk of an AGENT's input to the pane — a message another agent
+    /// sent through `agents_call` (the main agent's harness or the manager
+    /// pane), not the human user. Live-only: the TUI applies it when it
+    /// dispatches the pane turn, and the pane renders it with a distinct
+    /// rail so the user sees WHO is speaking (history replay never
+    /// produces this variant — the ACP session/load stream only carries
+    /// real user chunks).
+    AgentMessage {
+        /// The agent's input text.
+        text: String,
+    },
     /// A chunk of the agent's response text (the stream the TUI already
     /// renders as the sub-agent's message).
     Message {

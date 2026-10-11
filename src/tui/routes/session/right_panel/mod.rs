@@ -1602,6 +1602,7 @@ fn draw_activity_lines(
             }
             SubagentActivityLine::Message { index, text }
             | SubagentActivityLine::UserMessage { index, text }
+            | SubagentActivityLine::AgentMessage { index, text }
             | SubagentActivityLine::Thought { index, text } => {
                 // Whole markdown blocks: a PERSISTENT per-entry renderer
                 // (chat-style, like the streaming body's `tail_md`) feeds a

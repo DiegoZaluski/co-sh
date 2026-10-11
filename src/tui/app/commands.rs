@@ -4,6 +4,7 @@ use std::sync::atomic::Ordering;
 
 use super::App;
 use super::BUG_REPORT_URL;
+use super::agents_dispatch::either_split;
 use crate::session_store::format_session_timestamp;
 use crate::ui::agents_picker::AgentPick;
 use crate::ui::dialogs::DialogType;
@@ -15,9 +16,10 @@ impl App {
     /// agent so two Claude panes are two INDEPENDENT sessions (the
     /// per-pane binding lands in task "binding"). The `cosh` daemon pane is
     /// NOT inserted automatically: the Cosh Manager belongs to the user's
-    /// own split choice (Ctrl+0 checks whether pane 0 is the daemon before
-    /// contacting it), so only an explicitly marked `cosh` entry creates
-    /// its block. Opening the split does NOT spawn any session — panes
+    /// own split choice: only an explicitly marked `cosh` entry creates
+    /// its block. The MAIN agent needs no pane: `Ctrl+0` unfocuses every
+    /// pane and the shared prompt targets the normal-mode loop (running
+    /// as manager while the split is open). Opening the split does NOT spawn any session — panes
     /// start idle and only receive work when the shared prompt is
     /// submitted.
     pub(super) fn open_agents_split(&mut self, picks: Vec<AgentPick>) {
@@ -98,6 +100,10 @@ impl App {
             .current_session()
             .and_then(|s| s.agents_panes.clone());
         self.save_agents_metadata(panes, false);
+        // The registry follows the panes into the PARKED slot unchanged:
+        // the split keeps serving `agents_call` with the mode closed (the
+        // main agent coordinates while the user works the normal view).
+        self.sync_agents_pane_registry();
         // The mirrors follow the panes into the parked slot: the stream
         // keeps landing in the shared list (same routing as live panes).
         self.sync_agents_pane_mirrors();
@@ -106,7 +112,7 @@ impl App {
 
     /// Re-attach the parked split (the `/agents` re-entry): the SAME pane
     /// objects return to the screen — running turns surface mid-stream,
-    /// drafts and bound sessions are exactly where the user left them.
+    /// timelines and bound sessions are exactly where the user left them.
     /// Returns `true` when a parked split took the screen (the caller then
     /// skips opening the picker).
     pub(super) fn attach_parked_agents_split(&mut self) -> bool {
@@ -117,6 +123,10 @@ impl App {
                 .current_session()
                 .and_then(|s| s.agents_panes.clone());
             self.save_agents_metadata(panes, true);
+            // The registry follows the panes back onto the screen (same
+            // set it parked with — the sync is a re-affirmation, matching
+            // the mirrors' one below).
+            self.sync_agents_pane_registry();
             // A parked set rebuilt from metadata (session switch or app
             // restart) carries bound panes with empty timelines — the
             // rehydrate passes fire only now that the panes take the
@@ -145,6 +155,37 @@ impl App {
         self.prompt_view.focus();
     }
 
+    /// Mirror the /agents pane set into the harness-side `agents_call`
+    /// registry: each pane's registry id (the agent name, `name#k` for
+    /// same-CLI duplicates; the manager pane is never addressable) becomes
+    /// a [`cosh::harness::panes::PaneDescriptor`], with the pane's bound
+    /// state as the context block reports it. Called on EVERY split
+    /// lifecycle change — open, replace, park, re-attach, close — so the
+    /// registry tracks the LIVE or PARKED set exactly (a parked split keeps
+    /// serving `agents_call`: the main agent coordinates with the mode
+    /// closed). `set_panes` fails queued/orphaned requests of panes that
+    /// left the set, so a removed pane never strands a waiter.
+    pub(super) fn sync_agents_pane_registry(&mut self) {
+        let panes: Vec<cosh::harness::panes::PaneDescriptor> = either_split(&self.agents_split, &self.parked_agents_split)
+            .map(|split| {
+                split
+                    .panes
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, p)| {
+                        let id = split.pane_registry_id(i)?;
+                        Some(cosh::harness::panes::PaneDescriptor {
+                            id,
+                            agent: p.agent.clone(),
+                            bound: p.session_id.is_some(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        cosh::harness::panes::set_panes(panes);
+    }
+
     /// Mirror the `/agents` panes into the right panel's SHARED subagent
     /// list: every pane of the live OR parked split owns one stable window
     /// (opened on demand, pane-index routed — see
@@ -154,11 +195,7 @@ impl App {
     /// that vanished from the set (a fresh confirm with fewer panes) drops
     /// its mirror.
     pub(super) fn sync_agents_pane_mirrors(&mut self) {
-        let Some(split) = self
-            .agents_split
-            .as_ref()
-            .or(self.parked_agents_split.as_ref())
-        else {
+        let Some(split) = either_split(&self.agents_split, &self.parked_agents_split) else {
             return;
         };
         self.state
@@ -183,11 +220,7 @@ impl App {
     /// seals, the spinner stops. Resolves the live-or-parked split like the
     /// event routing does.
     pub(super) fn finish_agents_pane_mirror(&mut self, pane: usize, output: &str, failed: bool) {
-        let Some(split) = self
-            .agents_split
-            .as_ref()
-            .or(self.parked_agents_split.as_ref())
-        else {
+        let Some(split) = either_split(&self.agents_split, &self.parked_agents_split) else {
             return;
         };
         let Some(p) = split.panes.get(pane) else {
@@ -278,6 +311,10 @@ impl App {
             .clone()
             .map(crate::routes::session::agents_split::AgentsSplitState::new);
         let mode_open = self.agents_split.is_some();
+        // The harness-side registry follows the pane set on EVERY change
+        // (open, replace, close) — the `agents_call` tool's addressable ids
+        // and the context block are rebuilt from it.
+        self.sync_agents_pane_registry();
         self.save_agents_metadata(panes, mode_open);
         // A fresh pane set mirrors into the shared subagent list (the sync
         // also prunes mirrors of panes the new set no longer has). `None`
@@ -340,15 +377,8 @@ impl App {
     /// `AgentsPickerAction::Confirmed` / `set_agents_split`; an out-of-range
     /// index is silently ignored.
     pub(crate) fn bind_agents_pane_session(&mut self, pane: usize, session_id: String) {
-        let agent_name = self
-            .agents_split
-            .as_ref()
+        let agent_name = either_split(&self.agents_split, &self.parked_agents_split)
             .and_then(|split| split.panes.get(pane))
-            .or_else(|| {
-                self.parked_agents_split
-                    .as_ref()
-                    .and_then(|split| split.panes.get(pane))
-            })
             .map(|p| p.agent.clone());
         let Some(agent_name) = agent_name else {
             return;
@@ -381,6 +411,9 @@ impl App {
         // already in the cache, hence the explicit save.
         let session = session.clone();
         self.session_store.save_session(&session);
+        // The registry descriptor's `bound` flag follows the promotion: the
+        // context block now reports this pane as a bound agent session.
+        self.sync_agents_pane_registry();
     }
 
     /// Manual compaction has no running agent connector to inherit in auto
@@ -861,7 +894,7 @@ impl App {
             // Re-entry contract: a PARKED split (Esc'd out with the agent set
             // kept) re-attaches verbatim — the picker step is skipped
             // entirely because the user already picked and the panes keep
-            // their streaming turns, drafts and bound sessions.
+            // their streaming turns, timelines and bound sessions.
             if !self.attach_parked_agents_split() {
                 // Fresh entry (or a previously DISMISSED manager): open the
                 // picker from scratch, but pre-mark the rows the session's
