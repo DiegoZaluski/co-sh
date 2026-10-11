@@ -95,6 +95,11 @@ pub(crate) enum SubagentActivityLine {
     /// pane's prompt echoes through the pane input instead, so a live
     /// timeline never carries one.
     UserMessage { index: usize, text: String },
+    /// One blank breathing row emitted right after a user message (the
+    /// gap between the user's input and the agent's output). Derived at
+    /// render time — never stored — and only when something FOLLOWS the
+    /// user message: a trailing gap would reserve an unpainted row.
+    Gap,
 }
 
 /// The short, lowercase tool marker shown before the title (user decision:
@@ -139,6 +144,7 @@ impl SubagentActivityLine {
             | SubagentActivityLine::Plan { rows, .. } => {
                 u16::try_from(rows.len().max(1)).unwrap_or(u16::MAX)
             }
+            SubagentActivityLine::Gap => 1,
             SubagentActivityLine::Message { text, .. }
             | SubagentActivityLine::Thought { text, .. }
             | SubagentActivityLine::UserMessage { text, .. } => {
@@ -227,7 +233,21 @@ pub(crate) fn activity_lines(
             }
         }
     }
-    out
+    // The breathing row: one blank line after each user message that has
+    // visible content AFTER it — the gap between the user's input and the
+    // agent's output. A trailing user message gets NONE: a gap with
+    // nothing after it would reserve an unpainted row, which the
+    // deterministic fuzz invariant forbids.
+    let mut gapped = Vec::with_capacity(out.len() + 4);
+    let last = out.len().saturating_sub(1);
+    for (i, line) in out.into_iter().enumerate() {
+        let is_user = matches!(line, SubagentActivityLine::UserMessage { .. });
+        gapped.push(line);
+        if is_user && i < last {
+            gapped.push(SubagentActivityLine::Gap);
+        }
+    }
+    gapped
 }
 
 /// Visual rows one `Message`/`Thought` block occupies at `wrap_w`: the
@@ -5782,6 +5802,75 @@ mod tests {
             raw_input: Some(serde_json::json!({"path": "f.rs"})),
         });
         assert_eq!(activity_visual_rows(&activity, 60), 1);
+    }
+
+    /// The breathing row: `activity_lines` emits exactly one `Gap` after
+    /// each user message that has visible content after it — and NONE
+    /// after a trailing user message (an unpainted reserved row would
+    /// break the deterministic fuzz invariant).
+    #[test]
+    fn activity_lines_gaps_after_user_messages_but_not_trailing() {
+        let mut activity = SubagentActivity::default();
+        activity.apply(&SubagentEvent::UserMessage {
+            text: "what changed?".to_string(),
+        });
+        activity.apply(&SubagentEvent::Message {
+            text: "the answer".to_string(),
+        });
+
+        let lines = activity_lines(&activity, 60);
+        assert!(
+            matches!(&lines[0], SubagentActivityLine::UserMessage { .. }),
+            "user block first: {lines:?}"
+        );
+        assert_eq!(
+            lines[1],
+            SubagentActivityLine::Gap,
+            "one breathing row between input and output"
+        );
+        assert!(
+            matches!(&lines[2], SubagentActivityLine::Message { .. }),
+            "agent reply follows the gap: {lines:?}"
+        );
+
+        // A mid-transcript user message is gapped too (two turns), while
+        // the LAST user message gets no trailing gap. The tool call keeps
+        // the two user turns apart — consecutive user chunks would MERGE
+        // into one entry (the backscan coalesce), erasing the turn
+        // boundary the gap has to sit behind.
+        let mut activity = SubagentActivity::default();
+        activity.apply(&SubagentEvent::UserMessage {
+            text: "first".to_string(),
+        });
+        activity.apply(&SubagentEvent::ToolCall {
+            id: "c1".to_string(),
+            title: "t".to_string(),
+            kind: ToolKind::Read,
+            status: ToolCallStatus::Completed,
+            raw_input: Some(serde_json::json!({"path": "f.rs"})),
+        });
+        activity.apply(&SubagentEvent::Message {
+            text: "reply".to_string(),
+        });
+        activity.apply(&SubagentEvent::UserMessage {
+            text: "second".to_string(),
+        });
+        let lines = activity_lines(&activity, 60);
+        assert!(
+            matches!(
+                lines.last(),
+                Some(SubagentActivityLine::UserMessage { .. })
+            ),
+            "the trailing user message stays last: {lines:?}"
+        );
+        assert_eq!(
+            lines.iter().filter(|l| matches!(l, SubagentActivityLine::Gap)).count(),
+            1,
+            "only the first user turn is followed by a gap: {lines:?}"
+        );
+
+        // The gap costs exactly one visual row.
+        assert_eq!(SubagentActivityLine::Gap.visual_rows(60), 1);
     }
 
     #[test]

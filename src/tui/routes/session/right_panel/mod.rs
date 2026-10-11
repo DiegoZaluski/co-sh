@@ -1689,6 +1689,12 @@ fn draw_activity_lines(
                     }
                 }
             }
+            SubagentActivityLine::Gap => {
+                // The breathing row between the user's input and the
+                // agent's output: the section's background already painted
+                // it — nothing to draw, no selection region (an empty row
+                // is not content).
+            }
         }
         row += i32::from(line.visual_rows(wrap_w));
     }

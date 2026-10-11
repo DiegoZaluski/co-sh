@@ -930,6 +930,7 @@ fn render_pane(
                 line,
                 index,
                 pane_index,
+                &pane.agent,
                 rect.x + 1,
                 screen_y,
                 wrap_w,
@@ -955,7 +956,9 @@ fn render_pane(
 /// (`Message`/`Thought`) go through the pane's persistent
 /// `SubagentBlockRenderer` (chat-style incremental parsing, scratch-buffer
 /// blit — the exact pattern of the right panel's live window); Tool/Diff/
-/// Plan lines draw with the same marker/glyph styles. Every painted visual
+/// Plan lines draw with the same marker/glyph styles. The replayed user
+/// block additionally wears the prompt input's left `│` rail (see the
+/// `UserMessage` arm). Every painted visual
 /// row is reported as a `TextRegion` labeled with its CONTENT row, so
 /// copy-by-selection reads exactly what is on screen.
 #[allow(clippy::too_many_arguments)]
@@ -964,6 +967,7 @@ fn draw_activity_line(
     line: &SubagentActivityLine,
     index: usize,
     pane_index: usize,
+    agent: &str,
     x: u16,
     y: u16,
     wrap_w: u16,
@@ -1068,9 +1072,11 @@ fn draw_activity_line(
             // Persistent chat-style renderer per (pane, timeline) block —
             // `set_content` re-parses only the streamed tail. Thought is
             // dimmed, exactly like the right panel's mini-chat; the
-            // replayed user block renders at full text color, exactly
-            // like the agent's message (no invented marking).
+            // replayed user block renders at full text color and wears the
+            // prompt input's left `│` rail (painted after each blitted
+            // row, below).
             let dimmed = matches!(line, SubagentActivityLine::Thought { .. });
+            let is_user = matches!(line, SubagentActivityLine::UserMessage { .. });
             let fg = if dimmed { theme.text_muted } else { theme.text };
             let key = format!("{pane_index}:{index}");
             // This block is drawn THIS frame: its cache entry is live (the
@@ -1133,14 +1139,34 @@ fn draw_activity_line(
                     .collect();
                 let trimmed = text_from_cell_row(&row_cells, wrap_w as usize);
                 if !trimmed.is_empty() {
+                    let region_text = if is_user {
+                        format!("│ {trimmed}")
+                    } else {
+                        trimmed
+                    };
                     regions.push(TextRegion::one_row(
                         i32::from(content_row.saturating_add(sy)),
                         x,
                         x + wrap_w,
-                        trimmed,
+                        region_text,
                     ));
                 }
+                if is_user {
+                    // The prompt input's left rail, in the pane agent's
+                    // brand color — the pane's echo of the chat's
+                    // user-message box, one glyph, no more chrome.
+                    if let Some(rail) = buf.cell_mut((x - 1, y + di as u16)) {
+                        rail.set_char('│');
+                        rail.set_style(brand_fg(agent, 0.0, theme, focused));
+                    }
+                }
             }
+        }
+        SubagentActivityLine::Gap => {
+            // The breathing row between the user's input and the agent's
+            // output: the pane's background fill already painted it —
+            // nothing to draw, no selection region (an empty row is not
+            // content).
         }
     }
 }
