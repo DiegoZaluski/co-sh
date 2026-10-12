@@ -125,7 +125,7 @@ impl Default for Appearance {
             theme: String::new(),
             bell_enabled: true,
             transparent_background: false,
-            anim_enabled: true,
+            anim_enabled: false,
         }
     }
 }
