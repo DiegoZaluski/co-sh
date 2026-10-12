@@ -249,12 +249,17 @@ pub(crate) fn activity_lines(
             }
         }
     }
-    // The breathing row: one blank line after each INPUT message (the
-    // user's echo or an agent's `agents_call` input) that has visible
-    // content AFTER it — the gap between the input and the pane's output.
-    // A trailing input gets NONE: a gap with nothing after it would
-    // reserve an unpainted row, which the deterministic fuzz invariant
-    // forbids.
+    // The breathing rows around INPUT messages (the user's echo or an
+    // agent's `agents_call` input): one blank line AFTER each input that
+    // has visible content after it (the gap between the input and the
+    // pane's output), and one blank line BEFORE each input that follows
+    // other content (the gap between the previous answer and the next
+    // prompt — the output must never stick to the input above it). A
+    // trailing input gets no gap after it, and a leading input none before
+    // it: a gap with nothing on its outer side would reserve an unpainted
+    // row, which the deterministic fuzz invariant forbids. Consecutive
+    // inputs share the single gap between them (the after-gap doubles as
+    // the next input's before-gap).
     let mut gapped = Vec::with_capacity(out.len() + 4);
     let last = out.len().saturating_sub(1);
     for (i, line) in out.into_iter().enumerate() {
@@ -262,6 +267,9 @@ pub(crate) fn activity_lines(
             line,
             SubagentActivityLine::UserMessage { .. } | SubagentActivityLine::AgentMessage { .. }
         );
+        if is_input && i > 0 && !matches!(gapped.last(), Some(SubagentActivityLine::Gap)) {
+            gapped.push(SubagentActivityLine::Gap);
+        }
         gapped.push(line);
         if is_input && i < last {
             gapped.push(SubagentActivityLine::Gap);
@@ -1006,10 +1014,12 @@ fn tool_input_detail(raw_input: &serde_json::Value) -> Option<String> {
 }
 
 /// Which of the three chunk streams a coalescing chunk belongs to. The
-/// backscan merge (see [`SubagentActivity::coalesce_stream_chunk`]) stops
-/// at the OPPOSITE stream kind's open entry and at tool/plan turn
-/// boundaries; three kinds keep the agent narration, the dimmed reasoning
-/// and the replayed user turns in three separate growing rows.
+/// backscan merge (see [`SubagentActivity::coalesce_stream_chunk`]) merges
+/// into the nearest SAME-stream entry, keeps scanning back through the
+/// agent's interleaved narration/reasoning pair, and stops at everything
+/// else — tool/plan entries AND turn inputs. Three input kinds keep the
+/// agent narration, the dimmed reasoning and the replayed user turns in
+/// three separate growing rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StreamKind {
     /// The sub-agent's message text.
@@ -1278,10 +1288,14 @@ impl SubagentActivity {
     /// to be the timeline's tail opened a NEW sub-block per alternation,
     /// and the box rendered dozens of tiny rows that used a fraction of
     /// the row width (the "reasoning in columns" report). The scan walks
-    /// back through chunks of the OPPOSITE stream kind and stops at tool
-    /// and plan entries: those are turn boundaries, and stream content
-    /// after them belongs to a later turn, where a fresh entry is the
-    /// correct layout for both sub-agent flavors.
+    /// back through the agent's interleaved narration/reasoning pair and
+    /// stops at turn boundaries: tool and plan entries, and — crucially —
+    /// turn INPUTS (`UserMessage`, `AgentMessage`). Stream content after
+    /// them belongs to a later turn, where a fresh entry is the correct
+    /// layout for both sub-agent flavors: without the input boundary every
+    /// tool-less turn's answer merged across its own prompt into the
+    /// previous turn's block, and a replayed history collapsed into one
+    /// input blob plus one answer blob (the panes' garbled order).
     ///
     /// A whitespace-only chunk NEVER opens a fresh entry — it may only
     /// merge into an existing matching one. This is the same rule the
@@ -1320,10 +1334,23 @@ impl SubagentActivity {
                     *acc = bounded_tail(acc, SUBAGENT_TEXT_ENTRY_BYTES);
                     return true;
                 }
-                // Turn boundary: nothing older may absorb this chunk.
-                SubagentTimelineEntry::Tool(_) | SubagentTimelineEntry::Plan { .. } => break,
-                // The opposite stream kind: keep scanning back.
-                _ => {}
+                // Same-response interleave: the agent's narration and its
+                // dimmed reasoning alternate inside ONE response, so each
+                // keeps scanning back through the other (the mini-chat
+                // contract — one growing row per stream, not dozens of
+                // tiny rows).
+                SubagentTimelineEntry::Message { .. } if kind == StreamKind::Thought => {}
+                SubagentTimelineEntry::Thought { .. } if kind == StreamKind::Agent => {}
+                // Turn boundary: anything else ends this chunk's turn. A
+                // turn INPUT (`UserMessage` from the user's prompt or the
+                // history replay, `AgentMessage` from another agent's
+                // `agents_call`) must never let the next answer merge into
+                // the PREVIOUS turn's block — and a replayed input must
+                // never merge across the agent's answer into the previous
+                // turn's input. Tool/plan entries are the same kind of
+                // boundary for every stream. Every turn keeps its own
+                // chronological row: the pane's linear chat flow.
+                _ => break,
             }
         }
         // Whitespace-only chunks never OPEN an entry: an invisible blank row
@@ -1369,13 +1396,15 @@ impl SubagentActivity {
     /// Open a turn with the caller's input text: a FRESH `UserMessage` (the
     /// user's own prompt) or `AgentMessage` (another agent's `agents_call`
     /// input) entry, NEVER coalesced into an older one. The backscan in
-    /// [`Self::coalesce_stream_chunk`] skips opposite-kind entries, so a
-    /// plain `apply` here would merge consecutive tool-less turns' inputs
-    /// into a single row ("foobar" for prompts "foo" then "bar") — the
-    /// turn boundary is exactly what coalescing must not cross. A later
-    /// chunk of the SAME turn still merges into this entry through the
-    /// normal `apply` path. Whitespace-only input opens nothing (the same
-    /// invisible-row guard `coalesce_stream_chunk` keeps).
+    /// [`Self::coalesce_stream_chunk`] stops at turn inputs, so the fresh
+    /// entry ALSO shields the previous turn: the next answer's chunks stop
+    /// at it instead of merging into the older block (a plain `apply` here
+    /// would merge consecutive tool-less turns' inputs into a single row —
+    /// "foobar" for prompts "foo" then "bar" — and the following answer
+    /// would join them). A later chunk of the SAME turn still merges into
+    /// this entry through the normal `apply` path. Whitespace-only input
+    /// opens nothing (the same invisible-row guard `coalesce_stream_chunk`
+    /// keeps).
     pub(crate) fn open_turn_input(&mut self, text: &str, user: bool) {
         if text.trim().is_empty() {
             return;
@@ -5897,10 +5926,11 @@ mod tests {
         );
 
         // A mid-transcript user message is gapped too (two turns), while
-        // the LAST user message gets no trailing gap. The tool call keeps
-        // the two user turns apart — consecutive user chunks would MERGE
-        // into one entry (the backscan coalesce), erasing the turn
-        // boundary the gap has to sit behind.
+        // the LAST user message gets no trailing gap — but it DOES get the
+        // before-gap separating it from the previous answer. The tool call
+        // keeps the two user turns apart — and turn inputs are backscan
+        // boundaries anyway, so even consecutive input chunks keep their
+        // own entries and the gap keeps the turn boundary it sits behind.
         let mut activity = SubagentActivity::default();
         activity.apply(&SubagentEvent::UserMessage {
             text: "first".to_string(),
@@ -5928,12 +5958,156 @@ mod tests {
         );
         assert_eq!(
             lines.iter().filter(|l| matches!(l, SubagentActivityLine::Gap)).count(),
-            1,
-            "only the first user turn is followed by a gap: {lines:?}"
+            2,
+            "one gap after the first input, one before the trailing input: {lines:?}"
+        );
+
+        // Two full turns: every prompt is isolated — a gap below it AND a
+        // gap above the next one — so no answer ever sticks to a prompt.
+        let mut two_turns = SubagentActivity::default();
+        two_turns.open_turn_input("ola?", true);
+        two_turns.apply(&SubagentEvent::Message {
+            text: "oi!".to_string(),
+        });
+        two_turns.open_turn_input("nome?", true);
+        two_turns.apply(&SubagentEvent::Message {
+            text: "kilo.".to_string(),
+        });
+        let lines = activity_lines(&two_turns, 60);
+        let kinds: Vec<char> = lines
+            .iter()
+            .map(|line| match line {
+                SubagentActivityLine::UserMessage { .. } => 'U',
+                SubagentActivityLine::Message { .. } => 'M',
+                SubagentActivityLine::Gap => '_',
+                other => panic!("expected prompt/answer/gap rows, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!['U', '_', 'M', '_', 'U', '_', 'M'],
+            "prompt, gap, answer, gap, prompt, gap, answer: {lines:?}"
         );
 
         // The gap costs exactly one visual row.
         assert_eq!(SubagentActivityLine::Gap.visual_rows(60), 1);
+    }
+
+    /// REGRESSION (the panes' garbled order): turn inputs are backscan
+    /// boundaries. A tool-less second turn's answer used to skip over its
+    /// own prompt and merge into the previous turn's block, and a replayed
+    /// history collapsed into one input blob plus one answer blob — every
+    /// pane read as a single atropelada paragraph instead of a linear
+    /// chronological flow like the normal chat.
+    #[test]
+    fn turn_inputs_are_backscan_boundaries() {
+        fn texts(activity: &SubagentActivity) -> Vec<String> {
+            activity
+                .timeline
+                .iter()
+                .map(|entry| match entry {
+                    SubagentTimelineEntry::Message { text }
+                    | SubagentTimelineEntry::Thought { text }
+                    | SubagentTimelineEntry::UserMessage { text }
+                    | SubagentTimelineEntry::AgentMessage { text } => text.clone(),
+                    other => panic!("expected a text entry, got {other:?}"),
+                })
+                .collect()
+        }
+
+        // Two tool-less turns through the LIVE pane path (`open_turn_input`
+        // for the prompt, `apply` for the streamed answer): four rows, in
+        // arrival order, nothing merged.
+        let mut live = SubagentActivity::default();
+        live.open_turn_input("ola como vai?", true);
+        live.apply(&SubagentEvent::Message {
+            text: "tudo bem!".to_string(),
+        });
+        live.open_turn_input("qual seu nome?", true);
+        live.apply(&SubagentEvent::Message {
+            text: "sou o Kilo.".to_string(),
+        });
+        assert_eq!(
+            texts(&live),
+            vec![
+                "ola como vai?",
+                "tudo bem!",
+                "qual seu nome?",
+                "sou o Kilo."
+            ],
+            "each turn keeps its own chronological rows: {:?}",
+            live.timeline
+        );
+
+        // The REPLAY path (post-reboot: every message arrives as an `apply`
+        // chunk, inputs included): same four rows, same order.
+        let mut replay = SubagentActivity::default();
+        for event in [
+            SubagentEvent::UserMessage {
+                text: "ola como vai?".to_string(),
+            },
+            SubagentEvent::Message {
+                text: "tudo bem!".to_string(),
+            },
+            SubagentEvent::UserMessage {
+                text: "qual seu nome?".to_string(),
+            },
+            SubagentEvent::Message {
+                text: "sou o Kilo.".to_string(),
+            },
+        ] {
+            replay.apply(&event);
+        }
+        assert_eq!(
+            texts(&replay),
+            vec![
+                "ola como vai?",
+                "tudo bem!",
+                "qual seu nome?",
+                "sou o Kilo."
+            ],
+            "replayed history keeps the arrival order: {:?}",
+            replay.timeline
+        );
+
+        // An agent's `agents_call` input is the same kind of boundary.
+        let mut agent_turn = SubagentActivity::default();
+        agent_turn.open_turn_input("delegate this", false);
+        agent_turn.apply(&SubagentEvent::Message {
+            text: "on it.".to_string(),
+        });
+        agent_turn.open_turn_input("and this", false);
+        agent_turn.apply(&SubagentEvent::Message {
+            text: "done.".to_string(),
+        });
+        assert_eq!(
+            texts(&agent_turn),
+            vec!["delegate this", "on it.", "and this", "done."],
+            "agent inputs bound their turns too: {:?}",
+            agent_turn.timeline
+        );
+
+        // The same-turn interleave still coalesces: reasoning and narration
+        // alternate inside ONE response without inputs between them.
+        let mut interleave = SubagentActivity::default();
+        interleave.apply(&SubagentEvent::Thought {
+            text: "pensando ".to_string(),
+        });
+        interleave.apply(&SubagentEvent::Message {
+            text: "quase ".to_string(),
+        });
+        interleave.apply(&SubagentEvent::Thought {
+            text: "mais".to_string(),
+        });
+        interleave.apply(&SubagentEvent::Message {
+            text: "pronto".to_string(),
+        });
+        assert_eq!(
+            texts(&interleave),
+            vec!["pensando mais", "quase pronto"],
+            "one growing row per stream, no inputs crossed: {:?}",
+            interleave.timeline
+        );
     }
 
     #[test]

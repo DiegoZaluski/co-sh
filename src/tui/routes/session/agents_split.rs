@@ -1255,16 +1255,15 @@ fn draw_activity_line(
                     .collect();
                 let trimmed = text_from_cell_row(&row_cells, wrap_w as usize);
                 if !trimmed.is_empty() {
-                    let region_text = if is_user || is_agent_input {
-                        format!("│ {trimmed}")
-                    } else {
-                        trimmed
-                    };
+                    // Content-only, like the chat's regions: the input's
+                    // `│` rail is PAINT-only (drawn below) and never enters
+                    // the copied text — selecting an input copies exactly
+                    // what the user typed, no decoration prefix.
                     regions.push(TextRegion::one_row(
                         i32::from(content_row.saturating_add(sy)),
                         x,
                         x + wrap_w,
-                        region_text,
+                        trimmed,
                     ));
                 }
                 if is_user || is_agent_input {
@@ -1820,6 +1819,115 @@ mod tests {
         assert!(
             texts.iter().any(|t| t.contains("[turn error]")),
             "the failure marker is labeled: {texts:?}"
+        );
+    }
+
+    /// Regression (the panes' garbled order): two tool-less turns through
+    /// the full pane path — echo, stream, `finish_turn`, echo, stream,
+    /// `finish_turn` — must read as a linear chronological flow like the
+    /// normal chat. The second answer used to skip over its own prompt and
+    /// merge into the first turn's report block, so the pane showed one
+    /// atropelada paragraph instead of prompt/answer/prompt/answer.
+    #[test]
+    fn consecutive_pane_turns_keep_their_chronological_entries() {
+        let mut state = AgentsSplitState::new(vec!["kilo".into()]);
+        // Turn 1.
+        state.echo_turn_input(0, "ola como vai?", true);
+        state.apply_event(
+            0,
+            &SubagentEvent::Message {
+                text: "tudo bem! ".to_string(),
+            },
+        );
+        state.apply_event(
+            0,
+            &SubagentEvent::Message {
+                text: "como posso ajudar?".to_string(),
+            },
+        );
+        state.finish_turn(0, "tudo bem! como posso ajudar?", "end_turn");
+        // Turn 2 (no tool call in between — the old merge crossed here).
+        state.echo_turn_input(0, "qual seu nome?", true);
+        state.apply_event(
+            0,
+            &SubagentEvent::Message {
+                text: "sou o Kilo.".to_string(),
+            },
+        );
+        state.finish_turn(0, "sou o Kilo.", "end_turn");
+
+        let rows: Vec<(bool, String)> = state.panes[0]
+            .activity
+            .timeline
+            .iter()
+            .map(|entry| match entry {
+                SubagentTimelineEntry::UserMessage { text } => (true, text.clone()),
+                SubagentTimelineEntry::Message { text } => (false, text.clone()),
+                other => panic!("expected prompt/answer rows, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            rows.iter().map(|(user, _)| *user).collect::<Vec<_>>(),
+            vec![true, false, true, false],
+            "prompt, answer, prompt, answer — in arrival order: {rows:?}"
+        );
+        assert!(
+            rows[1].1.contains("como posso ajudar?"),
+            "the first answer stays its own row: {rows:?}"
+        );
+        assert!(
+            rows[3].1.contains("sou o Kilo."),
+            "the second answer stays its own row: {rows:?}"
+        );
+        assert!(
+            !rows[1].1.contains("Kilo"),
+            "the second answer never leaks into the first: {rows:?}"
+        );
+    }
+
+    /// The input's `│` rail is paint-only: drag-selecting an input copies
+    /// exactly what was typed, never the decoration — the chat's
+    /// content-only region contract (its rails sit outside the regions).
+    #[test]
+    fn selecting_a_pane_input_copies_no_rail() {
+        let theme = test_theme();
+        let mut state = AgentsSplitState::new(vec!["kilo".into()]);
+        state.echo_turn_input(0, "ola como vai?", true);
+        state.apply_event(
+            0,
+            &SubagentEvent::Message {
+                text: "tudo bem!".to_string(),
+            },
+        );
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut state, &theme);
+
+        // Sanity: the rail IS still painted (only the copy changes).
+        let body_top = area.y + 1;
+        let rail_painted = (0..area.height).any(|dy| {
+            buf.cell((area.x, body_top + dy))
+                .map(|cell| cell.symbol() == "│")
+                .unwrap_or(false)
+        });
+        assert!(rail_painted, "the rail still paints on screen");
+
+        // Drag across the whole body and copy.
+        let bottom = area.y + area.height - 1;
+        state.begin_selection(0, area.x, body_top, 0);
+        state.update_selection(area.x + area.width - 1, bottom, 20);
+        let copied = state.extract_selected_text();
+        assert!(
+            copied.contains("ola como vai?"),
+            "the typed text copies: {copied:?}"
+        );
+        assert!(
+            copied.contains("tudo bem!"),
+            "the answer copies too: {copied:?}"
+        );
+        assert!(
+            !copied.contains('│'),
+            "no rail glyph in the copy: {copied:?}"
         );
     }
 
