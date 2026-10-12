@@ -856,17 +856,11 @@ impl Fs {
                     handle.name()
                 );
             }
-            // The fs layer just wrote the file to disk: signal the save so
-            // servers with post-save pipelines (rust-analyzer's flycheck)
-            // regenerate compile-error diagnostics — didChange alone never
-            // triggers them, and the server's own watcher may be broken.
-            if let Err(err) = handle.save_file(&path) {
-                log::debug!(
-                    "passive diagnostics: could not save `{}` on {}: {err}",
-                    path.display(),
-                    handle.name()
-                );
-            }
+            // No `didSave` here on purpose: it is the flycheck trigger
+            // (rust-analyzer reruns `cargo check` on save - a compiler
+            // subprocess re-analyzing the workspace, GBs of RAM plus lock
+            // contention on `target/`). The pull below already observes the
+            // analysis diagnostics over `didOpen`/`didChange` alone.
         }
 
         let engine = lsp.diagnostics_engine();

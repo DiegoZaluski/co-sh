@@ -567,6 +567,19 @@ async fn drive_spawn(inner: &Weak<Inner>, key: &ClientKey, spec: ServerSpec) -> 
             let mut config = LanguageServerConfig::new(spec.name, binary, key.root.clone());
             config.args = spec.args.iter().map(|arg| (*arg).to_owned()).collect();
             config.events = Some(events_tx);
+            // Memory containment for rust-analyzer (the server behind the
+            // "LSP trava o PC" reports): without `cargo.targetDir` it shares
+            // the workspace `target/` with every `cargo build`/`check`,
+            // causing lock contention, stale incremental state and a second
+            // full artifact tree in RAM (opencode#17377). An isolated target
+            // dir keeps analysis artifacts out of the build's way; the same
+            // payload rides both config channels because servers read
+            // exactly one of the two (this client ships both, like opencode).
+            if spec.name == "rust-analyzer" {
+                let ra_options = serde_json::json!({ "cargo": { "targetDir": true } });
+                config.initialization_options = ra_options.clone();
+                config.settings = serde_json::json!({ "rust-analyzer": ra_options });
+            }
 
             match (inner.spawn_client)(config).await {
                 Ok(client) => SpawnOutcome::Ready(Arc::new(client)),

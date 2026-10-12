@@ -41,10 +41,16 @@ static GLOBAL_LSP: Mutex<Option<(PathBuf, Arc<Lsp>)>> = Mutex::new(None);
 
 /// Return the process-wide engine bound to `cwd`, creating it on first use.
 ///
-/// The event-ingestion task (manager events → diagnostics engine) and the
-/// startup auto-discovery spawn run on the *current* runtime's tasks — callers
-/// must invoke this from within a long-lived runtime (the TUI's shared agent
-/// runtime), not a per-turn one, or the tasks die with it.
+/// Startup is always lazy: creating the engine spawns NO server process.
+/// Servers start on the first file touch (`ensure_for_file`), never via
+/// root-marker discovery here — eagerly spawning every matching server
+/// (rust-analyzer AND taplo for a Rust repo) before the agent read anything
+/// is what made a Rust workspace eat GBs of RAM at session start.
+///
+/// The event-ingestion task (manager events → diagnostics engine) runs on the
+/// *current* runtime's tasks — callers must invoke this from within a
+/// long-lived runtime (the TUI's shared agent runtime), not a per-turn one,
+/// or the task dies with it.
 ///
 /// Returns `None` when no runtime is active; the caller's flag/env checks stay
 /// with the caller ([`crate::harness::core::build_lsp`]).
@@ -71,14 +77,6 @@ pub fn global_lsp(cwd: &str) -> Option<Arc<Lsp>> {
         while let Some(event) = event_rx.recv().await {
             engine.ingest_event(&event);
         }
-    });
-
-    // Startup auto-discovery: detect the workspace language from its root
-    // markers and start the matching server(s) eagerly. Soft-skipped (missing
-    // binaries, failed spawns) — never fatal.
-    let auto = Arc::clone(&manager);
-    handle.spawn(async move {
-        let _ = auto.ensure_for_root(auto.root()).await;
     });
 
     let lsp = Arc::new(Lsp::with_manager(Arc::clone(&manager), diagnostics));
@@ -141,5 +139,72 @@ mod tests {
     #[test]
     fn global_lsp_requires_a_runtime() {
         assert!(global_lsp("/tmp").is_none());
+    }
+
+    /// Startup is lazy, unconditionally: creating the engine inside a Rust
+    /// workspace with a discoverable `rust-analyzer` on `PATH` still spawns
+    /// NOTHING — no server process may start before the first file touch.
+    ///
+    /// The "server" is a sentinel shell script: if any startup path ever
+    /// executes it, the sentinel file appears and this test fails. (A plain
+    /// `running_clients().is_empty()` assertion would NOT catch a
+    /// regression — eager spawn failures are soft-skipped, so a broken lazy
+    /// path could still show zero clients.)
+    #[cfg(unix)]
+    #[test]
+    fn global_lsp_starts_no_servers() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        static PATH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = PATH_LOCK.lock().expect("path lock");
+
+        // Scratch workspace: markers that WOULD match rust-analyzer.
+        let work = tempfile::tempdir().unwrap();
+        std::fs::write(work.path().join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+        // Scratch bin dir with the sentinel "language server".
+        let bin = tempfile::tempdir().unwrap();
+        let sentinel = bin.path().join("spawned");
+        std::fs::write(
+            bin.path().join("rust-analyzer"),
+            format!("#!/bin/sh\ntouch \"{}\"\n", sentinel.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            bin.path().join("rust-analyzer"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+
+        // Prepend (never replace): every other binary keeps resolving.
+        let previous = std::env::var_os("PATH");
+        let mut paths = vec![bin.path().to_path_buf()];
+        paths.extend(std::env::split_paths(&previous.clone().unwrap_or_default()));
+        // SAFETY: PATH_LOCK serializes PATH mutation in this test binary;
+        // no other test here asserts on `rust-analyzer` resolution.
+        unsafe {
+            std::env::set_var("PATH", std::env::join_paths(paths).expect("joinable PATH"));
+        }
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            global_lsp(work.path().to_str().unwrap()).expect("engine builds");
+            // Generous window for any hypothetical eager spawn to fire:
+            // a reintroduced `ensure_for_root` task would exec the sentinel
+            // in milliseconds.
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        });
+
+        unsafe {
+            if let Some(previous) = previous {
+                std::env::set_var("PATH", previous);
+            } else {
+                std::env::remove_var("PATH");
+            }
+        }
+
+        assert!(
+            !sentinel.exists(),
+            "engine creation executed rust-analyzer: startup must stay lazy"
+        );
     }
 }

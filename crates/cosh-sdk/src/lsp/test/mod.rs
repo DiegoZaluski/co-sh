@@ -9,4 +9,5 @@ mod test_client;
 mod test_diagnostics;
 mod test_jsonrpc;
 mod test_manager;
+mod test_memory;
 mod test_transport;

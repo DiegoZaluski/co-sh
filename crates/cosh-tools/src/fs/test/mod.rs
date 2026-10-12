@@ -6,6 +6,8 @@ pub mod test_edit;
 #[cfg(test)]
 pub mod test_edit_dispatch;
 #[cfg(test)]
+pub mod test_lsp_memory;
+#[cfg(test)]
 pub mod test_lsp_notes;
 #[cfg(test)]
 pub mod test_path_traversal;
