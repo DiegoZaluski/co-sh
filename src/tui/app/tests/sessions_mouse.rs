@@ -606,6 +606,104 @@ async fn leaving_chat_content_to_sidebar_clears_focus_highlight() {
     );
 }
 
+/// Hover-follow: moving the cursor over a session row moves the shared
+/// selection there — the same contract as the slash menu, the model
+/// picker and the internal-tools list — without switching sessions or
+/// opening anything.
+#[tokio::test]
+async fn hover_over_session_row_moves_the_selection() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = build_small();
+    let before = app.state.current_session_id.clone();
+
+    // Rows: header 0..2, history-0 at 2, history-1 at 3, history-2 at 4.
+    assert_eq!(app.sidebar.selection.selected_index, 0);
+    let _ = app.handle_mouse_event(mouse(CKind::Moved, 5, 4)).unwrap();
+
+    assert_eq!(
+        app.sidebar.selection.selected_index, 2,
+        "hover must follow the cursor"
+    );
+    assert_eq!(
+        app.state.current_session_id, before,
+        "hover never switches sessions"
+    );
+    assert!(!app.dialog.visible(), "hover never opens a dialog");
+
+    // Off-list (the header) keeps the current selection.
+    let _ = app.handle_mouse_event(mouse(CKind::Moved, 5, 0)).unwrap();
+    assert_eq!(
+        app.sidebar.selection.selected_index, 2,
+        "a miss must keep the selection"
+    );
+
+    // End to end through the pixels: re-render and confirm the highlight
+    // glyph sits on the hovered row, not the first.
+    let area = Rect::new(0, 0, LEFT_PANEL_WIDTH, 40);
+    let mut buf = Buffer::empty(area);
+    app.sidebar
+        .render(&mut buf, area, &app.state.session_summaries, &app.theme);
+    let glyph_at = |y: u16| {
+        buf.cell((2, y))
+            .map(|c| c.symbol().to_string())
+            .unwrap_or_default()
+    };
+    assert_eq!(glyph_at(4), "🞴", "highlight follows to row 4");
+    assert_eq!(glyph_at(2), " ", "row 2 lost the highlight");
+}
+
+/// Hover-follow on the home screen: the left panel overlays every route,
+/// so the same list must follow the cursor there too — not only inside a
+/// session. (No current session ⇒ home mode.)
+#[tokio::test]
+async fn hover_over_session_row_moves_the_selection_on_home() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    assert!(
+        app.state.current_session_id.is_none(),
+        "fresh app has no session: this is the home screen"
+    );
+    app.sidebar.open = true;
+    app.left_panel = Mode::History;
+    app.state.session_summaries.clear();
+    for i in 0..3 {
+        app.state
+            .session_summaries
+            .push(crate::session_store::SessionSummary {
+                session_id: format!("history-{i}"),
+                title: format!("session {i}"),
+                created_at: i as u64,
+                message_count: 0,
+                cwd: String::new(),
+                model: None,
+                title_generated: false,
+            });
+    }
+
+    // Rows: header 0..2, history-0 at 2, history-1 at 3, history-2 at 4.
+    assert_eq!(app.sidebar.selection.selected_index, 0);
+    let _ = app.handle_mouse_event(mouse(CKind::Moved, 5, 4)).unwrap();
+
+    assert_eq!(
+        app.sidebar.selection.selected_index, 2,
+        "hover must follow the cursor on home too"
+    );
+    assert!(
+        app.state.current_session_id.is_none(),
+        "hover never enters a session"
+    );
+    assert!(!app.dialog.visible(), "hover never opens a dialog");
+
+    // A miss keeps the selection, like in session mode.
+    let _ = app.handle_mouse_event(mouse(CKind::Moved, 5, 0)).unwrap();
+    assert_eq!(
+        app.sidebar.selection.selected_index, 2,
+        "a miss must keep the selection"
+    );
+}
+
 /// The `delete all` footer button: pinned geometry (terminal 140x40 →
 /// sidebar rows 0..40, footer row 39, centered button columns 6..16).
 #[tokio::test]

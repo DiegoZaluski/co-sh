@@ -129,6 +129,41 @@ impl SessionsView {
         SessionsAction::None
     }
 
+    /// Move the visual selection to the row under the pointer WITHOUT
+    /// switching to it — the same hover-follow contract as the model picker
+    /// and the internal-tools list. The row comes from
+    /// [`SessionListLayout::item_index_at`], the same hit-test the click
+    /// path above uses, so hover and click can never disagree about which
+    /// row is which. Returns whether the pointer hit a session row;
+    /// hovering outside the list keeps the current selection.
+    pub fn follow_hover(
+        &mut self,
+        mouse: &MouseEvent,
+        area: Rect,
+        summaries: &[SessionSummary],
+        status: &SessionStatus,
+    ) -> bool {
+        if !self.open {
+            return false;
+        }
+        if mouse.x < area.x || mouse.x >= area.right() {
+            return false;
+        }
+        let Some(idx) =
+            SessionListLayout::item_index_at(area, self.selection.scroll_offset, mouse.y)
+        else {
+            return false;
+        };
+        // Mirror the click path: the selection only moves onto a real row
+        // while idle — never past the end, never while the agent is working.
+        if summaries.get(idx).is_some() && *status == SessionStatus::Idle {
+            self.selection.selected_index = idx;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Handle a key press on the sessions list. Returns an action to perform.
     pub fn handle_key(&mut self, key: KeyCode, summaries: &[SessionSummary]) -> SessionsAction {
         if !self.open {

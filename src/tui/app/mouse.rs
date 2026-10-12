@@ -1077,6 +1077,21 @@ impl App {
                         self.session_view.clear_hover();
                         self.hovered_queue_row = None;
                         self.state.right_panel.clear_hint_hover();
+                        // Sessions LIST: cursor movement follows the selection
+                        // (the same hover-follow contract as the subagent
+                        // list, the model picker and the internal-tools
+                        // list). A miss keeps the current selection; hover
+                        // never switches, deletes, or opens anything.
+                        if matches!(self.left_panel, Mode::History) {
+                            let sidebar_area =
+                                Rect::new(0, 0, LEFT_PANEL_WIDTH, self.terminal_height());
+                            let _ = self.sidebar.follow_hover(
+                                &mouse,
+                                sidebar_area,
+                                &self.state.session_summaries,
+                                &self.state.status,
+                            );
+                        }
                     } else if matches!(self.mode(), AppMode::Session)
                         && self.is_in_right_panel(x)
                     {
@@ -1132,6 +1147,27 @@ impl App {
                             };
                     }
                 }
+            }
+            // Sessions-list follow for routes WITHOUT a session surface
+            // (home): the left panel overlays every route, but the
+            // Session-gated hover block above never fires there — without
+            // this the same list follows the cursor in session and ignores
+            // it on home. Same contract: a miss keeps the current
+            // selection, hover never switches, deletes, or opens anything.
+            if matches!(event_type, MouseEventType::Move)
+                && !matches!(self.mode(), AppMode::Session)
+                && self.is_over_open_sidebar(x)
+                && matches!(self.left_panel, Mode::History)
+                && !self.dialog.visible()
+                && !self.question_dialog.visible
+            {
+                let sidebar_area = Rect::new(0, 0, LEFT_PANEL_WIDTH, self.terminal_height());
+                let _ = self.sidebar.follow_hover(
+                    &mouse,
+                    sidebar_area,
+                    &self.state.session_summaries,
+                    &self.state.status,
+                );
             }
             return Ok(true);
         }
