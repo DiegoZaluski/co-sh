@@ -10,6 +10,7 @@ use super::{
     App, AppMode, BACK_LINK_TEXT, BUG_REPORT_TEXT, EMPTY_SESSION_PROMPT_MIN_WIDTH,
     EMPTY_SESSION_PROMPT_RATIO, MIN_PROMPT_RESERVE_ROWS, SessionArea,
 };
+use crate::component::budget::{budget_bar_style, budget_block, budget_pct_style};
 use crate::component::prompt::PanePromptInfo;
 use crate::left_panel::{MIN_WIDTH_FOR_LEFT_PANEL, Mode};
 use crate::logo::LOGO_CHAT;
@@ -22,36 +23,6 @@ use crate::state::PendingQueues;
 use crate::theme::{Theme, rgba_color};
 use cosh_tools::subagent::palette::display_name;
 use cosh_tui::core::lib::unicode_util::graphemes_with_width;
-
-/// Render a 10-character budget bar like `▓▓▓▓▓░░░░░` from a 0-100 percentage.
-///
-/// `pub(crate)`: shared with the session route's `Part::Install` renderer —
-/// the weights-install chat line mirrors THIS component (one bar component,
-/// two consumers).
-pub(crate) fn render_budget_bar(pct: u8) -> String {
-    const FILLED: char = '▓';
-    const EMPTY: char = '░';
-    const BAR_LEN: usize = 10;
-    let filled = (pct as usize * BAR_LEN) / 100;
-    let empty = BAR_LEN.saturating_sub(filled);
-    std::iter::repeat_n(FILLED, filled)
-        .chain(std::iter::repeat_n(EMPTY, empty))
-        .collect()
-}
-
-/// Format an integer with thousands separators (e.g. `9612` → `9,612`) so
-/// large token counts stay readable at a glance in the header bar.
-pub(super) fn format_tokens(n: usize) -> String {
-    let digits = n.to_string();
-    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
-    for (i, ch) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(ch);
-    }
-    out
-}
 
 /// One visual row of the pending-queue strip. Every queued message owns
 /// its own internal padding: a `Pad` row directly above its first text
@@ -251,23 +222,28 @@ impl App {
                 .current_session()
                 .is_some_and(|s| !s.messages.is_empty());
             if matches!(self.mode(), AppMode::Session) && has_content {
-                let pct = self.context_info.as_ref().map_or(0, |info| info.budget_pct);
                 let tokens = self
                     .context_info
                     .as_ref()
                     .map_or(0, |info| info.total_tokens);
                 let max = self.context_info.as_ref().map_or(0, |info| info.max_tokens);
 
-                // "9,612 / 100,000 tok" — current context vs the model
-                // window; without a known window only the count is shown.
-                let token_str = if max > 0 {
-                    format!("{} / {} tok", format_tokens(tokens), format_tokens(max))
-                } else {
-                    format!("{} tok", format_tokens(tokens))
-                };
-                let budget_str = format!("{}{:>3}%", render_budget_bar(pct), pct);
-                let gap: u16 = 2;
-
+                // "9,612 / 100,000 tok" + bar + pct, composed in
+                // `component::budget` (the pane headers paint the same
+                // pair).
+                //
+                // Variant selection is EXACT, not a guessed threshold: the
+                // whole right cluster (cost + budget) must fit between the
+                // title's end and the right margin with one separator cell
+                // to spare, i.e.
+                //   cost + gap + block ≤ main.right − max(title_end, main.x) − 2
+                // Sizing only the budget part let a wide cost push the
+                // cluster over the back button; counting the cost flips to
+                // the compact `9.6k/100k 9%` exactly one column before the
+                // collision. A screen that fits not even the compact
+                // cluster paints nothing (the pane headers hide their
+                // budget the same way).
+                //
                 // Session cost — for USD-billed providers the session's
                 // dollar total (green). For Charm Hyper the header shows the
                 // REMAINING Hypercredit balance instead: credits are not
@@ -283,6 +259,9 @@ impl App {
                 // the provider name would miss custom providers pointed at
                 // the Charm gateway (their name is user-chosen, not "charm")
                 // and the header would wrongly fall back to dollars.
+                //
+                // Computed BEFORE the variant selection: the cost's width is
+                // part of the cluster the inequality sizes.
                 let credits_mode = self.hypercredit_balance.is_some();
                 let cost_str = if credits_mode {
                     self.hypercredit_balance.map(|b| format!("\u{25c6} {b:.0}"))
@@ -290,12 +269,40 @@ impl App {
                     self.session_cost().map(crate::usage::format_usd)
                 };
                 let cost_w = cost_str.as_ref().map_or(0, |s| s.chars().count()) as u16;
-                let cost_gap = if cost_str.is_some() { gap } else { 0 };
+                // Fixed like the old constant (it doubled as the
+                // counter↔bar gap then): the cost separator does not shrink
+                // with the variant, so the selection math stays exact.
+                let cost_gap: u16 = if cost_str.is_some() { 2 } else { 0 };
+
+                let title_end = area.x.saturating_add(1).saturating_add(title_w);
+                let cluster_left = title_end.max(main_area.x);
+                let avail = main_area
+                    .right()
+                    .saturating_sub(cluster_left)
+                    .saturating_sub(2)
+                    .saturating_sub(cost_w + cost_gap);
+                let block = budget_block(tokens as u64, max as u64, avail);
+                // No variant fits: empty strings paint nothing below, and
+                // the cost hides with the budget (nothing readable would
+                // survive the overlap anyway).
+                let cost_str = if block.is_some() { cost_str } else { None };
+                let (token_str, budget_str, pct_str, pct, gap) = match block {
+                    Some(block) => (
+                        block.counter,
+                        block.meter,
+                        block.pct_text,
+                        block.pct,
+                        block.gap,
+                    ),
+                    None => (String::new(), String::new(), String::new(), 0, 0),
+                };
 
                 let display_w = (cost_w as usize
                     + cost_gap as usize
-                    + (token_str.chars().count() + gap as usize + budget_str.chars().count()))
-                    as u16;
+                    + (token_str.chars().count()
+                        + gap as usize
+                        + budget_str.chars().count()
+                        + pct_str.chars().count())) as u16;
                 let right_x = main_area.right().saturating_sub(display_w + 1);
 
                 // Session cost — the leftmost element of the header line.
@@ -338,19 +345,21 @@ impl App {
                     }
                 }
 
-                // Budget bar (with conditional color)
+                // Budget bar (with conditional color) + bold percentage.
                 let offset = cost_w + cost_gap + token_str.chars().count() as u16 + gap;
-                let budget_style = if pct >= 90 {
-                    Style::default().fg(rgba_color(self.theme.error))
-                } else if pct >= 70 {
-                    Style::default().fg(rgba_color(self.theme.warning))
-                } else {
-                    Style::default().fg(rgba_color(self.theme.text_muted))
-                };
+                let budget_style = budget_bar_style(pct, &self.theme);
                 for (i, ch) in budget_str.chars().enumerate() {
                     if let Some(cell) = buf.cell_mut((right_x + offset + i as u16, area.y)) {
                         cell.set_char(ch);
                         cell.set_style(budget_style);
+                    }
+                }
+                let pct_style = budget_pct_style(pct, &self.theme);
+                let pct_offset = offset + budget_str.chars().count() as u16;
+                for (i, ch) in pct_str.chars().enumerate() {
+                    if let Some(cell) = buf.cell_mut((right_x + pct_offset + i as u16, area.y)) {
+                        cell.set_char(ch);
+                        cell.set_style(pct_style);
                     }
                 }
             }

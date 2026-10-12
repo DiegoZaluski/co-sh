@@ -1,4 +1,3 @@
-use super::render::format_tokens;
 use super::{App, message_prompt_text};
 use crate::routes::session::right_panel::RIGHT_PANEL_WIDTH;
 use crate::session_store::generate_session_id;

@@ -243,7 +243,7 @@ fn compaction_line(part: &CompactionPart, now: u64) -> String {
 
 /// The chat line for a [`Part::Install`] (the decision-model weights
 /// install). Rendered with the SAME bar component as the header budget bar
-/// (`render_budget_bar` from `app/render.rs`) so the two read as one
+/// (`render_budget_bar` from `component::budget`) so the two read as one
 /// component. While the download runs the elapsed time ticks live; the
 /// terminal event freezes the line.
 fn install_line(part: &InstallPart, now: u64) -> String {
@@ -266,17 +266,17 @@ fn install_line(part: &InstallPart, now: u64) -> String {
     if part.is_running() {
         let elapsed = now.saturating_sub(part.started_at);
         let secs = elapsed as f64 / 1000.0;
-        let bar = crate::app::render::render_budget_bar(pct);
+        let bar = crate::component::budget::render_budget_bar(pct);
         format!("installing {subject} {bar} {pct:>3}% · {mb_done}/{mb_total} MB · {secs:.1}s")
     } else if part.failed == Some(true) {
-        let bar = crate::app::render::render_budget_bar(pct);
+        let bar = crate::component::budget::render_budget_bar(pct);
         format!("installing {subject} {bar} failed")
     } else {
         // The frozen byte counts can LAG the Finished event (the last
         // Progress update is throttled), so the completion branch forces
         // the bar to full instead of trusting them — the label reads 100%,
         // the bar must match.
-        let bar = crate::app::render::render_budget_bar(100);
+        let bar = crate::component::budget::render_budget_bar(100);
         format!("installed {subject} {bar} 100%")
     }
 }

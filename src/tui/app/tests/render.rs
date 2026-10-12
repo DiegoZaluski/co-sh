@@ -1,4 +1,4 @@
-use super::{App, HOME_LOCK, format_tokens, isolate_home};
+use super::{App, HOME_LOCK, isolate_home};
 use crate::app::FramePacer;
 use crate::app::render::PendingQueueRow;
 use std::time::Duration;
@@ -135,30 +135,6 @@ fn pending_queue_layout_keep_empty_messages_visible() {
         PendingQueueRow::Text(0, 0, ref line) if line.is_empty()
     ));
     assert!(matches!(rows[2], PendingQueueRow::Pad(0, 0)));
-}
-
-#[test]
-fn format_tokens_small_values_have_no_separator() {
-    assert_eq!(format_tokens(0), "0");
-    assert_eq!(format_tokens(9), "9");
-    assert_eq!(format_tokens(999), "999");
-}
-
-#[test]
-fn format_tokens_groups_thousands() {
-    assert_eq!(format_tokens(1_000), "1,000");
-    assert_eq!(format_tokens(9_612), "9,612");
-    assert_eq!(format_tokens(100_000), "100,000");
-    assert_eq!(format_tokens(1_000_000), "1,000,000");
-    assert_eq!(format_tokens(1_234_567), "1,234,567");
-    assert_eq!(format_tokens(12_345_678), "12,345,678");
-}
-
-#[test]
-fn format_tokens_handles_large_values() {
-    assert_eq!(format_tokens(123_456), "123,456");
-    assert_eq!(format_tokens(9_876_543_210), "9,876,543,210");
-    assert_eq!(format_tokens(usize::MAX), "18,446,744,073,709,551,615");
 }
 
 /// The session chat area must shrink by the right-panel width whenever the

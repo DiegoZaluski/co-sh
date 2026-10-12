@@ -1876,3 +1876,62 @@ async fn a_session_model_event_lands_on_the_pane() {
         "pane chrome never streams into the timeline"
     );
 }
+
+/// A `Usage` pane event stores the ACP budget snapshot on the pane's
+/// activity (the pane header reads it) instead of streaming into the
+/// timeline.
+#[tokio::test]
+async fn a_usage_event_lands_on_the_pane() {
+    use crate::types::AgentPaneRef;
+    use cosh::harness::HarnessEvent;
+
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    let session_id = crate::session_store::generate_session_id();
+    app.state
+        .add_empty_session(session_id.clone(), "pane budget".into(), 0);
+    app.state.current_session_id = Some(session_id);
+    app.state.current_session_mut().unwrap().agents_panes =
+        Some(vec![AgentPaneRef::Name("kilo".into())]);
+    let panes = app
+        .state
+        .current_session()
+        .unwrap()
+        .agents_panes
+        .clone()
+        .unwrap();
+    app.agents_split = Some(crate::routes::session::agents_split::AgentsSplitState::new(
+        panes,
+    ));
+    assert!(
+        app.agents_split.as_ref().unwrap().panes[0]
+            .activity
+            .usage
+            .is_none(),
+        "no budget before the first UsageUpdate"
+    );
+
+    app.event_tx
+        .send(HarnessEvent::AgentsPaneEvent {
+            pane: 0,
+            epoch: app.agents_pane_epoch,
+            event: cosh_tools::subagent::events::SubagentEvent::Usage {
+                context_window: 100_000,
+                tokens_in_context: 9_612,
+            },
+        })
+        .ok();
+    app.poll_events();
+
+    let pane = &app.agents_split.as_ref().unwrap().panes[0];
+    assert_eq!(
+        pane.activity.usage,
+        Some((100_000, 9_612)),
+        "the ACP snapshot is stored as (context_window, tokens_in_context)"
+    );
+    assert!(
+        pane.activity.timeline.is_empty(),
+        "the budget never streams into the timeline"
+    );
+}

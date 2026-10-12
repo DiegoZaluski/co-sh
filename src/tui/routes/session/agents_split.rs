@@ -30,6 +30,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 
+use crate::component::budget::{budget_bar_style, budget_block, budget_pct_style};
 use crate::component::spinner::SpinnerState;
 use crate::routes::session::right_panel::subagent_theme_key;
 use crate::routes::session::right_panel::types::{
@@ -878,11 +879,78 @@ fn render_pane(
 
     // ── Header row: the agent's name, one breathing column in ──
     let name_x = rect.x.saturating_add(1);
-    let name_w = rect.width.saturating_sub(1);
     // The BRAND casing ("OpenCode"), not the lowercase ACP id — the id
     // stays the dispatch key; only the painted label changes. The palette
     // lookup is case-insensitive, so the brand colors still resolve.
     let label = display_name(&pane.agent).to_string();
+    let label_w = label.chars().count() as u16;
+    // The pane's ACP budget, top-right: the SAME pair the session header
+    // paints, fed by the harness's `UsageUpdate` snapshot. The component
+    // picks the widest variant that fits the pane's COLUMNS — the full
+    // `used / size tok` + bar on a wide pane, the compact `9.6k/100k 9%`
+    // on a narrow one. The variant is chosen AFTER reserving the logo
+    // (breathing + name + separator + right margin), so the budget
+    // shrinks to minimal instead of covering the name while the name can
+    // still be kept. No snapshot yet (or not even the compact pair fits
+    // beside the logo) → no budget, like the header hiding its price
+    // when nothing is known.
+    let mut name_end = rect.right();
+    if let Some((context_window, tokens_in_context)) = pane.activity.usage {
+        let reserved = label_w.saturating_add(3);
+        let avail = rect.width.saturating_sub(reserved);
+        if let Some(block) = budget_block(tokens_in_context, context_window, avail) {
+            let block_w = block.width();
+            let block_x = rect.right().saturating_sub(block_w + 1).max(rect.x);
+            let token_style = Style::default().fg(rgba_color(theme.text_muted));
+            for (i, ch) in block.counter.chars().enumerate() {
+                let Ok(i) = u16::try_from(i) else { break };
+                let Some(cx) = block_x.checked_add(i) else {
+                    break;
+                };
+                if cx >= rect.right() {
+                    break;
+                }
+                if let Some(cell) = buf.cell_mut((cx, rect.y)) {
+                    cell.set_char(ch);
+                    cell.set_style(token_style);
+                }
+            }
+            let bar_style = budget_bar_style(block.pct, theme);
+            let pct_style = budget_pct_style(block.pct, theme);
+            let bar_x = block_x.saturating_add(block.counter.chars().count() as u16 + block.gap);
+            for (i, ch) in block.meter.chars().enumerate() {
+                let Ok(i) = u16::try_from(i) else { break };
+                let Some(cx) = bar_x.checked_add(i) else {
+                    break;
+                };
+                if cx >= rect.right() {
+                    break;
+                }
+                if let Some(cell) = buf.cell_mut((cx, rect.y)) {
+                    cell.set_char(ch);
+                    cell.set_style(bar_style);
+                }
+            }
+            // The percentage reads bold, in the bar's own tone.
+            let pct_x = bar_x.saturating_add(block.meter.chars().count() as u16);
+            for (i, ch) in block.pct_text.chars().enumerate() {
+                let Ok(i) = u16::try_from(i) else { break };
+                let Some(cx) = pct_x.checked_add(i) else {
+                    break;
+                };
+                if cx >= rect.right() {
+                    break;
+                }
+                if let Some(cell) = buf.cell_mut((cx, rect.y)) {
+                    cell.set_char(ch);
+                    cell.set_style(pct_style);
+                }
+            }
+            // One separator column between the clipped name and the block.
+            name_end = block_x.saturating_sub(1);
+        }
+    }
+    let name_w = name_end.saturating_sub(name_x);
     draw_agent_name(buf, &label, name_x, rect.y, name_w, theme, focused);
     if pane.rehydrating {
         // The cold-restore state: the pane's bound history is streaming
@@ -1940,6 +2008,206 @@ mod tests {
             cell.style().fg,
             Some(rgba_color(expected)),
             "unfocused is dimmed"
+        );
+    }
+
+    /// The pane header's right corner carries the ACP budget: the SAME
+    /// pair the session header paints (`used / size tok` + bar + pct),
+    /// right-aligned with one breathing column at the pane edge, the name
+    /// clipping before it. A hot budget takes the header's warning/error
+    /// colors; no snapshot yet paints no budget at all.
+    #[test]
+    fn header_right_corner_paints_the_acp_budget() {
+        let theme = test_theme();
+        let area = Rect::new(0, 0, 60, 10);
+        let row_text = |buf: &Buffer| {
+            (0..60)
+                .map(|x| {
+                    buf.cell((x, 0))
+                        .map(|c| c.symbol().to_string())
+                        .unwrap_or_default()
+                })
+                .collect::<String>()
+        };
+
+        // 9% used: counter + empty bar, both in the muted tone.
+        let mut state = AgentsSplitState::new(vec!["kilo".into()]);
+        state.panes[0].activity.usage = Some((100_000, 9_612));
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut state, &theme);
+        let row = row_text(&buf);
+        let cols: Vec<char> = row.chars().collect();
+        let block = "9,612 / 100,000 tok  \u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}  9%";
+        let block_cols: Vec<char> = block.chars().collect();
+        assert_eq!(block_cols.len(), 35, "block width");
+        assert_eq!(
+            &cols[24..59],
+            &block_cols[..],
+            "right-aligned pair: {row:?}"
+        );
+        assert_eq!(cols[59], ' ', "one breathing column at the edge");
+        assert_eq!(
+            cols[1..5].iter().collect::<String>(),
+            "kilo",
+            "the name survives before the block"
+        );
+        assert_eq!(
+            buf.cell((24, 0)).unwrap().style().fg,
+            Some(rgba_color(theme.text_muted)),
+            "counter in the muted tone"
+        );
+        assert_eq!(
+            buf.cell((45, 0)).unwrap().style().fg,
+            Some(rgba_color(theme.text_muted)),
+            "cool bar in the muted tone"
+        );
+        assert!(
+            !buf.cell((45, 0))
+                .unwrap()
+                .style()
+                .add_modifier
+                .contains(Modifier::BOLD),
+            "the bar itself stays plain"
+        );
+        assert!(
+            buf.cell((56, 0))
+                .unwrap()
+                .style()
+                .add_modifier
+                .contains(Modifier::BOLD),
+            "the percentage reads bold"
+        );
+
+        // 95% used: the bar takes the header's hot color.
+        let mut state = AgentsSplitState::new(vec!["kilo".into()]);
+        state.panes[0].activity.usage = Some((100_000, 95_000));
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut state, &theme);
+        let row = row_text(&buf);
+        assert!(
+            row.ends_with("95,000 / 100,000 tok  \u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2591} 95% "),
+            "hot pair right-aligned: {row:?}"
+        );
+        let bar_x = 60 - 1 - "95,000 / 100,000 tok  \u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2591} 95%".chars().count() as u16
+            + "95,000 / 100,000 tok  ".chars().count() as u16;
+        assert_eq!(
+            buf.cell((bar_x, 0)).unwrap().style().fg,
+            Some(rgba_color(theme.error)),
+            "hot bar in the error tone"
+        );
+
+        // No snapshot: the name keeps the whole row, no budget anywhere.
+        let mut state = AgentsSplitState::new(vec!["kilo".into()]);
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut state, &theme);
+        let row = row_text(&buf);
+        let cols: Vec<char> = row.chars().collect();
+        assert!(
+            !row.contains("tok"),
+            "no budget before the first report: {row:?}"
+        );
+        assert_eq!(
+            cols[1..5].iter().collect::<String>(),
+            "kilo",
+            "name keeps its row: {row:?}"
+        );
+    }
+
+    /// A narrow pane drops to the compact budget (`9.6k/100k 9%`) instead
+    /// of overwriting its logo: same three numbers, no bar. A pane that
+    /// fits not even the compact pair paints no budget at all.
+    #[test]
+    fn header_narrow_pane_uses_the_compact_budget() {
+        let theme = test_theme();
+        let row_text = |buf: &Buffer, w: u16| {
+            (0..w)
+                .map(|x| {
+                    buf.cell((x, 0))
+                        .map(|c| c.symbol().to_string())
+                        .unwrap_or_default()
+                })
+                .collect::<String>()
+        };
+
+        // 30 columns: the 35-cell full pair cannot fit, the 12-cell
+        // compact one does — right-aligned, logo intact.
+        let area = Rect::new(0, 0, 30, 10);
+        let mut state = AgentsSplitState::new(vec!["kilo".into()]);
+        state.panes[0].activity.usage = Some((100_000, 9_612));
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut state, &theme);
+        let row = row_text(&buf, 30);
+        let cols: Vec<char> = row.chars().collect();
+        let compact: Vec<char> = "9.6k/100k 9%".chars().collect();
+        assert_eq!(
+            &cols[17..29],
+            &compact[..],
+            "compact pair right-aligned: {row:?}"
+        );
+        assert_eq!(cols[29], ' ', "one breathing column at the edge");
+        assert_eq!(
+            cols[1..5].iter().collect::<String>(),
+            "kilo",
+            "the logo survives: {row:?}"
+        );
+        assert_eq!(
+            buf.cell((17, 0)).unwrap().style().fg,
+            Some(rgba_color(theme.text_muted)),
+            "compact counter in the muted tone"
+        );
+        assert_eq!(
+            buf.cell((27, 0)).unwrap().style().fg,
+            Some(rgba_color(theme.text_muted)),
+            "cool compact meter in the muted tone"
+        );
+        assert!(
+            buf.cell((27, 0))
+                .unwrap()
+                .style()
+                .add_modifier
+                .contains(Modifier::BOLD),
+            "the compact percentage reads bold too"
+        );
+
+        // 12 columns: not even the compact pair fits — name only.
+        let area = Rect::new(0, 0, 12, 10);
+        let mut state = AgentsSplitState::new(vec!["kilo".into()]);
+        state.panes[0].activity.usage = Some((100_000, 9_612));
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut state, &theme);
+        let row = row_text(&buf, 12);
+        assert!(!row.contains('%'), "no budget at all: {row:?}");
+        assert_eq!(
+            &row.chars().collect::<Vec<_>>()[1..5],
+            &['k', 'i', 'l', 'o']
+        );
+    }
+
+    /// The budget never covers the logo: at 40 columns the 35-cell full
+    /// pair would fit the pane but NOT beside the 4-cell name, so the
+    /// header drops to compact while the name can still be kept.
+    #[test]
+    fn header_budget_yields_to_the_logo_before_clipping_it() {
+        let theme = test_theme();
+        let area = Rect::new(0, 0, 40, 10);
+        let mut state = AgentsSplitState::new(vec!["kilo".into()]);
+        state.panes[0].activity.usage = Some((100_000, 9_612));
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut state, &theme);
+        let row: String = (0..40)
+            .map(|x| {
+                buf.cell((x, 0))
+                    .map(|c| c.symbol().to_string())
+                    .unwrap_or_default()
+            })
+            .collect();
+        let cols: Vec<char> = row.chars().collect();
+        let compact: Vec<char> = "9.6k/100k 9%".chars().collect();
+        assert_eq!(&cols[27..39], &compact[..], "compact, not full: {row:?}");
+        assert_eq!(
+            cols[1..5].iter().collect::<String>(),
+            "kilo",
+            "the logo is kept whole: {row:?}"
         );
     }
 
