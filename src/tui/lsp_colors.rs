@@ -9,10 +9,10 @@
 
 use cosh_tui::core::lib::rgba::RGBA;
 
-/// (short label, logo background color) for a language server catalog name.
+/// (short label, logo color) for a language server catalog name.
 ///
-/// Colors are opaque (`alpha = 255`) logo colors: the text drawn on top uses
-/// a luminance-based contrast, like the pending-queue rows.
+/// Colors are opaque (`alpha = 255`) logo colors: the render paints the tag's
+/// FONT with them, on the default background.
 pub fn lsp_tag(server: &str) -> Option<(&'static str, RGBA)> {
     let (label, rgb) = match server {
         "rust-analyzer" => ("Rust", (0xF7, 0x4C, 0x00)),

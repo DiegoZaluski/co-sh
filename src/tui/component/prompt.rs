@@ -100,11 +100,14 @@ pub(crate) fn agent_mode_color(
 
 use crate::theme::contrast_color;
 
-/// Draw the inline LSP status segment on the prompt footer: an `LSP` label
-/// followed by one colored tag per active server, or `disabled` when LSP is
-/// turned off. Servers without a dedicated language color fall back to the
-/// theme's primary color. Draws up to `max_w` columns starting at `x`,
-/// returning the next free column.
+/// Draw the inline LSP status segment on the prompt footer: with servers
+/// connected, a bold `◈` marker followed by one tag per server, each in its
+/// language's logo color (theme's primary color fallback) and italic —
+/// foreground paint only, never a background fill. The `LSP` word appears
+/// solely for the bare (on, nothing running) and `disabled` states.
+/// Servers without a dedicated language color fall back to the theme's
+/// primary color. Draws up to `max_w` columns starting at `x`, returning the
+/// next free column.
 fn draw_lsp_segment(
     buf: &mut Buffer,
     available: bool,
@@ -115,12 +118,16 @@ fn draw_lsp_segment(
     theme: &Theme,
 ) -> u16 {
     let muted_style = Style::default().fg(rgba_color(theme.text_muted));
-    let label = "LSP ";
+    let label_style = muted_style.add_modifier(Modifier::BOLD);
+    // When servers are connected the `LSP` word drops out entirely — only
+    // the `◈` marker leads the tags: `◈ Rust`. The full `LSP` label appears
+    // solely for the bare (nothing running) and `disabled` states.
+    let label = if servers.is_empty() { "LSP " } else { "◈ " };
 
     // "disabled" means LSP itself is off — not "no server running". When LSP
     // is on but nothing is running, just show the bare `LSP` label, no tags.
     if !available {
-        let text = format!("{label} disabled");
+        let text = format!("{label}disabled");
         draw_text_line(buf, &text, x, y, max_w, muted_style);
         return x + text.chars().count() as u16;
     }
@@ -131,22 +138,26 @@ fn draw_lsp_segment(
         }
         if let Some(cell) = buf.cell_mut((x + i as u16, y)) {
             cell.set_char(ch);
-            cell.set_style(muted_style);
+            cell.set_style(label_style);
         }
     }
     x += label.chars().count() as u16;
 
     for server in servers {
         // The lookup gives the short human label (e.g. "Rust" for
-        // `rust-analyzer`); unknown servers keep their raw name. Tag color
-        // is the language's logo color, or theme.primary when unknown.
-        let (label, bg) = match lsp_colors::lsp_tag(server) {
+        // `rust-analyzer`); unknown servers keep their raw name. The
+        // language's logo color paints the FONT, on the default background;
+        // unknown servers use the theme's primary color instead.
+        let (label, color) = match lsp_colors::lsp_tag(server) {
             Some((lbl, color)) => (lbl, color),
             None => (server.as_str(), theme.primary),
         };
-        let fg = contrast_color(bg);
-        let bg_color = rgba_color(bg);
-        let tag = format!(" {label} ");
+        let tag_style = Style::default()
+            .fg(rgba_color(color))
+            .add_modifier(Modifier::ITALIC);
+        // No leading space: the label already ends with one — `◈ Rust`,
+        // not `◈  Rust`. The trailing space separates sibling tags.
+        let tag = format!("{label} ");
         for (i, ch) in tag.chars().enumerate() {
             let cx = x + i as u16;
             if cx >= x + max_w {
@@ -154,7 +165,7 @@ fn draw_lsp_segment(
             }
             if let Some(cell) = buf.cell_mut((cx, y)) {
                 cell.set_char(ch);
-                cell.set_style(Style::default().fg(fg).bg(bg_color));
+                cell.set_style(tag_style);
             }
         }
         x += tag.chars().count() as u16;
@@ -1276,8 +1287,9 @@ impl PromptView {
         );
         footer_x = footer_x.saturating_add(footer_text.chars().count() as u16);
 
-        // Inline LSP status: ` LSP <tag> <tag>…`, tags painted with the
-        // language's logo color (theme.primary fallback), disabled when empty.
+        // Inline LSP status: ` LSP <tag> <tag>…`, label bold, tags in the
+        // language's logo font color and italic (theme.primary fallback),
+        // disabled when empty.
         // Omitted entirely while the input box is still raised (no message yet).
         if has_conversation {
             footer_x = footer_x.saturating_add(3);
@@ -1713,6 +1725,89 @@ mod tests {
 
         // Prompt text starts three columns inside the left border.
         assert_eq!(buf[(3, 1)].bg, rgba_color(theme.accent));
+    }
+
+    #[test]
+    fn lsp_segment_paints_the_font_not_the_background() {
+        use crate::theme::ThemeRegistry;
+
+        let theme = ThemeRegistry::new().default_theme().clone();
+        let servers = vec!["rust-analyzer".to_string(), "taplo".to_string()];
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+        let end = draw_lsp_segment(&mut buf, true, &servers, 0, 0, 40, &theme);
+
+        // "◈ " (2) + "Rust " (5) + "taplo " (6): unknown servers keep
+        // their raw name, single spaces throughout.
+        assert_eq!(end, 13);
+        let text: String = (0..end).map(|x| buf[(x, 0)].symbol().to_string()).collect();
+        assert_eq!(text, "◈ Rust taplo ");
+
+        // The `◈` marker is bold, muted, with no background fill.
+        for x in 0..2 {
+            let cell = &buf[(x, 0)];
+            assert!(
+                cell.modifier.contains(Modifier::BOLD),
+                "label cell {x} must be bold"
+            );
+            assert_eq!(cell.fg, rgba_color(theme.text_muted));
+            assert_eq!(cell.bg, Color::Reset, "label must not fill the background");
+        }
+
+        // A known server paints the FONT in its logo color, italic, no fill.
+        let (_, rust) = lsp_colors::lsp_tag("rust-analyzer").expect("rust mapped");
+        let cell = &buf[(2, 0)];
+        assert_eq!(cell.symbol(), "R");
+        assert_eq!(cell.fg, rgba_color(rust));
+        assert!(
+            cell.modifier.contains(Modifier::ITALIC),
+            "server tag must be italic"
+        );
+        assert_eq!(cell.bg, Color::Reset, "tag must not fill the background");
+
+        // An unknown server keeps its raw name in the primary color — also
+        // italic, also font-only.
+        let cell = &buf[(7, 0)];
+        assert_eq!(cell.symbol(), "t");
+        assert_eq!(cell.fg, rgba_color(theme.primary));
+        assert!(
+            cell.modifier.contains(Modifier::ITALIC),
+            "unknown server tag must be italic too"
+        );
+        assert_eq!(cell.bg, Color::Reset, "tag must not fill the background");
+    }
+
+    #[test]
+    fn lsp_segment_without_servers_shows_the_bare_label() {
+        use crate::theme::ThemeRegistry;
+
+        let theme = ThemeRegistry::new().default_theme().clone();
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+        let end = draw_lsp_segment(&mut buf, true, &[], 0, 0, 40, &theme);
+
+        // Bare `LSP ` with no chevron and no tags.
+        assert_eq!(end, 4);
+        let text: String = (0..4).map(|x| buf[(x, 0)].symbol().to_string()).collect();
+        assert_eq!(text, "LSP ");
+    }
+
+    #[test]
+    fn lsp_segment_disabled_stays_muted_and_not_bold() {
+        use crate::theme::ThemeRegistry;
+
+        let theme = ThemeRegistry::new().default_theme().clone();
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+        let end = draw_lsp_segment(&mut buf, false, &[], 0, 0, 40, &theme);
+
+        assert_eq!(end, "LSP disabled".chars().count() as u16);
+        let cell = &buf[(0, 0)];
+        assert_eq!(cell.fg, rgba_color(theme.text_muted));
+        assert!(
+            !cell.modifier.contains(Modifier::BOLD),
+            "`disabled` keeps the plain muted style"
+        );
     }
 
     #[test]
