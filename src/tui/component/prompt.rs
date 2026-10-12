@@ -171,6 +171,35 @@ fn truncate_with_ellipsis(text: &str, max: usize) -> String {
     clipped
 }
 
+/// Badge of the focused `/agents` pane for the agent-label row: the
+/// agent's display name in its brand sweep, drawn as the FIRST right-side
+/// segment — ahead of the row's own `provider model level` triple, which
+/// then carries the pane's serving triple instead of the gateway's. ACP
+/// panes carry no provider unless the harness advertises one (the empty
+/// segment drops out of the fit below); the model id is shortened and
+/// truncated here, next to the normal-mode path.
+///
+/// `name_styles` is the header's own per-glyph sweep
+/// (`agents_split::brand_name_styles`, resolved by the caller): the badge
+/// logo IS the pane logo, painted over the row's fill. All other strings
+/// are caller-resolved (`display_name`).
+pub struct PanePromptInfo<'a> {
+    /// Display name of the focused agent.
+    pub name: &'a str,
+    /// Per-glyph brand styles of the display name, header-identical.
+    pub name_styles: &'a [Style],
+    /// Effective model id of the pane's session.
+    pub model: &'a str,
+    /// Human model label, when the harness names the value.
+    pub model_label: Option<&'a str>,
+    /// Serving provider id, when advertised.
+    pub provider: &'a str,
+    /// Human provider label, when named.
+    pub provider_label: Option<&'a str>,
+    /// Reasoning level display, when the harness offers a real choice.
+    pub reasoning: Option<&'a str>,
+}
+
 pub struct PromptView {
     pub input: String,
     pub cursor_pos: usize,
@@ -945,6 +974,7 @@ impl PromptView {
         provider: &str,
         model_name: &str,
         reasoning: Option<&str>,
+        pane: Option<PanePromptInfo<'_>>,
         delta_time: f64,
         show_logo: bool,
     ) {
@@ -1261,19 +1291,72 @@ impl PromptView {
         // bold and uses the same fixed muted color as the provider. Segments
         // are truncated so the row always respects the box interior and never
         // overlaps the agent label on the left.
-        if !model_name.is_empty() {
+        //
+        // A focused `/agents` pane feeds the same segments with its own
+        // serving triple — provider when advertised, else the pane's
+        // model (human label when the harness names the value, else the
+        // shortened id) and its reasoning level. An empty provider drops
+        // out of the fit below. Before the pane's first report the model
+        // side is empty and only the brand name shows; each turn's report
+        // replaces the triple.
+        let badge_model: &str = match &pane {
+            Some(p) => p.model_label.unwrap_or_else(|| short_model_name(p.model)),
+            None => short_model_name(model_name),
+        };
+        let badge_provider: &str = match &pane {
+            Some(p) => p.provider_label.unwrap_or(p.provider),
+            None => provider,
+        };
+        let (eff_provider, eff_reasoning) = match &pane {
+            Some(p) => (badge_provider, p.reasoning),
+            None => (provider, reasoning),
+        };
+        // The focused pane's brand name leads the right-side segments —
+        // painted glyph by glyph with the header's own sweep (plus the
+        // row's fill underneath, which the pre-fill above already
+        // painted), one spacer column after it; its width is reserved
+        // from the fit budget, so the cascade below still guarantees the
+        // row fits.
+        let agent_glyphs: Vec<(char, Style)> = match &pane {
+            Some(p) => p
+                .name
+                .chars()
+                .zip(p.name_styles.iter().copied())
+                .map(|(ch, style)| {
+                    let style = if label_bg != Color::Reset {
+                        style.bg(label_bg)
+                    } else {
+                        style
+                    };
+                    (ch, style)
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        let agent_w = if agent_glyphs.is_empty() {
+            0
+        } else {
+            agent_glyphs.len() + 1
+        };
+        if pane.is_some() || !badge_model.is_empty() {
             // Bare model name, without the lab/org prefix (display only).
-            let model_name = short_model_name(model_name);
-            let reason = reasoning.filter(|r| !r.is_empty() && *r != "default");
-            let sep = if reason.is_some() { " " } else { "" };
+            let model_name = badge_model;
+            let reason = eff_reasoning.filter(|r| !r.is_empty() && *r != "default");
+            // Spacer before the level, only when a model precedes it (the
+            // agent name carries its own trailing spacer).
+            let sep = if reason.is_some() && !model_name.is_empty() {
+                " "
+            } else {
+                ""
+            };
             let model_style = row_bg.fg(rgba_color(theme.text));
             let reason_style = row_muted_style.add_modifier(Modifier::BOLD);
 
             // Gateway provider prefix, muted, followed by one spacer column.
-            let prov_seg = if provider.is_empty() {
+            let prov_seg = if eff_provider.is_empty() {
                 String::new()
             } else {
-                format!("{provider} ")
+                format!("{eff_provider} ")
             };
             let prov_w = prov_seg.chars().count();
             let sep_w = sep.chars().count();
@@ -1282,10 +1365,10 @@ impl PromptView {
 
             // Interior width mirrors `max_line_w`: 3 columns of chrome on
             // each side (border + 2 padding). Reserve room for the agent
-            // label plus one spacer column.
+            // label plus one spacer column — and the brand name segment.
             let interior_w = input_area.width.saturating_sub(6) as usize;
             let label_w = agent_label.chars().count() + 1;
-            let avail = interior_w.saturating_sub(label_w);
+            let avail = interior_w.saturating_sub(label_w).saturating_sub(agent_w);
 
             // Fit order: drop the provider first, then shrink the model name
             // (ellipsis) — the reasoning level always stays fully visible.
@@ -1313,6 +1396,18 @@ impl PromptView {
             };
 
             let mut segments: Vec<(String, Style)> = Vec::new();
+            // The brand name goes glyph by glyph (one style per column —
+            // the header's gradient sweep), then one spacer column in the
+            // last glyph's style.
+            let mut glyphs = agent_glyphs.into_iter().peekable();
+            while let Some((ch, style)) = glyphs.next() {
+                let text = if glyphs.peek().is_none() {
+                    format!("{ch} ")
+                } else {
+                    ch.to_string()
+                };
+                segments.push((text, style));
+            }
             if !prov_out.is_empty() {
                 segments.push((prov_out, row_muted_style));
             }
@@ -1597,6 +1692,7 @@ mod tests {
             "",
             "",
             None,
+            None,
             0.0,
             false,
         );
@@ -1634,6 +1730,7 @@ mod tests {
             "",
             "",
             None,
+            None,
             0.0,
             false,
         );
@@ -1661,6 +1758,7 @@ mod tests {
             SystemTime::now(),
             "",
             "",
+            None,
             None,
             0.0,
             false,
@@ -1734,5 +1832,134 @@ mod tests {
 
         view.delete_word_before_cursor();
         assert_eq!(view.input, "alpha ");
+    }
+
+    /// Read one buffer row as a plain string (glyphs only).
+    fn row_text(buf: &Buffer, y: u16, width: u16) -> String {
+        (0..width)
+            .map(|x| buf[(x, y)].symbol().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn agents_pane_badge_adds_brand_name_model_and_reasoning() {
+        use crate::theme::ThemeRegistry;
+
+        let theme = ThemeRegistry::new().default_theme().clone();
+        let state = AppState::new();
+        let mut view = PromptView::new();
+        view.input = "abc".into();
+        view.cursor_pos = view.input.len();
+        // The header's own sweep, resolved like the caller does.
+        let name_styles =
+            crate::routes::session::agents_split::brand_name_styles("Kilo", &theme, true);
+
+        let area = Rect::new(0, 0, 80, 10);
+        let mut buf = Buffer::empty(area);
+        view.render(
+            &mut buf,
+            area,
+            &state,
+            &theme,
+            &AgentColors::from_theme(&theme),
+            &[],
+            SystemTime::now(),
+            "openrouter",
+            "deepseek-ai/deepseek-v4",
+            Some("high"),
+            Some(PanePromptInfo {
+                name: "Kilo",
+                name_styles: &name_styles,
+                model: "kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
+                model_label: Some("Nemotron free"),
+                provider: "nvidia",
+                provider_label: Some("Nvidia"),
+                reasoning: Some("high"),
+            }),
+            0.0,
+            false,
+        );
+
+        // One content line: the label row sits at BASE_H + 1.
+        let row = row_text(&buf, BASE_H + 1, area.width);
+        assert!(row.contains("Build"), "the mode label stays: {row:?}");
+        assert!(
+            row.contains("Kilo"),
+            "brand name leads the right side: {row:?}"
+        );
+        assert!(row.contains("Nvidia"), "provider shows when known: {row:?}");
+        assert!(
+            row.contains("Nemotron free"),
+            "human model label wins over the id: {row:?}"
+        );
+        assert!(row.contains("high"), "reasoning level: {row:?}");
+        assert!(
+            !row.contains("openrouter") && !row.contains("deepseek"),
+            "the pane replaces the gateway triple: {row:?}"
+        );
+        // Per-glyph sweep, header-identical: every badge glyph wears
+        // its own sweep style over the row fill (`find` is byte-based;
+        // the leading `│` is 3 bytes, so recount in chars for the cell).
+        let byte = row.find("Kilo").expect("brand name on the row");
+        let start = row[..byte].chars().count() as u16;
+        for (i, ch) in "Kilo".chars().enumerate() {
+            let cell = &buf[(start + i as u16, BASE_H + 1)];
+            assert_eq!(cell.symbol().to_string(), ch.to_string());
+            assert_eq!(
+                cell.fg,
+                name_styles[i].fg.unwrap(),
+                "glyph {i} wears the header sweep"
+            );
+        }
+    }
+
+    #[test]
+    fn agents_pane_badge_before_first_report_shows_only_the_brand_name() {
+        use crate::theme::ThemeRegistry;
+
+        let theme = ThemeRegistry::new().default_theme().clone();
+        let state = AppState::new();
+        let mut view = PromptView::new();
+        view.input = "abc".into();
+        view.cursor_pos = view.input.len();
+        let name_styles =
+            crate::routes::session::agents_split::brand_name_styles("Kilo", &theme, true);
+
+        let area = Rect::new(0, 0, 80, 10);
+        let mut buf = Buffer::empty(area);
+        view.render(
+            &mut buf,
+            area,
+            &state,
+            &theme,
+            &AgentColors::from_theme(&theme),
+            &[],
+            SystemTime::now(),
+            "openrouter",
+            "deepseek-ai/deepseek-v4",
+            Some("high"),
+            Some(PanePromptInfo {
+                name: "Kilo",
+                name_styles: &name_styles,
+                model: "",
+                model_label: None,
+                provider: "",
+                provider_label: None,
+                reasoning: None,
+            }),
+            0.0,
+            false,
+        );
+
+        let row = row_text(&buf, BASE_H + 1, area.width);
+        assert!(row.contains("Build"), "the mode label stays: {row:?}");
+        assert!(
+            row.contains("Kilo"),
+            "brand name still marks the target: {row:?}"
+        );
+        assert!(
+            !row.contains("openrouter") && !row.contains("deepseek") && !row.contains("high"),
+            "nothing served yet, nothing shown: {row:?}"
+        );
     }
 }

@@ -10,14 +10,17 @@ use super::{
     App, AppMode, BACK_LINK_TEXT, BUG_REPORT_TEXT, EMPTY_SESSION_PROMPT_MIN_WIDTH,
     EMPTY_SESSION_PROMPT_RATIO, MIN_PROMPT_RESERVE_ROWS, SessionArea,
 };
+use crate::component::prompt::PanePromptInfo;
 use crate::left_panel::{MIN_WIDTH_FOR_LEFT_PANEL, Mode};
 use crate::logo::LOGO_CHAT;
 #[cfg(feature = "home")]
 use crate::routes::home::footer::HomeFooterView;
+use crate::routes::session::agents_split::{DAEMON_LABEL, brand_name_styles};
 use crate::routes::session::footer::FooterView;
 use crate::routes::session::right_panel::render_right_panel;
 use crate::state::PendingQueues;
 use crate::theme::{Theme, rgba_color};
+use cosh_tools::subagent::palette::display_name;
 use cosh_tui::core::lib::unicode_util::graphemes_with_width;
 
 /// Render a 10-character budget bar like `▓▓▓▓▓░░░░░` from a 0-100 percentage.
@@ -965,6 +968,40 @@ impl App {
                         let provider = self.llm_config.provider.as_str();
                         let model_name = self.llm_config.model.as_deref().unwrap_or("");
                         let reasoning = self.llm_config.reasoning.as_deref();
+                        // Focused `/agents` pane badge: the prompt targets
+                        // that pane, so the agent-label row leads with the
+                        // pane's brand name + serving triple instead of the
+                        // gateway triple. The daemon pane IS the main agent
+                        // itself: no badge at all — the row stays exactly
+                        // the mode + gateway triple it always was. An ACP
+                        // pane shows its reported triple (provider only
+                        // when advertised) — empty until the first report,
+                        // replaced on change. Unfocused (`None`) is the
+                        // main agent: unchanged.
+                        let pane = self
+                            .agents_split
+                            .as_ref()
+                            .and_then(|split| split.focused)
+                            .and_then(|index| self.agents_split.as_ref()?.panes.get(index))
+                            .filter(|pane| pane.agent != DAEMON_LABEL);
+                        let mut name_styles = Vec::new();
+                        let pane_badge: Option<PanePromptInfo<'_>> = pane.map(|pane| {
+                            let name = display_name(&pane.agent);
+                            // The header's own per-glyph sweep, resolved
+                            // once: the badge logo IS the pane logo.
+                            name_styles = brand_name_styles(name, &self.theme, true);
+                            let info = pane.session_info.as_ref();
+                            let provider = info.and_then(|i| i.provider.as_deref());
+                            PanePromptInfo {
+                                name,
+                                name_styles: &name_styles,
+                                model: info.and_then(|i| i.model.as_deref()).unwrap_or(""),
+                                model_label: info.and_then(|i| i.model_label.as_deref()),
+                                provider: provider.unwrap_or(""),
+                                provider_label: info.and_then(|i| i.provider_label.as_deref()),
+                                reasoning: info.and_then(|i| i.reasoning.as_deref()),
+                            }
+                        });
                         self.prompt_view.render(
                             buf,
                             prompt_area,
@@ -976,6 +1013,7 @@ impl App {
                             provider,
                             model_name,
                             reasoning,
+                            pane_badge,
                             delta_time,
                             is_empty_session && self.anim_enabled,
                         );

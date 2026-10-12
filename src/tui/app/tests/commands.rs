@@ -1812,3 +1812,67 @@ async fn a_user_prompt_echoes_into_the_pane_timeline() {
         "each turn owns its input entry"
     );
 }
+
+/// A `SessionModel` pane event stores the serving pair on the pane (the
+/// prompt badge reads it) instead of streaming into the timeline.
+#[tokio::test]
+async fn a_session_model_event_lands_on_the_pane() {
+    use crate::types::AgentPaneRef;
+    use cosh::harness::HarnessEvent;
+
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    let session_id = crate::session_store::generate_session_id();
+    app.state
+        .add_empty_session(session_id.clone(), "pane badge".into(), 0);
+    app.state.current_session_id = Some(session_id);
+    app.state.current_session_mut().unwrap().agents_panes =
+        Some(vec![AgentPaneRef::Name("kilo".into())]);
+    let panes = app
+        .state
+        .current_session()
+        .unwrap()
+        .agents_panes
+        .clone()
+        .unwrap();
+    app.agents_split = Some(crate::routes::session::agents_split::AgentsSplitState::new(
+        panes,
+    ));
+    assert!(
+        app.agents_split.as_ref().unwrap().panes[0]
+            .session_info
+            .is_none(),
+        "no serving pair before the first report"
+    );
+
+    app.event_tx
+        .send(HarnessEvent::AgentsPaneEvent {
+            pane: 0,
+            epoch: app.agents_pane_epoch,
+            event: cosh_tools::subagent::events::SubagentEvent::SessionModel {
+                model: Some("kilo/nvidia/nemotron-3-ultra-550b-a55b:free".into()),
+                model_label: Some("Nemotron free".into()),
+                provider: Some("nvidia".into()),
+                provider_label: Some("Nvidia".into()),
+                reasoning: Some("High".into()),
+            },
+        })
+        .ok();
+    app.poll_events();
+
+    let pane = &app.agents_split.as_ref().unwrap().panes[0];
+    let info = pane.session_info.as_ref().expect("the report is stored");
+    assert_eq!(
+        info.model.as_deref(),
+        Some("kilo/nvidia/nemotron-3-ultra-550b-a55b:free")
+    );
+    assert_eq!(info.model_label.as_deref(), Some("Nemotron free"));
+    assert_eq!(info.provider.as_deref(), Some("nvidia"));
+    assert_eq!(info.provider_label.as_deref(), Some("Nvidia"));
+    assert_eq!(info.reasoning.as_deref(), Some("High"));
+    assert!(
+        pane.activity.timeline.is_empty(),
+        "pane chrome never streams into the timeline"
+    );
+}

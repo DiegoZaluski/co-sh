@@ -66,9 +66,9 @@ use agent_client_protocol::schema::v1::{
     ReadTextFileResponse, RequestPermissionOutcome, RequestPermissionRequest,
     RequestPermissionResponse, ResumeSessionRequest, ResumeSessionResponse,
     SelectedPermissionOutcome, SessionConfigId, SessionConfigKind, SessionConfigOption,
-    SessionConfigSelectOptions, SessionConfigValueId, SessionId, SessionNotification,
-    SetSessionConfigOptionRequest, StopReason, TextContent, WriteTextFileRequest,
-    WriteTextFileResponse,
+    SessionConfigOptionCategory, SessionConfigSelect, SessionConfigSelectOptions,
+    SessionConfigValueId, SessionId, SessionNotification, SetSessionConfigOptionRequest,
+    StopReason, TextContent, WriteTextFileRequest, WriteTextFileResponse,
 };
 use agent_client_protocol::{
     AcpAgent, Agent as AcpRole, Client, ConnectionTo, Error as AcpError, LineDirection,
@@ -724,6 +724,9 @@ pub(crate) async fn run_replay_session<T>(
 where
     T: agent_client_protocol::ConnectTo<agent_client_protocol::Client> + 'static,
 {
+    // The badge emission below runs OUTSIDE the notification closure that
+    // moves `chunk_tx`: it gets its own sender clone.
+    let model_tx = chunk_tx.clone();
     Client
         .builder()
         .name("cosh")
@@ -786,7 +789,11 @@ where
                 .block_task()
                 .await
                 .map_err(|e| acp_error(format!("ACP session/load failed: {e}")))?;
-            let _: LoadSessionResponse = loaded;
+            // The replayed pane's badge: same triple as a live turn (the
+            // load response carries the session's config options), so a
+            // rebooted pane shows its model without needing a new turn.
+            let loaded: LoadSessionResponse = loaded;
+            let _ = model_tx.send(session_model_info(loaded.config_options.as_deref(), ""));
             Ok(())
         })
         .await
@@ -968,6 +975,103 @@ async fn select_session_model(
     Ok(())
 }
 
+/// Read the session's badge triple from its ACP config options: the
+/// effective model id (+ human label, when the harness names the value),
+/// the serving provider (+ label, when a `provider` option is advertised
+/// at all — cline advertises one, kilo/opencode do not), and the
+/// reasoning/thought level display.
+///
+/// The model lookup prefers the spec's `Model` category and falls back to
+/// the `model` option id (the same id [`select_session_model`] matches —
+/// harnesses predate categories). The effective id is the preferred model
+/// when one was selected, else the advertised current value. The provider
+/// lookup is id-only (`provider`): no spec category exists for it.
+/// Thought level is category-only (`ThoughtLevel`), and only when the
+/// option offers MORE than one value — a single offered value (kilo's
+/// fixed `thinking`) is a marker, not a level, and stays empty. Boolean
+/// options are skipped in every slot — a model, provider or level
+/// selector is a value, not a toggle.
+pub(crate) fn session_model_info(
+    config_options: Option<&[SessionConfigOption]>,
+    preferred_model: &str,
+) -> super::events::SubagentEvent {
+    let options = config_options.unwrap_or_default();
+    let model_option = options
+        .iter()
+        .find(|o| matches!(o.category, Some(SessionConfigOptionCategory::Model)))
+        .or_else(|| options.iter().find(|o| o.id.0.as_ref() == "model"));
+    let (model, model_label) = match model_option {
+        Some(option) => match &option.kind {
+            SessionConfigKind::Select(select) => {
+                let current = if preferred_model.is_empty() {
+                    select.current_value.0.to_string()
+                } else {
+                    preferred_model.to_string()
+                };
+                (Some(current.clone()), select_value_name(select, &current))
+            }
+            _ => (None, None),
+        },
+        None => (None, None),
+    };
+    let (provider, provider_label) = match options.iter().find(|o| o.id.0.as_ref() == "provider") {
+        Some(option) => match &option.kind {
+            SessionConfigKind::Select(select) => {
+                let current = select.current_value.0.to_string();
+                (Some(current.clone()), select_value_name(select, &current))
+            }
+            _ => (None, None),
+        },
+        None => (None, None),
+    };
+    let reasoning = options
+        .iter()
+        .find(|o| matches!(o.category, Some(SessionConfigOptionCategory::ThoughtLevel)))
+        .and_then(|option| match &option.kind {
+            SessionConfigKind::Select(select) if select_value_count(select) > 1 => {
+                let current = select.current_value.0.to_string();
+                Some(select_value_name(select, &current).unwrap_or(current))
+            }
+            _ => None,
+        });
+    super::events::SubagentEvent::SessionModel {
+        model,
+        model_label,
+        provider,
+        provider_label,
+        reasoning,
+    }
+}
+
+/// How many values a Select option offers (ungrouped + grouped): a
+/// thought level with a single offered value is a fixed marker, not a
+/// level the session could hold instead.
+fn select_value_count(select: &SessionConfigSelect) -> usize {
+    match &select.options {
+        SessionConfigSelectOptions::Ungrouped(options) => options.len(),
+        SessionConfigSelectOptions::Grouped(groups) => groups.iter().map(|g| g.options.len()).sum(),
+        _ => 0,
+    }
+}
+
+/// Human label of `value` among a Select option's offered values
+/// (ungrouped or grouped), `None` when the harness names nothing.
+fn select_value_name(select: &SessionConfigSelect, value: &str) -> Option<String> {
+    let found = match &select.options {
+        SessionConfigSelectOptions::Ungrouped(options) => options
+            .iter()
+            .find(|o| o.value.0.as_ref() == value)
+            .map(|o| o.name.clone()),
+        SessionConfigSelectOptions::Grouped(groups) => groups
+            .iter()
+            .flat_map(|g| g.options.iter())
+            .find(|o| o.value.0.as_ref() == value)
+            .map(|o| o.name.clone()),
+        _ => None,
+    };
+    found.filter(|name| !name.is_empty())
+}
+
 /// Run one full ACP prompt turn against the given agent-side transport.
 ///
 /// `transport` is anything implementing [`ConnectTo`] for the agent role: in
@@ -1024,7 +1128,9 @@ where
 
     // Route the transport through the generic connection machinery. The
     // subprocess launcher gets stderr line logging; in-memory test channels
-    // pass through untouched.
+    // pass through untouched. The badge emission below runs OUTSIDE the
+    // notification closure that moves `chunk_tx`: its own sender clone.
+    let model_tx = chunk_tx.clone();
     Client
         .builder()
         .name("cosh")
@@ -1190,6 +1296,13 @@ where
             )
             .await
             .map_err(acp_error)?;
+
+            // The prompt badge's data: the session's serving triple, read
+            // from the same config options the selection above ran
+            // against. Emitted BEFORE the prompt so the pane shows what
+            // serves the turn from its first chunk; anything the harness
+            // does not advertise stays empty.
+            let _ = model_tx.send(session_model_info(config_options.as_deref(), preferred_model));
 
             let prompt_request = connection
                 .send_request(PromptRequest::new(

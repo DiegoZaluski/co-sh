@@ -80,8 +80,7 @@ const GAP: u16 = 1;
 #[derive(Debug, Clone, Default)]
 pub struct AgentPane {
     /// Agent CLI name (`"claude"`, `"kilo"`, …). The daemon pane is `"cosh"`.
-    pub agent: String,
-    /// Structured live transcript, REUSED from the right panel's
+    pub agent: String,    /// Structured live transcript, REUSED from the right panel's
     /// `SubagentActivity` so Message/Thought chunks coalesce and tool-call
     /// patches apply exactly like the existing sub-agent box.
     pub activity: SubagentActivity,
@@ -102,6 +101,11 @@ pub struct AgentPane {
     pub stop_signal: Option<Arc<AtomicBool>>,
     /// Session id for a future `resume` flow.
     pub session_id: Option<String>,
+    /// What serves this pane's session, from the ACP config options: the
+    /// prompt badge's `(model, reasoning)` pair. Empty until the first
+    /// turn (or replay pass) reports it; every report replaces it, so a
+    /// model/thought change shows on the next turn.
+    pub session_info: Option<AgentSessionInfo>,
     /// Top of the visible window in content rows — the chat's `scroll_y`.
     /// Re-clamped every render against the real content; sticky-bottom
     /// follow is [`AgentPane::auto_follow`].
@@ -119,6 +123,21 @@ pub struct AgentPane {
     pub body_height: u16,
 }
 
+/// The `/agents` prompt badge's data for one pane: what serves its
+/// session, read from the ACP config options (never guessed). `model` is
+/// the effective model id, `model_label` its human label when the harness
+/// names the value, `provider` (+ `provider_label`) the serving provider
+/// when advertised at all, `reasoning` the thought-level display when the
+/// harness offers a real choice.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentSessionInfo {
+    pub model: Option<String>,
+    pub model_label: Option<String>,
+    pub provider: Option<String>,
+    pub provider_label: Option<String>,
+    pub reasoning: Option<String>,
+}
+
 impl AgentPane {
     #[must_use]
     pub fn new(agent: String) -> Self {
@@ -128,6 +147,7 @@ impl AgentPane {
             running: false,
             stop_signal: None,
             session_id: None,
+            session_info: None,
             rehydrating: false,
             rehydrate_spinner: SpinnerState::new(),
             scroll_y: 0,
@@ -585,6 +605,15 @@ impl AgentsSplitState {
     pub fn echo_turn_input(&mut self, pane: usize, text: &str, user: bool) {
         if let Some(p) = self.panes.get_mut(pane) {
             p.activity.open_turn_input(text, user);
+        }
+    }
+
+    /// Store the pane's serving pair from a `SessionModel` report,
+    /// replacing whatever the previous turn reported. Out-of-range panes
+    /// are ignored, like [`Self::apply_event`].
+    pub fn set_session_info(&mut self, pane: usize, info: AgentSessionInfo) {
+        if let Some(p) = self.panes.get_mut(pane) {
+            p.session_info = Some(info);
         }
     }
 
@@ -1222,21 +1251,16 @@ fn draw_agent_name(
     focused: bool,
 ) {
     let chars: Vec<char> = agent.chars().filter(|c| !c.is_control()).collect();
-    let count = chars.len();
-    for (i, ch) in chars.into_iter().enumerate() {
+    for (i, (ch, style)) in chars
+        .into_iter()
+        .zip(brand_name_styles(agent, theme, focused))
+        .enumerate()
+    {
         let Ok(i) = u16::try_from(i) else { break };
         let Some(cx) = x.checked_add(i) else { break };
         if cx >= x.saturating_add(max_w) {
             break;
         }
-        // One sample per glyph column: `t` walks the mark's colors left to
-        // right (constant for single-color marks).
-        let t = if count <= 1 {
-            0.0
-        } else {
-            f32::from(i) / (count as f32 - 1.0)
-        };
-        let style = brand_fg(agent, t, theme, focused).add_modifier(Modifier::BOLD);
         if let Some(cell) = buf.cell_mut((cx, y)) {
             cell.set_char(ch);
             cell.set_style(style);
@@ -1282,6 +1306,31 @@ pub(crate) fn brand_fg(agent: &str, t: f32, theme: &Theme, focused: bool) -> Sty
             Style::default().fg(rgba_color(fg))
         }
     }
+}
+
+/// One BOLD brand style per glyph of an agent's display name — the exact
+/// sweep [`draw_agent_name`] paints (gradient marks walk their colors
+/// left to right, single-color marks stay solid, unknown agents keep the
+/// theme's text). Shared by the pane header and the `/agents` prompt
+/// badge so the two logos can never drift apart; the caller paints the
+/// background (the header relies on its fill, the badge on the row's).
+pub(crate) fn brand_name_styles(agent: &str, theme: &Theme, focused: bool) -> Vec<Style> {
+    let count = agent.chars().filter(|c| !c.is_control()).count();
+    agent
+        .chars()
+        .filter(|c| !c.is_control())
+        .enumerate()
+        .map(|(i, _)| {
+            // One sample per glyph column: `t` walks the mark's colors
+            // left to right (constant for single-color marks).
+            let t = if count <= 1 {
+                0.0
+            } else {
+                i as f32 / (count as f32 - 1.0)
+            };
+            brand_fg(agent, t, theme, focused).add_modifier(Modifier::BOLD)
+        })
+        .collect()
 }
 
 /// Draw `text` clipped to `max_w` columns, filtering control characters.

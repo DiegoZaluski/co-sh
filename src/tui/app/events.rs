@@ -288,7 +288,31 @@ impl App {
                     }
                     let target =
                         either_split_mut(&mut self.agents_split, &mut self.parked_agents_split);
-                    if let Some(split) = target {
+                    // Pane chrome, not timeline content: the session's
+                    // serving pair lands on the pane (the prompt badge
+                    // reads it), everything else streams into the
+                    // activity as before.
+                    if let SubagentEvent::SessionModel {
+                        model,
+                        model_label,
+                        provider,
+                        provider_label,
+                        reasoning,
+                    } = &event
+                    {
+                        if let Some(split) = target {
+                            split.set_session_info(
+                                pane,
+                                crate::routes::session::agents_split::AgentSessionInfo {
+                                    model: model.clone(),
+                                    model_label: model_label.clone(),
+                                    provider: provider.clone(),
+                                    provider_label: provider_label.clone(),
+                                    reasoning: reasoning.clone(),
+                                },
+                            );
+                        }
+                    } else if let Some(split) = target {
                         split.apply_event(pane, &event);
                     }
                     // The pane's mirror in the shared subagent list follows

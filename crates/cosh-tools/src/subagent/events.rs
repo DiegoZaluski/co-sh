@@ -266,6 +266,28 @@ pub enum SubagentEvent {
         /// Tokens currently in context.
         tokens_in_context: u64,
     },
+    /// The session's serving triple, read from the ACP session config
+    /// options once per turn (and per replay pass) — the data behind the
+    /// `/agents` prompt badge. Emitted by the caller, never by
+    /// `session/update` mapping: it is pane chrome, not timeline content,
+    /// so the TUI stores it on the pane instead of applying it. Anything
+    /// the harness does not advertise stays `None` and its segment drops
+    /// out of the badge.
+    SessionModel {
+        /// Effective model id (after the preferred-model selection).
+        model: Option<String>,
+        /// Human label of the model value, when the harness names it.
+        model_label: Option<String>,
+        /// Serving provider id, when the harness advertises a `provider`
+        /// option (cline does; kilo/opencode do not).
+        provider: Option<String>,
+        /// Human label of the provider value, when named.
+        provider_label: Option<String>,
+        /// Reasoning/thought level display, when the harness offers a real
+        /// choice (a single offered value is a fixed marker, not a level,
+        /// and stays empty).
+        reasoning: Option<String>,
+    },
     /// The session mode changed.
     Mode {
         /// The id of the new mode.

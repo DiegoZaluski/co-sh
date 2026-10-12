@@ -7,8 +7,8 @@
 // because they are exercised here.
 use super::SubAgent;
 use super::acp::{
-    ACP_AGENTS, Agent, acp_error, agent_launcher, ensure_path_within, install_hint, run_session,
-    run_replay_session, stop_reason_str, validate_agent,
+    ACP_AGENTS, Agent, acp_error, agent_launcher, ensure_path_within, install_hint,
+    run_replay_session, run_session, session_model_info, stop_reason_str, validate_agent,
 };
 use super::events::SubagentEvent;
 
@@ -257,7 +257,7 @@ async fn run_session_drives_a_full_acp_turn_end_to_end() {
     let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel();
     let accumulated = Arc::new(Mutex::new(super::closure::TurnClosure::default()));
 
-    let (turn, _, streamed) = tokio::join!(
+    let (turn, _, (badge, streamed)) = tokio::join!(
         run_session(
             client_side,
             "hello from acp".to_string(),
@@ -269,12 +269,24 @@ async fn run_session_drives_a_full_acp_turn_end_to_end() {
             chunk_tx,
         ),
         agent_task,
-        async { chunk_rx.recv().await },
+        async { (chunk_rx.recv().await, chunk_rx.recv().await) },
     );
 
     let (stop_reason, _session_id) = turn.unwrap();
     assert_eq!(stop_reason, "end_turn");
     assert_eq!(accumulated.lock().unwrap().output(), "hello from acp");
+    // The badge leads: the session report (no options advertised here)
+    // arrives before the first streamed chunk.
+    assert!(matches!(
+        badge.unwrap(),
+        SubagentEvent::SessionModel {
+            model: None,
+            model_label: None,
+            provider: None,
+            provider_label: None,
+            reasoning: None,
+        }
+    ));
     assert!(matches!(
         streamed.unwrap(),
         SubagentEvent::Message { text } if text == "hello from acp"
@@ -438,7 +450,7 @@ async fn run_session_serves_fs_requests_and_auto_approves_permissions() {
     let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel();
     let accumulated = Arc::new(Mutex::new(super::closure::TurnClosure::default()));
 
-    let (turn, _, streamed) = tokio::join!(
+    let (turn, _, (badge, streamed)) = tokio::join!(
         run_session(
             client_side,
             "exercise handlers".to_string(),
@@ -450,7 +462,7 @@ async fn run_session_serves_fs_requests_and_auto_approves_permissions() {
             chunk_tx,
         ),
         agent_task,
-        async { chunk_rx.recv().await },
+        async { (chunk_rx.recv().await, chunk_rx.recv().await) },
     );
 
     let (stop_reason, _session_id) = turn.unwrap();
@@ -459,6 +471,18 @@ async fn run_session_serves_fs_requests_and_auto_approves_permissions() {
         accumulated.lock().unwrap().output(),
         "read: l2\nperm: allow-yes\nperm-empty: Cancelled\nwrite: written-by-client"
     );
+    // The badge leads the stream (no options advertised here); the report
+    // follows as the second event.
+    assert!(matches!(
+        badge.unwrap(),
+        SubagentEvent::SessionModel {
+            model: None,
+            model_label: None,
+            provider: None,
+            provider_label: None,
+            reasoning: None,
+        }
+    ));
     assert!(matches!(
         streamed.unwrap(),
         SubagentEvent::Message { text } if text == accumulated.lock().unwrap().output()
@@ -568,7 +592,7 @@ async fn run_session_selects_the_preferred_session_model() {
     let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel();
     let accumulated = Arc::new(Mutex::new(super::closure::TurnClosure::default()));
 
-    let (turn, _, streamed) = tokio::join!(
+    let (turn, _, (badge, streamed)) = tokio::join!(
         run_session(
             client_side,
             "check model".to_string(),
@@ -580,12 +604,24 @@ async fn run_session_selects_the_preferred_session_model() {
             chunk_tx,
         ),
         agent_task,
-        async { chunk_rx.recv().await },
+        async { (chunk_rx.recv().await, chunk_rx.recv().await) },
     );
 
     let (stop_reason, _session_id) = turn.unwrap();
     assert_eq!(stop_reason, "end_turn");
     assert_eq!(accumulated.lock().unwrap().output(), "model-ok");
+    // The badge leads with the SELECTED model (not the advertised
+    // default) and its human label.
+    assert!(matches!(
+        badge.unwrap(),
+        SubagentEvent::SessionModel {
+            model: Some(model),
+            model_label: Some(label),
+            provider: None,
+            provider_label: None,
+            reasoning: None
+        } if model == PREFERRED && label == "Nemotron free"
+    ));
     assert!(matches!(
         streamed.unwrap(),
         SubagentEvent::Message { text } if text == "model-ok"
@@ -747,6 +783,15 @@ async fn run_session_maps_session_updates_into_typed_events() {
     assert_eq!(
         events,
         vec![
+            // The badge leads: this fixture advertises no config options,
+            // so every slot is empty.
+            SubagentEvent::SessionModel {
+                model: None,
+                model_label: None,
+                provider: None,
+                provider_label: None,
+                reasoning: None,
+            },
             SubagentEvent::UserMessage {
                 text: "user-echo".to_string(),
             },
@@ -1683,6 +1728,17 @@ async fn replay_loads_the_session_and_streams_the_history_without_prompting() {
             SubagentEvent::Message {
                 text: "all done".to_string(),
             },
+            // The badge trails the replay: the config options arrive WITH
+            // the load response, after the replayed history already
+            // streamed. This fixture loads no options, so every slot is
+            // empty.
+            SubagentEvent::SessionModel {
+                model: None,
+                model_label: None,
+                provider: None,
+                provider_label: None,
+                reasoning: None,
+            },
         ],
         "replay maps into the same typed stream a live turn produces"
     );
@@ -2237,7 +2293,7 @@ async fn resumed_session_selects_the_preferred_session_model() {
 
     let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel();
     let accumulated = Arc::new(Mutex::new(super::closure::TurnClosure::default()));
-    let (turn, _, streamed) = tokio::join!(
+    let (turn, _, (badge, streamed)) = tokio::join!(
         run_session(
             client_side,
             "check resumed model".to_string(),
@@ -2249,7 +2305,7 @@ async fn resumed_session_selects_the_preferred_session_model() {
             chunk_tx,
         ),
         agent_task,
-        async { chunk_rx.recv().await },
+        async { (chunk_rx.recv().await, chunk_rx.recv().await) },
     );
 
     let (stop_reason, session_id) = turn.unwrap();
@@ -2265,6 +2321,17 @@ async fn resumed_session_selects_the_preferred_session_model() {
         "the turn must resume AND switch the model before prompting"
     );
     assert_eq!(accumulated.lock().unwrap().output(), "model-resumed-ok");
+    // The badge leads on a resumed session too, with the SELECTED model.
+    assert!(matches!(
+        badge.unwrap(),
+        SubagentEvent::SessionModel {
+            model: Some(model),
+            model_label: Some(label),
+            provider: None,
+            provider_label: None,
+            reasoning: None
+        } if model == PREFERRED && label == "Nemotron free"
+    ));
     assert!(matches!(
         streamed.unwrap(),
         SubagentEvent::Message { text } if text == "model-resumed-ok"
@@ -2491,6 +2558,17 @@ async fn capture_real_opencode_stream_multi_tool() {
             SubagentEvent::SessionInfo { title } => serde_json::json!({
                 "kind": "SessionInfo", "title": title,
             }),
+            SubagentEvent::SessionModel {
+                model,
+                model_label,
+                provider,
+                provider_label,
+                reasoning,
+            } => serde_json::json!({
+                "kind": "SessionModel", "model": model,
+                "model_label": model_label, "provider": provider,
+                "provider_label": provider_label, "reasoning": reasoning,
+            }),
             // No catch-all: a new SubagentEvent variant must be added here
             // explicitly so captures never silently drop it.
         };
@@ -2613,6 +2691,17 @@ async fn capture_real_opencode_stream() {
             SubagentEvent::SessionInfo { title } => serde_json::json!({
                 "kind": "SessionInfo", "title": title,
             }),
+            SubagentEvent::SessionModel {
+                model,
+                model_label,
+                provider,
+                provider_label,
+                reasoning,
+            } => serde_json::json!({
+                "kind": "SessionModel", "model": model,
+                "model_label": model_label, "provider": provider,
+                "provider_label": provider_label, "reasoning": reasoning,
+            }),
             // No catch-all: a new SubagentEvent variant must be added here
             // explicitly so captures never silently drop it.
         };
@@ -2643,4 +2732,149 @@ async fn capture_real_opencode_stream() {
         serde_json::to_string_pretty(&out).expect("serialize capture"),
     )
     .unwrap_or_else(|e| panic!("write capture to {out_path}: {e}"));
+}
+
+/// `session_model_info` reads the badge triple from the session config
+/// options: the effective model id (+ human label), the provider (+
+/// label, when advertised) and the thought level (only when a real
+/// choice).
+#[test]
+fn session_model_info_reads_model_provider_and_thought_level() {
+    use agent_client_protocol::schema::v1::{
+        SessionConfigId, SessionConfigOption, SessionConfigOptionCategory,
+        SessionConfigSelectOption, SessionConfigValueId,
+    };
+
+    let options = vec![
+        SessionConfigOption::select(
+            SessionConfigId::new("model"),
+            "Model",
+            SessionConfigValueId::new("kilo/google/gemini-3-pro-image"),
+            vec![
+                SessionConfigSelectOption::new(
+                    SessionConfigValueId::new("kilo/google/gemini-3-pro-image"),
+                    "Gemini Pro",
+                ),
+                SessionConfigSelectOption::new(
+                    SessionConfigValueId::new("kilo/nvidia/nemotron-3-ultra-550b-a55b:free"),
+                    "Nemotron free",
+                ),
+            ],
+        )
+        .category(SessionConfigOptionCategory::Model),
+        SessionConfigOption::select(
+            SessionConfigId::new("provider"),
+            "Provider",
+            SessionConfigValueId::new("nvidia"),
+            vec![
+                SessionConfigSelectOption::new(SessionConfigValueId::new("nvidia"), "Nvidia"),
+                SessionConfigSelectOption::new(SessionConfigValueId::new("google"), "Google"),
+            ],
+        ),
+        SessionConfigOption::select(
+            SessionConfigId::new("reasoning"),
+            "Reasoning",
+            SessionConfigValueId::new("high"),
+            vec![
+                SessionConfigSelectOption::new(SessionConfigValueId::new("low"), "Low"),
+                SessionConfigSelectOption::new(SessionConfigValueId::new("high"), "High"),
+            ],
+        )
+        .category(SessionConfigOptionCategory::ThoughtLevel),
+    ];
+    assert!(matches!(
+        session_model_info(Some(&options), ""),
+        SubagentEvent::SessionModel {
+            model: Some(model),
+            model_label: Some(label),
+            provider: Some(provider),
+            provider_label: Some(provider_label),
+            reasoning: Some(reasoning),
+        } if model == "kilo/google/gemini-3-pro-image"
+            && label == "Gemini Pro"
+            && provider == "nvidia"
+            && provider_label == "Nvidia"
+            && reasoning == "High"
+    ));
+}
+
+/// A selected preferred model wins over the advertised current value, and
+/// its label resolves from the offered values.
+#[test]
+fn session_model_info_prefers_the_selected_model() {
+    use agent_client_protocol::schema::v1::{
+        SessionConfigId, SessionConfigOption, SessionConfigSelectOption, SessionConfigValueId,
+    };
+
+    const PREFERRED: &str = "kilo/nvidia/nemotron-3-ultra-550b-a55b:free";
+    let options = vec![SessionConfigOption::select(
+        SessionConfigId::new("model"),
+        "Model",
+        SessionConfigValueId::new("kilo/google/gemini-3-pro-image"),
+        vec![SessionConfigSelectOption::new(
+            SessionConfigValueId::new(PREFERRED),
+            "Nemotron free",
+        )],
+    )];
+    // No category set: the `model` id fallback still finds the option.
+    assert!(matches!(
+        session_model_info(Some(&options), PREFERRED),
+        SubagentEvent::SessionModel {
+            model: Some(model),
+            model_label: Some(label),
+            provider: None,
+            provider_label: None,
+            reasoning: None,
+        } if model == PREFERRED && label == "Nemotron free"
+    ));
+}
+
+/// A single offered thought value is a fixed marker, not a level: kilo's
+/// `thinking` stays empty instead of showing a bogus level.
+#[test]
+fn session_model_info_hides_a_single_valued_thought_level() {
+    use agent_client_protocol::schema::v1::{
+        SessionConfigId, SessionConfigOption, SessionConfigOptionCategory,
+        SessionConfigSelectOption, SessionConfigValueId,
+    };
+
+    let options = vec![
+        SessionConfigOption::select(
+            SessionConfigId::new("effort"),
+            "Effort",
+            SessionConfigValueId::new("thinking"),
+            vec![SessionConfigSelectOption::new(
+                SessionConfigValueId::new("thinking"),
+                "Thinking",
+            )],
+        )
+        .category(SessionConfigOptionCategory::ThoughtLevel),
+    ];
+    assert!(matches!(
+        session_model_info(Some(&options), ""),
+        SubagentEvent::SessionModel {
+            reasoning: None,
+            ..
+        }
+    ));
+}
+
+/// No options (or no model/thought among them) leaves every slot empty —
+/// the badge shows only the agent name until a report arrives.
+#[test]
+fn session_model_info_empty_without_advertised_options() {
+    assert!(matches!(
+        session_model_info(None, ""),
+        SubagentEvent::SessionModel {
+            model: None,
+            model_label: None,
+            provider: None,
+            provider_label: None,
+            reasoning: None,
+        }
+    ));
+    assert!(matches!(
+        session_model_info(Some(&[]), ""),
+        SubagentEvent::SessionModel { model: None, .. }
+    ));
 }
