@@ -1732,16 +1732,19 @@ mod tests {
         use crate::theme::ThemeRegistry;
 
         let theme = ThemeRegistry::new().default_theme().clone();
-        let servers = vec!["rust-analyzer".to_string(), "taplo".to_string()];
+        let servers = vec![
+            "rust-analyzer".to_string(),
+            "some-future-server".to_string(),
+        ];
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
         let end = draw_lsp_segment(&mut buf, true, &servers, 0, 0, 40, &theme);
 
-        // "◈ " (2) + "Rust " (5) + "taplo " (6): unknown servers keep
-        // their raw name, single spaces throughout.
-        assert_eq!(end, 13);
+        // "◈ " (2) + "Rust " (5) + "some-future-server " (19): unknown
+        // servers keep their raw name, single spaces throughout.
+        assert_eq!(end, 26);
         let text: String = (0..end).map(|x| buf[(x, 0)].symbol().to_string()).collect();
-        assert_eq!(text, "◈ Rust taplo ");
+        assert_eq!(text, "◈ Rust some-future-server ");
 
         // The `◈` marker is bold, muted, with no background fill.
         for x in 0..2 {
@@ -1768,7 +1771,7 @@ mod tests {
         // An unknown server keeps its raw name in the primary color — also
         // italic, also font-only.
         let cell = &buf[(7, 0)];
-        assert_eq!(cell.symbol(), "t");
+        assert_eq!(cell.symbol(), "s");
         assert_eq!(cell.fg, rgba_color(theme.primary));
         assert!(
             cell.modifier.contains(Modifier::ITALIC),
