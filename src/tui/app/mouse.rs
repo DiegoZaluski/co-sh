@@ -1341,7 +1341,7 @@ impl App {
                                         App::model_dialog_flat_entries(models, filter)
                                             .get(d.selected)
                                             .map(|entry| {
-                                                ((*entry).model.clone(), (*entry).provider.clone())
+                                                (entry.model.clone(), entry.provider.clone())
                                             })
                                     } else {
                                         None

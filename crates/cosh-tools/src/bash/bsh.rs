@@ -36,6 +36,8 @@ use super::liveness::LivenessConfig;
 use super::liveness::LivenessState;
 use super::liveness::ORPHAN_ESCAPE_MESSAGE;
 use super::liveness::sample_tree;
+#[cfg(windows)]
+use super::liveness::kill_process_tree;
 #[cfg(any(unix, windows))]
 use tokio::sync::mpsc;
 
@@ -95,6 +97,9 @@ const ESCAPE_DRAIN_WINDOW: Duration = Duration::from_millis(300);
 
 /// Kill the child's whole process tree with SIGKILL (unix).
 ///
+/// Windows counterpart: `liveness::kill_process_tree`, which walks the tree
+/// explicitly (no process groups on Windows).
+///
 /// The piped path spawns bash as its own process group
 /// (`tokio::process::Command::process_group`) and the PTY path spawns it as
 /// a session leader (portable_pty's `setsid`), so a negative-pid signal
@@ -112,6 +117,44 @@ fn kill_process_tree(pid: u32) {
             libc::kill(pid as libc::pid_t, libc::SIGKILL);
         }
     }
+}
+
+/// Kill the child's whole process tree and the child itself (Windows piped
+/// path).
+///
+/// The root kill comes first so the shell cannot fork further; the tree
+/// kill (`liveness::kill_process_tree`, iterative with its own settle)
+/// then catches the whole descendant closure, including grandchildren born
+/// from forks that were in flight. Without it, a late-born grandchild keeps
+/// the stdout/stderr pipes open and the host hangs until it exits on its
+/// own. The tree kill blocks (process-table scans plus a `taskkill` spawn),
+/// so it runs on the blocking pool.
+#[cfg(windows)]
+async fn kill_child_tree_settled(child: &mut tokio::process::Child) {
+    // Capture the pid up front: `Child::id()` goes `None` once the child is
+    // killed, which would silently skip the tree kill below.
+    let pid = child.id();
+    let _ = child.kill().await;
+    if let Some(pid) = pid {
+        let _ = tokio::task::spawn_blocking(move || kill_process_tree(pid)).await;
+    }
+    let _ = child.kill().await;
+}
+
+/// Kill the child's whole process tree and the child itself (Windows ConPTY
+/// path): same as `kill_child_tree_settled`, via the pre-cloned
+/// `ChildKiller` - the watcher thread owns the blocking `wait()`, so the
+/// async side cannot kill through the `Child` handle.
+#[cfg(windows)]
+async fn kill_pty_tree_settled(
+    killer: &mut Box<dyn portable_pty::ChildKiller + Send + Sync>,
+    child_pid: Option<u32>,
+) {
+    killer.kill().ok();
+    if let Some(pid) = child_pid {
+        let _ = tokio::task::spawn_blocking(move || kill_process_tree(pid)).await;
+    }
+    killer.kill().ok();
 }
 
 /// How often the Unix PTY read loop wakes up to run the input-wait watchdog.
@@ -758,6 +801,9 @@ pub(crate) fn spawn_bash_cfg(
             if let Some(pid) = child.id() {
                 kill_process_tree(pid);
             }
+            #[cfg(windows)]
+            kill_child_tree_settled(&mut child).await;
+            #[cfg(not(windows))]
             let _ = child.kill().await;
             let _ = child.wait().await;
             yield Ok(SpawnOutput {
@@ -786,6 +832,9 @@ pub(crate) fn spawn_bash_cfg(
                     if let Some(pid) = child.id() {
                         kill_process_tree(pid);
                     }
+                    #[cfg(windows)]
+                    kill_child_tree_settled(&mut child).await;
+                    #[cfg(not(windows))]
                     let _ = child.kill().await;
                     yield Ok(SpawnOutput {
                         stdout: vec![],
@@ -836,6 +885,9 @@ pub(crate) fn spawn_bash_cfg(
                             if let Some(pid) = child.id() {
                                 kill_process_tree(pid);
                             }
+                            #[cfg(windows)]
+                            kill_child_tree_settled(&mut child).await;
+                            #[cfg(not(windows))]
                             let _ = child.kill().await;
                             yield Ok(SpawnOutput {
                                 stdout: vec![],
@@ -905,6 +957,14 @@ pub(crate) fn spawn_bash_cfg(
         // still hold the pipes. Drain in-flight output for a short window,
         // then detach — dropping the read ends when the stream ends frees
         // us, while the orphans keep running on their own.
+        //
+        // Known Windows limitation: the stream itself ends promptly (items
+        // above), but cancelling the in-flight pipe reads while orphans
+        // hold the pipes delays *host process exit* until the orphans die
+        // (verified: a `sleep 30 &` orphan holds a short-lived host for the
+        // full 30s). A long-lived harness is unaffected - only process
+        // teardown waits - so the escape stays as is; fixing it would mean
+        // replacing the whole read loop with non-blocking polls.
         if escaped {
             let mut drained: Vec<SpawnOutput> = Vec::new();
             let _ = tokio::time::timeout(ESCAPE_DRAIN_WINDOW, async {
@@ -1688,7 +1748,6 @@ pub(crate) fn spawn_bash_pty_cfg(
         let mut liveness = LivenessState::new(child_pid, liveness_config);
         let mut next_tick = tokio::time::Instant::now() + liveness_config.tick;
         let mut output_since_tick = false;
-        let mut watchdog_fired = false;
 
         loop {
             tokio::select! {
@@ -1701,13 +1760,17 @@ pub(crate) fn spawn_bash_pty_cfg(
                     }
                 }, if deadline.is_some() && !timed_out => {
                     timed_out = true;
-                    killer.kill().ok();
+                    // Tree first so orphaned grandchildren cannot keep the
+                    // ConPTY output pipe (or the host) alive; the direct
+                    // kill then terminates the shell itself (iterative
+                    // passes - see `kill_pty_tree_settled`).
+                    kill_pty_tree_settled(&mut killer, liveness.child_pid()).await;
                     break;
                 }
 
                 () = async {
                     tokio::time::sleep_until(next_tick).await
-                }, if !watchdog_fired => {
+                } => {
                     next_tick += liveness_config.tick;
                     if let Some(pid) = liveness.child_pid() {
                         let sample = tokio::task::spawn_blocking(move || sample_tree(pid))
@@ -1717,8 +1780,9 @@ pub(crate) fn spawn_bash_pty_cfg(
                         if let Some(message) =
                             liveness.on_sample(std::time::Instant::now(), sample, had_output)
                         {
-                            watchdog_fired = true;
-                            killer.kill().ok();
+                            // Tree first (see the timeout arm above): killing
+                            // only the shell would orphan grandchildren.
+                            kill_pty_tree_settled(&mut killer, Some(pid)).await;
                             yield Ok(SpawnOutput {
                                 stdout: vec![],
                                 stderr: message.into_bytes(),

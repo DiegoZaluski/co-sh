@@ -21,7 +21,10 @@ use crate::telemetry::queue::EventQueue;
 use crate::telemetry::sanitize::sanitize_string;
 use crate::telemetry::schema::{ErrorCategory, EventType};
 use crate::telemetry::session::SessionTelemetry;
+#[cfg(target_os = "linux")]
 use crate::telemetry::sink::{FlushOutcome, SinkConfig};
+#[cfg(not(target_os = "linux"))]
+use crate::telemetry::sink::SinkConfig;
 use std::collections::BTreeMap;
 
 #[test]

@@ -32,8 +32,22 @@ const PLACEHOLDER: &str = "let's go!";
 const MAX_PROMPT_LINES: usize = 20;
 
 /// Thresholds for triggering paste compression (matches opencode: >=3 lines or >150 chars).
-const PASTE_MIN_LINES: usize = 3;
-const PASTE_MIN_CHARS: usize = 150;
+pub(crate) const PASTE_MIN_LINES: usize = 3;
+pub(crate) const PASTE_MIN_CHARS: usize = 150;
+
+/// Whether `text` is long enough to be compressed into a `[Pasted ~N lines]`
+/// placeholder by [`PromptView::handle_paste`]. Single source of truth for
+/// the compression decision: the prompt path and the Windows paste-burst
+/// coalescer (`app/paste_burst.rs`) must agree, otherwise a long single-line
+/// paste compresses on Unix (`Event::Paste`) but stays as streamed text on
+/// Windows (no absorbed Enter → no replay).
+pub(crate) fn paste_would_compress(text: &str) -> bool {
+    // Same normalization as `handle_paste` (CRLF -> LF, CR -> LF).
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    let trimmed = normalized.trim();
+    let line_count = trimmed.matches('\n').count() + 1;
+    line_count >= PASTE_MIN_LINES || trimmed.len() > PASTE_MIN_CHARS
+}
 
 /// A pasted text block that was compressed into a virtual-text placeholder.
 #[derive(Clone, Debug)]
@@ -651,7 +665,7 @@ impl PromptView {
         let trimmed = normalized.trim().to_string();
 
         let line_count = trimmed.matches('\n').count() + 1;
-        let is_long = line_count >= PASTE_MIN_LINES || trimmed.len() > PASTE_MIN_CHARS;
+        let is_long = paste_would_compress(text);
 
         if is_long {
             let virtual_text = format!("[Pasted ~{line_count} lines]");

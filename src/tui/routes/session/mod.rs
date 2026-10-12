@@ -56,6 +56,7 @@ use std::time::Instant;
 /// Rows are skipped (not partially copied) when the destination row falls
 /// outside `buf`'s area, matching the old per-cell `cell_mut(..) == None`
 /// behavior; `count` cells are copied from the start of each source row.
+#[allow(clippy::too_many_arguments)]
 fn blit_cell_rows(
     buf: &mut Buffer,
     dst_x: u16,

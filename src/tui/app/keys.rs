@@ -22,11 +22,13 @@ impl App {
     pub(super) fn process_key_event(&mut self, key: KeyEvent) -> io::Result<bool> {
         if key.kind == KeyEventKind::Press {
             // Windows paste-burst coalescing (see `paste_burst` module docs):
-            // a console paste arrives as one plain Char key per character plus
-            // one plain Enter per line break (crossterm has no bracketed paste
-            // on Windows), and each of those Enters used to submit the prompt
-            // — splitting a large paste into one message per line. Characters
-            // are NEVER withheld: they stream into the prompt in real time
+            // legacy-console fallback for pastes that arrive as one Char key
+            // per character plus one Enter per line break (modern consoles
+            // deliver a real `Event::Paste` via the patched crossterm, which
+            // bypasses this gate entirely). Each streamed Enter used to
+            // submit the prompt — splitting a large paste into one message
+            // per line. Characters are NEVER withheld: they stream into the
+            // prompt in real time
             // while being mirrored into the coalescer's shadow; only Enters
             // within the burst window are absorbed, and at burst end the run
             // is replayed through `PromptView::handle_paste` with its real
@@ -586,6 +588,9 @@ impl App {
             }
 
             // Shift/Ctrl/Alt+Enter inserts a newline instead of sending.
+            // (A modified Enter arriving within the paste-burst window never
+            // reaches here: the coalescer gate above absorbs it as a paste
+            // line break so the shadow stays in sync with the prompt.)
             if key.code == KeyCode::Enter && key.modifiers != KeyModifiers::NONE {
                 // In RAG mode with the create-db form open, the newline
                 // goes into the focused field instead of the prompt. The

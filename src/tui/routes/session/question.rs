@@ -2990,7 +2990,7 @@ mod tests {
             purpose: None,
             options: options.map(|o| {
                 o.into_iter()
-                    .map(|label| cosh_tools::question::types::QuestionOption::from_label(label))
+                    .map(cosh_tools::question::types::QuestionOption::from_label)
                     .collect()
             }),
             required: true,

@@ -93,50 +93,52 @@ fn git_entries_are_scoped_to_the_explorer_root() {
 #[test]
 fn aggregation_rolls_states_up_to_ancestors() {
     let root = Path::new("/work");
-    let mut index = StatusIndex::default();
-    index.files = HashMap::from([
-        (
-            PathBuf::from("/work/src/err.rs"),
-            EntryStatus {
-                git: None,
-                lsp: Some(LspFileStatus::Error),
-            },
-        ),
-        (
-            PathBuf::from("/work/src/sub/warn.rs"),
-            EntryStatus {
-                git: None,
-                lsp: Some(LspFileStatus::Warning),
-            },
-        ),
-        (
-            PathBuf::from("/work/docs/new.md"),
-            EntryStatus {
-                git: Some(GitFileStatus::Added),
-                lsp: None,
-            },
-        ),
-        (PathBuf::from("/work/clean.txt"), EntryStatus::default()),
-    ]);
-    index.explorer_root = root.to_path_buf();
+    let mut index = StatusIndex {
+        files: HashMap::from([
+            (
+                PathBuf::from("/work/src/err.rs"),
+                EntryStatus {
+                    git: None,
+                    lsp: Some(LspFileStatus::Error),
+                },
+            ),
+            (
+                PathBuf::from("/work/src/sub/warn.rs"),
+                EntryStatus {
+                    git: None,
+                    lsp: Some(LspFileStatus::Warning),
+                },
+            ),
+            (
+                PathBuf::from("/work/docs/new.md"),
+                EntryStatus {
+                    git: Some(GitFileStatus::Added),
+                    lsp: None,
+                },
+            ),
+            (PathBuf::from("/work/clean.txt"), EntryStatus::default()),
+        ]),
+        explorer_root: root.to_path_buf(),
+        ..StatusIndex::default()
+    };
     index.aggregate();
 
     // src holds an error AND a (nested) warning: error wins the marker,
     // and both axes are tracked independently.
-    let src = index.entry_status(&Path::new("/work/src"), true);
+    let src = index.entry_status(Path::new("/work/src"), true);
     assert_eq!(src.lsp, Some(LspFileStatus::Error));
     // src/sub only has the warning.
     assert_eq!(
-        index.entry_status(&Path::new("/work/src/sub"), true).lsp,
+        index.entry_status(Path::new("/work/src/sub"), true).lsp,
         Some(LspFileStatus::Warning)
     );
     // docs aggregates the added file; the clean file contributes nothing.
     assert_eq!(
-        index.entry_status(&Path::new("/work/docs"), true).git,
+        index.entry_status(Path::new("/work/docs"), true).git,
         Some(GitFileStatus::Added)
     );
     assert_eq!(
-        index.entry_status(&Path::new("/work"), true),
+        index.entry_status(Path::new("/work"), true),
         EntryStatus::default()
     );
     // The explorer root itself is not a row and is never aggregated.
@@ -146,17 +148,19 @@ fn aggregation_rolls_states_up_to_ancestors() {
 #[test]
 fn git_and_lsp_merge_per_axis() {
     // A file with both a modification and diagnostics keeps both signals.
-    let mut index = StatusIndex::default();
-    index.files = HashMap::from([(
-        PathBuf::from("/w/a.rs"),
-        EntryStatus {
-            git: Some(GitFileStatus::Modified),
-            lsp: Some(LspFileStatus::Warning),
-        },
-    )]);
-    index.explorer_root = PathBuf::from("/w");
+    let mut index = StatusIndex {
+        files: HashMap::from([(
+            PathBuf::from("/w/a.rs"),
+            EntryStatus {
+                git: Some(GitFileStatus::Modified),
+                lsp: Some(LspFileStatus::Warning),
+            },
+        )]),
+        explorer_root: PathBuf::from("/w"),
+        ..StatusIndex::default()
+    };
     index.aggregate();
-    let status = index.entry_status(&Path::new("/w/a.rs"), false);
+    let status = index.entry_status(Path::new("/w/a.rs"), false);
     assert_eq!(status.git, Some(GitFileStatus::Modified));
     assert_eq!(status.lsp, Some(LspFileStatus::Warning));
 }

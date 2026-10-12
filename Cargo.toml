@@ -216,3 +216,19 @@ perf = "deny"
 # they are migrated one crate at a time.
 [workspace.dependencies]
 lsp-types = "0.97"
+
+# Patches
+# Real bracketed paste on Windows (`Event::Paste`, atomic placeholder, zero
+# streaming heuristics): stock crossterm 0.29 cannot decode bracketed paste
+# from `ReadConsoleInput` (crossterm-rs/crossterm#737), and requesting the
+# mode even corrupts pasted newlines into Ctrl+Enter (#962). eitsupi's
+# VT-input hybrid (upstream PR crossterm-rs/crossterm#1030, manually
+# validated on Windows Terminal + modern conhost, already adopted via patch
+# by helix, yazi and codex) scopes ENABLE_VIRTUAL_TERMINAL_INPUT to the
+# bracketed-paste lifetime, so pastes arrive as one `Event::Paste` exactly
+# like on Unix. Pinned by rev for reproducibility — drop this section once
+# upstream merges and releases. Consoles without VT input (legacy conhost)
+# keep the old VK-record stream, still covered by the paste-burst coalescer
+# fallback in `src/tui/app/paste_burst.rs`.
+[patch.crates-io]
+crossterm = { git = "https://github.com/eitsupi/crossterm", rev = "94ed7154e35d24a2f643c61760e1eb05b8ca9e63" }

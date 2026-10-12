@@ -58,7 +58,7 @@ sessions and caches; it does not change the location of `setup.json`.
 | `theme` | `""` | Theme name. Empty uses the registry default. Use `/themes`. |
 | `bell_enabled` | `true` | Rings the terminal bell when the agent loop finishes. |
 | `transparent_background` | `false` | Uses the terminal's own background color for the TUI base. Panels keep their theme colors. |
-| `anim_enabled` | `true` | Shows the animated chat logo on an empty session. |
+| `anim_enabled` | `false` | Shows the animated chat logo on an empty session. |
 
 The TUI commands `/background`, `/bell`, and `/anim` edit the corresponding
 boolean fields.
