@@ -217,20 +217,21 @@ impl App {
         }
     }
 
-    /// Seal one pane's mirror at turn end: the final report becomes the
-    /// mirror window's BODY (the linear-chat contract), the transcript
-    /// seals, the spinner stops. Resolves the live-or-parked split like the
-    /// event routing does.
-    pub(super) fn finish_agents_pane_mirror(&mut self, pane: usize, output: &str, failed: bool) {
+    /// Seal one pane's mirror at turn end: the mirror inherits the pane's
+    /// ALREADY-CLOSED timeline (`SubagentActivity::close_turn` — the report
+    /// is its LAST chronological entry) and stops spinning. Resolves the
+    /// live-or-parked split like the event routing does.
+    pub(super) fn finish_agents_pane_mirror(&mut self, pane: usize, failed: bool) {
         let Some(split) = either_split(&self.agents_split, &self.parked_agents_split) else {
             return;
         };
         let Some(p) = split.panes.get(pane) else {
             return;
         };
-        self.state
-            .right_panel
-            .finish_agents_pane(pane, &p.activity, output, failed);
+        // The pane closed its turn first (the report is the timeline's LAST
+        // entry); the mirror only inherits that closed timeline and flips
+        // its marker — never a separate report body (the read-order bug).
+        self.state.right_panel.finish_agents_pane(pane, &p.activity, failed);
     }
 
     /// Fire cold-restore replay passes for every pane that needs one: a

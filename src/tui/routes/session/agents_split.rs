@@ -619,35 +619,22 @@ impl AgentsSplitState {
     }
 
     /// Deliver the turn's terminal report to pane `pane` — the `AgentsPaneDone`
-    /// `output`, which is the SAME text the stream already played into the
-    /// pane's timeline (the `TurnClosure` contract: the report is the last
-    /// streamed message segment). Appending it as another `Message` event
-    /// would duplicate the answer: the coalescer's backscan merges the
-    /// marker into the existing Message entry and the pane reads
-    /// `...hoje?Tudo bem! Como posso ajudar hoje?`.
-    ///
-    /// The completion path instead applies the SAME deduplication the right
-    /// panel's seal uses (`SubagentActivity::seal`): the last Message entry
-    /// whose text is contained in the report is DROPPED (the report below
-    /// carries it), then the marker — the raw report on success, the
-    /// `[turn <reason>]` prefix on failure — is appended as the turn's
-    /// closing block. A report that does NOT contain the streamed tail (a
-    /// turn that ended right after a tool call and fell back to a previous
-    /// segment, a truncated report) keeps the entry: degrades to keeping,
-    /// never to losing content.
+    /// `output`. The closure itself lives in ONE place shared with the
+    /// right-panel mirror ([`SubagentActivity::close_turn`]): seal the
+    /// timeline, drop the streamed Message entry whose text the report
+    /// carries (the `TurnClosure` contract — appending it raw would let the
+    /// coalescer merge the marker into that same entry, the "answer twice"
+    /// bug), then append the marker — the raw report on success, the
+    /// `[turn <reason>]` prefix on failure — as the turn's closing block.
+    /// A report that does NOT contain the streamed tail (a turn that ended
+    /// right after a tool call and fell back to a previous segment, a
+    /// truncated report) keeps the entry: degrades to keeping, never to
+    /// losing content.
     pub fn finish_turn(&mut self, pane: usize, output: &str, stop_reason: &str) {
         let Some(p) = self.panes.get_mut(pane) else {
             return;
         };
-        let failed = stop_reason == "error" || stop_reason == "cancelled";
-        p.activity.seal(!failed, Some(output));
-        let marker = if failed {
-            format!("\n\n[turn {stop_reason}] {output}")
-        } else {
-            output.to_string()
-        };
-        p.activity
-            .apply(&SubagentEvent::Message { text: marker });
+        p.activity.close_turn(output, stop_reason);
     }
 
     /// The list label of pane `pane` in the right panel's mirror entry:
@@ -1265,20 +1252,18 @@ fn draw_activity_line(
                     ));
                 }
                 if is_user || is_agent_input {
-                    // The prompt input's left rail. The user's echo wears it
-                    // in the pane agent's brand color; an `agents_call`
-                    // input wears it in the theme's secondary tone — the
-                    // color alone tells the user WHO is speaking. One
-                    // glyph, no more chrome.
+                    // The prompt input's left rail (the shared
+                    // `subagent_input_rail`). The user's echo wears it in
+                    // the pane agent's brand color; an `agents_call` input
+                    // wears it in the theme's secondary tone — the color
+                    // alone tells the user WHO is speaking. One glyph, no
+                    // more chrome.
                     let rail_style = if is_user {
                         brand_fg(agent, 0.0, theme, focused)
                     } else {
                         Style::default().fg(rgba_color(theme.secondary))
                     };
-                    if let Some(rail) = buf.cell_mut((x - 1, y + di as u16)) {
-                        rail.set_char('│');
-                        rail.set_style(rail_style);
-                    }
+                    subagent_input_rail(buf, x - 1, y + di as u16, rail_style);
                 }
             }
         }
@@ -1370,6 +1355,29 @@ pub(crate) fn brand_fg(agent: &str, t: f32, theme: &Theme, focused: bool) -> Sty
             };
             Style::default().fg(rgba_color(fg))
         }
+    }
+}
+
+/// The `│` INPUT rail marking a turn's INPUT (the user's echo in an
+/// `/agents` pane, the main agent's echoed prompt in a right-panel
+/// subagent window) — ONE glyph, paint-only, drawn in the column LEFT of
+/// the content: the same marking on both surfaces, so "who is speaking"
+/// reads identically in the split and in the panel. The STYLE is the
+/// caller's tone decision (the pane paints the user's rail in the agent's
+/// brand color and another agent's input in the theme's secondary tone;
+/// the right panel's echoed prompt is always the main agent's —
+/// secondary) — the GLYPH, the position and the paint-only contract live
+/// in this one function. Input text renders WITHOUT the rail in its
+/// selection regions — copying an input copies exactly what was typed,
+/// no decoration prefix.
+///
+/// Shared by BOTH render paths (this module's pane renderer and the
+/// right panel's window renderer) — a future restyle changes this one
+/// function, never a per-surface copy.
+pub(crate) fn subagent_input_rail(buf: &mut Buffer, x: u16, y: u16, style: Style) {
+    if let Some(rail) = buf.cell_mut((x, y)) {
+        rail.set_char('│');
+        rail.set_style(style);
     }
 }
 

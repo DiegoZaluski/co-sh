@@ -40,7 +40,7 @@ const REHYDRATE_BASH_KEEP: usize = 1;
 const REHYDRATE_SUBAGENT_KEEP_PER_AGENT: usize = 3;
 
 /// One persisted subagent call collected during rehydration:
-/// (agent CLI, `"→ cosh:"` input line, task description, review flag,
+/// (agent CLI, verbatim input prompt, task description, review flag,
 /// output text, whether the call failed). A named record — the raw tuple
 /// it replaced tripped `clippy::type_complexity` at six fields.
 type RehydratedSubagent = (String, Option<String>, Option<String>, bool, String, bool);
@@ -283,73 +283,6 @@ pub(crate) fn activity_lines(
 /// floored at one row. Shared by the height math and the renderer.
 pub(crate) fn activity_block_height(text: &str, wrap_w: u16) -> u16 {
     estimate_height(text, wrap_w).max(1)
-}
-
-/// Split a subagent PTY output into the optional main-agent input block
-/// (every LEADING `→ cosh: ...` line — the FULL prompt is echoed verbatim,
-/// one marker per line, by `app/events.rs` when the tool call carries an
-/// `input`) and the remaining subagent body. A marker-less line ENDS the
-/// input block (a stray body line can never be swallowed). When the output
-/// was truncated (tail-only retention) the prefix may be gone — then
-/// everything is body.
-pub(crate) fn split_subagent_output(output: &str) -> (Option<&str>, &str) {
-    if !output.starts_with("→ cosh:") {
-        return (None, output);
-    }
-    let mut consumed = 0usize;
-    for line in output.split_inclusive('\n') {
-        if line.starts_with("→ cosh:") {
-            consumed += line.len();
-        } else {
-            break;
-        }
-    }
-    let (input, body) = output.split_at(consumed);
-    let input = input.strip_suffix('\n').unwrap_or(input);
-    (Some(input), body)
-}
-
-/// The FULL input echo prepended to a subagent window's output (`→ cosh: …`
-/// on EVERY line). The prompt is echoed VERBATIM — never collapsed, never
-/// truncated: it is part of the chat flow (prompt, then the subagent's
-/// answer), exactly like a normal conversation, and the user scrolls to
-/// read long prompts. The marker is repeated per line so tail truncation
-/// can never orphan a marker-less prompt line into the body.
-/// `None` when there is nothing to show (no input, or empty after trim).
-///
-/// Both the live path (`ToolCall` in `app/events.rs`) and the rehydration
-/// path (`rehydrate_from_session`) must build the echo through THIS helper,
-/// so a restored window renders exactly like the original live run.
-///
-/// The `→ cosh: ` prefix is a STORAGE marker only: it is what
-/// [`split_subagent_output`] keys on to split prompt from body. The
-/// renderer strips it via [`subagent_prompt_text`] — the window shows the
-/// user's question as DIRECT text (the list row already names the agent
-/// CLI; the decoration is visual noise).
-pub(crate) fn subagent_input_line(input: &str) -> Option<String> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let mut echo = String::new();
-    for line in trimmed.lines() {
-        echo.push_str("→ cosh: ");
-        echo.push_str(line);
-        echo.push('\n');
-    }
-    Some(echo)
-}
-
-/// The DISPLAY text of a subagent window's input: the storage marker
-/// `→ cosh: ` stripped from EVERY line, leaving the user's prompt as
-/// direct (multi-line) text. Both the renderer and the height math must
-/// pass the echo through THIS helper so their wrap counts stay in lockstep.
-pub(crate) fn subagent_prompt_text(input_line: &str) -> String {
-    input_line
-        .lines()
-        .map(|line| line.strip_prefix("→ cosh: ").unwrap_or(line))
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 /// Filter control characters (keeping `\n`) so raw bytes can never reach
@@ -756,6 +689,14 @@ pub struct PtySession {
     /// record of the review decision, used to reconstruct the inferred
     /// `code-review-NN` numbering for the list entries.
     pub(crate) code_review: bool,
+    /// The main agent's input echo for THIS window, stored VERBATIM (no
+    /// marker line, no decoration): the linear-chat prompt rendered as
+    /// direct text above the body, wearing the `│` input rail at paint
+    /// time. The split between input and body is STATE, not string
+    /// parsing — the output carries only the sub-agent's side. `None` for
+    /// bash sessions and windows without an echoed prompt (empty/absent
+    /// input).
+    pub(crate) input_echo: Option<String>,
     /// Per-call routing identity (the `ToolCall` event's `call_ref`): binds
     /// THIS window to the EXACT dispatching call. Streams, reports and
     /// completion notifications carry the same ref back and route HERE —
@@ -799,6 +740,7 @@ impl PtySession {
             severity: None,
             description: None,
             code_review: false,
+            input_echo: None,
             call_ref: None,
             activity_rows_cache: None,
             bound: false,
@@ -965,6 +907,13 @@ const SUBAGENT_TOOL_TAIL_BYTES: usize = 4_000;
 /// (a single chunk may itself exceed the cap — ACP does not bound
 /// `ContentBlock::Text`).
 const SUBAGENT_TEXT_ENTRY_BYTES: usize = 8_000;
+/// Maximum bytes kept of the echoed main-agent prompt (`PtySession
+/// ::input_echo`). The old in-string echo was implicitly capped by the
+/// output's own truncation budget; the dedicated field carries the bound
+/// itself — one wrap-width row is ~200 chars, so 8k keeps any sane prompt
+/// fully scrollable while bounding pathological inputs (a prompt this
+/// large is noise, not context the user scrolls to re-read).
+const SUBAGENT_INPUT_ECHO_BYTES: usize = 8_000;
 /// Maximum transcript entries kept live. A very long turn drops its OLDEST
 /// entries — the box is a live mini-chat window, not a full archive.
 const SUBAGENT_TIMELINE_MAX_ENTRIES: usize = 200;
@@ -1415,6 +1364,47 @@ impl SubagentActivity {
         } else {
             SubagentTimelineEntry::AgentMessage { text }
         });
+    }
+
+    /// Close a turn: seal the live timeline, then append the turn's terminal
+    /// report as its LAST entry — the single turn-closing implementation for
+    /// BOTH render surfaces that show an agent conversation:
+    ///
+    /// - the `/agents` live pane (`AgentPane::finish_turn`), and
+    /// - the right panel's pane mirror, which inherits the CLOSED timeline
+    ///   through the pane sync and must never re-derive the closure itself
+    ///   (a mirror that rewrote the report into a separate window body
+    ///   rendered that body below the NEXT turn's input — the read order
+    ///   inverted: input above the previous turn's output. Keeping the
+    ///   report inside the chronological timeline is what makes the
+    ///   multi-turn mirror read like the chat).
+    ///
+    /// `stop_reason` picks the two per-path details (the same rule
+    /// `AgentsPaneDone` applies):
+    /// - `failed` = `error` | `cancelled`. On failure the body is the
+    ///   harness error and the transcript is all that remains of the
+    ///   agent's work — every entry stays, and the report lands prefixed
+    ///   with `[turn <reason>]`.
+    /// - On success the streamed report usually IS the last Message entry
+    ///   (the `TurnClosure` contract), so `seal` drops that entry when its
+    ///   text is contained in `output` — otherwise the answer would print
+    ///   twice. A body that does not carry it (a turn that ended right
+    ///   after a tool call, a truncated report) keeps the entry: degrades
+    ///   to keeping, never to losing content. Calls still `InProgress` seal
+    ///   `Completed` on success / `Failed` on failure.
+    ///
+    /// The appended entry is bounded like every timeline text entry (a
+    /// single chunk may itself exceed the cap — see
+    /// [`bounded_tail`]/`SUBAGENT_TEXT_ENTRY_BYTES`).
+    pub(crate) fn close_turn(&mut self, output: &str, stop_reason: &str) {
+        let failed = stop_reason == "error" || stop_reason == "cancelled";
+        self.seal(!failed, Some(output));
+        let marker = if failed {
+            format!("\n\n[turn {stop_reason}] {output}")
+        } else {
+            output.to_string()
+        };
+        self.apply(&SubagentEvent::Message { text: marker });
     }
 }
 
@@ -2311,6 +2301,31 @@ impl RightPanelState {
             session.description = resolved;
             session.code_review = code_review;
         }
+    }
+
+    /// Store the input echo of the last subagent window (the `ToolCall`'
+    /// `input`, routed to `agent`'s window like `set_last_subagent_meta`):
+    /// the FULL prompt verbatim — the linear-chat prompt rendered above the
+    /// body, wearing the `│` input rail at paint time. Bounded to
+    /// `SUBAGENT_INPUT_ECHO_BYTES` (tail kept) so a pathological prompt
+    /// cannot balloon the wrap math. A window without an echo (empty/absent
+    /// input) keeps `input_echo = None`.
+    ///
+    /// Height-relevant without its own `pty_gen` bump: correct only while
+    /// the caller runs RIGHT AFTER `start_pty` (which bumped) — the sole
+    /// caller does. A future second caller must bump `pty_gen` itself.
+    pub(crate) fn set_last_subagent_input_echo(&mut self, agent: &str, input: Option<&str>) {
+        let Some(session) = self
+            .pty_sessions
+            .iter_mut()
+            .rev()
+            .find(|s| s.is_subagent() && Self::is_window_of(s, agent))
+        else {
+            return;
+        };
+        session.input_echo = input
+            .map(|i| bounded_tail(i.trim(), SUBAGENT_INPUT_ECHO_BYTES))
+            .filter(|i| !i.is_empty());
     }
 
     /// Move the list selection to the row under screen row `y` WITHOUT
@@ -3261,22 +3276,27 @@ impl RightPanelState {
         running: bool,
         label: Option<&str>,
     ) {
-        self.sync_agents_pane_inner(pane, activity, running, label, None, false);
+        self.sync_agents_pane_inner(pane, activity, running, label, false, false);
     }
 
     /// The DONE variant: the pane's turn ended, so the mirror takes the
-    /// final report as its window BODY (the same linear-chat contract the
-    /// normal completion path applies — timeline stays, the body carries
-    /// the report) and seals its transcript. `failed` seals the tool rows
-    /// as failed and marks the window `Failed`.
+    /// pane's ALREADY-CLOSED timeline (`SubagentActivity::close_turn` ran
+    /// in the pane before this sync — the report is its LAST entry) and
+    /// flips its terminal marker. The mirror never re-derives the closure:
+    /// re-sealing here would treat the just-appended report entry as the
+    /// streamed duplicate and DELETE it, and writing the report into a
+    /// separate window body rendered that body below the NEXT turn's
+    /// input — the read order inverted on every multi-turn mirror (the
+    /// right-panel scramble). Keeping the report inside the chronological
+    /// timeline is what makes the mirror read like the chat.
+    /// `failed` marks the window `Failed`.
     pub(crate) fn finish_agents_pane(
         &mut self,
         pane: usize,
         activity: &SubagentActivity,
-        output: &str,
         failed: bool,
     ) {
-        self.sync_agents_pane_inner(pane, activity, false, None, Some(output), failed);
+        self.sync_agents_pane_inner(pane, activity, false, None, true, failed);
     }
 
     fn sync_agents_pane_inner(
@@ -3285,7 +3305,7 @@ impl RightPanelState {
         activity: &SubagentActivity,
         running: bool,
         label: Option<&str>,
-        final_output: Option<&str>,
+        closed: bool,
         failed: bool,
     ) {
         let Some(idx) = self
@@ -3309,14 +3329,6 @@ impl RightPanelState {
                 session.description = Some(label.to_string());
                 changed = true;
             }
-            if let Some(out) = final_output {
-                let mut out = out.to_string();
-                Self::truncate_output(&mut out);
-                if session.output != out {
-                    session.output = out;
-                    changed = true;
-                }
-            }
             if running {
                 // (Re-)engage: the pane started or continues a turn. An
                 // already-Running mirror is a no-op (no gen churn).
@@ -3324,24 +3336,38 @@ impl RightPanelState {
                     session.status = PtyStatus::Running;
                     changed = true;
                 }
-            } else if final_output.is_some()
-                || matches!(session.status, PtyStatus::Running)
-            {
-                // The turn ENDED — through the Done event (the report body
-                // present) or an un-signaled stop (the pane's set was
-                // superseded mid-turn: seal the partial transcript with no
-                // body). An ALREADY finished mirror stays untouched: an
-                // idle-but-bound pane re-syncs on every open without
-                // re-sealing or flipping its marker.
+            } else if closed || matches!(session.status, PtyStatus::Running) {
+                // The turn ENDED — through the Done event (`closed`) or an
+                // un-signaled stop (the pane's set was superseded mid-turn).
+                // The timeline arrives ALREADY closed (sealed + report
+                // appended by `SubagentActivity::close_turn` in the pane):
+                // the mirror only flips its terminal marker. An ALREADY
+                // finished mirror stays untouched: an idle-but-bound pane
+                // re-syncs on every open without re-sealing or flipping its
+                // marker.
                 session.status = if failed {
                     PtyStatus::Failed
                 } else {
                     PtyStatus::Completed
                 };
-                if failed {
-                    session.subagent_activity.seal_failed();
-                } else {
-                    session.subagent_activity.seal_completed(&session.output);
+                // Un-signaled stop only: the pane's activity never got
+                // closed (its Done was epoch-dropped), so InProgress tool
+                // rows would land frozen mid-spinner in this finished
+                // mirror — the mirror freezes its OWN copy here (the pane
+                // keeps its raw state; this is display projection).
+                // `seal(true, None)` keeps every entry and just completes
+                // the stuck rows; the failure flavor fails them.
+                if !closed
+                    && session.subagent_activity.timeline.iter().any(|e| {
+                        matches!(
+                            e,
+                            SubagentTimelineEntry::Tool(c)
+                                if c.status == ToolCallStatus::InProgress
+                        )
+                    })
+                {
+                    session.subagent_activity.seal(!failed, None);
+                    session.activity_rows_cache = None;
                 }
                 changed = true;
             }
@@ -3685,21 +3711,6 @@ impl RightPanelState {
         };
         if let Some(idx) = ref_match.or(fallback_match) {
             let session = &mut self.pty_sessions[idx];
-            // LINEAR CHAT: the final report REPLACES the streamed output
-            // below, but the echoed main-agent prompt is part of the
-            // conversation (prompt, then the answer) and must SURVIVE the
-            // replacement — capture the input block from the live output
-            // and re-prepend it, or the user could never scroll up to read
-            // what was asked once the window completes. Captured BEFORE any
-            // replacement (and only for subagent windows — bash outputs are
-            // never split). Same for the failure path below.
-            let echoed_input: Option<String> = if session.is_subagent() {
-                split_subagent_output(&session.output)
-                    .0
-                    .map(|block| format!("{block}\n"))
-            } else {
-                None
-            };
             if session.is_subagent() {
                 // The tool result of a `subagent_call` arrives JSON-wrapped
                 // (`SubAgentCallOutput`) — classification happens through the
@@ -3743,8 +3754,7 @@ impl RightPanelState {
             // narration Message each time; gating on the Running→finished
             // transition makes the later passes the plain no-ops the
             // ToolResult handler has always assumed they are (the output
-            // replacement itself is idempotent — the echo is re-split off
-            // the head before the re-prepend).
+            // replacement itself is idempotent).
             let was_running = matches!(session.status, PtyStatus::Running);
             session.status = PtyStatus::Completed;
             if was_running {
@@ -3757,14 +3767,13 @@ impl RightPanelState {
                 // the last message segment); a body that does not (a
                 // background failure notification, a truncated report, the
                 // closure's fallback) keeps the entry instead of losing
-                // content. Sealed BEFORE the echo re-prepend and tail
-                // truncation: the containment reference is the sub-agent's
-                // own report, not the echoed prompt above it.
+                // content. Sealed BEFORE the tail truncation: the
+                // containment reference is the sub-agent's own report, not
+                // the echoed prompt above it (that prompt lives OUTSIDE the
+                // output — `input_echo` — so it survives every replacement
+                // by construction).
                 session.subagent_activity.seal_completed(&final_output);
                 session.activity_rows_cache = None;
-            }
-            if let Some(echo) = echoed_input {
-                final_output.insert_str(0, &echo);
             }
             Self::truncate_output(&mut final_output);
             session.output = final_output;
@@ -3817,25 +3826,11 @@ impl RightPanelState {
         };
         if let Some(idx) = ref_match.or(fallback_match) {
             let session = &mut self.pty_sessions[idx];
-            // LINEAR CHAT (same contract as the completion path): the
-            // error text REPLACES the streamed output, but the echoed
-            // main-agent prompt must SURVIVE so the user can still scroll
-            // up to read what was asked. Captured before the replace and
-            // re-prepended. `truncate_output` bounds the TOTAL (echo +
-            // error): the echo sits at the head and truncation keeps the
-            // tail, so an error alone larger than the budget can still
-            // clip the prompt — the same 60k budget the echo occupied
-            // while streaming, no regression, but no echo priority.
-            let echoed_input: Option<String> = if session.is_subagent() {
-                split_subagent_output(&session.output)
-                    .0
-                    .map(|block| format!("{block}\n"))
-            } else {
-                None
-            };
-            if let Some(echo) = echoed_input {
-                error.insert_str(0, &echo);
-            }
+            // The error text REPLACES the streamed output. The echoed
+            // main-agent prompt is NOT in the output — it lives on
+            // `input_echo` — so it survives the replacement by construction
+            // (the old in-string marker needed a capture/re-prepend dance
+            // here; the dedicated field removed that failure mode).
             Self::truncate_output(&mut error);
             session.output = error;
             // SEAL ON THE TRANSITION ONLY (same double-fire contract as the
@@ -3979,7 +3974,7 @@ impl RightPanelState {
 
         // ── PTY sessions: collect bash + subagent calls chronologically ──
         let mut bashes: Vec<(String, String, bool)> = Vec::new();
-        // (agent, "→ cosh:" input line, description, code_review, output, failed)
+        // (agent, verbatim input prompt, description, code_review, output, failed)
         let mut subs: Vec<RehydratedSubagent> = Vec::new();
         for msg in &session.messages {
             for part in &msg.parts {
@@ -4060,12 +4055,11 @@ impl RightPanelState {
         for (agent, input, description, code_review, output, failed) in kept_subs {
             let command = format!("subagent: {agent}");
             // Same contract as the live path (events): the echo is the FULL
-            // verbatim prompt, one marker line per prompt line (empty/absent
-            // input → no echo at all).
-            let input_line = input.as_deref().and_then(subagent_input_line);
+            // verbatim prompt, stored on the window (`input_echo`) —
+            // empty/absent input echoes nothing.
             self.replay_pty(
                 command,
-                input_line,
+                input.filter(|i| !i.trim().is_empty()),
                 description,
                 code_review,
                 output,
@@ -4084,7 +4078,7 @@ impl RightPanelState {
     fn replay_pty(
         &mut self,
         command: String,
-        input_line: Option<String>,
+        input: Option<String>,
         description: Option<String>,
         code_review: bool,
         output: String,
@@ -4122,6 +4116,13 @@ impl RightPanelState {
         };
         session.description = description.or(inferred);
         session.code_review = code_review;
+        // The restored input echo rides the DEDICATED field (the same
+        // contract the live path applies in `set_last_subagent_input_echo`):
+        // the prompt renders verbatim above the body, wearing the `│` input
+        // rail — no in-string marker. Same `SUBAGENT_INPUT_ECHO_BYTES` bound.
+        session.input_echo = input
+            .map(|i| bounded_tail(i.trim(), SUBAGENT_INPUT_ECHO_BYTES))
+            .filter(|i| !i.is_empty());
         // Rehydrated review reports declare their outcome in a leading
         // `<!-- severity: ... -->` header, exactly like the live path's
         // `complete_last_pty`; consume it so a restored window keeps its
@@ -4129,9 +4130,6 @@ impl RightPanelState {
         if session.is_subagent() && !failed {
             let (severity, _) = cosh_tools::subagent::severity::extract_severity(&output);
             session.severity = severity;
-        }
-        if let Some(line) = input_line {
-            session.output.push_str(&line);
         }
         session.output.push_str(&output);
         Self::truncate_output(&mut session.output);
@@ -4243,20 +4241,21 @@ impl RightPanelState {
                 if !pty.command.starts_with("subagent:") {
                     continue;
                 }
-                let (input, body) = split_subagent_output(&pty.output);
                 // CLEAN view: the command header is NOT rendered anymore
                 // (the list row already names the agent CLI), so the
                 // height math counts only the input echo and the body —
-                // exactly what the renderer draws. The input line wraps
-                // like any text: a long one occupies multiple visual rows
-                // (the display strips the `→ cosh: ` storage marker via
-                // `subagent_prompt_text` — same text the renderer wraps).
+                // exactly what the renderer draws. The echo lives on the
+                // DEDICATED `input_echo` field (verbatim prompt, no
+                // marker) and wraps like any text: a long one occupies
+                // multiple visual rows (same text the renderer wraps).
                 // Input echo + body = the DISPLAYED rows (the placeholder
                 // floor of 1 keeps a just-started window visible before
                 // any output arrives — applied LAST, as a floor, so it
                 // never stacks on top of real content).
-                let input_rows = input
-                    .map(|input| wrap_count(&subagent_prompt_text(input), wrap_w))
+                let input_rows = pty
+                    .input_echo
+                    .as_deref()
+                    .map(|input| wrap_count(input, wrap_w))
                     .unwrap_or(0);
                 // CHAT SEPARATOR: the renderer draws one blank row between
                 // the echoed prompt and the body whenever BOTH exist — a
@@ -4265,7 +4264,7 @@ impl RightPanelState {
                 // body the same way on both sides of the lockstep.
                 // The severity header is consumed (tints the box, never
                 // shown): the height math counts the DISPLAYED body.
-                let clean = sanitize_subagent_text(subagent_visible_body(body));
+                let clean = sanitize_subagent_text(subagent_visible_body(&pty.output));
                 let body_rows = if !clean.trim().is_empty() {
                     estimate_height(&clean, wrap_w)
                 } else {
@@ -4400,7 +4399,7 @@ mod tests {
         assert_eq!(wrap_chars("qualquer coisa", 0), vec!["qualquer coisa"]);
         for line in [
             "coração pinga e anda".to_string(),
-            "→ cosh: ação é útil".to_string(),
+            "ação é útil com setas → no meio".to_string(),
             "x".repeat(200),
             "ab ".repeat(40),
         ] {
@@ -4450,10 +4449,10 @@ mod tests {
         state.update_last_pty("é".repeat(30_000) + "x");
         assert!(state.pty_sessions[0].output.len() <= MAX_PTY_OUTPUT_CHARS);
 
-        // Same for subagent output with the "→ cosh:" prefix.
+        // Same for subagent output with multi-byte content (arrows, accents).
         state.complete_last_pty(String::new());
         state.start_pty("subagent: opencode".to_string(), None);
-        state.update_last_pty(format!("→ cosh: olá\n{}", "→".repeat(30_001)));
+        state.update_last_pty(format!("olá\n{}", "→".repeat(30_001)));
         assert!(state.pty_sessions[1].output.len() <= MAX_PTY_OUTPUT_CHARS);
     }
 
@@ -4566,40 +4565,31 @@ mod tests {
     /// output on completion, but the echoed main-agent prompt must
     /// SURVIVE — the window stays a linear chat (prompt, then the answer)
     /// and the user can still scroll up to read what was asked. The echo
-    /// used to be evicted by the `session.output = final_output`
-    /// replacement, leaving the report with no visible question above it.
+    /// rides the DEDICATED `input_echo` field, so it survives every
+    /// output replacement by construction.
     #[test]
     fn complete_last_pty_for_agent_preserves_the_echoed_input() {
         let mut state = RightPanelState::new();
         state.start_pty("subagent: kilo".to_string(), None);
-        // Live path: the full multi-line prompt is echoed into the window.
-        let echo = subagent_input_line("review the last commit\nbe thorough").expect("echo");
-        state.update_last_pty_for_agent(echo, Some("kilo"));
+        // Live path: the full multi-line prompt echoes into the window's
+        // dedicated field (verbatim, trimmed).
+        let last = state.pty_sessions.len() - 1;
+        state.pty_sessions[last].input_echo =
+            Some("review the last commit\nbe thorough".to_string());
         state.update_last_pty_for_agent("streaming thoughts\n".to_string(), Some("kilo"));
 
         state.complete_last_pty_for_agent("Final report body.\n".to_string(), Some("kilo"));
 
         assert!(matches!(state.pty_sessions[0].status, PtyStatus::Completed));
-        // The prompt block sits ABOVE the report — exactly as echoed.
-        assert!(
-            state.pty_sessions[0]
-                .output
-                .starts_with("→ cosh: review the last commit\n→ cosh: be thorough\n"),
+        // The prompt stays on the field, untouched by the replacement.
+        assert_eq!(
+            state.pty_sessions[0].input_echo.as_deref(),
+            Some("review the last commit\nbe thorough"),
             "echoed prompt must survive the completion replacement"
         );
-        assert!(
-            state.pty_sessions[0]
-                .output
-                .ends_with("Final report body.\n"),
-            "the report follows the prompt in the linear chat flow"
-        );
-        // And the SPLIT agrees: input block first, then the body.
-        let (input, body) = split_subagent_output(&state.pty_sessions[0].output);
-        assert_eq!(
-            input,
-            Some("→ cosh: review the last commit\n→ cosh: be thorough")
-        );
-        assert_eq!(body, "Final report body.\n");
+        // The output carries ONLY the report (the echo is no longer part
+        // of the output string — it renders separately above it).
+        assert_eq!(state.pty_sessions[0].output, "Final report body.\n");
     }
 
     /// LINEAR CHAT REGRESSION (failure path): a failed subagent window
@@ -4609,21 +4599,20 @@ mod tests {
     fn fail_last_pty_for_agent_preserves_the_echoed_input() {
         let mut state = RightPanelState::new();
         state.start_pty("subagent: kilo".to_string(), None);
-        let echo = subagent_input_line("do the thing").expect("echo");
-        state.update_last_pty_for_agent(echo, Some("kilo"));
+        let last = state.pty_sessions.len() - 1;
+        state.pty_sessions[last].input_echo = Some("do the thing".to_string());
 
         state.fail_last_pty_for_agent("connection reset\n".to_string(), Some("kilo"));
 
         assert!(matches!(state.pty_sessions[0].status, PtyStatus::Failed));
-        assert!(
-            state.pty_sessions[0]
-                .output
-                .starts_with("→ cosh: do the thing\n"),
+        assert_eq!(
+            state.pty_sessions[0].input_echo.as_deref(),
+            Some("do the thing"),
             "echoed prompt must survive the failure replacement"
         );
-        assert!(
-            state.pty_sessions[0].output.ends_with("connection reset\n"),
-            "the error follows the prompt in the linear chat flow"
+        assert_eq!(
+            state.pty_sessions[0].output, "connection reset\n",
+            "the error replaces the output; the prompt lives on the field"
         );
     }
 
@@ -4667,39 +4656,47 @@ mod tests {
 
         // Interleaved live streams: ref-1 traffic must hit window 0 even
         // though window 1 is the newest Running one (the old router's
-        // guess), and vice versa.
-        let echo1 = subagent_input_line("first task").expect("echo");
-        let echo2 = subagent_input_line("second task").expect("echo");
-        state.update_last_pty_routed(echo1, Some("call-1"), Some("kilo"));
-        state.update_last_pty_routed(echo2, Some("call-2"), Some("kilo"));
+        // guess), and vice versa. Echoes ride the DEDICATED `input_echo`
+        // field, routed exactly like the live stream text.
+        let last = state.pty_sessions.len() - 1;
+        state.pty_sessions[last - 1].input_echo = Some("first task".to_string());
+        state.pty_sessions[last].input_echo = Some("second task".to_string());
         state.update_last_pty_routed("stream A\n".to_string(), Some("call-1"), Some("kilo"));
         state.update_last_pty_routed("stream B\n".to_string(), Some("call-2"), Some("kilo"));
 
         state.complete_last_pty_routed("report one\n".to_string(), Some("call-2"), Some("kilo"));
         state.complete_last_pty_routed("report zero\n".to_string(), Some("call-1"), Some("kilo"));
 
-        // Window 0 (call-1): its OWN input, then its OWN report. The report
-        // REPLACES the streamed output (the linear-chat contract: the
-        // echoed prompt survives, the live stream does not — its content
-        // is folded into the final report the sub-agent produced).
-        let (input, body) = split_subagent_output(&state.pty_sessions[0].output);
-        assert_eq!(input, Some("→ cosh: first task"));
+        // Window 0 (call-1): its OWN input echo (on the field) and its OWN
+        // report. The report REPLACES the streamed output (the linear-chat
+        // contract: the echoed prompt survives on `input_echo`, the live
+        // stream does not — its content is folded into the final report the
+        // sub-agent produced).
+        assert_eq!(
+            state.pty_sessions[0].input_echo.as_deref(),
+            Some("first task")
+        );
+        let body0 = &state.pty_sessions[0].output;
         assert!(
-            body.contains("report zero"),
-            "window 0 must hold call-1's report, got {body:?}"
+            body0.contains("report zero"),
+            "window 0 must hold call-1's report, got {body0:?}"
         );
         assert!(
-            !state.pty_sessions[0].output.contains("second task")
-                && !state.pty_sessions[0].output.contains("report one")
-                && !state.pty_sessions[0].output.contains("stream B"),
+            !state.pty_sessions[0].input_echo.as_deref().is_some_and(|i| i.contains("second task"))
+                && !body0.contains("second task")
+                && !body0.contains("report one")
+                && !body0.contains("stream B"),
             "sibling traffic must never land in window 0"
         );
         // Window 1 (call-2): idem, mirrored.
-        let (input, body) = split_subagent_output(&state.pty_sessions[1].output);
-        assert_eq!(input, Some("→ cosh: second task"));
+        assert_eq!(
+            state.pty_sessions[1].input_echo.as_deref(),
+            Some("second task")
+        );
+        let body1 = &state.pty_sessions[1].output;
         assert!(
-            body.contains("report one"),
-            "window 1 must hold call-2's report, got {body:?}"
+            body1.contains("report one"),
+            "window 1 must hold call-2's report, got {body1:?}"
         );
         assert!(
             !state.pty_sessions[1].output.contains("first task")
@@ -4716,7 +4713,7 @@ mod tests {
         let mut state = RightPanelState::new();
         state.start_pty("subagent: kilo".to_string(), None);
         state.bind_last_pty_call_ref(Some("call-1".to_string()));
-        state.update_last_pty_routed("→ cosh: bound\n".to_string(), Some("call-1"), Some("kilo"));
+        state.update_last_pty_routed("bound stream\n".to_string(), Some("call-1"), Some("kilo"));
 
         // A ref no window carries: the agent-hint fallback routes it to the
         // Running kilo window (pre-ref sources stay functional).
@@ -4750,7 +4747,7 @@ mod tests {
         state.start_pty("subagent: gemini".to_string(), None);
         state.bind_last_pty_call_ref(Some("call-8".to_string()));
         state.update_last_pty_routed(
-            "→ cosh: second spawn\n".to_string(),
+            "second spawn stream\n".to_string(),
             Some("call-8"),
             Some("gemini"),
         );
@@ -4840,15 +4837,17 @@ mod tests {
         state.subagent_rebuild_interval = Duration::ZERO;
         state.start_pty("subagent: kilo".to_string(), None);
 
-        // Input + body: input row + gap row + body row.
-        state.complete_last_pty("→ cosh: prompt\nbody line\n".to_string());
+        // Input + body: input row + gap row + body row. The echo rides the
+        // DEDICATED `input_echo` field; the body streams as plain text.
+        state.pty_sessions[0].input_echo = Some("prompt".to_string());
+        state.complete_last_pty("body line\n".to_string());
         assert_eq!(state.subagent_section_rows(40), &[3], "input + gap + body");
 
         // Input only (no body yet): NO gap — nothing after it to separate.
         let mut state2 = RightPanelState::new();
         state2.subagent_rebuild_interval = Duration::ZERO;
         state2.start_pty("subagent: kilo".to_string(), None);
-        state2.complete_last_pty("→ cosh: prompt\n".to_string());
+        state2.pty_sessions[0].input_echo = Some("prompt".to_string());
         assert_eq!(state2.subagent_section_rows(40), &[1], "input only, no gap");
     }
 
@@ -4864,8 +4863,9 @@ mod tests {
         state.subagent_rebuild_interval = Duration::ZERO;
         state.start_pty("subagent: kilo".to_string(), None);
         // Mid-stream: the prompt is echoed, the body does not exist yet, but
-        // the transcript is already growing.
-        state.update_last_pty("→ cosh: prompt\n".to_string());
+        // the transcript is already growing. The echo rides the DEDICATED
+        // `input_echo` field.
+        state.pty_sessions[0].input_echo = Some("prompt".to_string());
         state.update_subagent_activity(&tool_call_event("c1", "Reading a"), None);
 
         assert_eq!(
@@ -5689,7 +5689,7 @@ mod tests {
         let mut state = RightPanelState::new();
         state.replay_pty(
             "subagent: opencode".to_string(),
-            Some("→ cosh: review\n".to_string()),
+            Some("review".to_string()),
             None,
             false,
             "<!-- severity: yellow -->\nminor issues".to_string(),
@@ -5699,6 +5699,7 @@ mod tests {
             state.pty_sessions[0].severity,
             Some(cosh_tools::subagent::severity::Severity::Yellow)
         );
+        assert_eq!(state.pty_sessions[0].input_echo.as_deref(), Some("review"));
 
         // Failed (crashed) windows stay neutral — no report was delivered.
         state.replay_pty(
@@ -6309,8 +6310,10 @@ mod tests {
         assert!(kilos[2].output.contains("report 4"));
         assert!(kilos[0].superseded);
         assert!(!kilos[2].superseded);
-        // The "→ cosh:" input line is reconstructed as the first line.
-        assert!(opencodes[0].output.starts_with("→ cosh: other task\n"));
+        // The echoed prompt rides the dedicated `input_echo` field; the
+        // output holds only the report body.
+        assert_eq!(opencodes[0].input_echo.as_deref(), Some("other task"));
+        assert_eq!(opencodes[0].output, "other report");
         assert_eq!(opencodes[0].status, PtyStatus::Completed);
     }
 
@@ -6330,10 +6333,8 @@ mod tests {
 
         state.rehydrate_from_session(&session);
 
-        assert_eq!(
-            state.pty_sessions[0].output,
-            "→ cosh: oi\nOi! Como posso ajudar?"
-        );
+        assert_eq!(state.pty_sessions[0].output, "Oi! Como posso ajudar?");
+        assert_eq!(state.pty_sessions[0].input_echo.as_deref(), Some("oi"));
         assert!(!state.pty_sessions[0].output.contains("stop_reason"));
     }
 
@@ -6675,20 +6676,19 @@ mod tests {
         assert!(state.bash_buffer(40).len() < buf.len());
     }
 
-    /// The subagent rows account for the wrapped input line, so the box
-    /// never clips a window whose input is long. (The command header is
+    /// The subagent rows account for the wrapped input echo, so the box
+    /// never clips a window whose prompt is long. (The command header is
     /// NOT rendered anymore — the list row already names the agent CLI —
-    /// and the `→ cosh: ` storage marker is stripped from the display.)
+    /// and the echo rides the dedicated `input_echo` field.)
     #[test]
     fn subagent_rows_include_wrapped_header_and_input() {
         let mut state = RightPanelState::new();
         state.subagent_rebuild_interval = Duration::ZERO;
         state.start_pty("subagent: opencode".to_string(), None);
-        let long_input = format!("→ cosh: {}\n", "x".repeat(50));
-        state.update_last_pty(long_input); // no body yet
+        state.pty_sessions[0].input_echo = Some("x".repeat(50)); // no body yet
 
-        // Width 20: the DISPLAY text (marker stripped) is a 50-char
-        // x-run → hard-broken 20/20/10 → 3 rows; no header row.
+        // Width 20: the 50-char x-run hard-broken 20/20/10 → 3 rows; no
+        // header row.
         assert_eq!(state.subagent_section_rows(20), &[3]);
         // Width 80: the 50-char run fits on one row.
         assert_eq!(state.subagent_section_rows(80), &[1]);
@@ -7165,63 +7165,30 @@ mod tests {
         );
     }
 
-    /// The leading `→ cosh:` lines of a subagent output are the main
-    /// agent's FULL input block (the prompt is echoed verbatim, one marker
-    /// per line); everything after the first marker-less line is the body.
-    /// Outputs without the prefix (e.g. after tail truncation) are all body.
+    /// The echoed prompt lives on the DEDICATED `input_echo` field
+    /// (verbatim, no storage marker): a blank/whitespace-only prompt stores
+    /// NOTHING, a real prompt is trimmed but never truncated — the window
+    /// is a linear chat (prompt, then the answer) and the user SCROLLS to
+    /// read long prompts. No `…` may ever appear.
     #[test]
-    fn split_subagent_output_extracts_input_line() {
-        assert_eq!(
-            split_subagent_output("plain body\n"),
-            (None, "plain body\n")
-        );
-        assert_eq!(
-            split_subagent_output("→ cosh: review this\nbody\n"),
-            (Some("→ cosh: review this"), "body\n")
-        );
-        assert_eq!(
-            split_subagent_output("→ cosh: hi"),
-            (Some("→ cosh: hi"), "")
-        );
-        // FULL-prompt echo: EVERY leading marker line belongs to the input
-        // block; the first marker-less line ends it (never swallowed).
-        let out = "→ cosh: line a\n→ cosh: line b\n→ cosh: line c\nbody\n";
-        assert_eq!(
-            split_subagent_output(out),
-            (
-                Some("→ cosh: line a\n→ cosh: line b\n→ cosh: line c"),
-                "body\n"
-            )
-        );
-        // A blank line (marker-less) also ends the block.
-        let out = "→ cosh: a\n\nbody\n";
-        assert_eq!(split_subagent_output(out), (Some("→ cosh: a"), "\nbody\n"));
-    }
+    fn input_echo_field_stores_verbatim_trimmed_prompt() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: kilo".to_string(), None);
 
-    /// The FULL prompt is echoed VERBATIM — never collapsed, never
-    /// truncated: the window is a linear chat (prompt, then the answer)
-    /// and the user SCROLLS to read long prompts. No `…` may ever appear.
-    #[test]
-    fn subagent_input_line_echo_is_verbatim() {
-        let multiline = "review the last commit\nbe thorough\ncheck tests too";
-        let echo = subagent_input_line(multiline).unwrap();
-        // One marker per prompt line, content preserved exactly.
-        assert_eq!(
-            echo,
-            "→ cosh: review the last commit\n→ cosh: be thorough\n→ cosh: check tests too\n"
-        );
-        // Absent or blank input → no echo at all (same as before).
-        assert!(subagent_input_line("").is_none());
-        assert!(subagent_input_line("\n  \n").is_none());
-        // A long single-line prompt is NOT capped: the full 300 chars are
-        // echoed (they wrap; the section scrolls).
+        // Absent or blank input → no echo at all.
+        state.set_last_subagent_input_echo("kilo", Some(""));
+        assert!(state.pty_sessions[0].input_echo.is_none());
+        state.set_last_subagent_input_echo("kilo", Some("\n  \n"));
+        assert!(state.pty_sessions[0].input_echo.is_none());
+        state.set_last_subagent_input_echo("kilo", None);
+        assert!(state.pty_sessions[0].input_echo.is_none());
+
+        // A real prompt is stored TRIMMED but never truncated: the full
+        // 300 chars are kept (they wrap; the section scrolls).
         let long = "x".repeat(300);
-        let echo = subagent_input_line(&long).unwrap();
-        assert_eq!(
-            echo.chars().count(),
-            300 + "→ cosh: ".chars().count() + 1,
-            "no `…` truncation"
-        );
+        state.set_last_subagent_input_echo("kilo", Some(&format!("  {long}\n")));
+        let echo = state.pty_sessions[0].input_echo.as_deref().unwrap();
+        assert_eq!(echo, long, "no `…` truncation, whitespace trimmed");
         assert!(!echo.contains('…'));
     }
 
@@ -7261,28 +7228,25 @@ mod tests {
         );
     }
 
-    /// The subagent section rows add up the command header, the optional
-    /// input line and the markdown body rows, so the box height matches the
-    /// laid-out markdown (never clips the report).
+    /// The subagent section rows add up the input echo and the markdown
+    /// body rows, so the box height matches the laid-out markdown (never
+    /// clips the report).
     #[test]
     fn subagent_rows_reflect_markdown_height() {
         let mut state = RightPanelState::new();
         state.start_pty("subagent: opencode".to_string(), None);
-        state.update_last_pty(
-            "→ cosh: review this\n# Title\n\n```rust\nfn main() { println!(\"hi\"); }\n```\n"
-                .to_string(),
-        );
+        // The echo rides the DEDICATED `input_echo` field; the body streams
+        // into the output as DIRECT text (no marker).
+        let body = "# Title\n\n```rust\nfn main() { println!(\"hi\"); }\n```\n";
+        state.pty_sessions[0].input_echo = Some("review this".to_string());
+        state.update_last_pty(body.to_string());
 
         let w = 20u16;
         let rows = state.subagent_section_rows(w);
         assert_eq!(rows.len(), 1, "one subagent session");
-        let (input, body) = split_subagent_output(
-            "→ cosh: review this\n# Title\n\n```rust\nfn main() { println!(\"hi\"); }\n```\n",
-        );
-        assert_eq!(input, Some("→ cosh: review this"));
         // CLEAN view: NO command header. The input displays as direct
-        // prompt text (marker stripped), then ONE separator row (the chat
-        // gap — input and body both present), then the markdown body.
+        // prompt text, then ONE separator row (the chat gap — input and
+        // body both present), then the markdown body.
         let expected = 1 + 1 + estimate_height(&sanitize_subagent_text(body), w);
         assert_eq!(
             rows[0], expected,
@@ -7552,8 +7516,9 @@ mod tests {
         // A normal spawn of the same CLI: the sweep must skip the mirror.
         // The mirror is FINISHED here — exactly the shape the per-CLI
         // supersede sweep targets — so without the `bound` guard it would
-        // be evicted from the default display by a normal turn.
-        state.finish_agents_pane(0, &SubagentActivity::default(), "pane report", false);
+        // be evicted from the default display by a normal turn. The
+        // (empty) activity arrives ALREADY closed by the pane.
+        state.finish_agents_pane(0, &SubagentActivity::default(), false);
         state.start_pty("subagent: claude".to_string(), None);
         assert!(
             !state.pty_sessions[0].superseded,
@@ -7564,10 +7529,12 @@ mod tests {
         assert!(state.pty_sessions.len() == 2);
     }
 
-    /// The sync is pane-index routed and carries the label; crossing into
-    /// finished seals the transcript (the list stops spinning).
+    /// The sync is pane-index routed and carries the label; the DONE sync
+    /// takes the pane's ALREADY-CLOSED timeline (the report is its LAST
+    /// chronological entry — never a separate window body) and flips the
+    /// terminal marker.
     #[test]
-    fn pane_mirror_sync_applies_activity_and_seals_on_finish() {
+    fn pane_mirror_sync_applies_activity_and_finishes_on_the_closed_timeline() {
         let mut state = RightPanelState::new();
         state.open_agents_pane_window(1, "kilo");
         let mut activity = SubagentActivity::default();
@@ -7588,8 +7555,18 @@ mod tests {
             "the mirror carries the pane's coalesced timeline"
         );
 
-        // Finish: sealed, completed, and the report lands as the body.
-        state.finish_agents_pane(1, &activity, "final report", false);
+        // Finish: the PANE closed the turn first (seal + report appended as
+        // the LAST timeline entry by `close_turn`); the mirror inherits that
+        // closed timeline, seals nothing itself, and flips to Completed.
+        // The report follows the `TurnClosure` contract: it carries the
+        // streamed message, whose timeline entry is dropped by the seal
+        // (the body-kept copy would print the answer twice).
+        let mut closed = SubagentActivity::default();
+        closed.apply(&SubagentEvent::Message {
+            text: "working final report".into(),
+        });
+        closed.close_turn("working final report", "end_turn");
+        state.finish_agents_pane(1, &closed, false);
         let mirror = state
             .pty_sessions
             .iter()
@@ -7597,9 +7574,18 @@ mod tests {
             .unwrap();
         assert!(mirror.is_finished());
         assert!(matches!(mirror.status, PtyStatus::Completed));
-        assert_eq!(mirror.output, "final report");
-        // The seal froze the tool rows (none InProgress left) — the same
-        // contract the normal completion path applies.
+        // The report lives in the chronological timeline (last entry), NOT
+        // in a separate body: the read order stays linear across turns.
+        assert_eq!(mirror.output, "", "the mirror never writes a report body");
+        assert_eq!(
+            mirror.subagent_activity.timeline.last(),
+            Some(&SubagentTimelineEntry::Message {
+                text: "working final report".to_string()
+            }),
+            "the report is the timeline's LAST entry"
+        );
+        // The pane's close_turn froze the tool rows (none InProgress left)
+        // — the mirror's marker flip adds no sealing of its own.
         assert!(mirror
             .subagent_activity
             .timeline
@@ -7610,32 +7596,97 @@ mod tests {
             )));
 
         // An idle-but-bound pane re-syncs on every open WITHOUT flipping
-        // its marker or re-sealing: the mirror stays Completed, the
-        // transcript stays sealed, no gen churn.
+        // its marker or re-sealing: the mirror stays Completed, the closed
+        // timeline stays, no gen churn.
         let gen_before = state.pty_gen;
-        state.sync_agents_pane(1, &activity, false, Some("#2"));
+        state.sync_agents_pane(1, &closed, false, Some("#2"));
         let mirror = state
             .pty_sessions
             .iter()
             .find(|s| s.bound && s.agents_pane == Some(1))
             .unwrap();
         assert!(matches!(mirror.status, PtyStatus::Completed));
-        assert_eq!(mirror.output, "final report");
+        assert_eq!(mirror.output, "");
         assert_eq!(
             state.pty_gen, gen_before,
             "an idle re-sync churns nothing"
         );
 
         // A NEW turn re-engages the spinner (and only the Running status
-        // changed — the sealed transcript and report body stay).
-        state.sync_agents_pane(1, &activity, true, Some("#2"));
+        // changed — the closed timeline stays).
+        state.sync_agents_pane(1, &closed, true, Some("#2"));
         let mirror = state
             .pty_sessions
             .iter()
             .find(|s| s.bound && s.agents_pane == Some(1))
             .unwrap();
         assert!(matches!(mirror.status, PtyStatus::Running));
-        assert_eq!(mirror.output, "final report");
+        assert_eq!(mirror.output, "");
+    }
+
+    /// REGRESSION (issue 1 — the mirror's scrambled read order): a
+    /// multi-turn mirror must read like the chat. The pane's turn INPUT
+    /// echoed for turn 2 lands in the mirror's timeline; the PREVIOUS
+    /// turn's report lives in that same chronological timeline (its own
+    /// last entry) — never in a separate window body that renders below
+    /// every timeline entry, which displayed the new input ABOVE the old
+    /// output. The sync itself stays closure-free: it inherits whatever
+    /// timeline the pane closed and flips the marker.
+    #[test]
+    fn multi_turn_mirror_keeps_input_below_the_previous_output() {
+        let mut state = RightPanelState::new();
+        state.open_agents_pane_window(0, "kilo");
+
+        // Turn 1 through the full live path: echo, stream, close.
+        let mut activity = SubagentActivity::default();
+        activity.open_turn_input("primeira pergunta?", true);
+        activity.apply(&SubagentEvent::Message {
+            text: "primeira resposta.".into(),
+        });
+        activity.close_turn("primeira resposta.", "end_turn");
+        state.sync_agents_pane(0, &activity, true, None);
+
+        // Turn 2: the pane echoes the NEW input (fresh entry), streams its
+        // answer and closes. The mirror syncs along the way.
+        activity.open_turn_input("segunda pergunta?", true);
+        state.sync_agents_pane(0, &activity, true, None);
+        activity.apply(&SubagentEvent::Message {
+            text: "segunda resposta.".into(),
+        });
+        activity.close_turn("segunda resposta.", "end_turn");
+        state.finish_agents_pane(0, &activity, false);
+
+        let mirror = state
+            .pty_sessions
+            .iter()
+            .find(|s| s.bound && s.agents_pane == Some(0))
+            .unwrap();
+        // Every text entry in chronological order — no body blob below the
+        // timeline carrying an older turn's answer.
+        let texts: Vec<String> = mirror
+            .subagent_activity
+            .timeline
+            .iter()
+            .map(|entry| match entry {
+                SubagentTimelineEntry::Message { text }
+                | SubagentTimelineEntry::UserMessage { text }
+                | SubagentTimelineEntry::AgentMessage { text } => text.clone(),
+                other => panic!("expected a text entry, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            vec![
+                "primeira pergunta?",
+                "primeira resposta.",
+                "segunda pergunta?",
+                "segunda resposta.",
+            ],
+            "input N+1 never renders above output N: {:?}",
+            mirror.subagent_activity.timeline
+        );
+        assert_eq!(mirror.output, "", "no report body beside the timeline");
+        assert!(matches!(mirror.status, PtyStatus::Completed));
     }
 
     /// Normal subagent traffic must never land in a mirror: the agent-hint

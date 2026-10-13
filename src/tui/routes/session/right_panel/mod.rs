@@ -17,9 +17,10 @@ pub mod types;
 use todo::{render_todo_section, todo_section_height};
 use types::{
     PtySession, RightPanelState, SubagentActivityLine, SubagentBlockRenderer, SubagentBodyCache,
-    activity_lines, sanitize_subagent_text, split_subagent_output, subagent_prompt_text,
-    subagent_visible_body, wrap_chars,
+    activity_lines, sanitize_subagent_text, subagent_visible_body, wrap_chars,
 };
+
+use crate::routes::session::agents_split::subagent_input_rail;
 
 use std::collections::HashMap;
 
@@ -875,8 +876,8 @@ fn render_subagent_list(
 /// top-ranked candidate: running beats finished, newest first;
 /// superseded entries return only via ← navigation). The window shows
 /// ONLY content: the optional main-agent input (the user's prompt, direct
-/// text — the list row already names the agent CLI, so no `subagent: …`
-/// header and no `→ cosh:` decoration), then the body as
+/// text from the dedicated `input_echo` field — the list row already
+/// names the agent CLI, so no `subagent: …` header), then the body as
 /// **markdown** — the same renderer the chat uses for its content, so the
 /// report's headings/code/lists survive inside the box. Scrolling is in
 /// markdown layout rows (matching [`RightPanelState::subagent_section_rows`])
@@ -1065,14 +1066,15 @@ fn render_subagent_section(
 
     for (window, (sess_idx, session)) in sessions.iter().enumerate() {
         let sess_rows = i32::from(rows_all.get(*sess_idx).copied().unwrap_or(1));
-        let (input_line, body) = split_subagent_output(&session.output);
         // CLEAN view: no `subagent: <cli>` command header (the list row
-        // already names the agent) and no `→ cosh:` decoration — the
-        // input echoes as DIRECT prompt text (the storage marker is
-        // stripped by `subagent_prompt_text`), then the body. The rows
-        // math (types.rs) counts exactly the same two blocks.
-        let input_rows = input_line
-            .map(|input| wrap_chars(&subagent_prompt_text(input), wrap_w))
+        // already names the agent) — the input echoes as DIRECT prompt
+        // text from the window's DEDICATED `input_echo` field (verbatim,
+        // no marker), then the body. The rows math (types.rs) counts
+        // exactly the same two blocks.
+        let input_rows = session
+            .input_echo
+            .as_deref()
+            .map(|input| wrap_chars(input, wrap_w))
             .unwrap_or_default();
         let input_h = input_rows.len() as i32;
         let sess_end = content_row + sess_rows;
@@ -1121,7 +1123,11 @@ fn render_subagent_section(
         // Main-agent input echoed as DIRECT prompt text, wrapped; the same
         // visual rows feed the selection text regions (rebuilt only when
         // content or width changed). No command header — the list row
-        // already names the agent CLI.
+        // already names the agent CLI. Each input row wears the `│` input
+        // rail in the LEFT_PAD gutter (same marking as the `/agents`
+        // panes — the shared `subagent_input_rail` helper): input vs
+        // output stays readable at a glance, and the rail is PAINT-only
+        // (selection regions keep copying the bare text).
         draw_wrapped_rows(
             buf,
             x + LEFT_PAD,
@@ -1133,6 +1139,17 @@ fn render_subagent_section(
             wrap_w,
             text_style,
         );
+        for (offset, _) in input_rows.iter().enumerate() {
+            let row = content_row + offset as i32;
+            if (scroll_y..content_bottom).contains(&row) {
+                let line_y = inner_y + (row - scroll_y) as u16;
+                // The echoed prompt is always the MAIN agent's input, so the
+                // rail wears the theme's secondary tone (the same tone an
+                // `agents_call` input wears in the panes — the glyph marks
+                // "input", the tone marks who spoke).
+                subagent_input_rail(buf, x, line_y, Style::default().fg(rgba_color(theme.secondary)));
+            }
+        }
         if rebuild_regions {
             push_region_rows(
                 &mut state.subagent_text_regions,
@@ -1145,9 +1162,10 @@ fn render_subagent_section(
         // Whether the report body has visible content (the severity header
         // alone does not count): feeds the gap condition below, alongside
         // the live/sealed transcript rows.
-        let has_visible_body = !sanitize_subagent_text(subagent_visible_body(body))
-            .trim()
-            .is_empty();
+        let has_visible_body =
+            !sanitize_subagent_text(subagent_visible_body(&session.output))
+                .trim()
+                .is_empty();
         // Live activity (Phase 3b.2): tool calls, plan, thought — the same
         // lines the height math counts (for EVERY status now). A finished
         // window keeps its SEALED transcript (`SubagentActivity::seal`)
@@ -1188,6 +1206,9 @@ fn render_subagent_section(
             accents[window],
             theme,
             text_style,
+            session
+                .subagent_agent()
+                .unwrap_or_default(),
             session.id.as_str(),
             subagent_spinners,
             &mut live_spinner_keys,
@@ -1215,7 +1236,7 @@ fn render_subagent_section(
             // neutral color (no severity was extracted) but still lose a
             // leading header line here — accepted: a header on a FAILED
             // run is a malformed report.
-            let clean = sanitize_subagent_text(subagent_visible_body(body));
+            let clean = sanitize_subagent_text(subagent_visible_body(&session.output));
             if !clean.trim().is_empty() {
                 let body_h_u = body_h as u16;
                 let hit = state
@@ -1390,6 +1411,14 @@ fn draw_activity_lines(
     accent: RGBA,
     theme: &Theme,
     text_style: Style,
+    // The window's agent CLI: a USER's replayed echo in the timeline wears
+    // the input rail in the agent's own brand color — the same marking the
+    // `/agents` pane paints, so the mirrored timeline reads identically in
+    // both surfaces (pane AND this panel, where the pane renders outside
+    // `/agents` mode). Plain windows never carry timeline inputs in live
+    // mode, so the rail paints only when a `UserMessage`/`AgentMessage`
+    // entry actually exists.
+    agent: &str,
     session_id: &str,
     spinners: &mut HashMap<String, HighlightSpinner>,
     live_keys: &mut Vec<String>,
@@ -1687,6 +1716,26 @@ fn draw_activity_lines(
                             .collect();
                         let trimmed = text_from_cell_row(&row_cells, wrap_w as usize);
                         regions.push(TextRegion::one_row(r, x, x + wrap_w, trimmed));
+                    }
+                    // The prompt input's left rail (the shared
+                    // `subagent_input_rail`): a replayed USER echo wears it
+                    // in the window agent's brand color, an `agents_call`
+                    // input in the theme's secondary tone — the color alone
+                    // tells the user WHO is speaking. Same marking as the
+                    // `/agents` panes, so the mirrored timeline reads
+                    // identically in both surfaces. Rail is PAINT-only (the
+                    // regions above carry the bare text) and lives in the
+                    // LEFT_PAD gutter, one column left of the content.
+                    if let Some(rail_style) = match line {
+                        SubagentActivityLine::UserMessage { .. } => {
+                            Some(brand_fg(agent, 0.0, theme, true))
+                        }
+                        SubagentActivityLine::AgentMessage { .. } => {
+                            Some(Style::default().fg(rgba_color(theme.secondary)))
+                        }
+                        _ => None,
+                    } {
+                        subagent_input_rail(buf, x - 1, dst_y, rail_style);
                     }
                 }
             }
@@ -2025,17 +2074,16 @@ mod tests {
 
     /// The subagent body is rendered as markdown (like the chat content):
     /// heading text appears without the `#` markers, `**` emphasis is
-    /// consumed by the renderer, and the input line survives as plain
-    /// text. CLEAN view: no `subagent: …` header and no `→ cosh:` storage
-    /// marker — the prompt echoes as DIRECT text (the list row already
-    /// names the agent CLI).
+    /// consumed by the renderer, and the echoed prompt stays DIRECT text.
+    /// CLEAN view: no `subagent: …` header anywhere — the prompt echoes
+    /// from the dedicated `input_echo` field (the list row already names
+    /// the agent CLI).
     #[test]
     fn subagent_section_renders_markdown_body() {
         let mut state = RightPanelState::new();
         state.start_pty("subagent: opencode".to_string(), None);
-        state.update_last_pty(
-            "→ cosh: review this\n# Title\n\nSome **bold** text here.\n".to_string(),
-        );
+        state.pty_sessions[0].input_echo = Some("review this".to_string());
+        state.update_last_pty("# Title\n\nSome **bold** text here.\n".to_string());
         let theme = test_theme();
         let mut buf = Buffer::empty(Rect::new(0, 0, 50, 30));
 
@@ -2052,10 +2100,6 @@ mod tests {
         assert!(
             all.contains("review this"),
             "the prompt echoes as DIRECT text: {all:?}"
-        );
-        assert!(
-            !all.contains("→ cosh:"),
-            "storage marker leaked to the display: {all:?}"
         );
         assert!(all.contains("Title"), "heading text missing: {all:?}");
         assert!(
@@ -2102,34 +2146,142 @@ mod tests {
         state.subagent_rebuild_interval = std::time::Duration::ZERO;
         state.start_pty("subagent: kilo".to_string(), None);
         let tail = "word ".repeat(30); // 150 chars
-        state.update_last_pty(
-            crate::routes::session::right_panel::types::subagent_input_line(&tail).expect("echo"),
-        );
+        // The echo rides the DEDICATED `input_echo` field (verbatim prompt).
+        let last = state.pty_sessions.len() - 1;
+        state.pty_sessions[last].input_echo = Some(tail.clone());
 
         let mut buf = Buffer::empty(Rect::new(0, 0, 50, 30));
         render_subagent_section(&mut buf, 0, 0, 50, 30, &mut state, &theme, true);
 
-        // CLEAN view: no `subagent: kilo` header and no `→ cosh:` storage
-        // marker — the prompt echoes as DIRECT text; its LAST wrapped
-        // segment must be present somewhere in the buffer.
+        // CLEAN view: no `subagent: kilo` header — the prompt echoes as
+        // DIRECT text from `input_echo`; its LAST wrapped segment must be
+        // present somewhere in the buffer.
         let all: String = (0..30)
             .map(|y| row_text(&buf, y))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(!all.contains("→ cosh:"), "storage marker leaked: {all:?}");
         assert!(!all.contains("subagent: kilo"), "header leaked: {all:?}");
         assert!(
             all.contains("word"),
             "wrapped input segments missing: {all:?}"
         );
-        // Rows math agrees: the DISPLAY text (marker stripped) wraps into
-        // exactly the rows the height math counts — no header row on top.
-        let echo =
-            crate::routes::session::right_panel::types::subagent_input_line(&tail).expect("echo");
-        let display = subagent_prompt_text(&echo);
+        // Rows math agrees: the echo (verbatim) wraps into exactly the rows
+        // the height math counts — no header row on top.
         assert_eq!(
             state.subagent_section_rows(48),
-            &[wrap_chars(&display, 48).len() as u16]
+            &[wrap_chars(&tail, 48).len() as u16]
+        );
+    }
+
+    /// The right-panel window paints the `│` input rail in the LEFT_PAD
+    /// gutter on the echoed prompt's rows — the shared `subagent_input_rail`
+    /// helper (same glyph as the `/agents` panes), wearing the theme's
+    /// secondary tone (the echoed prompt is always the MAIN agent's input).
+    /// The rail is paint-only: gap and body rows keep the gutter clean.
+    #[test]
+    fn subagent_input_rows_wear_the_input_rail() {
+        let theme = test_theme();
+        let mut state = RightPanelState::new();
+        state.subagent_rebuild_interval = std::time::Duration::ZERO;
+        state.start_pty("subagent: kilo".to_string(), None);
+        state.pty_sessions[0].input_echo = Some("prompt".to_string());
+        state.update_last_pty("body line\n".to_string());
+
+        let mut buf = Buffer::empty(Rect::new(0, 0, 50, 12));
+        render_subagent_section(&mut buf, 0, 0, 50, 12, &mut state, &theme, true);
+
+        let want_fg = rgba_color(theme.secondary);
+        // Content starts at TOP_GAP+TOP_PAD = 2: row 2 is the echoed prompt
+        // (rail in the gutter), row 3 the chat gap, row 4 the body — both
+        // rail-less.
+        let rail = buf.cell((0, 2)).expect("cell");
+        assert_eq!(
+            rail.symbol(),
+            "│",
+            "the input row wears the rail in the LEFT_PAD gutter"
+        );
+        assert_eq!(
+            rail.fg, want_fg,
+            "the echoed prompt's rail wears the secondary tone"
+        );
+        for y in [3u16, 4u16] {
+            let cell = buf.cell((0, y)).expect("cell");
+            assert_ne!(
+                cell.symbol(),
+                "│",
+                "gap/body rows keep the gutter clean (row {y})"
+            );
+        }
+    }
+
+    /// The AGENT mirror (a `/agents` pane rendered in the right panel when
+    /// `/agents` mode is off) paints the SAME `│` input rail on its
+    /// timeline's input entries: a `UserMessage` wears the pane agent's
+    /// brand color (identical to the pane's own marking), an `AgentMessage`
+    /// (an `agents_call` input) the theme's secondary tone. The agent's own
+    /// message rows stay rail-less — the rail marks INPUTS only.
+    #[test]
+    fn agent_mirror_timeline_inputs_wear_the_input_rail() {
+        use cosh_tools::subagent::events::SubagentEvent;
+
+        let theme = test_theme();
+        let mut state = RightPanelState::new();
+        state.subagent_rebuild_interval = std::time::Duration::ZERO;
+        state.open_agents_pane_window(0, "kilo");
+        let mut activity = types::SubagentActivity::default();
+        // The user's prompt echoes into the pane (the brand rail), then the
+        // agent answers (rail-less).
+        activity.open_turn_input("ola como vai?", true);
+        activity.apply(&SubagentEvent::Message {
+            text: "tudo bem!".into(),
+        });
+        state.sync_agents_pane(0, &activity, true, None);
+
+        let mut buf = Buffer::empty(Rect::new(0, 0, 50, 12));
+        render_subagent_section(&mut buf, 0, 0, 50, 12, &mut state, &theme, true);
+
+        // Row 2 is the timeline's first entry (the user echo — no
+        // `input_echo` on a mirror, so activity starts at content row 2);
+        // row 3 is the agent's answer.
+        let rail = buf.cell((0, 2)).expect("cell");
+        assert_eq!(
+            rail.symbol(),
+            "│",
+            "the mirrored user echo wears the rail in the gutter: {:?}",
+            row_text(&buf, 2)
+        );
+        assert_ne!(
+            rail.fg, rgba_color(theme.secondary),
+            "the user echo's rail wears the AGENT's brand color, not secondary"
+        );
+        let answer = buf.cell((0, 3)).expect("cell");
+        assert_ne!(
+            answer.symbol(),
+            "│",
+            "the agent's own message stays rail-less: {:?}",
+            row_text(&buf, 3)
+        );
+
+        // An `agents_call` input (AgentMessage) wears the secondary tone —
+        // the same marking the pane paints for it.
+        let mut activity = types::SubagentActivity::default();
+        activity.open_turn_input("help me refactor", false);
+        activity.apply(&SubagentEvent::Message {
+            text: "on it".into(),
+        });
+        state.sync_agents_pane(0, &activity, true, None);
+        buf = Buffer::empty(Rect::new(0, 0, 50, 12));
+        render_subagent_section(&mut buf, 0, 0, 50, 12, &mut state, &theme, true);
+        let rail = buf.cell((0, 2)).expect("cell");
+        assert_eq!(
+            rail.symbol(),
+            "│",
+            "the agents_call input wears the rail too: {:?}",
+            row_text(&buf, 2)
+        );
+        assert_eq!(
+            rail.fg, rgba_color(theme.secondary),
+            "an agents_call input's rail wears the secondary tone"
         );
     }
 
@@ -2654,6 +2806,7 @@ mod tests {
                 RGBA::from_ints(255, 107, 48, 255),
                 &theme,
                 Style::default().fg(rgba_color(theme.text)),
+                "",
                 &session_id,
                 spinners,
                 &mut live_keys,
@@ -2922,12 +3075,10 @@ mod tests {
             let mut state = RightPanelState::new();
             state.subagent_rebuild_interval = std::time::Duration::from_millis(100);
             state.start_pty("subagent: opencode".to_string(), None);
-            state.update_last_pty(
-                crate::routes::session::right_panel::types::subagent_input_line(
-                    "multi-step tool narration prompt …",
-                )
-                .expect("echo"),
-            );
+            // The echo rides the DEDICATED `input_echo` field (verbatim prompt).
+            let last = state.pty_sessions.len() - 1;
+            state.pty_sessions[last].input_echo =
+                Some("multi-step tool narration prompt …".to_string());
 
             // Faithful mirror of `SubagentActivity::apply` coalescing: a
             // Message/Thought chunk joins the timeline's LAST entry when it
@@ -3119,11 +3270,10 @@ mod tests {
         state.start_pty("subagent: opencode".to_string(), None);
         state.start_pty("subagent: kilo".to_string(), None);
         for idx in [0usize, 1] {
-            let echo = crate::routes::session::right_panel::types::subagent_input_line(
-                format!("multi-step prompt {idx} …").as_str(),
-            )
-            .expect("echo");
-            state.pty_sessions[idx + 1].output = echo;
+            // The echo rides the DEDICATED `input_echo` field (verbatim prompt),
+            // exactly like production's `set_last_subagent_input_echo`.
+            state.pty_sessions[idx + 1].input_echo =
+                Some(format!("multi-step prompt {idx} …"));
         }
 
         let events1 = parsed1["events"].as_array().expect("events");
@@ -3289,7 +3439,7 @@ mod tests {
         };
         for case in 0..300u32 {
             let nblocks = 1 + (next() % 5) as usize;
-            let mut doc = String::from("\u{2192} cosh: task\n");
+            let mut doc = String::new();
             for _ in 0..nblocks {
                 let b = blocks[(next() as usize) % blocks.len()];
                 let filler =
@@ -3302,6 +3452,16 @@ mod tests {
             let mut state = RightPanelState::new();
             state.subagent_rebuild_interval = std::time::Duration::ZERO;
             state.start_pty("subagent: fuzz".to_string(), None);
+            // Half the corpus carries an echoed prompt on the DEDICATED
+            // `input_echo` field (alternating word lengths) so the input-rows
+            // + gap lockstep is exercised across the whole doc spread; the
+            // rest runs echo-less (no rail, no gap) like a headerless call.
+            if case % 2 == 0 {
+                let echo_words = words[(next() as usize) % words.len()]
+                    .repeat((1 + next() % 6) as usize);
+                let last = state.pty_sessions.len() - 1;
+                state.pty_sessions[last].input_echo = Some(echo_words);
+            }
             state.update_last_pty(doc.clone());
             state.complete_last_pty(doc.clone());
             let wrap_w = 48u16; // = render max_w 50 − left/right pads
@@ -3737,11 +3897,15 @@ mod tests {
         // Subagent: input + 8 body lines -> natural 12 (3 overhead + 9;
         // CLEAN view: no command header row).
         state.start_pty("subagent: kilo".to_string(), None);
+        // The echo rides the dedicated `input_echo` field (on the SUBAGENT
+        // window — the last session; [0] is the bash one); the output body
+        // is the streamed plain text.
+        let last = state.pty_sessions.len() - 1;
+        state.pty_sessions[last].input_echo = Some("task".to_string());
         state.complete_last_pty(
-            "\u{2192} cosh: task\n".to_string()
-                + &(0..8)
-                    .map(|i| format!("kilo line {i}\n"))
-                    .collect::<String>(),
+            (0..8)
+                .map(|i| format!("kilo line {i}\n"))
+                .collect::<String>(),
         );
 
         // H=26: available=25, base=12. Bash fits (pool += 6); sub deficit

@@ -386,12 +386,13 @@ impl App {
                         // same frame.
                         self.serve_agents_pane_queues();
                     }
-                    // The mirror seals: the final report becomes its window
-                    // body (the linear-chat contract), the transcript seals
-                    // and the list entry stops spinning. Runs even when the
-                    // split is gone (no pane to read from — the sync would
-                    // no-op; the binding below still persists).
-                    self.finish_agents_pane_mirror(pane, &output, failed);
+                    // The mirror finishes: it inherits the pane's ALREADY-CLOSED
+                    // timeline (`close_turn` ran in `finish_turn` above — the
+                    // report is its LAST chronological entry) and the list
+                    // entry stops spinning. Runs even when the split is gone
+                    // (no pane to read from — the sync would no-op; the
+                    // binding below still persists).
+                    self.finish_agents_pane_mirror(pane, failed);
                     // Persist the binding for the NEXT open: a `Name` pane
                     // promotes to `Bound { agent, session_id }` in the
                     // session metadata, so a mode switch or app restart
@@ -667,23 +668,15 @@ impl App {
                                 .unwrap_or(false),
                         );
                         // Show the input message as the first lines of the
-                        // dialogue, visually prefixed to indicate it came
-                        // from the main agent. The echo is the FULL prompt
-                        // (verbatim, one marker line per prompt line): it
-                        // is part of the linear chat flow — prompt, then
-                        // the subagent's answer — and the section scrolls,
-                        // so a long prompt never buries anything.
-                        if let Some(line) =
-                            crate::routes::session::right_panel::types::subagent_input_line(msg)
-                        {
-                            // Targeted at THIS agent's window: with a parallel
-                            // background turn running, the untargeted append
-                            // would graft the echo into the sibling's
-                            // mini-chat.
-                            self.state
-                                .right_panel
-                                .update_last_pty_for_agent(line, Some(agent));
-                        }
+                        // dialogue: the linear chat flow — prompt, then
+                        // the subagent's answer. The echo is stored
+                        // VERBATIM on the window (`input_echo` field) and
+                        // wears the `│` input rail at paint time; the
+                        // section scrolls, so a long prompt never buries
+                        // anything.
+                        self.state
+                            .right_panel
+                            .set_last_subagent_input_echo(agent, Some(msg));
                         self.state.right_panel.scroll_to_bottom();
                     }
 
