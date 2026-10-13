@@ -579,7 +579,7 @@ impl App {
                     // Manager mode (the `/agents` split is open): the main
                     // loop coordinates the panes through `agents_call`
                     // instead of building — same instructions + tool set
-                    // as the pane-0 manager turn.
+                    // as a cosh-pane manager turn.
                     if manager_mode {
                         harness =
                             harness.with_instructions(cosh::harness::core::INSTRUCTIONS_MANAGER);

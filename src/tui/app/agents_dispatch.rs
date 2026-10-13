@@ -3,7 +3,8 @@
 //! agent itself (the normal-mode loop, running as manager while the split
 //! is open). External agent CLIs each get an independent ACP turn
 //! (`cosh_tools::subagent::acp::call` — the same one-shot contract the prompt
-//! corrector uses); the cosh pane (index 0) is the MAIN agent itself running
+//! corrector uses); each cosh pane (the app's own manager pane, at any split
+//! position) runs the MAIN agent itself
 //! as the session's MANAGER on its own real cosh session — persisted in the
 //! session store (visible in the history panel) with the
 //! `INSTRUCTIONS_MANAGER` system prompt, and without the file-writing tools
@@ -31,7 +32,7 @@ use crate::ui::toast::{ToastOptions, ToastVariant};
 /// The manager tool set: a base disabled set PLUS the workspace-mutating
 /// tools a coordinator never touches. The single constructor behind BOTH
 /// manager loops — the MAIN loop's manager mode (`start_agent_loop`,
-/// based on the user's own disabled tools) and the pane-0 manager turn
+/// based on the user's own disabled tools) and the cosh-pane manager turn
 /// below (based on an empty set: the pane is a fresh harness without user
 /// preferences) — so the two managers can never drift apart.
 pub(super) fn manager_disabled_tools(user_disabled: &HashSet<String>) -> HashSet<String> {
@@ -41,7 +42,7 @@ pub(super) fn manager_disabled_tools(user_disabled: &HashSet<String>) -> HashSet
         .chain(MANAGER_BLOCKED_TOOLS.iter().map(|tool| (*tool).to_string()))
         .collect()
 }
-/// Tools no manager loop ever sees: neither the pane-0 manager turn nor
+/// Tools no manager loop ever sees: neither a cosh-pane manager turn nor
 /// the MAIN agent while the `/agents` split is open. The manager reads,
 /// searches, runs commands and coordinates its panes — it must not edit
 /// the workspace or mutate anything outside the pane coordination:
@@ -168,6 +169,16 @@ impl App {
             return;
         };
         let is_daemon = agent == DAEMON_LABEL;
+        // The registry id this pane answers to while THIS turn runs. For the
+        // manager pane it is the id `agents_call` would use to reach it; the
+        // manager harness carries it so it refuses to address itself (a
+        // self-call would queue behind the very turn making it — deadlock).
+        let own_registry_id = if is_daemon {
+            either_split(&self.agents_split, &self.parked_agents_split)
+                .and_then(|split| split.pane_registry_id(pane))
+        } else {
+            None
+        };
         // Fallible pre-flight BEFORE any bookkeeping: minting (or reusing)
         // the manager pane's own cosh session can fail (I/O), and a refused
         // turn must leave the pane idle — never stranded `running` with a
@@ -263,6 +274,7 @@ impl App {
                     epoch,
                     input,
                     signal,
+                    own_registry_id,
                     daemon_connector.expect("manager pane carries its connector"),
                     fallbacks,
                     summarization_models,
@@ -341,10 +353,13 @@ impl App {
                 .panes
                 .iter()
                 .enumerate()
-                // The manager pane is never addressable, a running pane
-                // serves later (the queue holds), a rehydrating pane first
-                // finishes its replay.
-                .filter(|(_, p)| p.agent != DAEMON_LABEL && !p.running && !p.rehydrating)
+                // A running pane serves later (the queue holds), a
+                // rehydrating pane first finishes its replay. The cosh pane
+                // is a normal queue target — its own turn's `agents_call` to
+                // itself is rejected at the tool layer (see
+                // `Harness::with_own_pane_id`), so a queued request always
+                // belongs to a pane that CAN free itself.
+                .filter(|(_, p)| !p.running && !p.rehydrating)
                 .filter_map(|(i, _)| {
                     let id = split.pane_registry_id(i)?;
                     cosh::harness::panes::has_queued_request(&id).then_some((i, id))
@@ -575,6 +590,7 @@ fn run_manager_turn(
     epoch: u64,
     input: String,
     stop_signal: Arc<AtomicBool>,
+    own_registry_id: Option<String>,
     connector: Result<Connector, String>,
     fallbacks: Vec<(String, String)>,
     summarization_models: Vec<(String, String)>,
@@ -636,6 +652,10 @@ fn run_manager_turn(
                 // background pane report drains ONLY here, never into the
                 // main chat loop's context.
                 .as_manager()
+                // Bind the pane id this loop runs in, so `agents_call`
+                // refuses to target its own running pane (self-call
+                // deadlock) while sibling cosh panes stay addressable.
+                .with_own_pane_id(own_registry_id)
                 // Foreground-only for `subagent_call` (gated on the
                 // requester tag inside the dispatch arm): a background
                 // sub-agent task spawned here would park its completion

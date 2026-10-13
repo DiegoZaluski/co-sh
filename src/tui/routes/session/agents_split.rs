@@ -675,19 +675,17 @@ impl AgentsSplitState {
     /// The registry id this pane is addressable under in `agents_call`: the
     /// agent CLI name, or `name#k` when THIS split runs several panes of the
     /// same CLI (the same disambiguation `pane_mirror_label` renders). The
-    /// manager pane itself is NOT addressable — it IS the main agent — so
-    /// its id is `None` and `"cosh"` never appears in the registry.
+    /// manager pane is addressable like every other agent: a `cosh` pane's
+    /// id is `"cosh"` (or `"cosh#k"` among several `cosh` panes).
     #[must_use]
     pub fn pane_registry_id(&self, pane: usize) -> Option<String> {
-        if self.panes.get(pane)?.agent == DAEMON_LABEL {
-            return None;
-        }
+        // Resolve the agent FIRST: this is also the range check
+        // (`pane_mirror_label` returns `None` for a lone instance too, so it
+        // cannot distinguish an out-of-range index).
+        let agent = self.panes.get(pane)?.agent.clone();
         match self.pane_mirror_label(pane) {
-            Some(suffix) => {
-                let agent = self.panes.get(pane)?.agent.clone();
-                Some(format!("{agent}{suffix}"))
-            }
-            None => Some(self.panes.get(pane)?.agent.clone()),
+            Some(suffix) => Some(format!("{agent}{suffix}")),
+            None => Some(agent),
         }
     }
 
@@ -720,8 +718,8 @@ impl AgentsSplitState {
 /// - Gaps are exactly 1 cell (row/column) between panes; there are no
 ///   double borders.
 ///
-/// Pane ORDER is preserved: pane 0 (the daemon) keeps its index position in
-/// the grid, so focus hotkeys and dispatch routing stay stable.
+/// Pane ORDER is preserved: the app's own manager pane keeps its index
+/// position in the grid, so focus hotkeys and dispatch routing stay stable.
 ///
 /// Returns exactly `pane_count` rects (empty for 0), all inside `area` and
 /// pairwise non-overlapping. Degenerate areas may clamp panes to zero
@@ -1644,6 +1642,20 @@ mod tests {
         assert_eq!(state.pane_count(), 2);
         assert_eq!(state.panes[0].agent, "cosh");
         assert_eq!(state.panes[1].agent, "claude");
+        // The cosh pane is addressable like every other agent: its registry
+        // id is `"cosh"`, not `None`.
+        assert_eq!(state.pane_registry_id(0).as_deref(), Some("cosh"));
+        assert_eq!(state.pane_registry_id(1).as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn cosh_panes_are_registry_addressable_with_occurrence_suffixes() {
+        let state =
+            AgentsSplitState::new(vec![DAEMON_LABEL.into(), "claude".into(), DAEMON_LABEL.into()]);
+        assert_eq!(state.pane_registry_id(0).as_deref(), Some("cosh#1"));
+        assert_eq!(state.pane_registry_id(1).as_deref(), Some("claude"));
+        assert_eq!(state.pane_registry_id(2).as_deref(), Some("cosh#2"));
+        assert!(state.pane_registry_id(3).is_none(), "out-of-range pane");
     }
 
     #[test]

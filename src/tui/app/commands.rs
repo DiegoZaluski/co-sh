@@ -157,7 +157,8 @@ impl App {
 
     /// Mirror the /agents pane set into the harness-side `agents_call`
     /// registry: each pane's registry id (the agent name, `name#k` for
-    /// same-CLI duplicates; the manager pane is never addressable) becomes
+    /// same-CLI duplicates; the manager pane is addressable like every
+    /// other agent) becomes
     /// a [`cosh::harness::panes::PaneDescriptor`], with the pane's bound
     /// state as the context block reports it. Called on EVERY split
     /// lifecycle change — open, replace, park, re-attach, close — so the
@@ -177,6 +178,7 @@ impl App {
                         Some(cosh::harness::panes::PaneDescriptor {
                             id,
                             agent: p.agent.clone(),
+                            is_manager: p.agent == crate::routes::session::agents_split::DAEMON_LABEL,
                             bound: p.session_id.is_some(),
                         })
                     })

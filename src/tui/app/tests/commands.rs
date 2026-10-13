@@ -1935,3 +1935,81 @@ async fn a_usage_event_lands_on_the_pane() {
         "the budget never streams into the timeline"
     );
 }
+
+/// End-to-end `/agents` queue flow with a `cosh` pane. The registry mirrors
+/// the split (cosh addressable like any agent), an `agents_call` queued to
+/// "cosh" is picked up by the App's queue service (which used to skip the
+/// daemon), and the pane-keyed completion resolves the waiter — exactly the
+/// path a manager delegation to a sibling takes.
+#[tokio::test]
+async fn agents_call_serves_a_queued_cosh_pane_end_to_end() {
+    use cosh::harness::panes::{self, ReplyMode};
+
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    // Contract: this test drives `serve_agents_pane_queues` → `dispatch_to_pane`,
+    // which spawns a manager turn thread. Neutralize the daemon connector so
+    // `run_manager_turn` returns its error immediately (`daemon_connector`
+    // fails before building a runtime) instead of ever touching the network or
+    // $HOME — no live turn thread is left behind, regardless of any provider
+    // in the ambient environment.
+    app.llm_config.provider.clear();
+    app.llm_config.model = None;
+    app.router_view.fallbacks.clear();
+    let session_id = crate::session_store::generate_session_id();
+    app.state
+        .add_empty_session(session_id.clone(), "cosh queue".into(), 0);
+    app.state.current_session_id = Some(session_id);
+    app.open_agents_split(vec![
+        crate::ui::agents_picker::AgentPick {
+            name: "cosh".into(),
+            instances: 1,
+        },
+        crate::ui::agents_picker::AgentPick {
+            name: "claude".into(),
+            instances: 1,
+        },
+    ]);
+    // Re-affirm the mirror (open already syncs; explicit here so the test
+    // fails at the registry assertion, not at the serve step).
+    app.sync_agents_pane_registry();
+
+    let ids: Vec<String> = panes::list_panes().into_iter().map(|p| p.id).collect();
+    assert!(ids.contains(&"cosh".to_string()), "cosh is registered: {ids:?}");
+    assert!(
+        ids.contains(&"claude".to_string()),
+        "sibling pane is registered too: {ids:?}"
+    );
+
+    // The MAIN loop delegates to the cosh pane: the request queues, the
+    // queue service dispatches it (the daemon filter is gone), and the turn
+    // is running.
+    let handle = panes::enqueue("cosh", "do the work", panes::MAIN, ReplyMode::Wait)
+        .expect("cosh pane is addressable");
+    assert!(panes::has_queued_request("cosh"), "request queued");
+    app.serve_agents_pane_queues();
+    assert!(
+        !panes::has_queued_request("cosh"),
+        "the cosh request left the queue: it was served"
+    );
+    assert!(
+        app.agents_split.as_ref().unwrap().panes[0].running,
+        "the cosh pane turn started"
+    );
+
+    // The turn's end (keyed by pane) resolves the waiter with its report.
+    panes::complete_request("cosh", Ok("report".to_string()));
+    let rx = handle.receiver.expect("wait mode carries a receiver");
+    let answer = rx.await.expect("sender alive");
+    assert_eq!(answer, Ok("report".to_string()));
+
+    // No split: the same service does not panic with no pane set to serve.
+    app.close_agents_split();
+    app.sync_agents_pane_registry();
+    app.serve_agents_pane_queues();
+    assert!(
+        !panes::has_queued_request("cosh"),
+        "an absent cosh pane has no queue to serve"
+    );
+}

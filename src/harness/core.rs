@@ -164,7 +164,8 @@ pub const INSTRUCTIONS_SUBAGENT: &str = concat!(
     "- If a tool returns an error, consider a different approach instead of retrying the same call.\n"
 );
 
-/// Base instructions for the MANAGER loop (pane 0 of the `/agents` split):
+/// Base instructions for the MANAGER loop (a `cosh` pane of the `/agents`
+/// split, at any position):
 /// the main agent running as the session's coordinator while the split is
 /// open. It delegates work to the panes instead of building — its
 /// deliverable is coordination, not code.
@@ -628,12 +629,18 @@ pub struct Harness {
     nested: bool,
     /// Which loop this harness drives for the /agents pane bridge
     /// ([`super::panes::MAIN`] for the normal chat loop,
-    /// [`super::panes::MANAGER`] for the split's pane-0 manager loop). Tags
+    /// [`super::panes::MANAGER`] for the split's cosh-pane manager loop). Tags
     /// every `agents_call` request so a background report is drained ONLY
     /// by the loop that asked for it — the two loops never run
     /// concurrently (the `/agents` gate refuses to open while the main
     /// loop works), but a delivery can outlive its requester's turn.
     panes_requester: &'static str,
+    /// The registry id of the /agents pane this harness itself runs in
+    /// (`Some("cosh")`, `Some("cosh#2")`, …) when the loop IS a pane; `None`
+    /// for the MAIN chat loop, which has no pane. `agents_call` refuses to
+    /// target this id: the manager would queue a turn behind the very turn
+    /// making the call, deadlocking the wait.
+    panes_own_id: Option<String>,
     /// PreToolUse hooks runner (empty when no hooks are configured).
     hook_runner: Option<super::hooks::HookRunner>,
 
@@ -836,6 +843,7 @@ impl Harness {
             active_call_ref: None,
             nested: false,
             panes_requester: super::panes::MAIN,
+            panes_own_id: None,
             tool_call_synthetic: 0,
             context_manager: ContextManager::new(MAX_CONTEXT_TOKENS),
             disabled_tools,
@@ -1114,7 +1122,8 @@ impl Harness {
         self
     }
 
-    /// Mark this harness as the MANAGER loop (the `/agents` split's pane 0):
+    /// Mark this harness as the MANAGER loop (the `/agents` split's `cosh`
+    /// pane, at any position):
     /// its `agents_call` requests are tagged [`super::panes::MANAGER`] so a
     /// background pane report is drained only by this loop — the main
     /// chat loop must never inject a report the manager asked for, and
@@ -1122,6 +1131,20 @@ impl Harness {
     #[must_use]
     pub const fn as_manager(mut self) -> Self {
         self.panes_requester = super::panes::MANAGER;
+        self
+    }
+
+    /// Bind this harness to the `/agents` pane it runs in (the pane's
+    /// registry id: `"cosh"`, `"cosh#2"`, …). `agents_call` then refuses to
+    /// target that exact id: a MANAGER loop calling its OWN pane would queue
+    /// a turn behind the very turn making the call, and the `wait` could
+    /// never resolve (deadlock). Sibling `cosh` panes — different ids — stay
+    /// addressable in `background`; a `Wait` call to one is refused by the
+    /// cross-pane guard in [`super::panes::enqueue`]. `None` for the MAIN
+    /// loop, which owns no pane.
+    #[must_use]
+    pub fn with_own_pane_id(mut self, id: Option<String>) -> Self {
+        self.panes_own_id = id;
         self
     }
 
@@ -4095,7 +4118,7 @@ impl Harness {
             // top-level loops ever run concurrently, a notification can land
             // in the other session's context — revisit then (e.g. an
             // owner-session tag on each task).
-            // The manager loop (the /agents split's pane 0) must not drain
+            // The manager loop (the /agents split's cosh pane) must not drain
             // the TOP-LEVEL background registry either: those notifications
             // belong to the main chat loop's context (the same rule a
             // nested loop obeys — the requester tag keeps the streams
@@ -5652,6 +5675,21 @@ impl Harness {
                     "`agents_call` requires a non-empty `pane` and `input`.".to_string()
                 );
             }
+            // Self-call guard (deadlock): a MANAGER loop runs INSIDE its own
+            // pane, so asking that same pane to run a turn would queue behind
+            // the turn making the call — the `wait` could never resolve and
+            // the background busy-guard would spin forever. This refuses
+            // BOTH modes for the pane's OWN id; the cross-pane `Wait` case
+            // (a manager targeting ANOTHER cosh pane) is refused inside
+            // `panes::enqueue` with a pointer to background mode. Sibling
+            // cosh panes reached in background stay addressable.
+            if self.panes_requester == super::panes::MANAGER
+                && self.panes_own_id.as_deref() == Some(pane.as_str())
+            {
+                return Err(format!(
+                    "`agents_call` cannot target this pane's own session ('{pane}'): the manager is already running in it, so the request could never be served. Address a different pane."
+                ));
+            }
             let background = args_map
                 .get("run_in_background")
                 .and_then(|v| v.as_bool())
@@ -6195,6 +6233,7 @@ impl Harness {
             active_call_ref: None,
             nested: false,
             panes_requester: super::panes::MAIN,
+            panes_own_id: None,
             tool_call_synthetic: 0,
             context_manager: ContextManager::new(MAX_CONTEXT_TOKENS),
             disabled_tools: HashSet::new(),

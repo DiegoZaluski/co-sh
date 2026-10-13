@@ -1087,3 +1087,26 @@ fn handoff_notice_lists_each_stale_tool_once() {
         "current tools are never listed as stale: {notice}"
     );
 }
+
+/// A MANAGER loop runs INSIDE its own `/agents` pane: `agents_call` to that
+/// same pane would queue a turn behind the very turn making the call, so the
+/// wait could never resolve. The guard rejects it before touching the pane
+/// registry (deterministic — no global state needed for the assertion).
+#[tokio::test]
+async fn agents_call_refuses_the_managers_own_pane() {
+    let mut h = Harness::new_test()
+        .as_manager()
+        .with_own_pane_id(Some("cosh".into()));
+
+    h.push_tool_call(ToolCallData {
+        id: String::new(),
+        name: "agents_call".into(),
+        arguments: json!({"pane": "cosh", "input": "delegate to myself"}),
+        thought_signature: String::new(),
+    });
+    let err = h.dispatch_next().await.unwrap_err();
+    assert!(
+        err.contains("cannot target this pane's own session"),
+        "self-call must be refused up front: {err}"
+    );
+}

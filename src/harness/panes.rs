@@ -19,11 +19,11 @@
 //!   returns a receipt immediately (`background` mode — the report is
 //!   delivered later by the requester's loop drain, [`take_ready_deliveries`]).
 //!
-//! Requests are tagged with their REQUESTER (`main` loop or `manager`
-//! pane-0 loop) so a background report is drained only by the loop that
-//! asked for it — the two loops never run concurrently (the `/agents`
-//! gate refuses to open while the main loop works, and the main submit
-//! path routes into the split while it is open), but a delivery can
+//! Requests are tagged with their REQUESTER (`main` loop or the `manager`
+//! loop running in a cosh pane) so a background report is drained only by
+//! the loop that asked for it — the two loops never run concurrently (the
+//! `/agents` gate refuses to open while the main loop works, and the main
+//! submit path routes into the split while it is open), but a delivery can
 //! outlive its requester's turn, and the wrong loop must never inject it.
 
 use std::collections::{HashMap, VecDeque};
@@ -31,8 +31,8 @@ use std::sync::{Mutex, OnceLock};
 
 /// The top-level agent loop (the normal chat session) as a requester tag.
 pub const MAIN: &str = "main";
-/// The manager loop (pane 0, the `cosh` pane's own cosh session) as a
-/// requester tag.
+/// The manager loop (the `cosh` pane's own cosh session — the app's own
+/// pane, at any split position) as a requester tag.
 pub const MANAGER: &str = "manager";
 
 /// One addressable pane of the `/agents` split, as the harness sees it.
@@ -40,11 +40,16 @@ pub const MANAGER: &str = "manager";
 pub struct PaneDescriptor {
     /// The addressable id: the agent CLI name, or `name#k` when the split
     /// runs several panes of the same CLI (same disambiguation the right
-    /// panel's mirrors use). The manager pane itself is NOT addressable —
-    /// the caller IS the main agent — so `"cosh"` never appears here.
+    /// panel's mirrors use). The manager pane is addressable like every
+    /// other agent, under `"cosh"` (or `"cosh#k"` among several).
     pub id: String,
     /// The agent CLI backing the pane (`"claude"`, `"kilo"`, …).
     pub agent: String,
+    /// Whether this pane runs THIS app's own manager loop (a `cosh` pane).
+    /// Manager panes can never free themselves while a peer manager waits on
+    /// them, so `agents_call` gates `Wait` calls between them (see
+    /// [`enqueue`]); background calls stay allowed.
+    pub is_manager: bool,
     /// Whether the pane already carries a bound agent session (`true`) or
     /// has never run (`false` — the first `agents_call` wakes it).
     pub bound: bool,
@@ -196,7 +201,9 @@ pub fn has_panes() -> bool {
 /// # Errors
 ///
 /// An unknown pane id (the model guessed a name that is not bound — the
-/// error names the known ids so the model can correct itself).
+/// error names the known ids so the model can correct itself). Also a
+/// `Wait` call from a manager (`MANAGER`) loop to a cosh pane: see the
+/// mutual-deadlock guard below.
 pub fn enqueue(
     pane: &str,
     text: &str,
@@ -204,10 +211,30 @@ pub fn enqueue(
     mode: ReplyMode,
 ) -> Result<EnqueueHandle, String> {
     let mut state = registry().lock().unwrap_or_else(|p| p.into_inner());
-    if !state.panes.iter().any(|p| p.id == pane) {
+    let Some(target) = state.panes.iter().find(|p| p.id == pane) else {
         let known: Vec<&str> = state.panes.iter().map(|p| p.id.as_str()).collect();
         return Err(format!(
             "no pane '{pane}' in this session's /agents split; known panes: {known:?}"
+        ));
+    };
+    // Mutual-deadlock guard: a cosh pane runs a MANAGER loop, and a manager
+    // turn cannot end while it waits on another pane. A `Wait` call between
+    // cosh panes can therefore deadlock (self on the same id, or two managers
+    // on each other's pane: both turns stay busy, `serve_agents_pane_queues`
+    // skips running panes, and no turn ever reaches `complete_request`).
+    // Background calls are non-blocking and safe — they are the intended
+    // coordination path for a planner/implementer pair — so only `Wait` is
+    // refused, with a pointer to `run_in_background`. (The separate self-call
+    // guard in `Harness` also refuses a background call a pane makes to its
+    // OWN id: that request could only run after the current turn, which the
+    // busy-guard keeps alive.) A manager may still `Wait` on an ACP pane: an
+    // external CLI's turn ends on its own and frees the waiter.
+    if requester == MANAGER && target.is_manager && mode == ReplyMode::Wait {
+        return Err(format!(
+            "`agents_call` to the cosh pane '{pane}' cannot block: cosh panes run manager \
+             loops, and a manager turn cannot finish while waiting on a peer pane — two of \
+             them waiting on each other would deadlock. Re-run with \
+             `run_in_background: true`: the report then arrives as an [automated notification]."
         ));
     }
     state.next_id += 1;
@@ -524,6 +551,9 @@ mod tests {
         PaneDescriptor {
             id: id.to_string(),
             agent: agent.to_string(),
+            // `cosh` is the app's manager label; the production sync sets the
+            // flag from `DAEMON_LABEL`, mirrored here for the tests.
+            is_manager: agent == "cosh",
             bound,
         }
     }
@@ -671,5 +701,60 @@ mod tests {
             "{block}"
         );
         assert!(block.contains("- kilo — kilo (no session yet"), "{block}");
+    }
+
+    /// A manager `Wait` call to another cosh pane is refused (mutual-deadlock
+    /// guard) and points at background mode; the same call in background is
+    /// accepted — the intended planner/implementer coordination path.
+    #[test]
+    fn manager_wait_to_a_cosh_pane_is_refused_but_background_is_allowed() {
+        let _g = lock();
+        set_panes(vec![
+            pane("cosh#1", "cosh", false),
+            pane("cosh#2", "cosh", false),
+        ]);
+        let err = match enqueue("cosh#2", "plan", MANAGER, ReplyMode::Wait) {
+            Err(error) => error,
+            Ok(_) => panic!("cosh→cosh wait must be refused"),
+        };
+        assert!(err.contains("cannot block"), "{err}");
+        assert!(err.contains("run_in_background"), "suggests the fix: {err}");
+
+        let handle = enqueue("cosh#2", "plan", MANAGER, ReplyMode::Background)
+            .expect("background cosh→cosh is the supported path");
+        assert!(handle.receiver.is_none(), "background carries no receiver");
+        assert!(pop_next_request("cosh#2").is_some(), "queued and servable");
+
+        // The reverse direction must behave identically: the guard is about
+        // the cosh↔cosh pair, not the specific ids or ordering.
+        let reverse = match enqueue("cosh#1", "plan", MANAGER, ReplyMode::Wait) {
+            Err(error) => error,
+            Ok(_) => panic!("cosh#2→cosh#1 wait must be refused too"),
+        };
+        assert!(reverse.contains("cannot block"), "{reverse}");
+        assert!(
+            enqueue("cosh#1", "plan", MANAGER, ReplyMode::Background).is_ok(),
+            "background cosh#2→cosh#1 is the supported path"
+        );
+    }
+
+    /// The guard is about cosh→cosh only: a manager may still `Wait` on an ACP
+    /// pane (its turn ends on its own), and the MAIN loop may `Wait` on a cosh
+    /// pane (the main loop is not a pane and cannot be the one blocking it).
+    #[test]
+    fn manager_wait_to_an_acp_pane_and_main_wait_to_cosh_stay_allowed() {
+        let _g = lock();
+        set_panes(vec![
+            pane("claude", "claude", false),
+            pane("cosh", "cosh", false),
+        ]);
+        assert!(
+            enqueue("claude", "review", MANAGER, ReplyMode::Wait).is_ok(),
+            "manager → ACP wait is safe"
+        );
+        assert!(
+            enqueue("cosh", "coordinate", MAIN, ReplyMode::Wait).is_ok(),
+            "main → cosh wait is safe"
+        );
     }
 }
