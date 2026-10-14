@@ -92,6 +92,28 @@ impl App {
                 return Ok(false);
             }
 
+            // /agents split: Ctrl+X INTERRUPTS the FOCUSED pane's turn
+            // (issue 5 recovery affordance). With split Esc park-only
+            // (issue 3), a pane whose stream stalls silently (a lost
+            // provider connection, an agent that never answers) had NO
+            // keyboard path out: the pane sat `running` forever and the
+            // dispatch gate refused every new prompt. Ctrl+X forces the
+            // turn closed — the pane's own stop signal first (a live turn
+            // winds down through its normal Done path), then the
+            // watchdog's force-recovery (a dead turn whose thread can no
+            // longer deliver) — and the pane accepts prompts again. The
+            // gate sits beside `focus_pane_hotkey` ABOVE the modal chain:
+            // `x` is dead to every modal, and the recovery must work even
+            // with the slash menu or a dialog open.
+            if key.code == KeyCode::Char('x')
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT)
+                && self.agents_split.is_some()
+            {
+                self.interrupt_focused_pane();
+                return Ok(false);
+            }
+
             // ESC clears a question-dialog copy selection BEFORE the loop
             // interrupt and the dialog dispatch: the question dialog's own
             // Esc is a semantic REJECT of the pending tool call (it dismisses

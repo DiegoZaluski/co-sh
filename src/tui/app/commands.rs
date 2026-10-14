@@ -264,6 +264,36 @@ impl App {
         }
     }
 
+    /// Fail every IN-FLIGHT `agents_call` of the outgoing split's panes:
+    /// a pane whose set is being replaced or torn down has its turn
+    /// signal-stopped and its terminal `AgentsPaneDone` dropped against the
+    /// bumped epoch — its registry `serving` entry would otherwise outlive
+    /// the turn forever, keeping `has_outstanding_requests` true and
+    /// hanging the requester loop's busy-guard (the loop waits at its
+    /// natural-completion point for an answer that can never arrive).
+    /// Same-id survival (a fresh confirm keeping the `cosh` pane) is the
+    /// case `set_panes` cannot handle: the id exists in BOTH sets, so the
+    /// registry keeps the stale entry — failing here, keyed by the
+    /// OUTGOING set's ids, is the precise cut.
+    fn fail_outgoing_pane_requests(&self) {
+        let ids: Vec<String> = either_split(&self.agents_split, &self.parked_agents_split)
+            .map(|split| {
+                split
+                    .panes
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, _)| split.pane_registry_id(i))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for id in ids {
+            cosh::harness::panes::fail_serving(
+                &id,
+                "the pane's set was replaced or torn down".into(),
+            );
+        }
+    }
+
     /// The state-only core of open/close: signal-stop every pane of the
     /// outgoing split, swap the pane set, persist mode + pane set on the
     /// session and reconcile the shared spinner. Does NOT touch prompt
@@ -276,6 +306,12 @@ impl App {
     /// `AgentsPaneDone` against a stale epoch so the handler drops them
     /// instead of binding old sessions into the new set.
     fn set_agents_split(&mut self, panes: Option<Vec<crate::types::AgentPaneRef>>) {
+        // The cancelled turns' in-flight `agents_call` requests must fail
+        // NOW, keyed by the OUTGOING ids — after the swap their terminal
+        // Done is stale-dropped and could never resolve them (the stale
+        // id may even survive into the new set, where a blind completion
+        // could hit the WRONG turn's request).
+        self.fail_outgoing_pane_requests();
         // The split slots' generation moves on EVERY replacement or teardown
         // (see the `agents_pane_epoch` field doc): the outgoing set's
         // cancelled turns deliver their terminal Done against the OLD epoch
@@ -603,7 +639,11 @@ impl App {
         // pane turns stop through their own signals; the pane set + bindings
         // stay behind in the (no longer current) session's metadata. The
         // epoch moves with the teardown: their terminal Done arrives stale
-        // and is dropped (Home has no pane set to bind into anyway).
+        // and is dropped (Home has no pane set to bind into anyway). The
+        // in-flight `agents_call` requests fail first, keyed by the outgoing
+        // ids — the stale-dropped Done can never resolve them (see
+        // `fail_outgoing_pane_requests`).
+        self.fail_outgoing_pane_requests();
         self.agents_pane_epoch = self.agents_pane_epoch.wrapping_add(1);
         for split in self
             .agents_split
@@ -661,7 +701,11 @@ impl App {
         // set and bindings live on in each session's own metadata. The
         // epoch moves with the teardown: their terminal Done arrives stale
         // and is dropped instead of binding old-session ACP ids into the
-        // NEW session's metadata under a same-named pane.
+        // NEW session's metadata under a same-named pane. The in-flight
+        // `agents_call` requests fail first, keyed by the outgoing ids —
+        // the stale-dropped Done can never resolve them (see
+        // `fail_outgoing_pane_requests`).
+        self.fail_outgoing_pane_requests();
         self.agents_pane_epoch = self.agents_pane_epoch.wrapping_add(1);
         for split in self
             .agents_split

@@ -1228,3 +1228,113 @@ async fn agents_command_reattaches_the_parked_split_while_working() {
         "the main loop keeps running behind the re-attach"
     );
 }
+
+/// Issue 5 — Ctrl+X with a split pane focused force-closes THAT pane's
+/// stuck turn: the pane goes idle (it accepts prompts again), the stop
+/// signal is stored (a live turn winds down through its normal Done path)
+/// and the timeline seals with the `[turn …]` cancellation marker. This is
+/// the only keyboard path out of a silently stalled pane — split Esc is
+/// park-only (issue 3), so a `running` pane with no activity used to be
+/// unrecoverable.
+#[tokio::test]
+async fn ctrl_x_force_closes_a_stuck_focused_pane_turn() {
+    use crate::routes::session::right_panel::types::SubagentTimelineEntry;
+
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    app.agents_split = Some(crate::routes::session::agents_split::AgentsSplitState::new(
+        vec!["claude".into(), "kilo".into()],
+    ));
+    app.process_key_event(mod_key(KeyCode::Char('1'), KeyModifiers::CONTROL))
+        .unwrap();
+    // The focused pane's turn starts (the normal dispatch path), then
+    // stalls: running with no further events.
+    app.prompt_view.input = "long task".into();
+    app.process_key_event(mod_key(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert!(app.agents_split.as_ref().unwrap().panes[0].running);
+
+    app.process_key_event(mod_key(KeyCode::Char('x'), KeyModifiers::CONTROL))
+        .unwrap();
+
+    let split = app.agents_split.as_ref().unwrap();
+    assert!(
+        !split.panes[0].running,
+        "the stuck pane's turn is force-closed"
+    );
+    assert!(
+        split.panes[0].stop_signal.is_none(),
+        "the pane accepts a new dispatch (signal cleared)"
+    );
+    assert!(
+        !split.panes[1].running && split.panes[1].last_activity.is_none(),
+        "the sibling pane is untouched"
+    );
+    assert!(
+        split.panes[0].activity.timeline.iter().any(|e| matches!(
+            e,
+            SubagentTimelineEntry::Message { text }
+                if text.contains("[turn cancelled] interrupted by the user (Ctrl+X)")
+        )),
+        "the timeline seals with the cancellation marker"
+    );
+    // The MAIN agent's stop signal is NEVER touched (only the pane's).
+    assert!(!app.stop_signal.load(std::sync::atomic::Ordering::Relaxed));
+}
+
+/// Issue 5 — Ctrl+X only interrupts when a pane turn is actually stuck:
+/// an idle focused pane is a no-op (nothing to close, no marker appended),
+/// and with NO pane focused (the MAIN agent) the key is inert — the main
+/// loop is interrupted by plain Esc in the normal view, never by Ctrl+X.
+#[tokio::test]
+async fn ctrl_x_is_inert_without_a_running_focused_pane() {
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    app.agents_split = Some(crate::routes::session::agents_split::AgentsSplitState::new(
+        vec!["claude".into(), "kilo".into()],
+    ));
+
+    // Focused but IDLE pane: no-op.
+    app.process_key_event(mod_key(KeyCode::Char('1'), KeyModifiers::CONTROL))
+        .unwrap();
+    app.process_key_event(mod_key(KeyCode::Char('x'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert!(!app.agents_split.as_ref().unwrap().panes[0].running);
+    assert!(
+        app.agents_split
+            .as_ref()
+            .unwrap()
+            .panes[0]
+            .activity
+            .timeline
+            .iter()
+            .all(|e| !matches!(
+                e,
+                crate::routes::session::right_panel::types::SubagentTimelineEntry::Message { text }
+                    if text.contains("[turn")
+            )),
+        "no cancellation marker on an idle pane"
+    );
+
+    // Unfocused (MAIN agent target) with a stuck-looking main loop: Ctrl+X
+    // does NOT touch the main loop's stop signal.
+    app.process_key_event(mod_key(KeyCode::Char('0'), KeyModifiers::CONTROL))
+        .unwrap();
+    app.state.status = crate::types::SessionStatus::Working;
+    app.process_key_event(mod_key(KeyCode::Char('x'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert!(
+        !app.stop_signal.load(std::sync::atomic::Ordering::Relaxed),
+        "Ctrl+X never interrupts the MAIN agent — plain Esc does"
+    );
+    assert!(
+        app.agents_split.is_some(),
+        "the split stays open (Ctrl+X is not a park/leave key)"
+    );
+}

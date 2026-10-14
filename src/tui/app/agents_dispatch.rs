@@ -19,6 +19,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::time::Instant;
 
 use cosh::harness::events::HarnessEvent;
 use cosh_sdk::connector::{Connector, ToolCallMode};
@@ -93,6 +94,78 @@ pub(super) fn either_split_mut<'a>(
 }
 
 impl App {
+    /// Force-close ONE pane's turn (issue 5 recovery): the pane goes idle,
+    /// its timeline closes with a `[turn cancelled]` marker carrying
+    /// `reason`, its in-flight `agents_call` request fails (the requester's
+    /// busy-guard unblocks), and the shared mirror seals as failed. A real
+    /// terminal Done from a turn still winding down arrives against an IDLE
+    /// pane and is dropped by the handler's pane-idle guard — no double
+    /// closure, no re-binding, no double-completed request.
+    ///
+    /// Recovery must never depend on the turn thread answering: the stop
+    /// signal is stored first (best-effort graceful cancel — ACP sends
+    /// `session/cancel`, the manager loop breaks out), then the state is
+    /// closed unconditionally. This is the only path back for a pane whose
+    /// thread died or whose provider stalled silently.
+    fn force_close_pane(&mut self, pane: usize, reason: &str) {
+        // The registry request fails keyed by the pane's id, read BEFORE the
+        // exclusive state borrow below.
+        let registry_id = either_split(&self.agents_split, &self.parked_agents_split)
+            .and_then(|split| split.pane_registry_id(pane));
+        let Some(split) = either_split_mut(&mut self.agents_split, &mut self.parked_agents_split)
+        else {
+            return;
+        };
+        let Some(p) = split.panes.get_mut(pane) else {
+            return;
+        };
+        if !p.running {
+            return;
+        }
+        if let Some(signal) = &p.stop_signal {
+            signal.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        p.running = false;
+        p.last_activity = None;
+        p.stop_signal = None;
+        split.finish_turn(pane, reason, "cancelled");
+        if let Some(id) = registry_id {
+            cosh::harness::panes::fail_serving(&id, reason.to_string());
+        }
+        self.finish_agents_pane_mirror(pane, true);
+    }
+
+    /// Ctrl+X on the split (issue 5 recovery affordance): force-close the
+    /// FOCUSED pane's turn. With split-Esc park-only, a pane whose stream
+    /// stalled silently had no keyboard path out — the pane sat `running`
+    /// forever and the dispatch gate refused every new prompt. Ctrl+X is
+    /// that path: the pane goes idle immediately and accepts prompts again.
+    /// An idle focused pane (or no pane focused — the MAIN agent, which
+    /// plain Esc interrupts in the normal view) is a no-op.
+    pub(super) fn interrupt_focused_pane(&mut self) {
+        let Some(focused) = self.agents_split.as_ref().and_then(|split| split.focused) else {
+            return;
+        };
+        self.force_close_pane(focused, "interrupted by the user (Ctrl+X)");
+    }
+
+    /// Frame-tick watchdog (issue 5): force-close every pane `running` with
+    /// NO event of any kind for [`PANE_IDLE_WATCHDOG`] — its turn thread
+    /// died or its provider stalled without a way to report, and the pane
+    /// would otherwise pin the spinner forever. Runs beside the queue
+    /// service (the frame tick is the only guaranteed heartbeat) and
+    /// BEFORE it, so a recovered pane can immediately take queued work.
+    /// Lives on the LIVE or PARKED split alike: a parked pane's dead turn
+    /// must recover too (its mirror keeps spinning otherwise).
+    pub(super) fn reconcile_pane_watchdog(&mut self) {
+        let stale: Vec<usize> = either_split(&self.agents_split, &self.parked_agents_split)
+            .map(|split| split.stale_panes(Instant::now()))
+            .unwrap_or_default();
+        for pane in stale {
+            self.force_close_pane(pane, "the turn stopped responding (watchdog)");
+        }
+    }
+
     /// Send a submitted prompt to the FOCUSED pane of the active split —
     /// or, when NO pane holds the focus (`Ctrl+0`), to the MAIN agent
     /// itself (the same normal-mode loop, running as manager while the

@@ -290,6 +290,23 @@ pub struct EnqueueHandle {
 #[must_use]
 pub fn pop_next_request(pane: &str) -> Option<PaneRequest> {
     let mut state = registry().lock().unwrap_or_else(|p| p.into_inner());
+    // A leftover serving entry on a pane the App is about to dispatch to
+    // is ORPHANED: the App only pops when the pane is free (`!running`),
+    // so any entry still here belongs to a turn that never completed —
+    // its dispatch was refused after the pop (manager-session mint
+    // failure), or its terminal `AgentsPaneDone` was dropped against a
+    // torn-down epoch. Leaving it would keep `has_outstanding_requests`
+    // true forever and hang the requester's busy-guard (the manager loop
+    // waits at its natural-completion point) — the pane would sit
+    // `running` with no activity behind it. Fail the stale wait so the
+    // requester unblocks instead.
+    if let Some(request) = state.serving.remove(pane) {
+        fail_wait(
+            &mut state,
+            &request.id,
+            format!("pane '{pane}' orphaned the request: its turn never completed"),
+        );
+    }
     let request = state.queues.get_mut(pane)?.pop_front()?;
     state.serving.insert(pane.to_string(), request.clone());
     Some(request)
@@ -330,6 +347,18 @@ pub fn complete_request(pane: &str, output: Result<String, String>) {
             requester: request.requester,
             output,
         }),
+    }
+}
+
+/// Fail a pane's IN-FLIGHT request, if any: the pane's turn was force-
+/// recovered (watchdog) or reset without completing — a leftover serving
+/// entry would keep [`has_outstanding_requests`] true forever and hang the
+/// requester's busy-guard at its natural-completion point. Queued (not yet
+/// served) requests are kept: the recovered pane can still serve them.
+pub fn fail_serving(pane: &str, error: String) {
+    let mut state = registry().lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(request) = state.serving.remove(pane) {
+        fail_wait(&mut state, &request.id, error);
     }
 }
 
@@ -756,5 +785,71 @@ mod tests {
             enqueue("cosh", "coordinate", MAIN, ReplyMode::Wait).is_ok(),
             "main → cosh wait is safe"
         );
+    }
+
+    /// Issue 5 regression: a leftover `serving` entry on a pane the App is
+    /// about to dispatch to is ORPHANED — its turn never completed (the
+    /// dispatch was refused after the pop, or the terminal Done was
+    /// stale-dropped). `pop_next_request` must fail that stale wait so the
+    /// requester's busy-guard unblocks instead of hanging forever, while
+    /// the freshly popped request serves normally.
+    #[test]
+    fn pop_next_request_fails_an_orphaned_serving_entry() {
+        let _g = lock();
+        set_panes(vec![pane("cosh#1", "cosh", false)]);
+        let lost = enqueue("cosh#1", "lost turn", MAIN, ReplyMode::Wait).unwrap();
+        let lost_rx = lost.receiver.expect("receiver");
+        assert!(pop_next_request("cosh#1").is_some(), "dispatched");
+        // The turn died BEFORE its completion: the serving entry survives.
+        // The App pops again for the pane's NEXT request — the orphaned
+        // wait fails, and the new request takes the serving slot.
+        let next = enqueue("cosh#1", "next turn", MAIN, ReplyMode::Wait).unwrap();
+        let next_rx = next.receiver.expect("receiver");
+        let popped = pop_next_request("cosh#1").expect("next queued request");
+        assert_eq!(popped.text, "next turn");
+        let answer = block_on(async move { lost_rx.await.expect("sender alive") });
+        assert_eq!(
+            answer,
+            Err("pane 'cosh#1' orphaned the request: its turn never completed".to_string()),
+            "the orphaned turn's wait is failed by the next pop"
+        );
+        assert!(
+            has_outstanding_requests(MAIN),
+            "the NEW request is outstanding (serving) until it completes"
+        );
+        complete_request("cosh#1", Ok("done".to_string()));
+        let ok = block_on(async move { next_rx.await.expect("sender alive") });
+        assert_eq!(ok, Ok("done".to_string()));
+        assert!(!has_outstanding_requests(MAIN));
+    }
+
+    /// Issue 5 regression: `fail_serving` is the teardown-side release —
+    /// the pane's in-flight wait resolves with the given reason and the
+    /// registry shows no outstanding work (the manager loop's busy-guard
+    /// can reach its Done instead of waiting forever).
+    #[test]
+    fn fail_serving_releases_the_in_flight_wait() {
+        let _g = lock();
+        set_panes(vec![pane("cosh#1", "cosh", false)]);
+        let handle = enqueue("cosh#1", "in flight", MAIN, ReplyMode::Wait).unwrap();
+        let rx = handle.receiver.expect("receiver");
+        assert!(pop_next_request("cosh#1").is_some(), "dispatched");
+        assert!(
+            has_outstanding_requests(MAIN),
+            "the wait is outstanding while served"
+        );
+        fail_serving("cosh#1", "the pane's set was replaced or torn down".into());
+        let answer = block_on(async move { rx.await.expect("sender alive") });
+        assert_eq!(
+            answer,
+            Err("the pane's set was replaced or torn down".to_string())
+        );
+        assert!(
+            !has_outstanding_requests(MAIN),
+            "no outstanding requests survive the failure"
+        );
+        // A second failure is a no-op: the entry is gone.
+        fail_serving("cosh#1", "again".into());
+        assert!(!has_outstanding_requests(MAIN));
     }
 }

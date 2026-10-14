@@ -339,6 +339,18 @@ impl App {
                     if epoch != self.agents_pane_epoch {
                         continue;
                     }
+                    // A pane whose turn was already force-closed (the
+                    // Ctrl+X interrupt's synthetic Done, issue 5) or reset
+                    // by a slot swap is NOT running: a late real Done from
+                    // the winding-down turn thread must not append a
+                    // second closure into the timeline, rebind a session,
+                    // or re-resolve registry work already settled.
+                    let pane_idle = either_split(&self.agents_split, &self.parked_agents_split)
+                        .and_then(|split| split.panes.get(pane))
+                        .is_none_or(|p| !p.running);
+                    if pane_idle {
+                        continue;
+                    }
                     // Take the session id up front: the pane bookkeeping and
                     // the persistence below both want it, and the match-arm
                     // binding owns the value (no Copy).

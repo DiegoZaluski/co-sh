@@ -1054,7 +1054,9 @@ async fn agents_pane_done_promotes_the_pane_binding_for_the_next_open() {
 
     // Pane 0's turn completes: the session id must land in the metadata
     // for THAT pane only — pane 1 (the other claude instance) stays fresh,
-    // so both instances keep independent sessions.
+    // so both instances keep independent sessions. The pane is dispatched
+    // first (running), as every real Done follows a dispatch.
+    app.agents_split.as_mut().unwrap().set_running(0, true);
     app.event_tx
         .send(HarnessEvent::AgentsPaneDone {
             pane: 0,
@@ -1084,7 +1086,9 @@ async fn agents_pane_done_promotes_the_pane_binding_for_the_next_open() {
     assert_eq!(panes[2], AgentPaneRef::Name("cosh".into()));
 
     // Rebinding pane 0 to a NEW session (a later turn) overwrites — the
-    // binding tracks the pane's latest context, not its first.
+    // binding tracks the pane's latest context, not its first. Each turn
+    // re-dispatches its pane (running) before the Done lands.
+    app.agents_split.as_mut().unwrap().set_running(0, true);
     app.event_tx
         .send(HarnessEvent::AgentsPaneDone {
             pane: 0,
@@ -1095,6 +1099,7 @@ async fn agents_pane_done_promotes_the_pane_binding_for_the_next_open() {
         })
         .ok();
     app.poll_events();
+    app.agents_split.as_mut().unwrap().set_running(1, true);
     app.event_tx
         .send(HarnessEvent::AgentsPaneDone {
             pane: 1,
@@ -1447,7 +1452,10 @@ async fn stale_epoch_agents_pane_done_is_dropped() {
         );
     }
 
-    // Positive control: a CURRENT-epoch Done still applies in full.
+    // Positive control: a CURRENT-epoch Done still applies in full. The
+    // pane is dispatched first (running), as every real Done follows a
+    // dispatch.
+    app.agents_split.as_mut().unwrap().set_running(0, true);
     app.event_tx
         .send(HarnessEvent::AgentsPaneDone {
             pane: 0,
@@ -2011,5 +2019,104 @@ async fn agents_call_serves_a_queued_cosh_pane_end_to_end() {
     assert!(
         !panes::has_queued_request("cosh"),
         "an absent cosh pane has no queue to serve"
+    );
+}
+
+/// Issue 5 — the frame-tick watchdog force-closes a pane whose turn went
+/// silent: `running` with NO event for longer than [`PANE_IDLE_WATCHDOG`]
+/// means the turn thread died or stalled with no way to report (its Done
+/// can never arrive). The pane goes idle, its timeline seals with the
+/// watchdog marker, and a turn that is still streaming (recent activity)
+/// or idle is never touched.
+#[tokio::test]
+async fn the_pane_watchdog_force_closes_a_silent_turn() {
+    use crate::routes::session::right_panel::types::SubagentTimelineEntry;
+    use std::time::Duration;
+
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    let session_id = crate::session_store::generate_session_id();
+    app.state
+        .add_empty_session(session_id.clone(), "watchdog".into(), 0);
+    app.state.current_session_id = Some(session_id);
+    app.open_agents_split(vec![crate::ui::agents_picker::AgentPick {
+        name: "claude".into(),
+        instances: 2,
+    }]);
+
+    // Pane 0: dispatched, then silent for longer than the watchdog window
+    // (backdate its baseline directly — no real 10-minute sleep).
+    // Pane 1: dispatched and STREAMING (fresh activity).
+    app.agents_split.as_mut().unwrap().set_running(0, true);
+    app.agents_split.as_mut().unwrap().set_running(1, true);
+    let stale = crate::routes::session::agents_split::PANE_IDLE_WATCHDOG + Duration::from_secs(1);
+    app.agents_split.as_mut().unwrap().panes[0].last_activity =
+        Some(std::time::Instant::now() - stale);
+
+    app.reconcile_pane_watchdog();
+
+    let split = app.agents_split.as_ref().unwrap();
+    assert!(
+        !split.panes[0].running,
+        "the silent pane's turn is force-closed"
+    );
+    assert!(
+        split.panes[0].activity.timeline.iter().any(|e| matches!(
+            e,
+            SubagentTimelineEntry::Message { text }
+                if text.contains("[turn cancelled] the turn stopped responding (watchdog)")
+        )),
+        "the watchdog seals the timeline with its reason"
+    );
+    assert!(
+        split.panes[1].running,
+        "a streaming pane is never touched by the watchdog"
+    );
+    assert!(
+        split.panes[1].activity.timeline.is_empty(),
+        "no marker lands on the live pane"
+    );
+
+    // An IDLE pane is also untouched (a second run after recovery is a
+    // no-op — the recovered pane stays closed and clean).
+    app.reconcile_pane_watchdog();
+    assert!(!app.agents_split.as_ref().unwrap().panes[0].running);
+}
+
+/// Issue 5 — the watchdog runs on the LIVE and the PARKED split alike:
+/// a pane that went silent while its split was parked (the user left to
+/// the normal view) must recover the same way, or the parked pane's
+/// spinner would spin forever behind the scenes.
+#[tokio::test]
+async fn the_pane_watchdog_covers_the_parked_split() {
+    use std::time::Duration;
+
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    let session_id = crate::session_store::generate_session_id();
+    app.state
+        .add_empty_session(session_id.clone(), "parked watchdog".into(), 0);
+    app.state.current_session_id = Some(session_id);
+    app.open_agents_split(vec![crate::ui::agents_picker::AgentPick {
+        name: "claude".into(),
+        instances: 1,
+    }]);
+    app.agents_split.as_mut().unwrap().set_running(0, true);
+    app.park_agents_split();
+    assert!(app.parked_agents_split.is_some());
+
+    // The parked pane goes silent beyond the watchdog window.
+    let stale = crate::routes::session::agents_split::PANE_IDLE_WATCHDOG + Duration::from_secs(1);
+    app.parked_agents_split.as_mut().unwrap().panes[0].last_activity =
+        Some(std::time::Instant::now() - stale);
+
+    app.reconcile_pane_watchdog();
+
+    let parked = app.parked_agents_split.as_ref().unwrap();
+    assert!(
+        !parked.panes[0].running,
+        "a parked pane's dead turn recovers too"
     );
 }
