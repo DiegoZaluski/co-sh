@@ -2115,6 +2115,174 @@ mod tests {
         );
     }
 
+    /// REGRESSION (user-visible "reasoning stays pinned while the earlier
+    /// content is pushed out of its block"): the BACKSCAN-era coalescer
+    /// absorbed every later chunk of a stream kind into the FIRST block of
+    /// that kind, so a real multi-delta response — reasoning bursts and
+    /// message deltas alternating several times — painted one giant
+    /// Thought block as a fixed head while the narrated content slid under
+    /// it in arrival order (and reasoning that arrived AFTER the
+    /// conclusion rendered ABOVE it). This test pins the FULL paint of a
+    /// realistic frame-by-frame stream, exactly the shape the internal
+    /// bridge emits: every alternation opens its own block, the painted
+    /// rows read in strict arrival order, and the newest delta is always
+    /// the LAST text on screen — the contract the chat itself keeps.
+    #[test]
+    fn multi_delta_interleaved_stream_paints_in_arrival_order() {
+        use cosh_tools::subagent::events::SubagentEvent;
+
+        let theme = test_theme();
+        let mut state = RightPanelState::new();
+        // REAL throttle: frames arrive faster than the 100 ms rebuild —
+        // the streaming condition under which the old backscan mispainted.
+        state.subagent_rebuild_interval = std::time::Duration::from_millis(100);
+        state.start_pty("subagent: parity".to_string(), None);
+
+        let mut events: Vec<SubagentEvent> = Vec::new();
+        for round in 0..4 {
+            for c in 0..6 {
+                events.push(SubagentEvent::Thought {
+                    text: format!("pensando sobre o aspecto {round}.{c} da tarefa, "),
+                });
+            }
+            for c in 0..5 {
+                events.push(SubagentEvent::Message {
+                    text: format!("observação {round}.{c} registrada; "),
+                });
+            }
+        }
+        events.push(SubagentEvent::Message {
+            text: "conclusão final da análise.".to_string(),
+        });
+        // The reported tail shape: the model kept reasoning AFTER stating
+        // its conclusion. Under tail-only coalescing that reasoning opens
+        // its own block BELOW the conclusion; the backscan merged it into
+        // the top Thought block instead, leaving the conclusion pinned as
+        // the last paint (the exact inversion the user reported).
+        events.push(SubagentEvent::Thought {
+            text: "revisão final: nada a corrigir.".to_string(),
+        });
+
+        let wrap_w = 44u16;
+        for (frame, event) in events.iter().enumerate() {
+            state.update_subagent_activity(event, None);
+            if !state.is_scrolled_up() {
+                state.scroll_to_bottom();
+            }
+            let rows = state.subagent_section_rows_for_display(wrap_w);
+            let natural = (BOX_OVERHEAD + i32::from(rows.iter().sum::<u16>())).max(4) as u16;
+            let mut buf = Buffer::empty(Rect::new(0, 0, wrap_w + 2, natural));
+            render_subagent_section(&mut buf, 0, 0, wrap_w + 2, natural, &mut state, &theme, false);
+            let painted: Vec<String> = (0..natural)
+                .map(|y| row_text(&buf, y).trim_end().to_string())
+                .filter(|t| !t.is_empty() && !t.contains("subagent:"))
+                .collect();
+
+            // ARRIVAL ORDER, every frame: a row carrying round-r content
+            // must never precede a row carrying round-(r-1) content of the
+            // opposite kind (the backscan signature: newer reasoning
+            // pinned above older narration). K = thought rows, M = message
+            // rows; the painted sequence must read K0…M0 K1…M1 … exactly
+            // as the events arrived. The old paint merged all rounds of
+            // one kind into the kind's FIRST block, producing all-Ks-then
+            // -all-Ms (or vice versa), which this window check rejects.
+            let rank = |t: &str| -> Option<(u8, char)> {
+                if let Some(rest) = t.strip_prefix("pensando sobre o aspecto ") {
+                    rest.chars().next().map(|d| (d as u8, 'K'))
+                } else if let Some(rest) = t.strip_prefix("observação ") {
+                    rest.chars().next().map(|d| (d as u8, 'M'))
+                } else if t.contains("conclusão final") {
+                    Some((4, 'M'))
+                } else if t.contains("revisão final") {
+                    // The post-conclusion reasoning is its OWN burst: rank
+                    // it one round past the conclusion so the M(4)→K pair
+                    // reads as the arrival it is (the backscan would have
+                    // put this row inside the TOP thought block, which the
+                    // K-run ordering below still rejects).
+                    Some((5, 'K'))
+                } else {
+                    None
+                }
+            };
+            let sequence: Vec<(u8, char)> = painted.iter().filter_map(|t| rank(t)).collect();
+            for pair in sequence.windows(2) {
+                // Within one round: K rows precede M rows (arrival). Across
+                // rounds: round r's K may follow round r-1's M; round r's
+                // content must never precede round r-1's same-kind content.
+                let ok = match (pair[0], pair[1]) {
+                    ((rk, 'K'), (rm, 'M')) => rk == rm,
+                    ((rm, 'M'), (rk, 'K')) => rk == rm + 1,
+                    ((rk, 'K'), (rm, 'K')) => rm >= rk,
+                    ((rm, 'M'), (rk, 'M')) => rk >= rm,
+                    _ => false,
+                };
+                assert!(
+                    ok,
+                    "frame {frame}: painted rows break arrival order at \
+                     {pair:?}: {painted:?}"
+                );
+            }
+        }
+
+        // The FINAL frame paints the newest delta last and the
+        // post-conclusion reasoning BELOW the conclusion — the reasoning
+        // bursts above stay in their per-round blocks instead of absorbing
+        // later content.
+        let rows = state.subagent_section_rows_for_display(wrap_w);
+        let natural = (BOX_OVERHEAD + i32::from(rows.iter().sum::<u16>())).max(4) as u16;
+        let mut buf = Buffer::empty(Rect::new(0, 0, wrap_w + 2, natural));
+        render_subagent_section(&mut buf, 0, 0, wrap_w + 2, natural, &mut state, &theme, false);
+        let content_rows: Vec<String> = (0..natural)
+            .map(|y| row_text(&buf, y).trim_end().to_string())
+            .filter(|t| !t.is_empty() && !t.contains("subagent:"))
+            .collect();
+        let last_text = content_rows
+            .iter()
+            .rfind(|t| {
+                t.contains("pensando")
+                    || t.contains("observação")
+                    || t.contains("conclusão")
+                    || t.contains("revisão final")
+            })
+            .expect("stream text painted");
+        assert!(
+            last_text.contains("revisão final"),
+            "the newest delta (post-conclusion reasoning) must paint LAST: {content_rows:?}"
+        );
+        // The post-conclusion reasoning renders BELOW the conclusion — the
+        // backscan pinned it inside the top Thought block instead, leaving
+        // the conclusion as the last painted text.
+        let conclusion_row = content_rows
+            .iter()
+            .position(|t| t.contains("conclusão final"))
+            .expect("conclusion painted");
+        let revision_row = content_rows
+            .iter()
+            .position(|t| t.contains("revisão final"))
+            .expect("post-conclusion reasoning painted");
+        assert!(
+            conclusion_row < revision_row,
+            "post-conclusion reasoning (row {revision_row}) must paint BELOW the \
+             conclusion (row {conclusion_row}): {content_rows:?}"
+        );
+        // Per-round blocks: the reasoning of round 1 sits BELOW the
+        // message rows of round 0 (the old paint pinned all reasoning
+        // above all messages).
+        let m0_row = content_rows
+            .iter()
+            .position(|t| t.contains("observação 0."))
+            .expect("round-0 messages painted");
+        let k1_row = content_rows
+            .iter()
+            .position(|t| t.contains("pensando sobre o aspecto 1."))
+            .expect("round-1 thoughts painted");
+        assert!(
+            m0_row < k1_row,
+            "round-1 reasoning must paint BELOW round-0 messages \
+             (m0 row {m0_row}, k1 row {k1_row}): {content_rows:?}"
+        );
+    }
+
     /// Issue 2: the right panel's subagent window paints the SAME embedded
     /// unified diff the `/agents` pane paints (both consume the shared
     /// `subagent_diff_block` cell grid), keyed `{session_id}:diff{index}`
