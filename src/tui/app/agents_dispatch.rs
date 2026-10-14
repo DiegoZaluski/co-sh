@@ -119,10 +119,12 @@ impl App {
         {
             // Same gate the `/new` command applies to a working loop: a
             // second dispatch while that pane's turn is live would
-            // interleave two streams inside one pane. Esc stops it first.
+            // interleave two streams inside one pane. (Issue 3 made
+            // split-Esc park-only — it no longer stops a pane's turn — so
+            // the toast must not claim Esc stops anything.)
             self.toast_state.show(ToastOptions {
                 title: Some("Agents".into()),
-                message: "The focused agent is still working — Esc stops it.".into(),
+                message: "The focused agent is still working.".into(),
                 variant: ToastVariant::Warning,
                 duration_ms: 4000,
             });

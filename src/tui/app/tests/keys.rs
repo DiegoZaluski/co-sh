@@ -824,11 +824,13 @@ async fn ctrl_zero_unfocuses_through_the_open_picker() {
     );
 }
 
-/// ESC with NO pane focused targets the MAIN loop: while it runs, ESC
-/// stops it (the shared stop signal) and the split stays open — it must
-/// NOT park the mode out from under the running turn.
+/// ESC with NO pane focused PARKS the split — even while the main loop is
+/// Working (issue 3): leaving to watch/delegate in the normal view must
+/// never interrupt the main loop's turn, and the main loop is interrupted
+/// from the normal view exactly as before (its stop signal stays UNTOUCHED
+/// by the split's Esc).
 #[tokio::test]
-async fn esc_with_main_focused_stops_the_loop_instead_of_parking() {
+async fn esc_with_main_focused_parks_and_never_stops_the_loop() {
     let _home = HOME_LOCK.lock();
     isolate_home();
     let mut app = App::new("/tmp".to_string());
@@ -846,12 +848,21 @@ async fn esc_with_main_focused_stops_the_loop_instead_of_parking() {
         .unwrap();
 
     assert!(
-        app.stop_signal.load(std::sync::atomic::Ordering::Relaxed),
-        "ESC with the main agent focused must interrupt the main loop"
+        !app.stop_signal.load(std::sync::atomic::Ordering::Relaxed),
+        "the split's Esc must NEVER flag the main loop's stop — issue 3"
     );
     assert!(
-        app.agents_split.is_some(),
-        "the split must stay open — parking would hide the mode mid-turn"
+        app.agents_split.is_none(),
+        "Esc parks the split regardless of focus or the main loop's state"
+    );
+    assert!(
+        app.parked_agents_split.is_some(),
+        "the pane set parks (nothing is destroyed)"
+    );
+    assert_eq!(
+        app.state.status,
+        crate::types::SessionStatus::Working,
+        "the main loop keeps running behind the park"
     );
 }
 
@@ -1009,5 +1020,124 @@ async fn alt_shift_digit_is_not_a_pane_hotkey() {
         app.agents_split.as_ref().map(|s| s.focused),
         Some(Some(0)),
         "Alt+Shift+digit must leave the focus alone"
+    );
+}
+
+/// Issue 3 — Enter with a SPLIT PANE focused dispatches to that pane even
+/// while the MAIN agent is Working: delegating to an idle pane mid-run
+/// must work, and the main loop keeps streaming untouched. The pane's
+/// dispatch path is exactly the normal one (the running flag flips, the
+/// echo lands).
+#[tokio::test]
+async fn enter_dispatches_to_a_focused_pane_while_the_main_loop_is_working() {
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    app.agents_split = Some(crate::routes::session::agents_split::AgentsSplitState::new(
+        vec!["claude".into(), "kilo".into()],
+    ));
+    app.process_key_event(mod_key(KeyCode::Char('1'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(Some(0)));
+    // The MAIN loop is mid-turn.
+    app.state.status = crate::types::SessionStatus::Working;
+    app.prompt_view.input = "help the agent".into();
+
+    app.process_key_event(mod_key(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+
+    assert!(
+        app.agents_split.as_ref().unwrap().panes[0].running,
+        "the focused pane's turn started while the main loop runs"
+    );
+    assert!(
+        !app.queue_choice_dialog.visible,
+        "a pane-targeted Enter must NOT open the queue-choice dialog"
+    );
+    assert!(
+        app.prompt_view.input.is_empty(),
+        "the dispatched message left the prompt"
+    );
+    assert_eq!(
+        app.state.status,
+        crate::types::SessionStatus::Working,
+        "the main loop's status is untouched"
+    );
+}
+
+/// Issue 3 — Enter with NO pane focused (the MAIN agent target) while
+/// Working keeps the EXISTING queue behavior: the queue-choice dialog
+/// opens, nothing is dispatched, no turn starts.
+#[tokio::test]
+async fn enter_with_main_target_while_working_still_queues() {
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    app.agents_split = Some(crate::routes::session::agents_split::AgentsSplitState::new(
+        vec!["claude".into(), "kilo".into()],
+    ));
+    app.process_key_event(mod_key(KeyCode::Char('0'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(None));
+    app.state.status = crate::types::SessionStatus::Working;
+    app.prompt_view.input = "follow up".into();
+
+    app.process_key_event(mod_key(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+
+    assert!(
+        app.queue_choice_dialog.visible,
+        "the main-target Enter keeps its queue-choice behavior"
+    );
+    assert!(
+        !app.agents_split.as_ref().unwrap().panes[0].running
+            && !app.agents_split.as_ref().unwrap().panes[1].running,
+        "no pane received the message"
+    );
+    assert!(
+        !app.prompt_view.input.is_empty(),
+        "the draft stays until the queue choice resolves"
+    );
+}
+
+/// Issue 3 — the `/agents` command opens the split (or re-attaches the
+/// parked one) EVEN WHILE the main loop streams: the old Working refusal
+/// is gone. A parked set re-attaches verbatim; a fresh entry opens the
+/// picker pre-marked. The main loop's state is untouched either way.
+#[tokio::test]
+async fn agents_command_reattaches_the_parked_split_while_working() {
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    // A previously-parked split: the pane set persists in the metadata.
+    app.state.current_session_mut().unwrap().agents_panes =
+        Some(vec![crate::types::AgentPaneRef::Name("kilo".into())]);
+    app.agents_split = Some(crate::routes::session::agents_split::AgentsSplitState::new(
+        vec!["kilo".into()],
+    ));
+    app.park_agents_split();
+    assert!(app.parked_agents_split.is_some() && app.agents_split.is_none());
+    // The MAIN loop is mid-turn.
+    app.state.status = crate::types::SessionStatus::Working;
+
+    app.run_slash_command(&crate::ui::slash_menu::SlashCommand {
+        name: "agents".into(),
+        desc: String::new(),
+    });
+
+    assert!(
+        app.agents_split.is_some(),
+        "the parked split re-attaches while the main loop runs"
+    );
+    assert_eq!(
+        app.state.status,
+        crate::types::SessionStatus::Working,
+        "the main loop keeps running behind the re-attach"
     );
 }

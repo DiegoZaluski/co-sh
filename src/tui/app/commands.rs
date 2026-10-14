@@ -879,21 +879,13 @@ impl App {
         } else if cmd.name == "models" {
             self.open_model_dialog();
         } else if cmd.name == "agents" {
-            // Refuse while the normal agent loop is working (mirrors /new):
-            // the split would replace the live transcript mid-stream, and
-            // the submit path would fall into the queue-choice dialog
-            // instead of ever reaching the fan-out.
-            if self.state.status == crate::types::SessionStatus::Working {
-                use crate::ui::toast::{ToastOptions, ToastVariant};
-                self.toast_state.show(ToastOptions {
-                    title: Some("Agents".into()),
-                    message: "The agent is working — wait for it to finish.".into(),
-                    variant: ToastVariant::Warning,
-                    duration_ms: 4000,
-                });
-                self.slash_menu.visible = false;
-                return;
-            }
+            // Openable ANY time — including while the main loop streams:
+            // the split is an overlay of the SAME session, the loop keeps
+            // running behind it (its spinner, queues and stop wiring are
+            // untouched), and Esc out of the split PARKS it back without
+            // interrupting anything. The old refusal (mirroring /new) is
+            // gone: watching an agent mid-run or delegating to an idle one
+            // while the main agent works is the point of the mode.
             // Re-entry contract: a PARKED split (Esc'd out with the agent set
             // kept) re-attaches verbatim — the picker step is skipped
             // entirely because the user already picked and the panes keep

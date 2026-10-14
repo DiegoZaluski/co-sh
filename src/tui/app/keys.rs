@@ -136,6 +136,12 @@ impl App {
                         | crate::types::SessionStatus::Retry { .. }
                 )
                 && !self.modal_box_open()
+                // The /agents split owns Esc FIRST (issue 3): its Esc is
+                // PARK — leave the split with every turn (the main loop
+                // included) still running. Flagging the shared stop here
+                // would kill the main loop the user is walking away from
+                // to WATCH, not to interrupt.
+                && self.agents_split.is_none()
             {
                 self.stop_signal.store(true, Ordering::Relaxed);
             }
@@ -1374,6 +1380,37 @@ impl App {
                         return Ok(false);
                     }
                     self.prompt_view.note_activity();
+                    // The /agents split intercepts the shared prompt: the
+                    // FOCUSED pane receives the message as its own turn —
+                    // EVEN WHILE the main agent is working (issue 3:
+                    // delegating to an idle pane mid-run must work; the
+                    // main loop keeps streaming untouched). When NO pane
+                    // holds the focus (`Ctrl+0`, the MAIN agent), the
+                    // Working branch below keeps its queue-choice dialog —
+                    // the message targets the main loop, which is exactly
+                    // what the queue serves.
+                    let split_pane_focused = self
+                        .agents_split
+                        .as_ref()
+                        .and_then(|split| split.focused)
+                        .is_some()
+                        // A mid-paste-burst Enter is a STREAMED line break,
+                        // not a submission (the coalescer replays the whole
+                        // run with its real line breaks at burst end):
+                        // dispatching here would start the pane's turn on
+                        // the partial text and strand the rest of the paste
+                        // in the prompt for a second, unintended send. The
+                        // keystroke falls through to the queue branch (the
+                        // pre-issue-3 behavior for every Working Enter).
+                        && !self.paste_burst_pending_flush_deadline();
+                    if split_pane_focused {
+                        let msg = self.prompt_view.send_message();
+                        if msg.trim().is_empty() {
+                            return Ok(false);
+                        }
+                        self.dispatch_to_agents_split(msg);
+                        return Ok(false);
+                    }
                     if self.state.status == crate::types::SessionStatus::Working {
                         // The agent loop is running: ask which queue the
                         // message should join instead of sending it now.
@@ -1389,10 +1426,8 @@ impl App {
                     if msg.trim().is_empty() {
                         return Ok(false);
                     }
-                    // The /agents split intercepts the shared prompt: the
-                    // FOCUSED pane receives the message as its own turn —
-                    // or, when NO pane holds the focus (`Ctrl+0`), the MAIN
-                    // agent itself (the normal-mode loop as manager).
+                    // No pane focused: the MAIN agent itself (the
+                    // normal-mode loop as manager).
                     if self.agents_split.is_some() {
                         self.dispatch_to_agents_split(msg);
                         return Ok(false);
@@ -1436,49 +1471,15 @@ impl App {
                         self.dialog.pop();
                         return Ok(false);
                     } else if self.agents_split.is_some() {
-                        // /agents split ESC semantics: the first ESC stops
-                        // ONLY the focused pane's turn (its own stop signal
-                        // — never the shared loop's), or — when NO pane
-                        // holds the focus (`Ctrl+0`, the MAIN agent) — the
-                        // main loop itself; when everything targeted is
-                        // already idle, ESC leaves the split entirely.
-                        let main_focused = self
-                            .agents_split
-                            .as_ref()
-                            .is_some_and(|split| split.focused.is_none());
-                        if main_focused
-                            && matches!(
-                                self.state.status,
-                                crate::types::SessionStatus::Working
-                                    | crate::types::SessionStatus::Retry { .. }
-                            )
-                        {
-                            self.stop_signal.store(true, Ordering::Relaxed);
-                            return Ok(false);
-                        }
-                        let focused_running = self
-                            .agents_split
-                            .as_ref()
-                            .and_then(|split| split.focused_pane())
-                            .is_some_and(|pane| pane.running);
-                        if focused_running {
-                            if let Some(split) = &mut self.agents_split
-                                && let Some(focused) = split.focused
-                                && let Some(pane) = split.panes.get_mut(focused)
-                            {
-                                if let Some(signal) = &pane.stop_signal {
-                                    signal.store(true, Ordering::Relaxed);
-                                }
-                                pane.running = false;
-                            }
-                        } else {
-                            // Esc with everything idle PARKS the split (mode
-                            // closed, pane set + running state kept): a
-                            // running turn would keep streaming and a later
-                            // /agents re-attaches the same panes verbatim.
-                            // Nothing is destroyed here.
-                            self.park_agents_split();
-                        }
+                        // /agents split ESC semantics (issue 3): Esc ONLY
+                        // PARKS the split — leave the mode with every turn
+                        // still running (a pane's stream and the MAIN loop
+                        // alike). Interrupting a turn is the focused pane's
+                        // own affordance, never this key's side effect; the
+                        // main loop keeps streaming behind the park and is
+                        // interrupted from the normal view exactly as
+                        // before.
+                        self.park_agents_split();
                         return Ok(false);
                     } else if self.state.status == crate::types::SessionStatus::Working {
                         self.stop_signal.store(true, Ordering::Relaxed);
@@ -1519,58 +1520,12 @@ impl App {
                         self.dialog.pop();
                         return Ok(false);
                     } else if self.agents_split.is_some() {
-                        // Same split ESC semantics as Interrupt above: stop
-                        // the focused pane first (or the main loop when NO
-                        // pane holds the focus), leave the split on the
-                        // second ESC. The queue-clear paths below must never
-                        // run while a PANE is the target — but a MAIN-target
-                        // cancel clears them exactly like the normal mode.
-                        let main_focused = self
-                            .agents_split
-                            .as_ref()
-                            .is_some_and(|split| split.focused.is_none());
-                        if main_focused
-                            && matches!(
-                                self.state.status,
-                                crate::types::SessionStatus::Working
-                                    | crate::types::SessionStatus::Retry { .. }
-                            )
-                        {
-                            self.stop_signal.store(true, Ordering::Relaxed);
-                            if let Some(id) = self.state.current_session_id.clone()
-                                && let Some(queues) = self.state.pending_queues.get_mut(&id)
-                            {
-                                queues.clear();
-                            }
-                            self.queued_input.clear();
-                            self.next_request_in_flight = false;
-                            self.queue_actions_deferred_start = false;
-                            self.edit_requeue_hint = None;
-                            self.edit_hold_queue = None;
-                            self.hovered_queue_row = None;
-                            return Ok(false);
-                        }
-                        let focused_running = self
-                            .agents_split
-                            .as_ref()
-                            .and_then(|split| split.focused_pane())
-                            .is_some_and(|pane| pane.running);
-                        if focused_running {
-                            if let Some(split) = &mut self.agents_split
-                                && let Some(focused) = split.focused
-                                && let Some(pane) = split.panes.get_mut(focused)
-                            {
-                                if let Some(signal) = &pane.stop_signal {
-                                    signal.store(true, Ordering::Relaxed);
-                                }
-                                pane.running = false;
-                            }
-                        } else {
-                            // Same park contract as the Interrupt ESC above:
-                            // an idle Esc leaves the mode without destroying
-                            // the pane set.
-                            self.park_agents_split();
-                        }
+                        // Same park contract as the Interrupt ESC above
+                        // (issue 3): Esc ONLY leaves the mode — every turn
+                        // (panes AND the main loop) keeps running behind
+                        // the park; nothing is stopped here, nothing is
+                        // destroyed.
+                        self.park_agents_split();
                         return Ok(false);
                     } else if self.state.status == crate::types::SessionStatus::Working {
                         self.stop_signal.store(true, Ordering::Relaxed);
