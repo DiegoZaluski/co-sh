@@ -330,24 +330,56 @@ pub fn has_queued_request(pane: &str) -> bool {
 /// requester's next loop drain. Called by the App from the `AgentsPaneDone`
 /// handler (keyed by pane — the App never knows request ids). A pane with
 /// no tracked request (a pure user turn) is a no-op.
-pub fn complete_request(pane: &str, output: Result<String, String>) {
+///
+/// Returns the resolved request's requester tag (`Some(MAIN)` /
+/// `Some(MANAGER)`) — the App's wake promise reads it: a MAIN-requested
+/// pane turn that completes while the main loop is NOT running must wake
+/// the main agent with the report (the caller promised an output for its
+/// input; a user-initiated pane turn promises nothing). `None` when the
+/// pane served nothing tracked.
+#[must_use]
+pub fn complete_request(pane: &str, output: Result<String, String>) -> Option<&'static str> {
     let mut state = registry().lock().unwrap_or_else(|p| p.into_inner());
-    let Some(request) = state.serving.remove(pane) else {
-        return;
-    };
+    let request = state.serving.remove(pane)?;
+    let requester = request.requester;
     match request.mode {
         ReplyMode::Wait => {
-            if let Some(pending) = state.waits.remove(&request.id) {
-                let _ = pending.tx.send(output);
+            // A LIVE waiter takes the report inline. A DEAD one (the
+            // requester's turn ended or was stopped while the pane worked
+            // — the oneshot was dropped) must not swallow the report: the
+            // wake promise ("an input sent by the agent owes it an output")
+            // parks the delivery for the requester's drain / the App's
+            // idle-main-agent wake, exactly like background mode.
+            match state.waits.remove(&request.id) {
+                Some(pending) => {
+                    // `send` hands the value BACK when the receiver is gone
+                    // — a dropped wait handle means the requester's turn
+                    // ended before the report; the promise parks it.
+                    if let Err(undelivered) = pending.tx.send(output) {
+                        state.deliveries.push(PaneDelivery {
+                            pane: pane.to_string(),
+                            request_id: request.id,
+                            requester,
+                            output: undelivered,
+                        });
+                    }
+                }
+                None => state.deliveries.push(PaneDelivery {
+                    pane: pane.to_string(),
+                    request_id: request.id,
+                    requester,
+                    output,
+                }),
             }
         }
         ReplyMode::Background => state.deliveries.push(PaneDelivery {
             pane: pane.to_string(),
             request_id: request.id,
-            requester: request.requester,
+            requester,
             output,
         }),
     }
+    Some(requester)
 }
 
 /// Fail a pane's IN-FLIGHT request, if any: the pane's turn was force-
@@ -466,7 +498,7 @@ pub fn take_ready_deliveries(requester: &str) -> Vec<PaneDelivery> {
 /// Render one finished background delivery as the `[automated
 /// notification]` user turn both loop drain sites inject (the per-turn
 /// drain and the pre-Done busy-guard): same contract, same shape.
-pub(crate) fn delivery_note(delivery: &PaneDelivery) -> String {
+pub fn delivery_note(delivery: &PaneDelivery) -> String {
     let report = match &delivery.output {
         Ok(report) => super::background::sanitize(report),
         Err(error) => error.clone(),
@@ -620,7 +652,11 @@ mod tests {
         // completion is keyed by PANE (the App never knows request ids).
         let request = pop_next_request("claude").expect("queued request");
         assert_eq!(request.id, handle.request_id);
-        complete_request("claude", Ok("done".to_string()));
+        assert_eq!(
+            complete_request("claude", Ok("done".to_string())),
+            Some(MAIN),
+            "the completion reports its requester — the App's wake promise reads it"
+        );
         let answer = block_on(async move { rx.await.expect("sender alive") });
         assert_eq!(answer, Ok("done".to_string()));
     }
@@ -637,7 +673,7 @@ mod tests {
         assert!(pop_next_request("claude").is_some(), "dispatched");
         // The completion is keyed by pane; the BACKGROUND mode parks the
         // delivery for the requester's drain.
-        complete_request("claude", Ok("report".to_string()));
+        assert_eq!(complete_request("claude", Ok("report".to_string())), Some(MANAGER));
         let deliveries = take_ready_deliveries(MANAGER);
         assert_eq!(deliveries.len(), 1);
         assert_eq!(deliveries[0].pane, "claude");
@@ -689,7 +725,10 @@ mod tests {
         // then the pane's turn completes and the delivery parks.
         let handle = enqueue("claude", "go", MANAGER, ReplyMode::Background).unwrap();
         assert!(pop_next_request("claude").is_some());
-        complete_request("claude", Ok("report".to_string()));
+        assert_eq!(
+            complete_request("claude", Ok("report".to_string())),
+            Some(MANAGER)
+        );
         // A parked delivery is FINISHED work, not outstanding (it drains on
         // the requester's next turn — the same contract the background
         // sub-agents run on); the drain here is the sanity check.
@@ -817,7 +856,7 @@ mod tests {
             has_outstanding_requests(MAIN),
             "the NEW request is outstanding (serving) until it completes"
         );
-        complete_request("cosh#1", Ok("done".to_string()));
+        assert_eq!(complete_request("cosh#1", Ok("done".to_string())), Some(MAIN));
         let ok = block_on(async move { next_rx.await.expect("sender alive") });
         assert_eq!(ok, Ok("done".to_string()));
         assert!(!has_outstanding_requests(MAIN));

@@ -1088,12 +1088,14 @@ fn handoff_notice_lists_each_stale_tool_once() {
     );
 }
 
-/// A MANAGER loop runs INSIDE its own `/agents` pane: `agents_call` to that
-/// same pane would queue a turn behind the very turn making the call, so the
-/// wait could never resolve. The guard rejects it before touching the pane
-/// registry (deterministic — no global state needed for the assertion).
+/// A pane loop (any harness with its own pane id bound) NEVER coordinates:
+/// `with_own_pane_id` strips the `agents_call` tool at build time, and the
+/// dispatch arm refuses pane-originated calls as defense in depth. This
+/// test drives the dispatch arm directly with a pushed call (simulating a
+/// stale/re-added tool) and asserts the pane-call refusal fires BEFORE the
+/// registry is touched — no queue entry, no self-call error shape.
 #[tokio::test]
-async fn agents_call_refuses_the_managers_own_pane() {
+async fn agents_call_is_refused_from_a_pane_loop() {
     let mut h = Harness::new_test()
         .as_manager()
         .with_own_pane_id(Some("cosh".into()));
@@ -1101,12 +1103,12 @@ async fn agents_call_refuses_the_managers_own_pane() {
     h.push_tool_call(ToolCallData {
         id: String::new(),
         name: "agents_call".into(),
-        arguments: json!({"pane": "cosh", "input": "delegate to myself"}),
+        arguments: json!({"pane": "claude", "input": "a pane must not delegate"}),
         thought_signature: String::new(),
     });
     let err = h.dispatch_next().await.unwrap_err();
     assert!(
-        err.contains("cannot target this pane's own session"),
-        "self-call must be refused up front: {err}"
+        err.contains("`agents_call` is not available to a pane"),
+        "a pane loop must never coordinate: {err}"
     );
 }

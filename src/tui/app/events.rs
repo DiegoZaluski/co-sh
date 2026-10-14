@@ -392,11 +392,18 @@ impl App {
                         } else {
                             Ok(output.clone())
                         };
-                        cosh::harness::panes::complete_request(&id, report);
+                        let requester = cosh::harness::panes::complete_request(&id, report);
                         // The pane just freed: the queue service may
                         // dispatch its NEXT queued agent message in this
                         // same frame.
                         self.serve_agents_pane_queues();
+                        // The wake promise (issue: the main agent must be
+                        // woken by the report of a pane turn IT initiated,
+                        // and never disturbed by a user-initiated pane
+                        // turn): a MAIN-requested pane turn that completed
+                        // while the main loop is idle starts a fresh
+                        // main-agent turn carrying the report.
+                        self.wake_main_agent_if_promised(requester);
                     }
                     // The mirror finishes: it inherits the pane's ALREADY-CLOSED
                     // timeline (`close_turn` ran in `finish_turn` above — the

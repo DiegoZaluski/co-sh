@@ -1128,12 +1128,11 @@ fn tool_input_detail(raw_input: &serde_json::Value) -> Option<String> {
 }
 
 /// Which of the three chunk streams a coalescing chunk belongs to. The
-/// backscan merge (see [`SubagentActivity::coalesce_stream_chunk`]) merges
-/// into the nearest SAME-stream entry, keeps scanning back through the
-/// agent's interleaved narration/reasoning pair, and stops at everything
-/// else — tool/plan entries AND turn inputs. Three input kinds keep the
-/// agent narration, the dimmed reasoning and the replayed user turns in
-/// three separate growing rows.
+/// coalescer (see [`SubagentActivity::coalesce_stream_chunk`]) merges a
+/// chunk ONLY into a tail entry of the same stream — any other shape opens
+/// a fresh entry at the tail, keeping the timeline chronological like the
+/// chat. Four input kinds keep the agent narration, the dimmed reasoning,
+/// the user's turns and other agents' inputs in separate growing rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StreamKind {
     /// The sub-agent's message text.
@@ -1404,85 +1403,68 @@ impl SubagentActivity {
 
     /// Merge one streamed message/thought chunk into the timeline.
     ///
-    /// The mini-chat contract (see [`Self::apply`]) says stream chunks
-    /// coalesce into one growing transcript row — the NEAREST matching
-    /// entry, not strictly the last one. Models interleave reasoning and
-    /// text deltas inside a single response; requiring the matching entry
-    /// to be the timeline's tail opened a NEW sub-block per alternation,
-    /// and the box rendered dozens of tiny rows that used a fraction of
-    /// the row width (the "reasoning in columns" report). The scan walks
-    /// back through the agent's interleaved narration/reasoning pair and
-    /// stops at turn boundaries: tool and plan entries, and — crucially —
-    /// turn INPUTS (`UserMessage`, `AgentMessage`). Stream content after
-    /// them belongs to a later turn, where a fresh entry is the correct
-    /// layout for both sub-agent flavors: without the input boundary every
-    /// tool-less turn's answer merged across its own prompt into the
-    /// previous turn's block, and a replayed history collapsed into one
-    /// input blob plus one answer blob (the panes' garbled order).
+    /// The mini-chat contract is CHRONOLOGICAL: a stream chunk coalesces
+    /// into the timeline's TAIL entry only when it is the same kind (a run
+    /// of deltas of one stream is one growing row); anything else — a
+    /// different stream kind, a tool/plan entry, a turn input — opens a
+    /// FRESH entry at the tail. The newest content is always the LAST
+    /// entry, and the box scrolls in arrival order exactly like the chat.
+    ///
+    /// The coalescer once scanned BACK to the nearest same-kind entry,
+    /// because a model that interleaves reasoning and text deltas inside
+    /// one response then opened a new sub-block per alternation (the
+    /// "reasoning in columns" report — rows using a fraction of the
+    /// width). But the backscan let a new reasoning chunk cross the
+    /// narration that followed the previous reasoning burst and merge into
+    /// the OLD thought block ABOVE it: the conclusion stayed pinned low
+    /// while newer reasoning rendered higher — the mini-chat read
+    /// backwards. Chronological order is the contract the chat itself
+    /// keeps; per-alternation entries are the faithful transcript of an
+    /// interleaved stream, each wrapped full-width.
     ///
     /// A whitespace-only chunk NEVER opens a fresh entry — it may only
-    /// merge into an existing matching one. This is the same rule the
-    /// chat's `Token` handler applies ("leading whitespace before any text
-    /// must never open a blank bubble"): providers emit stray blank chunks
+    /// merge into a matching tail. This is the same rule the chat's
+    /// `Token` handler applies ("leading whitespace before any text must
+    /// never open a blank bubble"): providers emit stray blank chunks
     /// BEFORE the reasoning starts, and the invisible entry opened by one
-    /// let the backscan merge capture the answer's text INTO that
-    /// pre-reasoning row — the conclusion then displayed ABOVE the thought
-    /// that actually preceded it (the "answer above reasoning" order bug).
+    /// let a later merge capture the answer's text INTO that
+    /// pre-reasoning row. A newline-carrying whitespace delta still
+    /// MERGES into a matching tail — paragraph breaks mid-stream are real
+    /// content (the chat keeps the same distinction).
     ///
     /// Returns whether VISIBLE text changed: `false` for a whitespace-only
     /// chunk with no matching open entry, so the caller does not yank the
     /// viewport on an invisible no-op.
     fn coalesce_stream_chunk(&mut self, text: &str, kind: StreamKind) -> bool {
-        for entry in self.timeline.iter_mut().rev() {
-            match entry {
-                SubagentTimelineEntry::Message { text: acc } if kind == StreamKind::Agent => {
-                    acc.push_str(text);
-                    *acc = bounded_tail(acc, SUBAGENT_TEXT_ENTRY_BYTES);
-                    return true;
-                }
-                SubagentTimelineEntry::Thought { text: acc } if kind == StreamKind::Thought => {
-                    acc.push_str(text);
-                    *acc = bounded_tail(acc, SUBAGENT_TEXT_ENTRY_BYTES);
-                    return true;
-                }
-                SubagentTimelineEntry::UserMessage { text: acc } if kind == StreamKind::User => {
-                    acc.push_str(text);
-                    *acc = bounded_tail(acc, SUBAGENT_TEXT_ENTRY_BYTES);
-                    return true;
-                }
-                SubagentTimelineEntry::AgentMessage { text: acc }
-                    if kind == StreamKind::AgentInput =>
-                {
-                    acc.push_str(text);
-                    *acc = bounded_tail(acc, SUBAGENT_TEXT_ENTRY_BYTES);
-                    return true;
-                }
-                // Same-response interleave: the agent's narration and its
-                // dimmed reasoning alternate inside ONE response, so each
-                // keeps scanning back through the other (the mini-chat
-                // contract — one growing row per stream, not dozens of
-                // tiny rows).
-                SubagentTimelineEntry::Message { .. } if kind == StreamKind::Thought => {}
-                SubagentTimelineEntry::Thought { .. } if kind == StreamKind::Agent => {}
-                // Turn boundary: anything else ends this chunk's turn. A
-                // turn INPUT (`UserMessage` from the user's prompt or the
-                // history replay, `AgentMessage` from another agent's
-                // `agents_call`) must never let the next answer merge into
-                // the PREVIOUS turn's block — and a replayed input must
-                // never merge across the agent's answer into the previous
-                // turn's input. Tool/plan entries are the same kind of
-                // boundary for every stream. Every turn keeps its own
-                // chronological row: the pane's linear chat flow.
-                _ => break,
+        // TAIL-ONLY coalescing: only the timeline's LAST entry may absorb a
+        // chunk, and only when it is the same stream kind. Any other shape —
+        // a different kind, a tool/plan entry, a turn input — opens a fresh
+        // entry at the tail. The newest content is therefore always the last
+        // entry, and the box scrolls in arrival order like the chat.
+        if let Some(acc) = self.timeline.last_mut().and_then(|entry| match entry {
+            SubagentTimelineEntry::Message { text: acc } if kind == StreamKind::Agent => Some(acc),
+            SubagentTimelineEntry::Thought { text: acc } if kind == StreamKind::Thought => Some(acc),
+            SubagentTimelineEntry::UserMessage { text: acc } if kind == StreamKind::User => {
+                Some(acc)
             }
+            SubagentTimelineEntry::AgentMessage { text: acc }
+                if kind == StreamKind::AgentInput =>
+            {
+                Some(acc)
+            }
+            _ => None,
+        }) {
+            acc.push_str(text);
+            *acc = bounded_tail(acc, SUBAGENT_TEXT_ENTRY_BYTES);
+            return true;
         }
         // Whitespace-only chunks never OPEN an entry: an invisible blank row
-        // would sit before the reasoning it precedes and (via the backscan
-        // merge above) capture the answer text into it, inverting the
-        // displayed order. A newline-carrying whitespace delta must still
-        // MERGE into an open entry — paragraph breaks mid-stream are real
-        // content (the chat keeps the same distinction). Nothing visible
-        // changed, so the caller must not auto-scroll for it.
+        // would sit before the reasoning it precedes and a later merge would
+        // capture the answer text into it, inverting the displayed order. A
+        // newline-carrying whitespace delta must still MERGE into an open
+        // tail entry — paragraph breaks mid-stream are real content (the
+        // chat keeps the same distinction). Nothing visible changed, so the
+        // caller must not auto-scroll for it.
         if text.trim().is_empty() {
             return false;
         }
@@ -1518,10 +1500,11 @@ impl SubagentActivity {
 
     /// Open a turn with the caller's input text: a FRESH `UserMessage` (the
     /// user's own prompt) or `AgentMessage` (another agent's `agents_call`
-    /// input) entry, NEVER coalesced into an older one. The backscan in
-    /// [`Self::coalesce_stream_chunk`] stops at turn inputs, so the fresh
-    /// entry ALSO shields the previous turn: the next answer's chunks stop
-    /// at it instead of merging into the older block (a plain `apply` here
+    /// input) entry, NEVER coalesced into an older one. Tail-only coalescing
+    /// in [`Self::coalesce_stream_chunk`] never merges across a shape
+    /// mismatch, so the fresh entry ALSO shields the previous turn: the
+    /// next answer's chunks stop at it instead of merging into the older
+    /// block (a plain `apply` here
     /// would merge consecutive tool-less turns' inputs into a single row —
     /// "foobar" for prompts "foo" then "bar" — and the following answer
     /// would join them). A later chunk of the SAME turn still merges into
@@ -6297,14 +6280,14 @@ mod tests {
         assert_eq!(SubagentActivityLine::Gap.visual_rows(60), 1);
     }
 
-    /// REGRESSION (the panes' garbled order): turn inputs are backscan
+    /// REGRESSION (the panes' garbled order): turn inputs are coalescing
     /// boundaries. A tool-less second turn's answer used to skip over its
     /// own prompt and merge into the previous turn's block, and a replayed
     /// history collapsed into one input blob plus one answer blob — every
     /// pane read as a single atropelada paragraph instead of a linear
     /// chronological flow like the normal chat.
     #[test]
-    fn turn_inputs_are_backscan_boundaries() {
+    fn turn_inputs_are_coalescing_boundaries() {
         fn texts(activity: &SubagentActivity) -> Vec<String> {
             activity
                 .timeline
@@ -6391,8 +6374,12 @@ mod tests {
             agent_turn.timeline
         );
 
-        // The same-turn interleave still coalesces: reasoning and narration
-        // alternate inside ONE response without inputs between them.
+        // The same-turn interleave no longer coalesces ACROSS kinds: the
+        // tail-only contract (REGRESSION, user-visible "conclusion pinned
+        // above newer reasoning") opens a fresh entry per alternation so
+        // the newest content is always the LAST entry, in arrival order —
+        // exactly like the chat. Reasoning and narration still coalesce
+        // within their own kind when they are adjacent.
         let mut interleave = SubagentActivity::default();
         interleave.apply(&SubagentEvent::Thought {
             text: "pensando ".to_string(),
@@ -6408,9 +6395,66 @@ mod tests {
         });
         assert_eq!(
             texts(&interleave),
-            vec!["pensando mais", "quase pronto"],
-            "one growing row per stream, no inputs crossed: {:?}",
+            vec!["pensando ", "quase ", "mais", "pronto"],
+            "arrival order, one entry per alternation: {:?}",
             interleave.timeline
+        );
+    }
+
+    /// REGRESSION (user-visible "conclusion pinned above newer reasoning"):
+    /// nearest-entry coalescing let a `Thought` chunk scan past a newer
+    /// `Message` and merge into the OLD reasoning block, so the response's
+    /// conclusion stayed pinned at the bottom while newer reasoning painted
+    /// ABOVE it. Under tail-only coalescing, a `Thought` that arrives after
+    /// the conclusion must open a FRESH entry BELOW it.
+    #[test]
+    fn reasoning_after_the_conclusion_lands_below_it() {
+        fn texts(activity: &SubagentActivity) -> Vec<String> {
+            activity
+                .timeline
+                .iter()
+                .map(|entry| match entry {
+                    SubagentTimelineEntry::Message { text }
+                    | SubagentTimelineEntry::Thought { text }
+                    | SubagentTimelineEntry::UserMessage { text }
+                    | SubagentTimelineEntry::AgentMessage { text } => text.clone(),
+                    other => panic!("expected a text entry, got {other:?}"),
+                })
+                .collect()
+        }
+
+        let mut activity = SubagentActivity::default();
+        // The reported shape: a reasoning burst, then the conclusion, then
+        // MORE reasoning (the model kept thinking after stating a result).
+        activity.apply(&SubagentEvent::Thought {
+            text: "primeira hipótese".to_string(),
+        });
+        activity.apply(&SubagentEvent::Message {
+            text: "conclusão: está correto.".to_string(),
+        });
+        activity.apply(&SubagentEvent::Thought {
+            text: "espera, revisando".to_string(),
+        });
+        assert_eq!(
+            texts(&activity),
+            vec![
+                "primeira hipótese",
+                "conclusão: está correto.",
+                "espera, revisando"
+            ],
+            "the new reasoning must render BELOW the conclusion, never above it: {:?}",
+            activity.timeline
+        );
+        // The tail is the newest content — a later same-kind chunk merges
+        // into IT, not into the older reasoning block above.
+        activity.apply(&SubagentEvent::Thought {
+            text: " ainda".to_string(),
+        });
+        assert_eq!(
+            texts(&activity)[2],
+            "espera, revisando ainda",
+            "post-conclusion reasoning coalesces with itself: {:?}",
+            activity.timeline
         );
     }
 

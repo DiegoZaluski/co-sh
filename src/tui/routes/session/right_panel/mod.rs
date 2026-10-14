@@ -1999,20 +1999,22 @@ fn highlight_section_selection(
 mod tests {
     use super::*;
     use crate::theme::ThemeRegistry;
+    use types::SubagentTimelineEntry;
     // The bin target does not use `Color` (the live render goes through
     // `rgba_color`), but the test assertions decode `Color::Rgb` values —
     // scoped here so the production import stays warning-free.
     use ratatui::style::Color;
 
-    /// REGRESSION (user-visible "reasoning in columns"): the timeline's
-    /// stream coalescing used to require the matching entry to be the
-    /// timeline's LAST one, so a model that interleaves reasoning and text
-    /// deltas opened a new tiny sub-block per alternation and the box
-    /// painted rows that used a fraction of the width. With nearest-entry
-    /// coalescing (the documented mini-chat contract), interleaved chunks
-    /// merge into one entry per kind and every painted row fills the box.
+    /// REGRESSION (user-visible "conclusion pinned above newer reasoning"):
+    /// the timeline's stream coalescing used to scan back past newer
+    /// entries to find a matching kind, so a `Thought` chunk arriving after
+    /// the response's `Message` conclusion merged into the OLD reasoning
+    /// block ABOVE it — the conclusion stayed pinned at the bottom while
+    /// newer reasoning rendered higher. Under TAIL-ONLY coalescing, every
+    /// chunk merges only into the timeline's LAST entry (same kind) or
+    /// opens a fresh one: the painted order is strictly arrival order.
     #[test]
-    fn interleaved_reasoning_and_text_coalesce_into_full_width_blocks() {
+    fn interleaved_reasoning_and_text_paint_in_arrival_order() {
         use cosh_tools::subagent::events::SubagentEvent;
 
         let theme = test_theme();
@@ -2036,15 +2038,39 @@ mod tests {
             );
         }
         let activity = state.pty_sessions[0].subagent_activity.clone();
-        // Two entries total: one Thought run, one Message run.
-        assert_eq!(activity.timeline.len(), 2);
+        // Tail-only: one fresh entry per alternation, 20 total, in arrival
+        // order — the newest content is always the LAST entry.
+        assert_eq!(activity.timeline.len(), 20);
+        let texts = activity
+            .timeline
+            .iter()
+            .map(|entry| match entry {
+                SubagentTimelineEntry::Message { text }
+                | SubagentTimelineEntry::Thought { text }
+                | SubagentTimelineEntry::UserMessage { text }
+                | SubagentTimelineEntry::AgentMessage { text } => text.clone(),
+                other => panic!("expected a text entry, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        for i in 0..10 {
+            let ti = 2 * i;
+            let mi = ti + 1;
+            assert_eq!(
+                texts[ti], format!("pensando no passo {i} "),
+                "thought {i} must sit at arrival position {ti}: {texts:?}"
+            );
+            assert_eq!(
+                texts[mi], format!("ponto {i}; "),
+                "message {i} must sit at arrival position {mi}: {texts:?}"
+            );
+        }
 
+        // The paint agrees: within the box, the FIRST message ("ponto 0")
+        // must render strictly ABOVE the SECOND thought ("pensando no
+        // passo 1") — the exact inversion the old backscan produced.
         let wrap_w = 40u16;
         let rows = state.subagent_section_rows_for_display(wrap_w);
         let natural = (BOX_OVERHEAD + i32::from(rows.iter().sum::<u16>())).max(4) as u16;
-        // max_w = wrap_w + LEFT_PAD + RIGHT_PAD: the renderer derives its
-        // own wrap width from max_w, so the height math and the paint must
-        // agree on the same 40 columns.
         let mut buf = Buffer::empty(Rect::new(0, 0, wrap_w + 2, natural));
         render_subagent_section(
             &mut buf,
@@ -2056,26 +2082,36 @@ mod tests {
             &theme,
             false,
         );
-        // The old bug's signature is the RATIO of short rows: one tiny
-        // sub-block per alternation painted nearly every row narrow. The
-        // coalesced layout paints full rows with at most ONE short final
-        // line per block (two blocks: one Thought run, one Message run).
         let content_rows = (0..natural)
             .map(|y| row_text(&buf, y).trim_end().to_string())
             .filter(|t| !t.trim().is_empty() && !t.contains("subagent:"))
             .collect::<Vec<_>>();
         assert!(
             !content_rows.is_empty(),
-            "the coalesced blocks must be visible"
+            "the streamed entries must be visible"
         );
-        let short_rows = content_rows
+        let msg0_row = content_rows
             .iter()
-            .filter(|t| t.trim_start().chars().count() as u16 <= wrap_w / 2)
-            .count();
+            .position(|t| t.contains("ponto 0"))
+            .expect("first message must be painted");
+        let thought1_row = content_rows
+            .iter()
+            .position(|t| t.contains("pensando no passo 1"))
+            .expect("second thought must be painted");
         assert!(
-            short_rows <= 2,
-            "stream blocks must coalesce into wide rows; {short_rows} narrow rows betray \
-             per-alternation fragments: {content_rows:?}"
+            msg0_row < thought1_row,
+            "message 0 (row {msg0_row}) must paint ABOVE thought 1 (row \
+             {thought1_row}): {content_rows:?}"
+        );
+        // And the tail of the paint is the newest content, not a pinned
+        // conclusion: the LAST text row carries the newest chunk.
+        let last_text = content_rows
+            .iter()
+            .rfind(|t| t.contains("ponto") || t.contains("pensando"))
+            .expect("stream text painted");
+        assert!(
+            last_text.contains("ponto 9"),
+            "the newest chunk (ponto 9) must paint LAST: {content_rows:?}"
         );
     }
 

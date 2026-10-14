@@ -2007,7 +2007,11 @@ async fn agents_call_serves_a_queued_cosh_pane_end_to_end() {
     );
 
     // The turn's end (keyed by pane) resolves the waiter with its report.
-    panes::complete_request("cosh", Ok("report".to_string()));
+    assert_eq!(
+        panes::complete_request("cosh", Ok("report".to_string())),
+        Some(panes::MAIN),
+        "a MAIN-requested pane turn resolves the wake promise's tag"
+    );
     let rx = handle.receiver.expect("wait mode carries a receiver");
     let answer = rx.await.expect("sender alive");
     assert_eq!(answer, Ok("report".to_string()));
@@ -2252,5 +2256,152 @@ async fn a_rebooted_cosh_pane_replays_its_session_from_the_store() {
         app.state.current_session().unwrap().agents_panes.clone().unwrap()[0].session_id(),
         Some(manager_session_id),
         "a replay never rebinds the pane's session"
+    );
+}
+
+/// The wake promise (user-reported): "se o agente principal mandou uma
+/// mensagem para um agente em um pane, ele precisa ter um output no
+/// futuro". A pane turn whose request was made by the MAIN loop (here:
+/// wait mode, whose waiter died when the main turn ended) must wake the
+/// idle main agent with the report — the promise input → output holds.
+/// The gateway-recommendation gate is pre-declined so `start_agent_loop`
+/// runs its real path in the test (no dialog, no parked message).
+#[tokio::test]
+async fn a_main_initiated_pane_report_wakes_the_idle_main_agent() {
+    use cosh::harness::panes::{self, ReplyMode};
+
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.gateway_declined = true;
+    let session_id = crate::session_store::generate_session_id();
+    app.state
+        .add_empty_session(session_id.clone(), "wake promise".into(), 0);
+    app.state.current_session_id = Some(session_id);
+    app.open_agents_split(vec![crate::ui::agents_picker::AgentPick {
+        name: "cosh".into(),
+        instances: 1,
+    }]);
+    app.sync_agents_pane_registry();
+
+    // The MAIN loop delegates to the cosh pane and its turn ends before
+    // the report arrives (the user pressed Esc, or the loop finished while
+    // the pane kept working): the request is WAIT mode — an inline wait —
+    // so simulate the ended waiter by completing the request AFTER the
+    // handle is dropped into a dead receiver.
+    let handle = panes::enqueue("cosh", "delegate the work", panes::MAIN, ReplyMode::Wait)
+        .expect("cosh pane is addressable");
+    app.serve_agents_pane_queues();
+    // The pane is running the delegated turn; the app is IDLE (no main
+    // loop running — the state never went Working).
+    assert!(
+        app.agents_split.as_ref().unwrap().panes[0].running,
+        "the pane turn started"
+    );
+    drop(handle);
+
+    // The pane's turn completes: the completion reports the MAIN
+    // requester and the wake promise fires — the idle main agent starts
+    // a FRESH turn carrying the report.
+    let requester = panes::complete_request("cosh", Ok("the pane's report".to_string()));
+    assert_eq!(requester, Some(panes::MAIN));
+    app.agents_split.as_mut().unwrap().set_running(0, false);
+    app.wake_main_agent_if_promised(requester);
+
+    assert_eq!(
+        app.state.status,
+        crate::types::SessionStatus::Working,
+        "the main agent must be woken by the report it was promised"
+    );
+    assert!(
+        app.state
+            .current_session()
+            .unwrap()
+            .messages
+            .iter()
+            .any(|m| m.role == crate::types::MessageRole::User
+                && m.parts.iter().any(|p| matches!(p, crate::types::Part::Text(t) if t.text.contains("the pane's report")))),
+        "the wake turn's input carries the pane's report"
+    );
+}
+
+/// The other half of the wake promise: a pane turn the USER initiated
+/// (no `agents_call` request — the completion resolves nothing) must NOT
+/// wake an idle main agent. The pane works in harmony with the main agent.
+#[tokio::test]
+async fn a_user_initiated_pane_turn_never_wakes_the_main_agent() {
+    use cosh::harness::panes;
+
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    let session_id = crate::session_store::generate_session_id();
+    app.state
+        .add_empty_session(session_id.clone(), "harmony".into(), 0);
+    app.state.current_session_id = Some(session_id);
+    app.open_agents_split(vec![crate::ui::agents_picker::AgentPick {
+        name: "cosh".into(),
+        instances: 1,
+    }]);
+    app.sync_agents_pane_registry();
+
+    // A USER turn ran in the pane and completed: the registry tracked no
+    // request, so the completion resolves None and no wake can arm.
+    assert!(
+        !panes::has_queued_request("cosh"),
+        "a user turn tracks no agents_call request"
+    );
+    let requester = panes::complete_request("cosh", Ok("a user-driven report".to_string()));
+    assert_eq!(
+        requester, None,
+        "a user-initiated pane turn promises no output to any agent"
+    );
+    app.agents_split.as_mut().unwrap().set_running(0, false);
+    app.wake_main_agent_if_promised(requester);
+
+    assert_eq!(
+        app.state.status,
+        crate::types::SessionStatus::Idle,
+        "a user-initiated pane turn must leave the main agent idle"
+    );
+}
+
+/// A MANAGER-requested pane completion (a sibling pane a manager pane
+/// delegated to — legacy shape; pane loops no longer carry the tool) must
+/// not wake the MAIN agent: the delivery belongs to the manager's drain.
+#[tokio::test]
+async fn a_manager_initiated_pane_report_never_wakes_the_main_agent() {
+    use cosh::harness::panes::{self, ReplyMode};
+
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    let session_id = crate::session_store::generate_session_id();
+    app.state
+        .add_empty_session(session_id.clone(), "manager tag".into(), 0);
+    app.state.current_session_id = Some(session_id);
+    app.open_agents_split(vec![crate::ui::agents_picker::AgentPick {
+        name: "cosh".into(),
+        instances: 1,
+    }]);
+    app.sync_agents_pane_registry();
+
+    let handle = panes::enqueue("cosh", "manager to sibling", panes::MANAGER, ReplyMode::Background)
+        .expect("cosh pane is addressable");
+    let _ = handle;
+    app.serve_agents_pane_queues();
+    app.agents_split.as_mut().unwrap().set_running(0, false);
+    let requester = panes::complete_request("cosh", Ok("manager's report".to_string()));
+    assert_eq!(requester, Some(panes::MANAGER));
+    app.wake_main_agent_if_promised(requester);
+
+    assert_eq!(
+        app.state.status,
+        crate::types::SessionStatus::Idle,
+        "a manager-tagged delivery never wakes the MAIN agent"
+    );
+    assert!(
+        panes::take_ready_deliveries(panes::MANAGER).len() == 1,
+        "the delivery stays parked for the manager loop's own drain"
     );
 }

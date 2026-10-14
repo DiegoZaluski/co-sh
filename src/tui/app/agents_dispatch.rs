@@ -412,6 +412,39 @@ impl App {
         }
     }
 
+    /// The wake promise (user-reported: "se o agente principal mandou uma
+    /// mensagem para um agente em um pane, ele precisa ter um output no
+    /// futuro"). A pane turn whose `agents_call` request was made by the
+    /// MAIN loop resolves the promise here: when the main loop is NOT
+    /// running (it ended before the report arrived — it may even have been
+    /// stopped), the parked deliveries are drained and become the input of
+    /// a FRESH main-agent turn — the main agent is woken to receive the
+    /// report. A USER-initiated pane turn tracks no request
+    /// (`complete_request` → `None`) and wakes nothing: the pane works in
+    /// harmony with a running or idle main agent. A live main loop is left
+    /// alone — it drains its deliveries at its own natural points (the
+    /// per-iteration drain and the pre-Done busy-guard).
+    pub(super) fn wake_main_agent_if_promised(&mut self, requester: Option<&'static str>) {
+        if requester != Some(cosh::harness::panes::MAIN) {
+            return;
+        }
+        if self.state.status == crate::types::SessionStatus::Working {
+            return;
+        }
+        let notes: Vec<String> =
+            cosh::harness::panes::take_ready_deliveries(cosh::harness::panes::MAIN)
+                .iter()
+                .map(cosh::harness::panes::delivery_note)
+                .collect();
+        if notes.is_empty() {
+            // Nothing parked (a wait-mode resolution whose receiver died —
+            // the requester's turn was stopped): no promise left to keep.
+            return;
+        }
+        let report = notes.join("\n\n");
+        self.start_agent_loop(report);
+    }
+
     /// Dispatch every queued `agents_call` request whose target pane is
     /// idle. Called from the frame tick (a request enqueued while every
     /// pane idles would otherwise wait for a pane event that never comes —
@@ -731,10 +764,17 @@ fn run_manager_turn(
                 .unwrap_or_else(|_| ".".to_string());
             let mut manager = cosh::harness::Harness::new(connector, &cwd, disabled)
                 .with_mode(cosh::harness::Mode::Yolo)
-                .with_instructions(cosh::harness::core::INSTRUCTIONS_MANAGER)
+                // PANE instructions, not the manager's: this loop IS a pane
+                // doing delegated work — its deliverable is the task report,
+                // never further coordination (the replication bug: manager
+                // instructions + `agents_call` made one delegation from the
+                // main agent fan out to every sibling cosh pane).
+                .with_instructions(cosh::harness::core::INSTRUCTIONS_PANE)
                 // The manager loop's pane requests are tagged MANAGER: a
                 // background pane report drains ONLY here, never into the
-                // main chat loop's context.
+                // main chat loop's context. (Moot since the pane lost
+                // `agents_call` — the tag routes nothing anymore — but it
+                // keeps the loop outside the MAIN drain path by typing.)
                 .as_manager()
                 // Bind the pane id this loop runs in, so `agents_call`
                 // refuses to target its own running pane (self-call

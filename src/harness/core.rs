@@ -192,6 +192,35 @@ pub const INSTRUCTIONS_MANAGER: &str = concat!(
     "- If a tool returns an error, consider a different approach instead of retrying the same call.\n"
 );
 
+/// Base instructions for a PANE loop (a `cosh` pane of the `/agents` split
+/// running delegated work): the same tool discipline as the manager, but
+/// the deliverable is the task itself — the pane reports back to whoever
+/// delegated to it and never coordinates the other panes. The harness
+/// strips the `agents_call` tool and the panes context block from a bound
+/// pane (`with_own_pane_id`); these instructions keep the prompt aligned
+/// with that tool set instead of telling the pane to delegate with a tool
+/// it no longer has.
+pub const INSTRUCTIONS_PANE: &str = concat!(
+    "## Identity\n",
+    "You are Cosh running as the agent of one /agents pane: a task was delegated to YOU (by the coordinating agent or the user).\n\n",
+    "## Capabilities\n",
+    "- You have access to external tools for inspection and command execution, code execution, web search, and more.\n",
+    "- Tool invocation is defined entirely by each tool specification.\n",
+    "- The available tools and their specifications are listed below.\n\n",
+    "## Constraints\n",
+    "- Execute the delegated task directly — do NOT delegate further: the pane-coordination tool is not available to you, and trying to fan work out to the other panes would replicate your task onto every one of them instead of the addressed one.\n",
+    "- Your report is the reply to whoever delegated to you: end with the complete answer/report of what you did as a normal text message.\n",
+    "- One task per turn: everything you need is in the delegated input — do not ask for more context.\n",
+    "- Do not introduce yourself or volunteer information about your internal capabilities or available tools.\n",
+    "- Use a tool only when it is required to produce or verify the requested result.\n",
+    "- If the request can be completed correctly without using any tool, answer directly.\n",
+    "- Avoid unnecessary narration or descriptions of obvious actions.\n",
+    "- Internal tool invocations are part of the execution protocol and are never user-visible responses.\n",
+    "- After you call a tool, its result will appear under `## Tool Result` in the session context.\n",
+    "  Use that result to continue your response — do not call the same tool again with the same arguments.\n",
+    "- If a tool returns an error, consider a different approach instead of retrying the same call.\n"
+);
+
 /// Maximum consecutive tool-call failures before aborting the agent loop.
 const MAX_TOOL_RETRIES: usize = 10;
 
@@ -1135,16 +1164,23 @@ impl Harness {
     }
 
     /// Bind this harness to the `/agents` pane it runs in (the pane's
-    /// registry id: `"cosh"`, `"cosh#2"`, …). `agents_call` then refuses to
-    /// target that exact id: a MANAGER loop calling its OWN pane would queue
-    /// a turn behind the very turn making the call, and the `wait` could
-    /// never resolve (deadlock). Sibling `cosh` panes — different ids — stay
-    /// addressable in `background`; a `Wait` call to one is refused by the
-    /// cross-pane guard in [`super::panes::enqueue`]. `None` for the MAIN
-    /// loop, which owns no pane.
+    /// registry id: `"cosh"`, `"cosh#2"`, …). A pane loop NEVER coordinates:
+    /// binding the id strips the `agents_call` tool (registered in `new`
+    /// before the id was known) and the header's panes block (skipped in
+    /// `format_header_context`). The reported replication bug lived exactly
+    /// here: a cosh pane ran the manager instructions + the tool, so one
+    /// delegation from the main agent made the pane's own manager loop
+    /// re-delegate to EVERY sibling — the call propagated to all the cosh
+    /// agents instead of staying in the addressed one. Coordination belongs
+    /// to the TOP-LEVEL agent alone; a pane does its work and reports back.
+    /// `None` for the MAIN loop, which owns no pane and keeps the tool.
     #[must_use]
     pub fn with_own_pane_id(mut self, id: Option<String>) -> Self {
         self.panes_own_id = id;
+        if self.panes_own_id.is_some() {
+            self.harness_tools
+                .retain(|tool| tool.name != "agents_call");
+        }
         self
     }
 
@@ -1398,7 +1434,12 @@ impl Harness {
         // caches stay valid). Registered ONLY when panes exist: with no
         // agents the header stays byte-identical with the pre-feature one,
         // and nothing is interpolated for something that does not exist.
-        if super::panes::has_panes()
+        // A PANE loop (own pane id bound) skips it too: coordination is the
+        // top-level agent's job — a pane must not see the addressable pane
+        // set, let alone re-delegate (the replication bug `with_own_pane_id`
+        // documents).
+        if self.panes_own_id.is_none()
+            && super::panes::has_panes()
             && let Some(block) = super::panes::context_block()
         {
             let _ = writeln!(out, "{block}");
@@ -5673,6 +5714,20 @@ impl Harness {
             if pane.is_empty() || input.trim().is_empty() {
                 return Err(
                     "`agents_call` requires a non-empty `pane` and `input`.".to_string()
+                );
+            }
+            // Pane-call guard (defense in depth): `with_own_pane_id` strips
+            // the tool from every pane loop, so this arm is unreachable from
+            // a pane — but if a pane ever reaches it anyway (a re-added
+            // tool, a stale harness), refuse BEFORE the registry is
+            // touched: a pane must never queue work into the pane set.
+            // NO pop here — the arm already popped this call at its top,
+            // and every error path after that point pops nothing.
+            if self.panes_own_id.is_some() {
+                return Err(
+                    "`agents_call` is not available to a pane: pane agents execute their \
+                     delegated task and report back — the coordinating agent owns the panes."
+                        .to_string(),
                 );
             }
             // Self-call guard (deadlock): a MANAGER loop runs INSIDE its own
