@@ -2120,3 +2120,137 @@ async fn the_pane_watchdog_covers_the_parked_split() {
         "a parked pane's dead turn recovers too"
     );
 }
+
+/// Issue 6 — rebooting with a cosh pane in the split restores its chat:
+/// 1. the manager turn's terminal Done carries the pane's OWN cosh session
+///    id, so the persisted entry promotes to `Bound` (before the fix every
+///    manager Done carried `session: None` and the binding never reached
+///    disk);
+/// 2. a reboot rebuilds the pane `Bound` from that metadata and the
+///    cold-restore replay loads the session straight from the STORE (the
+///    manager pane is not an ACP client — no `session/load` round-trip):
+///    the pane's timeline refills with the conversation.
+#[tokio::test]
+async fn a_rebooted_cosh_pane_replays_its_session_from_the_store() {
+    use crate::types::{AgentPaneRef, Message, MessageRole, Part, TextPart};
+    use cosh::harness::HarnessEvent;
+
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    let session_id = crate::session_store::generate_session_id();
+    app.state
+        .add_empty_session(session_id.clone(), "cosh pane restore".into(), 0);
+    app.state.current_session_id = Some(session_id);
+    app.open_agents_split(vec![crate::ui::agents_picker::AgentPick {
+        name: "cosh".into(),
+        instances: 1,
+    }]);
+
+    // The manager pane's cosh session exists in the store with a real
+    // conversation (as `persist_manager_session` leaves it after a turn).
+    let manager_session_id = "mgr-sess-issue6";
+    app.session_store.save_session(&crate::types::Session {
+        id: manager_session_id.into(),
+        title: "agents manager".into(),
+        messages: vec![
+            Message {
+                id: "m0".into(),
+                role: MessageRole::User,
+                parts: vec![Part::Text(TextPart {
+                    text: "plan the work".into(),
+                    synthetic: false,
+                })],
+                created_at: 0,
+                agent: None,
+                model: None,
+            },
+            Message {
+                id: "m1".into(),
+                role: MessageRole::Assistant,
+                parts: vec![Part::Text(TextPart {
+                    text: "the plan".into(),
+                    synthetic: false,
+                })],
+                created_at: 0,
+                agent: None,
+                model: None,
+            },
+        ],
+        created_at: 0,
+        title_generated: true,
+        provider: None,
+        model: None,
+        reasoning: None,
+        agents_panes: None,
+        agents_mode_open: false,
+        ctx_ids: std::collections::HashMap::new(),
+    });
+
+    // The manager turn completes: the Done now carries the pane's session.
+    app.agents_split.as_mut().unwrap().set_running(0, true);
+    app.event_tx
+        .send(HarnessEvent::AgentsPaneDone {
+            pane: 0,
+            epoch: app.agents_pane_epoch,
+            output: "the report".into(),
+            stop_reason: "end_turn".into(),
+            session: Some(manager_session_id.into()),
+        })
+        .ok();
+    app.poll_events();
+
+    assert_eq!(
+        app.state.current_session().unwrap().agents_panes.clone().unwrap()[0],
+        AgentPaneRef::Bound {
+            agent: "cosh".into(),
+            session_id: manager_session_id.into(),
+        },
+        "the manager Done must promote the cosh pane's binding (issue 6)"
+    );
+
+    // REBOOT: the process died with the app — a fresh split rebuilds from
+    // the persisted metadata (Bound seed, EMPTY timelines) and the
+    // cold-restore pass replays the bound session.
+    let persisted = app
+        .state
+        .current_session()
+        .unwrap()
+        .agents_panes
+        .clone()
+        .unwrap();
+    app.agents_split = Some(crate::routes::session::agents_split::AgentsSplitState::new(
+        persisted,
+    ));
+    app.trigger_agents_pane_replays();
+    app.poll_events();
+
+    let pane = &app.agents_split.as_ref().unwrap().panes[0];
+    assert!(!pane.rehydrating, "the store replay ends synchronously");
+    let texts: Vec<String> = pane
+        .activity
+        .timeline
+        .iter()
+        .filter_map(|e| match e {
+            crate::routes::session::right_panel::types::SubagentTimelineEntry::Message { text }
+            | crate::routes::session::right_panel::types::SubagentTimelineEntry::UserMessage {
+                text,
+            } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        texts.iter().any(|t| t.contains("plan the work")),
+        "the replayed user prompt lands in the rebooted pane: {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t.contains("the plan")),
+        "the replayed manager reply lands in the rebooted pane: {texts:?}"
+    );
+    // The binding survives the replay untouched.
+    assert_eq!(
+        app.state.current_session().unwrap().agents_panes.clone().unwrap()[0].session_id(),
+        Some(manager_session_id),
+        "a replay never rebinds the pane's session"
+    );
+}

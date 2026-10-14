@@ -684,15 +684,22 @@ fn run_manager_turn(
                 epoch,
                 output: error,
                 stop_reason: "error".to_string(),
-                session: None,
+                // The manager session was already minted and its shell
+                // persisted by the pre-flight — the binding must reach the
+                // metadata even on a failed first turn, or a reboot would
+                // rebuild the pane UNBOUND (issue 6).
+                session: Some(session_id),
             });
             return;
         }
     };
     let disabled: HashSet<String> = manager_disabled_tools(&HashSet::new());
     // The panic path (outside the closure) still needs a sender: the
-    // original moves into the closure below.
+    // original moves into the closure below. The session id is cloned for
+    // the same reason — the panic Done must carry the binding too (issue 6:
+    // a panicked FIRST turn must still leave the pane bound on disk).
     let panic_tx = event_tx.clone();
+    let panic_session = session_id.clone();
 
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let rt = match tokio::runtime::Builder::new_current_thread()
@@ -706,7 +713,9 @@ fn run_manager_turn(
                     epoch,
                     output: format!("manager runtime: {e}"),
                     stop_reason: "error".to_string(),
-                    session: None,
+                    // Same as the connector failure above: the session
+                    // shell exists, the binding must persist (issue 6).
+                    session: Some(session_id),
                 });
                 return;
             }
@@ -824,10 +833,14 @@ fn run_manager_turn(
                 epoch,
                 output,
                 stop_reason,
-                // The cosh pane's session binding is NOT an ACP session —
-                // its own cosh session id lives on the pane (`pane
-                // .session_id`) and is bound at creation, never here.
-                session: None,
+                // The cosh pane's session id IS the bound session: carried
+                // here so the Done handler seeds `pane.session_id` AND
+                // promotes the persisted pane ref to `Bound { agent: cosh,
+                // session_id }` — without it the binding never reached
+                // disk and a reboot rebuilt the pane UNBOUND (empty chat,
+                // issue 6), even though the manager session itself was
+                // fully persisted in the store.
+                session: Some(session_id),
             });
         });
     }));
@@ -840,7 +853,7 @@ fn run_manager_turn(
             epoch,
             output: "the manager turn panicked".to_string(),
             stop_reason: "error".to_string(),
-            session: None,
+            session: Some(panic_session),
         });
     }
 }
