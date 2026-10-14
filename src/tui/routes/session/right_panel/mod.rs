@@ -17,7 +17,8 @@ pub mod types;
 use todo::{render_todo_section, todo_section_height};
 use types::{
     PtySession, RightPanelState, SubagentActivityLine, SubagentBlockRenderer, SubagentBodyCache,
-    activity_lines, sanitize_subagent_text, subagent_visible_body, wrap_chars,
+    SubagentDiffCells, activity_lines, sanitize_subagent_text, subagent_diff_block,
+    subagent_diff_content_key, subagent_diff_rows, subagent_visible_body, wrap_chars,
 };
 
 use crate::routes::session::agents_split::subagent_input_rail;
@@ -1215,6 +1216,7 @@ fn render_subagent_section(
             &mut live_block_keys,
             rebuild_regions,
             &mut state.subagent_activity_cache,
+            &mut state.subagent_diff_cells,
             &mut state.subagent_text_regions,
         );
         // Markdown body: blit the visible slice of the previously rendered
@@ -1349,6 +1351,12 @@ fn render_subagent_section(
     state
         .subagent_activity_cache
         .retain(|key, _| live_blocks.contains(key.as_str()));
+    // The EditDiff cell cache rides the SAME live-key list (the arm keys
+    // itself `{session_id}:diff{index}` into it), so its pruning is one
+    // pass too.
+    state
+        .subagent_diff_cells
+        .retain(|key, _| live_blocks.contains(key.as_str()));
 
     highlight_section_selection(
         buf,
@@ -1397,6 +1405,9 @@ fn render_subagent_section(
 /// `live_block_keys` does the same for the block renderer map: every
 /// Message/Thought timeline index seen this frame is collected so entries
 /// whose index vanished (timeline bounded, sessions finished) are pruned.
+/// The `EditDiff` cell cache is keyed through `live_block_keys` too
+/// (`{session_id}:diff{index}`), so its entries are pruned by the SAME
+/// pass — no separate live list needed.
 #[allow(clippy::too_many_arguments)]
 fn draw_activity_lines(
     buf: &mut Buffer,
@@ -1425,6 +1436,7 @@ fn draw_activity_lines(
     live_block_keys: &mut Vec<String>,
     rebuild_regions: bool,
     block_cache: &mut HashMap<String, SubagentBlockRenderer>,
+    diff_cells: &mut HashMap<String, SubagentDiffCells>,
     regions: &mut Vec<TextRegion>,
 ) {
     let marker_style_ok = Style::default().fg(rgba_color(theme.success));
@@ -1599,6 +1611,72 @@ fn draw_activity_lines(
                     );
                     if rebuild_regions {
                         regions.push(TextRegion::one_row(r, x + 2, x + wrap_w, seg.clone()));
+                    }
+                }
+            }
+            SubagentActivityLine::EditDiff {
+                index,
+                path,
+                unified,
+            } => {
+                // The REAL unified diff of a completed file edit — the SAME
+                // `DiffRenderable` panel the chat's edit box paints, blitted
+                // from the per-line cell cache (parse + tree-sitter
+                // highlight once per change, not once per frame). The panel
+                // sits indented at x+2, under the compact `path +N −M`
+                // summary line above it. Every visible row reports a
+                // content-only region sampled from the same cells, so
+                // copy-by-selection reads the plain `+`/`-` lines.
+                let panel_w = wrap_w.saturating_sub(2);
+                let key = format!("{session_id}:diff{index}");
+                live_block_keys.push(key.clone());
+                let rows = usize::from(subagent_diff_rows(unified, panel_w));
+                let content_key = subagent_diff_content_key(path, unified);
+                let stale = diff_cells.get(&key).is_none_or(|e| {
+                    e.wrap_w != wrap_w
+                        || e.theme_key != theme_key
+                        || e.content_key != content_key
+                });
+                if stale {
+                    let cells = subagent_diff_block(unified, path, panel_w, theme);
+                    diff_cells.insert(
+                        key.clone(),
+                        SubagentDiffCells {
+                            wrap_w,
+                            theme_key,
+                            content_key,
+                            cells,
+                        },
+                    );
+                }
+                let Some(entry) = diff_cells.get(&key) else {
+                    continue;
+                };
+                for ri in 0..rows {
+                    let r = row + ri as i32;
+                    if r < scroll_y || r >= content_bottom {
+                        continue;
+                    }
+                    let dst_y = inner_y + (r - scroll_y) as u16;
+                    let base = ri * usize::from(panel_w);
+                    for dx in 0..panel_w {
+                        if let Some(dst) = buf.cell_mut((x + 2 + dx, dst_y)) {
+                            *dst = entry.cells[base + usize::from(dx)].clone();
+                        }
+                    }
+                    if rebuild_regions {
+                        let row_cells: Vec<ratatui::buffer::Cell> = (0..panel_w)
+                            .map(|dx| {
+                                entry.cells[base + usize::from(dx)].clone()
+                            })
+                            .collect();
+                        let trimmed = text_from_cell_row(&row_cells, panel_w as usize);
+                        regions.push(TextRegion::one_row(
+                            r,
+                            x + 2,
+                            x + wrap_w,
+                            trimmed,
+                        ));
                     }
                 }
             }
@@ -1998,6 +2076,89 @@ mod tests {
             short_rows <= 2,
             "stream blocks must coalesce into wide rows; {short_rows} narrow rows betray \
              per-alternation fragments: {content_rows:?}"
+        );
+    }
+
+    /// Issue 2: the right panel's subagent window paints the SAME embedded
+    /// unified diff the `/agents` pane paints (both consume the shared
+    /// `subagent_diff_block` cell grid), keyed `{session_id}:diff{index}`
+    /// in the window's diff-cell cache, and the tool row carries the REAL
+    /// tool name. Height math and paint must agree — sized by
+    /// `subagent_section_rows_for_display`, the panel's LAST row stays
+    /// visible inside the natural height.
+    #[test]
+    fn subagent_window_paints_the_embedded_edit_diff() {
+        use cosh_tools::subagent::events::SubagentEvent;
+
+        const DIFF: &str = "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,2 +1,3 @@\n fn main() {\n-    old();\n+    new();\n }";
+        let theme = test_theme();
+        let mut state = RightPanelState::new();
+        state.subagent_rebuild_interval = std::time::Duration::ZERO;
+        state.start_pty("subagent: cosh".to_string(), None);
+        state.update_subagent_activity(
+            &SubagentEvent::ToolCall {
+                id: "c1".to_string(),
+                title: "fs_edit src/main.rs".to_string(),
+                kind: cosh_tools::subagent::events::ToolKind::Edit,
+                status: ToolCallStatus::InProgress,
+                raw_input: Some(serde_json::json!({"path": "src/main.rs"})),
+                tool: Some("fs_edit".to_string()),
+            },
+            None,
+        );
+        state.update_subagent_activity(
+            &SubagentEvent::ToolCallUpdate {
+                id: "c1".to_string(),
+                status: Some(ToolCallStatus::Completed),
+                title: None,
+                raw_output: None,
+                content: cosh_tools::subagent::events::ToolOutputBlock {
+                    text: "edited".to_string(),
+                    skipped: 0,
+                    diff: Some(cosh_tools::subagent::events::ToolDiffSummary {
+                        path: "src/main.rs".to_string(),
+                        added: 1,
+                        removed: 1,
+                        unified: Some(DIFF.to_string()),
+                    }),
+                },
+            },
+            None,
+        );
+
+        let wrap_w = 40u16;
+        let rows = state.subagent_section_rows_for_display(wrap_w);
+        let natural = (BOX_OVERHEAD + i32::from(rows.iter().sum::<u16>())).max(4) as u16;
+        let mut buf = Buffer::empty(Rect::new(0, 0, wrap_w + 2, natural));
+        render_subagent_section(
+            &mut buf,
+            0,
+            0,
+            wrap_w + 2,
+            natural,
+            &mut state,
+            &theme,
+            false,
+        );
+        let all: String = (0..natural)
+            .map(|y| row_text(&buf, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        // The REAL tool name and the diff panel (hunk header + the code
+        // lines with their line-number gutter).
+        assert!(all.contains("fs_edit src/main.rs"), "real tool name: {all:?}");
+        assert!(
+            all.contains("@@ -1,2 +1,3 @@"),
+            "hunk header visible: {all:?}"
+        );
+        assert!(all.contains("2 +     new();"), "added line visible: {all:?}");
+        assert!(all.contains("2 -     old();"), "removed line visible: {all:?}");
+        // The window's own diff-cell cache holds the entry, keyed by the
+        // session id and the tool call's timeline index.
+        assert!(
+            !state.subagent_diff_cells.is_empty(),
+            "the window's diff-cell cache must carry the entry: {:?}",
+            state.subagent_diff_cells.keys().collect::<Vec<_>>()
         );
     }
 
@@ -2575,6 +2736,7 @@ mod tests {
                 kind: ToolKind::Read,
                 status: ToolCallStatus::InProgress,
                 raw_input: Some(serde_json::json!({ "path": format!("src/f{i}.rs") })),
+                tool: None,
             });
             events.push(SubagentEvent::Message {
                 text: format!("passo {i} concluído. "),
@@ -2664,6 +2826,7 @@ mod tests {
                 kind: ToolKind::Read,
                 status: ToolCallStatus::InProgress,
                 raw_input: Some(serde_json::json!({ "path": format!("src/f{i}.rs") })),
+                tool: None,
             });
             events.push(SubagentEvent::ToolCallUpdate {
                 id: format!("c{i}"),
@@ -2764,6 +2927,7 @@ mod tests {
                 kind: ToolKind::Edit,
                 status: ToolCallStatus::InProgress,
                 raw_input: None,
+                tool: None,
             },
             None,
         );
@@ -2790,6 +2954,7 @@ mod tests {
         let mut live_keys = Vec::new();
         let mut live_block_keys = Vec::new();
         let mut block_cache = HashMap::new();
+        let mut diff_cells: HashMap<String, SubagentDiffCells> = HashMap::new();
         let mut regions = Vec::new();
         let mut paint = |spinners: &mut HashMap<String, HighlightSpinner>| {
             let mut buf = Buffer::empty(Rect::new(0, 0, 40, 6));
@@ -2813,6 +2978,7 @@ mod tests {
                 &mut live_block_keys,
                 false,
                 &mut block_cache,
+                &mut diff_cells,
                 &mut regions,
             );
             buf
@@ -2988,6 +3154,7 @@ mod tests {
                     raw_input: Some(serde_json::json!({
                         "path": format!("T{i}start src/f{i}.rs T{i}end")
                     })),
+                    tool: None,
                 });
                 events.push(SubagentEvent::ToolCallUpdate {
                     id: format!("t{i}"),
@@ -3163,6 +3330,7 @@ mod tests {
                         raw_input: ev["raw_input"]
                             .as_object()
                             .map(|o| serde_json::Value::Object(o.clone())),
+                        tool: None,
                     },
                     "ToolCallUpdate" => SubagentEvent::ToolCallUpdate {
                         id: ev["id"].as_str().expect("id").to_string(),
@@ -3304,6 +3472,7 @@ mod tests {
                         raw_input: ev["raw_input"]
                             .as_object()
                             .map(|o| serde_json::Value::Object(o.clone())),
+                        tool: None,
                     },
                     "ToolCallUpdate" => SubagentEvent::ToolCallUpdate {
                         id: ev["id"].as_str().expect("id").to_string(),

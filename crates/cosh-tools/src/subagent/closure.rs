@@ -98,6 +98,7 @@ mod tests {
             kind: crate::subagent::events::ToolKind::Read,
             status: crate::subagent::events::ToolCallStatus::InProgress,
             raw_input: None,
+            tool: None,
         }
     }
 

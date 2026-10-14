@@ -34,7 +34,8 @@ use crate::component::budget::{budget_bar_style, budget_block, budget_pct_style}
 use crate::component::spinner::SpinnerState;
 use crate::routes::session::right_panel::subagent_theme_key;
 use crate::routes::session::right_panel::types::{
-    activity_lines, SubagentActivity, SubagentActivityLine, SubagentBlockRenderer,
+    SubagentDiffCells, activity_lines, subagent_diff_block, subagent_diff_content_key,
+    subagent_diff_rows, SubagentActivity, SubagentActivityLine, SubagentBlockRenderer,
 };
 use crate::theme::{Theme, blend, contrast_fg, luminance, rgba_color};
 use crate::util::text_region::{TextRegion, extract_text_in_region, text_from_cell_row};
@@ -228,6 +229,12 @@ pub struct AgentsSplitState {
     /// `{pane_index}:{timeline_index}`. Lives on the split state (not the
     /// pane) so the pane model stays plain data.
     pub block_cache: HashMap<String, SubagentBlockRenderer>,
+    /// Cached styled cells of the panes' `EditDiff` activity lines — the
+    /// SAME per-line cache the right panel's window uses (`SubagentDiffCells`,
+    /// pruned by the frame's live keys). Key: `{pane_index}:diff{index}`.
+    /// Lives on the split state (not the pane) so the pane model stays
+    /// plain data.
+    pub diff_cells: HashMap<String, SubagentDiffCells>,
     /// Copy-by-selection state (the chat's drag contract, one selection for
     /// the whole split): the pane it started in, the screen-space anchor/
     /// focus, and the content rows they map to.
@@ -269,6 +276,7 @@ impl AgentsSplitState {
             focused: Some(0),
             pane_rects: Vec::new(),
             block_cache: HashMap::new(),
+            diff_cells: HashMap::new(),
             selection_pane: None,
             drag_selection: None,
             selection_anchor_content_y: 0,
@@ -798,6 +806,7 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &mut AgentsSplitState, theme:
     let AgentsSplitState {
         panes,
         block_cache,
+        diff_cells,
         pane_regions,
         ..
     } = state;
@@ -819,11 +828,16 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &mut AgentsSplitState, theme:
             Some(i) == focused,
             theme,
             block_cache,
+            diff_cells,
             &mut live_keys,
             &mut pane_regions[i],
         );
     }
     block_cache.retain(|key, _| live_keys.contains(key));
+    // The EditDiff cell cache rides the SAME live-key set (the arm keys
+    // itself `{pane_index}:diff{index}` into it), so its pruning is one
+    // pass too — the right panel's window prunes identically.
+    diff_cells.retain(|key, _| live_keys.contains(key));
     // Copy-by-selection highlight, painted LAST so it inverts the final
     // cells (the right panel paints its highlight the same way).
     highlight_selection(buf, state);
@@ -843,6 +857,7 @@ fn render_pane(
     focused: bool,
     theme: &Theme,
     block_cache: &mut HashMap<String, SubagentBlockRenderer>,
+    diff_cells: &mut HashMap<String, SubagentDiffCells>,
     live_keys: &mut HashSet<String>,
     out_regions: &mut Vec<TextRegion>,
 ) {
@@ -1038,6 +1053,7 @@ fn render_pane(
                 theme_key,
                 tint,
                 block_cache,
+                diff_cells,
                 live_keys,
                 &mut regions,
                 content_row,
@@ -1075,6 +1091,7 @@ fn draw_activity_line(
     theme_key: u64,
     tint: RGBA,
     block_cache: &mut HashMap<String, SubagentBlockRenderer>,
+    diff_cells: &mut HashMap<String, SubagentDiffCells>,
     live_keys: &mut HashSet<String>,
     regions: &mut Vec<TextRegion>,
     content_row: u16,
@@ -1120,6 +1137,69 @@ fn draw_activity_line(
                     x + wrap_w,
                     region_text,
                 ));
+            }
+        }
+        SubagentActivityLine::EditDiff {
+            index,
+            path,
+            unified,
+        } => {
+            // The REAL unified diff of a completed file edit — the SAME
+            // `DiffRenderable` panel the chat's edit box paints, blitted
+            // from the per-line cell cache (parse + tree-sitter highlight
+            // once per change, not once per frame). The panel sits
+            // indented at x+2, under the compact `path +N −M` summary
+            // line above it. Every visible row reports a content-only
+            // region sampled from the same cells, so copy-by-selection
+            // reads the plain `+`/`-` lines.
+            let panel_w = wrap_w.saturating_sub(2);
+            let key = format!("{pane_index}:diff{index}");
+            live_keys.insert(key.clone());
+            let rows = usize::from(subagent_diff_rows(unified, panel_w));
+            let content_key = subagent_diff_content_key(path, unified);
+            let stale = diff_cells.get(&key).is_none_or(|e| {
+                e.wrap_w != wrap_w || e.theme_key != theme_key || e.content_key != content_key
+            });
+            if stale {
+                let cells = subagent_diff_block(unified, path, panel_w, theme);
+                diff_cells.insert(
+                    key.clone(),
+                    SubagentDiffCells {
+                        wrap_w,
+                        theme_key,
+                        content_key,
+                        cells,
+                    },
+                );
+            }
+            let Some(entry) = diff_cells.get(&key) else {
+                return;
+            };
+            for di in 0..draw_rows {
+                let ri = skip as usize + di;
+                if ri >= rows {
+                    break;
+                }
+                let line_y = y + di as u16;
+                let base = ri * usize::from(panel_w);
+                for dx in 0..panel_w {
+                    let Some(dst) = buf.cell_mut((x + 2 + dx, line_y)) else {
+                        break;
+                    };
+                    *dst = entry.cells[base + usize::from(dx)].clone();
+                }
+                let row_cells: Vec<ratatui::buffer::Cell> = (0..panel_w)
+                    .map(|dx| entry.cells[base + usize::from(dx)].clone())
+                    .collect();
+                let trimmed = text_from_cell_row(&row_cells, panel_w as usize);
+                if !trimmed.is_empty() {
+                    regions.push(TextRegion::one_row(
+                        i32::from(content_row.saturating_add(ri as u16)),
+                        x,
+                        x + wrap_w,
+                        trimmed,
+                    ));
+                }
             }
         }
         SubagentActivityLine::Diff(rows) => {
@@ -2452,6 +2532,83 @@ mod tests {
         assert!(
             all.contains("line 39 of the stream"),
             "newest line visible: {all:?}"
+        );
+    }
+
+    /// Issue 2: an internal sub-agent's `fs_edit` must paint its REAL
+    /// unified diff inside the pane (the chat's `DiffRenderable` panel,
+    /// blitted from the shared cell cache) and label the row with the REAL
+    /// tool name — not the category short form. Rendered end-to-end
+    /// through `render` so the scroll window, the cache insert and the
+    /// blit are all exercised together.
+    #[test]
+    fn render_pane_paints_the_embedded_edit_diff_with_the_real_tool_name() {
+        const DIFF: &str = "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,2 +1,3 @@\n fn main() {\n-    old();\n+    new();\n }";
+        let theme = test_theme();
+        let mut state = AgentsSplitState::new(vec!["cosh".into()]);
+        state.set_running(0, true);
+        state.apply_event(
+            0,
+            &SubagentEvent::ToolCall {
+                id: "c1".to_string(),
+                title: "fs_edit src/main.rs".to_string(),
+                kind: cosh_tools::subagent::events::ToolKind::Edit,
+                status: ToolCallStatus::InProgress,
+                raw_input: Some(serde_json::json!({"path": "src/main.rs"})),
+                tool: Some("fs_edit".to_string()),
+            },
+        );
+        state.apply_event(
+            0,
+            &cosh_tools::subagent::events::SubagentEvent::ToolCallUpdate {
+                id: "c1".to_string(),
+                status: Some(ToolCallStatus::Completed),
+                title: None,
+                raw_output: None,
+                content: cosh_tools::subagent::events::ToolOutputBlock {
+                    text: "edited".to_string(),
+                    skipped: 0,
+                    diff: Some(cosh_tools::subagent::events::ToolDiffSummary {
+                        path: "src/main.rs".to_string(),
+                        added: 1,
+                        removed: 1,
+                        unified: Some(DIFF.to_string()),
+                    }),
+                },
+            },
+        );
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut state, &theme);
+
+        let all: String = (0..24)
+            .map(|y| {
+                (0..80)
+                    .map(|x| {
+                        buf.cell((x, y))
+                            .map(|c| c.symbol().to_string())
+                            .unwrap_or_default()
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        // The REAL tool name, not the category's short form.
+        assert!(
+            all.contains("fs_edit src/main.rs"),
+            "the tool row must carry the real tool name: {all:?}"
+        );
+        // The diff panel painted through the shared `DiffRenderable`: the
+        // `+`/`-` code lines with the hunk header and the line-number
+        // gutter (`2 +     new();` — gutter + sign + code).
+        assert!(all.contains("@@ -1,2 +1,3 @@"), "hunk header visible: {all:?}");
+        assert!(all.contains("2 +     new();"), "added line visible: {all:?}");
+        assert!(all.contains("2 -     old();"), "removed line visible: {all:?}");
+        // The panel came from the shared cell cache (inserted this frame).
+        assert!(
+            state.diff_cells.contains_key("0:diff0"),
+            "the EditDiff cell cache entry must exist: keys {:?}",
+            state.diff_cells.keys().collect::<Vec<_>>()
         );
     }
 }

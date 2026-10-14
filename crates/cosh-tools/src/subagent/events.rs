@@ -184,6 +184,12 @@ pub struct ToolDiffSummary {
     pub added: u32,
     /// Lines present in `old_text` but not in `new_text` (0 for new files).
     pub removed: u32,
+    /// The REAL unified diff of the edit (the chat's `DiffRenderable` paints
+    /// it; the summary line above stays the compact magnitude). `None` when
+    /// the source could not produce one. Serialized with a default so older
+    /// persisted envelopes (summary-only) still load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unified: Option<String>,
 }
 
 /// A typed event produced by a running sub-agent session.
@@ -239,6 +245,17 @@ pub enum SubagentEvent {
         status: ToolCallStatus,
         /// Raw input parameters, when the harness reports them.
         raw_input: Option<serde_json::Value>,
+        /// The tool's REAL name (`fs_edit`, `find_grep`, …) when the source
+        /// carries one — the internal sub-agent does; an ACP harness does
+        /// not (its protocol has only the kind + a free-form title). The
+        /// TUI labels the row with THIS name, exactly like the main chat's
+        /// compact renderer, instead of the kind's generic short form.
+        /// `#[serde(default)]`: persisted envelopes from before the field
+        /// existed still load (they render by kind, as they always did);
+        /// `skip_serializing_if` keeps `None` out of the wire form (an ACP
+        /// harness never sees a `tool: null` it does not understand).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool: Option<String>,
     },
     /// An update to a previously announced tool call.
     ToolCallUpdate {
@@ -347,6 +364,10 @@ impl SubagentEvent {
             kind: ToolKind::from_acp(call.kind),
             status: ToolCallStatus::from_acp(call.status),
             raw_input: call.raw_input,
+            // The ACP protocol carries no tool name — the free-form title is
+            // all a harness gives us. `None`: the row labels itself by kind,
+            // as it always did.
+            tool: None,
         }
     }
 
@@ -451,6 +472,12 @@ pub(crate) fn extract_content_text(content: Vec<schema::ToolCallContent>) -> Too
     }
 }
 
+/// Context lines around each hunk of the unified diff the TUI renders from
+/// an ACP diff block (`ToolDiffSummary::unified`). Three lines — the same
+/// default git uses, keeping the agent-view diffs and the chat's edit boxes
+/// visually identical.
+pub(crate) const UNIFIED_DIFF_CONTEXT: usize = 3;
+
 /// Line-count budget of [`diff_summary`]: beyond this many lines a text side
 /// is treated as unbounded and the set difference stops being meaningful —
 /// the counts degrade to the raw line-count delta instead of an O(n) scan
@@ -488,5 +515,9 @@ pub(crate) fn diff_summary(path: &str, old_text: Option<&str>, new_text: &str) -
         path: path.to_string(),
         added: u32::try_from(added).unwrap_or(u32::MAX),
         removed: u32::try_from(removed).unwrap_or(u32::MAX),
+        unified: old_text.map(|old| {
+            cosh_sdk::hashline::diff::structured_patch(old, new_text, UNIFIED_DIFF_CONTEXT)
+                .to_unified_diff(path, path)
+        }),
     }
 }

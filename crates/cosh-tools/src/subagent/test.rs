@@ -805,6 +805,7 @@ async fn run_session_maps_session_updates_into_typed_events() {
                 kind: ToolKind::Read,
                 status: ToolCallStatus::InProgress,
                 raw_input: Some(serde_json::json!({"path": "config.toml"})),
+                tool: None,
             },
             SubagentEvent::ToolCallUpdate {
                 id: "call-1".to_string(),
@@ -859,6 +860,7 @@ fn subagent_events_round_trip_through_json() {
         kind: ToolKind::Execute,
         status: ToolCallStatus::InProgress,
         raw_input: Some(serde_json::json!({"cmd": "cargo test"})),
+        tool: None,
     };
     let json = serde_json::to_value(&event).unwrap();
     assert_eq!(
@@ -896,6 +898,7 @@ fn subagent_events_round_trip_through_json() {
             kind: ToolKind::Unknown,
             status: ToolCallStatus::Unknown,
             raw_input: None,
+            tool: None,
         }
     );
 
@@ -1714,6 +1717,7 @@ async fn replay_loads_the_session_and_streams_the_history_without_prompting() {
                 kind: ToolKind::Read,
                 status: ToolCallStatus::Pending,
                 raw_input: None,
+                tool: None,
             },
             SubagentEvent::ToolCallUpdate {
                 id: "call-1".to_string(),
@@ -2523,10 +2527,11 @@ async fn capture_real_opencode_stream_multi_tool() {
                 kind,
                 status,
                 raw_input,
+                tool,
             } => serde_json::json!({
                 "kind": "ToolCall", "id": id, "title": title,
                 "tool_kind": format!("{kind:?}"), "status": format!("{status:?}"),
-                "raw_input": raw_input,
+                "raw_input": raw_input, "tool": tool,
             }),
             SubagentEvent::ToolCallUpdate {
                 id,
@@ -2656,10 +2661,11 @@ async fn capture_real_opencode_stream() {
                 kind,
                 status,
                 raw_input,
+                tool,
             } => serde_json::json!({
                 "kind": "ToolCall", "id": id, "title": title,
                 "tool_kind": format!("{kind:?}"), "status": format!("{status:?}"),
-                "raw_input": raw_input,
+                "raw_input": raw_input, "tool": tool,
             }),
             SubagentEvent::ToolCallUpdate {
                 id,

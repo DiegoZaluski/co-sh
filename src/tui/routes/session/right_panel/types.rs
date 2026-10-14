@@ -14,12 +14,15 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use cosh_tui::core::lib::rgba::RGBA;
+use cosh_tui::core::renderables::diff::{DiffRenderable, DiffViewMode};
 
 use super::RIGHT_PANEL_WIDTH;
 
 use cosh_tui::core::renderables::markdown::{MarkdownRenderable, estimate_height};
 use ratatui::buffer::{Buffer, Cell};
+use ratatui::layout::Rect;
 
+use crate::theme::Theme;
 use crate::types::{Part, Session, ToolStatus};
 use crate::util::text_region::{TextRegion, extract_text_in_region};
 
@@ -30,6 +33,14 @@ use cosh_tools::subagent::SubAgent;
 use cosh_tools::subagent::events::{
     PlanEntry, PlanEntryStatus, SubagentEvent, ToolCallStatus, ToolKind,
 };
+
+/// Heuristic over the embedded diff string: does it look like a unified
+/// diff the `DiffRenderable` can paint? Mirrors the chat's
+/// `looks_like_unified_diff` (kept separate so the panel does not depend
+/// on `tool_render`'s private helpers).
+fn looks_like_subagent_diff(output: &str) -> bool {
+    output.starts_with("--- ") || output.starts_with("diff --git ")
+}
 
 /// Rehydration limits when the panel is rebuilt from a persisted session
 /// (app restart, session switch): only the most recent bash command and the
@@ -78,6 +89,19 @@ pub(crate) enum SubagentActivityLine {
     },
     /// A file-edit diff summary: `path +N −M`, wrapped.
     Diff(Vec<String>),
+    /// The file-edit's REAL unified diff (the same string the chat's edit
+    /// box paints): the diff panel alone, indented under its tool row like
+    /// every other tool artifact (the compact `path +N −M` summary line
+    /// right above labels it). Sized by [`subagent_diff_rows`] and drawn
+    /// from [`subagent_diff_block`]'s cell grid — the shared
+    /// `DiffRenderable` wrappers both subagent surfaces use. `path` picks
+    /// the syntax language (the chat's `lang_name_from_path`); `index` is
+    /// the timeline position: the cell cache's key.
+    EditDiff {
+        index: usize,
+        path: String,
+        unified: String,
+    },
     /// A plan entry with its checkbox glyph (☐/☑/☒) on the first row.
     Plan {
         status: PlanEntryStatus,
@@ -107,7 +131,88 @@ pub(crate) enum SubagentActivityLine {
 }
 
 /// The short, lowercase tool marker shown before the title (user decision:
-/// no icons — just the tool name, small and direct).
+/// no icons — just the tool name, small and direct). A call that carries
+/// its REAL tool name (`fs_edit`, `find_grep`, …) renders that instead —
+/// the same names the main chat's compact renderer shows — so `/agents`
+/// and the panel never relabel a tool the way the category kind does.
+pub(crate) fn tool_row_name(call: &SubagentToolCall) -> &str {
+    match &call.tool {
+        Some(name) if !name.is_empty() => name.as_str(),
+        _ => tool_kind_name(call.kind),
+    }
+}
+
+/// The row budget of ONE embedded diff block at `width` columns:
+/// `DiffRenderable::painted_rows` capped at 30 — the SAME cap the chat's
+/// edit box enforces (`edit_box_rows`), so a huge file edit degrades to a
+/// truncated panel here exactly like it does in the chat. Shared by the
+/// height math and both renderers, so they can never disagree.
+pub(crate) fn subagent_diff_rows(unified: &str, width: u16) -> u16 {
+    if unified.is_empty() || width == 0 {
+        return 0;
+    }
+    let mut diff = DiffRenderable::new(Some(unified.to_string()));
+    diff.set_show_line_numbers(true);
+    if width >= 100 {
+        diff.set_view_mode(DiffViewMode::Split);
+    }
+    u16::try_from(diff.painted_rows(width).min(30)).unwrap_or(u16::MAX)
+}
+
+/// Render ONE embedded diff block into a fresh row-major cell grid
+/// (`rows * width` cells, exactly `subagent_diff_rows` rows) — the shared
+/// `DiffRenderable` configured EXACTLY like the chat's `render_edit`
+/// (line numbers, the theme's diff palette, split view at ≥100 columns,
+/// markdown-palette syntax highlighting) so the agent-view diff and the
+/// chat's edit box are the same picture. `path` feeds the same
+/// `lang_name_from_path` mapping the chat uses, so the code lines
+/// highlight with the file's language in every view. A scratch buffer +
+/// blit, because the chat path owns its own screen area while a subagent
+/// box paints inside a scrolled, clipped window; `subagent_diff_rows`
+/// sized the budget with the same config, so nothing clips.
+pub(crate) fn subagent_diff_block(
+    unified: &str,
+    path: &str,
+    width: u16,
+    theme: &Theme,
+) -> Vec<Cell> {
+    let rows = usize::from(subagent_diff_rows(unified, width));
+    let mut cells = vec![Cell::default(); rows.saturating_mul(usize::from(width))];
+    if rows == 0 {
+        return cells;
+    }
+    let area = Rect::new(0, 0, width, rows as u16);
+    let mut scratch = Buffer::empty(area);
+    let mut diff = DiffRenderable::new(Some(unified.to_string()));
+    diff.set_show_line_numbers(true);
+    diff.set_code_lang(crate::routes::session::tool_render::lang_name_from_path(path)
+        .map(str::to_string));
+    diff.set_added_bg(theme.diff_added_bg);
+    diff.set_removed_bg(theme.diff_removed_bg);
+    diff.set_context_bg(theme.diff_context_bg);
+    diff.set_added_sign_color(theme.diff_highlight_added);
+    diff.set_removed_sign_color(theme.diff_highlight_removed);
+    diff.set_hunk_header_fg(theme.diff_hunk_header);
+    diff.set_line_number_fg(theme.diff_line_number);
+    diff.set_added_line_number_bg(theme.diff_added_line_number_bg);
+    diff.set_removed_line_number_bg(theme.diff_removed_line_number_bg);
+    diff.set_syntax_colors(crate::util::markdown::syntax_colors(theme));
+    diff.set_code_default_fg(theme.text);
+    if width >= 100 {
+        diff.set_view_mode(DiffViewMode::Split);
+    }
+    use cosh_tui::core::renderable::Renderable as _;
+    diff.render_self(&mut scratch, area);
+    for y in 0..rows as u16 {
+        for x in 0..width {
+            if let Some(src) = scratch.cell((x, y)) {
+                cells[usize::from(y) * usize::from(width) + usize::from(x)] = src.clone();
+            }
+        }
+    }
+    cells
+}
+
 fn tool_kind_name(kind: ToolKind) -> &'static str {
     match kind {
         ToolKind::Read => "read",
@@ -147,6 +252,14 @@ impl SubagentActivityLine {
             | SubagentActivityLine::Diff(rows)
             | SubagentActivityLine::Plan { rows, .. } => {
                 u16::try_from(rows.len().max(1)).unwrap_or(u16::MAX)
+            }
+            SubagentActivityLine::EditDiff { unified, .. } => {
+                // The diff panel alone (the compact summary line above it
+                // is the tool row's own artifact), sized at the 2-col
+                // indented width — the SAME width every renderer paints
+                // the panel at. The shared helper keeps the height math
+                // and the renderers in lockstep.
+                subagent_diff_rows(unified, wrap_w.saturating_sub(2)).max(1)
             }
             SubagentActivityLine::Gap => 1,
             SubagentActivityLine::Message { text, .. }
@@ -222,7 +335,7 @@ pub(crate) fn activity_lines(
                 out.push(SubagentActivityLine::AgentMessage { index, text: clean });
             }
             SubagentTimelineEntry::Tool(call) => {
-                let name = tool_kind_name(call.kind);
+                let name = tool_row_name(call);
                 let detail = call.detail.clone().unwrap_or_else(|| call.title.clone());
                 // The marker/spinner occupies the leading 2 columns and the
                 // text starts at x+2 on EVERY row — wrap at the indented
@@ -237,6 +350,22 @@ pub(crate) fn activity_lines(
                         &format!("{} +{} −{}", diff.path, diff.added, diff.removed),
                         wrap_w.saturating_sub(2),
                     )));
+                    // The REAL unified diff, when the event source carried
+                    // one: an extra block painting the same panel the
+                    // chat's edit box renders (the summary line above stays
+                    // the compact magnitude — it labels the block).
+                    if let Some(unified) = diff
+                        .unified
+                        .as_deref()
+                        .filter(|d| looks_like_subagent_diff(d))
+                        && !unified.trim().is_empty()
+                    {
+                        out.push(SubagentActivityLine::EditDiff {
+                            index,
+                            path: diff.path.clone(),
+                            unified: unified.to_string(),
+                        });
+                    }
                 }
             }
             SubagentTimelineEntry::Plan { entries } => {
@@ -588,6 +717,36 @@ pub(crate) struct SubagentBodyCache {
     pub(crate) cells: Vec<Cell>,
 }
 
+/// Cached styled cells of ONE `EditDiff` activity line — the rendered diff
+/// panel (row-major, `wrap_w - 2` wide). Frames between timeline edits blit
+/// these cells instead of re-running the diff renderer (parse + tree-sitter
+/// highlight) every frame; the same pattern as the body's `SubagentBodyCache`.
+#[derive(Debug, Clone)]
+pub(crate) struct SubagentDiffCells {
+    /// Wrap width the panel was laid out at (the panel itself is `wrap_w - 2`).
+    pub(crate) wrap_w: u16,
+    /// Theme colors the cells were styled with — a live theme switch must
+    /// re-render (rendered cells carry concrete colors).
+    pub(crate) theme_key: u64,
+    /// Hash of the unified diff + path the cells were rendered from: a
+    /// `ToolCallUpdate` may REPLACE the diff payload under the same
+    /// timeline index (the "last diff wins" rule), and the cache key alone
+    /// would keep painting the superseded edit.
+    pub(crate) content_key: u64,
+    /// Row-major rendered cells, `(wrap_w - 2)` × `rows`.
+    pub(crate) cells: Vec<Cell>,
+}
+
+/// Stable content key of an EditDiff line: the unified diff and the path
+/// hashed together (the path participates because it picks the syntax
+/// language the cells were highlighted with). Any change re-renders.
+pub(crate) fn subagent_diff_content_key(path: &str, unified: &str) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(&path, &mut h);
+    std::hash::Hash::hash(&unified, &mut h);
+    std::hash::Hasher::finish(&h)
+}
+
 /// Persistent renderer of ONE live-activity block (a `Message`/`Thought`
 /// timeline entry) of a running subagent window — the per-block counterpart
 /// of the chat's streaming `MarkdownRenderable`: the renderer instance
@@ -870,6 +1029,12 @@ pub(crate) struct SubagentToolCall {
     pub(crate) title: String,
     /// Category of the tool (drives the short name marker in Phase 3b).
     pub(crate) kind: ToolKind,
+    /// The tool's REAL name (`fs_edit`, `find_grep`, …) when the event
+    /// source carries one (the internal sub-agent does; an ACP harness's
+    /// protocol has no tool name). The row labels itself with THIS — the
+    /// same names the main chat's compact renderer shows — instead of the
+    /// kind's generic short form. `None`: label by kind.
+    pub(crate) tool: Option<String>,
     /// Lifecycle status (drives the spinner/✓/✗ marker in Phase 3b).
     pub(crate) status: ToolCallStatus,
     /// Tail of the latest output text (content text, or a compact rendering
@@ -1013,11 +1178,13 @@ impl SubagentActivity {
                 kind,
                 status,
                 raw_input,
+                tool,
             } => {
                 let call = SubagentToolCall {
                     id: id.clone(),
                     title: title.clone(),
                     kind: *kind,
+                    tool: tool.clone(),
                     status: *status,
                     // The raw input is usually a JSON object of parameters;
                     // keep its compact JSON form as the initial tail (a
@@ -1039,6 +1206,13 @@ impl SubagentActivity {
                 }) {
                     existing.title = call.title;
                     existing.kind = call.kind;
+                    // A source that names its tools keeps naming them: only
+                    // a `Some` overwrites, so an envelope without names (or
+                    // a later patch that dropped the field) never erases a
+                    // known name back to the generic kind form.
+                    if call.tool.is_some() {
+                        existing.tool = call.tool;
+                    }
                     existing.status = call.status;
                     // Seed the tail from the re-announced input only when
                     // nothing accumulated yet (the first announcement may
@@ -1624,6 +1798,11 @@ pub struct RightPanelState {
     /// SAME `activity_block_height` number the row math reserves, so the
     /// blit and the layout agree by construction.
     pub(crate) subagent_activity_cache: HashMap<String, SubagentBlockRenderer>,
+    /// Cached rendered diff cells per `EditDiff` activity line, keyed
+    /// `"{session_id}:{index}"` — pruned by the same live-key pass that
+    /// retires the markdown block renderers, so a sealed/evicted line's
+    /// cells do not pin memory.
+    pub(crate) subagent_diff_cells: HashMap<String, SubagentDiffCells>,
     /// Reusable scratch buffer for blitting the visible slice of a session's
     /// markdown body: the markdown renderer lays out from content row 0, so
     /// the full body is rendered here, copied into the body cache, and only
@@ -1771,6 +1950,7 @@ impl RightPanelState {
             pty_gen: 0,
             subagent_body_cache: Vec::new(),
             subagent_activity_cache: HashMap::new(),
+            subagent_diff_cells: HashMap::new(),
             bash_buffer_cache: Vec::new(),
             bash_cache_gen: 0,
             bash_cache_w: 0,
@@ -5097,6 +5277,7 @@ mod tests {
             title: title.to_string(),
             kind: ToolKind::Read,
             status: ToolCallStatus::InProgress,
+            tool: None,
             raw_input: Some(serde_json::json!({"path": "a.txt"})),
         }
     }
@@ -5633,6 +5814,7 @@ mod tests {
                     kind: ToolKind::Read,
                     status: ToolCallStatus::InProgress,
                     raw_input: None,
+                    tool: None,
                 },
                 None,
             );
@@ -5779,6 +5961,7 @@ mod tests {
             kind: ToolKind::Read,
             status: ToolCallStatus::InProgress,
             raw_input: Some(serde_json::json!({"path": "src/main.rs"})),
+            tool: None,
         });
         activity.apply(&SubagentEvent::ToolCallUpdate {
             id: "c1".to_string(),
@@ -5792,6 +5975,7 @@ mod tests {
                     path: "src/main.rs".to_string(),
                     added: 12,
                     removed: 3,
+                    unified: None,
                 }),
             },
         });
@@ -5816,6 +6000,122 @@ mod tests {
         );
     }
 
+    /// Issue 2: the subagent's file edit must carry its REAL unified diff
+    /// (an `EditDiff` line the renderers paint through the chat's
+    /// `DiffRenderable`) and the tool row must use the REAL tool name —
+    /// the internal bridge's `fs_edit` must not degrade to `edit`, nor the
+    /// edit to a summary-only block. A summary without a unified payload
+    /// (older ACP agents) must NOT produce an empty `EditDiff` line.
+    #[test]
+    fn activity_lines_embed_the_unified_diff_and_the_real_tool_name() {
+        const DIFF: &str = "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,2 +1,3 @@\n fn main() {\n-    old();\n+    new();\n }";
+        let mut activity = SubagentActivity::default();
+        activity.apply(&SubagentEvent::ToolCall {
+            id: "c1".to_string(),
+            title: "fs_edit src/main.rs".to_string(),
+            kind: ToolKind::Edit,
+            status: ToolCallStatus::InProgress,
+            raw_input: Some(serde_json::json!({"path": "src/main.rs"})),
+            tool: Some("fs_edit".to_string()),
+        });
+        activity.apply(&SubagentEvent::ToolCallUpdate {
+            id: "c1".to_string(),
+            status: Some(ToolCallStatus::Completed),
+            title: None,
+            raw_output: None,
+            content: cosh_tools::subagent::events::ToolOutputBlock {
+                text: "edited".to_string(),
+                skipped: 0,
+                diff: Some(cosh_tools::subagent::events::ToolDiffSummary {
+                    path: "src/main.rs".to_string(),
+                    added: 1,
+                    removed: 1,
+                    unified: Some(DIFF.to_string()),
+                }),
+            },
+        });
+
+        let lines = activity_lines(&activity, 60);
+        // Tool row (real name + detail), diff summary, then the embedded
+        // unified diff.
+        assert_eq!(lines.len(), 3);
+        assert_eq!(
+            lines[0],
+            SubagentActivityLine::Tool {
+                id: "c1".to_string(),
+                rows: vec!["fs_edit src/main.rs".to_string()],
+                status: ToolCallStatus::Completed,
+            }
+        );
+        assert_eq!(
+            lines[1],
+            SubagentActivityLine::Diff(vec!["src/main.rs +1 −1".to_string()])
+        );
+        assert_eq!(
+            lines[2],
+            SubagentActivityLine::EditDiff {
+                // The EditDiff shares the TOOL CALL's timeline index (the
+                // update patched the call in place — there is no separate
+                // timeline entry), so its cache key is stable across the
+                // update stream.
+                index: 0,
+                path: "src/main.rs".to_string(),
+                unified: DIFF.to_string(),
+            }
+        );
+        // The EditDiff's row budget comes from the shared helper (marker
+        // row NOT included — the summary above it is the tool's artifact):
+        // panel rows at the indented width.
+        assert_eq!(
+            lines[2].visual_rows(60),
+            subagent_diff_rows(DIFF, 58).max(1)
+        );
+        assert!(subagent_diff_rows(DIFF, 58) >= 1);
+        // The summary-only shape (no unified payload) emits no EditDiff.
+        let mut summary_only = SubagentActivity::default();
+        summary_only.apply(&SubagentEvent::ToolCall {
+            id: "c2".to_string(),
+            title: "edit f".to_string(),
+            kind: ToolKind::Edit,
+            status: ToolCallStatus::InProgress,
+            raw_input: None,
+            tool: None,
+        });
+        summary_only.apply(&SubagentEvent::ToolCallUpdate {
+            id: "c2".to_string(),
+            status: Some(ToolCallStatus::Completed),
+            title: None,
+            raw_output: None,
+            content: cosh_tools::subagent::events::ToolOutputBlock {
+                text: String::new(),
+                skipped: 0,
+                diff: Some(cosh_tools::subagent::events::ToolDiffSummary {
+                    path: "f.rs".to_string(),
+                    added: 2,
+                    removed: 0,
+                    unified: None,
+                }),
+            },
+        });
+        assert!(!activity_lines(&summary_only, 60)
+            .iter()
+            .any(|l| matches!(l, SubagentActivityLine::EditDiff { .. })));
+    }
+
+    /// The embedded diff block is bounded by the SAME 30-row cap the chat's
+    /// edit box enforces, so a huge edit degrades identically in both
+    /// surfaces (never floods the panel's window budget).
+    #[test]
+    fn subagent_diff_rows_caps_at_the_chat_budget() {
+        let mut big = String::from("--- a/big.rs\n+++ b/big.rs\n@@ -1,200 +1,200 @@\n");
+        for i in 0..200 {
+            big.push_str(&format!("-line {i}\n+line {i} edited\n"));
+        }
+        assert_eq!(subagent_diff_rows(&big, 58), 30);
+        assert_eq!(subagent_diff_rows("", 58), 0);
+        assert_eq!(subagent_diff_rows("--- a\n", 0), 0);
+    }
+
     #[test]
     fn activity_lines_fall_back_to_the_title_without_a_detail() {
         let mut activity = SubagentActivity::default();
@@ -5825,6 +6125,7 @@ mod tests {
             kind: ToolKind::Execute,
             status: ToolCallStatus::InProgress,
             raw_input: Some(serde_json::json!({"unknown_key": 42})),
+            tool: None,
         });
         let lines = activity_lines(&activity, 60);
         assert_eq!(
@@ -5893,6 +6194,7 @@ mod tests {
             kind: ToolKind::Read,
             status: ToolCallStatus::InProgress,
             raw_input: Some(serde_json::json!({"path": "f.rs"})),
+            tool: None,
         });
         assert_eq!(activity_visual_rows(&activity, 60), 1);
     }
@@ -5942,6 +6244,7 @@ mod tests {
             kind: ToolKind::Read,
             status: ToolCallStatus::Completed,
             raw_input: Some(serde_json::json!({"path": "f.rs"})),
+            tool: None,
         });
         activity.apply(&SubagentEvent::Message {
             text: "reply".to_string(),

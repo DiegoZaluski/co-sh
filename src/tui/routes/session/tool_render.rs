@@ -155,8 +155,11 @@ fn draw_link_row(
 
 /// Map a file path to the tree-sitter language name used by [`highlight`]
 /// (and by the markdown codeblock renderer), so tool boxes share the exact
-/// same highlighting coverage as chat codeblocks.
-fn lang_name_from_path(filepath: &str) -> Option<&'static str> {
+/// same highlighting coverage as chat codeblocks. `pub(crate)`: the
+/// subagent surfaces (right panel + `/agents` panes) label their embedded
+/// diffs with the same language so every view of one edit highlights
+/// identically.
+pub(crate) fn lang_name_from_path(filepath: &str) -> Option<&'static str> {
     let ext = Path::new(filepath)
         .extension()
         .and_then(|e| e.to_str())

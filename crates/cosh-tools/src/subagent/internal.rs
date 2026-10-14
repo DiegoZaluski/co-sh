@@ -63,9 +63,10 @@ impl InternalEventBridge {
     }
 
     /// A tool call was announced by the nested loop: a `ToolCall` event with
-    /// a synthesized id, the tool-derived kind and title, and the raw input
+    /// a synthesized id, the tool-derived kind and title, the raw input
     /// (the TUI extracts the same detail keys — path, query, command — it
-    /// shows for ACP calls).
+    /// shows for ACP calls), and the tool's REAL name — the TUI labels the
+    /// row with it, exactly like the main chat's compact renderer.
     pub fn tool_call(&mut self, tool: &str, input: &Value) -> SubagentEvent {
         let id = format!("internal-{}", self.issued);
         self.issued += 1;
@@ -76,6 +77,7 @@ impl InternalEventBridge {
             kind: tool_kind(tool),
             status: ToolCallStatus::InProgress,
             raw_input: Some(input.clone()),
+            tool: Some(tool.to_string()),
         }
     }
 
@@ -228,7 +230,10 @@ fn output_tail(output: &str) -> String {
 /// One-line diff summary parsed from a serialized `fs_edit`-family result
 /// (a JSON array of per-target objects whose `diff` field is a unified
 /// diff). The LAST diff wins — one summary line per tool call, the same
-/// rule the ACP content extraction applies to multiple diff blocks.
+/// rule the ACP content extraction applies to multiple diff blocks. The
+/// result's unified diff is carried VERBATIM in `unified`, so the TUI
+/// paints the SAME box the chat's edit tool renders (the summary line
+/// stays the compact magnitude).
 ///
 /// `None` for anything that is not an edit result with a diff (bash text,
 /// grep listings, read output — those are not file modifications).
@@ -255,6 +260,7 @@ fn diff_summary_from_result(tool: String, output: &str) -> Option<ToolDiffSummar
                 path: path.to_string(),
                 added,
                 removed,
+                unified: Some(diff.to_string()),
             })
         })
         .next_back()
@@ -287,12 +293,16 @@ mod tests {
                 kind,
                 status,
                 raw_input,
+                tool,
             } => {
                 assert_eq!(id, "internal-0");
                 assert_eq!(title, "fs_read");
                 assert_eq!(kind, ToolKind::Read);
                 assert_eq!(status, ToolCallStatus::InProgress);
                 assert_eq!(raw_input, Some(serde_json::json!({"path": "src/a.rs"})));
+                // Issue 2: the internal bridge carries the tool's REAL name
+                // so the TUI labels the row like the main chat does.
+                assert_eq!(tool.as_deref(), Some("fs_read"));
             }
             other => panic!("expected ToolCall, got {other:?}"),
         }
