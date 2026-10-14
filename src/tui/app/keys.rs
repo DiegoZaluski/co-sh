@@ -142,6 +142,10 @@ impl App {
                 // would kill the main loop the user is walking away from
                 // to WATCH, not to interrupt.
                 && self.agents_split.is_none()
+                // A focused right-panel block owns Esc FIRST (issue 4):
+                // its Esc folds the block back into the list — the stop
+                // belongs to a LATER Esc, once focus is out of the block.
+                && self.state.right_panel.panel_focus.is_none()
             {
                 self.stop_signal.store(true, Ordering::Relaxed);
             }
@@ -215,8 +219,29 @@ impl App {
                 return Ok(false);
             }
 
-            if key.code == KeyCode::Esc && self.state.right_panel.panel_focus.is_some() {
+            // Issue 4: a FOCUSED right-panel block owns this Esc — fold it
+            // back into the list, release the focus, CONSUME the key. The
+            // old flow cleared the focus but let the Esc fall through, so
+            // the same keystroke reached the agent-loop stop below: one
+            // press both left the block and killed the loop. Two distinct
+            // actions share one key only across TWO presses: this Esc
+            // returns to the list, the NEXT Esc (focus already clear) runs
+            // the normal stop/cancel semantics.
+            //
+            // The fold only applies when an EXPANDED view exists (same
+            // guard as the Ctrl+Alt+L chord): with the list already
+            // showing, latching `subagent_list_mode = Some(true)` would
+            // force the FIRST future subagent into a one-row list. Either
+            // way the focus is released and the key consumed.
+            if key.code == KeyCode::Esc
+                && !self.modal_box_open()
+                && self.state.right_panel.panel_focus.is_some()
+            {
+                if self.state.right_panel.subagent_list_mode == Some(false) {
+                    self.state.right_panel.subagent_list_open();
+                }
                 self.state.right_panel.panel_focus = None;
+                return Ok(false);
             }
 
             // AltGr exclusion: Char + CTRL+ALT is the Windows-console

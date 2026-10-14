@@ -282,6 +282,93 @@ async fn shift_b_n_type_normally_without_panel_focus() {
     assert_eq!(app.state.right_panel.panel_focus, None);
 }
 
+/// Issue 4 — Esc while a right-panel block is focused ONLY folds it back
+/// into the list: the agent loop keeps running (stop signal untouched),
+/// the focus is released and the key is CONSUMED. The old flow cleared
+/// the focus but let the same Esc reach the loop-stop path — one press
+/// both left the block and killed the loop.
+#[tokio::test]
+async fn esc_on_a_focused_panel_block_folds_back_without_stopping_the_loop() {
+    use crate::routes::session::right_panel::types::{PanelFocus, RightPanelState};
+
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    let mut panel = RightPanelState::new();
+    for agent in ["kilo", "opencode"] {
+        panel.start_pty(format!("subagent: {agent}"), None);
+        panel.complete_last_pty(format!("{agent} report\n"));
+    }
+    // An EXPANDED subagent block is focused (the two-session default is
+    // list mode — force the expanded single-window view first).
+    panel.subagent_list_mode = Some(false);
+    panel.panel_focus = Some(PanelFocus::Agent("kilo".to_string()));
+    app.state.right_panel = panel;
+    // The agent loop is mid-turn.
+    app.state.status = crate::types::SessionStatus::Working;
+
+    app.process_key_event(mod_key(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+
+    assert_eq!(
+        app.state.right_panel.panel_focus, None,
+        "the Esc released the block focus"
+    );
+    assert_eq!(
+        app.state.right_panel.subagent_list_mode,
+        Some(true),
+        "the expanded block folded back into the list"
+    );
+    assert!(
+        !app.stop_signal.load(std::sync::atomic::Ordering::Relaxed),
+        "the loop must keep running — issue 4"
+    );
+    assert_eq!(
+        app.state.status,
+        crate::types::SessionStatus::Working,
+        "the loop is untouched by the fold-back Esc"
+    );
+}
+
+/// Issue 4 — the NEXT Esc (focus already released by the fold-back) runs
+/// the normal stop semantics: with the agent loop still Working and no
+/// modal box open, it interrupts the loop.
+#[tokio::test]
+async fn esc_after_the_fold_back_stops_the_loop_normally() {
+    use crate::routes::session::right_panel::types::{PanelFocus, RightPanelState};
+
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    let mut panel = RightPanelState::new();
+    for agent in ["kilo", "opencode"] {
+        panel.start_pty(format!("subagent: {agent}"), None);
+        panel.complete_last_pty(format!("{agent} report\n"));
+    }
+    panel.subagent_list_mode = Some(false);
+    panel.panel_focus = Some(PanelFocus::Agent("kilo".to_string()));
+    app.state.right_panel = panel;
+    app.state.status = crate::types::SessionStatus::Working;
+
+    // First Esc: fold back, loop keeps running.
+    app.process_key_event(mod_key(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+    assert!(!app.stop_signal.load(std::sync::atomic::Ordering::Relaxed));
+    assert_eq!(app.state.right_panel.panel_focus, None);
+
+    // Second Esc: focus is out of the block — the normal stop.
+    app.process_key_event(mod_key(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+    assert!(
+        app.stop_signal.load(std::sync::atomic::Ordering::Relaxed),
+        "the SECOND Esc (focus clear) must interrupt the loop"
+    );
+}
+
 /// Ctrl+P toggles the right panel: hidden even with content and a wide
 /// terminal, shown again on a second press, and a panel slot that held
 /// keyboard focus is released when the panel is hidden.
