@@ -2136,7 +2136,7 @@ async fn the_pane_watchdog_covers_the_parked_split() {
 ///    the pane's timeline refills with the conversation.
 #[tokio::test]
 async fn a_rebooted_cosh_pane_replays_its_session_from_the_store() {
-    use crate::types::{AgentPaneRef, Message, MessageRole, Part, TextPart};
+    use crate::types::{AgentPaneRef, Message, MessageRole, Part, ReasoningPart, TextPart};
     use cosh::harness::HarnessEvent;
 
     let _guard = HOME_LOCK.lock();
@@ -2172,10 +2172,18 @@ async fn a_rebooted_cosh_pane_replays_its_session_from_the_store() {
             Message {
                 id: "m1".into(),
                 role: MessageRole::Assistant,
-                parts: vec![Part::Text(TextPart {
-                    text: "the plan".into(),
-                    synthetic: false,
-                })],
+                // Reasoning precedes the text, exactly as
+                // `persist_manager_session` writes a reasoning-carrying turn.
+                parts: vec![
+                    Part::Reasoning(ReasoningPart {
+                        text: "thinking about the plan".into(),
+                        collapsed: true,
+                    }),
+                    Part::Text(TextPart {
+                        text: "the plan".into(),
+                        synthetic: false,
+                    }),
+                ],
                 created_at: 0,
                 agent: None,
                 model: None,
@@ -2251,6 +2259,40 @@ async fn a_rebooted_cosh_pane_replays_its_session_from_the_store() {
         texts.iter().any(|t| t.contains("the plan")),
         "the replayed manager reply lands in the rebooted pane: {texts:?}"
     );
+    // The persisted REASONING replays as a Thought entry (dimmed, like the
+    // live pane's thinking blocks), BEFORE the message it preceded — a
+    // rebooted pane must not lose the model's thinking.
+    let thoughts: Vec<String> = pane
+        .activity
+        .timeline
+        .iter()
+        .filter_map(|e| match e {
+            crate::routes::session::right_panel::types::SubagentTimelineEntry::Thought { text } => {
+                Some(text.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        thoughts
+            .iter()
+            .any(|t| t.contains("thinking about the plan")),
+        "the replayed reasoning lands as a Thought in the rebooted pane: {thoughts:?}"
+    );
+    // Arrival order: the reasoning precedes the message it belongs to.
+    let plan_msg = pane.activity.timeline.iter().position(|e| {
+        matches!(e, crate::routes::session::right_panel::types::SubagentTimelineEntry::Message { text } if text.contains("the plan"))
+    });
+    let thought = pane.activity.timeline.iter().position(|e| {
+        matches!(e, crate::routes::session::right_panel::types::SubagentTimelineEntry::Thought { text } if text.contains("thinking about the plan"))
+    });
+    match (thought, plan_msg) {
+        (Some(t), Some(m)) => assert!(
+            t < m,
+            "reasoning replays BEFORE its message, mirroring the live arrival order"
+        ),
+        _ => unreachable!("both entries were asserted present above"),
+    }
     // The binding survives the replay untouched.
     assert_eq!(
         app.state.current_session().unwrap().agents_panes.clone().unwrap()[0].session_id(),

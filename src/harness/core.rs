@@ -640,6 +640,12 @@ pub struct Harness {
     pending_thinking_blocks: Vec<ClaudeThinkingBlock>,
     /// To stop the agent loop.
     pub(crate) stop: bool,
+    /// Reasoning deltas accumulated for the CURRENT stream attempt. Cleared
+    /// at every stream start and by a mid-stream reset, and recorded with the
+    /// attempt's context item (`add_assistant_with_reasoning`) so a restored
+    /// session rehydrates the thinking blocks. DISPLAY-ONLY payload — see
+    /// `ContextItem::Assistant::reasoning`.
+    attempt_reasoning: String,
     tool_issuer: VecDeque<ToolCallData>,
     /// Routing identity of the call currently being dispatched: set at the
     /// top of [`Self::dispatch_next`] (the SAME per-call ref the
@@ -795,6 +801,13 @@ pub struct Harness {
     pub(crate) mock_map_delay_queue: VecDeque<u64>,
     #[cfg(test)]
     pub(crate) mock_stream_queue: VecDeque<Result<Vec<String>, String>>,
+    /// Test-only queue of mock REASONING chunks, consumed one queue entry per
+    /// mock stream (parallel to `mock_stream_queue`): each entry's strings are
+    /// emitted as `HarnessEvent::Reasoning` deltas and accumulated on
+    /// `attempt_reasoning` exactly like the real stream path, so tests can
+    /// drive the reasoning-persistence contract end to end.
+    #[cfg(test)]
+    pub(crate) mock_reasoning_queue: VecDeque<Vec<String>>,
     /// Test-only per-token pause (ms) applied by the mock stream so tests
     /// can interleave with it — e.g. set the stop signal mid-stream and
     /// assert the loop stops instead of completing the turn.
@@ -862,6 +875,9 @@ impl Harness {
             harness_tools: default_harness_tools(),
             cosh_tools: Some(cosh_tools),
             pending_images: Vec::new(),
+            attempt_reasoning: String::new(),
+            #[cfg(test)]
+            mock_reasoning_queue: VecDeque::new(),
             mode: Mode::Build,
             instructions: None,
             stop_signal: None,
@@ -2998,12 +3014,26 @@ impl Harness {
         mut on_event: impl FnMut(StreamEvent),
     ) -> Result<String, String> {
         // Reset the truncation signal and the thinking-block stash for this
-        // stream before anything else.
+        // stream before anything else. The reasoning accumulator belongs to
+        // the CURRENT attempt: a reset (or a fresh stream) must not leak the
+        // previous attempt's thinking into this one's context item.
         self.last_finish_reason = None;
         self.pending_thinking_blocks.clear();
+        self.attempt_reasoning.clear();
 
         #[cfg(test)]
         if let Some(response) = self.mock_stream_queue.pop_front() {
+            // Mock reasoning chunks ride the SAME accumulation + event path
+            // as the real stream: emitted as `HarnessEvent::Reasoning`
+            // deltas BEFORE the text tokens and accumulated on
+            // `attempt_reasoning`, so tests drive the reasoning-persistence
+            // contract end to end without a real provider.
+            for chunk in self.mock_reasoning_queue.pop_front().unwrap_or_default() {
+                self.attempt_reasoning.push_str(&chunk);
+                if let Some(ref rtx) = self.reasoning_tx {
+                    let _ = rtx.send(super::events::HarnessEvent::Reasoning { text: chunk });
+                }
+            }
             match response {
                 Ok(tokens) => {
                     let mut extractor = self.build_extractor();
@@ -3012,6 +3042,19 @@ impl Harness {
                     if self.mock_stream_resets.pop_front() == Some(true) {
                         self.handle_mid_stream_reset(&mut extractor);
                         on_event(StreamEvent::Reset);
+                        // The RETRIED segment streams its own reasoning: emit
+                        // the next queue entry AFTER the marker, riding the
+                        // same accumulation + event path — so a test can pin
+                        // that the reset discarded the failed attempt's
+                        // thinking while the retry's survives.
+                        for chunk in self.mock_reasoning_queue.pop_front().unwrap_or_default() {
+                            self.attempt_reasoning.push_str(&chunk);
+                            if let Some(ref rtx) = self.reasoning_tx {
+                                let _ = rtx.send(super::events::HarnessEvent::Reasoning {
+                                    text: chunk,
+                                });
+                            }
+                        }
                     }
                     for token in &tokens {
                         // Mid-stream stop: an interrupted mock turn must
@@ -3177,13 +3220,19 @@ impl Harness {
             self.dispatch_chunk(token, chunk.tool_call(), &mut extractor, &mut on_event);
             // Stream reasoning/thinking deltas to the TUI so the user sees the
             // model "think" while it works (never echoed back to the model).
+            // The same deltas accumulate on `attempt_reasoning` so the loop
+            // can record them with the response's context item (DISPLAY-ONLY
+            // payload — the model never receives it back). Accumulated even
+            // when no reasoning channel is wired, so a harness without a TUI
+            // listener still persists the thinking.
             let reasoning = chunk.reasoning();
-            if !reasoning.is_empty()
-                && let Some(ref rtx) = self.reasoning_tx
-            {
-                let _ = rtx.send(super::events::HarnessEvent::Reasoning {
-                    text: reasoning.to_string(),
-                });
+            if !reasoning.is_empty() {
+                self.attempt_reasoning.push_str(reasoning);
+                if let Some(ref rtx) = self.reasoning_tx {
+                    let _ = rtx.send(super::events::HarnessEvent::Reasoning {
+                        text: reasoning.to_string(),
+                    });
+                }
             }
             // Stash Claude thinking blocks (emitted at turn end when the turn
             // ended with a tool call) so `push_tool_history` can replay them
@@ -3277,6 +3326,10 @@ impl Harness {
         self.pending_thinking_blocks.clear();
         self.tool_issuer.clear();
         self.last_finish_reason = None;
+        // The retried attempt restarts clean: the discarded partial content
+        // takes its reasoning with it (the TUI drops the streaming message's
+        // reasoning part on the same reset).
+        self.attempt_reasoning.clear();
     }
 
     /// Route a tool call the provider delivered NATIVELY (structured
@@ -3443,13 +3496,19 @@ impl Harness {
             self.dispatch_chunk(token, chunk.tool_call(), &mut extractor, &mut on_event);
             // Stream reasoning/thinking deltas to the TUI so the user sees the
             // model "think" while it works (never echoed back to the model).
+            // The same deltas accumulate on `attempt_reasoning` so the loop
+            // can record them with the response's context item (DISPLAY-ONLY
+            // payload — the model never receives it back). Accumulated even
+            // when no reasoning channel is wired, so a harness without a TUI
+            // listener still persists the thinking.
             let reasoning = chunk.reasoning();
-            if !reasoning.is_empty()
-                && let Some(ref rtx) = self.reasoning_tx
-            {
-                let _ = rtx.send(super::events::HarnessEvent::Reasoning {
-                    text: reasoning.to_string(),
-                });
+            if !reasoning.is_empty() {
+                self.attempt_reasoning.push_str(reasoning);
+                if let Some(ref rtx) = self.reasoning_tx {
+                    let _ = rtx.send(super::events::HarnessEvent::Reasoning {
+                        text: reasoning.to_string(),
+                    });
+                }
             }
         }
 
@@ -4275,8 +4334,15 @@ impl Harness {
                     // non-closable: a truncated turn is not a final answer
                     // and must never be promoted to a Closure.
                     if !assistant_response.is_empty() {
-                        self.context_manager
-                            .add_assistant(&assistant_response, false);
+                        // Same DISPLAY-ONLY reasoning contract as the normal
+                        // record site: the user watched this thinking render
+                        // before the stop — it must survive a reboot too.
+                        let reasoning = std::mem::take(&mut self.attempt_reasoning);
+                        self.context_manager.add_assistant_with_reasoning(
+                            &assistant_response,
+                            false,
+                            Some(&reasoning),
+                        );
                     }
                     // The stop can land mid-stream or during connect; the
                     // `is_empty()` guard above covers the no-output case.
@@ -4427,8 +4493,16 @@ impl Harness {
             // pure text is closable.
             let had_tools = self.has_pending_tools();
             if !assistant_response.is_empty() {
-                self.context_manager
-                    .add_assistant(&assistant_response, !had_tools);
+                // The attempt's reasoning rides the item (DISPLAY-ONLY — see
+                // `ContextItem::Assistant::reasoning`); `take` because the
+                // accumulator is cleared per attempt and the next stream
+                // would otherwise leak this turn's thinking into the next.
+                let reasoning = std::mem::take(&mut self.attempt_reasoning);
+                self.context_manager.add_assistant_with_reasoning(
+                    &assistant_response,
+                    !had_tools,
+                    Some(&reasoning),
+                );
             }
 
             // Record extraction failures in the correction memory so the model
@@ -6278,6 +6352,7 @@ impl Harness {
             harness_tools: default_harness_tools(),
             cosh_tools: None,
             pending_images: Vec::new(),
+            attempt_reasoning: String::new(),
             mode: Mode::Build,
             instructions: None,
             stop_signal: None,
@@ -6329,6 +6404,7 @@ impl Harness {
             mock_chat_queue: VecDeque::new(),
             mock_map_delay_queue: VecDeque::new(),
             mock_stream_queue: VecDeque::new(),
+            mock_reasoning_queue: VecDeque::new(),
             mock_stream_delay_ms: 0,
             mock_native_stream_queue: VecDeque::new(),
             #[cfg(test)]
@@ -6461,6 +6537,22 @@ impl Harness {
     #[cfg(test)]
     pub(crate) fn with_mock_stream_delay_ms(mut self, ms: u64) -> Self {
         self.mock_stream_delay_ms = ms;
+        self
+    }
+
+    /// Queue mock REASONING chunks for the NEXT stream (parallel to
+    /// [`Self::with_mock_streams`]): one entry per mock stream, popped in
+    /// order. Each entry's strings ride the SAME accumulation +
+    /// `HarnessEvent::Reasoning` path the real stream uses, BEFORE that
+    /// stream's text tokens — so a test can drive the full
+    /// reasoning-persistence contract (capture → context item → session
+    /// replay) end to end without a real provider.
+    #[cfg(test)]
+    pub(crate) fn with_mock_reasonings(mut self, chunks: Vec<Vec<&str>>) -> Self {
+        for entry in chunks {
+            self.mock_reasoning_queue
+                .push_back(entry.into_iter().map(|s| s.to_string()).collect());
+        }
         self
     }
 

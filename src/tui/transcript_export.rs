@@ -175,11 +175,13 @@ mod tests {
                     id: 2,
                     original: "hidden answer".into(),
                     closable: true,
+                    reasoning: None,
                 },
                 ContextItem::Assistant {
                     id: 3,
                     original: "visible answer".into(),
                     closable: true,
+                    reasoning: None,
                 },
             ])
         };

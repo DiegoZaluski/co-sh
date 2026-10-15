@@ -2237,3 +2237,109 @@ async fn checkup_veto_is_bounded_by_max_iterations() {
         "the MAX_ITERATIONS cap must bound the veto, events={events:?}"
     );
 }
+
+// ── Reasoning persistence ──────────────────────────────────────────────────
+//
+// Reasoning deltas stream through `HarnessEvent::Reasoning` for the live
+// timeline, but they must ALSO be recorded on the context item so a
+// session restore rehydrates them. The mock reasoning queue drives the
+// SAME accumulation path the real stream uses.
+
+#[tokio::test]
+async fn run_agent_loop_records_the_attempt_reasoning_on_the_context_item() {
+    let mut h = Harness::new_test()
+        .with_mock_reasonings(vec![vec!["thinking hard ", "about the request"]])
+        .with_mock_stream(Ok(vec!["Hello", " world"]));
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stop_signal = Arc::new(AtomicBool::new(false));
+
+    h.run_agent_loop("hi", tx, answer_rx, perm_rx, stop_signal)
+        .await;
+
+    // The live reasoning deltas still stream (the pane's thought bubble).
+    while let Ok(event) = rx.try_recv() {
+        if matches!(event, HarnessEvent::Done { .. }) {
+            break;
+        }
+    }
+    let items: Vec<ContextItem> = h.context_manager.items_snapshot();
+    match &items[1] {
+        ContextItem::Closure {
+            content, reasoning, ..
+        } => {
+            assert_eq!(content, "Hello world");
+            assert_eq!(
+                reasoning.as_deref(),
+                Some("thinking hard about the request"),
+                "the loop must record the attempt's reasoning, and close_loop must \
+                 carry it into the promoted Closure"
+            );
+        }
+        _ => panic!("expected a closure item at index 1: {items:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_reasoning_less_response_records_no_reasoning() {
+    let mut h = Harness::new_test().with_mock_stream(Ok(vec!["plain", " answer"]));
+
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stop_signal = Arc::new(AtomicBool::new(false));
+
+    h.run_agent_loop("hi", tx, answer_rx, perm_rx, stop_signal)
+        .await;
+
+    let items: Vec<ContextItem> = h.context_manager.items_snapshot();
+    match &items[1] {
+        ContextItem::Closure { reasoning, .. } => {
+            assert!(
+                reasoning.is_none(),
+                "no reasoning queue entry → a None (absent) reasoning"
+            );
+        }
+        _ => panic!("expected a closure item at index 1: {items:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_mid_stream_reset_discards_the_failed_attempts_reasoning() {
+    // A mid-stream retry discards the failed attempt's partial message —
+    // its reasoning goes WITH it (the TUI drops the streaming message's
+    // reasoning on the same reset). The retried tokens' reasoning is the
+    // only one that may reach the context item. The mock fires the reset
+    // BEFORE its own tokens (mirroring the SDK: failure → marker → retry
+    // tokens within one stream), so the reasoning queued for THIS stream is
+    // accumulated, then cleared by the marker, then re-accumulated by the
+    // second queue entry for the retried tokens.
+    let mut h = Harness::new_test()
+        .with_mock_reasonings(vec![vec!["thinking-a "], vec!["thinking-b "]])
+        .with_mock_stream_reset()
+        .with_mock_stream(Ok(vec!["good"]));
+
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stop_signal = Arc::new(AtomicBool::new(false));
+
+    h.run_agent_loop("hi", tx, answer_rx, perm_rx, stop_signal)
+        .await;
+
+    let items: Vec<ContextItem> = h.context_manager.items_snapshot();
+    match &items[1] {
+        ContextItem::Closure { content, reasoning, .. } => {
+            assert_eq!(content, "good");
+            assert_eq!(
+                reasoning.as_deref(),
+                Some("thinking-b "),
+                "the reset must have discarded thinking-a (the failed attempt's \
+                 reasoning): only the retried attempt's thinking survives: {reasoning:?}"
+            );
+        }
+        _ => panic!("expected a closure item at index 1: {items:?}"),
+    }
+}

@@ -1548,3 +1548,153 @@ fn turn_user_thread_starts_after_the_last_cycle_boundary() {
     mgr.add_user("post-compaction request");
     assert_eq!(mgr.turn_user_thread(), vec!["post-compaction request"]);
 }
+
+// ── Reasoning persistence (DISPLAY-ONLY, WRITE-ONCE) ──────────────────────
+
+#[test]
+fn assistant_reasoning_survives_the_save_restore_roundtrip() {
+    let mut cm = cm(10_000);
+    cm.add_user("why is the sky blue");
+    cm.add_assistant_with_reasoning(
+        "Because Rayleigh scattering.",
+        true,
+        Some("The user asks a physics question. Scatter short wavelengths."),
+    );
+
+    // The captured reasoning rides the Assistant draft before promotion.
+    let items_before = cm.items_snapshot();
+    match &items_before[1] {
+        ContextItem::Assistant { reasoning, .. } => {
+            assert_eq!(
+                reasoning.as_deref(),
+                Some("The user asks a physics question. Scatter short wavelengths."),
+                "the captured reasoning must ride the Assistant item"
+            );
+        }
+        _ => panic!("expected an assistant draft at index 1: {items_before:?}"),
+    }
+
+    // The loop closes (promoting the draft in place) and a FOLLOWING turn
+    // runs — exactly the shape `run_agent_loop` produces.
+    cm.close_loop();
+    cm.add_user("and sunsets?");
+    cm.add_assistant("Longer path, red light survives.", false);
+
+    let state = cm.save_state();
+    let mut restored = ContextManager::new(10_000);
+    restored.restore_state(&state);
+
+    let items = restored.items_snapshot();
+    match &items[1] {
+        ContextItem::Closure { reasoning, .. } => {
+            assert_eq!(
+                reasoning.as_deref(),
+                Some("The user asks a physics question. Scatter short wavelengths."),
+                "close_loop must carry the reasoning into the promoted Closure and \
+                 restore_state must preserve it"
+            );
+        }
+        _ => panic!("unexpected item shape at index 1: {items:?}"),
+    }
+    // A reasoning-less response restores with NO reasoning.
+    match &items[3] {
+        ContextItem::Assistant { reasoning, .. } => {
+            assert!(reasoning.is_none(), "no reasoning → None");
+        }
+        _ => panic!("expected an assistant item at index 3: {items:?}"),
+    }
+}
+
+#[test]
+fn legacy_context_records_without_reasoning_still_restore() {
+    // A context persisted BEFORE the reasoning field existed serializes its
+    // Assistant/Closure items with no `reasoning` key; serde's default must
+    // admit them instead of rejecting the whole session.
+    let legacy_json = r#"[
+        {"User": {"id": 1, "original": "hi", "synthetic": false}},
+        {"Assistant": {"id": 2, "original": "hello", "closable": true}},
+        {"Closure": {"id": 3, "content": "hello"}}
+    ]"#;
+    let items: Vec<ContextItem> = serde_json::from_str(legacy_json)
+        .expect("legacy records without `reasoning` must deserialize via the default");
+    match (&items[1], &items[2]) {
+        (ContextItem::Assistant { reasoning, .. }, ContextItem::Closure { reasoning: cr, .. }) => {
+            assert!(reasoning.is_none() && cr.is_none());
+        }
+        _ => panic!("unexpected shapes: {items:?}"),
+    }
+}
+
+#[test]
+fn reasoning_less_items_serialize_without_the_reasoning_key() {
+    // The `skip_serializing_if` keeps reasoning-less items byte-identical to
+    // the pre-field JSONL: no `"reasoning": null` bloat in the append-only
+    // context deltas.
+    let item = ContextItem::Assistant {
+        id: 7,
+        original: "plain answer".into(),
+        closable: true,
+        reasoning: None,
+    };
+    let json = serde_json::to_string(&item).unwrap();
+    assert!(
+        !json.contains("reasoning"),
+        "a reasoning-less Assistant must not carry a reasoning key: {json}"
+    );
+
+    let with = ContextItem::Closure {
+        id: 8,
+        content: "done".into(),
+        reasoning: Some("thought it through".into()),
+    };
+    let json = serde_json::to_string(&with).unwrap();
+    assert!(
+        json.contains("reasoning"),
+        "a reasoning-carrying Closure must serialize the key: {json}"
+    );
+}
+
+#[test]
+fn reasoning_never_enters_the_model_payload_or_the_budget() {
+    // The DISPLAY-ONLY contract, mirrored over BOTH consumers:
+    // `build_messages` (the request payload) and `tokens()` (the compaction
+    // budget). A reasoning-carrying item must render/budget exactly like a
+    // reasoning-less one.
+    let mut with_reasoning = cm(10_000);
+    with_reasoning.add_user("prompt");
+    with_reasoning.add_assistant_with_reasoning(
+        "the answer",
+        true,
+        Some("A LOT of thinking text that must never reach the model or the budget."),
+    );
+
+    let mut without_reasoning = cm(10_000);
+    without_reasoning.add_user("prompt");
+    without_reasoning.add_assistant("the answer", true);
+
+    let msgs_with = with_reasoning.build_messages("");
+    let msgs_without = without_reasoning.build_messages("");
+    assert_eq!(msgs_with.len(), msgs_without.len());
+    assert_eq!(
+        msgs_with[1].content.as_deref(),
+        Some("the answer"),
+        "the payload text is the response only — no thinking text"
+    );
+    let rendered_with: Vec<String> = msgs_with
+        .iter()
+        .map(|m| m.content.clone().unwrap_or_default())
+        .collect();
+    assert!(
+        !rendered_with
+            .iter()
+            .any(|c| c.contains("A LOT of thinking")),
+        "reasoning must NEVER appear in the model payload: {rendered_with:?}"
+    );
+
+    // Budget parity: same token count with and without reasoning.
+    assert_eq!(
+        with_reasoning.total_tokens(),
+        without_reasoning.total_tokens(),
+        "reasoning must cost zero tokens in the compaction budget"
+    );
+}

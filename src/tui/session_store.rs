@@ -2140,6 +2140,7 @@ mod tests {
             id,
             original: text.to_string(),
             closable: true,
+            reasoning: None,
         }
     }
 
@@ -3438,6 +3439,7 @@ mod tests {
                     id: 2,
                     original: "draft".into(),
                     closable: true,
+                    reasoning: None,
                 },
             ]
             .into_iter()
@@ -3461,6 +3463,7 @@ mod tests {
         changed.items[1] = ContextItem::Closure {
             id: 2,
             content: "draft".into(),
+            reasoning: None,
         };
         changed.next_id = 9;
         changed.max_tokens = 64_000;

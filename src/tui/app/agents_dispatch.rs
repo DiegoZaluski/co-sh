@@ -575,17 +575,30 @@ impl App {
             if let Some(session) = self.session_store.load_session(&session_id) {
                 for message in &session.messages {
                     for part in &message.parts {
-                        if let crate::types::Part::Text(text) = part {
-                            let event = if matches!(message.role, crate::types::MessageRole::User) {
-                                SubagentEvent::UserMessage {
-                                    text: text.text.clone(),
-                                }
-                            } else {
-                                SubagentEvent::Message {
-                                    text: text.text.clone(),
-                                }
-                            };
-                            events.push(event);
+                        // Reasoning parts replay as Thought timeline entries
+                        // (dimmed, same as the live pane's thinking blocks);
+                        // arrival order is preserved because the persist
+                        // side wrote reasoning BEFORE the text part.
+                        match part {
+                            crate::types::Part::Text(text) => {
+                                let event =
+                                    if matches!(message.role, crate::types::MessageRole::User) {
+                                        SubagentEvent::UserMessage {
+                                            text: text.text.clone(),
+                                        }
+                                    } else {
+                                        SubagentEvent::Message {
+                                            text: text.text.clone(),
+                                        }
+                                    };
+                                events.push(event);
+                            }
+                            crate::types::Part::Reasoning(reasoning) => {
+                                events.push(SubagentEvent::Thought {
+                                    text: reasoning.text.clone(),
+                                });
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -900,24 +913,37 @@ fn run_manager_turn(
 
 /// Project a manager context snapshot into the DISPLAY messages the session
 /// store persists: user prompts (synthetic provenance kept) and assistant
-/// text/closures. Tool calls/results are structural context, not display
-/// prose — the pane's live timeline already showed them.
+/// text/closures, each carrying its DISPLAY-ONLY reasoning (`None` for user
+/// prompts and reasoning-less responses — see
+/// [`cosh::harness::context::ContextItem::Assistant::reasoning`]). Tool
+/// calls/results are structural context, not display prose — the pane's live
+/// timeline already showed them.
 fn manager_context_display(
     context: &cosh::harness::ContextManagerState,
-) -> Vec<(crate::types::MessageRole, String)> {
+) -> Vec<(crate::types::MessageRole, String, Option<String>)> {
     context
         .items
         .iter()
         .filter_map(|item| match item {
             cosh::harness::context::ContextItem::User { original, .. } => {
-                Some((crate::types::MessageRole::User, original.clone()))
+                Some((crate::types::MessageRole::User, original.clone(), None))
             }
-            cosh::harness::context::ContextItem::Assistant { original, .. } => {
-                Some((crate::types::MessageRole::Assistant, original.clone()))
-            }
-            cosh::harness::context::ContextItem::Closure { content, .. } => {
-                Some((crate::types::MessageRole::Assistant, content.clone()))
-            }
+            cosh::harness::context::ContextItem::Assistant {
+                original,
+                reasoning,
+                ..
+            } => Some((
+                crate::types::MessageRole::Assistant,
+                original.clone(),
+                reasoning.clone(),
+            )),
+            cosh::harness::context::ContextItem::Closure {
+                content, reasoning, ..
+            } => Some((
+                crate::types::MessageRole::Assistant,
+                content.clone(),
+                reasoning.clone(),
+            )),
             _ => None,
         })
         .collect()
@@ -929,7 +955,7 @@ fn manager_context_display(
 fn persist_manager_session(
     store: &crate::session_store::SessionStore,
     session_id: &str,
-    display: Vec<(crate::types::MessageRole, String)>,
+    display: Vec<(crate::types::MessageRole, String, Option<String>)>,
     context: cosh::harness::ContextManagerState,
 ) {
     let created_at = std::time::SystemTime::now()
@@ -954,16 +980,30 @@ fn persist_manager_session(
     session.messages = display
         .into_iter()
         .enumerate()
-        .map(|(i, (role, text))| crate::types::Message {
-            id: format!("msg-{i}"),
-            role,
-            parts: vec![crate::types::Part::Text(crate::types::TextPart {
+        .map(|(i, (role, text, reasoning))| {
+            // Reasoning precedes the text, mirroring the live timeline's
+            // arrival order (`push_reasoning` before the text tokens).
+            // `None` reasoning emits no part, so reasoning-less turns
+            // persist exactly as before (byte-identical messages).
+            let mut parts = Vec::new();
+            if let Some(reasoning) = reasoning.filter(|r| !r.is_empty()) {
+                parts.push(crate::types::Part::Reasoning(crate::types::ReasoningPart {
+                    text: reasoning,
+                    collapsed: true,
+                }));
+            }
+            parts.push(crate::types::Part::Text(crate::types::TextPart {
                 text,
                 synthetic: false,
-            })],
-            created_at: 0,
-            agent: None,
-            model: None,
+            }));
+            crate::types::Message {
+                id: format!("msg-{i}"),
+                role,
+                parts,
+                created_at: 0,
+                agent: None,
+                model: None,
+            }
         })
         .collect();
     store.save_session_async_with_context(&mut session, context);

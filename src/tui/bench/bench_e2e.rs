@@ -117,6 +117,7 @@ pub(crate) fn realistic_context(rounds: usize) -> cosh::harness::context::Contex
             id: next_id,
             original: format!("### Answer {r}\n\nDetailed analysis with code spans.\n"),
             closable: true,
+            reasoning: None,
         });
         next_id += 1;
         items.push(ContextItem::ToolCall {

@@ -100,6 +100,22 @@ pub enum ContextItem {
         /// a [`ContextItem::Closure`] by [`ContextManager::close_loop`]. An
         /// output that carried a tool call is structural (never closable).
         closable: bool,
+        /// The model's reasoning that preceded the text in THIS response —
+        /// captured per attempt from the harness's reasoning stream.
+        ///
+        /// STRICTLY DISPLAY-ONLY and WRITE-ONCE: set at the item's birth
+        /// (never mutated in place afterwards), read only by display
+        /// projections (the agents manager pane). It NEVER enters
+        /// `build_messages` — the model must not see its own thinking as
+        /// assistant prose — and `tokens()` must never count it (the
+        /// compaction budget must not inflate with text the model will
+        /// never receive again). `None`/absent for every provider without
+        /// a separate reasoning channel and for contexts persisted before
+        /// this field existed; the `skip_serializing_if` keeps reasoning-less
+        /// items byte-identical to the pre-field JSONL (no serialization
+        /// bloat in the append-only context deltas).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning: Option<String>,
     },
     /// A tool CALL — structural, never prose-compressed. Renders as an
     /// `assistant` message with native `tool_calls`.
@@ -145,8 +161,18 @@ pub enum ContextItem {
         images: Vec<cosh_sdk::connector::ImageBlock>,
     },
     /// The final text response of a completed agent loop. Replaces the raw
-    /// assistant text in place.
-    Closure { id: u64, content: String },
+    /// assistant text in place, carrying the draft's reasoning (the same
+    /// DISPLAY-ONLY, WRITE-ONCE payload — see
+    /// [`ContextItem::Assistant::reasoning`]).
+    Closure {
+        id: u64,
+        content: String,
+        /// The promoted draft's reasoning. `None`/absent for closures built
+        /// before the field existed (serde default restores legacy records)
+        /// and for every reasoning-less response.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning: Option<String>,
+    },
     /// A derived continuation checkpoint produced by LLM compaction. It is
     /// appended to immutable history and records the exact ranges it covers;
     /// model composition places it before the recent raw tail. A later
@@ -781,11 +807,34 @@ impl ContextManager {
     /// pure-text turn (no tool call) and may be promoted to a [`Closure`] by
     /// [`Self::close_loop`].
     pub fn add_assistant(&mut self, text: &str, closable: bool) {
+        self.add_assistant_with_reasoning(text, closable, None);
+    }
+
+    /// Like [`Self::add_assistant`], carrying the model's reasoning that
+    /// preceded the text in the SAME response. The reasoning is DISPLAY-ONLY
+    /// timeline data: it never enters `build_messages` (the model must not
+    /// see its own thinking as assistant prose) and costs zero tokens — but
+    /// it persists with the item so a restored session renders its Thought
+    /// blocks again (the same contract the main chat's `Part::Reasoning`
+    /// keeps). `None` for every reasoning-less response. WRITE-ONCE: set at
+    /// the item's birth, never mutated in place afterwards (the context
+    /// deltas serialize whole changed items — incremental appends would
+    /// re-emit the item on every save).
+    pub fn add_assistant_with_reasoning(
+        &mut self,
+        text: &str,
+        closable: bool,
+        reasoning: Option<&str>,
+    ) {
         let id = self.next_id();
         self.push_item(ContextItem::Assistant {
             id,
             original: text.to_string(),
             closable,
+            // An EMPTY reasoning is indistinguishable from "no reasoning":
+            // normalize to None so the item stays byte-identical to a
+            // reasoning-less one (no `"reasoning": ""` key in the deltas).
+            reasoning: reasoning.map(str::to_string).filter(|r| !r.is_empty()),
         });
     }
 
@@ -1100,6 +1149,7 @@ impl ContextManager {
             id,
             original,
             closable,
+            reasoning,
         }) = self.items.back()
         else {
             return;
@@ -1109,6 +1159,10 @@ impl ContextManager {
         }
         let draft_id = *id;
         let content = original.clone();
+        // Carry the draft's reasoning into the promoted Closure (DISPLAY-ONLY
+        // payload — see `ContextItem::Assistant::reasoning`). The promotion
+        // must not silently drop the thinking the item was born with.
+        let draft_reasoning = reasoning.clone();
         // Swap the draft in place for a Closure (SAME id, immediate). This is
         // a transform, not a hide: the item's identity and visibility are
         // unchanged, so the token cache is adjusted by the exact delta.
@@ -1117,6 +1171,7 @@ impl ContextManager {
         self.items[last] = ContextItem::Closure {
             id: draft_id,
             content,
+            reasoning: draft_reasoning,
         };
         let new_tokens = self.items[last].tokens(self.encoding);
         self.cached_items_tokens = self
