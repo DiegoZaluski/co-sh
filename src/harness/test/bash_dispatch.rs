@@ -191,7 +191,9 @@ async fn bash_run_pty_output_is_clean_text() {
 #[cfg(unix)]
 #[tokio::test]
 async fn bash_run_streams_lines_incrementally() {
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
+
+    use crate::harness::HarnessEvent;
 
     let tools = make_tools();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
