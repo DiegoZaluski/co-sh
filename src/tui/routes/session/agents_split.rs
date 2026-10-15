@@ -375,16 +375,18 @@ impl AgentsSplitState {
 
     /// Toggle the expanded pane: an unfocused split maximizes the FOCUSED
     /// pane (focusing it first — expansion needs a target), an already-
-    /// maximized split restores the grid. Returns the new state so the
-    /// caller can seed the snapshot probe for a newly focused pane. The
-    /// hotkeys stay consistent: `focus_hotkey` first RESTORES the grid
-    /// (jumping to another pane ends the expansion — one click/keystroke
-    /// back), then focuses.
+    /// maximized split restores the grid. Returns whether the toggle
+    /// HANDLED the key (the caller consumes it). The hotkeys stay
+    /// consistent:
+    /// `focus_hotkey` first RESTORES the grid (jumping to another pane
+    /// ends the expansion — one click/keystroke back), then focuses.
     pub fn toggle_maximized(&mut self) -> bool {
         match self.maximized {
+            // Restore: the grid returns, the key is consumed — the caller
+            // must NOT park on the same press (the walk-back is two Escs).
             Some(_) => {
                 self.maximized = None;
-                false
+                true
             }
             None => {
                 if let Some(focused) = self.focused {
@@ -394,6 +396,21 @@ impl AgentsSplitState {
                     false
                 }
             }
+        }
+    }
+
+    /// The ESC walk-back primitive: restore the grid ONLY when a pane is
+    /// expanded. `true` means the press was consumed (the caller must NOT
+    /// park — the next Esc will); `false` means the grid was already up
+    /// (nothing expanded) and the caller falls through to its own Esc
+    /// semantics — the park. Distinct from [`Self::toggle_maximized`]
+    /// because an Esc with the grid up must NEVER re-expand (a toggle
+    /// would oscillate expand/restore forever and the user could never
+    /// leave the split with Esc).
+    pub fn restore_maximized(&mut self) -> bool {
+        match self.maximized.take() {
+            Some(_) => true,
+            None => false,
         }
     }
 
@@ -3055,5 +3072,70 @@ mod tests {
             "the EditDiff cell cache entry must exist: keys {:?}",
             state.diff_cells.keys().collect::<Vec<_>>()
         );
+    }
+}
+
+#[cfg(test)]
+mod zoom_tests {
+    use super::*;
+
+    fn split() -> AgentsSplitState {
+        AgentsSplitState::new(vec!["opencode".into(), "kilo".into()])
+    }
+
+    /// The Esc walk-back contract: expand (Ctrl+O) → Esc restores the
+    /// GRID (mode stays open) → the next Esc parks (leaves to the chat).
+    /// The FIRST toggle must consume the Esc and leave the split live.
+    #[test]
+    fn esc_walks_back_grid_first_then_parks() {
+        let mut s = split();
+        s.focused = Some(1);
+        // Expand (Ctrl+O): the focused pane takes the area.
+        assert!(s.toggle_maximized(), "expansion must engage");
+        assert_eq!(s.maximized, Some(1));
+        // First Esc: `restore_maximized` consumes it and restores the grid —
+        // the caller must NOT park on this press.
+        assert!(s.restore_maximized(), "the first Esc only restores the grid");
+        assert_eq!(s.maximized, None, "grid restored");
+        // Second Esc: the grid is up, nothing to restore — `false` hands the
+        // key to the caller, whose next branch parks the split (leaves to
+        // the chat). The toggle must never be what the Esc runs: with the
+        // grid up a toggle would RE-EXPAND and the user could never leave.
+        assert!(!s.restore_maximized(), "grid up: the Esc falls through to park");
+        assert_eq!(s.maximized, None);
+        assert_eq!(s.focused, Some(1), "focus survives the walk-back");
+        // Ctrl+O is still a true toggle (expand again from the grid).
+        assert!(s.toggle_maximized());
+        assert_eq!(s.maximized, Some(1));
+        assert!(s.toggle_maximized());
+        assert_eq!(s.maximized, None);
+    }
+
+    /// A hotkey to another pane ends the expansion (grid returns, target
+    /// focused) — one gesture back to the grid.
+    #[test]
+    fn hotkey_ends_the_expansion() {
+        let mut s = split();
+        s.focused = Some(0);
+        assert!(s.toggle_maximized());
+        assert_eq!(s.maximized, Some(0));
+        assert_eq!(s.focus_hotkey('2'), Some(1));
+        assert_eq!(s.maximized, None, "grid returned");
+        assert_eq!(s.focused, Some(1));
+    }
+
+    /// The maximized layout hands the pane the full area and the others a
+    /// zero rect, index positions preserved.
+    #[test]
+    fn maximized_layout_preserves_indexes() {
+        let area = ratatui::layout::Rect::new(0, 0, 100, 30);
+        let rects = compute_layout_with_maximized(3, area, Some(1));
+        assert_eq!(rects.len(), 3);
+        assert_eq!(rects[1], area);
+        assert_eq!(rects[0].width, 0);
+        assert_eq!(rects[2].width, 0);
+        // Grid fallback for `None`.
+        let grid = compute_layout_with_maximized(3, area, None);
+        assert!(grid.iter().all(|r| r.width > 0));
     }
 }

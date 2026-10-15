@@ -1563,12 +1563,14 @@ impl App {
                     } else if self
                         .agents_split
                         .as_mut()
-                        .is_some_and(AgentsSplitState::toggle_maximized)
+                        .is_some_and(AgentsSplitState::restore_maximized)
                     {
                         // /agents split, EXPANDED: the first Esc only
                         // restores the grid (the pane falls back into the
                         // split with its turn still running) — the park is
-                        // the NEXT Esc's job.
+                        // the NEXT Esc's job. (`restore_maximized`, not the
+                        // toggle: with the grid already up an Esc must fall
+                        // through to the park, never re-expand.)
                         return Ok(false);
                     } else if self.agents_split.is_some() {
                         // /agents split ESC semantics (issue 3): Esc ONLY
@@ -1630,7 +1632,7 @@ impl App {
                         if self
                             .agents_split
                             .as_mut()
-                            .is_some_and(AgentsSplitState::toggle_maximized)
+                            .is_some_and(AgentsSplitState::restore_maximized)
                         {
                             return Ok(false);
                         }
