@@ -292,6 +292,21 @@ impl ExtractAction {
         std::mem::take(&mut self.last_failed_raw)
     }
 
+    /// True when the stream ended with a construct that proves the response
+    /// was CUT, regardless of what `finish_reason` claims:
+    /// - `depth > 0`: a `{` was opened but never closed — the tool-call JSON
+    ///   is incomplete, so no call was validated and none will dispatch;
+    /// - `pending_tool_call`: a call WAS validated but parked for delivery
+    ///   and the stream ended before the next poll could return it — it
+    ///   would be silently dropped.
+    /// Trailing text after a completed call (`deferred_tail`) is deliberately
+    /// excluded: it also occurs on healthy ends, so it cannot distinguish a
+    /// cut from a clean finish.
+    #[must_use]
+    pub fn has_unfinished_stream(&self) -> bool {
+        self.state.pending_tool_call.is_some() || self.state.depth > 0
+    }
+
     /// Render the failure warning for a rejected tool call: the configured
     /// label, the human-readable rejection reason, the truncated offending
     /// raw payload, and — for schema-shaped rejections — the expected argument

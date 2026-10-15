@@ -2343,3 +2343,274 @@ async fn a_mid_stream_reset_discards_the_failed_attempts_reasoning() {
         _ => panic!("expected a closure item at index 1: {items:?}"),
     }
 }
+
+// ── Natural-stop gate: deterministic veto layer ────────────────────────────
+//
+// The provider's `finish_reason` describes the RESPONSE, not the TASK. The
+// gate below vetoes a claimed-clean stop (`stop`/`end_turn` with no pending
+// tools) in exactly three provable shapes, each consuming one scarce nudge:
+// reasoning-only streams, empty responses, and stops with an open plan.
+// Mocks mirror the real provider wire: reasoning deltas accumulate exactly
+// like Anthropic's `thinking` / OpenAI `reasoning` deltas, and the finish
+// frames are the normalized values the SDK produces (see
+// `normalize_finish_reason` in cosh-sdk connector/output.rs).
+
+#[tokio::test]
+async fn natural_stop_gate_continues_a_reasoning_only_stream_and_promotes_the_reasoning_once() {
+    // Stream 1 mirrors the "reasoning ended, the answer never came" cut: the
+    // model streamed its thinking (Anthropic `thinking` deltas, OpenAI
+    // `reasoning` deltas) and the provider then closed the stream with a
+    // clean `stop` and ZERO answer tokens.
+    // Stream 2 is the continuation: the model answers.
+    let mut h = Harness::new_test()
+        .with_mock_reasonings(vec![vec!["step 1: read the file ", "step 2: edit it"]])
+        .with_mock_streams(vec![Ok(vec![]), Ok(vec!["The edit is ", "done"])])
+        .with_mock_finish_reason(Some("stop"));
+
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stop_signal = Arc::new(AtomicBool::new(false));
+
+    h.run_agent_loop("do the work", tx, answer_rx, perm_rx, stop_signal)
+        .await;
+
+    // The gate promoted the reasoning into the ONE-SHOT steering message.
+    assert_eq!(
+        h.promoted_reasoning_log,
+        vec!["step 1: read the file step 2: edit it"],
+        "the reasoning-only stop must promote the attempt's reasoning exactly once"
+    );
+    // The turn ends with the continuation's answer as the loop Closure.
+    let items: Vec<ContextItem> = h.context_manager.items_snapshot();
+    match &items[1] {
+        ContextItem::Closure { content, .. } => {
+            assert_eq!(content, "The edit is done");
+        }
+        _ => panic!("expected a closure item at index 1: {items:?}"),
+    }
+}
+
+#[tokio::test]
+async fn natural_stop_gate_retries_a_bare_empty_response() {
+    // Stream 1: `stop` with zero tokens AND zero reasoning — a bare cut (or a
+    // degenerate empty completion). The gate must retry, not Done.
+    // Stream 2: the real answer.
+    let mut h = Harness::new_test()
+        .with_mock_streams(vec![Ok(vec![]), Ok(vec!["now", " done"])])
+        .with_mock_finish_reason(Some("stop"));
+
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stop_signal = Arc::new(AtomicBool::new(false));
+
+    h.run_agent_loop("do the work", tx, answer_rx, perm_rx, stop_signal)
+        .await;
+
+    assert!(
+        h.promoted_reasoning_log.is_empty(),
+        "no reasoning was streamed: nothing to promote"
+    );
+    let items: Vec<ContextItem> = h.context_manager.items_snapshot();
+    match &items[1] {
+        ContextItem::Closure { content, .. } => {
+            assert_eq!(content, "now done");
+        }
+        _ => panic!("expected a closure item at index 1: {items:?}"),
+    }
+}
+
+#[tokio::test]
+async fn natural_stop_gate_continues_when_the_plan_still_has_open_tasks() {
+    // The plan has a pending task; the model nevertheless ends a clean text
+    // turn with `stop`. The gate must veto the stop with the open-plan nudge
+    // (the same rule the loop already applies to outstanding pane requests
+    // and background sub-agents), then the continuation completes.
+    // The plan cannot be completed from inside the test (no plan tool in
+    // the test harness), so every stop with the open plan consumes one
+    // nudge. Queue 4 streams: the first three stops are vetoed, the fourth
+    // exhausts the budget and the stop stands — proving BOTH that the gate
+    // vetoes stops with an open plan AND that it stays bounded.
+    let mut h = Harness::new_test()
+        .with_mock_streams(vec![
+            Ok(vec!["starting ", "work"]),
+            Ok(vec!["continuing ", "work"]),
+            Ok(vec!["still ", "working"]),
+            Ok(vec!["final ", "answer"]),
+        ])
+        .with_mock_finish_reason(Some("stop"));
+
+    use cosh_tools::plan::types::{TodoItem, TodoStatus};
+    h.context_manager.set_todo_list(cosh_tools::plan::types::TodoList {
+        items: vec![TodoItem {
+            id: "task-1".into(),
+            description: "write the report".into(),
+            status: TodoStatus::Pending,
+            depends_on: Vec::new(),
+        }],
+    });
+
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stop_signal = Arc::new(AtomicBool::new(false));
+
+    h.run_agent_loop("do the work", tx, answer_rx, perm_rx, stop_signal)
+        .await;
+
+    // The first stop was vetoed (the first stream's text cannot be the
+    // Closure — the loop continued), the nudges eventually ran out, and the
+    // turn ended with the LAST stream's text as the Closure. Each vetoed
+    // turn records its own Assistant item, so the Closure is the LAST item.
+    let items: Vec<ContextItem> = h.context_manager.items_snapshot();
+    match items.last() {
+        Some(ContextItem::Closure { content, .. }) => {
+            assert_eq!(
+                content, "final answer",
+                "the earlier stops must have been vetoed; the loop only ends after \
+                 the nudge budget with the final stream"
+            );
+        }
+        other => panic!("expected a trailing closure item, got {other:?}"),
+    }
+    assert_eq!(
+        items
+            .iter()
+            .filter(|i| matches!(i, ContextItem::Assistant { .. }))
+            .count(),
+        3,
+        "the three vetoed stops must each be recorded as ordinary assistant turns"
+    );
+}
+
+#[tokio::test]
+async fn natural_stop_gate_bounded_three_nudges_then_visible_done() {
+    // A model that INSISTS on stopping while the plan stays open must still
+    // terminate: 3 nudges, then the natural stop stands. The Done event is
+    // the same terminal event as every legitimate completion — visible, not
+    // a hang.
+    let mut h = Harness::new_test().with_mock_streams(vec![
+        Ok(vec!["stop 1"]),
+        Ok(vec!["stop 2"]),
+        Ok(vec!["stop 3"]),
+        Ok(vec!["stop 4"]),
+    ]);
+
+    use cosh_tools::plan::types::{TodoItem, TodoStatus};
+    h.context_manager.set_todo_list(cosh_tools::plan::types::TodoList {
+        items: vec![TodoItem {
+            id: "task-1".into(),
+            description: "never finished".into(),
+            status: TodoStatus::Pending,
+            depends_on: Vec::new(),
+        }],
+    });
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stop_signal = Arc::new(AtomicBool::new(false));
+    let handle = tokio::spawn(async move {
+        h.run_agent_loop("do the work", tx, answer_rx, perm_rx, stop_signal)
+            .await;
+    });
+    let events = pump_terminal_events(rx).await;
+    handle.abort();
+
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, HarnessEvent::Done { .. }))
+            .count(),
+        1,
+        "the loop must terminate visibly after the nudge budget, events={events:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_stream_cut_mid_tool_call_is_never_a_finished_turn() {
+    // Stream 1 mirrors a stream CUT mid-tool-call: the model opened the
+    // inline-JSON call `{` and the stream died before the closing `}`. The
+    // provider's finish frame says `stop` (an EOF-during-JSON stream can
+    // still close "cleanly" at the HTTP layer) — the unclosed object is the
+    // proof of the cut, so the gate must treat the turn as truncated
+    // (the `!finished` continuation arm), not as a natural stop.
+    // Stream 2: the model re-emits the complete call; it dispatches and the
+    // turn ends.
+    let mut h = Harness::new_test()
+        .with_test_tool(
+            "test_tool",
+            serde_json::json!({"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]}),
+        )
+        .with_mock_streams(vec![
+            Ok(vec![r#"{"name": "test_tool", "arguments": {"x":"#]),
+            Ok(vec![r#"{"name": "test_tool", "arguments": {"x": "v"}}"#]),
+        ])
+        .with_mock_finish_reason(Some("stop"));
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stop_signal = Arc::new(AtomicBool::new(false));
+    let handle = tokio::spawn(async move {
+        h.run_agent_loop("do the work", tx, answer_rx, perm_rx, stop_signal)
+            .await;
+    });
+    let events = pump_terminal_events(rx).await;
+    handle.abort();
+
+    // The cut call was NOT silently swallowed: the loop continued and the
+    // COMPLETE retry call dispatched (ToolCall + ToolResult present — the
+    // same events the canonical tool-loop test asserts). The terminal event
+    // follows the dispatch (Done, or the terminal error of the drained mock
+    // queue — both prove the loop kept working after the cut).
+    assert!(
+        events.iter().any(|e| matches!(e, HarnessEvent::ToolCall { .. })),
+        "the complete retry call must be extracted and dispatched, events={events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(e, HarnessEvent::ToolResult { .. })),
+        "the dispatched retry call must produce a result, events={events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            HarnessEvent::Done { .. } | HarnessEvent::Error { .. }
+        )),
+        "the turn must reach a terminal event after the retry, events={events:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_healthy_single_text_turn_still_ends_naturally() {
+    // Regression guard for the veto layer: a clean, complete answer with no
+    // plan, no reasoning cut and no empty response must still reach Done on
+    // the first turn — the gate must never turn every turn into a retry.
+    let mut h = Harness::new_test()
+        .with_mock_stream(Ok(vec!["2+2 é ", "4"]))
+        .with_mock_finish_reason(Some("stop"));
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stop_signal = Arc::new(AtomicBool::new(false));
+
+    h.run_agent_loop("what is 2+2", tx, answer_rx, perm_rx, stop_signal)
+        .await;
+
+    let events = pump_terminal_events(rx).await;
+
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, HarnessEvent::Done { .. }))
+            .count(),
+        1,
+        "exactly one Done on the first turn, events={events:?}"
+    );
+    assert!(
+        h.promoted_reasoning_log.is_empty(),
+        "a healthy turn must not consume a nudge"
+    );
+}

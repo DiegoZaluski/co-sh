@@ -715,6 +715,20 @@ impl ContextManager {
         self.todo.list()
     }
 
+    /// Whether the mirrored plan still holds pending or in-progress tasks —
+    /// the deterministic "work is not done" signal the agent loop's
+    /// natural-stop gate consults before honoring a provider stop.
+    pub(crate) fn plan_has_open_tasks(&self) -> bool {
+        self.todo.has_open_tasks()
+    }
+
+    /// Descriptions of the plan's open tasks (pending / in progress), in
+    /// list order — the material the natural-stop gate's continuation nudge
+    /// names. Empty for a fresh/cleared mirror and for a terminal plan.
+    pub(crate) fn open_plan_tasks(&self) -> Vec<String> {
+        self.todo.open_task_descriptions()
+    }
+
     /// Consume a restore request, including an explicit reset for absent plans.
     pub(crate) fn take_restored_todo_list(&mut self) -> Option<TodoList> {
         std::mem::take(&mut self.todo_restore_pending)

@@ -159,6 +159,36 @@ fn all_terminal(list: &TodoList) -> bool {
         .any(|i| matches!(i.status, TodoStatus::Pending | TodoStatus::InProgress))
 }
 
+impl TodoContext {
+    /// True when the mirrored plan still holds pending or in-progress tasks —
+    /// the deterministic "the work is not done yet" signal the natural-stop
+    /// gate consults before honoring a provider stop. `false` for a fresh or
+    /// cleared mirror (no plan = no open work) and for an empty or
+    /// fully-terminal list.
+    #[must_use]
+    pub(crate) fn has_open_tasks(&self) -> bool {
+        self.list.as_ref().is_some_and(|list| !all_terminal(list))
+    }
+
+    /// The descriptions of the plan's open tasks (pending or in progress),
+    /// in list order — the material the natural-stop gate's continuation
+    /// nudge names. Empty for a fresh/cleared mirror and for a fully
+    /// terminal plan.
+    #[must_use]
+    pub(crate) fn open_task_descriptions(&self) -> Vec<String> {
+        self.list
+            .as_ref()
+            .map(|list| {
+                list.items
+                    .iter()
+                    .filter(|i| matches!(i.status, TodoStatus::Pending | TodoStatus::InProgress))
+                    .map(|i| i.description.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

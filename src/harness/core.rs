@@ -713,11 +713,31 @@ pub struct Harness {
     /// `max_tokens` — the loop must continue instead of treating the
     /// truncated turn as a finished one.
     last_finish_reason: Option<String>,
+    /// Whether the most recently completed stream ended with a half-parsed
+    /// construct still in flight (a validated tool call awaiting delivery or
+    /// an unclosed JSON object). A stream in this state was CUT mid-tool-call
+    /// regardless of what `finish_reason` claims — the natural-stop gate
+    /// must treat the turn as truncated, never as finished. Set at stream
+    /// end from the extractor, reset at every stream start.
+    last_stream_unfinished: bool,
 
     /// Bounded, deduplicated memory of tool correction errors.
     /// Persists across agent loop iterations so the model never repeats the
     /// same mistake blindly.
     correction_memory: CorrectionMemory,
+    /// Remaining natural-stop continuations granted by the deterministic
+    /// nudges (reasoning-only retry, empty-response retry, cut tool-call
+    /// retry, open-plan nudge), per agent loop. Independent of
+    /// `MAX_ITERATIONS` (which bounds ALL continuations): the nudges must
+    /// stay scarce so a model that keeps insisting on stopping with open
+    /// work still terminates visibly instead of looping to 100.
+    stop_nudges_left: u32,
+    /// Test-only record of every reasoning promotion the natural-stop gate
+    /// performed, so tests can pin the one-turn promotion contract without
+    /// intercepting the request wire. `pub(crate)` under `cfg(test)` only:
+    /// the test modules are siblings of `core` and read the log directly.
+    #[cfg(test)]
+    pub(crate) promoted_reasoning_log: Vec<String>,
 
     /// Cache of permanently-allowed subagents (Allow chosen by user).
     /// Each entry is the agent name (e.g. "opencode", "claude").
@@ -896,6 +916,10 @@ impl Harness {
             tool_extraction_failure_count: 0,
             last_failed_raw: String::new(),
             last_finish_reason: None,
+            last_stream_unfinished: false,
+            stop_nudges_left: 3,
+            #[cfg(test)]
+            promoted_reasoning_log: Vec::new(),
             correction_memory: CorrectionMemory::new(5),
             agent_permissions: HashSet::new(),
             approved_paths: HashSet::new(),
@@ -3018,6 +3042,7 @@ impl Harness {
         // the CURRENT attempt: a reset (or a fresh stream) must not leak the
         // previous attempt's thinking into this one's context item.
         self.last_finish_reason = None;
+        self.last_stream_unfinished = false;
         self.pending_thinking_blocks.clear();
         self.attempt_reasoning.clear();
 
@@ -3093,6 +3118,10 @@ impl Harness {
                         Some(reason) => reason,
                         None => Some("stop".to_string()),
                     };
+                    // Mock-path parity with the real stream: freeze the
+                    // extractor's end-of-stream state for the natural-stop
+                    // gate (a parked call or unclosed JSON object = a cut).
+                    self.last_stream_unfinished = extractor.has_unfinished_stream();
                     return Ok("done".into());
                 }
                 Err(msg) => {
@@ -3243,6 +3272,11 @@ impl Harness {
         }
 
         self.last_failed_raw = extractor.take_last_failed_raw();
+        // Freeze the extractor's end-of-stream state for the agent loop's
+        // natural-stop gate: a parked tool call or an unclosed JSON object at
+        // stream end proves the response was CUT, whatever `finish_reason`
+        // claims.
+        self.last_stream_unfinished = extractor.has_unfinished_stream();
 
         // log::debug!("stream_chat_with_messages DONE total_tokens={token_count}");
         self.emit_usage(&mut stream).await;
@@ -3955,6 +3989,9 @@ impl Harness {
         // iteration so the user prompt is not sent twice).
         let mut current_input = String::new();
         let mut iteration = 0u64;
+        // Fresh nudge budget per agent loop: a harness reused across loops
+        // must not inherit the previous turn's exhausted budget.
+        self.stop_nudges_left = 3;
 
         // Whether ANY tool ran this turn. A turn with zero tool dispatches
         // is a pure text exchange — the request was answerable directly, so
@@ -5348,7 +5385,7 @@ impl Harness {
                     // the turn IS complete — continuing would send a bogus
                     // "cut off" prompt.
                     Some("stop" | "STOP" | "end_turn" | "tool_calls")
-                );
+                ) && !self.last_stream_unfinished;
                 if !finished {
                     if iteration >= MAX_ITERATIONS {
                         // Safety net — emit a terminal event so the TUI does
@@ -5383,6 +5420,79 @@ impl Harness {
                          Please continue exactly where you left off."
                         .to_string();
                     continue;
+                }
+
+                // Deterministic stop-veto layer (no decision model required).
+                // The provider's `stop` describes the RESPONSE, not the TASK:
+                // three shapes prove the turn is not actually finished, and
+                // each grants a continuation that consumes one scarce nudge
+                // (bounded per loop, independent of MAX_ITERATIONS) so a model
+                // that keeps insisting on stopping still terminates visibly.
+                let reason = self.last_finish_reason.as_deref().unwrap_or("none");
+                if self.stop_nudges_left > 0 {
+                    // (1) Reasoning ended, the answer never came: the attempt
+                    // produced thinking deltas but zero answer text (the
+                    // accumulator is only drained when a non-empty response
+                    // is recorded, so it still holds the thinking here).
+                    // Promote the reasoning into the ONE-SHOT steering message
+                    // so the next request reuses it instead of re-deriving
+                    // it; steering is per-iteration state, so the promotion
+                    // vanishes from the very next turn.
+                    if assistant_response.is_empty() && !self.attempt_reasoning.is_empty() {
+                        self.stop_nudges_left -= 1;
+                        let reasoning = std::mem::take(&mut self.attempt_reasoning);
+                        #[cfg(test)]
+                        self.promoted_reasoning_log.push(reasoning.clone());
+                        log::info!(
+                            target: "laya",
+                            "natural-stop gate: reasoning-only stream (finish reason {reason}) — continuing, reasoning promoted for one turn"
+                        );
+                        current_input = format!(
+                            "[Harness note: your previous response ended right after your \
+                             reasoning, before any answer. Reuse the thinking below instead \
+                             of reasoning again — continue exactly where you left off.]\n\n\
+                             <your-previous-reasoning>\n{reasoning}\n</your-previous-reasoning>"
+                        );
+                        continue;
+                    }
+                    // (2) Empty response with no reasoning at all: a bare cut
+                    // (or a degenerate empty completion) — never a finished
+                    // turn.
+                    if assistant_response.is_empty() {
+                        self.stop_nudges_left -= 1;
+                        log::info!(
+                            target: "laya",
+                            "natural-stop gate: empty response (finish reason {reason}) — retrying"
+                        );
+                        current_input =
+                            "Your previous response was empty. Continue with your work."
+                                .to_string();
+                        continue;
+                    }
+                    // (3) Open plan: pending or in-progress tasks remain, so
+                    // the task is not done even though the response ended
+                    // cleanly. Same rule the loop already applies to
+                    // outstanding pane requests and background sub-agents.
+                    if self.context_manager.plan_has_open_tasks() {
+                        self.stop_nudges_left -= 1;
+                        let tasks = self.context_manager.open_plan_tasks();
+                        log::info!(
+                            target: "laya",
+                            "natural-stop gate: stop with {} open plan task(s) — continuing",
+                            tasks.len()
+                        );
+                        let list = tasks
+                            .iter()
+                            .map(|t| format!("- {t}"))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        current_input = format!(
+                            "[Harness note: the plan still has {} open task(s). Continue \
+                             with the next one — do not ask whether to continue.]\n{list}",
+                            tasks.len()
+                        );
+                        continue;
+                    }
                 }
 
                 // No tools, no extraction failures, deliberate completion —
@@ -5551,10 +5661,18 @@ impl Harness {
 
             // log::debug!("run_agent_loop RESTARTING with tool results");
             // The tool results have already been recorded in the context
-            // manager via `push_tool_history` during dispatch. Just set the
-            // continuation prompt for the next iteration.
-            current_input =
-                "Please continue with your response based on the information above.".to_string();
+            // manager via `push_tool_history` during dispatch. The follow-up
+            // request is built with NO steering text: the conversation
+            // already ends in `tool_calls → tool results`, which is the
+            // provider-standard signal that the next assistant turn is the
+            // REACTION to those results (the same structural continuation
+            // Codex uses — `while turnInput.length > 0` re-sends only the
+            // history). A synthetic "please continue with your response"
+            // user turn would ask for a RESPONSE instead of the reaction —
+            // the exact trigger of the premature status-message stop — and
+            // would also inject a fabricated user turn into every cycle of
+            // the wire, breaking the exact-prefix property.
+            current_input.clear();
 
             // Compact before the next request. The LLM compaction runs when
             // the total is still over the trigger — the harness performs the
@@ -6371,6 +6489,10 @@ impl Harness {
             tool_extraction_failure_count: 0,
             last_failed_raw: String::new(),
             last_finish_reason: None,
+            last_stream_unfinished: false,
+            stop_nudges_left: 3,
+            #[cfg(test)]
+            promoted_reasoning_log: Vec::new(),
             correction_memory: CorrectionMemory::new(5),
             agent_permissions: HashSet::new(),
             approved_paths: HashSet::new(),
