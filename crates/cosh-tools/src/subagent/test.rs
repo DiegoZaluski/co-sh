@@ -2885,3 +2885,139 @@ fn session_model_info_empty_without_advertised_options() {
         SubagentEvent::SessionModel { model: None, .. }
     ));
 }
+// ── Lazy authentication (auth_required → authenticate → retry) ───────
+/// The lazy-auth contract: the client NEVER authenticates proactively.
+/// The fixture advertises an agent auth method and rejects the FIRST
+/// `session/new` with `auth_required` (-32000); the turn must then send
+/// exactly one `authenticate`, retry `session/new`, and complete the
+/// prompt — mirroring `devin acp`, where a proactive `authenticate`
+/// forces a browser login on every session while a lazy one never does.
+#[tokio::test(flavor = "current_thread")]
+async fn run_session_authenticates_lazily_only_after_auth_required() {
+    use agent_client_protocol::schema::v1::{
+        AgentCapabilities, AuthenticateRequest, AuthenticateResponse, AuthMethod, AuthMethodAgent,
+        InitializeResponse, NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse,
+        SessionId,
+    };
+    use agent_client_protocol::{
+        Agent as AgentRole, Channel, Error as AcpError, ErrorCode, Responder,
+    };
+    // Not a `const`: `From<ErrorCode>` is not const-callable.
+    let auth_required = i32::from(ErrorCode::AuthRequired);
+    let (client_side, agent_side) = Channel::duplex();
+    let auth_log: RequestLog = Arc::default();
+    let new_log = auth_log.clone();
+    let authenticate_log = auth_log.clone();
+    let prompt_log = auth_log.clone();
+    let agent_task = tokio::spawn(async move {
+        let _ = AgentRole
+            .builder()
+            .name("auth-fixture")
+            .on_receive_request(
+                async move |request: InitializeRequest,
+                            responder: Responder<InitializeResponse>,
+                            _cx| {
+                    responder.respond(
+                        InitializeResponse::new(request.protocol_version)
+                            .agent_capabilities(AgentCapabilities::new())
+                            .auth_methods(vec![AuthMethod::Agent(AuthMethodAgent::new(
+                                "fixture-auth",
+                                "Log in with fixture",
+                            ))]),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_request: NewSessionRequest,
+                            responder: Responder<NewSessionResponse>,
+                            _cx| {
+                    // First `session/new` is rejected with auth_required;
+                    // after the client authenticates, the retry succeeds.
+                    let first = !new_log
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|e| e.starts_with("new"));
+                    new_log
+                        .lock()
+                        .unwrap()
+                        .push(if first { "new-rejected" } else { "new" }.to_string());
+                    if first {
+                        let _ = responder.respond_with_error(AcpError::new(
+                            auth_required,
+                            "Please log in to use the fixture",
+                        ));
+                    } else {
+                        let _ = responder.respond(NewSessionResponse::new(SessionId::new(
+                            "auth-fixture",
+                        )));
+                    }
+                    Ok(())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |request: AuthenticateRequest,
+                            responder: Responder<AuthenticateResponse>,
+                            _cx| {
+                    authenticate_log
+                        .lock()
+                        .unwrap()
+                        .push(format!("authenticate:{}", request.method_id.0));
+                    responder.respond(AuthenticateResponse::new())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |request: PromptRequest, responder: Responder<PromptResponse>, _cx| {
+                    prompt_log.lock().unwrap().push("PROMPT".to_string());
+                    let _ = _cx.send_notification(SessionNotification::new(
+                        request.session_id.clone(),
+                        SessionUpdate::AgentMessageChunk(
+                            agent_client_protocol::schema::v1::ContentChunk::new(ContentBlock::Text(
+                                TextContent::new("authenticated turn"),
+                            )),
+                        ),
+                    ));
+                    responder.respond(PromptResponse::new(
+                        agent_client_protocol::schema::v1::StopReason::EndTurn,
+                    ))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_to(agent_side)
+            .await;
+    });
+    let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel();
+    let accumulated = Arc::new(Mutex::new(super::closure::TurnClosure::default()));
+    let (turn, _, (_badge, streamed)) = tokio::join!(
+        run_session(
+            client_side,
+            "lazy auth please".to_string(),
+            None,
+            std::env::temp_dir(),
+            "",
+            accumulated.clone(),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            chunk_tx,
+        ),
+        agent_task,
+        async { (chunk_rx.recv().await, chunk_rx.recv().await) },
+    );
+    let (stop_reason, session_id) = turn.unwrap();
+    assert_eq!(stop_reason, "end_turn");
+    assert_eq!(session_id, "auth-fixture");
+    assert_eq!(accumulated.lock().unwrap().output(), "authenticated turn");
+    // The full lazy-auth dance, in order: rejected new → ONE authenticate →
+    // retried new → prompt. The core regression guard: authenticate must
+    // NOT precede the first session/new (the proactive-auth bug).
+    assert_eq!(
+        auth_log.lock().unwrap().as_slice(),
+        ["new-rejected", "authenticate:fixture-auth", "new", "PROMPT"],
+    );
+    assert!(matches!(
+        streamed.unwrap(),
+        SubagentEvent::Message { text } if text == "authenticated turn"
+    ));
+}
