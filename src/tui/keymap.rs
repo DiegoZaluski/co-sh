@@ -44,6 +44,10 @@ pub enum Action {
     MaximizeTodo,
     /// Bring the right panel's mixed view back (corner hint f4).
     MaximizeMixedView,
+    /// Toggle the focused `/agents` pane's expanded view (Ctrl+O): the
+    /// pane takes the whole session area while the others keep running
+    /// off-screen; a second press restores the grid.
+    TogglePaneZoom,
 }
 
 #[derive(Debug, Clone)]
@@ -236,6 +240,13 @@ impl KeyMap {
                     KeyBinding {
                         key: KeyCode::F(4),
                         modifiers: KeyModifiers::NONE,
+                    },
+                ),
+                (
+                    Action::TogglePaneZoom,
+                    KeyBinding {
+                        key: Char('o'),
+                        modifiers: KeyModifiers::CONTROL,
                     },
                 ),
                 // 'n'/'p' for NextSession/PrevSession intentionally omitted

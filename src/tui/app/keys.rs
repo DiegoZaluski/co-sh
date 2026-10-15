@@ -12,6 +12,7 @@ use crate::left_panel::{MIN_WIDTH_FOR_LEFT_PANEL, Mode};
 #[cfg(feature = "home")]
 use crate::routes::home::HomeAction;
 use crate::routes::router::FocusTarget;
+use crate::routes::session::agents_split::AgentsSplitState;
 use crate::ui::dialogs::DialogType;
 use crate::util::edit_history::{RedoOutcome, UndoOutcome};
 use crate::util::selection;
@@ -1276,6 +1277,40 @@ impl App {
                         return Ok(false);
                     }
                 }
+                Some(crate::keymap::Action::TogglePaneZoom) => {
+                    // Toggle the FOCUSED pane's expansion (Ctrl+O): the
+                    // pane takes the session area, the others keep
+                    // running off-screen (the events never stopped).
+                    // The MAIN agent holds the focus (`Ctrl+0`) or no
+                    // split is open: nothing to zoom — the key then does
+                    // nothing rather than expanding an unfocused target.
+                    if matches!(self.mode(), AppMode::Session)
+                        && self.agents_split.is_some()
+                    {
+                        let focused = self
+                            .agents_split
+                            .as_ref()
+                            .and_then(|split| split.focused);
+                        if focused.is_some() {
+                            let zoomed = self
+                                .agents_split
+                                .as_mut()
+                                .map(AgentsSplitState::toggle_maximized)
+                                .unwrap_or(false);
+                            if zoomed {
+                                // A fresh focus on a pane that never
+                                // probed: seed its command/config
+                                // snapshot (the same contract the pane
+                                // hotkeys run).
+                                if let Some(index) = focused {
+                                    super::agents_dispatch::ensure_pane_snapshot(self, index);
+                                }
+                                super::agents_dispatch::sync_slash_source(self);
+                            }
+                        }
+                        return Ok(false);
+                    }
+                }
                 Some(crate::keymap::Action::ScrollUp) => {
                     if self.sidebar_focused
                         && self.sidebar.open
@@ -1525,6 +1560,16 @@ impl App {
                         self.clear_rag_pending_state();
                         self.dialog.pop();
                         return Ok(false);
+                    } else if self
+                        .agents_split
+                        .as_mut()
+                        .is_some_and(AgentsSplitState::toggle_maximized)
+                    {
+                        // /agents split, EXPANDED: the first Esc only
+                        // restores the grid (the pane falls back into the
+                        // split with its turn still running) — the park is
+                        // the NEXT Esc's job.
+                        return Ok(false);
                     } else if self.agents_split.is_some() {
                         // /agents split ESC semantics (issue 3): Esc ONLY
                         // PARKS the split — leave the mode with every turn
@@ -1579,7 +1624,16 @@ impl App {
                         // (issue 3): Esc ONLY leaves the mode — every turn
                         // (panes AND the main loop) keeps running behind
                         // the park; nothing is stopped here, nothing is
-                        // destroyed.
+                        // destroyed. With a pane EXPANDED, the first Esc
+                        // only restores the grid (see the Interrupt arm) —
+                        // the park is the next Esc.
+                        if self
+                            .agents_split
+                            .as_mut()
+                            .is_some_and(AgentsSplitState::toggle_maximized)
+                        {
+                            return Ok(false);
+                        }
                         self.park_agents_split();
                         return Ok(false);
                     } else if self.state.status == crate::types::SessionStatus::Working {

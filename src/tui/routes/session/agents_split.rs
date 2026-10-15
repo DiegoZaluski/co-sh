@@ -265,6 +265,15 @@ pub struct AgentsSplitState {
     /// unfocuses; a pane hotkey or click focuses again. Fresh splits
     /// start on the first picked pane.
     pub focused: Option<usize>,
+    /// The pane that took the whole session area (`Ctrl+O` toggle on the
+    /// focused pane, or a double-click on it). The OTHER panes stay fully
+    /// alive — turns keep running, streams keep landing in their
+    /// timelines — they are simply painted nothing: the layout hands
+    /// their slots degenerate rects (the already-supported zero-size
+    /// path), so every index-keyed structure (pane_regions, block_cache,
+    /// diff_cells, pane_rects) survives unchanged. `None` = the normal
+    /// grid. A pane hotkey or double-click restores the grid.
+    pub maximized: Option<usize>,
     /// Screen rects of the LAST rendered frame — the mouse dispatcher
     /// hit-tests these, exactly like `SessionView::pill_area`.
     pub pane_rects: Vec<Rect>,
@@ -317,6 +326,7 @@ impl AgentsSplitState {
         Self {
             panes,
             focused: Some(0),
+            maximized: None,
             pane_rects: Vec::new(),
             block_cache: HashMap::new(),
             diff_cells: HashMap::new(),
@@ -345,6 +355,8 @@ impl AgentsSplitState {
     /// unmatched key — the caller only needs the index to seed a
     /// per-pane fetch like the command snapshot).
     pub fn focus_hotkey(&mut self, ch: char) -> Option<usize> {
+        // Jumping to another pane ends the expansion: the grid returns.
+        self.maximized = None;
         if ch == UNFOCUS_HOTKEY {
             self.focused = None;
             return None;
@@ -358,6 +370,30 @@ impl AgentsSplitState {
             Some(index)
         } else {
             None
+        }
+    }
+
+    /// Toggle the expanded pane: an unfocused split maximizes the FOCUSED
+    /// pane (focusing it first — expansion needs a target), an already-
+    /// maximized split restores the grid. Returns the new state so the
+    /// caller can seed the snapshot probe for a newly focused pane. The
+    /// hotkeys stay consistent: `focus_hotkey` first RESTORES the grid
+    /// (jumping to another pane ends the expansion — one click/keystroke
+    /// back), then focuses.
+    pub fn toggle_maximized(&mut self) -> bool {
+        match self.maximized {
+            Some(_) => {
+                self.maximized = None;
+                false
+            }
+            None => {
+                if let Some(focused) = self.focused {
+                    self.maximized = Some(focused);
+                    true
+                } else {
+                    false
+                }
+            }
         }
     }
 
@@ -867,6 +903,38 @@ pub fn compute_layout(pane_count: usize, area: Rect) -> Vec<Rect> {
     if pane_count == 1 {
         return vec![area];
     }
+    compute_layout_with_maximized(pane_count, area, None)
+}
+
+/// The layout WITH an expanded pane: pane `maximized` takes the whole
+/// area, every other pane's slot collapses to a zero rect (the
+/// degenerate path `render_pane` already skips). Index positions are
+/// PRESERVED — the caller's per-index structures need no re-keying.
+#[must_use]
+pub fn compute_layout_with_maximized(
+    pane_count: usize,
+    area: Rect,
+    maximized: Option<usize>,
+) -> Vec<Rect> {
+    if let Some(i) = maximized
+        && i < pane_count
+    {
+        return (0..pane_count)
+            .map(|j| {
+                if j == i {
+                    area
+                } else {
+                    Rect::new(area.x, area.y, 0, 0)
+                }
+            })
+            .collect();
+    }
+    compute_layout_grid(pane_count, area)
+}
+
+/// The normal grid: the bin-packing heuristic.
+#[must_use]
+fn compute_layout_grid(pane_count: usize, area: Rect) -> Vec<Rect> {
 
     // Every pane is an equal participant: the single-row test uses the FULL
     // pane count (the daemon is not subtracted), so its block is one of the
@@ -932,7 +1000,7 @@ fn split_columns(x: u16, y: u16, total_w: u16, h: u16, count: usize) -> Vec<Rect
 /// Render the split view: compute the layout, record the hit rects on the
 /// state, then paint each pane (header + activity tail).
 pub fn render(buf: &mut Buffer, area: Rect, state: &mut AgentsSplitState, theme: &Theme) {
-    let rects = compute_layout(state.pane_count(), area);
+    let rects = compute_layout_with_maximized(state.pane_count(), area, state.maximized);
     state.pane_rects = rects.clone();
     // Every pane gets a region slot for THIS frame: panes that do not
     // render (degenerate rects) contribute an empty list, so extraction

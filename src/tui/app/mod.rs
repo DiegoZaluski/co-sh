@@ -551,6 +551,12 @@ pub struct App {
     last_mouse_x: u16,
     /// Last known mouse Y position (for keyboard scroll targeting).
     last_mouse_y: u16,
+    /// Double-click detector for the `/agents` panes: the pane index the
+    /// last left PRESS landed in plus its instant. A press inside the SAME
+    /// pane within the double-click window toggles the pane's expansion
+    /// (`agents_split::AgentsSplitState::toggle_maximized`) and disarms the
+    /// detector; any other press re-arms it.
+    last_pane_click: Option<(usize, Instant)>,
     /// Timestamp of last scroll wheel event (for debouncing rapid scrolls).
     last_scroll_time: Instant,
     /// Set after the external editor returned: the next frame must be a
@@ -864,6 +870,7 @@ impl App {
             perf_frame: 0,
             last_mouse_x: 0,
             last_mouse_y: 0,
+            last_pane_click: None,
             last_scroll_time: Instant::now(),
             needs_full_redraw: false,
             sidebar_focused: false,

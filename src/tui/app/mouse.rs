@@ -135,6 +135,29 @@ impl App {
                         return Ok(true);
                     }
                     MouseEventType::Down if button == MouseButton::Left => {
+                        // Double-click on a pane toggles its EXPANSION: the
+                        // pane takes the session area, the others keep
+                        // running off-screen (the events never stopped) —
+                        // and the second press inside the expanded pane
+                        // restores the grid. Detector: the same pane
+                        // pressed twice within the double-click window.
+                        // The toggle consumes the click (no second drag
+                        // anchor; the FIRST press already focused the pane,
+                        // so Ctrl+O and the double-click stay in sync).
+                        const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+                        let double = self
+                            .last_pane_click
+                            .take_if(|(pane, at)| {
+                                *pane == index && at.elapsed() <= DOUBLE_CLICK
+                            })
+                            .is_some();
+                        if double
+                            && let Some(split) = &mut self.agents_split
+                        {
+                            split.toggle_maximized();
+                            return Ok(true);
+                        }
+                        self.last_pane_click = Some((index, Instant::now()));
                         if let Some(split) = &mut self.agents_split {
                             split.focused = Some(index);
                             // A pane click always ends any in-flight
