@@ -4,6 +4,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 
+use crate::component::spinner::SpinnerState;
 use crate::theme::{Theme, rgba_color};
 use crate::util::draw::draw_text_line_compact;
 
@@ -54,16 +55,57 @@ pub enum SlashMenuMouseAction {
 
 /// OpenCode-faithful slash ("/") autocomplete menu.
 /// Renders inline above the prompt, not as a modal dialog.
+///
+/// The command SOURCE is dynamic: the default cosh set, or the focused
+/// `/agents` pane's own command list (the agent's exact spellings). While
+/// an agent snapshot is being fetched the menu renders a spinner row
+/// instead of commands — the probe takes seconds, so the user sees WHY the
+/// list is still empty.
+///
+/// Which command source the slash menu is currently serving. The router
+/// reads this — not the split's focus — so a picked command can never
+/// disagree with the list the user saw: the menu's own source IS the
+/// routing decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    /// The cosh harness's own set (the main agent / no pane focused).
+    Cosh,
+    /// A focused agent pane's own list (already blocklist-filtered).
+    Agent,
+}
+
 pub struct SlashMenu {
     pub visible: bool,
     pub query: String,
     pub selected: usize,
     pub commands: Vec<SlashCommand>,
+    /// Which list `commands` currently holds (see [`Source`]).
+    pub source: Source,
+    /// True while an agent command snapshot is being fetched for the
+    /// focused pane: the menu shows a spinner row, accepts navigation
+    /// keys as a no-op, and refuses execution.
+    pub loading: bool,
+    /// Animation state for the loading row (advanced by the render tick
+    /// while `loading` is set, same contract the ModelList spinner has).
+    pub spinner: SpinnerState,
 }
 
 impl SlashMenu {
     pub fn new() -> Self {
-        let commands = vec![
+        Self {
+            visible: false,
+            query: String::new(),
+            selected: 0,
+            commands: Self::cosh_commands(),
+            source: Source::Cosh,
+            loading: false,
+            spinner: SpinnerState::new(),
+        }
+    }
+
+    /// The cosh harness's own command set (the default source).
+    pub fn cosh_commands() -> Vec<SlashCommand> {
+        vec![
             SlashCommand {
                 name: "models".into(),
                 desc: "Manage models".into(),
@@ -128,14 +170,31 @@ impl SlashMenu {
                 name: "undo".into(),
                 desc: "Undo last revert".into(),
             },
-        ];
+        ]
+    }
 
-        Self {
-            visible: false,
-            query: String::new(),
-            selected: 0,
-            commands,
-        }
+    /// Swap the command source to an agent's own list (the pane's cached
+    /// snapshot, blocklist-filtered by the app layer). Resets selection.
+    pub fn set_agent_commands(&mut self, commands: Vec<SlashCommand>) {
+        self.commands = commands;
+        self.source = Source::Agent;
+        self.loading = false;
+        self.selected = 0;
+    }
+
+    /// Swap back to the cosh command set (unfocused / closed split).
+    pub fn set_cosh_commands(&mut self) {
+        self.commands = Self::cosh_commands();
+        self.source = Source::Cosh;
+        self.loading = false;
+        self.selected = 0;
+    }
+
+    /// Flag the menu as fetching an agent's command snapshot: a spinner
+    /// row renders until `set_agent_commands` / `set_cosh_commands` swaps
+    /// the source in.
+    pub fn set_loading(&mut self, loading: bool) {
+        self.loading = loading;
     }
 
     pub fn check_state(input: &str) -> (bool, String) {
@@ -172,6 +231,9 @@ impl SlashMenu {
     }
 
     pub fn select_next(&mut self) {
+        if self.loading {
+            return;
+        }
         let idxs = self.filtered_indices();
         if idxs.is_empty() {
             return;
@@ -181,6 +243,9 @@ impl SlashMenu {
     }
 
     pub fn select_prev(&mut self) {
+        if self.loading {
+            return;
+        }
         let idxs = self.filtered_indices();
         if idxs.is_empty() {
             return;
@@ -194,6 +259,9 @@ impl SlashMenu {
     }
 
     pub fn get_selected_command(&self) -> Option<&SlashCommand> {
+        if self.loading {
+            return None;
+        }
         let idxs = self.filtered_indices();
         if idxs.is_empty() {
             return None;
@@ -285,6 +353,48 @@ impl SlashMenu {
     /// selected-row fill follow it so the menu reads as part of the prompt.
     pub fn render(&self, buf: &mut Buffer, prompt_area: Rect, theme: &Theme, mode_color: RGBA) {
         if !self.visible {
+            return;
+        }
+
+        // Loading state: one spinner row instead of commands (an agent
+        // snapshot probe is in flight — the list is empty BECAUSE of that,
+        // so the placeholder below would lie about it).
+        if self.loading {
+            let row_y = prompt_area.y.saturating_sub(1);
+            let menu_width = prompt_area.width;
+            let content_x = prompt_area.x + 1;
+            let content_width = menu_width.saturating_sub(2);
+            draw_bg_line(buf, content_x, row_y, content_width, rgba_color(theme.background_element));
+            if let Some(cell) = buf.cell_mut((prompt_area.x, row_y)) {
+                cell.set_char('│');
+                cell.set_style(
+                    Style::default()
+                        .fg(rgba_color(mode_color))
+                        .bg(rgba_color(theme.background)),
+                );
+            }
+            if menu_width > 1
+                && let Some(cell) = buf.cell_mut((prompt_area.x + menu_width - 1, row_y))
+            {
+                cell.set_char('│');
+                cell.set_style(
+                    Style::default()
+                        .fg(rgba_color(mode_color))
+                        .bg(rgba_color(theme.background)),
+                );
+            }
+            let spinner_char = self.spinner.current_char();
+            // The spinner alone carries the message: "loading" needs no
+            // words after it — the frame is self-explanatory.
+            let text = spinner_char.to_string();
+            draw_text_line_compact(
+                buf,
+                &text,
+                content_x + 1,
+                row_y,
+                content_width.saturating_sub(2),
+                Style::default().fg(rgba_color(theme.text_muted)),
+            );
             return;
         }
 

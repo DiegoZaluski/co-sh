@@ -192,6 +192,56 @@ pub struct ToolDiffSummary {
     pub unified: Option<String>,
 }
 
+/// One slash command the agent harness advertises through the ACP
+/// `available_commands_update` session update.
+///
+/// The name is the AGENT's own spelling (`/models` for one harness,
+/// `/model` for another) — the TUI keeps it verbatim in its slash menu and
+/// only the opened box gets standardized through the client-side mapping.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentCommand {
+    /// Command name as the agent exposes it (e.g. `compact`, `new`).
+    pub name: String,
+    /// Human-readable description of what the command does.
+    pub description: String,
+    /// Input hint when the command takes free-form text after its name
+    /// (the unstructured `hint`; `None` for argument-less commands).
+    pub input_hint: Option<String>,
+}
+
+/// One offered value of a session configuration select option: the id the
+/// `session/set_config_option` request takes plus its human label.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentConfigValue {
+    /// Value id (what `set_config_option` selects).
+    pub value: String,
+    /// Human-readable label of the value, when the harness names it.
+    pub name: String,
+}
+
+/// One session configuration option, mirrored from the ACP config-option
+/// payloads (`session/new`, `session/resume`, `session/set_config_option`
+/// and the `config_option_update` session update). This is the data behind
+/// the agent-side config boxes: model, provider, thought level, mode …
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentConfigOption {
+    /// Unique identifier of the option (e.g. `model`).
+    pub id: String,
+    /// Human-readable label of the option.
+    pub name: String,
+    /// Optional description.
+    pub description: Option<String>,
+    /// Semantic category when the harness names one (`model`, `mode`,
+    /// `thought_level`, ...); unknown or absent categories stay `None`.
+    pub category: Option<String>,
+    /// Offered values of a select option (empty for boolean options).
+    pub values: Vec<AgentConfigValue>,
+    /// Current value id of a select option (empty when not a select).
+    pub current: String,
+    /// Current value of a boolean option (`None` when not boolean).
+    pub boolean: Option<bool>,
+}
+
 /// A typed event produced by a running sub-agent session.
 ///
 /// Everything the ACP `session/update` stream offers that the TUI can act
@@ -315,6 +365,97 @@ pub enum SubagentEvent {
         /// The session title, when one was set.
         title: Option<String>,
     },
+    /// The agent's available slash commands were (re)published. Emitted by
+    /// a live turn whenever the harness refreshes its command list — the
+    /// TUI caches it per pane and feeds the focused pane's slash menu.
+    /// Also produced by the on-demand `session_snapshot` probe. NOT timeline
+    /// content: the TUI stores it on the pane like `SessionModel`.
+    Commands {
+        /// The full command list, in the harness's published order.
+        commands: Vec<AgentCommand>,
+    },
+    /// The session's config options were (re)published (the full set, not a
+    /// delta — ACP always carries the complete list). Pane chrome like
+    /// `SessionModel`/`Commands`: stored on the pane, never streamed into
+    /// the timeline.
+    ConfigOptions {
+        /// The full option list.
+        options: Vec<AgentConfigOption>,
+    },
+}
+
+/// Whether a config VALUE must never reach the TUI's pickers: the
+/// `/agents` split runs YOLO by contract, so permission-escalation modes
+/// some harnesses publish as plain session-mode values (claude's
+/// `bypassPermissions`, devin's `bypass`) must be stripped at the mirror —
+/// the single choke point every config-options path flows through (the
+/// snapshot probe, live `config_option_update`s, and `set_config_option`
+/// responses alike).
+fn value_exposed(value: &str) -> bool {
+    let normalized = value.trim().to_lowercase().replace(['-', ' ', '.'], "_");
+    !(normalized.contains("bypass")
+        || normalized.contains("permission")
+        || normalized.contains("yolo")
+        // The permission-softening spellings no stem above can catch —
+        // each harness's own docs publish them as plain mode/mode-config
+        // VALUES: claude's `acceptEdits` and devin's `accept-edits` (both
+        // switch edits to auto-accept — the YOLO contract decides that),
+        // codex's `agent-full-access` (the everything-runs toggle).
+        || normalized.contains("accept")
+        // camelCase publications (`fullAccess`) fold to `fullaccess` — no
+        // underscore — so this stem is checked in BOTH forms (claude's
+        // `acceptEdits` precedent shows camelCase value spellings exist).
+        || normalized.contains("full_access")
+        || normalized.contains("fullaccess"))
+}
+
+/// Mirror one ACP [`SessionConfigOption`] into the protocol-free shape.
+pub(crate) fn mirror_config_option(option: &schema::SessionConfigOption) -> AgentConfigOption {
+    let (values, current, boolean) = match &option.kind {
+        schema::SessionConfigKind::Select(select) => {
+            let values = match &select.options {
+                schema::SessionConfigSelectOptions::Ungrouped(options) => options
+                    .iter()
+                    .filter(|o| value_exposed(&o.value.0))
+                    .map(|o| AgentConfigValue {
+                        value: o.value.0.to_string(),
+                        name: o.name.clone(),
+                    })
+                    .collect(),
+                schema::SessionConfigSelectOptions::Grouped(groups) => groups
+                    .iter()
+                    .flat_map(|g| g.options.iter())
+                    .filter(|o| value_exposed(&o.value.0))
+                    .map(|o| AgentConfigValue {
+                        value: o.value.0.to_string(),
+                        name: o.name.clone(),
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            (values, select.current_value.0.to_string(), None)
+        }
+        schema::SessionConfigKind::Boolean(flag) => (Vec::new(), String::new(), Some(flag.current_value)),
+        _ => (Vec::new(), String::new(), None),
+    };
+    AgentConfigOption {
+        id: option.id.0.to_string(),
+        name: option.name.clone(),
+        description: option.description.clone(),
+        category: option.category.as_ref().map(|c| match c {
+            schema::SessionConfigOptionCategory::Model => "model".to_string(),
+            schema::SessionConfigOptionCategory::Mode => "mode".to_string(),
+            schema::SessionConfigOptionCategory::ModelConfig => "model_config".to_string(),
+            schema::SessionConfigOptionCategory::ThoughtLevel => "thought_level".to_string(),
+            schema::SessionConfigOptionCategory::Other(other) => other.clone(),
+            // `#[non_exhaustive]`: a future spec category carries no string
+            // of its own here — the option still mirrors, just uncategorized.
+            _ => String::new(),
+        }),
+        values,
+        current,
+        boolean,
+    }
 }
 
 impl SubagentEvent {
@@ -352,6 +493,27 @@ impl SubagentEvent {
             schema::SessionUpdate::SessionInfoUpdate(update) => {
                 session_info_title(&update).map(|title| Self::SessionInfo { title: Some(title) })
             }
+            schema::SessionUpdate::AvailableCommandsUpdate(update) => {
+                Some(Self::Commands {
+                    commands: update
+                        .available_commands
+                        .into_iter()
+                        .map(|cmd| AgentCommand {
+                            name: cmd.name,
+                            description: cmd.description,
+                            input_hint: match cmd.input {
+                                Some(schema::AvailableCommandInput::Unstructured(input)) => {
+                                    Some(input.hint)
+                                }
+                                _ => None,
+                            },
+                        })
+                        .collect(),
+                })
+            }
+            schema::SessionUpdate::ConfigOptionUpdate(update) => Some(Self::ConfigOptions {
+                options: update.config_options.iter().map(mirror_config_option).collect(),
+            }),
             // No display representation (yet).
             _ => None,
         }

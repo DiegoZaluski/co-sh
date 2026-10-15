@@ -249,7 +249,7 @@ impl App {
                 } else {
                     self.prompt_view.note_activity();
                     self.prompt_view.handle_paste(&text);
-                    self.slash_menu.update(&self.prompt_view.input);
+                    self.slash_menu_refresh();
                 }
             }
             Event::Mouse(crossterm_mouse) => {
@@ -312,8 +312,31 @@ impl App {
                                 },
                             );
                         }
+                    } else if let SubagentEvent::Commands { commands } = &event {
+                        // Pane chrome like `SessionModel`: the agent's own
+                        // slash commands cache on the pane (the focused
+                        // pane's slash menu reads it through `slash_source`).
+                        if let Some(split) = target {
+                            split.set_agent_commands(pane, commands.clone());
+                        }
+                    } else if let SubagentEvent::ConfigOptions { options } = &event {
+                        // Pane chrome like `SessionModel`: the config options
+                        // cache on the pane (the standardized config boxes
+                        // the mapped command groups open read it).
+                        if let Some(split) = target {
+                            split.set_agent_config_options(pane, options.clone());
+                        }
                     } else if let Some(split) = target {
                         split.apply_event(pane, &event);
+                    }
+                    // A Commands/ConfigOptions landing on the FOCUSED pane
+                    // swaps the slash menu's spinner row for the real list
+                    // (idempotent no-op for every other pane).
+                    if matches!(
+                        &event,
+                        SubagentEvent::Commands { .. } | SubagentEvent::ConfigOptions { .. }
+                    ) {
+                        super::agents_dispatch::sync_slash_source(self);
                     }
                     // The pane's mirror in the shared subagent list follows
                     // the same stream (pane-index routed; see
@@ -1754,7 +1777,7 @@ impl App {
                         }
                         Ok(corrected) if self.prompt_view.input == original => {
                             self.prompt_view.replace_with_correction(corrected);
-                            self.slash_menu.update(&self.prompt_view.input);
+                            self.slash_menu_refresh();
                         }
                         Ok(_) => {
                             // The user edited or sent the draft while the

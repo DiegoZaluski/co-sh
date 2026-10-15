@@ -1678,6 +1678,9 @@ impl Tools for CoshTools {
                                 &body_agent,
                                 &call_input,
                                 resume,
+                                // The subagent_call tool carries no user
+                                // config picks: the registry defaults apply.
+                                &[],
                                 cwd,
                                 stop_signal,
                                 chunk_tx,
@@ -1805,6 +1808,9 @@ impl Tools for CoshTools {
                         &agent,
                         &call_input,
                         resume,
+                        // The subagent_call tool carries no user
+                        // config picks: the registry defaults apply.
+                        &[],
                         cwd,
                         stop_signal,
                         chunk_tx,

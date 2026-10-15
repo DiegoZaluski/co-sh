@@ -1108,6 +1108,14 @@ impl App {
                     }
                 }
             }
+            // Animate the slash menu's loading row the same way: the menu
+            // shows its spinner while an agent command snapshot probe is
+            // in flight (frame advances only while the menu is visible).
+            if self.slash_menu.loading {
+                for _ in 0..animation_ticks {
+                    self.slash_menu.spinner.advance();
+                }
+            }
             // The slash menu renders first so modal dialogs (e.g. the Ctrl+C
             // "Quit cosh?" confirm) always paint on top of it — the menu is
             // inline chrome, the dialog is a modal overlay that owns the

@@ -155,6 +155,12 @@ impl App {
                             // routing stays on `split.focused`.
                             self.prompt_view.blur();
                         }
+                        // The click also FOCUSES the pane: the slash menu's
+                        // source switches to the pane's own commands (and
+                        // the snapshot probe seeds on first focus), the
+                        // same switch the digit hotkeys perform.
+                        super::agents_dispatch::ensure_pane_snapshot(self, index);
+                        super::agents_dispatch::sync_slash_source(self);
                         return Ok(true);
                     }
                     MouseEventType::Up if button == MouseButton::Left => {
@@ -840,6 +846,9 @@ impl App {
                             DialogType::ToolCallList { .. } => {
                                 self.handle_tool_call_dialog_key(KeyCode::Up);
                             }
+                            DialogType::AgentConfigList { .. } => {
+                                self.handle_agent_config_dialog_key(KeyCode::Up);
+                            }
                             DialogType::CheckupModelList { .. } => {
                                 self.handle_checkup_model_dialog_key(KeyCode::Up);
                             }
@@ -931,6 +940,9 @@ impl App {
                             DialogType::ToolCallList { .. } => {
                                 self.handle_tool_call_dialog_key(KeyCode::Down);
                             }
+                            DialogType::AgentConfigList { .. } => {
+                                self.handle_agent_config_dialog_key(KeyCode::Down);
+                            }
                             DialogType::CheckupModelList { .. } => {
                                 self.handle_checkup_model_dialog_key(KeyCode::Down);
                             }
@@ -1012,13 +1024,20 @@ impl App {
         // Model picker hover owns its non-release events too. The regular
         // dialog click dispatch below intentionally runs only on release, so
         // without this path the model highlight could never follow the mouse.
+        // The /agents config box rides the same contract (its row highlight
+        // follows the mouse through the shared list-dialog component).
         if matches!(
             event_type,
             MouseEventType::Move | MouseEventType::Drag | MouseEventType::Down
         ) && self
             .dialog
             .current()
-            .is_some_and(|d| matches!(&d.dialog_type, DialogType::ModelList { .. }))
+            .is_some_and(|d| {
+                matches!(
+                    &d.dialog_type,
+                    DialogType::ModelList { .. } | DialogType::AgentConfigList { .. }
+                )
+            })
         {
             let area = self.terminal_size();
             self.dialog.handle_mouse(&mouse, area, &self.theme);
@@ -1364,6 +1383,10 @@ impl App {
                                 self.handle_tool_call_dialog_key(KeyCode::Enter);
                                 return Ok(true);
                             }
+                            DialogType::AgentConfigList { .. } => {
+                                self.confirm_agent_config_from_mouse();
+                                return Ok(true);
+                            }
                             DialogType::CheckupModelList { .. } => {
                                 self.handle_checkup_model_dialog_key(KeyCode::Enter);
                                 return Ok(true);
@@ -1420,6 +1443,14 @@ impl App {
                     return Ok(true);
                 }
                 DialogAction::Dismissed => {
+                    // The /agents config box dismissed by click: drop its
+                    // dispatch context with the box (no restore semantics
+                    // like the model/theme pickers — nothing to revert).
+                    if self.is_agent_config_dialog_visible() {
+                        self.agent_config_edit = None;
+                        self.dialog.pop();
+                        return Ok(true);
+                    }
                     // Reasoning sub-dialog dismissed (click outside): pop back
                     // to the model list, keeping the restore state intact.
                     if self.is_reasoning_dialog_visible() {

@@ -2,6 +2,7 @@ pub mod agent_spinner;
 pub mod agent_spinner_bass;
 pub mod budget;
 pub mod cursor;
+pub mod list_dialog;
 pub mod prompt;
 pub mod rag_input;
 pub mod search_bar;

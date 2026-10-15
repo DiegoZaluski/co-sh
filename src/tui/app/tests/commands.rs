@@ -2012,6 +2012,10 @@ async fn agents_call_serves_a_queued_cosh_pane_end_to_end() {
         Some(panes::MAIN),
         "a MAIN-requested pane turn resolves the wake promise's tag"
     );
+    // Everything HOME-sensitive above has already run: release the lock
+    // before the await point (clippy::await_holding_lock) — the remaining
+    // steps only touch the app's in-memory state, never $HOME.
+    drop(_guard);
     let rx = handle.receiver.expect("wait mode carries a receiver");
     let answer = rx.await.expect("sender alive");
     assert_eq!(answer, Ok("report".to_string()));

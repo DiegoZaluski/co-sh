@@ -107,6 +107,11 @@ impl App {
         // The mirrors follow the panes into the parked slot: the stream
         // keeps landing in the shared list (same routing as live panes).
         self.sync_agents_pane_mirrors();
+        // The slash menu follows the panes into the PARKED slot: no live
+        // split serves the screen, so the cosh set returns (a parked
+        // split's stale `focused` must never hijack the menu — see
+        // `sync_slash_source`, which only trusts the LIVE split).
+        super::agents_dispatch::sync_slash_source(self);
         self.prompt_view.focus();
     }
 
@@ -136,6 +141,12 @@ impl App {
             // The mirrors are already in place (the parked slot kept them
             // alive); one sync re-affirms their state for the re-open.
             self.sync_agents_pane_mirrors();
+            // The re-attached pane set carries its focus (pane 0 on a
+            // rebuilt one): the slash menu's source follows it — agent
+            // list when the pane was already probed, spinner/cosh
+            // otherwise, and a fresh probe seed when the cache is empty.
+            super::agents_dispatch::ensure_pane_snapshot(self, 0);
+            super::agents_dispatch::sync_slash_source(self);
             self.prompt_view.focus();
             return true;
         }
@@ -374,6 +385,16 @@ impl App {
         {
             self.agent_spinner = None;
         }
+        // The slash menu's source follows the pane set on EVERY change
+        // (open, replace, close): a fresh confirm leaves pane 0 focused, a
+        // teardown restores the cosh set. Without this the menu would keep
+        // serving a dead set's command list (and a fresh confirm would
+        // leave the cosh list routing into the pane — see
+        // `route_agent_slash_command`, which trusts the menu's source).
+        if mode_open {
+            super::agents_dispatch::ensure_pane_snapshot(self, 0);
+        }
+        super::agents_dispatch::sync_slash_source(self);
     }
 
     /// Record the session's `/agents` bookkeeping — the pane set (with its
@@ -771,6 +792,15 @@ impl App {
         }
         // Same cleanup, now against the NEWLY selected session.
         self.finalize_stale_compaction_lines();
+        // The slash menu follows the rebuilt pane set: a session restored
+        // with the mode open leaves pane 0 focused (agent list, fresh probe
+        // seed), every other outcome returns the cosh set. Without this a
+        // stale agent list from the OLD session would keep serving the
+        // menu into the new one.
+        if self.agents_split.is_some() {
+            super::agents_dispatch::ensure_pane_snapshot(self, 0);
+        }
+        super::agents_dispatch::sync_slash_source(self);
         true
     }
 
@@ -918,6 +948,17 @@ impl App {
     }
 
     pub(super) fn run_slash_command(&mut self, cmd: &crate::ui::slash_menu::SlashCommand) {
+        // The menu's own SOURCE decides the routing — not a re-derived
+        // focus: a pick must never disagree with the list the user saw.
+        // The source is kept in lockstep with the split by
+        // `sync_slash_source` on every focus/teardown/open path.
+        if self.slash_menu.source == crate::ui::slash_menu::Source::Agent
+            && super::agents_dispatch::route_agent_slash_command(self, cmd)
+        {
+            self.slash_menu.visible = false;
+            self.prompt_view.clear_all();
+            return;
+        }
         if cmd.name == "themes" {
             self.open_theme_dialog();
         } else if cmd.name == "models" {

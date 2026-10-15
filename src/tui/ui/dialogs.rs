@@ -12,6 +12,7 @@ use cosh_tui::core::renderables::r#box::BoxRenderable;
 use cosh_tui::core::types::{MouseButton, MouseEvent, MouseEventType};
 
 use crate::component::cursor::{Cursor, CursorState};
+use crate::component::list_dialog::{self, FilterState, ListRow, MouseHit};
 use crate::component::spinner::SpinnerState;
 use crate::theme::{Theme, rgba_color};
 use crate::util::draw::draw_text_line_compact;
@@ -20,13 +21,6 @@ use crate::util::field_selection::DragSelection;
 /// Hint drawn next to the spinner while the ModelList waits on the
 /// background API fetch started by `open_model_dialog`.
 const MODEL_LIST_LOADING_HINT: &str = "Loading models";
-
-/// Visual item in the model list - either a provider header or a model
-#[derive(Debug, Clone)]
-enum VisualItem {
-    Header(String),
-    Model(ModelEntry),
-}
 
 /// Paint the dialog surface: fill the rect with spaces on `bg`, strip every
 /// modifier (a dialog is a clean slate — no lingering bold/underline from
@@ -92,6 +86,28 @@ pub(crate) fn model_entry_matches_filter(entry: &ModelEntry, filter: &str) -> bo
     }
     let needle = filter.to_lowercase();
     entry.model.to_lowercase().contains(&needle) || entry.provider.to_lowercase().contains(&needle)
+}
+
+/// Only `options` rows matching the shared list-dialog filter (case-
+/// insensitive `contains` over name and value id — the model picker's
+/// convention). The AgentConfigList render arm uses this; the mouse arm
+/// and the keyboard handler re-derive the SAME rows through it, so the
+/// painted list, the hit-test and the Enter target can never drift.
+pub(crate) fn filter_matches(
+    options: &[(String, String)],
+    filter: &str,
+) -> Vec<(String, String)> {
+    options
+        .iter()
+        .filter(|(value, name)| {
+            // The component's shared convention, applied per field: a value
+            // matches when either its id or its display name contains the
+            // filter.
+            list_dialog::matches_filter(filter, value)
+                || list_dialog::matches_filter(filter, name)
+        })
+        .cloned()
+        .collect()
 }
 
 /// Rows for the Shortcuts dialog. A `Header` is a scope title rendered full
@@ -397,6 +413,26 @@ fn confirm_dialog_w(message: &str, area_width: u16) -> u16 {
     30u16.max(needed).min(area_width.saturating_sub(4)).max(16)
 }
 
+/// Content-derived width for the agent config box (the `confirm_dialog_w`
+/// convention): the longest value name — or the title — plus room for the
+/// ● indicator and padding, floored at the compact-picker minimum and
+/// clamped to the terminal. The mouse arm computes the SAME width, so the
+/// hit-test always walks the frame the renderer painted.
+pub(crate) fn agent_config_dialog_w(
+    title: &str,
+    options: &[(String, String)],
+    area_width: u16,
+) -> u16 {
+    let longest = options
+        .iter()
+        .map(|(_, name)| name.chars().count() as u16)
+        .chain(std::iter::once(title.chars().count() as u16))
+        .max()
+        .unwrap_or(0);
+    let needed = longest + 6;
+    28u16.max(needed).min(area_width.saturating_sub(4)).max(16)
+}
+
 /// Phases of the [`DialogType::DeviceLogin`] sign-in, mirroring the
 /// gateway offer box's Connecting → Authorizing progression.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -447,6 +483,21 @@ pub enum DialogType {
     /// two paths are mutually exclusive at the request level.
     ToolCallList {
         current: String,
+    },
+    /// Standardized config picker for a focused `/agents` pane's mapped
+    /// command group (model / provider / reasoning / mode): the pane's OWN
+    /// ACP config options rendered cosh-style. `options` are
+    /// `(value_id, display_name)` rows of the matched session config
+    /// option, `current` the active value id (the row indicator); the app
+    /// layer applies the picked value through `session/set_config_option`.
+    /// Filtering/selection/cursor live in the shared list-dialog
+    /// component's [`FilterState`] — the same search box every cosh list
+    /// picker carries.
+    AgentConfigList {
+        title: String,
+        options: Vec<(String, String)>,
+        current: String,
+        filter: FilterState,
     },
     /// Compact three-option picker for the checkup resident model
     /// (Settings → Checkup model): `english` / `multilingual` /
@@ -670,6 +721,18 @@ impl std::fmt::Debug for DialogType {
             Self::ToolCallList { current } => f
                 .debug_struct("ToolCallList")
                 .field("current", current)
+                .finish(),
+            Self::AgentConfigList {
+                title,
+                options,
+                current,
+                filter,
+            } => f
+                .debug_struct("AgentConfigList")
+                .field("title", title)
+                .field("options", options)
+                .field("current", current)
+                .field("filter", &filter.filter)
                 .finish(),
             Self::CheckupModelList { current } => f
                 .debug_struct("CheckupModelList")
@@ -1007,7 +1070,7 @@ impl DialogState {
                 current: _,
                 filter,
             } => {
-                // Recompute dialog geometry (same as render)
+                // Recompute the filtered list (same as render)
                 let filtered: Vec<&str> = if filter.is_empty() {
                     themes.iter().map(String::as_str).collect()
                 } else {
@@ -1025,51 +1088,16 @@ impl DialogState {
                     instance.selected
                 };
 
-                let max_w = 40u16.min(area.width.saturating_sub(4));
-                let dialog_w = max_w.max(24).min(area.width.saturating_sub(2));
-                let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
-
-                let max_visible_height = (area.height.saturating_sub(4)) as usize;
-                let max_visible = max_visible_height.min(filtered.len().max(1)).clamp(1, 10);
-                let dialog_h = (max_visible + 4) as u16;
-                let dialog_y = area
-                    .y
-                    .saturating_add((area.height.saturating_sub(dialog_h)) / 2);
-
-                // Check outside dialog
-                if x < dialog_x
-                    || x >= dialog_x + dialog_w
-                    || y_click < dialog_y
-                    || y_click >= dialog_y + dialog_h
-                {
-                    return DialogAction::Dismissed;
-                }
-
-                // Check "esc" label (top-right)
-                let header_pad = 4;
-                let header_x = dialog_x + header_pad;
-                let header_w = dialog_w.saturating_sub(header_pad * 2);
-                let esc_label = "esc";
-                let esc_x = header_x + header_w.saturating_sub(esc_label.len() as u16);
-                // esc is on first line (dialog_y)
-                if y_click == dialog_y && x >= esc_x && x < esc_x + esc_label.len() as u16 {
-                    return DialogAction::Dismissed;
-                }
-
-                // Check list items
-                let list_top = dialog_y + 3;
-
-                let scroll_offset = if selection >= max_visible {
-                    selection - max_visible + 1
-                } else {
-                    0
-                };
-                let scroll_offset = scroll_offset.min(filtered.len().saturating_sub(max_visible));
-
-                if y_click >= list_top {
-                    let row = (y_click - list_top) as usize;
-                    if row < max_visible {
-                        let item_idx = scroll_offset + row;
+                // The shared list-dialog component owns the geometry and the
+                // hit-test (theme box: preferred 40, floor 24, 10-row cap) —
+                // the scroll window and the row mapping can never drift from
+                // the painted frame.
+                let layout =
+                    list_dialog::compute_layout(selection, filtered.len(), 10, 40, 24, area, false);
+                match list_dialog::hit_test(&layout, x, y_click) {
+                    MouseHit::Outside | MouseHit::Dismiss => return DialogAction::Dismissed,
+                    MouseHit::Inside => return DialogAction::Consumed,
+                    MouseHit::Row(item_idx) => {
                         if item_idx < filtered.len() {
                             instance.selected = item_idx;
                             return DialogAction::Confirmed;
@@ -1330,6 +1358,59 @@ impl DialogState {
 
                 DialogAction::Consumed
             }
+            DialogType::AgentConfigList {
+                title,
+                options,
+                filter,
+                ..
+            } => {
+                // The shared list-dialog component owns the geometry: the
+                // box clamps to the terminal, the scroll window follows the
+                // selection, and the hit-test walks the SAME window the
+                // renderer painted — over the SAME filtered rows (a click
+                // must hit the list the search shows, not an invisible
+                // unfiltered twin) at the SAME content-derived width.
+                // Outside the box → dismiss; on the header's "esc" →
+                // dismiss; on a row → select it (release then confirms —
+                // one click applies, like the model list).
+                let rows = filter_matches(options, &filter.filter);
+                let max_w = agent_config_dialog_w(title, options, area.width);
+                let layout = filter.layout(
+                    filter.clamped(rows.len()),
+                    rows.len(),
+                    10,
+                    max_w,
+                    max_w,
+                    area,
+                    false,
+                );
+                match filter.mouse_hit(&layout, x, y_click) {
+                    MouseHit::Outside | MouseHit::Dismiss => DialogAction::Dismissed,
+                    MouseHit::Inside => DialogAction::Consumed,
+                    MouseHit::Row(index) => {
+                        if index < rows.len() {
+                            // `filter.selected` is the box's single source
+                            // of truth (the render arm and the confirm path
+                            // read it) — hover just moves it; release then
+                            // confirms the row the highlight sits on.
+                            filter.selected = index;
+                            match mouse.event_type {
+                                // Match the model list: hover moves only
+                                // the visual selection, release confirms.
+                                MouseEventType::Move
+                                | MouseEventType::Drag
+                                | MouseEventType::Down => DialogAction::Consumed,
+                                MouseEventType::Up if mouse.button == MouseButton::Left => {
+                                    DialogAction::Confirmed
+                                }
+                                _ => DialogAction::Consumed,
+                            }
+                        } else {
+                            DialogAction::Consumed
+                        }
+                    }
+                }
+            }
             DialogType::ApiKeyInput { .. } => {
                 // Same box geometry as render (`render_text_input_dialog`):
                 // the Login button lives on the box's bottom row, right-aligned.
@@ -1505,83 +1586,57 @@ impl DialogState {
                     instance.selected
                 };
 
-                let max_w = 50u16.min(area.width.saturating_sub(4));
-                let dialog_w = max_w.max(30).min(area.width.saturating_sub(2));
-                let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
-
-                let total_items = flat_entries.len() + grouped.len();
-                let max_visible_height = (area.height.saturating_sub(4)) as usize;
-                let max_visible = max_visible_height.min(total_items.max(1)).max(1);
-                let dialog_h = (max_visible + 4) as u16;
-                let dialog_y = area
-                    .y
-                    .saturating_add((area.height.saturating_sub(dialog_h)) / 2);
-
-                // Check outside dialog
-                if x < dialog_x
-                    || x >= dialog_x + dialog_w
-                    || y_click < dialog_y
-                    || y_click >= dialog_y + dialog_h
-                {
-                    return DialogAction::Dismissed;
-                }
-
-                // Check "esc" label (top-right)
-                let header_pad = 4;
-                let header_x = dialog_x + header_pad;
-                let header_w = dialog_w.saturating_sub(header_pad * 2);
-                let esc_label = "esc";
-                let esc_x = header_x + header_w.saturating_sub(esc_label.len() as u16);
-                if y_click == dialog_y && x >= esc_x && x < esc_x + esc_label.len() as u16 {
-                    return DialogAction::Dismissed;
-                }
-
-                // Build visual items (headers + models) to map Y to model index
-                let mut visual_list: Vec<(&str, bool)> = Vec::new(); // (label, is_model)
-                for (provider, entries) in &grouped {
-                    visual_list.push((provider.as_str(), false));
-                    for entry in entries {
-                        visual_list.push((&entry.model, true));
-                    }
-                }
-
-                let list_top = dialog_y + 3;
-
-                // Build the same visual-to-model map used by the renderer.
-                // Headers occupy rows but are not selectable.
-                let mut model_idx = 0;
-                let mut visual_to_model = Vec::with_capacity(visual_list.len());
-                for (_, is_model) in &visual_list {
-                    if *is_model {
-                        visual_to_model.push(Some(model_idx));
-                        model_idx += 1;
-                    } else {
-                        visual_to_model.push(None);
-                    }
-                }
-
-                // Compute the visible window from the currently selected model,
-                // just like render(). Hovering a row updates the shared
-                // selection; the following frame then keeps that row visible.
-                let visual_selection = visual_to_model
+                // The same visual rows the renderer paints (headers +
+                // models), through the shared list-dialog component: ONE
+                // geometry and ONE hit-test — the scroll window and the
+                // row mapping can never drift from the painted frame.
+                let rows: Vec<ListRow> = grouped
+                    .keys()
+                    .zip(grouped.values())
+                    .flat_map(|(provider, entries)| {
+                        let mut items = vec![ListRow::scope(provider.clone())];
+                        for entry in entries {
+                            items.push(ListRow::item(entry.model.clone(), "", false));
+                        }
+                        items
+                    })
+                    .collect();
+                let mut model_count = 0;
+                let visual_selection = rows
                     .iter()
-                    .position(|index| *index == Some(selection))
+                    .position(|row| {
+                        if row.header {
+                            false
+                        } else {
+                            let is_selected = model_count == selection;
+                            model_count += 1;
+                            is_selected
+                        }
+                    })
                     .unwrap_or(0);
-                let scroll_offset =
-                    if visual_selection >= max_visible && max_visible < visual_list.len() {
-                        visual_selection.saturating_sub(max_visible - 1)
-                    } else {
-                        0
-                    };
-                let scroll_offset =
-                    scroll_offset.min(visual_list.len().saturating_sub(max_visible));
+                let layout = list_dialog::compute_layout(
+                    visual_selection,
+                    rows.len(),
+                    usize::MAX,
+                    50,
+                    30,
+                    area,
+                    false,
+                );
 
-                if y_click >= list_top {
-                    let row = (y_click - list_top) as usize;
-                    if row < max_visible {
-                        let vis_idx = scroll_offset + row;
-                        if let Some(Some(model_index)) = visual_to_model.get(vis_idx) {
-                            instance.selected = *model_index;
+                match list_dialog::hit_test(&layout, x, y_click) {
+                    MouseHit::Outside | MouseHit::Dismiss => return DialogAction::Dismissed,
+                    MouseHit::Inside => return DialogAction::Consumed,
+                    MouseHit::Row(vis_idx) => {
+                        // Headers occupy rows but are not selectable: map
+                        // the visual index back onto the model index the
+                        // dialog stores (the renderer's inverse lookup).
+                        let model_index = rows[..vis_idx.min(rows.len())]
+                            .iter()
+                            .filter(|row| !row.header)
+                            .count();
+                        if vis_idx < rows.len() && !rows[vis_idx].header {
+                            instance.selected = model_index;
                             return match mouse.event_type {
                                 // Match the slash menu: hover moves only the
                                 // visual selection, while release confirms it.
@@ -1812,141 +1867,43 @@ impl DialogState {
                     instance.selected
                 };
 
-                // Responsive sizing: shrink with terminal, minimum 24 cols
-                let max_w = 40u16.min(area.width.saturating_sub(4));
-                let dialog_w = max_w.max(24).min(area.width.saturating_sub(2));
-                let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
+                // Visual rows for the shared list-dialog component: the
+                // theme name plus its right-anchored swatch strip (the
+                // component truncates the label to keep the chips in a
+                // clean column, exactly as this arm always painted them).
+                let rows: Vec<ListRow> = filtered
+                    .iter()
+                    .map(|(name, row_swatches)| {
+                        ListRow::swatch_item(
+                            (*name).to_string(),
+                            *name == current.as_str(),
+                            (*row_swatches).to_vec(),
+                        )
+                    })
+                    .collect();
 
-                // Fit list to available height
-                // Layout: 1 title + 1 filter + 1 gap + max_visible items + 1 paddingBottom = max_visible + 4
-                let max_visible_height = (area.height.saturating_sub(4)) as usize;
-                let max_visible = max_visible_height.min(filtered.len().max(1)).clamp(1, 10);
-                let dialog_h = (max_visible + 4) as u16;
-                let dialog_y = area
-                    .y
-                    .saturating_add((area.height.saturating_sub(dialog_h)) / 2);
-                let dialog_area = Rect::new(dialog_x, dialog_y, dialog_w, dialog_h);
-
-                // Fill background (NO border - original DialogSelect has no border)
-                let bg_color = rgba_color(theme.background_element);
-                clear_dialog_surface(buf, dialog_area, bg_color);
-
-                // Header area (paddingLeft=4, paddingRight=4 like original)
-                let header_pad = 4;
-                let header_x = dialog_x + header_pad;
-                let header_w = dialog_w.saturating_sub(header_pad * 2);
-
-                // Line 0: Title (bold, like original TextAttributes.BOLD) + "esc" label (right-aligned, muted)
-                let title_style = Style::default()
-                    .fg(rgba_color(theme.text))
-                    .add_modifier(Modifier::BOLD);
-                draw_text_line_compact(buf, "Themes", header_x, dialog_y, header_w, title_style);
-                let esc_label = "esc";
-                let esc_x = header_x + header_w.saturating_sub(esc_label.len() as u16);
-                draw_text_line_compact(
+                // The shared list-dialog component owns the box: terminal-
+                // clamped geometry, the Search line with the blinking
+                // cursor, the scroll window that follows the selection
+                // (theme box: preferred 40, floor 24, 10-row cap).
+                let layout =
+                    list_dialog::compute_layout(selection, rows.len(), 10, 40, 24, area, false);
+                list_dialog::render_chrome_raw(
                     buf,
-                    esc_label,
-                    esc_x,
-                    dialog_y,
-                    header_w,
-                    Style::default().fg(rgba_color(theme.text_muted)),
+                    &layout,
+                    theme,
+                    now,
+                    filter,
+                    &instance.cursor,
+                    "Themes",
+                    None,
                 );
 
-                // Line 1: Filter input (background_element bg to match dialog, textMuted fg)
-                let bg_element = rgba_color(theme.background_element);
-                for cx in header_x..header_x + header_w {
-                    if let Some(cell) = buf.cell_mut((cx, dialog_y + 1)) {
-                        cell.set_char(' ');
-                        cell.set_style(Style::default().bg(bg_element));
-                    }
-                }
+                let list_x = layout.x + 1;
+                let list_w = layout.width.saturating_sub(2);
+                let list_top = layout.list_top();
 
-                // Use the reusable cursor component (no blur behavior; always focused)
-                let cursor_state = instance.cursor.current_state(now);
-
-                // Show "Search" when empty, otherwise show filter text + cursor
-                let has_filter = !filter.is_empty();
-                if has_filter {
-                    draw_text_line_compact(
-                        buf,
-                        filter.as_str(),
-                        header_x,
-                        dialog_y + 1,
-                        header_w,
-                        Style::default().fg(rgba_color(theme.text)).bg(bg_element),
-                    );
-                    // Blinking cursor at end of filter text
-                    let cursor_x = header_x + filter.len() as u16;
-                    if cursor_x < header_x + header_w
-                        && let Some(cell) = buf.cell_mut((cursor_x, dialog_y + 1))
-                    {
-                        match cursor_state {
-                            CursorState::On => {
-                                cell.set_char('\u{2588}');
-                                cell.set_style(
-                                    Style::default()
-                                        .fg(rgba_color(theme.primary))
-                                        .bg(bg_element),
-                                );
-                            }
-                            CursorState::Off | CursorState::Blur => {
-                                // Semi-transparent cursor with medium shade character
-                                cell.set_char('\u{2592}');
-                                cell.set_style(
-                                    Style::default()
-                                        .fg(rgba_color(theme.text_muted))
-                                        .bg(bg_element),
-                                );
-                            }
-                        }
-                    }
-                } else {
-                    // Show "Search" label when filter is empty
-                    let search_label = "Search";
-                    draw_text_line_compact(
-                        buf,
-                        search_label,
-                        header_x,
-                        dialog_y + 1,
-                        header_w,
-                        Style::default()
-                            .fg(rgba_color(theme.text_muted))
-                            .bg(bg_element),
-                    );
-                    // Cursor positioned over the first character of the placeholder
-                    if let Some(cell) = buf.cell_mut((header_x, dialog_y + 1)) {
-                        match cursor_state {
-                            CursorState::On => {
-                                cell.set_char('\u{2588}');
-                                cell.set_style(
-                                    Style::default()
-                                        .fg(rgba_color(theme.primary))
-                                        .bg(bg_element),
-                                );
-                            }
-                            CursorState::Off | CursorState::Blur => {
-                                // Semi-transparent cursor with medium shade character
-                                cell.set_char('\u{2592}');
-                                cell.set_style(
-                                    Style::default()
-                                        .fg(rgba_color(theme.text_muted))
-                                        .bg(bg_element),
-                                );
-                            }
-                        }
-                    }
-                }
-
-                // Line 2: Gap (empty, matches original gap={1})
-
-                // Lines 3+: Theme list (paddingLeft=1, paddingRight=1 like original scrollbox)
-                // After list: paddingBottom=1 (line dialog_y + 3 + max_visible)
-                let list_top = dialog_y + 3;
-                let list_pad = 1; // original scrollbox paddingLeft=1
-                let list_x = dialog_x + list_pad;
-                let list_w = dialog_w.saturating_sub(list_pad * 2);
-
-                if filtered.is_empty() {
+                if rows.is_empty() {
                     draw_text_line_compact(
                         buf,
                         "No matching themes",
@@ -1956,140 +1913,7 @@ impl DialogState {
                         Style::default().fg(rgba_color(theme.text_muted)),
                     );
                 } else {
-                    let bg_element = rgba_color(theme.background_element);
-                    // Scroll offset: keep selection visible
-                    let scroll_offset = if selection >= max_visible {
-                        selection - max_visible + 1
-                    } else {
-                        0
-                    };
-                    let scroll_offset =
-                        scroll_offset.min(filtered.len().saturating_sub(max_visible));
-                    for (vis_idx, &(theme_name, theme_row_swatches)) in filtered
-                        .iter()
-                        .enumerate()
-                        .skip(scroll_offset)
-                        .take(max_visible)
-                    {
-                        let ry = list_top + (vis_idx - scroll_offset) as u16;
-                        let is_current = theme_name == current.as_str();
-                        let is_selected = vis_idx == selection;
-
-                        // Draw full row background first
-                        if is_selected {
-                            for cx in list_x..list_x + list_w {
-                                if let Some(cell) = buf.cell_mut((cx, ry)) {
-                                    cell.set_char(' ');
-                                    cell.set_style(Style::default().bg(rgba_color(theme.primary)));
-                                }
-                            }
-                        } else {
-                            // Match dialog background — NOT Color::Reset (which is terminal black)
-                            for cx in list_x..list_x + list_w {
-                                if let Some(cell) = buf.cell_mut((cx, ry)) {
-                                    cell.set_char(' ');
-                                    cell.set_style(Style::default().bg(bg_element));
-                                }
-                            }
-                        }
-
-                        // Indicator: ● (U+25cf) with accent color for current theme (changes with preview)
-                        // For selected: use contrast color; for non-selected current: use accent
-                        let (indicator_fg, indicator_ch) = if is_current {
-                            if is_selected {
-                                // Selected + current: ● uses contrast foreground
-                                let (pr, pg, pb, _) = theme.primary.to_ints();
-                                let lum = (0.299 * f32::from(pr)
-                                    + 0.587 * f32::from(pg)
-                                    + 0.114 * f32::from(pb))
-                                    / 255.0;
-                                (
-                                    if lum > 0.5 {
-                                        Color::Rgb(0, 0, 0)
-                                    } else {
-                                        Color::Rgb(255, 255, 255)
-                                    },
-                                    "\u{25cf}",
-                                )
-                            } else {
-                                // Current but not selected: ● uses accent color (changes with theme preview)
-                                (rgba_color(theme.accent), "\u{25cf}")
-                            }
-                        } else {
-                            (Color::Reset, " ")
-                        };
-
-                        // Draw ● indicator with its color
-                        if let Some(cell) = buf.cell_mut((list_x, ry)) {
-                            cell.set_char(indicator_ch.chars().next().unwrap_or(' '));
-                            cell.set_style(Style::default().fg(indicator_fg).bg(if is_selected {
-                                rgba_color(theme.primary)
-                            } else {
-                                bg_element
-                            }));
-                        }
-                        // Space after indicator
-                        if let Some(cell) = buf.cell_mut((list_x + 1, ry)) {
-                            cell.set_char(' ');
-                            cell.set_style(Style::default().bg(if is_selected {
-                                rgba_color(theme.primary)
-                            } else {
-                                bg_element
-                            }));
-                        }
-
-                        // Theme name
-                        let (name_fg, name_bg) = if is_selected {
-                            let (pr, pg, pb, _) = theme.primary.to_ints();
-                            let lum = (0.299 * f32::from(pr)
-                                + 0.587 * f32::from(pg)
-                                + 0.114 * f32::from(pb))
-                                / 255.0;
-                            (
-                                if lum > 0.5 {
-                                    Color::Rgb(0, 0, 0)
-                                } else {
-                                    Color::Rgb(255, 255, 255)
-                                },
-                                rgba_color(theme.primary),
-                            )
-                        } else {
-                            (rgba_color(theme.text), bg_element)
-                        };
-
-                        // Color chips right-anchor at the row's edge, so the
-                        // strips line up in a clean column across rows no
-                        // matter how long the name is; the name is truncated
-                        // to leave room for them.
-                        let row_swatches: &[RGBA] = theme_row_swatches;
-                        let chips_w = crate::ui::theme_swatches::swatches_width(row_swatches.len());
-                        let row_bg = if is_selected {
-                            rgba_color(theme.primary)
-                        } else {
-                            bg_element
-                        };
-                        let gap_after_name = u16::from(!row_swatches.is_empty());
-                        let name_max_w = list_w
-                            .saturating_sub(2)
-                            .saturating_sub(chips_w)
-                            .saturating_sub(gap_after_name);
-                        draw_text_line_compact(
-                            buf,
-                            theme_name,
-                            list_x + 2,
-                            ry,
-                            name_max_w,
-                            Style::default().fg(name_fg).bg(name_bg),
-                        );
-
-                        crate::ui::theme_swatches::draw_theme_swatches(
-                            buf,
-                            list_x + list_w.saturating_sub(chips_w),
-                            ry,
-                            row_swatches,
-                            row_bg,
-                        );
-                    }
+                    list_dialog::render_rows(buf, &layout, theme, &rows, selection);
                 }
                 // Lines after list: paddingBottom=1 (already filled with background)
                 // NO footer, NO separator - matching original DialogSelect
@@ -2477,140 +2301,72 @@ impl DialogState {
                     instance.selected
                 };
 
-                // Responsive sizing: shrink with terminal, minimum 24 cols
-                let max_w = 50u16.min(area.width.saturating_sub(4));
-                let dialog_w = max_w.max(30).min(area.width.saturating_sub(2));
-                let dialog_x = area.x + area.width.saturating_sub(dialog_w) / 2;
+                // Visual rows for the shared list-dialog component: provider
+                // headers (never selectable) + models (★ auto keeps its
+                // accent treatment). Selection is a MODEL index, so map it
+                // to its visual position first — the lookup stays identical
+                // to handle_mouse() so hover, scrolling and the painted
+                // highlight agree.
+                let rows: Vec<ListRow> = grouped
+                    .iter()
+                    .flat_map(|(provider, entries)| {
+                        let mut items = vec![ListRow::scope(provider.clone())];
+                        for entry in entries {
+                            let is_current = entry.model == current.as_str();
+                            if entry.model == "auto" {
+                                items.push(ListRow::accent_item(
+                                    "★ auto  (fallback chain)",
+                                    is_current,
+                                ));
+                            } else {
+                                items.push(ListRow::item(entry.model.clone(), "", is_current));
+                            }
+                        }
+                        items
+                    })
+                    .collect();
+                let mut model_count = 0;
+                let visual_selection = rows
+                    .iter()
+                    .position(|row| {
+                        if row.header {
+                            false
+                        } else {
+                            let is_selected = model_count == selection;
+                            model_count += 1;
+                            is_selected
+                        }
+                    })
+                    .unwrap_or(0);
 
-                // Calculate total items (models + provider headers)
-                let total_items = flat_entries.len() + grouped.len();
-
-                // Fit list to available height
-                let max_visible_height = (area.height.saturating_sub(4)) as usize;
-                let max_visible = max_visible_height.min(total_items.max(1)).max(1);
-                let dialog_h = (max_visible + 4) as u16;
-                let dialog_y = area
-                    .y
-                    .saturating_add((area.height.saturating_sub(dialog_h)) / 2);
-                let dialog_area = Rect::new(dialog_x, dialog_y, dialog_w, dialog_h);
-
-                // Fill background (NO border - original DialogSelect has no border)
-                let bg_color = rgba_color(theme.background_element);
-                clear_dialog_surface(buf, dialog_area, bg_color);
-
-                // Header area (paddingLeft=4, paddingRight=4 like original)
-                let header_pad = 4;
-                let header_x = dialog_x + header_pad;
-                let header_w = dialog_w.saturating_sub(header_pad * 2);
-
-                // Line 0: Title (bold, like original TextAttributes.BOLD) + "esc" label (right-aligned, muted)
-                let title_style = Style::default()
-                    .fg(rgba_color(theme.text))
-                    .add_modifier(Modifier::BOLD);
-                draw_text_line_compact(buf, "Models", header_x, dialog_y, header_w, title_style);
-                let esc_label = "esc";
-                let esc_x = header_x + header_w.saturating_sub(esc_label.len() as u16);
-                draw_text_line_compact(
+                // The shared list-dialog component owns the box: terminal-
+                // clamped geometry, the Search line with the blinking
+                // cursor, the scroll window that follows the selection. The
+                // model list is UNCAPTED — its window grows with the
+                // terminal (the compact pickers cap at 10, this does not).
+                let layout = list_dialog::compute_layout(
+                    visual_selection,
+                    rows.len(),
+                    usize::MAX,
+                    50,
+                    30,
+                    area,
+                    false,
+                );
+                list_dialog::render_chrome_raw(
                     buf,
-                    esc_label,
-                    esc_x,
-                    dialog_y,
-                    header_w,
-                    Style::default().fg(rgba_color(theme.text_muted)),
+                    &layout,
+                    theme,
+                    now,
+                    filter,
+                    &instance.cursor,
+                    "Models",
+                    None,
                 );
 
-                // Line 1: Filter input (background_element bg to match dialog, textMuted fg)
-                let bg_element = rgba_color(theme.background_element);
-                for cx in header_x..header_x + header_w {
-                    if let Some(cell) = buf.cell_mut((cx, dialog_y + 1)) {
-                        cell.set_char(' ');
-                        cell.set_style(Style::default().bg(bg_element));
-                    }
-                }
-
-                // Use the reusable cursor component (no blur behavior; always focused)
-                let cursor_state = instance.cursor.current_state(now);
-
-                // Show "Search" when empty, otherwise show filter text + cursor
-                let has_filter = !filter.is_empty();
-                if has_filter {
-                    draw_text_line_compact(
-                        buf,
-                        filter.as_str(),
-                        header_x,
-                        dialog_y + 1,
-                        header_w,
-                        Style::default().fg(rgba_color(theme.text)).bg(bg_element),
-                    );
-                    // Blinking cursor at end of filter text
-                    let cursor_x = header_x + filter.len() as u16;
-                    if cursor_x < header_x + header_w
-                        && let Some(cell) = buf.cell_mut((cursor_x, dialog_y + 1))
-                    {
-                        match cursor_state {
-                            CursorState::On => {
-                                cell.set_char('\u{2588}');
-                                cell.set_style(
-                                    Style::default()
-                                        .fg(rgba_color(theme.primary))
-                                        .bg(bg_element),
-                                );
-                            }
-                            CursorState::Off | CursorState::Blur => {
-                                // Semi-transparent cursor with medium shade character
-                                cell.set_char('\u{2592}');
-                                cell.set_style(
-                                    Style::default()
-                                        .fg(rgba_color(theme.text_muted))
-                                        .bg(bg_element),
-                                );
-                            }
-                        }
-                    }
-                } else {
-                    // Show "Search" label when filter is empty
-                    let search_label = "Search";
-                    draw_text_line_compact(
-                        buf,
-                        search_label,
-                        header_x,
-                        dialog_y + 1,
-                        header_w,
-                        Style::default()
-                            .fg(rgba_color(theme.text_muted))
-                            .bg(bg_element),
-                    );
-                    // Cursor positioned over the first character of the placeholder
-                    if let Some(cell) = buf.cell_mut((header_x, dialog_y + 1)) {
-                        match cursor_state {
-                            CursorState::On => {
-                                cell.set_char('\u{2588}');
-                                cell.set_style(
-                                    Style::default()
-                                        .fg(rgba_color(theme.primary))
-                                        .bg(bg_element),
-                                );
-                            }
-                            CursorState::Off | CursorState::Blur => {
-                                // Semi-transparent cursor with medium shade character
-                                cell.set_char('\u{2592}');
-                                cell.set_style(
-                                    Style::default()
-                                        .fg(rgba_color(theme.text_muted))
-                                        .bg(bg_element),
-                                );
-                            }
-                        }
-                    }
-                }
-
-                // Line 2: Gap (empty, matches original gap={1})
-
-                // Lines 3+: Model list grouped by provider
-                let list_top = dialog_y + 3;
-                let list_pad = 1;
-                let list_x = dialog_x + list_pad;
-                let list_w = dialog_w.saturating_sub(list_pad * 2);
+                let list_x = layout.x + 1;
+                let list_w = layout.width.saturating_sub(2);
+                let list_top = layout.list_top();
 
                 if *loading {
                     // Models are still being fetched through the API: show the
@@ -2632,7 +2388,7 @@ impl DialogState {
                         list_w.saturating_sub(2),
                         Style::default().fg(rgba_color(theme.text_muted)),
                     );
-                } else if flat_entries.is_empty() {
+                } else if rows.is_empty() {
                     draw_text_line_compact(
                         buf,
                         "No matching models",
@@ -2642,178 +2398,7 @@ impl DialogState {
                         Style::default().fg(rgba_color(theme.text_muted)),
                     );
                 } else {
-                    let bg_element = rgba_color(theme.background_element);
-                    let mut current_y = list_top;
-
-                    // Build visual items: headers + models
-                    // Each visual item is either a header or a model
-                    // We need to map selection (model index) to visual index
-                    let mut visual_items: Vec<VisualItem> = Vec::new();
-                    for (provider, entries) in &grouped {
-                        visual_items.push(VisualItem::Header(provider.clone()));
-                        for entry in entries {
-                            visual_items.push(VisualItem::Model((*entry).clone()));
-                        }
-                    }
-
-                    // Map selection to visual index. Selection is a model
-                    // index, while headers also occupy rows in the dialog.
-                    // Keeping this lookup identical to handle_mouse() makes
-                    // hover, scrolling, and the painted highlight agree.
-                    let mut model_count = 0;
-                    let visual_selection = visual_items
-                        .iter()
-                        .position(|item| match item {
-                            VisualItem::Header(_) => false,
-                            VisualItem::Model(_) => {
-                                let is_selected = model_count == selection;
-                                model_count += 1;
-                                is_selected
-                            }
-                        })
-                        .unwrap_or(0);
-
-                    // Calculate scroll offset
-                    let mut scroll_offset = 0;
-                    if visual_selection >= max_visible && max_visible < visual_items.len() {
-                        scroll_offset = visual_selection.saturating_sub(max_visible - 1);
-                    }
-                    scroll_offset =
-                        scroll_offset.min(visual_items.len().saturating_sub(max_visible));
-
-                    // Draw visible items
-                    let mut model_index = 0;
-                    for (visual_index, item) in visual_items.iter().enumerate() {
-                        match item {
-                            VisualItem::Header(provider) => {
-                                if visual_index >= scroll_offset
-                                    && (visual_index - scroll_offset) < max_visible
-                                {
-                                    let header_style = Style::default()
-                                        .fg(rgba_color(theme.text_muted))
-                                        .add_modifier(Modifier::BOLD);
-                                    draw_text_line_compact(
-                                        buf,
-                                        provider,
-                                        list_x,
-                                        current_y,
-                                        list_w,
-                                        header_style,
-                                    );
-                                    current_y += 1;
-                                }
-                            }
-                            VisualItem::Model(entry) => {
-                                let is_current = entry.model == current.as_str();
-                                let is_selected = model_index == selection;
-
-                                if visual_index >= scroll_offset
-                                    && (visual_index - scroll_offset) < max_visible
-                                {
-                                    // Draw full row background first
-                                    if is_selected {
-                                        for cx in list_x..list_x + list_w {
-                                            if let Some(cell) = buf.cell_mut((cx, current_y)) {
-                                                cell.set_char(' ');
-                                                cell.set_style(
-                                                    Style::default().bg(rgba_color(theme.primary)),
-                                                );
-                                            }
-                                        }
-                                    } else {
-                                        for cx in list_x..list_x + list_w {
-                                            if let Some(cell) = buf.cell_mut((cx, current_y)) {
-                                                cell.set_char(' ');
-                                                cell.set_style(Style::default().bg(bg_element));
-                                            }
-                                        }
-                                    }
-
-                                    // Indicator: ● (U+25cf) with accent color for current model
-                                    let (indicator_fg, indicator_ch) = if is_current {
-                                        if is_selected {
-                                            let (pr, pg, pb, _) = theme.primary.to_ints();
-                                            let lum = (0.299 * f32::from(pr)
-                                                + 0.587 * f32::from(pg)
-                                                + 0.114 * f32::from(pb))
-                                                / 255.0;
-                                            (
-                                                if lum > 0.5 {
-                                                    Color::Rgb(0, 0, 0)
-                                                } else {
-                                                    Color::Rgb(255, 255, 255)
-                                                },
-                                                "\u{25cf}",
-                                            )
-                                        } else {
-                                            (rgba_color(theme.accent), "\u{25cf}")
-                                        }
-                                    } else {
-                                        (Color::Reset, " ")
-                                    };
-
-                                    // Draw ● indicator with its color
-                                    if let Some(cell) = buf.cell_mut((list_x, current_y)) {
-                                        cell.set_char(indicator_ch.chars().next().unwrap_or(' '));
-                                        cell.set_style(Style::default().fg(indicator_fg).bg(
-                                            if is_selected {
-                                                rgba_color(theme.primary)
-                                            } else {
-                                                bg_element
-                                            },
-                                        ));
-                                    }
-                                    // Space after indicator
-                                    if let Some(cell) = buf.cell_mut((list_x + 1, current_y)) {
-                                        cell.set_char(' ');
-                                        cell.set_style(Style::default().bg(if is_selected {
-                                            rgba_color(theme.primary)
-                                        } else {
-                                            bg_element
-                                        }));
-                                    }
-
-                                    // Model name (with special styling for "auto")
-                                    let is_auto = entry.model == "auto";
-                                    let display_name = if is_auto {
-                                        "★ auto  (fallback chain)"
-                                    } else {
-                                        &entry.model
-                                    };
-                                    let (name_fg, name_bg) = if is_auto && !is_selected {
-                                        (rgba_color(theme.accent), bg_element)
-                                    } else if is_selected {
-                                        let (pr, pg, pb, _) = theme.primary.to_ints();
-                                        let lum = (0.299 * f32::from(pr)
-                                            + 0.587 * f32::from(pg)
-                                            + 0.114 * f32::from(pb))
-                                            / 255.0;
-                                        (
-                                            if lum > 0.5 {
-                                                Color::Rgb(0, 0, 0)
-                                            } else {
-                                                Color::Rgb(255, 255, 255)
-                                            },
-                                            rgba_color(theme.primary),
-                                        )
-                                    } else {
-                                        (rgba_color(theme.text), bg_element)
-                                    };
-                                    draw_text_line_compact(
-                                        buf,
-                                        display_name,
-                                        list_x + 2,
-                                        current_y,
-                                        list_w.saturating_sub(2),
-                                        Style::default().fg(name_fg).bg(name_bg),
-                                    );
-
-                                    current_y += 1;
-                                }
-                                model_index += 1;
-                            }
-                        }
-                    }
+                    list_dialog::render_rows(buf, &layout, theme, &rows, visual_selection);
                 }
                 // Lines after list: paddingBottom=1 (already filled with background)
                 // NO footer, NO separator - matching original DialogSelect
@@ -3610,6 +3195,45 @@ impl DialogState {
                         list_w.saturating_sub(2),
                         Style::default().fg(name_fg).bg(name_bg),
                     );
+                }
+            }
+            DialogType::AgentConfigList {
+                title,
+                options,
+                current,
+                filter,
+            } => {
+                // The shared list-dialog component owns the box: terminal-
+                // clamped geometry, the Search line with the blinking
+                // cursor, and a scroll window that follows the selection
+                // (the config lists can outgrow ten rows — opencode's
+                // `model` alone publishes 115 values — so the selection may
+                // never fall off-screen again). One row per ACP value, ●
+                // on the active value.
+                let rows = filter_matches(options, &filter.filter);
+                let selection = filter.clamped(rows.len());
+                let max_w = agent_config_dialog_w(title, options, area.width);
+                let layout = filter.layout(selection, rows.len(), 10, max_w, max_w, area, false);
+                list_dialog::render_chrome(buf, &layout, theme, now, filter, title, None);
+                if rows.is_empty() {
+                    // Same inset as the model/theme boxes: one padding cell
+                    // in from the box edge, not the header's four.
+                    let list_x = layout.x + 1;
+                    let list_w = layout.width.saturating_sub(2);
+                    draw_text_line_compact(
+                        buf,
+                        "No matching values",
+                        list_x,
+                        layout.list_top(),
+                        list_w,
+                        Style::default().fg(rgba_color(theme.text_muted)),
+                    );
+                } else {
+                    let rows = rows
+                        .into_iter()
+                        .map(|(value, name)| ListRow::item(name, "", value == current.as_str()))
+                        .collect::<Vec<_>>();
+                    list_dialog::render_rows(buf, &layout, theme, &rows, selection);
                 }
             }
         }

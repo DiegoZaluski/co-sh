@@ -405,6 +405,14 @@ impl App {
                 return Ok(false);
             }
 
+            // Check the /agents standardized config box (standalone, like
+            // tool-call): the focused pane's own ACP config options.
+            if self.is_agent_config_dialog_visible()
+                && self.handle_agent_config_dialog_key(key.code)
+            {
+                return Ok(false);
+            }
+
             // Check the checkup-model picker (standalone, like tool-call)
             #[cfg(feature = "onnx")]
             if self.is_checkup_model_dialog_visible()
@@ -2062,7 +2070,7 @@ impl App {
                                 self.prompt_view.reset_history_index();
 
                                 // Check if "/" menu should open
-                                self.slash_menu.update(&self.prompt_view.input);
+                                self.slash_menu_refresh();
                             }
                             _ => {}
                         }
@@ -2127,8 +2135,19 @@ impl App {
         }
         // Out-of-range digits consume without moving — the split may not
         // own pane 7 today; something else might tomorrow.
-        if let Some(split) = self.agents_split.as_mut() {
-            split.focus_hotkey(ch);
+        if ch.is_ascii_digit() && self.agents_split.is_some() {
+            // The focus IS the slash-menu source switch: the focused pane's
+            // own command list takes over (fetching its snapshot on first
+            // focus), unfocusing (`0`) restores the cosh set. The snapshot
+            // probe only seeds when a pane actually took the focus.
+            let focused = self
+                .agents_split
+                .as_mut()
+                .and_then(|split| split.focus_hotkey(ch));
+            if let Some(index) = focused {
+                super::agents_dispatch::ensure_pane_snapshot(self, index);
+            }
+            super::agents_dispatch::sync_slash_source(self);
         }
         true
     }
@@ -2147,7 +2166,7 @@ impl App {
     fn prompt_clear(&mut self) {
         self.prompt_view.clear_all();
         self.prompt_view.note_activity();
-        self.slash_menu.update(&self.prompt_view.input);
+        self.slash_menu_refresh();
     }
 
     /// Ctrl+Z on the chat prompt: step back one edit-history step (last
@@ -2167,7 +2186,7 @@ impl App {
                 duration_ms: 3000,
             });
         }
-        self.slash_menu.update(&self.prompt_view.input);
+        self.slash_menu_refresh();
     }
 
     /// Ctrl+Y on the chat prompt: reapply the most recently undone edit —
@@ -2185,7 +2204,7 @@ impl App {
                 duration_ms: 3000,
             });
         }
-        self.slash_menu.update(&self.prompt_view.input);
+        self.slash_menu_refresh();
     }
 
     /// Paste the system clipboard's TEXT into the chat prompt through the
@@ -2216,7 +2235,7 @@ impl App {
         }
         self.prompt_view.note_activity();
         self.prompt_view.handle_paste(&text);
-        self.slash_menu.update(&self.prompt_view.input);
+        self.slash_menu_refresh();
     }
 
     /// Key handling while the slash menu is visible: menu navigation,
@@ -2245,7 +2264,7 @@ impl App {
             KeyCode::Backspace => {
                 if key.modifiers.contains(KeyModifiers::CONTROL) {
                     self.prompt_view.delete_word_before_cursor();
-                    self.slash_menu.update(&self.prompt_view.input);
+                    self.slash_menu_refresh();
                 } else {
                     self.prompt_view.note_activity();
                     if !self.prompt_view.input.is_empty() {
@@ -2253,7 +2272,7 @@ impl App {
                         // virtual-text placeholder is still removed
                         // atomically instead of chipped char by char.
                         self.prompt_view.backspace();
-                        self.slash_menu.update(&self.prompt_view.input);
+                        self.slash_menu_refresh();
                     }
                 }
             }
@@ -2274,7 +2293,7 @@ impl App {
                 self.prompt_view.note_activity();
                 self.prompt_view.type_char(ch);
                 let was_visible = self.slash_menu.visible;
-                self.slash_menu.update(&self.prompt_view.input);
+                self.slash_menu_refresh();
                 // If menu closed (e.g., user typed space), remove the leading "/"
                 if was_visible
                     && !self.slash_menu.visible

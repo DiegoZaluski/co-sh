@@ -59,6 +59,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
+use agent_client_protocol::schema::v1 as schema;
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, AuthenticateRequest, CancelNotification, ClientCapabilities, ContentBlock,
     FileSystemCapabilities, InitializeRequest, LoadSessionRequest, LoadSessionResponse,
@@ -579,6 +580,7 @@ pub async fn call(
     agent: &str,
     input: &str,
     resume: Option<String>,
+    picks: &[(String, String)],
     cwd: PathBuf,
     stop_signal: Arc<AtomicBool>,
     chunk_tx: tokio::sync::mpsc::UnboundedSender<SubagentEvent>,
@@ -588,6 +590,17 @@ pub async fn call(
         .iter()
         .find(|a| a.name == agent)
         .ok_or_else(|| format!("unknown agent '{agent}'"))?;
+    // The caller's picks win — the /agents config box writes the user's
+    // choices into the pane's config cache and every turn re-applies them
+    // (`apply_session_picks`), so the choices survive. A model-less pick
+    // set falls back to the registry default (kilo's ACP default is a
+    // paid-tier model that fails the prompt). OWNED: the picks move into
+    // the blocking turn task, outliving this call's borrows.
+    let mut owned: Vec<(String, String)> = picks.to_vec();
+    if !entry.model.is_empty() && !owned.iter().any(|(id, _)| id == "model") {
+        owned.push(("model".to_string(), entry.model.to_string()));
+    }
+    let picks = owned;
     let launcher = agent_launcher(entry)?
         // Surface harness stderr in the logs to ease debugging of
         // unauthenticated/failed launches.
@@ -617,7 +630,7 @@ pub async fn call(
                     input,
                     resume,
                     cwd,
-                    entry.model,
+                    &picks,
                     accumulated,
                     stop_signal,
                     chunk_tx,
@@ -800,6 +813,239 @@ where
         .map_err(|e| format!("ACP connection failed: {e}"))
 }
 
+/// Shared collector for the on-demand snapshot probes: one probe stores the
+/// commands and config options the harness publishes during the handshake /
+/// resume window, so the awaiting side can poll both slots.
+#[derive(Default)]
+struct SnapshotCollector {
+    commands: Option<Vec<super::events::AgentCommand>>,
+    config_options: Option<Vec<super::events::AgentConfigOption>>,
+}
+
+/// Whether the collector already holds BOTH probe results.
+fn snapshot_complete(collector: &SnapshotCollector) -> bool {
+    collector.commands.is_some() && collector.config_options.is_some()
+}
+
+/// Poll the collector every 50 ms until BOTH probe slots are filled or the
+/// deadline passes. Harnesses publish `available_commands_update` at
+/// different moments (right after the handshake, during `session/load`
+/// replay, or lazily); the deadline bounds the wait without starving the
+/// ones that need the full window.
+async fn wait_for_snapshot(
+    collector: &Mutex<SnapshotCollector>,
+    timeout: Duration,
+) -> (Vec<super::events::AgentCommand>, Vec<super::events::AgentConfigOption>) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        {
+            let collected = collector.lock().unwrap_or_else(|e| e.into_inner());
+            if snapshot_complete(&collected) {
+                return (
+                    collected.commands.clone().unwrap_or_default(),
+                    collected.config_options.clone().unwrap_or_default(),
+                );
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let collected = collector.lock().unwrap_or_else(|e| e.into_inner());
+    (
+        collected.commands.clone().unwrap_or_default(),
+        collected.config_options.clone().unwrap_or_default(),
+    )
+}
+
+/// The result of an on-demand ACP probe: what the harness advertises for
+/// its session without any prompt being sent.
+#[derive(Debug, Clone, Default)]
+pub struct SessionSnapshot {
+    /// The harness's slash commands (its OWN spellings).
+    pub commands: Vec<super::events::AgentCommand>,
+    /// The session's config options (model, provider, thought level, …).
+    pub config_options: Vec<super::events::AgentConfigOption>,
+}
+
+/// Probe an agent's session ON DEMAND: connect, `session/load`/`resume`
+/// (falling back to `session/new` like every resume path), and collect the
+/// `available_commands_update` / `config_option_update` notifications the
+/// harness publishes around the handshake. NO prompt is ever sent — the
+/// probe only reads what the harness advertises. Returns whatever arrived
+/// within the window (either slot may stay empty when the harness publishes
+/// lazily); the caller decides how to degrade.
+///
+/// Used by the `/agents` slash-menu plumbing when a pane is focused with no
+/// cached command list (see the app's snapshot dispatch).
+///
+/// # Errors
+///
+/// Returns an error when the agent is unsupported or the ACP handshake
+/// fails outright (the process cannot even be launched). A resume failure
+/// is NOT an error — the fallback session/new still probes.
+#[allow(clippy::unwrap_used)]
+pub async fn session_snapshot(
+    agent: &str,
+    session_id: Option<String>,
+    cwd: PathBuf,
+) -> Result<SessionSnapshot, String> {
+    validate_agent(agent)?;
+    let entry = ACP_AGENTS
+        .iter()
+        .find(|a| a.name == agent)
+        .ok_or_else(|| format!("unknown agent '{agent}'"))?;
+    // The harnesses validate `cwd` as an ABSOLUTE path (claude-code ACP
+    // rejects `session/new` with a relative one — "must be an absolute
+    // path"). The TUI stores the working directory as the user typed it,
+    // which may be relative (`.` in a `cosh` session started in-place), so
+    // canonicalize here; an unresolvable path keeps the original and fails
+    // at the harness with the same clarity as before.
+    let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
+    let launcher = agent_launcher(entry)?
+        .with_debug(|line, direction| {
+            if matches!(direction, LineDirection::Stderr) {
+                log::debug!("subagent ACP stderr: {line}");
+            }
+        });
+
+    tokio::task::spawn_blocking(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("failed to build ACP runtime: {e}"))?
+            .block_on(run_snapshot_session(
+                launcher, session_id, cwd,
+            ))
+    })
+    .await
+    .map_err(|e| format!("sub-agent task failed: {e}"))?
+}
+
+/// The snapshot connection itself: initialize → authenticate (when
+/// advertised) → open-or-resume → collect the probe notifications for a
+/// short window, then disconnect. The notification handler fills the shared
+/// collector; the response payloads (`session/new`, `session/resume`)
+/// fill the config-option slot synchronously.
+async fn run_snapshot_session<T>(
+    transport: T,
+    session_id: Option<String>,
+    cwd: PathBuf,
+) -> Result<SessionSnapshot, String>
+where
+    T: agent_client_protocol::ConnectTo<agent_client_protocol::Client> + 'static,
+{
+    let collector = Arc::new(Mutex::new(SnapshotCollector::default()));
+    let notify_collector = collector.clone();
+    Client
+        .builder()
+        .name("cosh")
+        .on_receive_notification(
+            async move |notification: SessionNotification, _cx| {
+                // Both probe-relevant updates land in the collector; nothing
+                // here touches a timeline (no prompt was ever sent).
+                match notification.update {
+                    schema::SessionUpdate::AvailableCommandsUpdate(update) => {
+                        let commands = update
+                            .available_commands
+                            .into_iter()
+                            .map(|cmd| super::events::AgentCommand {
+                                name: cmd.name,
+                                description: cmd.description,
+                                input_hint: match cmd.input {
+                                    Some(schema::AvailableCommandInput::Unstructured(input)) => {
+                                        Some(input.hint)
+                                    }
+                                    _ => None,
+                                },
+                            })
+                            .collect();
+                        notify_collector
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .commands = Some(commands);
+                    }
+                    schema::SessionUpdate::ConfigOptionUpdate(update) => {
+                        let options = update
+                            .config_options
+                            .iter()
+                            .map(super::events::mirror_config_option)
+                            .collect();
+                        notify_collector
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .config_options = Some(options);
+                    }
+                    _ => {}
+                }
+                Ok(())
+            },
+            on_receive_notification!(),
+        )
+        .connect_with(transport, async move |connection: ConnectionTo<AcpRole>| {
+            // No `fs` capabilities: the probe serves nothing.
+            let capabilities = ClientCapabilities::new();
+            let init = connection
+                .send_request(
+                    InitializeRequest::new(ProtocolVersion::V1).client_capabilities(capabilities),
+                )
+                .block_task()
+                .await
+                .map_err(|e| acp_error(format!("ACP initialize failed: {e}")))?;
+
+            // Same auth contract as a turn: reuse the user's existing login.
+            let mut auth_error = None;
+            for method in &init.auth_methods {
+                match connection
+                    .send_request(AuthenticateRequest::new(method.id().clone()))
+                    .block_task()
+                    .await
+                {
+                    Ok(_) => {
+                        auth_error = None;
+                        break;
+                    }
+                    Err(e) => {
+                        auth_error = Some(format!("ACP authenticate failed: {e}"));
+                    }
+                }
+            }
+            if let Some(e) = auth_error {
+                return Err(acp_error(e));
+            }
+
+            // Resume-or-new (the shared fallback ladder). The returned
+            // config options (when the response carries them) fill the
+            // config slot without waiting for a notification.
+            let support = session_resume_support(&init.agent_capabilities);
+            let (session, config_options) =
+                open_or_resume_session(&connection, session_id, &cwd, support).await?;
+            let options: Option<Vec<schema::SessionConfigOption>> = config_options;
+            if let Some(options) = options {
+                collector
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .config_options = Some(
+                    options.iter().map(super::events::mirror_config_option).collect(),
+                );
+            }
+            let _ = session; // the probe does not re-bind anything
+
+            // Collect window: give the harness time to publish its command
+            // list around the handshake/resume.
+            let (commands, config) =
+                wait_for_snapshot(&collector, Duration::from_secs(3)).await;
+            Ok(SessionSnapshot {
+                commands,
+                config_options: config,
+            })
+        })
+        .await
+        .map_err(|e| format!("ACP connection failed: {e}"))
+}
+
+
 /// Whether the agent harness supports resuming sessions, read from the
 /// capabilities advertised at `initialize`. Both ACP mechanisms count:
 /// `sessionCapabilities.resume` (`session/resume`) and the older top-level
@@ -834,7 +1080,7 @@ enum SessionResumeSupport {
 /// fresh `session/new`: resume is a default, never a hard dependency.
 ///
 /// Returns the session id to prompt against plus the config options the
-/// session came back with (used by [`select_session_model`]; `None` for a
+/// session came back with (consumed by [`apply_session_picks`]; `None` for a
 /// plain `session/new` response is carried through as-is).
 ///
 /// # Errors
@@ -912,66 +1158,66 @@ async fn open_or_resume_session(
     Ok((session.session_id, session.config_options))
 }
 
-/// Select the agent's preferred session model, when one is registered and
-/// the harness advertises a `model` config option in `session/new`.
+/// Apply the pane's config picks inside the TURN's own connection. ACP
+/// config options are per-connection state (a set on a disposable
+/// connection dies with it — verified against opencode and kilo), so this
+/// — re-run before every prompt — is the only path a pick survives.
 ///
-/// A mismatch here is fatal on some harnesses (e.g. kilo's ACP default is a
-/// paid-tier model that fails the prompt with "You need to sign in", while
-/// its own CLI default is a working free model), so a selection that the
-/// harness rejects aborts the turn. An unregistered model (empty string) or
-/// a harness without a `model` option is a no-op.
+/// Each pick is `(config id, value id)`. A pick whose option the harness
+/// no longer advertises, or whose value is no longer offered (a stale
+/// pane cache), is SKIPPED with a log — the turn proceeds on the
+/// harness's current value instead of failing every prompt. A set
+/// request that the harness or transport rejects is fatal: something is
+/// genuinely wrong with the connection.
 ///
 /// # Errors
 ///
-/// Returns an error when the model is not among the harness's offered
-/// values, or when the `session/set_config_option` request fails.
-async fn select_session_model(
+/// Returns an error when a `session/set_config_option` request fails.
+async fn apply_session_picks(
     connection: &ConnectionTo<AcpRole>,
     session_id: &SessionId,
     config_options: Option<&[SessionConfigOption]>,
-    preferred_model: &str,
+    picks: &[(String, String)],
 ) -> Result<(), String> {
-    if preferred_model.is_empty() {
-        return Ok(());
-    }
-    let Some(option) = config_options
-        .unwrap_or_default()
-        .iter()
-        .find(|option| option.id.0.as_ref() == "model")
-    else {
-        return Ok(());
-    };
-    let SessionConfigKind::Select(select) = &option.kind else {
-        return Ok(());
-    };
-    if select.current_value.0.as_ref() == preferred_model {
-        return Ok(());
-    }
-    let offered: Vec<&str> = match &select.options {
-        SessionConfigSelectOptions::Ungrouped(options) => {
-            options.iter().map(|o| o.value.0.as_ref()).collect()
+    let options = config_options.unwrap_or_default();
+    for (config_id, value) in picks {
+        let Some(option) = options.iter().find(|option| option.id.0.as_ref() == config_id)
+        else {
+            log::debug!("sub-agent ACP pick '{config_id}' skipped: option not advertised");
+            continue;
+        };
+        let SessionConfigKind::Select(select) = &option.kind else {
+            continue;
+        };
+        if select.current_value.0.as_ref() == value {
+            continue;
         }
-        SessionConfigSelectOptions::Grouped(groups) => groups
-            .iter()
-            .flat_map(|g| g.options.iter().map(|o| o.value.0.as_ref()))
-            .collect(),
-        _ => Vec::new(),
-    };
-    if !offered.contains(&preferred_model) {
-        return Err(format!(
-            "ACP session model '{preferred_model}' is not offered by this harness; \
-             update the agent's `model` entry in the registry",
-        ));
+        let offered: Vec<&str> = match &select.options {
+            SessionConfigSelectOptions::Ungrouped(options) => {
+                options.iter().map(|o| o.value.0.as_ref()).collect()
+            }
+            SessionConfigSelectOptions::Grouped(groups) => groups
+                .iter()
+                .flat_map(|g| g.options.iter().map(|o| o.value.0.as_ref()))
+                .collect(),
+            _ => Vec::new(),
+        };
+        if !offered.contains(&value.as_str()) {
+            log::debug!(
+                "sub-agent ACP pick '{config_id}={value}' skipped: not offered by this harness"
+            );
+            continue;
+        }
+        connection
+            .send_request(SetSessionConfigOptionRequest::new(
+                session_id.clone(),
+                SessionConfigId::new(config_id.as_str()),
+                SessionConfigValueId::new(value.as_str()),
+            ))
+            .block_task()
+            .await
+            .map_err(|e| format!("ACP set config '{config_id}' failed: {e}"))?;
     }
-    connection
-        .send_request(SetSessionConfigOptionRequest::new(
-            session_id.clone(),
-            SessionConfigId::new("model"),
-            SessionConfigValueId::new(preferred_model),
-        ))
-        .block_task()
-        .await
-        .map_err(|e| format!("ACP set model failed: {e}"))?;
     Ok(())
 }
 
@@ -982,7 +1228,7 @@ async fn select_session_model(
 /// reasoning/thought level display.
 ///
 /// The model lookup prefers the spec's `Model` category and falls back to
-/// the `model` option id (the same id [`select_session_model`] matches —
+/// the `model` option id (the same id [`apply_session_picks`] matches —
 /// harnesses predate categories). The effective id is the preferred model
 /// when one was selected, else the advertised current value. The provider
 /// lookup is id-only (`provider`): no spec category exists for it.
@@ -1077,8 +1323,10 @@ fn select_value_name(select: &SessionConfigSelect, value: &str) -> Option<String
 /// `transport` is anything implementing [`ConnectTo`] for the agent role: in
 /// production it is the [`AcpAgent`] subprocess launcher; tests use an
 /// in-memory [`Channel`](agent_client_protocol::Channel) instead. Returns
-/// the prompt's stop reason on success. `select_session_model` runs before
-/// the prompt, and the shared stop flag is raced against the prompt await
+/// the prompt's stop reason on success. `apply_session_picks` re-applies
+/// the caller's config picks inside the turn's own connection before the
+/// prompt (ACP config options are per-connection state), and the shared
+/// stop flag is raced against the prompt await
 /// (Phase 5 cancellation: a trigger sends `session/cancel` and the turn
 /// still ends with the agent's own answer). Message text feeds the
 /// [`TurnClosure`](super::closure::TurnClosure) — only the message written
@@ -1099,7 +1347,7 @@ pub(crate) async fn run_session<T>(
     input: String,
     resume: Option<String>,
     cwd: PathBuf,
-    preferred_model: &'static str,
+    picks: &[(String, String)],
     accumulated: Arc<Mutex<super::closure::TurnClosure>>,
     stop_signal: Arc<AtomicBool>,
     chunk_tx: tokio::sync::mpsc::UnboundedSender<SubagentEvent>,
@@ -1281,27 +1529,28 @@ where
                 )
                 .await?;
 
-            // Select the preferred session model when the agent registered
-            // one and the harness advertises a `model` config option. A
-            // mismatch here is fatal on some harnesses (e.g. kilo's ACP
-            // default is a paid-tier model that fails the prompt with "You
-            // need to sign in"), so a failed selection aborts the turn.
-            // Resumed sessions carry their config options in the resume
-            // response, so the selection applies to them too.
-            select_session_model(
-                &connection,
-                &session_id,
-                config_options.as_deref(),
-                preferred_model,
-            )
-            .await
-            .map_err(acp_error)?;
+            // Re-apply the pane's config picks inside THIS turn's own
+            // connection — per-connection state dies with the connection
+            // (verified against opencode and kilo), so this re-run before
+            // every prompt is the only path a pick survives. Stale picks
+            // (option/value no longer offered) are skipped inside; a
+            // transport/harness rejection aborts the turn. Resumed
+            // sessions carry their config options in the resume response,
+            // so the picks apply to them too.
+            apply_session_picks(&connection, &session_id, config_options.as_deref(), picks)
+                .await
+                .map_err(acp_error)?;
 
             // The prompt badge's data: the session's serving triple, read
-            // from the same config options the selection above ran
-            // against. Emitted BEFORE the prompt so the pane shows what
-            // serves the turn from its first chunk; anything the harness
-            // does not advertise stays empty.
+            // from the same config options the picks above ran against.
+            // Emitted BEFORE the prompt so the pane shows what serves the
+            // turn from its first chunk; anything the harness does not
+            // advertise stays empty.
+            let preferred_model = picks
+                .iter()
+                .find(|(id, _)| id == "model")
+                .map(|(_, value)| value.as_str())
+                .unwrap_or("");
             let _ = model_tx.send(session_model_info(config_options.as_deref(), preferred_model));
 
             let prompt_request = connection

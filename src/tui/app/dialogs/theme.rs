@@ -122,9 +122,13 @@ impl App {
                     let DialogType::ThemeList { filter, .. } = &mut d.dialog_type else {
                         return true;
                     };
-                    filter.pop();
-                    d.selected = 0;
-                    d.cursor.note_activity();
+                    // The shared list-dialog filter edit: pop + selection
+                    // reset + cursor blink, one definition for every list box.
+                    crate::component::list_dialog::pop_filter(
+                        filter,
+                        &mut d.selected,
+                        &mut d.cursor,
+                    );
                     filter.is_empty()
                 };
                 if is_empty {
@@ -185,10 +189,18 @@ impl App {
     pub(in crate::app) fn theme_dialog_push_filter(&mut self, ch: char) {
         if let Some(d) = self.dialog.current_mut() {
             if let DialogType::ThemeList { filter, .. } = &mut d.dialog_type {
-                filter.push(ch);
+                // The shared list-dialog filter edit: push + selection reset
+                // + cursor blink, one definition for every cosh list box.
+                crate::component::list_dialog::push_filter(
+                    filter,
+                    &mut d.selected,
+                    &mut d.cursor,
+                    ch,
+                );
+            } else {
+                d.selected = 0;
+                d.cursor.note_activity();
             }
-            d.selected = 0;
-            d.cursor.note_activity();
         }
         self.apply_filtered_theme_preview();
     }

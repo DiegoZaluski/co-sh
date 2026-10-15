@@ -30,6 +30,142 @@ use crate::routes::session::agents_split::{AgentsSplitState, DAEMON_LABEL};
 use cosh::setup::SkillsConfig;
 use crate::ui::toast::{ToastOptions, ToastVariant};
 
+/// Sync the slash menu's command source to the split's focus: a FOCUSED
+/// pane serves its own (blocklist-filtered) command list — or its spinner
+/// row while the snapshot probe is still in flight — and NO focus returns
+/// the cosh set (the main agent's commands). Only the LIVE split counts:
+/// a parked split's stale `focused` must not hijack the menu (its prompt
+/// routing goes to the main agent). Idempotent by content: an unchanged
+/// source keeps the menu's selection, so this is safe to call on every
+/// focus change and probe arrival.
+pub(super) fn sync_slash_source(app: &mut App) {
+    let next = app
+        .agents_split
+        .as_ref()
+        .and_then(|split| split.slash_source());
+    match next {
+        Some((commands, loading)) => {
+            if !slash_lists_equal(&commands, &app.slash_menu.commands) {
+                app.slash_menu.set_agent_commands(commands);
+            }
+            app.slash_menu.set_loading(loading);
+        }
+        None => {
+            let cosh = crate::ui::slash_menu::SlashMenu::cosh_commands();
+            if !slash_lists_equal(&cosh, &app.slash_menu.commands) {
+                app.slash_menu.set_cosh_commands();
+            }
+            app.slash_menu.set_loading(false);
+        }
+    }
+}
+
+/// Menu-source equality by (name, desc) pairs — a cheap change detector so
+/// repeated syncs never reset the user's selection/filter position.
+fn slash_lists_equal(
+    a: &[crate::ui::slash_menu::SlashCommand],
+    b: &[crate::ui::slash_menu::SlashCommand],
+) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b.iter())
+            .all(|(x, y)| x.name == y.name && x.desc == y.desc)
+}
+
+/// Route a slash command picked while a LIVE split pane holds the focus:
+/// the command belongs to the AGENT, not to cosh. Returns `true` when
+/// consumed (the caller closes the menu and clears the draft).
+///
+/// - A mapped group with a config target (models / provider / reasoning /
+///   mode) opens the standardized config box bound to the pane's own ACP
+///   config option — the agent's exact command name never leaves the menu,
+///   only what opens afterwards is cosh's.
+/// - Everything else (compact, review, custom harness commands …) is sent
+///   to the pane VERBATIM as its next prompt (`/name`) — the harness
+///   interprets its own command; no per-agent maintenance.
+///
+/// Unfocused, the daemon pane focused, or no live split: `false` — the
+/// command falls through to the cosh command set.
+pub(super) fn route_agent_slash_command(
+    app: &mut App,
+    cmd: &crate::ui::slash_menu::SlashCommand,
+) -> bool {
+    let Some(split) = app.agents_split.as_ref() else {
+        return false;
+    };
+    let Some(focused) = split.focused else {
+        return false;
+    };
+    let Some(pane) = split.panes.get(focused) else {
+        return false;
+    };
+    if pane.agent == DAEMON_LABEL {
+        return false;
+    }
+    if let Some(target) = crate::routes::session::agent_command_map::resolve(&cmd.name)
+        .and_then(|group| group.target)
+    {
+        app.open_agent_config_dialog(target);
+        return true;
+    }
+    // Direct passthrough: the command goes to the pane as its prompt.
+    app.dispatch_to_agents_split(format!("/{}", cmd.name));
+    true
+}
+
+/// Focus arrived on pane `pane` (hotkey or click): when the pane has never
+/// collected its agent's command/config snapshot, spawn the on-demand ACP
+/// probe (`session_snapshot` — resume + observe, never prompts) and flag
+/// the slash menu's spinner until the result lands. The daemon pane is
+/// skipped: it is cosh itself, and the cosh command set already serves the
+/// menu (its slash commands are the TUI's own, not an ACP publication).
+/// The LIVE split only — a parked pane cannot take focus.
+pub(super) fn ensure_pane_snapshot(app: &mut App, pane: usize) {
+    let Some(split) = app.agents_split.as_mut() else {
+        return;
+    };
+    let Some(p) = split.panes.get_mut(pane) else {
+        return;
+    };
+    if p.agent == DAEMON_LABEL || p.commands.is_some() || p.snapshot_loading {
+        return;
+    }
+    let agent = p.agent.clone();
+    let session_id = p.session_id.clone();
+    p.snapshot_loading = true;
+    if split.focused == Some(pane) {
+        app.slash_menu.set_agent_commands(Vec::new());
+        app.slash_menu.set_loading(true);
+    }
+    let cwd = PathBuf::from(&app.state.working_directory);
+    let event_tx = app.event_tx.clone();
+    let epoch = app.agents_pane_epoch;
+    app.tokio_handle.spawn(async move {
+        let result =
+            cosh_tools::subagent::acp::session_snapshot(&agent, session_id, cwd).await;
+        let (commands, options) = match result {
+            Ok(snapshot) => (snapshot.commands, snapshot.config_options),
+            Err(err) => {
+                let _ = event_tx.send(HarnessEvent::Toast {
+                    message: format!("Command list for {agent} unavailable: {err}"),
+                    variant: cosh::harness::events::ToastVariant::Info,
+                });
+                (Vec::new(), Vec::new())
+            }
+        };
+        let _ = event_tx.send(HarnessEvent::AgentsPaneEvent {
+            pane,
+            epoch,
+            event: SubagentEvent::Commands { commands },
+        });
+        let _ = event_tx.send(HarnessEvent::AgentsPaneEvent {
+            pane,
+            epoch,
+            event: SubagentEvent::ConfigOptions { options },
+        });
+    });
+}
+
 /// The manager tool set: a base disabled set PLUS the workspace-mutating
 /// tools a coordinator never touches. The single constructor behind BOTH
 /// manager loops — the MAIN loop's manager mode (`start_agent_loop`,
@@ -94,6 +230,19 @@ pub(super) fn either_split_mut<'a>(
 }
 
 impl App {
+    /// Refresh the slash menu from its input — ALWAYS after re-deriving the
+    /// source. Every site that used to call `slash_menu.update(...)` directly
+    /// routes through here instead: with the menu open, the source must be
+    /// re-derived against the CURRENT split state on EVERY recalculation, not
+    /// only on focus changes. This closes the leak class where a stale source
+    /// (the split opened/closed/parked between two menu updates) let the cosh
+    /// command list render over a focused agent pane — or an agent's list over
+    /// the main agent — and a pick then executed against the WRONG harness.
+    pub(in crate::app) fn slash_menu_refresh(&mut self) {
+        sync_slash_source(self);
+        self.slash_menu.update(&self.prompt_view.input);
+    }
+
     /// Force-close ONE pane's turn (issue 5 recovery): the pane goes idle,
     /// its timeline closes with a `[turn cancelled]` marker carrying
     /// `reason`, its in-flight `agents_call` request fails (the requester's
@@ -237,9 +386,41 @@ impl App {
         // config (only when the focused pane IS the daemon — the connector
         // resolution runs lazily so a split of ACP agents alone never
         // computes it).
-        let Some((agent, resume)) = either_split(&self.agents_split, &self.parked_agents_split)
-            .and_then(|split| split.panes.get(pane))
-            .map(|p| (p.agent.clone(), p.session_id.clone()))
+        let Some((agent, resume, picks)) =
+            either_split(&self.agents_split, &self.parked_agents_split)
+                .and_then(|split| split.panes.get(pane))
+                .map(|p| {
+                    (
+                        p.agent.clone(),
+                        p.session_id.clone(),
+                        // The user's picks from the /agents config boxes,
+                        // mirrored into the pane's config cache (the box
+                        // confirm writes the pick onto the cached option's
+                        // current AND records the id in `picked_config_ids`).
+                        // Only USER-PICKED ids ride the turn — ACP config
+                        // options are per-connection state, so
+                        // `apply_session_picks` re-applies them inside the
+                        // turn's own connection. Untouched options keep the
+                        // harness's own default, letting `acp::call`'s
+                        // registry default (e.g. a working free model where
+                        // the harness's default is a paid-tier login wall)
+                        // still apply.
+                        p.config_options
+                            .as_ref()
+                            .map(|opts| {
+                                opts.iter()
+                                    .filter(|o| {
+                                        !o.current.is_empty()
+                                            && p.picked_config_ids
+                                                .iter()
+                                                .any(|id| id == &o.id)
+                                    })
+                                    .map(|o| (o.id.clone(), o.current.clone()))
+                                    .collect::<Vec<(String, String)>>()
+                            })
+                            .unwrap_or_default(),
+                    )
+                })
         else {
             return;
         };
@@ -370,8 +551,15 @@ impl App {
             tokio_handle.spawn(async move {
                 let (chunk_tx, mut chunk_rx) =
                     tokio::sync::mpsc::unbounded_channel::<SubagentEvent>();
-                let call =
-                    cosh_tools::subagent::acp::call(&agent, &input, resume, cwd, signal, chunk_tx);
+                let call = cosh_tools::subagent::acp::call(
+                    &agent,
+                    &input,
+                    resume,
+                    &picks,
+                    cwd,
+                    signal,
+                    chunk_tx,
+                );
                 tokio::pin!(call);
                 let mut chunks_open = true;
                 let result = loop {

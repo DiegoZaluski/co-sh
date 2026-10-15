@@ -25,7 +25,9 @@ use std::time::{Duration, Instant};
 use cosh_tui::core::lib::rgba::{ColorInput, RGBA};
 use cosh_tui::core::renderable::Renderable;
 use cosh_tui::core::renderables::markdown::MarkdownRenderable;
-use cosh_tools::subagent::events::{PlanEntryStatus, SubagentEvent, ToolCallStatus};
+use cosh_tools::subagent::events::{
+    AgentCommand, AgentConfigOption, PlanEntryStatus, SubagentEvent, ToolCallStatus,
+};
 use cosh_tools::subagent::palette::{display_name, palette_for};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -126,6 +128,27 @@ pub struct AgentPane {
     /// turn (or replay pass) reports it; every report replaces it, so a
     /// model/thought change shows on the next turn.
     pub session_info: Option<AgentSessionInfo>,
+    /// The agent's own slash commands, from `available_commands_update` (a
+    /// live turn) or the on-demand snapshot probe. `None` = never fetched;
+    /// `Some(vec![])` = fetched and the harness advertised none. Feeds the
+    /// slash menu while THIS pane holds the focus (the agent's exact
+    /// spellings, blocklist-filtered by the app layer).
+    pub commands: Option<Vec<AgentCommand>>,
+    /// The session's config options (model / provider / thought level /
+    /// mode), same sources as `commands`. Feeds the standardized config
+    /// boxes the mapped command groups open.
+    pub config_options: Option<Vec<AgentConfigOption>>,
+    /// Option ids the user actually picked in a config box (the box
+    /// confirm records them). `dispatch_to_pane` sends ONLY these ids'
+    /// currents as turn picks — an untouched option rides on the harness's
+    /// own default, letting `acp::call`'s registry default (e.g. a working
+    /// free model where the harness's default is a paid-tier login wall)
+    /// still apply.
+    pub picked_config_ids: Vec<String>,
+    /// True while an on-demand snapshot probe for this pane is in flight
+    /// (focus arrived with no cache): the slash menu shows its spinner row
+    /// until the probe returns.
+    pub snapshot_loading: bool,
     /// Top of the visible window in content rows — the chat's `scroll_y`.
     /// Re-clamped every render against the real content; sticky-bottom
     /// follow is [`AgentPane::auto_follow`].
@@ -169,6 +192,10 @@ impl AgentPane {
             stop_signal: None,
             session_id: None,
             session_info: None,
+            commands: None,
+            config_options: None,
+            picked_config_ids: Vec::new(),
+            snapshot_loading: false,
             rehydrating: false,
             rehydrate_spinner: SpinnerState::new(),
             scroll_y: 0,
@@ -317,22 +344,24 @@ impl AgentsSplitState {
     /// Focus the pane bound to hotkey `ch`: `'0'` UNFOCUSES every pane
     /// (the shared prompt then targets the MAIN agent — the normal-mode
     /// loop, running as manager while the split is open); `'1'..='9'`
-    /// focus the 1st..9th pane in picker order. Returns whether the key
-    /// matched (out-of-range digits leave the focus alone).
-    pub fn focus_hotkey(&mut self, ch: char) -> bool {
+    /// focus the 1st..9th pane in picker order. Returns the pane index the
+    /// key FOCUSED (`None` for an unfocus, an out-of-range digit, or an
+    /// unmatched key — the caller only needs the index to seed a
+    /// per-pane fetch like the command snapshot).
+    pub fn focus_hotkey(&mut self, ch: char) -> Option<usize> {
         if ch == UNFOCUS_HOTKEY {
             self.focused = None;
-            return true;
+            return None;
         }
         let index = match ch {
             '1'..='9' => usize::from(ch as u8 - b'1'),
-            _ => return false,
+            _ => return None,
         };
         if index < self.panes.len() {
             self.focused = Some(index);
-            true
+            Some(index)
         } else {
-            false
+            None
         }
     }
 
@@ -668,6 +697,88 @@ impl AgentsSplitState {
         if let Some(p) = self.panes.get_mut(pane) {
             p.session_info = Some(info);
         }
+    }
+
+    /// Store the pane's slash commands from a `Commands` report (a live
+    /// turn's `available_commands_update` or the snapshot probe's result),
+    /// replacing any earlier list. Out-of-range panes are ignored.
+    pub fn set_agent_commands(&mut self, pane: usize, commands: Vec<AgentCommand>) {
+        if let Some(p) = self.panes.get_mut(pane) {
+            p.commands = Some(commands);
+            p.snapshot_loading = false;
+        }
+    }
+
+    /// Store the pane's config options from a `ConfigOptions` report,
+    /// replacing any earlier list. Out-of-range panes are ignored.
+    pub fn set_agent_config_options(&mut self, pane: usize, options: Vec<AgentConfigOption>) {
+        if let Some(p) = self.panes.get_mut(pane) {
+            p.config_options = Some(options);
+            p.snapshot_loading = false;
+        }
+    }
+
+    /// Flag pane `pane`'s snapshot probe as in flight (focus arrived with
+    /// an empty cache). Out-of-range panes are ignored.
+    pub fn set_snapshot_loading(&mut self, pane: usize, loading: bool) {
+        if let Some(p) = self.panes.get_mut(pane) {
+            p.snapshot_loading = loading;
+        }
+    }
+
+    /// The focused pane's slash-menu source: `None` when NO pane is
+    /// focused — OR the focused pane is the DAEMON (cosh itself: its
+    /// commands are the TUI's own set, which the caller serves directly;
+    /// an ACP probe would be meaningless). Otherwise the focused pane's
+    /// entries: the group commands SYNTHESIZED from the pane's own ACP
+    /// config options first (model / provider / reasoning / mode — the
+    /// controls harnesses like opencode and kilo never publish as slash
+    /// commands, see `agent_command_map::synthesized_group_commands`),
+    /// then the pane's own published command list blocklist-filtered, with
+    /// any published command that duplicates a synthesized group name
+    /// dropped (the group's box wins — one entry per control). Options
+    /// still in flight contribute no synthesized entries yet — a later
+    /// sync re-runs this method once they land.
+    /// `snapshot_loading` marks an in-flight probe: the menu shows its
+    /// spinner row until the entries land.
+    #[must_use]
+    pub fn slash_source(
+        &self,
+    ) -> Option<(Vec<crate::ui::slash_menu::SlashCommand>, bool)> {
+        let pane = self.focused_pane()?;
+        if pane.agent == DAEMON_LABEL {
+            return None;
+        }
+        let agent = pane.agent.as_str();
+        let mut entries: Vec<crate::ui::slash_menu::SlashCommand> = pane
+            .config_options
+            .as_ref()
+            .map(|options| super::agent_command_map::synthesized_group_commands(options))
+            .unwrap_or_default();
+        // The synthesized group spellings, normalized once — the dedup
+        // filter below reads this SET, not `entries` itself (the mutable
+        // extend borrow would otherwise conflict with the closure's read).
+        let group_names: std::collections::HashSet<String> = entries
+            .iter()
+            .map(|entry| super::agent_command_map::normalize(&entry.name))
+            .collect();
+        let commands = pane.commands.clone().unwrap_or_default();
+        entries.extend(commands.iter().filter(|cmd| {
+            !super::agent_command_map::is_blocked(agent, &cmd.name)
+                // A published command that duplicates a synthesized group
+                // (claude's `/model`, a future fixed opencode) is covered
+                // by the synthesized entry: same box, standardized name.
+                && !group_names
+                    .contains(&super::agent_command_map::normalize(&cmd.name))
+        }).map(|cmd| crate::ui::slash_menu::SlashCommand {
+            name: cmd.name.clone(),
+            // The agent's command NAME is verbatim; the description is
+            // unwrapped to ONE line (harnesses publish whole skill
+            // briefs — opencode's `customize-opencode`, claude's skill
+            // commands — which flood the row otherwise).
+            desc: super::agent_command_map::menu_description(&cmd.description),
+        }));
+        Some((entries, pane.snapshot_loading))
     }
 
     /// Deliver the turn's terminal report to pane `pane` — the `AgentsPaneDone`
@@ -1798,26 +1909,26 @@ mod tests {
         let mut state = AgentsSplitState::new(vec!["claude".into(), "kilo".into()]);
         // '1' targets the first pane (claude), '2' the second (kilo) —
         // hotkeys count panes 1-based; '0' is the main agent, never a pane.
-        assert!(state.focus_hotkey('2'));
+        assert_eq!(state.focus_hotkey('2'), Some(1));
         assert_eq!(state.focused, Some(1));
         assert_eq!(state.focused_pane().map(|p| p.agent.as_str()), Some("kilo"));
-        assert!(state.focus_hotkey('1'));
+        assert_eq!(state.focus_hotkey('1'), Some(0));
         assert_eq!(state.focused, Some(0));
         assert_eq!(state.focused_pane().map(|p| p.agent.as_str()), Some("claude"));
         // '0' UNFOCUSES every pane: the shared prompt then targets the
         // MAIN agent (the normal-mode loop as manager).
-        assert!(state.focus_hotkey('0'));
+        assert_eq!(state.focus_hotkey('0'), None);
         assert_eq!(state.focused, None);
         assert!(state.focused_pane().is_none(), "no pane holds the focus");
         // A pane hotkey focuses again from the unfocused state.
-        assert!(state.focus_hotkey('2'));
+        assert_eq!(state.focus_hotkey('2'), Some(1));
         assert_eq!(state.focused, Some(1));
         // Out-of-range and unknown keys leave the focus alone.
-        assert!(!state.focus_hotkey('3'));
+        assert_eq!(state.focus_hotkey('3'), None);
         assert_eq!(state.focused, Some(1));
-        assert!(!state.focus_hotkey('9'));
+        assert_eq!(state.focus_hotkey('9'), None);
         assert_eq!(state.focused, Some(1));
-        assert!(!state.focus_hotkey('x'));
+        assert_eq!(state.focus_hotkey('x'), None);
         assert_eq!(state.focused, Some(1));
     }
 
@@ -1827,9 +1938,9 @@ mod tests {
         // Fresh splits start on the first pane; unfocusing and focusing
         // again lands back on it.
         assert_eq!(state.focused, Some(0));
-        assert!(state.focus_hotkey('0'));
+        assert_eq!(state.focus_hotkey('0'), None);
         assert_eq!(state.focused, None);
-        assert!(state.focus_hotkey('1'));
+        assert_eq!(state.focus_hotkey('1'), Some(0));
         assert_eq!(state.focused, Some(0));
     }
 
@@ -2213,7 +2324,7 @@ mod tests {
         // highlight belongs to whoever owns it), or its contrast-lifted
         // variant on a theme where the raw color would dissolve — the same
         // formula the painter applies.
-        assert!(state.focus_hotkey('2'));
+        assert_eq!(state.focus_hotkey('2'), Some(1));
         let mut buf = Buffer::empty(area);
         render(&mut buf, area, &mut state, &theme);
         let brand = RGBA::from_ints(0xD9, 0x77, 0x57, 255);
@@ -2477,7 +2588,7 @@ mod tests {
         // "devin" carries the official tri-color logomark (blue → green →
         // cyan-blue), so the name paints as a real sweep.
         let mut state = AgentsSplitState::new(vec!["kilo".into(), "devin".into()]);
-        assert!(state.focus_hotkey('2'));
+        assert_eq!(state.focus_hotkey('2'), Some(1));
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
         render(&mut buf, area, &mut state, &theme);

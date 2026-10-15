@@ -452,6 +452,7 @@ impl App {
             && !self.is_rag_mode()
             && !self.is_theme_dialog_visible()
             && !self.is_tool_call_dialog_visible()
+            && !self.is_agent_config_dialog_visible()
             && !self.is_message_actions_dialog_visible()
             && !self.is_undo_dialog_visible()
             // The /agents picker owns the keyboard while open: chars are
@@ -654,7 +655,7 @@ impl App {
         self.prompt_view.note_activity();
         self.prompt_view.handle_paste(&expected);
         let inserted_len = self.prompt_view.input.len() - pre_len;
-        self.slash_menu.update(&self.prompt_view.input);
+        self.slash_menu_refresh();
         self.paste_burst.anchor = Some(AnchorState {
             pos: shadow.chars().count(),
             pos_bytes: shadow.len(),
@@ -758,7 +759,7 @@ impl App {
             .retain(|p| self.prompt_view.input.contains(&p.virtual_text));
         self.prompt_view.note_activity();
         self.prompt_view.handle_paste(&received);
-        self.slash_menu.update(&self.prompt_view.input);
+        self.slash_menu_refresh();
     }
 
     /// Replay the pending run through the NORMAL paste path
@@ -845,7 +846,7 @@ impl App {
         if retracted {
             self.prompt_view.note_activity();
             self.prompt_view.handle_paste(&text);
-            self.slash_menu.update(&self.prompt_view.input);
+            self.slash_menu_refresh();
         }
     }
 

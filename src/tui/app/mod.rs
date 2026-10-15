@@ -289,6 +289,13 @@ pub struct App {
     /// spawned task itself exits without emitting a late `PromptCorrection`.
     prompt_correction_cancel: Arc<AtomicBool>,
     pub slash_menu: crate::ui::slash_menu::SlashMenu,
+    /// Context of an open [`DialogType::AgentConfigList`]: the split
+    /// generation (`agents_pane_epoch`), pane index, agent name and ACP
+    /// config option id the box was opened FOR — all captured at OPEN time.
+    /// Confirm re-validates epoch + agent against the live split, so a
+    /// teardown-and-rebuild under an open box can never dispatch a stale
+    /// config id into a rebuilt pane that merely shares the index.
+    agent_config_edit: Option<(u64, usize, String, String)>,
     /// Multi-select dialog behind `/agents`: picks which agent CLIs receive
     /// delegated work. Owns its own visibility (`visible` flag) and mark
     /// state; `None` fields below mean the picker is not on screen.
@@ -784,6 +791,7 @@ impl App {
             prompt_correction_task: None,
             prompt_correction_cancel: Arc::new(AtomicBool::new(false)),
             slash_menu: crate::ui::slash_menu::SlashMenu::new(),
+            agent_config_edit: None,
             agents_picker: crate::ui::agents_picker::AgentsPicker::new(),
             agents_split: None,
             parked_agents_split: None,

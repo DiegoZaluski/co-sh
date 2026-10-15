@@ -203,7 +203,16 @@ async fn correct_with_acp(
     // The correction cancel flag is passed through as the ACP stop signal
     // (Phase 5): Esc interrupts the remote turn via `session/cancel`
     // instead of abandoning the blocking runtime to the turn timeout.
-    let call = cosh_tools::subagent::acp::call(agent, request, None, cwd, cancelled, chunk_tx);
+    let call = cosh_tools::subagent::acp::call(
+        agent,
+        request,
+        None,
+        // No user picks on the correction path: the registry defaults apply.
+        &[],
+        cwd,
+        cancelled,
+        chunk_tx,
+    );
     tokio::pin!(call);
     let mut chunks_open = true;
 

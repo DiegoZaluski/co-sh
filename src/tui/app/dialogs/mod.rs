@@ -1,3 +1,4 @@
+mod agent_config;
 mod checkup;
 mod confirm;
 mod message_actions;

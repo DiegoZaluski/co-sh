@@ -4,6 +4,7 @@ pub mod streaming;
 pub mod tool_render;
 
 pub mod agents_split;
+pub mod agent_command_map;
 
 pub mod delete;
 pub mod permission;
@@ -257,11 +258,10 @@ fn install_line(part: &InstallPart, now: u64) -> String {
     };
     // 0% until the first file announces its size; the mirror's big graph
     // dominates the total, so the bar fills in one visible sweep.
-    let pct = if part.bytes_total == 0 {
-        0
-    } else {
-        ((part.bytes_done.min(part.bytes_total) * 100) / part.bytes_total) as u8
-    };
+    let pct = (part.bytes_done.min(part.bytes_total))
+        .checked_mul(100)
+        .and_then(|scaled| scaled.checked_div(part.bytes_total))
+        .unwrap_or(0) as u8;
     let mb_done = part.bytes_done / (1024 * 1024);
     let mb_total = part.bytes_total / (1024 * 1024);
     if part.is_running() {

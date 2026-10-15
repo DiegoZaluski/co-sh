@@ -285,9 +285,13 @@ impl App {
                 let DialogType::ModelList { filter, .. } = &mut d.dialog_type else {
                     return true;
                 };
-                filter.pop();
-                d.selected = 0;
-                d.cursor.note_activity();
+                // The shared list-dialog filter edit: pop + selection reset
+                // + cursor blink, one definition for every cosh list box.
+                crate::component::list_dialog::pop_filter(
+                    filter,
+                    &mut d.selected,
+                    &mut d.cursor,
+                );
                 true
             }
             KeyCode::Char(ch) => {
@@ -616,10 +620,18 @@ impl App {
     pub(in crate::app) fn model_dialog_push_filter(&mut self, ch: char) {
         if let Some(d) = self.dialog.current_mut() {
             if let DialogType::ModelList { filter, .. } = &mut d.dialog_type {
-                filter.push(ch);
+                // The shared list-dialog filter edit: push + selection reset
+                // + cursor blink, one definition for every cosh list box.
+                crate::component::list_dialog::push_filter(
+                    filter,
+                    &mut d.selected,
+                    &mut d.cursor,
+                    ch,
+                );
+            } else {
+                d.selected = 0;
+                d.cursor.note_activity();
             }
-            d.selected = 0;
-            d.cursor.note_activity();
         }
     }
 

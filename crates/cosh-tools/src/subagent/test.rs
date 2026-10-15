@@ -264,7 +264,7 @@ async fn run_session_drives_a_full_acp_turn_end_to_end() {
             "hello from acp".to_string(),
             None,
             std::env::temp_dir(),
-            "",
+            &[],
             accumulated.clone(),
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             chunk_tx,
@@ -457,7 +457,7 @@ async fn run_session_serves_fs_requests_and_auto_approves_permissions() {
             "exercise handlers".to_string(),
             None,
             scratch.path().to_path_buf(),
-            "",
+            &[],
             accumulated.clone(),
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             chunk_tx,
@@ -593,13 +593,16 @@ async fn run_session_selects_the_preferred_session_model() {
     let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel();
     let accumulated = Arc::new(Mutex::new(super::closure::TurnClosure::default()));
 
+    // Bound to a local: the join!'s future borrows the picks, so they
+    // cannot be an inline temporary (E0716).
+    let preferred_picks = [("model".to_string(), PREFERRED.to_string())];
     let (turn, _, (badge, streamed)) = tokio::join!(
         run_session(
             client_side,
             "check model".to_string(),
             None,
             std::env::temp_dir(),
-            PREFERRED,
+            &preferred_picks,
             accumulated.clone(),
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             chunk_tx,
@@ -765,7 +768,7 @@ async fn run_session_maps_session_updates_into_typed_events() {
             "do the thing".to_string(),
             None,
             std::env::temp_dir(),
-            "",
+            &[],
             accumulated.clone(),
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             chunk_tx,
@@ -2027,8 +2030,8 @@ async fn drive_turn(
             input.to_string(),
             resume,
             std::env::temp_dir(),
-            "",
-            accumulated,
+            &[],
+            accumulated.clone(),
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             chunk_tx,
         ),
@@ -2298,13 +2301,16 @@ async fn resumed_session_selects_the_preferred_session_model() {
 
     let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel();
     let accumulated = Arc::new(Mutex::new(super::closure::TurnClosure::default()));
+    // Bound to a local: the join!'s future borrows the picks, so they
+    // cannot be an inline temporary (E0716).
+    let preferred_picks = [("model".to_string(), PREFERRED.to_string())];
     let (turn, _, (badge, streamed)) = tokio::join!(
         run_session(
             client_side,
             "check resumed model".to_string(),
             Some("stored-9".to_string()),
             std::env::temp_dir(),
-            PREFERRED,
+            &preferred_picks,
             accumulated.clone(),
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             chunk_tx,
@@ -2320,7 +2326,7 @@ async fn resumed_session_selects_the_preferred_session_model() {
     assert_eq!(
         log.lock().unwrap().as_slice(),
         // The set-config entry proves model selection ran on the RESUMED
-        // session: skipping `select_session_model` for resumes would leave
+        // session: skipping `apply_session_picks` for resumes would leave
         // the log at just ["resume:stored-9"] and fail this assertion.
         ["resume:stored-9", "set-config:model"],
         "the turn must resume AND switch the model before prompting"
@@ -2451,7 +2457,7 @@ async fn run_session_cancels_the_remote_turn_on_the_stop_signal() {
             "long running task".to_string(),
             None,
             std::env::temp_dir(),
-            "",
+            &[],
             accumulated.clone(),
             stop_signal.clone(),
             chunk_tx,
@@ -2501,6 +2507,8 @@ async fn capture_real_opencode_stream_multi_tool() {
              crates/cosh-tools/src/subagent/ and count them. Think step by \
              step; narrate between the steps.",
             None,
+            // No user picks: the registry defaults apply.
+            &[],
             std::path::PathBuf::from("/home/inky/co-sh"),
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             chunk_tx,
@@ -2574,6 +2582,18 @@ async fn capture_real_opencode_stream_multi_tool() {
                 "kind": "SessionModel", "model": model,
                 "model_label": model_label, "provider": provider,
                 "provider_label": provider_label, "reasoning": reasoning,
+            }),
+            SubagentEvent::Commands { commands } => serde_json::json!({
+                "kind": "Commands",
+                "commands": commands.iter().map(|c| serde_json::json!({
+                    "name": c.name, "description": c.description,
+                })).collect::<Vec<_>>(),
+            }),
+            SubagentEvent::ConfigOptions { options } => serde_json::json!({
+                "kind": "ConfigOptions",
+                "options": options.iter().map(|o| serde_json::json!({
+                    "id": o.id, "name": o.name, "current": o.current,
+                })).collect::<Vec<_>>(),
             }),
             // No catch-all: a new SubagentEvent variant must be added here
             // explicitly so captures never silently drop it.
@@ -2635,6 +2655,8 @@ async fn capture_real_opencode_stream() {
              (3) state how many lines the file has. Think step by step \
              before answering, then answer.",
             None,
+            // No user picks: the registry defaults apply.
+            &[],
             std::path::PathBuf::from("/home/inky/co-sh"),
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             chunk_tx,
@@ -2708,6 +2730,18 @@ async fn capture_real_opencode_stream() {
                 "kind": "SessionModel", "model": model,
                 "model_label": model_label, "provider": provider,
                 "provider_label": provider_label, "reasoning": reasoning,
+            }),
+            SubagentEvent::Commands { commands } => serde_json::json!({
+                "kind": "Commands",
+                "commands": commands.iter().map(|c| serde_json::json!({
+                    "name": c.name, "description": c.description,
+                })).collect::<Vec<_>>(),
+            }),
+            SubagentEvent::ConfigOptions { options } => serde_json::json!({
+                "kind": "ConfigOptions",
+                "options": options.iter().map(|o| serde_json::json!({
+                    "id": o.id, "name": o.name, "current": o.current,
+                })).collect::<Vec<_>>(),
             }),
             // No catch-all: a new SubagentEvent variant must be added here
             // explicitly so captures never silently drop it.
