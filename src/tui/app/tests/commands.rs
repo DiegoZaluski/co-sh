@@ -2451,3 +2451,64 @@ async fn a_manager_initiated_pane_report_never_wakes_the_main_agent() {
         "the delivery stays parked for the manager loop's own drain"
     );
 }
+
+/// A prompt drag released OVER a pane belongs to the prompt: the split owns
+/// the release only while a pane selection is in flight. The copy must land
+/// and the prompt selection must clear — never die silently under the pane.
+#[tokio::test]
+async fn prompt_drag_released_over_pane_copies_and_clears() {
+    use crossterm::event::{
+        KeyModifiers, MouseButton as CBtn, MouseEvent as CMouse, MouseEventKind as CKind,
+    };
+
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.set_test_size(100, 40);
+    let session_id = crate::session_store::generate_session_id();
+    app.state
+        .add_empty_session(session_id.clone(), "sel".into(), 0);
+    app.state.current_session_id = Some(session_id);
+    app.open_agents_split(vec![crate::ui::agents_picker::AgentPick {
+        name: "claude".into(),
+        instances: 1,
+    }]);
+    // Render once so the split records its hit rects.
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 40)).unwrap();
+    terminal.draw(|f| app.render(f, 0.0)).unwrap();
+    let rect = app.agents_split.as_ref().unwrap().pane_rects[0];
+
+    // Arm a prompt drag selection (press+drag happened over the prompt);
+    // no split selection is in flight.
+    app.prompt_view.input = "hello world".into();
+    app.prompt_view.begin_selection(0, false);
+    app.prompt_view.sel_end = Some(5);
+    assert!(app.prompt_view.has_selection());
+    app.mouse_down_pos = Some((2, 38));
+    app.mouse_drag_active = true;
+    assert!(!app.agents_split.as_ref().unwrap().has_selection());
+
+    // Release over the pane: the generic dispatch must copy the prompt
+    // text and drop the selection.
+    app.handle_mouse_event(CMouse {
+        kind: CKind::Up(CBtn::Left),
+        column: rect.x + 5,
+        row: rect.y + 2,
+        modifiers: KeyModifiers::NONE,
+    })
+    .expect("release handled");
+    assert!(
+        !app.prompt_view.has_selection(),
+        "the foreign release must clear the prompt selection"
+    );
+    let toast = app
+        .toast_state
+        .current
+        .as_ref()
+        .expect("a copy toast must show");
+    assert!(
+        toast.message.contains("5 chars"),
+        "the prompt text is what copies: {}",
+        toast.message
+    );
+}

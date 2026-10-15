@@ -164,29 +164,33 @@ impl App {
                         return Ok(true);
                     }
                     MouseEventType::Up if button == MouseButton::Left => {
-                        if let Some(split) = &mut self.agents_split {
-                            if split.has_selection() {
-                                // Copy only a REAL drag range (the chat's
-                                // rule: a bare click never copies the one
-                                // glyph under it); either way the selection
-                                // is consumed here.
-                                if split.is_drag() {
-                                    let text = split.extract_selected_text();
-                                    if !text.is_empty() {
-                                        crate::util::selection::copy_selection(
-                                            &text,
-                                            &mut self.toast_state,
-                                        );
-                                    }
+                        // A release over a pane belongs to the split ONLY
+                        // while a pane selection is in flight (press started
+                        // in a pane). Otherwise it belongs to whatever
+                        // surface the press started on (prompt/chat drag
+                        // ending over a pane): fall through to the generic
+                        // dispatch so it copies and clears instead of dying
+                        // silently here — and leave the focus alone (a
+                        // foreign release must not steal it).
+                        if let Some(split) = &mut self.agents_split
+                            && split.has_selection()
+                        {
+                            // Copy only a REAL drag range (the chat's
+                            // rule: a bare click never copies the one
+                            // glyph under it); either way the selection
+                            // is consumed here.
+                            if split.is_drag() {
+                                let text = split.extract_selected_text();
+                                if !text.is_empty() {
+                                    crate::util::selection::copy_selection(
+                                        &text,
+                                        &mut self.toast_state,
+                                    );
                                 }
-                                split.cancel_selection();
-                                return Ok(true);
                             }
-                            split.focused = Some(index);
+                            split.cancel_selection();
+                            return Ok(true);
                         }
-                        // A plain click (no drag range) fell through the
-                        // Down branch already; release just confirms focus.
-                        return Ok(true);
                     }
                     _ => {}
                 }

@@ -288,9 +288,6 @@ pub struct AgentsSplitState {
     pub drag_selection: Option<(u16, u16, u16, u16)>,
     pub selection_anchor_content_y: i32,
     pub selection_focus_content_y: i32,
-    /// Scroll the anchor was taken with — the extraction pairs it with the
-    /// CURRENT focus scroll so the selection survives scrolling mid-drag.
-    pub selection_mouse_down_scroll: u16,
     /// Text regions of the LAST rendered frame, per pane (content-row
     /// labeled) — the extraction source, rebuilt every frame like the right
     /// panel's regions so it always matches what is painted.
@@ -327,7 +324,6 @@ impl AgentsSplitState {
             drag_selection: None,
             selection_anchor_content_y: 0,
             selection_focus_content_y: 0,
-            selection_mouse_down_scroll: 0,
             pane_regions: Vec::new(),
             is_auto_scrolling: false,
             auto_scroll_accumulator: 0.0,
@@ -429,10 +425,6 @@ impl AgentsSplitState {
         self.selection_pane = Some(pane);
         self.selection_anchor_content_y = content_y;
         self.selection_focus_content_y = content_y;
-        self.selection_mouse_down_scroll = self
-            .panes
-            .get(pane)
-            .map_or(0, |p| p.effective_scroll);
         self.drag_selection = Some((x, y, x, y));
     }
 
@@ -486,7 +478,6 @@ impl AgentsSplitState {
         self.drag_selection = None;
         self.selection_anchor_content_y = 0;
         self.selection_focus_content_y = 0;
-        self.selection_mouse_down_scroll = 0;
         self.stop_auto_scroll();
     }
 
@@ -599,23 +590,22 @@ impl AgentsSplitState {
 
     /// Extract the text spanned by the active selection out of the pane's
     /// painted regions (the chat's flow-based algorithm, scoped to the
-    /// anchor pane so a drag never leaks across panes).
+    /// anchor pane so a drag never leaks across panes). Both endpoints are
+    /// content-space rows — the anchor stored at press time, the focus
+    /// tracked live — so the selection survives scrolling during the drag,
+    /// exactly like `SessionView::get_text_in_region`.
     #[must_use]
     pub fn extract_selected_text(&self) -> String {
         let Some(pane) = self.selection_pane else {
             return String::new();
         };
-        let Some((sx, sy, fx, _fy)) = self.drag_selection else {
+        let Some((sx, _, fx, _)) = self.drag_selection else {
             return String::new();
         };
         let Some(regions) = self.pane_regions.get(pane) else {
             return String::new();
         };
-        // The anchor used the scroll at mouse-down, the focus the current
-        // scroll, so the selection survives scrolling during the drag.
-        let content_anchor = i32::from(sy)
-            .saturating_sub(i32::from(self.pane_body_top(pane)))
-            .saturating_add(i32::from(self.selection_mouse_down_scroll));
+        let content_anchor = self.selection_anchor_content_y;
         let content_focus = self.selection_focus_content_y;
         let start_content_y = content_anchor.min(content_focus);
         let end_content_y = content_anchor.max(content_focus);
@@ -625,14 +615,6 @@ impl AgentsSplitState {
             (fx, sx)
         };
         extract_text_in_region(regions, start_content_y, end_content_y, start_x, end_x)
-    }
-
-    /// Screen row the pane's body starts at (below its header), from the
-    /// LAST recorded rect.
-    fn pane_body_top(&self, pane: usize) -> u16 {
-        self.pane_rects
-            .get(pane)
-            .map_or(0, |r| r.y + 1)
     }
 
     /// Whether any pane has a running sub-agent turn.
@@ -958,6 +940,19 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &mut AgentsSplitState, theme:
     state.pane_regions.clear();
     state.pane_regions.resize(state.pane_count(), Vec::new());
     let focused = state.focused;
+    // Active drag-selection span in content rows, for the anchor pane only:
+    // rows inside it get selection regions even when scrolled out of view,
+    // so a release after an auto-scroll drag copies the whole span (the
+    // chat rebuilds regions for the span on release; panes emit them during
+    // the frame instead — same coverage, no second layout pass).
+    let select_sel: Option<(usize, i32, i32)> = state
+        .selection_pane
+        .filter(|_| state.drag_selection.is_some())
+        .map(|p| {
+            let a = state.selection_anchor_content_y;
+            let f = state.selection_focus_content_y;
+            (p, a.min(f), a.max(f))
+        });
     // Split the borrows once: the per-pane loop needs `&mut panes[i]`,
     // `&mut block_cache` and `&mut pane_regions[i]` simultaneously (the
     // cache is keyed per pane, the regions per pane slot).
@@ -978,6 +973,9 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &mut AgentsSplitState, theme:
         let Some(pane) = panes.get_mut(i) else {
             break;
         };
+        let select_span = select_sel
+            .filter(|(p, _, _)| *p == i)
+            .map(|(_, lo, hi)| (lo, hi));
         render_pane(
             buf,
             rect,
@@ -989,6 +987,7 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &mut AgentsSplitState, theme:
             diff_cells,
             &mut live_keys,
             &mut pane_regions[i],
+            select_span,
         );
     }
     block_cache.retain(|key, _| live_keys.contains(key));
@@ -1006,6 +1005,10 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &mut AgentsSplitState, theme:
 /// the right panel's REAL pipeline (`activity_lines` + `SubagentBlockRenderer`),
 /// so markdown blocks wrap, style and cache exactly like the sub-agent
 /// mini-chat instead of a stripped-down mirror.
+///
+/// `select_span` is the active drag-selection span in content rows (for
+/// THIS pane; `None` otherwise): rows inside it report selection regions
+/// even when scrolled out of view, so the release copies the whole span.
 #[allow(clippy::too_many_arguments)]
 fn render_pane(
     buf: &mut Buffer,
@@ -1018,6 +1021,7 @@ fn render_pane(
     diff_cells: &mut HashMap<String, SubagentDiffCells>,
     live_keys: &mut HashSet<String>,
     out_regions: &mut Vec<TextRegion>,
+    select_span: Option<(i32, i32)>,
 ) {
     if rect.width == 0 || rect.height == 0 {
         return;
@@ -1169,6 +1173,9 @@ fn render_pane(
     // (passing `skip` so a straddling block shows only its lower part) and
     // label every painted visual row with its CONTENT row — the selection
     // regions' coordinate system, exactly the right panel's contract.
+    // Lines overlapping the active selection span are visited even when
+    // fully off-window: they paint nothing but still report regions, so a
+    // release after an auto-scroll drag copies the whole span.
     let theme_key = subagent_theme_key(theme);
     // Same whisper-lighter background for markdown blocks so they merge
     // with the pane instead of floating as distinct boxes.
@@ -1178,23 +1185,42 @@ fn render_pane(
     for (index, line) in lines.iter().enumerate() {
         let h = line.visual_rows(wrap_w);
         let line_end = content_row.saturating_add(h);
-        if line_end <= scroll_y {
-            // Entirely above the window.
+        // Selection-span overlap in this line's ri-relative rows
+        // (end-exclusive), so off-window rows still report regions.
+        let emit_rows: Option<(u16, u16)> = select_span.and_then(|(lo, hi)| {
+            let elo = lo
+                .saturating_sub(i32::from(content_row))
+                .clamp(0, i32::from(h)) as u16;
+            let ehi = hi
+                .saturating_add(1)
+                .saturating_sub(i32::from(content_row))
+                .clamp(0, i32::from(h)) as u16;
+            (elo < ehi).then_some((elo, ehi))
+        });
+        if line_end <= scroll_y && emit_rows.is_none() {
+            // Entirely above the window and outside the selection.
             content_row = line_end;
             continue;
         }
-        if content_row >= scroll_y.saturating_add(body_h) {
+        if content_row >= scroll_y.saturating_add(body_h) && emit_rows.is_none() {
             break;
         }
+        // Off-window lines overlapping the span emit regions only: no
+        // screen position, no painted rows.
+        let visible =
+            line_end > scroll_y && content_row < scroll_y.saturating_add(body_h);
         let skip = scroll_y.saturating_sub(content_row);
         // A block straddling the window top has content_row < scroll_y: the
         // screen position clamps to the body top and `skip` carries the
         // scrolled-off part (saturating — the raw difference underflows).
         let screen_y = body_y + content_row.saturating_sub(scroll_y);
-        let draw_rows = h
-            .saturating_sub(skip)
-            .min(rect.bottom().saturating_sub(screen_y));
-        if draw_rows > 0 {
+        let draw_rows = if visible {
+            h.saturating_sub(skip)
+                .min(rect.bottom().saturating_sub(screen_y))
+        } else {
+            0
+        };
+        if draw_rows > 0 || emit_rows.is_some() {
             draw_activity_line(
                 buf,
                 line,
@@ -1215,6 +1241,7 @@ fn render_pane(
                 live_keys,
                 &mut regions,
                 content_row,
+                emit_rows,
             );
         }
         content_row = line_end;
@@ -1222,8 +1249,27 @@ fn render_pane(
     *out_regions = regions;
 }
 
+/// Union of a line's painted band `[skip, skip + paint)` with the
+/// selection-span band `emit` (both ri-relative, end-exclusive), clamped to
+/// the line's `len` rows: the single row range an activity-line arm below
+/// iterates — it paints only the painted band but reports selection regions
+/// for the whole union, so one loop serves both without duplicating the
+/// per-row text formatting.
+fn paint_emit_window(skip: u16, paint: usize, emit: Option<(u16, u16)>, len: usize) -> (u16, u16) {
+    let (mut lo, mut hi) = (skip, skip.saturating_add(paint.min(u16::MAX as usize) as u16));
+    if let Some((elo, ehi)) = emit {
+        lo = lo.min(elo);
+        hi = hi.max(ehi);
+    }
+    let len = len.min(u16::MAX as usize) as u16;
+    (lo.min(len), hi.min(len))
+}
+
 /// Paint ONE drawable activity line at absolute `(x, y)`, clipped to
-/// `draw_rows` with its first `skip` rows scrolled off. Markdown blocks
+/// `draw_rows` with its first `skip` rows scrolled off. `emit_rows` is an
+/// optional ri-relative row band (end-exclusive) that reports selection
+/// regions WITHOUT painting — the active drag-selection span where it
+/// overlaps this line — so off-window rows still copy. Markdown blocks
 /// (`Message`/`Thought`) go through the pane's persistent
 /// `SubagentBlockRenderer` (chat-style incremental parsing, scratch-buffer
 /// blit — the exact pattern of the right panel's live window); Tool/Diff/
@@ -1253,7 +1299,12 @@ fn draw_activity_line(
     live_keys: &mut HashSet<String>,
     regions: &mut Vec<TextRegion>,
     content_row: u16,
+    emit_rows: Option<(u16, u16)>,
 ) {
+    // Painted band in ri-relative rows: the union loop below paints only
+    // these, but reports regions for `emit_rows` too.
+    let paint_hi = skip.saturating_add(draw_rows.min(u16::MAX as usize) as u16);
+    let painting = |ri: u16| ri >= skip && ri < paint_hi;
     let text_style = if focused {
         Style::default().fg(rgba_color(theme.text))
     } else {
@@ -1276,14 +1327,17 @@ fn draw_activity_line(
                 ToolCallStatus::Failed => marker_style_err,
                 _ => dimmed_style,
             };
-            for di in 0..draw_rows {
-                let ri = skip as usize + di;
+            let (rlo, rhi) = paint_emit_window(skip, draw_rows, emit_rows, rows.len());
+            for ri in rlo..rhi {
+                let ri = ri as usize;
                 let Some(seg) = rows.get(ri) else { break };
-                let line_y = y + di as u16;
-                if ri == 0 {
-                    draw_text(buf, marker, x, line_y, wrap_w, marker_style);
+                let line_y = y + (ri as u16).saturating_sub(skip);
+                if painting(ri as u16) {
+                    if ri == 0 {
+                        draw_text(buf, marker, x, line_y, wrap_w, marker_style);
+                    }
+                    draw_text(buf, seg, x + 2, line_y, wrap_w.saturating_sub(2), text_style);
                 }
-                draw_text(buf, seg, x + 2, line_y, wrap_w.saturating_sub(2), text_style);
                 let region_text = if ri == 0 {
                     format!("{marker} {seg}")
                 } else {
@@ -1333,18 +1387,23 @@ fn draw_activity_line(
             let Some(entry) = diff_cells.get(&key) else {
                 return;
             };
-            for di in 0..draw_rows {
-                let ri = skip as usize + di;
-                if ri >= rows {
+            let (rlo, rhi) = paint_emit_window(skip, draw_rows, emit_rows, rows);
+            for ri in rlo..rhi {
+                let ri = ri as usize;
+                let line_y = y + (ri as u16).saturating_sub(skip);
+                let base = ri * usize::from(panel_w);
+                // Defensive: the cache must hold `rows` full panels, but an
+                // emit-only row must never index past a short cache.
+                if base.saturating_add(usize::from(panel_w)) > entry.cells.len() {
                     break;
                 }
-                let line_y = y + di as u16;
-                let base = ri * usize::from(panel_w);
-                for dx in 0..panel_w {
-                    let Some(dst) = buf.cell_mut((x + 2 + dx, line_y)) else {
-                        break;
-                    };
-                    *dst = entry.cells[base + usize::from(dx)].clone();
+                if painting(ri as u16) {
+                    for dx in 0..panel_w {
+                        let Some(dst) = buf.cell_mut((x + 2 + dx, line_y)) else {
+                            break;
+                        };
+                        *dst = entry.cells[base + usize::from(dx)].clone();
+                    }
                 }
                 let row_cells: Vec<ratatui::buffer::Cell> = (0..panel_w)
                     .map(|dx| entry.cells[base + usize::from(dx)].clone())
@@ -1361,11 +1420,14 @@ fn draw_activity_line(
             }
         }
         SubagentActivityLine::Diff(rows) => {
-            for di in 0..draw_rows {
-                let ri = skip as usize + di;
+            let (rlo, rhi) = paint_emit_window(skip, draw_rows, emit_rows, rows.len());
+            for ri in rlo..rhi {
+                let ri = ri as usize;
                 let Some(seg) = rows.get(ri) else { break };
-                let line_y = y + di as u16;
-                draw_text(buf, seg, x + 2, line_y, wrap_w.saturating_sub(2), dimmed_style);
+                let line_y = y + (ri as u16).saturating_sub(skip);
+                if painting(ri as u16) {
+                    draw_text(buf, seg, x + 2, line_y, wrap_w.saturating_sub(2), dimmed_style);
+                }
                 regions.push(TextRegion::one_row(
                     i32::from(content_row.saturating_add(ri as u16)),
                     x,
@@ -1380,14 +1442,17 @@ fn draw_activity_line(
                 PlanEntryStatus::InProgress => ("☐", text_style),
                 _ => ("☐", dimmed_style),
             };
-            for di in 0..draw_rows {
-                let ri = skip as usize + di;
+            let (rlo, rhi) = paint_emit_window(skip, draw_rows, emit_rows, rows.len());
+            for ri in rlo..rhi {
+                let ri = ri as usize;
                 let Some(seg) = rows.get(ri) else { break };
-                let line_y = y + di as u16;
-                if ri == 0 {
-                    draw_text(buf, glyph, x, line_y, wrap_w, style);
+                let line_y = y + (ri as u16).saturating_sub(skip);
+                if painting(ri as u16) {
+                    if ri == 0 {
+                        draw_text(buf, glyph, x, line_y, wrap_w, style);
+                    }
+                    draw_text(buf, seg, x + 2, line_y, wrap_w.saturating_sub(2), style);
                 }
-                draw_text(buf, seg, x + 2, line_y, wrap_w.saturating_sub(2), style);
                 let region_text = if ri == 0 {
                     format!("{glyph} {seg}")
                 } else {
@@ -1458,20 +1523,26 @@ fn draw_activity_line(
             entry.md.render_self(&mut entry.scratch, area);
             // Blit the VISIBLE band of the block: rows `skip..skip+draw_rows`
             // (the scroll window decides which band; at sticky bottom an
-            // oversized block naturally shows its tail). Every painted row
-            // becomes a content-row region sampled from the same cells, so
-            // extraction matches the display.
-            for di in 0..draw_rows {
-                let sy = (skip as usize + di) as u16;
-                for cx in 0..wrap_w {
-                    let Some(src) = entry.scratch.cell((cx, sy)) else {
-                        break;
-                    };
-                    let Some(dst) = buf.cell_mut((x + cx, y + di as u16)) else {
-                        break;
-                    };
-                    dst.set_symbol(src.symbol());
-                    dst.set_style(src.style());
+            // oversized block naturally shows its tail). Every row in the
+            // union with the selection span becomes a content-row region
+            // sampled from the same cells, so extraction matches the
+            // display — including rows scrolled out of view.
+            let block_h = h_from(text, wrap_w) as usize;
+            let (rlo, rhi) = paint_emit_window(skip, draw_rows, emit_rows, block_h);
+            for sy in rlo..rhi {
+                let paint_row = painting(sy);
+                let dy = sy.saturating_sub(skip);
+                if paint_row {
+                    for cx in 0..wrap_w {
+                        let Some(src) = entry.scratch.cell((cx, sy)) else {
+                            break;
+                        };
+                        let Some(dst) = buf.cell_mut((x + cx, y + dy)) else {
+                            break;
+                        };
+                        dst.set_symbol(src.symbol());
+                        dst.set_style(src.style());
+                    }
                 }
                 let row_cells: Vec<ratatui::buffer::Cell> = (0..wrap_w)
                     .map(|dx| entry.scratch.cell((dx, sy)).cloned().unwrap_or_default())
@@ -1495,13 +1566,15 @@ fn draw_activity_line(
                     // the pane agent's brand color; an `agents_call` input
                     // wears it in the theme's secondary tone — the color
                     // alone tells the user WHO is speaking. One glyph, no
-                    // more chrome.
-                    let rail_style = if is_user {
-                        brand_fg(agent, 0.0, theme, focused)
-                    } else {
-                        Style::default().fg(rgba_color(theme.secondary))
-                    };
-                    subagent_input_rail(buf, x - 1, y + di as u16, rail_style);
+                    // more chrome. Paint-only: emit-only rows skip it.
+                    if paint_row {
+                        let rail_style = if is_user {
+                            brand_fg(agent, 0.0, theme, focused)
+                        } else {
+                            Style::default().fg(rgba_color(theme.secondary))
+                        };
+                        subagent_input_rail(buf, x - 1, y + dy, rail_style);
+                    }
                 }
             }
         }
@@ -1661,9 +1734,9 @@ fn draw_text(buf: &mut Buffer, text: &str, x: u16, y: u16, max_w: u16, style: St
 
 /// Copy-by-selection highlight: invert the cells under the drag selection
 /// (the chat's flow-based algorithm, scoped to the ANCHOR pane so a drag
-/// never paints into a neighbour). The anchor is re-projected with the
-/// scroll it was taken at, the focus with the CURRENT scroll, so the visual
-/// band survives scrolling mid-drag — exactly the right panel's contract.
+/// never paints into a neighbour). Both endpoints live in content space
+/// and are projected with the CURRENT render scroll, so the visual band
+/// follows the content when it scrolls mid-drag — the chat's contract.
 /// Painted after the pane content so it inverts the final cells.
 fn highlight_selection(buf: &mut Buffer, state: &AgentsSplitState) {
     let Some((sx, _sy, fx, _fy)) = state.drag_selection else {
@@ -1689,8 +1762,12 @@ fn highlight_selection(buf: &mut Buffer, state: &AgentsSplitState) {
     let max_x = rect.right().saturating_sub(1);
     let anchor_content = state.selection_anchor_content_y;
     let focus_content = state.selection_focus_content_y;
+    // Both endpoints track the CURRENT render scroll (the chat projects
+    // both with its live `scroll_y` too): the band follows the content
+    // when it scrolls mid-drag instead of pinning the anchor edge to the
+    // press row.
     let anchor_screen = anchor_content
-        .saturating_sub(i32::from(state.selection_mouse_down_scroll))
+        .saturating_sub(i32::from(pane.effective_scroll))
         .saturating_add(body_top)
         .clamp(body_top, body_last) as u16;
     let focus_screen = focus_content
@@ -2200,6 +2277,148 @@ mod tests {
         // Out-of-range set_running is a no-op.
         state.set_running(9, true);
         assert!(!state.any_running());
+    }
+
+    /// Seed one pane with `n` single-row blocks: Message and Thought
+    /// alternate because same-kind stream chunks coalesce into one entry.
+    fn seed_tall_pane(state: &mut AgentsSplitState, n: usize) {
+        for i in 0..n {
+            let text = format!("sel row {i:02}");
+            if i % 2 == 0 {
+                state.apply_event(0, &SubagentEvent::Message { text });
+            } else {
+                state.apply_event(0, &SubagentEvent::Thought { text });
+            }
+        }
+    }
+
+    /// Selection regions cover the whole drag span even when it scrolled
+    /// out of view: rows inside the span report regions during the frame
+    /// (the chat rebuilds regions for the span on release instead — same
+    /// coverage), so the release copies off-screen rows too.
+    #[test]
+    fn selection_span_reports_regions_beyond_the_viewport() {
+        let theme = test_theme();
+        let mut state = AgentsSplitState::new(vec!["kilo".into()]);
+        seed_tall_pane(&mut state, 14);
+        let area = Rect::new(0, 0, 60, 10);
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut state, &theme);
+        let mut ys: Vec<i32> = state.pane_regions[0].iter().map(|r| r.y1).collect();
+        ys.sort();
+        ys.dedup();
+        assert!(ys.len() >= 8, "need a scrollable pane, got {ys:?}");
+        let anchor = ys[0];
+        let focus = ys[7];
+        let rect = state.pane_rects[0];
+
+        // Scroll to the bottom: the anchor leaves the viewport.
+        {
+            let pane = &mut state.panes[0];
+            pane.auto_follow = false;
+            pane.scroll_y = pane.content_height.saturating_sub(pane.body_height);
+        }
+        state.selection_pane = Some(0);
+        state.selection_anchor_content_y = anchor;
+        state.selection_focus_content_y = focus;
+        state.drag_selection = Some((rect.x + 1, 2, rect.x + 30, 8));
+        let mut buf2 = Buffer::empty(area);
+        render(&mut buf2, area, &mut state, &theme);
+
+        let covered: Vec<i32> = state.pane_regions[0].iter().map(|r| r.y1).collect();
+        for row in anchor..=focus {
+            assert!(
+                covered.contains(&row),
+                "off-screen row {row} must report a region: {covered:?}"
+            );
+        }
+        let anchor_text = state.pane_regions[0]
+            .iter()
+            .find(|r| r.y1 == anchor)
+            .map(|r| r.text.clone())
+            .unwrap_or_default();
+        let copied = state.extract_selected_text();
+        assert!(
+            !anchor_text.is_empty() && copied.contains(&anchor_text),
+            "the off-screen anchor row copies: {copied:?}"
+        );
+    }
+
+    /// The highlight band follows the content when it scrolls mid-drag:
+    /// both endpoints project with the CURRENT render scroll (the chat's
+    /// contract), instead of pinning the anchor edge to the press row.
+    #[test]
+    fn highlight_band_tracks_content_when_scrolled_mid_drag() {
+        let theme = test_theme();
+        let mut state = AgentsSplitState::new(vec!["kilo".into()]);
+        seed_tall_pane(&mut state, 14);
+        let area = Rect::new(0, 0, 60, 10);
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut state, &theme);
+        // Pin the viewport to the top and re-render: the rows below come
+        // from scroll 0 (fresh panes sticky-follow to the bottom).
+        state.panes[0].auto_follow = false;
+        state.panes[0].scroll_y = 0;
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut state, &theme);
+        let mut ys: Vec<i32> = state.pane_regions[0].iter().map(|r| r.y1).collect();
+        ys.sort();
+        ys.dedup();
+        assert!(ys.len() >= 6, "need a scrollable pane, got {ys:?}");
+        let anchor = ys[2];
+        let focus = ys[3];
+        let rect = state.pane_rects[0];
+        let body_top = rect.y + 1;
+        let sx = rect.x + 2;
+        let fx = rect.x + 20;
+
+        fn changed_rows(sel: &Buffer, base: &Buffer, area: Rect) -> Vec<u16> {
+            (area.y..area.bottom())
+                .filter(|y| {
+                    (area.x..area.right())
+                        .any(|x| sel.cell((x, *y)) != base.cell((x, *y)))
+                })
+                .collect()
+        }
+        // Render with the selection, then without (same scroll): the only
+        // difference between the frames is the highlight band.
+        fn band_at(
+            state: &mut AgentsSplitState,
+            area: Rect,
+            theme: &Theme,
+            anchor: i32,
+            focus: i32,
+            sx: u16,
+            fx: u16,
+        ) -> Vec<u16> {
+            state.selection_pane = Some(0);
+            state.selection_anchor_content_y = anchor;
+            state.selection_focus_content_y = focus;
+            state.drag_selection = Some((sx, 0, fx, 0));
+            let mut sel = Buffer::empty(area);
+            render(&mut sel, area, state, theme);
+            state.selection_pane = None;
+            state.drag_selection = None;
+            let mut base = Buffer::empty(area);
+            render(&mut base, area, state, theme);
+            changed_rows(&sel, &base, area)
+        }
+
+        // At rest the band sits on the anchor/focus rows.
+        let screen = |content: i32, scroll: u16| body_top + (content as u16).saturating_sub(scroll);
+        assert_eq!(
+            band_at(&mut state, area, &theme, anchor, focus, sx, fx),
+            vec![screen(anchor, 0), screen(focus, 0)],
+            "resting band covers the anchor..focus rows"
+        );
+
+        // Scrolled one row down, the whole band moves with the content.
+        state.panes[0].scroll_y = 1;
+        assert_eq!(
+            band_at(&mut state, area, &theme, anchor, focus, sx, fx),
+            vec![screen(anchor, 1), screen(focus, 1)],
+            "the anchor edge must track the scroll, not the press row"
+        );
     }
 
     /// A rehydrating pane's header paints ONLY the simple braille spinner
