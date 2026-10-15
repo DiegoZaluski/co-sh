@@ -563,6 +563,12 @@ pub struct SessionView {
     /// rendered once, the streaming text part patched incrementally (see
     /// `streaming` module). Freed when nothing is streaming.
     streaming_msg: Option<streaming::StreamingMessageCache>,
+    /// Id of the message the streaming cache last rendered. Kept after the
+    /// message stops being the session's last one (a queued user message was
+    /// injected below it): the height cache must keep re-estimating it while
+    /// deltas still arrive, or its frozen estimate clips the painted content
+    /// (the "block cut" symptom).
+    last_streamed_msg: Option<String>,
     /// Caches for the width we are NOT currently rendering at (see
     /// [`WidthCacheSnapshot`]): parked when a full rebuild leaves one width and
     /// swapped back O(1) when the toggle returns — never cloned.
@@ -573,6 +579,23 @@ pub struct SessionView {
 struct HeightCacheUpdate {
     full_rebuild: bool,
     tool_state_changed: bool,
+}
+
+/// Who is asking [`SessionView::ensure_height_caches_fresh`] to run.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HeightCacheMode {
+    /// The renderer: caches may be rebuilt, extended and re-estimated freely.
+    Render,
+    /// Mouse hit-testing (`update_hover` / `handle_mouse`): the cursor must
+    /// be mapped against the layout the last render PAINTED. When the caches
+    /// are structurally fresh (same session/width/config/tool version) the
+    /// incremental content scan is skipped entirely — re-estimating here
+    /// would mutate the shared caches between frames and desynchronize the
+    /// hover/click geometry from the screen (the highlight used to jump onto
+    /// the block above a queued message during active streaming). Structural
+    /// staleness (session switch, width/config change, message count grew)
+    /// still rebuilds: the old layout cannot be mapped onto the new content.
+    PaintedOnly,
 }
 
 /// A standby copy of the width-dependent render caches, kept so a left-panel
@@ -865,6 +888,7 @@ impl SessionView {
             msg_cache_last_used: Vec::new(),
             msg_cache_bytes: 0,
             streaming_msg: None,
+            last_streamed_msg: None,
             width_cache_snapshot: None,
             hovered_msg_idx: None,
             pending_message_action: None,
@@ -2362,7 +2386,15 @@ impl SessionView {
             return self.clear_hover();
         }
         let max_w = inner_area.width.saturating_sub(6).max(2);
-        self.ensure_height_caches_fresh(session, max_w, config, None);
+        // PaintedOnly: hover maps the cursor against the layout the last
+        // render painted — never mutates the shared caches between frames.
+        self.ensure_height_caches_fresh(
+            session,
+            max_w,
+            config,
+            HeightCacheMode::PaintedOnly,
+            state.status == SessionStatus::Working,
+        );
 
         let next = self
             .message_index_at_y(
@@ -2460,7 +2492,15 @@ impl SessionView {
             return false;
         }
 
-        self.ensure_height_caches_fresh(session, max_w, config, None);
+        // PaintedOnly: the click maps against the layout the last render
+        // painted — never mutates the shared caches between frames.
+        self.ensure_height_caches_fresh(
+            session,
+            max_w,
+            config,
+            HeightCacheMode::PaintedOnly,
+            state.status == SessionStatus::Working,
+        );
 
         // Binary search for the message that contains the click position,
         // using the prefix-y array directly (no O(n) per-click allocation of
@@ -2710,6 +2750,11 @@ impl SessionView {
     ) -> Option<streaming::StreamState> {
         if !streaming {
             self.streaming_msg = None;
+            // Turn ended. The height-cache pin (`last_streamed_msg`) is
+            // deliberately KEPT here: the scan in `ensure_height_caches_fresh`
+            // still needs it this frame to land the streamed message's final
+            // height (its token changed since the last pass), and it retires
+            // there once the estimate is up to date.
             return None;
         }
         let Some(msg) = session.messages.last() else {
@@ -2730,6 +2775,11 @@ impl SessionView {
         let config_tok = config_token(config);
         let width = inner_area.width;
         let text_pi = msg.parts.len() - 1;
+        // Track which message the streaming cache is rendering: while deltas
+        // keep arriving to it AFTER a queued message was injected below it
+        // (it is no longer `last`), the height cache must keep re-estimating
+        // it or its frozen estimate clips the painted content.
+        self.last_streamed_msg = Some(msg.id.clone());
 
         let identity_ok = self.streaming_msg.as_ref().is_some_and(|sc| {
             sc.message_id == msg.id
@@ -2883,16 +2933,35 @@ impl SessionView {
         session: &crate::types::Session,
         max_w: u16,
         config: &TuiConfig,
-        stream_state: Option<&streaming::StreamState>,
+        mode: HeightCacheMode,
+        streaming: bool,
     ) -> HeightCacheUpdate {
         let config_tok = config_token(config);
         let session_changed = self.last_session_id.as_deref() != Some(session.id.as_str());
+        // Streaming pins are session-scoped: message ids (`msg-N`) are not
+        // unique across sessions, so a pin carried over a switch could bind
+        // to an unrelated message in the new session.
+        if session_changed {
+            self.last_streamed_msg = None;
+        }
         let tool_state_changed = self.last_tool_state_version != self.tool_state.version;
         let cache_stale = session_changed
             || tool_state_changed
             || self.msg_height_cache.len() != session.messages.len()
             || self.cache_max_w != max_w
             || self.cache_config_token != config_tok;
+
+        // Mouse hit-testing between frames (`update_hover` / `handle_mouse`):
+        // the cursor must be mapped against the layout the last render
+        // PAINTED. When the caches are structurally fresh, re-estimating
+        // content here would mutate the shared caches and desynchronize the
+        // hover/click geometry from the screen (the highlight used to jump
+        // onto the block above a freshly injected queued message while the
+        // agent streamed). Structural staleness still rebuilds below — the
+        // old layout cannot be mapped onto different content safely.
+        if mode == HeightCacheMode::PaintedOnly && !cache_stale {
+            return HeightCacheUpdate::default();
+        }
 
         if cache_stale {
             // ── Width-snapshot swap: restore a previously-rendered width ─────
@@ -3143,6 +3212,51 @@ impl SessionView {
                 self.prefix_y.push(y); // new total (no trailing gap)
                 // Sync actual_total_height using .max() — see note above.
                 self.actual_total_height = self.actual_total_height.max(self.cached_total_height);
+                // The injection frame lands HERE (count grew): the pinned
+                // streaming message is NOT one of the new messages, so the
+                // loop above skipped it. Re-estimate it now — its deltas
+                // since the last build would otherwise be clipped by the
+                // stale height on this very frame, AND the walk would save
+                // cells carrying the FRESH content token rendered with the
+                // STALE heights, poisoning the per-message cell cache (the
+                // next frame would then blit the clipped content as a hit).
+                if let Some(pin) = &self.last_streamed_msg
+                    && let Some(pi) = session.messages.iter().position(|m| m.id == *pin)
+                    && pi < prev_len
+                {
+                    let msg = &session.messages[pi];
+                    let part_hs: Vec<u16> = msg
+                        .parts
+                        .iter()
+                        .map(|p| {
+                            Self::estimate_part_height(
+                                p,
+                                max_w,
+                                config,
+                                &msg.role,
+                                &self.tool_state,
+                            )
+                        })
+                        .collect();
+                    let msg_h = Self::render_message_height(
+                        msg,
+                        max_w,
+                        config,
+                        Some(&part_hs),
+                        &self.tool_state,
+                    );
+                    self.part_heights_cache[pi] = part_hs;
+                    self.msg_height_cache[pi] = msg_h;
+                    if pi < self.msg_change_tokens.len() {
+                        self.msg_change_tokens[pi] = msg_change_token(msg);
+                    }
+                    // The pinned message's height changed inside the OLD
+                    // range: recompute the whole prefix chain and the total
+                    // (O(n) sums, injection frame only).
+                    self.cached_total_height = self.rebuild_prefix_y();
+                    self.actual_total_height =
+                        self.actual_total_height.max(self.cached_total_height);
+                }
                 log::debug!(
                     "[PERF] msg_height_cache: extended prev={} now={}",
                     prev_len,
@@ -3175,20 +3289,38 @@ impl SessionView {
             // per-part heights are authoritative and were already brought up to
             // date by `update_streaming_message_cache` this frame. Skip the
             // O(n) content hash + per-part re-estimate entirely.
-            let stream_ident = stream_state.filter(|s| {
-                session
-                    .messages
-                    .last()
-                    .is_some_and(|m| s.message_id == m.id)
-            });
+            // The streaming cache's heights are authoritative for the LAST
+            // message (refreshed by `update_streaming_message_cache` earlier
+            // this frame). Cloned out so the scan below can mutate `self`.
+            // Mouse paths (PaintedOnly) never reach this block.
+            let stream_last: Option<(u16, Vec<u16>)> = self
+                .streaming_msg
+                .as_ref()
+                .filter(|s| {
+                    session
+                        .messages
+                        .last()
+                        .is_some_and(|m| s.message_id == m.id)
+                })
+                .map(|s| (s.height, s.part_hs.clone()));
             if !self.msg_height_cache.is_empty() {
                 let last_idx = session.messages.len() - 1;
+                // A queued message injected below the still-streaming one
+                // makes it no-longer-last; the pin keeps it a candidate so
+                // its continued deltas re-estimate instead of freezing (the
+                // "cut block" symptom). It settles itself once its content
+                // stops changing.
+                let pinned_idx = self
+                    .last_streamed_msg
+                    .as_ref()
+                    .and_then(|id| session.messages.iter().position(|m| m.id == *id));
                 // Take last pass's mutable set (carried over to catch an
                 // in-place completion), then store this pass's for next time.
                 let prev_mutable = std::mem::take(&mut self.prev_mutable_msgs);
                 let curr_mutable = mutable_msg_indices(session);
                 let is_candidate = |idx: usize| {
                     idx == last_idx
+                        || Some(idx) == pinned_idx
                         || prev_mutable.binary_search(&idx).is_ok()
                         || curr_mutable.binary_search(&idx).is_ok()
                 };
@@ -3197,20 +3329,20 @@ impl SessionView {
                         continue;
                     }
                     if idx == last_idx
-                        && let Some(s) = stream_ident
+                        && let Some((s_height, s_part_hs)) = stream_last.as_ref()
                     {
                         // Streaming message: use the cache's heights without
                         // hashing. The stored token is the cache height — a
                         // cheap monotonic stand-in; once streaming ends the
                         // normal `msg_change_token` path re-estimates once and
                         // replaces it.
-                        if self.msg_height_cache.get(idx) != Some(&(s.height as i32)) {
+                        if self.msg_height_cache.get(idx) != Some(&(*s_height as i32)) {
                             if idx < self.part_heights_cache.len() {
-                                self.part_heights_cache[idx] = s.part_hs.clone();
-                                self.msg_height_cache[idx] = s.height as i32;
+                                self.part_heights_cache[idx] = s_part_hs.clone();
+                                self.msg_height_cache[idx] = *s_height as i32;
                             }
                             if idx < self.msg_change_tokens.len() {
-                                self.msg_change_tokens[idx] = s.height as u64;
+                                self.msg_change_tokens[idx] = *s_height as u64;
                             }
                             changed_last = true;
                             any_changed = true;
@@ -3253,14 +3385,22 @@ impl SessionView {
                 }
                 self.prev_mutable_msgs = curr_mutable;
             }
+            if !streaming {
+                // Turn ended: the scan above just landed the pinned message's
+                // final height (its streaming stand-in token no longer
+                // matched the real content hash, forcing the one-shot
+                // re-estimate). Retire the pin so no message stays a
+                // per-frame re-hash candidate for the rest of the session.
+                self.last_streamed_msg = None;
+            }
             if any_changed {
                 // The changed message's height moved, so every start position
                 // after the first changed message shifts — rebuild the whole
                 // prefix_y (O(n) sums) and the cached total.
                 self.cached_total_height = self.rebuild_prefix_y();
-                self.last_msg_change_token = if let Some(s) = stream_ident {
+                self.last_msg_change_token = if let Some((s_height, _)) = stream_last.as_ref() {
                     // Streaming: avoid the O(n) hash of the last message.
-                    s.height as u64
+                    *s_height as u64
                 } else {
                     session.messages.last().map(msg_change_token).unwrap_or(0)
                 };
@@ -4097,8 +4237,16 @@ impl SessionView {
         let config_tok = config_token(config);
         let stream_state = self
             .update_streaming_message_cache(session, inner_area, max_w, config, theme, streaming);
-        let height_update =
-            self.ensure_height_caches_fresh(session, max_w, config, stream_state.as_ref());
+        let height_update = self.ensure_height_caches_fresh(
+            session,
+            max_w,
+            config,
+            // Render mode: the walk may rebuild/extend/re-estimate freely;
+            // the streaming snapshot is read from `self.streaming_msg`
+            // inside (already refreshed by the call above).
+            HeightCacheMode::Render,
+            streaming,
+        );
 
         // Ensure render cache vectors match message count
         let n_msgs = session.messages.len();
