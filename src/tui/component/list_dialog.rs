@@ -127,6 +127,10 @@ pub struct ListBoxLayout {
     pub max_visible: usize,
     /// The box carries a subtitle line above the search line.
     pub subtitle: bool,
+    /// The box carries the Search line (the ModelList/ThemeList shape).
+    /// Searchless boxes (the reasoning sub-box — a level list never long
+    /// enough to filter) drop the line and its chrome row entirely.
+    pub search: bool,
     /// The cursor-follow scroll window this geometry was computed with
     /// (the offset the renderer MUST paint — and the mouse MUST hit-test —
     /// so the three can never drift).
@@ -134,10 +138,12 @@ pub struct ListBoxLayout {
 }
 
 impl ListBoxLayout {
-    /// The screen Y where the list rows start (below the header chrome).
+    /// The screen Y where the list rows start (below the header chrome):
+    /// title, then the optional subtitle and Search lines, then the gap
+    /// row ahead of the first row.
     #[must_use]
     pub fn list_top(&self) -> u16 {
-        self.y + 3 + u16::from(self.subtitle)
+        self.y + 2 + u16::from(self.subtitle) + u16::from(self.search)
     }
 
     /// The screen Y of visual row `index` (scroll offset applied).
@@ -277,6 +283,7 @@ impl FilterState {
         min_w: u16,
         area: Rect,
         subtitle: bool,
+        search: bool,
     ) -> ListBoxLayout {
         compute_layout(
             visual_selected,
@@ -286,6 +293,7 @@ impl FilterState {
             min_w,
             area,
             subtitle,
+            search,
         )
     }
 
@@ -314,14 +322,16 @@ pub fn compute_layout(
     min_w: u16,
     area: Rect,
     subtitle: bool,
+    search: bool,
 ) -> ListBoxLayout {
     let max_w = max_w.min(area.width.saturating_sub(4));
     let width = max_w.max(min_w).min(area.width.saturating_sub(2));
     let x = area.x + area.width.saturating_sub(width) / 2;
 
     // Fit the list to the available height: the header chrome (3 rows,
-    // 4 with a subtitle) plus one bottom padding row leave the rest.
-    let chrome = 4 + u16::from(subtitle);
+    // 4 with a subtitle, minus the Search row on a searchless box) plus
+    // one bottom padding row leave the rest.
+    let chrome = 3 + u16::from(subtitle) + u16::from(search);
     let max_visible_height = area.height.saturating_sub(chrome) as usize;
     let max_visible = max_visible_height.min(rows.max(1)).min(max_visible_cap).max(1);
     let height = max_visible as u16 + chrome;
@@ -333,6 +343,7 @@ pub fn compute_layout(
         width,
         height,
         subtitle,
+        search,
         max_visible,
         scroll_offset: ListBoxLayout::scroll_offset_for(visual_selected, rows, max_visible),
     }
@@ -493,7 +504,12 @@ pub fn render_chrome_raw(
     };
 
     // The Search line: the ModelList's exact rendering (placeholder +
-    // cursor over its first char, or filter text + trailing cursor).
+    // cursor over its first char, or filter text + trailing cursor). A
+    // searchless layout (`search: false` — the reasoning sub-box) drops
+    // the line entirely; the layout already gave its chrome row back.
+    if !layout.search {
+        return;
+    }
     let cursor_state = cursor.current_state(now);
     if filter_text.is_empty() {
         draw_text_line_compact(
@@ -708,13 +724,13 @@ mod tests {
         // the window shrinks with the height — but never past the row
         // count (3 rows → a 3-row window even in a tall-enough area).
         let area = Rect::new(0, 0, 30, 12);
-        let layout = state.layout(0, 3, 10, 60, 28, area, false);
+        let layout = state.layout(0, 3, 10, 60, 28, area, false, true);
         assert_eq!(layout.width, 28);
         assert_eq!(layout.max_visible, 3);
         // 500 rows under a 10-row cap: the window is the cap, and the box
         // stays fully on screen instead of leaking off the bottom.
         let tall_area = Rect::new(0, 0, 100, 30);
-        let layout = state.layout(499, 500, 10, 60, 28, tall_area, false);
+        let layout = state.layout(499, 500, 10, 60, 28, tall_area, false, true);
         assert_eq!(layout.max_visible, 10);
         assert_eq!(layout.height, 14);
         assert!(layout.y + layout.height <= tall_area.height);
@@ -722,7 +738,7 @@ mod tests {
         assert_eq!(layout.scroll_offset, 490);
         // A subtitle consumes one chrome row from the window and adds one
         // to the box.
-        let layout = state.layout(499, 500, 10, 60, 28, tall_area, true);
+        let layout = state.layout(499, 500, 10, 60, 28, tall_area, true, true);
         assert_eq!(layout.height, 15);
         assert_eq!(layout.list_top(), layout.y + 4);
     }
@@ -731,7 +747,7 @@ mod tests {
     fn mouse_hit_maps_rows_through_the_scroll_window() {
         let state = FilterState::new();
         let area = Rect::new(0, 0, 100, 40);
-        let layout = state.layout(15, 40, 10, 60, 28, area, false);
+        let layout = state.layout(15, 40, 10, 60, 28, area, false, true);
         // Selection 15 in a 10-row window → offset 6; the first visible
         // row is visual index 6, at y = layout.y + 3.
         assert_eq!(layout.scroll_offset, 6);

@@ -731,8 +731,8 @@ impl AgentsSplitState {
     /// commands are the TUI's own set, which the caller serves directly;
     /// an ACP probe would be meaningless). Otherwise the focused pane's
     /// entries: the group commands SYNTHESIZED from the pane's own ACP
-    /// config options first (model / provider / reasoning / mode — the
-    /// controls harnesses like opencode and kilo never publish as slash
+    /// config options first (model / provider / mode — the controls
+    /// harnesses like opencode and kilo never publish as slash
     /// commands, see `agent_command_map::synthesized_group_commands`),
     /// then the pane's own published command list blocklist-filtered, with
     /// any published command that duplicates a synthesized group name

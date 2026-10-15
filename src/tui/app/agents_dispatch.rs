@@ -76,8 +76,8 @@ fn slash_lists_equal(
 /// the command belongs to the AGENT, not to cosh. Returns `true` when
 /// consumed (the caller closes the menu and clears the draft).
 ///
-/// - A mapped group with a config target (models / provider / reasoning /
-///   mode) opens the standardized config box bound to the pane's own ACP
+/// - A mapped group with a config target (models / provider / mode) opens
+///   the standardized config box bound to the pane's own ACP
 ///   config option — the agent's exact command name never leaves the menu,
 ///   only what opens afterwards is cosh's.
 /// - Everything else (compact, review, custom harness commands …) is sent

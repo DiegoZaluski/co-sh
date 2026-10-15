@@ -485,18 +485,21 @@ pub enum DialogType {
         current: String,
     },
     /// Standardized config picker for a focused `/agents` pane's mapped
-    /// command group (model / provider / reasoning / mode): the pane's OWN
+    /// command group (model / provider / mode): the pane's OWN
     /// ACP config options rendered cosh-style. `options` are
     /// `(value_id, display_name)` rows of the matched session config
     /// option, `current` the active value id (the row indicator); the app
     /// layer applies the picked value through `session/set_config_option`.
     /// Filtering/selection/cursor live in the shared list-dialog
     /// component's [`FilterState`] — the same search box every cosh list
-    /// picker carries.
+    /// picker carries, OMITTED when `search` is false (the reasoning
+    /// sub-box: a level list is never long enough to filter, and it must
+    /// render the exact shape of the cosh reasoning picker).
     AgentConfigList {
         title: String,
         options: Vec<(String, String)>,
         current: String,
+        search: bool,
         filter: FilterState,
     },
     /// Compact three-option picker for the checkup resident model
@@ -726,12 +729,14 @@ impl std::fmt::Debug for DialogType {
                 title,
                 options,
                 current,
+                search,
                 filter,
             } => f
                 .debug_struct("AgentConfigList")
                 .field("title", title)
                 .field("options", options)
                 .field("current", current)
+                .field("search", search)
                 .field("filter", &filter.filter)
                 .finish(),
             Self::CheckupModelList { current } => f
@@ -1093,7 +1098,7 @@ impl DialogState {
                 // the scroll window and the row mapping can never drift from
                 // the painted frame.
                 let layout =
-                    list_dialog::compute_layout(selection, filtered.len(), 10, 40, 24, area, false);
+                    list_dialog::compute_layout(selection, filtered.len(), 10, 40, 24, area, false, true);
                 match list_dialog::hit_test(&layout, x, y_click) {
                     MouseHit::Outside | MouseHit::Dismiss => return DialogAction::Dismissed,
                     MouseHit::Inside => return DialogAction::Consumed,
@@ -1361,6 +1366,7 @@ impl DialogState {
             DialogType::AgentConfigList {
                 title,
                 options,
+                search,
                 filter,
                 ..
             } => {
@@ -1383,6 +1389,7 @@ impl DialogState {
                     max_w,
                     area,
                     false,
+                    *search,
                 );
                 match filter.mouse_hit(&layout, x, y_click) {
                     MouseHit::Outside | MouseHit::Dismiss => DialogAction::Dismissed,
@@ -1622,6 +1629,7 @@ impl DialogState {
                     30,
                     area,
                     false,
+                    true,
                 );
 
                 match list_dialog::hit_test(&layout, x, y_click) {
@@ -1887,7 +1895,7 @@ impl DialogState {
                 // cursor, the scroll window that follows the selection
                 // (theme box: preferred 40, floor 24, 10-row cap).
                 let layout =
-                    list_dialog::compute_layout(selection, rows.len(), 10, 40, 24, area, false);
+                    list_dialog::compute_layout(selection, rows.len(), 10, 40, 24, area, false, true);
                 list_dialog::render_chrome_raw(
                     buf,
                     &layout,
@@ -2352,6 +2360,7 @@ impl DialogState {
                     30,
                     area,
                     false,
+                    true,
                 );
                 list_dialog::render_chrome_raw(
                     buf,
@@ -3201,11 +3210,13 @@ impl DialogState {
                 title,
                 options,
                 current,
+                search,
                 filter,
             } => {
                 // The shared list-dialog component owns the box: terminal-
                 // clamped geometry, the Search line with the blinking
-                // cursor, and a scroll window that follows the selection
+                // cursor (omitted on a searchless box — the reasoning
+                // sub-box), and a scroll window that follows the selection
                 // (the config lists can outgrow ten rows — opencode's
                 // `model` alone publishes 115 values — so the selection may
                 // never fall off-screen again). One row per ACP value, ●
@@ -3213,7 +3224,16 @@ impl DialogState {
                 let rows = filter_matches(options, &filter.filter);
                 let selection = filter.clamped(rows.len());
                 let max_w = agent_config_dialog_w(title, options, area.width);
-                let layout = filter.layout(selection, rows.len(), 10, max_w, max_w, area, false);
+                let layout = filter.layout(
+                    selection,
+                    rows.len(),
+                    10,
+                    max_w,
+                    max_w,
+                    area,
+                    false,
+                    *search,
+                );
                 list_dialog::render_chrome(buf, &layout, theme, now, filter, title, None);
                 if rows.is_empty() {
                     // Same inset as the model/theme boxes: one padding cell
