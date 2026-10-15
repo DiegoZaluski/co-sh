@@ -61,6 +61,7 @@ mod prompt_correction;
 mod prompt_undo;
 mod provider_login;
 mod providers;
+mod queue_block_probe;
 mod rag;
 mod render;
 mod router_mouse;
