@@ -6,7 +6,7 @@
 //! `/model` on another, `/llm` on a third — and the slash menu shows those
 //! names verbatim. What gets standardized is what happens AFTER the user
 //! picks one: equivalent commands across harnesses open the SAME kind of
-//! cosh box (the model list, the provider list, the reasoning picker …),
+//! cosh box (the model list, the provider list …),
 //! filled with that agent's own ACP config options.
 //!
 //! Three buckets, resolved by [`resolve`]:
@@ -71,23 +71,6 @@ pub const COMMAND_GROUPS: &[CommandGroup] = &[
         desc: "Switch the agent's provider",
         names: &["provider", "providers"],
         target: Some(ConfigTarget::ById("provider")),
-    },
-    CommandGroup {
-        id: "reasoning",
-        title: "Reasoning",
-        desc: "Set the reasoning effort level",
-        names: &[
-            "reasoning",
-            "thinking",
-            "thought",
-            "thought_level",
-            "thinking_level",
-            "reasoning_level",
-            // kilo names its effort option `effort` (category
-            // `thought_level`) — the reasoning group's own spelling.
-            "effort",
-        ],
-        target: Some(ConfigTarget::ByCategory("thought_level")),
     },
     CommandGroup {
         id: "mode",
@@ -254,9 +237,12 @@ pub fn match_option(
 /// `model`/`mode` are NOT in its `available_commands_update`; the kilo ACP
 /// publishes only prompt-commands) proved the mapping above can never rely
 /// on a harness PUBLISHING a command: the most useful controls — model,
-/// provider, reasoning effort, mode — reach the client as session config
-/// OPTIONS (`session/new` / `session/resume` payloads and
-/// `config_option_update`s), with no slash command advertising them at all.
+/// provider, mode — reach the client as session config OPTIONS
+/// (`session/new` / `session/resume` payloads and `config_option_update`s),
+/// with no slash command advertising them at all. Reasoning effort is NOT
+/// synthesized here: it follows the cosh model-picker flow — a SECOND box
+/// opened after the model pick (see the app's config confirm), and it
+/// simply never appears for agents without a controllable level.
 /// So for every mapped group whose config option the pane actually holds,
 /// the menu synthesizes the group's entry (the group id as the name — the
 /// one spelling cosh standardizes on — and the group's one-liner). The box
@@ -298,9 +284,14 @@ mod tests {
         }
         assert_eq!(resolve("provider").unwrap().id, "provider");
         assert_eq!(resolve("PROVIDERS").unwrap().id, "provider");
-        assert_eq!(resolve("thinking").unwrap().id, "reasoning");
-        assert_eq!(resolve("thought-level").unwrap().id, "reasoning");
         assert_eq!(resolve("modes").unwrap().id, "mode");
+        // Reasoning is NOT a mapped group anymore: the cosh flow chains the
+        // level sub-box after the model pick instead of its own entry — the
+        // spellings resolve to nothing (direct passthrough), like any
+        // unknown command.
+        for name in ["reasoning", "thinking", "thought", "effort"] {
+            assert!(resolve(name).is_none(), "{name} must not resolve");
+        }
     }
 
     #[test]
@@ -433,7 +424,8 @@ mod tests {
             .collect();
         assert_eq!(names, vec!["models", "mode"]);
 
-        // kilo: model + effort(thought_level) + mode.
+        // kilo: model + mode (effort/thought_level exists but is NOT
+        // synthesized — it chains after the model pick instead).
         let kilo = vec![
             option("model", Some("model"), &["kilo/google/gemini-3-pro-image"]),
             option("effort", Some("thought_level"), &["thinking"]),
@@ -443,7 +435,7 @@ mod tests {
             .iter()
             .map(|c| c.name.clone())
             .collect();
-        assert_eq!(names, vec!["models", "reasoning", "mode"]);
+        assert_eq!(names, vec!["models", "mode"]);
 
         // cline: provider and model BOTH category "model" — the two-pass
         // match must bind the models entry to id `model`, the provider
@@ -471,7 +463,8 @@ mod tests {
             .collect();
         assert_eq!(names, vec!["models", "mode"]);
 
-        // claude: model + effort + mode (fast is a boolean — valueless).
+        // claude: model + mode (fast is a boolean — valueless; the effort
+        // option chains after the model pick, no standalone entry).
         let claude = vec![
             option("mode", Some("mode"), &["default", "plan", "auto"]),
             option("model", Some("model"), &["default", "opus", "fable"]),
@@ -482,7 +475,7 @@ mod tests {
             .iter()
             .map(|c| c.name.clone())
             .collect();
-        assert_eq!(names, vec!["models", "reasoning", "mode"]);
+        assert_eq!(names, vec!["models", "mode"]);
 
         // gemini publishes ZERO config options: nothing synthesizes.
         assert!(synthesized_group_commands(&[]).is_empty());
