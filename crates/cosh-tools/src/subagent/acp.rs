@@ -11,14 +11,21 @@
 //!
 //! 1. Spawns the agent harness as a subprocess speaking ACP over stdio.
 //! 2. `initialize` — negotiates the protocol version and capabilities.
-//! 3. `authenticate` — when the agent advertises auth methods.
-//! 4. `session/new` — opens a session rooted at the workspace directory.
-//! 5. `session/prompt` — sends the task as the user prompt.
-//! 6. `session/update` notifications — mapped events stream live to the
+//! 3. `session/new` — opens a session rooted at the workspace directory.
+//!    Authentication is LAZY: when the agent advertises auth methods, cosh
+//!    does NOT authenticate proactively — several harnesses treat an
+//!    `authenticate` call as a fresh interactive login even when they
+//!    already hold valid credentials (measured on `devin acp`: 19.5 s,
+//!    a browser flow and a credentials rewrite, EVERY session), while the
+//!    same harness accepts the whole session silently from its own stored
+//!    login. `authenticate` is sent only after an operation is rejected
+//!    with `auth_required` (see [`authenticate_on_auth_required`]).
+//! 4. `session/prompt` — sends the task as the user prompt.
+//! 5. `session/update` notifications — mapped events stream live to the
 //!    TUI's sub-agent box, and message chunks feed the turn's closure
 //!    ([`TurnClosure`](crate::subagent::closure)): only the message written
 //!    after the LAST tool call is the report returned to the caller.
-//! 7. The turn ends when the `session/prompt` response arrives with a
+//! 6. The turn ends when the `session/prompt` response arrives with a
 //!    [`StopReason`](agent_client_protocol::schema::v1::StopReason).
 //!
 //! Because the interaction follows a protocol contract, ANY harness that
@@ -61,10 +68,10 @@ use std::time::Duration;
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1 as schema;
 use agent_client_protocol::schema::v1::{
-    AgentCapabilities, AuthenticateRequest, CancelNotification, ClientCapabilities, ContentBlock,
-    FileSystemCapabilities, InitializeRequest, LoadSessionRequest, LoadSessionResponse,
-    NewSessionRequest, PermissionOptionKind, PromptRequest, ReadTextFileRequest,
-    ReadTextFileResponse, RequestPermissionOutcome, RequestPermissionRequest,
+    AgentCapabilities, AuthMethod, AuthenticateRequest, CancelNotification, ClientCapabilities,
+    ContentBlock, FileSystemCapabilities, InitializeRequest, LoadSessionRequest,
+    LoadSessionResponse, NewSessionRequest, PermissionOptionKind, PromptRequest,
+    ReadTextFileRequest, ReadTextFileResponse, RequestPermissionOutcome, RequestPermissionRequest,
     RequestPermissionResponse, ResumeSessionRequest, ResumeSessionResponse,
     SelectedPermissionOutcome, SessionConfigId, SessionConfigKind, SessionConfigOption,
     SessionConfigOptionCategory, SessionConfigSelect, SessionConfigSelectOptions,
@@ -72,7 +79,7 @@ use agent_client_protocol::schema::v1::{
     StopReason, TextContent, WriteTextFileRequest, WriteTextFileResponse,
 };
 use agent_client_protocol::{
-    AcpAgent, Agent as AcpRole, Client, ConnectionTo, Error as AcpError, LineDirection,
+    AcpAgent, Agent as AcpRole, Client, ConnectionTo, Error as AcpError, ErrorCode, LineDirection,
     on_receive_notification, on_receive_request,
 };
 
@@ -220,6 +227,16 @@ pub(crate) fn agent_launcher(entry: &Agent) -> Result<AcpAgent, String> {
 pub(crate) fn acp_error(message: impl Into<String>) -> AcpError {
     let mut error = AcpError::internal_error();
     error.message = message.into();
+    error
+}
+
+/// Wrap a wire error into a context-carrying `AcpError` WITHOUT discarding
+/// its protocol code. The lazy-auth retry points match on
+/// `ErrorCode::AuthRequired`; a plain `acp_error` rewrite (internal_error)
+/// would erase that code and strand the turn unauthenticated.
+pub(crate) fn wrap_acp_failure(prefix: &str, e: AcpError) -> AcpError {
+    let mut error = acp_error(format!("{prefix}: {e}"));
+    error.code = e.code;
     error
 }
 
@@ -545,10 +562,13 @@ pub fn validate_agent(agent: &str) -> Result<(), String> {
 ///
 /// 1. Looks up `agent` in [`ACP_AGENTS`] to get the ACP launch command.
 /// 2. Runs a full ACP client turn (see the [module docs](self)):
-///    `initialize` → `authenticate` (when advertised) → `session/new` or,
-///    when resuming, `session/resume`/`session/load` (falling back to
-///    `session/new` on any resume failure) → `session/prompt`,
-///    auto-approving permission requests and serving `fs/*` requests.
+///    `initialize` → `session/new` (or, when resuming,
+///    `session/resume`/`session/load`, falling back to `session/new` on any
+///    resume failure) → `session/prompt`, auto-approving permission
+///    requests and serving `fs/*` requests. Authentication is lazy: an
+///    `auth_required` rejection triggers one `authenticate` attempt and a
+///    retry of the rejected operation (see
+///    [`authenticate_on_auth_required`]).
 ///    The shared stop flag is raced against the prompt await; a trigger
 ///    sends `session/cancel` and the agent ends the turn itself.
 /// 3. Streams typed [`SubagentEvent`]s through `chunk_tx` (for the TUI)
@@ -770,38 +790,39 @@ where
                 .await
                 .map_err(|e| acp_error(format!("ACP initialize failed: {e}")))?;
 
-            // Same auth contract as a turn: reuse the user's existing login
-            // so the load can access the session at all.
-            let mut auth_error = None;
-            for method in &init.auth_methods {
-                match connection
-                    .send_request(AuthenticateRequest::new(method.id().clone()))
-                    .block_task()
-                    .await
-                {
-                    Ok(_) => {
-                        auth_error = None;
-                        break;
-                    }
-                    Err(e) => {
-                        auth_error = Some(format!("ACP authenticate failed: {e}"));
-                    }
-                }
-            }
-            if let Some(e) = auth_error {
-                return Err(acp_error(e));
-            }
-
-            // The load MUST be honored: a `loadSession`-less harness cannot
-            // replay, and the caller decides how to degrade.
+            // LAZY authentication, same contract as a live turn: the
+            // stored id is loaded first, and `authenticate` runs only when
+            // the load is rejected with `auth_required` (a proactive call
+            // forces harnesses like `devin acp` into a fresh interactive
+            // browser login on EVERY connection).
             let loaded = connection
                 .send_request(LoadSessionRequest::new(
-                    SessionId::new(session_id),
-                    cwd,
+                    SessionId::new(session_id.clone()),
+                    cwd.clone(),
                 ))
                 .block_task()
                 .await
-                .map_err(|e| acp_error(format!("ACP session/load failed: {e}")))?;
+                .map_err(|e| wrap_acp_failure("ACP session/load failed", e));
+            let loaded = match loaded {
+                Ok(loaded) => loaded,
+                Err(auth_error) if auth_error.code == ErrorCode::AuthRequired => {
+                    authenticate_on_auth_required(
+                        &connection,
+                        &init.auth_methods,
+                        &auth_error,
+                    )
+                    .await?;
+                    connection
+                        .send_request(LoadSessionRequest::new(
+                            SessionId::new(session_id),
+                            cwd,
+                        ))
+                        .block_task()
+                        .await
+                        .map_err(|e| wrap_acp_failure("ACP session/load failed", e))?
+                }
+                Err(auth_error) => return Err(auth_error),
+            };
             // The replayed pane's badge: same triple as a live turn (the
             // load response carries the session's config options), so a
             // rebooted pane shows its model without needing a new turn.
@@ -1154,10 +1175,82 @@ async fn open_or_resume_session(
         .send_request(NewSessionRequest::new(cwd.to_path_buf()))
         .block_task()
         .await
-        .map_err(|e| acp_error(format!("ACP session/new failed: {e}")))?;
+        .map_err(|e| wrap_acp_failure("ACP session/new failed", e))?;
     Ok((session.session_id, session.config_options))
 }
 
+/// Lazy ACP authentication: after an `auth_required` rejection, send
+/// `authenticate` for the first method the harness handles ITSELF; the
+/// caller then retries the rejected operation.
+///
+/// Proactive authentication turned out to be wrong for several harnesses:
+/// `devin acp` (measured) treats every `authenticate` as a fresh
+/// interactive login even while holding valid stored credentials — about
+/// twenty seconds, a browser flow and a credentials-file rewrite on EVERY
+/// session — while the same harness accepts sessions and prompts silently
+/// from its own stored login. The protocol's answer is `auth_required`
+/// (`ErrorCode::AuthRequired`): work unauthenticated, and authenticate
+/// only when the harness rejects an operation.
+///
+/// `terminal` methods are skipped: the protocol REQUIRES clients to run
+/// those as separate interactive processes instead of passing them to
+/// `authenticate`, and a headless sub-agent turn cannot open a TUI. The
+/// enum is `#[non_exhaustive]` upstream: any future variant is treated as
+/// agent-managed (attempted, not skipped) — failing open toward auth, not
+/// away from it. When no self-managed method exists (or every one fails),
+/// the ORIGINAL error is returned — its message carries the harness's own
+/// auth guidance (e.g. "Please log in to use Devin"), which the caller
+/// surfaces verbatim.
+///
+/// # Errors
+///
+/// Returns the passed-in `trigger` unchanged when there is nothing to
+/// authenticate with, or the last `authenticate` failure otherwise.
+async fn authenticate_on_auth_required(
+    connection: &ConnectionTo<AcpRole>,
+    auth_methods: &[AuthMethod],
+    trigger: &AcpError,
+) -> Result<(), AcpError> {
+    log::debug!("sub-agent ACP operation rejected with auth_required ({trigger})");
+    let mut last_failure: Option<AcpError> = None;
+    for method in auth_methods {
+        if matches!(method, AuthMethod::Terminal(_)) {
+            continue;
+        }
+        match connection
+            .send_request(AuthenticateRequest::new(method.id().clone()))
+            .block_task()
+            .await
+        {
+            Ok(_) => {
+                log::debug!("sub-agent ACP authenticated with method '{}'", method.id().0);
+                return Ok(());
+            }
+            Err(e) => {
+                log::debug!(
+                    "sub-agent ACP authenticate with method '{}' failed: {e}",
+                    method.id().0
+                );
+                // Deliberately NOT `wrap_acp_failure`: the failure of an
+                // authenticate attempt itself is terminal (retrying the
+                // operation without a successful authentication is
+                // pointless), so preserving its wire code would only
+                // invite an outer retry loop.
+                last_failure = Some(acp_error(format!(
+                    "ACP authenticate with method '{}' failed: {e}",
+                    method.id().0
+                )));
+            }
+        }
+    }
+    match last_failure {
+        Some(failure) => Err(failure),
+        // Nothing self-managed to try: surface the harness's own guidance.
+        None => Err(trigger.clone()),
+    }
+}
+
+///
 /// Apply the pane's config picks inside the TURN's own connection. ACP
 /// config options are per-connection state (a set on a disposable
 /// connection dies with it — verified against opencode and kilo), so this
@@ -1172,13 +1265,16 @@ async fn open_or_resume_session(
 ///
 /// # Errors
 ///
-/// Returns an error when a `session/set_config_option` request fails.
+/// Returns an error when the config id is unknown to the harness's own
+/// pick list, or when the `session/set_config_option` request fails. The
+/// wire error's protocol code is preserved so a rejection can be
+/// recognized as `auth_required` by the lazy-auth retry.
 async fn apply_session_picks(
     connection: &ConnectionTo<AcpRole>,
     session_id: &SessionId,
     config_options: Option<&[SessionConfigOption]>,
     picks: &[(String, String)],
-) -> Result<(), String> {
+) -> Result<(), AcpError> {
     let options = config_options.unwrap_or_default();
     for (config_id, value) in picks {
         let Some(option) = options.iter().find(|option| option.id.0.as_ref() == config_id)
@@ -1216,7 +1312,7 @@ async fn apply_session_picks(
             ))
             .block_task()
             .await
-            .map_err(|e| format!("ACP set config '{config_id}' failed: {e}"))?;
+            .map_err(|e| wrap_acp_failure("ACP session/set_config_option failed", e))?;
     }
     Ok(())
 }
@@ -1488,58 +1584,80 @@ where
                 .await
                 .map_err(|e| acp_error(format!("ACP initialize failed: {e}")))?;
 
-            // Authenticate when the agent advertises methods (e.g. `goose
-            // acp`). The user's existing login is reused: the first method
-            // that succeeds wins, and a failing method is skipped rather
-            // than aborting — an adapter can advertise several (codex:
-            // `api-key` requires env keys the user may not have, while
-            // `chat-gpt` works with the stored `codex login` state). A
-            // harness that manages auth itself advertises no methods and is
-            // skipped.
-            let mut auth_error = None;
-            for method in &init.auth_methods {
-                match connection
-                    .send_request(AuthenticateRequest::new(method.id().clone()))
-                    .block_task()
-                    .await
-                {
-                    Ok(_) => {
-                        auth_error = None;
-                        break;
-                    }
-                    Err(e) => {
-                        log::debug!(
-                            "sub-agent ACP authenticate with method '{}' failed: {e}",
-                            method.id().0
-                        );
-                        auth_error = Some(format!("ACP authenticate failed: {e}"));
-                    }
-                }
-            }
-            if let Some(e) = auth_error {
-                return Err(acp_error(e));
-            }
-
+            // LAZY authentication: no proactive `authenticate` call even
+            // when the harness advertises auth methods — see
+            // [`authenticate_on_auth_required`] for why (measured on
+            // `devin acp`: a proactive call forces a fresh interactive
+            // browser login on EVERY session, while the harness's own
+            // stored login is honored silently when nobody asks it to
+            // re-authenticate). The advertised methods are kept and used
+            // ONLY when an operation below is rejected with
+            // `auth_required`, at which point one self-managed
+            // authentication attempt precedes the retry. A harness that
+            // manages auth itself advertises no methods, and the retry
+            // path then simply re-surfaces its own error message.
             let (session_id, config_options) =
-                open_or_resume_session(
+                match open_or_resume_session(
                     &connection,
-                    resume,
+                    resume.clone(),
                     &cwd,
                     session_resume_support(&init.agent_capabilities),
                 )
-                .await?;
+                .await
+                {
+                    Ok(session) => session,
+                    Err(auth_error)
+                        if auth_error.code == ErrorCode::AuthRequired =>
+                    {
+                        authenticate_on_auth_required(
+                            &connection,
+                            &init.auth_methods,
+                            &auth_error,
+                        )
+                        .await?;
+                        open_or_resume_session(
+                            &connection,
+                            resume,
+                            &cwd,
+                            session_resume_support(&init.agent_capabilities),
+                        )
+                        .await?
+                    }
+                    Err(auth_error) => return Err(auth_error),
+                };
 
-            // Re-apply the pane's config picks inside THIS turn's own
+// Re-apply the pane's config picks inside THIS turn's own
             // connection — per-connection state dies with the connection
             // (verified against opencode and kilo), so this re-run before
             // every prompt is the only path a pick survives. Stale picks
             // (option/value no longer offered) are skipped inside; a
             // transport/harness rejection aborts the turn. Resumed
             // sessions carry their config options in the resume response,
-            // so the picks apply to them too.
-            apply_session_picks(&connection, &session_id, config_options.as_deref(), picks)
-                .await
-                .map_err(acp_error)?;
+            // so the picks apply to them too. An `auth_required`
+            // rejection triggers one lazy-authentication attempt (see
+            // [`authenticate_on_auth_required`]) before the retry.
+            let picks_applied =
+                apply_session_picks(&connection, &session_id, config_options.as_deref(), picks)
+                    .await;
+            match picks_applied {
+                Ok(()) => {}
+                Err(auth_error) if auth_error.code == ErrorCode::AuthRequired => {
+                    authenticate_on_auth_required(
+                        &connection,
+                        &init.auth_methods,
+                        &auth_error,
+                    )
+                    .await?;
+                    apply_session_picks(
+                        &connection,
+                        &session_id,
+                        config_options.as_deref(),
+                        picks,
+                    )
+                    .await?;
+                }
+                Err(auth_error) => return Err(auth_error),
+            }
 
             // The prompt badge's data: the session's serving triple, read
             // from the same config options the picks above ran against.
@@ -1556,7 +1674,7 @@ where
             let prompt_request = connection
                 .send_request(PromptRequest::new(
                     session_id.clone(),
-                    vec![ContentBlock::Text(TextContent::new(input))],
+                    vec![ContentBlock::Text(TextContent::new(&input))],
                 ))
                 .block_task();
 
@@ -1585,7 +1703,34 @@ where
                 }
             };
             let prompt = prompt
-                .map_err(|e| acp_error(format!("ACP session/prompt failed: {e}")))?;
+                .map_err(|e| wrap_acp_failure("ACP session/prompt failed", e));
+            // The lazy-auth retry for the PROMPT is not raced against the
+            // stop signal: a `auth_required` rejection arrives quickly (it
+            // precedes any model work), and authenticating first is exactly
+            // what a user-triggered login would have done before the turn.
+            let prompt = match prompt {
+                Ok(prompt) => Ok(prompt),
+                Err(auth_error) if auth_error.code == ErrorCode::AuthRequired => {
+                    authenticate_on_auth_required(
+                        &connection,
+                        &init.auth_methods,
+                        &auth_error,
+                    )
+                    .await?;
+                    // Same session: the rejection happened after the
+                    // session existed, so retrying on a NEW session would
+                    // strand this turn's history in a fresh one.
+                    connection
+                        .send_request(PromptRequest::new(
+                            session_id.clone(),
+                            vec![ContentBlock::Text(TextContent::new(input))],
+                        ))
+                        .block_task()
+                        .await
+                        .map_err(|e| wrap_acp_failure("ACP session/prompt failed", e))
+                }
+                Err(auth_error) => Err(auth_error),
+            }?;
 
             // The session id flows back to the caller: it is stored per
             // agent name and reused by the next `continue_session` call.
