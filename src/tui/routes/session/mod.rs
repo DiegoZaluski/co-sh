@@ -2383,7 +2383,11 @@ impl SessionView {
         let msg_bottom = (vp_top - self.scroll_y + self.prefix_y[idx] + self.msg_height_cache[idx])
             .min(vp_bottom_excl);
         for cy in msg_top..msg_bottom {
-            for cx in inner_area.x..inner_area.x + inner_area.width {
+            // Light the BAND only, not the rail columns: the rails stand on
+            // the transcript background and the band is one column inside
+            // each rail — lighting the rails too made the box read a
+            // couple of columns wider under the cursor.
+            for cx in inner_area.x + 1..inner_area.x + inner_area.width - 1 {
                 if let Some(cell) = buf.cell_mut((cx, u16::try_from(cy).unwrap_or(0))) {
                     cell.set_bg(rgba_color(theme.background_element));
                 }

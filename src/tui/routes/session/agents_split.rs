@@ -1380,7 +1380,11 @@ pub fn render(
                 continue;
             }
             let y = u16::try_from(sy).unwrap_or(rect.y);
-            for x in rect.x..rect.right() {
+            // Light the BAND only, not the rail columns (the same fix the
+            // chat's hover got): the rails stand on the pane background
+            // and lighting them too made the box read a couple of columns
+            // wider under the cursor.
+            for x in rect.x + 1..rect.right().saturating_sub(1) {
                 if let Some(cell) = buf.cell_mut((x, y)) {
                     cell.set_bg(rgba_color(theme.background_element));
                 }
