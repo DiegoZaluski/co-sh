@@ -272,6 +272,14 @@ impl SubagentActivityLine {
     }
 }
 
+/// The extra rows an INPUT line (the user's echo, an `agents_call` input)
+/// reserves around its markdown block IN THE PANE'S layout: the sent box's
+/// breathing (one pad row above, one below — the chat's border+padding
+/// rows). The right panel's window paints inputs WITHOUT the frame, so
+/// this growth belongs to the pane's own height math (the pane's render
+/// adds it per input line; the shared `visual_rows` stays content-height).
+pub(crate) const INPUT_BOX_PAD_ROWS: u16 = 2;
+
 /// The drawable activity lines of one sub-agent session, in
 /// CHRONOLOGICAL order (mini-chat): transcript entries render in arrival
 /// order, so tool calls, thoughts and message text climb upward as new

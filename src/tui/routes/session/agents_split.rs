@@ -34,11 +34,13 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 
 use crate::component::budget::{budget_bar_style, budget_block, budget_pct_style};
+use crate::component::prompt_message_box;
 use crate::component::spinner::SpinnerState;
 use crate::routes::session::right_panel::subagent_theme_key;
 use crate::routes::session::right_panel::types::{
-    SubagentDiffCells, activity_lines, subagent_diff_block, subagent_diff_content_key,
-    subagent_diff_rows, SubagentActivity, SubagentActivityLine, SubagentBlockRenderer,
+    SubagentDiffCells, SubagentTimelineEntry, activity_lines, subagent_diff_block,
+    subagent_diff_content_key, subagent_diff_rows, SubagentActivity, SubagentActivityLine,
+    SubagentBlockRenderer, INPUT_BOX_PAD_ROWS,
 };
 use crate::theme::{Theme, blend, contrast_fg, luminance, rgba_color};
 use crate::util::text_region::{TextRegion, extract_text_in_region, text_from_cell_row};
@@ -153,6 +155,12 @@ pub struct AgentPane {
     /// Re-clamped every render against the real content; sticky-bottom
     /// follow is [`AgentPane::auto_follow`].
     pub scroll_y: u16,
+    /// The INPUT boxes (the user's echo, an `agents_call` input) of this
+    /// pane's timeline, in timeline order — the chat's clickable
+    /// user-message boxes' equivalent. Rebuilt every render (content
+    /// coordinates, pad rows included); the hover highlight and the input
+    /// click hit-test read it. Empty between renders.
+    pub input_rows: Vec<InputBoxHit>,
     /// The chat's sticky-bottom contract: new content drags the view along
     /// until the user scrolls away; scrolling back to the bottom re-engages
     /// it. A new turn re-engages it unconditionally.
@@ -199,6 +207,7 @@ impl AgentPane {
             rehydrating: false,
             rehydrate_spinner: SpinnerState::new(),
             scroll_y: 0,
+            input_rows: Vec::new(),
             auto_follow: true,
             effective_scroll: 0,
             content_height: 0,
@@ -251,6 +260,24 @@ impl AgentPane {
         let row = i32::from(y).saturating_sub(body_top);
         row.saturating_add(i32::from(self.effective_scroll))
     }
+
+    /// Whether screen position `(x, y)` sits on one of this pane's input
+    /// boxes (the render registry, LAST frame's layout): `true` for the
+    /// pane + the box's content-row span. The click hit-test and the
+    /// hover walker share this.
+    pub fn input_box_at(&self, rect: Rect, x: u16, y: u16) -> Option<std::ops::Range<i32>> {
+        self.input_hit_at(rect, x, y).map(|hit| hit.span.clone())
+    }
+
+    /// The full hit of the input box under `(x, y)` (the render registry,
+    /// LAST frame's layout): span + timeline index + user ordinal.
+    pub fn input_hit_at(&self, rect: Rect, x: u16, y: u16) -> Option<&InputBoxHit> {
+        if x < rect.x || x >= rect.x + rect.width || y < rect.y + 1 || y >= rect.bottom() {
+            return None;
+        }
+        let row = self.content_row_at(rect, y);
+        self.input_rows.iter().find(|hit| hit.span.contains(&row))
+    }
 }
 
 /// State of the whole `/agents` split view.
@@ -259,6 +286,19 @@ pub struct AgentsSplitState {
     /// One pane per agent in picker order. The `cosh` daemon pane exists
     /// only when the picker marked it, and only as an ordinary pane.
     pub panes: Vec<AgentPane>,
+    /// The pane under the cursor AND the content-row span of the input
+    /// box hovered there (the chat's `hovered_msg_idx` contract, pane
+    /// scoped): the render lights the box's rows with
+    /// `background_element`, the click-ability cue. `None` = no pane
+    /// input hovered. Cleared by any move off the pane/box.
+    pub hovered_input: Option<(usize, InputBoxHit)>,
+    /// A confirmed plain click ON a pane's input box: `(pane, hit)` —
+    /// the pane plus the clicked box's identity (timeline index for
+    /// Copy, user ordinal for Revert/Fork). The app layer resolves it to
+    /// the pane session's message and opens the Message Actions dialog
+    /// (the chat's pending_message_action contract, pane scoped).
+    /// Consumed by the mouse dispatcher.
+    pub pending_input_action: Option<(usize, InputBoxHit)>,
     /// Focused pane index. `None` means NO pane holds the focus: the
     /// shared prompt targets the MAIN agent (the same loop as the normal
     /// mode, running as manager while the split is open). `Ctrl+0`
@@ -326,6 +366,8 @@ impl AgentsSplitState {
         Self {
             panes,
             focused: Some(0),
+            hovered_input: None,
+            pending_input_action: None,
             maximized: None,
             pane_rects: Vec::new(),
             block_cache: HashMap::new(),
@@ -417,6 +459,99 @@ impl AgentsSplitState {
     /// The currently focused pane, if any (`None` when the main agent
     /// holds the focus).
     #[must_use]
+    /// Track the cursor over the split: the pane under `(x, y)` AND the
+    /// input box its row falls on (the chat's `update_hover`, pane
+    /// scoped). Returns `true` when the hover target changed (the caller
+    /// repaints). Off-pane or off-box movement clears.
+    pub fn update_hover(&mut self, x: u16, y: u16) -> bool {
+        let next = self
+            .pane_rects
+            .iter()
+            .position(|rect| {
+                x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height
+            })
+            .and_then(|i| {
+                let rect = self.pane_rects[i];
+                self.panes
+                    .get(i)
+                    .and_then(|pane| pane.input_hit_at(rect, x, y))
+                    .cloned()
+                    .map(|hit| (i, hit))
+            });
+        let changed = next != self.hovered_input;
+        self.hovered_input = next;
+        changed
+    }
+
+    /// A plain (non-drag) click on a pane's input box: resolve the pane +
+    /// the input entry's timeline index and record it for the app layer
+    /// (the Message Actions dialog). `false` when the click is not on an
+    /// input box (the caller's normal pane handling proceeds).
+    pub fn click_input_at(&mut self, x: u16, y: u16) -> bool {
+        let target = self.pane_rects.iter().position(|rect| {
+            x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height
+        });
+        let Some(index) = target else {
+            return false;
+        };
+        let rect = self.pane_rects[index];
+        let hit = self
+            .panes
+            .get(index)
+            .and_then(|pane| pane.input_hit_at(rect, x, y))
+            .cloned();
+        let Some(hit) = hit else {
+            return false;
+        };
+        self.pending_input_action = Some((index, hit));
+        true
+    }
+
+    /// Take the pending input action (consume-on-read, like the chat's
+    /// `pending_message_action.take()`).
+    pub fn take_input_action(&mut self) -> Option<(usize, InputBoxHit)> {
+        self.pending_input_action.take()
+    }
+
+    /// Discard any pending input action (a drag consumed the press — the
+    /// click never became a click).
+    pub fn clear_input_action(&mut self) {
+        self.pending_input_action = None;
+    }
+
+    /// The raw TEXT behind an input hit (the Copy action's source): the
+    /// timeline entry's own text, un-sanitized — exactly what the sender
+    /// typed/sent.
+    pub fn input_text(&self, pane: usize, hit: &InputBoxHit) -> Option<String> {
+        match self.panes.get(pane)?.activity.timeline.get(hit.timeline_index) {
+            Some(SubagentTimelineEntry::UserMessage { text })
+            | Some(SubagentTimelineEntry::AgentMessage { text }) => Some(text.clone()),
+            _ => None,
+        }
+    }
+
+    /// Replace a pane's whole timeline from replay events (the post-revert
+    /// rebuild): clears the activity, then applies every event through the
+    /// same coalescer a live turn streams through.
+    pub fn reset_timeline(&mut self, pane: usize, events: &[SubagentEvent]) {
+        let Some(p) = self.panes.get_mut(pane) else {
+            return;
+        };
+        p.activity = SubagentActivity::default();
+        for event in events {
+            p.activity.apply(event);
+        }
+    }
+
+    /// Clear the hovered pane-input highlight. `true` when one was set.
+    pub fn clear_hover(&mut self) -> bool {
+        if self.hovered_input.is_some() {
+            self.hovered_input = None;
+            return true;
+        }
+        false
+    }
+
     pub fn focused_pane(&self) -> Option<&AgentPane> {
         self.focused.and_then(|i| self.panes.get(i))
     }
@@ -1080,6 +1215,28 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &mut AgentsSplitState, theme:
     // itself `{pane_index}:diff{index}` into it), so its pruning is one
     // pass too — the right panel's window prunes identically.
     diff_cells.retain(|key, _| live_keys.contains(key));
+    // Hover highlight over a pane's input box (the chat's
+    // `render_hover_highlight` recolor, pane scoped): the click-ability
+    // cue. Painted after the panes so it lightens the final cells.
+    if let Some((pane_index, hit)) = state.hovered_input.as_ref()
+        && let (Some(pane), Some(rect)) =
+            (state.panes.get(*pane_index), state.pane_rects.get(*pane_index).copied())
+    {
+        let body_top = i32::from(rect.y + 1);
+        let body_end = i32::from(rect.bottom());
+        for row in hit.span.clone() {
+            let sy = body_top + row - i32::from(pane.effective_scroll);
+            if sy < body_top || sy >= body_end {
+                continue;
+            }
+            let y = u16::try_from(sy).unwrap_or(rect.y);
+            for x in rect.x..rect.right() {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    cell.set_bg(rgba_color(theme.background_element));
+                }
+            }
+        }
+    }
     // Copy-by-selection highlight, painted LAST so it inverts the final
     // cells (the right panel paints its highlight the same way).
     highlight_selection(buf, state);
@@ -1212,6 +1369,9 @@ fn render_pane(
     }
 
     // ── Body: the right panel's drawable pipeline (markdown included) ──
+    // The input-box registry is THIS frame's: stale spans from a previous
+    // layout must never light a row the current layout does not own.
+    pane.input_rows.clear();
     let body_y = rect.y + 1;
     let body_h = rect.bottom().saturating_sub(body_y);
     // Same wrap rule as the right panel's subagent section: width minus the
@@ -1233,9 +1393,18 @@ fn render_pane(
 
     // Content height in VISUAL rows — the scroll ceiling, computed from the
     // same `visual_rows` the renderer consumes so they can never disagree.
+    // Input lines (the sent boxes) reserve their BREATHING rows in this
+    // pane's flow: one pad row above + one below the markdown block (the
+    // chat's border+padding). The pads are real flow rows — the first
+    // input's top pad exists (it is not a frame decoration clamped away)
+    // and the bottom pad is a margin the following output flows UNDER,
+    // never over.
     let content_height: u16 = lines
         .iter()
-        .map(|l| l.visual_rows(wrap_w))
+        .map(|l| {
+            l.visual_rows(wrap_w)
+                .saturating_add(u16::from(is_input_line(l)) * INPUT_BOX_PAD_ROWS)
+        })
         .fold(0u16, u16::saturating_add);
     let max_scroll = content_height.saturating_sub(body_h);
     // Sticky bottom (the chat's follow contract): a following pane shows the
@@ -1267,9 +1436,22 @@ fn render_pane(
     let tint = RGBA::from_hex("#0A0A0D");
     let mut regions: Vec<TextRegion> = Vec::new();
     let mut content_row: u16 = 0;
+    // The running USER-input ordinal: the k-th user echo of the timeline
+    // (the positional key into the pane session's user messages).
+    let mut user_inputs: usize = 0;
     for (index, line) in lines.iter().enumerate() {
         let h = line.visual_rows(wrap_w);
-        let line_end = content_row.saturating_add(h);
+        let input = is_input_line(line);
+        // Input boxes own their breathing rows IN THE FLOW: the line's
+        // extent is [content_row, content_row + h + pads) — one pad row
+        // above the block, one below. The first input's top pad is a real
+        // row (it exists even at content row 0 — nothing clamps it away),
+        // and the bottom pad is a margin the following output flows UNDER,
+        // never over. Non-input lines keep the bare block extent.
+        let top_pad = u16::from(input) * (INPUT_BOX_PAD_ROWS / 2);
+        let line_end = content_row
+            .saturating_add(h)
+            .saturating_add(u16::from(input) * INPUT_BOX_PAD_ROWS);
         // Selection-span overlap in this line's ri-relative rows
         // (end-exclusive), so off-window rows still report regions.
         let emit_rows: Option<(u16, u16)> = select_span.and_then(|(lo, hi)| {
@@ -1294,14 +1476,68 @@ fn render_pane(
         // screen position, no painted rows.
         let visible =
             line_end > scroll_y && content_row < scroll_y.saturating_add(body_h);
-        let skip = scroll_y.saturating_sub(content_row);
-        // A block straddling the window top has content_row < scroll_y: the
-        // screen position clamps to the body top and `skip` carries the
-        // scrolled-off part (saturating — the raw difference underflows).
-        let screen_y = body_y + content_row.saturating_sub(scroll_y);
+        if input {
+            // The box's full extent: pad row above, content rows, pad row
+            // below — the clickable surface, hover target and drag anchor.
+            // The hit carries the box's identity: its timeline entry
+            // (Copy) and, for a USER echo, its user ordinal (the
+            // Revert/Fork target in the pane session).
+            let is_user_echo = matches!(line, SubagentActivityLine::UserMessage { .. });
+            let user_ordinal = is_user_echo.then(|| {
+                let ordinal = user_inputs;
+                user_inputs += 1;
+                ordinal
+            });
+            // The line's OWN `index` is the timeline position (activity_lines
+            // stamps Message-block lines from the timeline enumerate) — the
+            // walk's `index` is the LINES position, which skips empty
+            // entries and would drift.
+            let timeline_index = match line {
+                SubagentActivityLine::UserMessage { index, .. }
+                | SubagentActivityLine::AgentMessage { index, .. } => *index,
+                _ => index,
+            };
+            pane.input_rows.push(InputBoxHit {
+                span: i32::from(content_row)..i32::from(line_end),
+                timeline_index,
+                user_ordinal,
+            });
+            // The frame paints the WHOLE visible box band in ONE call,
+            // BEFORE the content blit: the rails sit on the pane
+            // background outside the blit's `[x, x + wrap_w)` span, the
+            // band fills the interior, and the markdown bg (the panel
+            // tone) overwrites the band inside the blit exactly like the
+            // chat's parts overwrite theirs. The band is CLAMPED to the
+            // visible window: a box straddling the window top paints only
+            // its lower rows and never bleeds into the header or a
+            // neighbor pane.
+            let box_top = content_row.max(scroll_y);
+            let box_bottom = line_end.min(scroll_y.saturating_add(body_h));
+            if box_bottom > box_top {
+                let frame_y = body_y + box_top.saturating_sub(scroll_y);
+                let frame_h = box_bottom - box_top;
+                let rail = if matches!(line, SubagentActivityLine::UserMessage { .. }) {
+                    brand_rgba(&pane.agent, 0.0, theme, focused)
+                } else {
+                    theme.secondary
+                };
+                let frame = Rect::new(
+                    rect.x,
+                    frame_y,
+                    wrap_w.saturating_add(2),
+                    frame_h,
+                );
+                prompt_message_box::render(buf, frame, rail, theme);
+            }
+        }
+        // The BLOCK (the markdown content) sits `top_pad` rows below the
+        // line's start; the screen position and the skip account for it.
+        let block_content_row = content_row.saturating_add(top_pad);
+        let block_screen_y = body_y + block_content_row.saturating_sub(scroll_y);
+        let block_skip = scroll_y.saturating_sub(block_content_row);
         let draw_rows = if visible {
-            h.saturating_sub(skip)
-                .min(rect.bottom().saturating_sub(screen_y))
+            h.saturating_sub(block_skip)
+                .min(rect.bottom().saturating_sub(block_screen_y))
         } else {
             0
         };
@@ -1313,9 +1549,9 @@ fn render_pane(
                 pane_index,
                 &pane.agent,
                 rect.x + 1,
-                screen_y,
+                block_screen_y,
                 wrap_w,
-                skip,
+                block_skip,
                 draw_rows as usize,
                 focused,
                 theme,
@@ -1325,13 +1561,40 @@ fn render_pane(
                 diff_cells,
                 live_keys,
                 &mut regions,
-                content_row,
+                block_content_row,
                 emit_rows,
             );
         }
         content_row = line_end;
     }
     *out_regions = regions;
+}
+
+/// One clickable INPUT box of a pane, as registered by the last render:
+/// the screen-independent identity the click handler needs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InputBoxHit {
+    /// Content-row span of the whole box (pads included) — the hover and
+    /// click hit-test target.
+    pub span: std::ops::Range<i32>,
+    /// The box's timeline entry index (`SubagentActivity.timeline`) —
+    /// Copy reads the text straight from it, no store round-trip.
+    pub timeline_index: usize,
+    /// The k-th USER input of the timeline (`None` for an `agents_call`
+    /// input): the positional key into the pane session's user messages —
+    /// the same order the echo and the replay builders follow — that
+    /// maps the click onto the store's Revert/Fork target.
+    pub user_ordinal: Option<usize>,
+}
+
+/// Whether this activity line renders as a sent-prompt INPUT box (the
+/// user's echo, an `agents_call` input): the clickable, hoverable,
+/// frame-carrying surface. The chat's clickable-user-message equivalent.
+fn is_input_line(line: &SubagentActivityLine) -> bool {
+    matches!(
+        line,
+        SubagentActivityLine::UserMessage { .. } | SubagentActivityLine::AgentMessage { .. }
+    )
 }
 
 /// Union of a line's painted band `[skip, skip + paint)` with the
@@ -1369,7 +1632,7 @@ fn draw_activity_line(
     line: &SubagentActivityLine,
     index: usize,
     pane_index: usize,
-    agent: &str,
+    _agent: &str,
     x: u16,
     y: u16,
     wrap_w: u16,
@@ -1566,18 +1829,36 @@ fn draw_activity_line(
             let dimmed = matches!(line, SubagentActivityLine::Thought { .. });
             let is_user = matches!(line, SubagentActivityLine::UserMessage { .. });
             let is_agent_input = matches!(line, SubagentActivityLine::AgentMessage { .. });
+            // The chat's sent box BREATHES: one padding row above and one
+            // below the content (its height math adds border 1 + padding 1
+            // to the user message). The pane's input box mirrors that: the
+            // frame paints `PROMPT_BOX_PAD` rows above and below the
+            // markdown block (see the frame guards below) — padding is
+            // chrome, it never enters the content rows' regions or the
+            // copied text.
             let fg = if dimmed { theme.text_muted } else { theme.text };
+            // The input blocks (the user's echo, an `agents_call` input)
+            // render on the chat's sent-box PANEL band — the frame the
+            // `prompt_message_box` component paints under them carries
+            // `background_panel`, so the markdown bg must MATCH it or the
+            // blit would overwrite the band and the box would read as bare
+            // text. Every other block keeps the pane's whisper tint.
+            let is_input = is_user || is_agent_input;
+            let block_bg = if is_input { theme.background_panel } else { tint };
             let key = format!("{pane_index}:{index}");
             // This block is drawn THIS frame: its cache entry is live (the
             // split-level `retain` drops every key not reported here).
             live_keys.insert(key.clone());
             let stale = block_cache.get(&key).is_none_or(|e| {
-                e.wrap_w != wrap_w || e.theme_key != theme_key || e.bg != tint || e.dimmed != dimmed
+                e.wrap_w != wrap_w
+                    || e.theme_key != theme_key
+                    || e.bg != block_bg
+                    || e.dimmed != dimmed
             });
             if stale {
                 let mut md = MarkdownRenderable::new(Some(text.clone()));
                 md.set_fg(Some(ColorInput::RGBA(fg)));
-                md.set_bg(Some(ColorInput::RGBA(tint)));
+                md.set_bg(Some(ColorInput::RGBA(block_bg)));
                 crate::util::markdown::apply_theme(&mut md, theme);
                 let area = Rect::new(0, 0, wrap_w, h_from(text, wrap_w));
                 block_cache.insert(
@@ -1585,7 +1866,7 @@ fn draw_activity_line(
                     SubagentBlockRenderer {
                         wrap_w,
                         theme_key,
-                        bg: tint,
+                        bg: block_bg,
                         dimmed,
                         text: text.clone(),
                         md,
@@ -1617,6 +1898,25 @@ fn draw_activity_line(
             for sy in rlo..rhi {
                 let paint_row = painting(sy);
                 let dy = sy.saturating_sub(skip);
+                if paint_row && is_input {
+                    // The chat's sent-prompt FRAME (the extracted
+                    // `component::prompt_message_box`): `│` rails on BOTH
+                    // sides + the panel band, the same geometry the main
+                    // chat's submitted message paints. The band goes down
+                    // BEFORE the blit — the content overwrites it exactly
+                    // like the chat's parts overwrite the band — and the
+                    // rails sit one column OUTSIDE the blit's
+                    // `[x, x + wrap_w)` span, so they survive it. Painted
+                    // per VISIBLE row: a block straddling the pane's top
+                    // edge must never bleed its frame into the header row
+                    // or a neighbor pane.
+                    //
+                    // The FRAME (and its speaker TONE) is painted by the
+                    // walk — one call over the whole visible box band,
+                    // BEFORE this blit. This loop only blits the content
+                    // rows; the rails survive the blit because they sit
+                    // outside `[x, x + wrap_w)`.
+                }
                 if paint_row {
                     for cx in 0..wrap_w {
                         let Some(src) = entry.scratch.cell((cx, sy)) else {
@@ -1635,31 +1935,16 @@ fn draw_activity_line(
                 let trimmed = text_from_cell_row(&row_cells, wrap_w as usize);
                 if !trimmed.is_empty() {
                     // Content-only, like the chat's regions: the input's
-                    // `│` rail is PAINT-only (drawn below) and never enters
-                    // the copied text — selecting an input copies exactly
-                    // what the user typed, no decoration prefix.
+                    // frame (rails + band) is PAINT-only (drawn ABOVE the
+                    // blit, OUTSIDE this `[x, x + wrap_w)` span) and never
+                    // enters the copied text — selecting an input copies
+                    // exactly what was typed, no decoration prefix.
                     regions.push(TextRegion::one_row(
                         i32::from(content_row.saturating_add(sy)),
                         x,
                         x + wrap_w,
                         trimmed,
                     ));
-                }
-                if is_user || is_agent_input {
-                    // The prompt input's left rail (the shared
-                    // `subagent_input_rail`). The user's echo wears it in
-                    // the pane agent's brand color; an `agents_call` input
-                    // wears it in the theme's secondary tone — the color
-                    // alone tells the user WHO is speaking. One glyph, no
-                    // more chrome. Paint-only: emit-only rows skip it.
-                    if paint_row {
-                        let rail_style = if is_user {
-                            brand_fg(agent, 0.0, theme, focused)
-                        } else {
-                            Style::default().fg(rgba_color(theme.secondary))
-                        };
-                        subagent_input_rail(buf, x - 1, y + dy, rail_style);
-                    }
                 }
             }
         }
@@ -1723,7 +2008,9 @@ fn draw_agent_name(
 /// A brand mark never dissolves into the surface: when the sampled color's
 /// luminance sits too close to the background's, it lifts toward the
 /// readable contrast color instead.
-pub(crate) fn brand_fg(agent: &str, t: f32, theme: &Theme, focused: bool) -> Style {
+/// The brand color as a raw RGBA (the rail/frame painters want the color
+/// itself, not a `Style`): the exact tone [`brand_fg`] wraps.
+pub(crate) fn brand_rgba(agent: &str, t: f32, theme: &Theme, focused: bool) -> RGBA {
     let bg_lum = {
         let (r, g, b, _) = theme.background_element.to_ints();
         luminance(r, g, b)
@@ -1736,22 +2023,24 @@ pub(crate) fn brand_fg(agent: &str, t: f32, theme: &Theme, focused: bool) -> Sty
             if (luminance(br, bg_, bb) - bg_lum).abs() < BRAND_CONTRAST_FLOOR {
                 brand = blend(brand, contrast_fg(theme.background_element), 0.6);
             }
-            let fg = if focused {
+            if focused {
                 brand
             } else {
                 blend(theme.background_element, brand, DIM_UNFOCUSED)
-            };
-            Style::default().fg(rgba_color(fg))
+            }
         }
         None => {
-            let fg = if focused {
+            if focused {
                 theme.text
             } else {
                 theme.text_muted
-            };
-            Style::default().fg(rgba_color(fg))
+            }
         }
     }
+}
+
+pub(crate) fn brand_fg(agent: &str, t: f32, theme: &Theme, focused: bool) -> Style {
+    Style::default().fg(rgba_color(brand_rgba(agent, t, theme, focused)))
 }
 
 /// The `│` INPUT rail marking a turn's INPUT (the user's echo in an
@@ -2302,6 +2591,203 @@ mod tests {
         assert!(
             !rows[1].1.contains("Kilo"),
             "the second answer never leaks into the first: {rows:?}"
+        );
+    }
+
+    /// The input's `│` rail is paint-only: drag-selecting an input copies
+    /// exactly what was typed, never the decoration — the chat's
+    /// content-only region contract (its rails sit outside the regions).
+    /// The sent-prompt FRAME on a pane input: the extracted chat box —
+    /// `│` rails on BOTH sides of the input block plus the panel band —
+    /// with the USER's echo wearing the pane agent's brand tone and an
+    /// `agents_call` input wearing the theme's secondary. The shape is the
+    /// component's contract; the rail TONE is the speaker.
+    #[test]
+    fn pane_input_paints_the_sent_prompt_frame_with_speaker_tones() {
+        let theme = test_theme();
+        let mut state = AgentsSplitState::new(vec!["kilo".into()]);
+        // The user's echo (brand tone)…
+        state.echo_turn_input(0, "ola como vai?", true);
+        // …and an agent-sent input (secondary tone) in the SAME pane.
+        state.echo_turn_input(0, "and this too", false);
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut state, &theme);
+
+        let body_top = area.y + 1;
+        // Both rails of the input frame: `│` glyphs on the frame columns
+        // (one OUTSIDE the content span on each side), full input height.
+        let mut rows_with_rails = 0;
+        let mut band_seen = false;
+        let panel = theme.background_panel;
+        let (pr, pg, pb, _) = panel.to_ints();
+        let band = ratatui::style::Color::Rgb(pr, pg, pb);
+        for dy in 0..area.height - 1 {
+            let y = body_top + dy;
+            let mut rails = 0u32;
+            for cx in 0..area.width {
+                if let Some(c) = buf.cell((cx, y)) {
+                    if c.symbol() == "\u{2502}" {
+                        rails += 1;
+                    }
+                    if c.bg == band {
+                        band_seen = true;
+                    }
+                }
+            }
+            if rails >= 2 {
+                rows_with_rails += 1;
+            }
+        }
+        assert!(
+            rows_with_rails >= 2,
+            "the frame paints both rails on the input rows: {rows_with_rails}"
+        );
+        assert!(band_seen, "the panel band paints under the input");
+    }
+
+    /// The frame TONE follows the speaker (kept dynamics): the USER's
+    /// echo wears the pane agent's BRAND color, an `agents_call` input
+    /// wears the theme's SECONDARY — the color alone tells WHO is speaking.
+    #[test]
+    /// The sent box BREATHES like the chat's: a pad row above and below
+    /// the content, painted by the frame (the chat's border+padding rows).
+    #[test]
+    fn pane_input_box_carries_the_chat_breathing_rows() {
+        let theme = test_theme();
+        let mut state = AgentsSplitState::new(vec!["kilo".into()]);
+        // An answer FIRST, so the input box sits past content row 0 and its
+        // top pad row has a real content coordinate (the first box's top
+        // pad clamps at 0 — there is no row above the timeline start).
+        state.apply_event(
+            0,
+            &SubagentEvent::Message {
+                text: "answer".to_string(),
+            },
+        );
+        state.echo_turn_input(0, "breathing", true);
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut state, &theme);
+
+        let rect = state.pane_rects[0];
+        // The content rows of the input box (registry: pad-inclusive), so
+        // the pad rows are the span's FIRST and LAST rows. The box sits
+        // past content row 0 (an answer precedes it), so its full
+        // pad+content+pad extent exists.
+        let pane = &state.panes[0];
+        let hit = pane.input_rows.last().expect("input box registered");
+        assert_eq!(
+            hit.span.len() as u16,
+            3,
+            "1 pad + 1 content + 1 pad: {:?}",
+            hit.span
+        );
+        assert_eq!(hit.user_ordinal, Some(0), "a user echo carries its ordinal");
+        let pad_top = i32::from(rect.y + 1) + hit.span.start - i32::from(pane.effective_scroll);
+        let pad_bottom =
+            i32::from(rect.y + 1) + hit.span.end - 1 - i32::from(pane.effective_scroll);
+        let body_top = i32::from(rect.y + 1);
+        let panel = theme.background_panel;
+        let (pr, pg, pb, _) = panel.to_ints();
+        let band = ratatui::style::Color::Rgb(pr, pg, pb);
+        for (label, sy) in [("top pad", pad_top), ("bottom pad", pad_bottom)] {
+            assert!(sy >= body_top, "{label} must not bleed into the header");
+            let y = u16::try_from(sy).unwrap();
+            for cx in rect.x + 1..rect.right() - 1 {
+                let cell = buf.cell((cx, y)).unwrap();
+                assert_eq!(cell.bg, band, "{label} row carries the band (x={cx})");
+                assert_ne!(cell.symbol(), "b", "{label} row carries no content");
+            }
+        }
+    }
+
+    /// The hover highlight (the click cue): a pane input box under the
+    /// cursor lights with `background_element`, the chat's
+    /// hovered-user-message recolor, pane scoped.
+    #[test]
+    fn pane_input_hover_lights_the_box() {
+        let theme = test_theme();
+        let mut state = AgentsSplitState::new(vec!["kilo".into()]);
+        state.echo_turn_input(0, "hover me", true);
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut state, &theme);
+
+        let rect = state.pane_rects[0];
+        let pane = &state.panes[0];
+        let hit = pane.input_rows.first().expect("input box registered");
+        // The hover target: a row inside the box (content row -> screen).
+        let hover_row = hit.span.start + 1;
+        let hover_y = (i32::from(rect.y + 1) + hover_row - i32::from(pane.effective_scroll)) as u16;
+        let hover_x = rect.x + 4;
+
+        // Before: some band tone (NOT the hover tone).
+        let element = theme.background_element;
+        let (er, eg, eb, _) = element.to_ints();
+        let hover_bg = ratatui::style::Color::Rgb(er, eg, eb);
+        assert_ne!(
+            buf.cell((hover_x, hover_y)).unwrap().bg,
+            hover_bg,
+            "unhovered box does not carry the hover tone"
+        );
+
+        // Move the cursor onto the box, re-render, check the recolor.
+        assert!(state.update_hover(hover_x, hover_y), "hover registers");
+        let mut buf2 = Buffer::empty(area);
+        render(&mut buf2, area, &mut state, &theme);
+        assert_eq!(
+            buf2.cell((hover_x, hover_y)).unwrap().bg,
+            hover_bg,
+            "the hovered box lights with background_element"
+        );
+        // Off the box clears (the chat's clear_hover contract).
+        assert!(state.clear_hover());
+        let mut buf3 = Buffer::empty(area);
+        render(&mut buf3, area, &mut state, &theme);
+        assert_ne!(
+            buf3.cell((hover_x, hover_y)).unwrap().bg,
+            hover_bg,
+            "cleared hover drops the light"
+        );
+    }
+
+    fn pane_input_rail_tone_follows_the_speaker() {
+        let theme = test_theme();
+        // `new` focuses pane 0: the expectation uses the FOCUSED brand.
+        let mut state = AgentsSplitState::new(vec!["kilo".into()]);
+        state.echo_turn_input(0, "user speaks", true);
+        state.echo_turn_input(0, "agent speaks", false);
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut state, &theme);
+
+        let expected_user = rgba_color(brand_rgba("kilo", 0.0, &theme, true));
+        let expected_agent = rgba_color(theme.secondary);
+        let body_top = area.y + 1;
+        let mut user_rail = None;
+        let mut agent_rail = None;
+        // Body rows only: the buffer ends at `area.height`.
+        for dy in 0..area.height - 1 {
+            let y = body_top + dy;
+            for cx in 0..area.width {
+                let Some(cell) = buf.cell((cx, y)) else {
+                    continue;
+                };
+                if cell.symbol() != "\u{2502}" {
+                    continue;
+                }
+                if cell.fg == expected_user {
+                    user_rail = Some(cell.fg);
+                } else if cell.fg == expected_agent {
+                    agent_rail = Some(cell.fg);
+                }
+            }
+        }
+        assert_eq!(user_rail, Some(expected_user), "the user echo wears brand");
+        assert_eq!(
+            agent_rail, Some(expected_agent),
+            "the agents_call input wears secondary"
         );
     }
 
