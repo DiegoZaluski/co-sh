@@ -39,9 +39,9 @@ use crate::component::scroll_pill::ScrollPill;
 use crate::component::spinner::SpinnerState;
 use crate::routes::session::right_panel::subagent_theme_key;
 use crate::routes::session::right_panel::types::{
-    SubagentDiffCells, SubagentTimelineEntry, activity_lines, subagent_diff_block,
-    subagent_diff_content_key, subagent_diff_rows, SubagentActivity, SubagentActivityLine,
-    SubagentBlockRenderer, INPUT_BOX_PAD_ROWS,
+    SubagentDiffCells, SubagentTimelineEntry, activity_block_height, activity_lines,
+    subagent_diff_block, subagent_diff_content_key, subagent_diff_rows, SubagentActivity,
+    SubagentActivityLine, SubagentBlockRenderer, INPUT_BOX_PAD_ROWS,
 };
 use crate::theme::{Theme, blend, contrast_fg, luminance, rgba_color};
 use crate::util::text_region::{TextRegion, extract_text_in_region, text_from_cell_row};
@@ -56,6 +56,13 @@ pub const DAEMON_LABEL: &str = "cosh";
 /// opencode ink on a dark theme), so it lifts toward the readable
 /// contrast color instead.
 pub(crate) const BRAND_CONTRAST_FLOOR: f32 = 40.0;
+
+/// The sent box's INTERNAL breathing, left and right: the columns between
+/// each rail and the text. The chat's transcript keeps two (`x_off =
+/// area.x + 3`, `max_w = area.width - 6`); the pane's input box mirrors
+/// it — the markdown wraps and blits at `wrap_w - 2 * this`, starting
+/// `this + 1` columns after the pane edge (rail + breathing).
+pub(crate) const INPUT_BOX_INSET_COLS: u16 = 2;
 
 /// How far an UNFOCUSED pane's brand-colored name dims toward the element
 /// background — the same register the old muted header used, so the
@@ -1590,8 +1597,18 @@ fn render_pane(
     // (the positional key into the pane session's user messages).
     let mut user_inputs: usize = 0;
     for (index, line) in lines.iter().enumerate() {
-        let h = line.visual_rows(wrap_w);
         let input = is_input_line(line);
+        // An input's markdown wraps INSIDE the box's 2-column breathing on
+        // each side (the chat's max_w = box width - 6): measure the block
+        // at the inset width, or the reserved rows would disagree with the
+        // drawn ones. Every other line keeps the pipeline width.
+        let h = match line {
+            SubagentActivityLine::UserMessage { text, .. }
+            | SubagentActivityLine::AgentMessage { text, .. } => {
+                activity_block_height(text, wrap_w.saturating_sub(INPUT_BOX_INSET_COLS))
+            }
+            _ => line.visual_rows(wrap_w),
+        };
         // Input boxes own their breathing rows IN THE FLOW: the line's
         // extent is [content_row, content_row + h + pads) — one pad row
         // above the block, one below. The first input's top pad is a real
@@ -2012,12 +2029,29 @@ fn draw_activity_line(
             // text. Every other block keeps the pane's whisper tint.
             let is_input = is_user || is_agent_input;
             let block_bg = if is_input { theme.background_panel } else { tint };
+            // The input's INTERNAL breathing (the chat's sent box keeps two
+            // columns between each rail and the text): the markdown renders
+            // into a NARROWER scratch and blits two columns in — the
+            // renderer always starts text at its canvas column 0, so the
+            // inset has to come from the blit geometry. The two breathing
+            // columns keep the frame's band (same panel tone as the
+            // markdown bg), blending seamlessly like the chat's padding.
+            let block_w = if is_input {
+                wrap_w.saturating_sub(INPUT_BOX_INSET_COLS * 2)
+            } else {
+                wrap_w
+            };
+            let blit_x = if is_input {
+                x + INPUT_BOX_INSET_COLS
+            } else {
+                x
+            };
             let key = format!("{pane_index}:{index}");
             // This block is drawn THIS frame: its cache entry is live (the
             // split-level `retain` drops every key not reported here).
             live_keys.insert(key.clone());
             let stale = block_cache.get(&key).is_none_or(|e| {
-                e.wrap_w != wrap_w
+                e.wrap_w != block_w
                     || e.theme_key != theme_key
                     || e.bg != block_bg
                     || e.dimmed != dimmed
@@ -2027,11 +2061,11 @@ fn draw_activity_line(
                 md.set_fg(Some(ColorInput::RGBA(fg)));
                 md.set_bg(Some(ColorInput::RGBA(block_bg)));
                 crate::util::markdown::apply_theme(&mut md, theme);
-                let area = Rect::new(0, 0, wrap_w, h_from(text, wrap_w));
+                let area = Rect::new(0, 0, block_w, h_from(text, block_w));
                 block_cache.insert(
                     key.clone(),
                     SubagentBlockRenderer {
-                        wrap_w,
+                        wrap_w: block_w,
                         theme_key,
                         bg: block_bg,
                         dimmed,
@@ -2048,7 +2082,7 @@ fn draw_activity_line(
                 entry.md.set_content(text.clone());
                 entry.text = text.clone();
             }
-            let area = Rect::new(0, 0, wrap_w, h_from(text, wrap_w));
+            let area = Rect::new(0, 0, block_w, h_from(text, block_w));
             if entry.scratch.area() != &area {
                 entry.scratch.resize(area);
             }
@@ -2060,56 +2094,42 @@ fn draw_activity_line(
             // union with the selection span becomes a content-row region
             // sampled from the same cells, so extraction matches the
             // display — including rows scrolled out of view.
-            let block_h = h_from(text, wrap_w) as usize;
+            let block_h = h_from(text, block_w) as usize;
             let (rlo, rhi) = paint_emit_window(skip, draw_rows, emit_rows, block_h);
             for sy in rlo..rhi {
                 let paint_row = painting(sy);
                 let dy = sy.saturating_sub(skip);
-                if paint_row && is_input {
-                    // The chat's sent-prompt FRAME (the extracted
-                    // `component::prompt_message_box`): `│` rails on BOTH
-                    // sides + the panel band, the same geometry the main
-                    // chat's submitted message paints. The band goes down
-                    // BEFORE the blit — the content overwrites it exactly
-                    // like the chat's parts overwrite the band — and the
-                    // rails sit one column OUTSIDE the blit's
-                    // `[x, x + wrap_w)` span, so they survive it. Painted
-                    // per VISIBLE row: a block straddling the pane's top
-                    // edge must never bleed its frame into the header row
-                    // or a neighbor pane.
-                    //
-                    // The FRAME (and its speaker TONE) is painted by the
-                    // walk — one call over the whole visible box band,
-                    // BEFORE this blit. This loop only blits the content
-                    // rows; the rails survive the blit because they sit
-                    // outside `[x, x + wrap_w)`.
-                }
                 if paint_row {
-                    for cx in 0..wrap_w {
+                    // An input blits INSIDE the box: the two breathing
+                    // columns stay on the frame's band (painted by the
+                    // walk, same panel tone — seamless like the chat's
+                    // padding), the markdown cells land at `blit_x`.
+                    for cx in 0..block_w {
                         let Some(src) = entry.scratch.cell((cx, sy)) else {
                             break;
                         };
-                        let Some(dst) = buf.cell_mut((x + cx, y + dy)) else {
+                        let Some(dst) = buf.cell_mut((blit_x + cx, y + dy)) else {
                             break;
                         };
                         dst.set_symbol(src.symbol());
                         dst.set_style(src.style());
                     }
                 }
-                let row_cells: Vec<ratatui::buffer::Cell> = (0..wrap_w)
+                let row_cells: Vec<ratatui::buffer::Cell> = (0..block_w)
                     .map(|dx| entry.scratch.cell((dx, sy)).cloned().unwrap_or_default())
                     .collect();
-                let trimmed = text_from_cell_row(&row_cells, wrap_w as usize);
+                let trimmed = text_from_cell_row(&row_cells, block_w as usize);
                 if !trimmed.is_empty() {
-                    // Content-only, like the chat's regions: the input's
-                    // frame (rails + band) is PAINT-only (drawn ABOVE the
-                    // blit, OUTSIDE this `[x, x + wrap_w)` span) and never
-                    // enters the copied text — selecting an input copies
-                    // exactly what was typed, no decoration prefix.
+                    // Content-only, like the chat's regions: the frame
+                    // (rails + band + the breathing columns) is PAINT-only
+                    // and never enters the copied text — the region spans
+                    // exactly the blitted content at `blit_x`, so selecting
+                    // an input copies exactly what was typed, no decoration
+                    // prefix.
                     regions.push(TextRegion::one_row(
                         i32::from(content_row.saturating_add(sy)),
-                        x,
-                        x + wrap_w,
+                        blit_x,
+                        blit_x + block_w,
                         trimmed,
                     ));
                 }
