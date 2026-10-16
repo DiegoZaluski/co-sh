@@ -1248,6 +1248,11 @@ fn render_pane(
     // ── Body: the right panel's drawable pipeline (markdown included) ──
     let body_y = rect.y + 1;
     let body_h = rect.bottom().saturating_sub(body_y);
+    // One-row breathing room between the content and the pane's bottom
+    // edge: the last body row stays empty (background fill only) so text
+    // never glues to the border. All scroll/paint math below runs against
+    // this shrunk window.
+    let view_h = body_h.saturating_sub(1);
     // Same wrap rule as the right panel's subagent section: width minus the
     // left+right padding, so `estimate_height` agrees with the drawn rows.
     let wrap_w = rect.width.saturating_sub(2);
@@ -1261,7 +1266,7 @@ fn render_pane(
         // measurement still lands so a stale scroll offset cannot survive.
         pane.effective_scroll = 0;
         pane.content_height = 0;
-        pane.body_height = body_h;
+        pane.body_height = view_h;
         pane.pill.clear();
         return;
     }
@@ -1272,7 +1277,7 @@ fn render_pane(
         .iter()
         .map(|l| l.visual_rows(wrap_w))
         .fold(0u16, u16::saturating_add);
-    let max_scroll = content_height.saturating_sub(body_h);
+    let max_scroll = content_height.saturating_sub(view_h);
     // Sticky bottom (the chat's follow contract): a following pane shows the
     // newest rows; a scrolled-up pane keeps its offset, clamped to content.
     // The follow branch also WRITES BACK into `scroll_y`: without this the
@@ -1286,7 +1291,7 @@ fn render_pane(
     pane.scroll_y = scroll_y;
     pane.effective_scroll = scroll_y;
     pane.content_height = content_height;
-    pane.body_height = body_h;
+    pane.body_height = view_h;
 
     // Sliding window: walk the lines with their absolute content row, skip
     // the ones fully above `scroll_y`, paint the ones intersecting the body
@@ -1322,21 +1327,24 @@ fn render_pane(
             content_row = line_end;
             continue;
         }
-        if content_row >= scroll_y.saturating_add(body_h) && emit_rows.is_none() {
+        if content_row >= scroll_y.saturating_add(view_h) && emit_rows.is_none() {
             break;
         }
         // Off-window lines overlapping the span emit regions only: no
         // screen position, no painted rows.
         let visible =
-            line_end > scroll_y && content_row < scroll_y.saturating_add(body_h);
+            line_end > scroll_y && content_row < scroll_y.saturating_add(view_h);
         let skip = scroll_y.saturating_sub(content_row);
         // A block straddling the window top has content_row < scroll_y: the
         // screen position clamps to the body top and `skip` carries the
         // scrolled-off part (saturating — the raw difference underflows).
         let screen_y = body_y + content_row.saturating_sub(scroll_y);
+        // Clipped to the shrunk window end so nothing bleeds into the
+        // bottom breathing row.
+        let window_end = body_y.saturating_add(view_h).min(rect.bottom());
         let draw_rows = if visible {
             h.saturating_sub(skip)
-                .min(rect.bottom().saturating_sub(screen_y))
+                .min(window_end.saturating_sub(screen_y))
         } else {
             0
         };
@@ -1370,7 +1378,7 @@ fn render_pane(
     // Scroll-to-bottom pill, anchored to the pane's last body row (the
     // shared component; per-pane state lives on `pane.pill`). Painted last
     // so it sits above the activity lines.
-    let max = i32::from(content_height.saturating_sub(body_h));
+    let max = i32::from(content_height.saturating_sub(view_h));
     pane.pill.render(
         buf,
         i32::from(scroll_y),
