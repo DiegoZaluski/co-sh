@@ -121,6 +121,17 @@ impl App {
                 Some((index, rect))
             });
             if let Some((index, rect)) = target {
+                // Per-pane scroll pill (the shared `⮟` component): a click
+                // jumps that pane back to the live tail and re-engages its
+                // auto-follow. Checked before focus/selection — the pill is
+                // a button, not a selection anchor.
+                if matches!(event_type, MouseEventType::Down) && button == MouseButton::Left
+                    && let Some(split) = &mut self.agents_split
+                    && split.click_pill(x, y)
+                {
+                    self.scroll_pill_pressed = true;
+                    return Ok(true);
+                }
                 match event_type {
                     MouseEventType::ScrollUp | MouseEventType::ScrollDown => {
                         // Three wheel rows per notch, the session's cadence.
@@ -317,7 +328,7 @@ impl App {
                     && !self.permission_dialog.visible
                     && !self.queue_choice_dialog.visible
                     && !self.free_gateway_dialog.visible
-                    && let Some(pill) = self.session_view.pill_area
+                    && let Some(pill) = self.session_view.pill.area
                     && x >= pill.x
                     && x < pill.right()
                     && y >= pill.y

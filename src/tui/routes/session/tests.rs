@@ -6834,7 +6834,7 @@ fn pill_shows_when_scrolled_away_and_hides_at_bottom() {
             "pill must paint when scrolled away"
         );
         assert!(
-            view.pill_area.is_some(),
+            view.pill.area.is_some(),
             "hit rect must track the painted pill"
         );
     }
@@ -6843,7 +6843,7 @@ fn pill_shows_when_scrolled_away_and_hides_at_bottom() {
         "progress must settle at 1.0 after enough frames"
     );
     let (px, py) = {
-        let rect = view.pill_area.expect("pill rect must be set when settled");
+        let rect = view.pill.area.expect("pill rect must be set when settled");
         (rect.x, rect.y)
     };
     let (gx, gy) = pill_cell(&render_pill_once(&mut view, area), area).unwrap();
@@ -6870,7 +6870,7 @@ fn pill_shows_when_scrolled_away_and_hides_at_bottom() {
     view.scroll_y = view.total_height - area.height as i32;
     let buf = render_pill_once(&mut view, area);
     assert!(
-        view.pill_area.is_none(),
+        view.pill.area.is_none(),
         "hit rect must clear on the first retract frame"
     );
     assert!(
@@ -6889,7 +6889,7 @@ fn pill_shows_when_scrolled_away_and_hides_at_bottom() {
     }
     assert_eq!(view.pill_progress(), 0.0, "retract must finish at 0");
     assert!(
-        view.pill_area.is_none(),
+        view.pill.area.is_none(),
         "rect must be cleared at the bottom"
     );
     assert!(pill_cell(&render_pill_once(&mut view, area), area).is_none());
@@ -6916,7 +6916,7 @@ fn pill_stays_hidden_within_one_page_of_bottom() {
             pill_cell(&buf, area).is_none(),
             "pill must stay hidden at scroll_y={scroll_y}"
         );
-        assert!(view.pill_area.is_none());
+        assert!(view.pill.area.is_none());
         assert_eq!(view.pill_progress(), 0.0);
     }
 }
@@ -6972,7 +6972,7 @@ fn clear_pill_parks_animation_so_the_live_loop_can_rest() {
 
     view.clear_pill();
 
-    assert!(view.pill_area.is_none(), "hit rect must drop immediately");
+    assert!(view.pill.area.is_none(), "hit rect must drop immediately");
     assert_eq!(view.pill_progress(), 0.0, "progress must park at rest");
     assert!(
         !view.pill_animating(),
@@ -6998,7 +6998,7 @@ fn pill_renders_on_the_caller_provided_anchor_row() {
     for _ in 0..6 {
         render_pill_anchored(&mut view, area, anchor);
     }
-    let rect = view.pill_area.expect("pill must be visible");
+    let rect = view.pill.area.expect("pill must be visible");
     assert_eq!(rect.y, anchor, "settled pill must sit on the anchor row");
     assert_eq!(rect.width, 5, "hit rect keeps the pill's dimensions");
     assert_eq!(rect.height, 1);
@@ -7009,13 +7009,13 @@ fn pill_renders_on_the_caller_provided_anchor_row() {
         render_pill_anchored(&mut view, area, higher);
     }
     assert_eq!(
-        view.pill_area.expect("pill must be visible").y,
+        view.pill.area.expect("pill must be visible").y,
         higher,
         "pill must follow the anchor row"
     );
 
     // A slide from an anchor at the viewport's top clamps inside it.
-    view.pill_progress = 0.0;
+    view.pill.progress = 0.0;
     let buf = render_pill_anchored(&mut view, area, area.y);
     let (_, gy) = pill_cell(&buf, area).expect("glyph must paint");
     assert!(gy >= area.y, "slide must clamp inside the viewport");

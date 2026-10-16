@@ -1099,7 +1099,13 @@ impl App {
             pacer.record_draw(draw_started.elapsed());
             draw_result?;
 
-            if self.live_requested || self.session_view.pill_animating() {
+            if self.live_requested
+                || self.session_view.pill_animating()
+                || self
+                    .agents_split
+                    .as_ref()
+                    .is_some_and(|split| split.pill_animating())
+            {
                 // When auto-scroll is active, don't block on event::poll.
                 // Same for the scroll-to-bottom pill's slide/fade: it advances
                 // per rendered frame, so blocking on input here would freeze

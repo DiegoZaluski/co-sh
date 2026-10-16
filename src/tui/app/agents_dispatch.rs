@@ -23,7 +23,7 @@ use std::time::Instant;
 
 use cosh::harness::events::HarnessEvent;
 use cosh_sdk::connector::{Connector, ToolCallMode};
-use cosh_tools::subagent::events::SubagentEvent;
+use cosh_tools::subagent::events::{SubagentEvent, ToolCallStatus, ToolOutputBlock};
 
 use super::App;
 use crate::routes::session::agents_split::{AgentsSplitState, DAEMON_LABEL};
@@ -753,24 +753,35 @@ impl App {
         };
         // The manager pane is NOT an ACP client — its bound session is a
         // real cosh session in THIS app's store, so cold-restore reads the
-        // session directly (no `session/load` round-trip): the display
-        // projection replays as UserMessage / Message chunks through the
-        // SAME pane-event channel, then the terminal replayed event clears
-        // the in-flight flag.
+        // session directly (no `session/load` round-trip): the persisted
+        // CONTEXT — the same authoritative snapshot a resume would restore
+        // into a fresh harness — replays as the pane's typed event stream
+        // through the SAME pane-event channel, then the terminal replayed
+        // event clears the in-flight flag.
         if agent == DAEMON_LABEL {
             let epoch = self.agents_pane_epoch;
             let mut events = Vec::new();
-            if let Some(session) = self.session_store.load_session(&session_id) {
-                for message in &session.messages {
-                    for part in &message.parts {
-                        // Reasoning parts replay as Thought timeline entries
-                        // (dimmed, same as the live pane's thinking blocks);
-                        // arrival order is preserved because the persist
-                        // side wrote reasoning BEFORE the text part.
-                        match part {
-                            crate::types::Part::Text(text) => {
-                                let event =
-                                    if matches!(message.role, crate::types::MessageRole::User) {
+            if let Some(context) = self.session_store.load_context(&session_id) {
+                events.extend(manager_context_replay_events(&context));
+            } else {
+                // Sessions persisted before the context snapshot existed in
+                // the store (or display-only shells) carry none: degrade to
+                // the old display projection — prose-only, but never empty
+                // when the session had text.
+                if let Some(session) = self.session_store.load_session(&session_id) {
+                    for message in &session.messages {
+                        for part in &message.parts {
+                            // Reasoning parts replay as Thought timeline
+                            // entries (dimmed, same as the live pane's
+                            // thinking blocks); arrival order is preserved
+                            // because the persist side wrote reasoning
+                            // BEFORE the text part.
+                            match part {
+                                crate::types::Part::Text(text) => {
+                                    let event = if matches!(
+                                        message.role,
+                                        crate::types::MessageRole::User
+                                    ) {
                                         SubagentEvent::UserMessage {
                                             text: text.text.clone(),
                                         }
@@ -779,14 +790,15 @@ impl App {
                                             text: text.text.clone(),
                                         }
                                     };
-                                events.push(event);
+                                    events.push(event);
+                                }
+                                crate::types::Part::Reasoning(reasoning) => {
+                                    events.push(SubagentEvent::Thought {
+                                        text: reasoning.text.clone(),
+                                    });
+                                }
+                                _ => {}
                             }
-                            crate::types::Part::Reasoning(reasoning) => {
-                                events.push(SubagentEvent::Thought {
-                                    text: reasoning.text.clone(),
-                                });
-                            }
-                            _ => {}
                         }
                     }
                 }
@@ -1106,6 +1118,148 @@ fn run_manager_turn(
 /// [`cosh::harness::context::ContextItem::Assistant::reasoning`]). Tool
 /// calls/results are structural context, not display prose — the pane's live
 /// timeline already showed them.
+/// Rebuild the manager pane's replayed event stream from the session's
+/// persisted CONTEXT — the same authoritative snapshot `run_manager_turn`
+/// restores into a fresh harness on resume.
+///
+/// The old cold-restore replayed the session's DISPLAY projection instead:
+/// `manager_context_display` persists only User/Assistant prose (text +
+/// reasoning), so every `ContextItem::ToolCall`/`ToolResult` — the tool rows
+/// and output tails that make up most of a working manager pane's visible
+/// history — was silently dropped from the rebuilt timeline. The bug
+/// surfaced when adding a pane: `open_agents_split` rebuilds the split from
+/// scratch (`AgentsSplitState::new`), `trigger_agents_pane_replays` refills
+/// every bound pane with an empty timeline, and the cosh pane came back
+/// stripped to its prose while the ACP panes (full `session/load` replay)
+/// kept their tool rows.
+///
+/// The mapping mirrors the LIVE bridge (`InternalEventBridge` plus the
+/// `HarnessEvent` → `SubagentEvent` match in `run_manager_turn`), driven by
+/// the same item order the harness appended during its turns:
+///
+/// - `User` → `UserMessage` (the pane's input rail, same as the old
+///   display-projection replay).
+/// - `Assistant`/`Closure` → the item's reasoning first (the live loop
+///   streams reasoning BEFORE the text), then the text as `Message`.
+/// - `ToolCall` → an `InProgress` row with the tool's real name and its raw
+///   arguments as the initial tail — the same shape the bridge synthesizes.
+/// - `ToolResult` → a `ToolCallUpdate` patching the call row (paired by
+///   the exact `call_id`, stronger than the live bridge's FIFO contract)
+///   to `Completed` with its output tail and, for the edit family, the
+///   same one-line diff summary the bridge derives.
+/// - `Error` → a `Message` entry, so a failed turn's error line survives
+///   a process restart like any other transcript row.
+/// - `Compaction` → `UserMessage` with the checkpoint's summary (the
+///   "conversation continues from here" prose is model-visible, so the
+///   replayed pane shows it too).
+///
+/// NO model-visibility filtering here: the pane timeline is a TRANSCRIPT
+/// (what streamed live into it), not the model view. Useless-chain sweeps,
+/// cancelled-run debris and compaction boundaries only hide items from the
+/// MODEL — the user watched every one of them stream into the pane, so the
+/// rebuilt timeline keeps them; masking likewise never rewrote the row.
+fn manager_context_replay_events(
+    context: &cosh::harness::context::ContextManagerState,
+) -> Vec<SubagentEvent> {
+    use cosh::harness::context::ContextItem;
+
+    let mut events: Vec<SubagentEvent> = Vec::new();
+    // Announced-but-unresolved calls by their context `call_id` → the tool
+    // name (the edit-family diff summary is derived from it). A result
+    // pairs back through this map; an unpaired result (its call was hidden
+    // or absent) lands nowhere, exactly like the live bridge's FIFO
+    // contract — and the TUI's apply locates the row to patch BY ID, so
+    // the update never needs an index.
+    let mut announced: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for item in &context.items {
+        match item {
+            ContextItem::User { original, .. } => {
+                if !original.is_empty() {
+                    events.push(SubagentEvent::UserMessage {
+                        text: original.clone(),
+                    });
+                }
+            }
+            ContextItem::Assistant {
+                original, reasoning, ..
+            }
+            | ContextItem::Closure {
+                content: original,
+                reasoning,
+                ..
+            } => {
+                if let Some(reasoning) =
+                    reasoning.as_ref().filter(|r| !r.is_empty())
+                {
+                    events.push(SubagentEvent::Thought {
+                        text: reasoning.clone(),
+                    });
+                }
+                if !original.is_empty() {
+                    events.push(SubagentEvent::Message {
+                        text: original.clone(),
+                    });
+                }
+            }
+            ContextItem::ToolCall {
+                id: _,
+                call_id,
+                name,
+                arguments,
+                ..
+            } => {
+                let input: serde_json::Value =
+                    serde_json::from_str(arguments).unwrap_or(serde_json::Value::Null);
+                events.push(SubagentEvent::ToolCall {
+                    id: call_id.clone(),
+                    title: name.clone(),
+                    kind: cosh_tools::subagent::internal::tool_kind(name),
+                    status: ToolCallStatus::InProgress,
+                    raw_input: Some(input),
+                    tool: Some(name.clone()),
+                });
+                announced.insert(call_id.clone(), name.clone());
+            }
+            ContextItem::ToolResult {
+                id: _,
+                call_id,
+                content,
+                ..
+            } => {
+                let Some(tool) = announced.remove(call_id) else {
+                    continue;
+                };
+                events.push(SubagentEvent::ToolCallUpdate {
+                    id: call_id.clone(),
+                    status: Some(ToolCallStatus::Completed),
+                    title: None,
+                    raw_output: None,
+                    content: ToolOutputBlock {
+                        text: cosh_tools::subagent::internal::output_tail(content),
+                        skipped: 0,
+                        diff: cosh_tools::subagent::internal::diff_summary_from_result(
+                            tool, content,
+                        ),
+                    },
+                });
+            }
+            ContextItem::Error { content, .. } => {
+                events.push(SubagentEvent::Message {
+                    text: content.clone(),
+                });
+            }
+            ContextItem::Compaction { summary, .. } => {
+                events.push(SubagentEvent::UserMessage {
+                    text: summary.clone(),
+                });
+            }
+            _ => {}
+        }
+    }
+    events
+}
+
 fn manager_context_display(
     context: &cosh::harness::ContextManagerState,
 ) -> Vec<(crate::types::MessageRole, String, Option<String>)> {

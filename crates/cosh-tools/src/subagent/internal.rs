@@ -216,7 +216,12 @@ pub fn tool_kind(tool: &str) -> ToolKind {
 
 /// The displayed tail of a tool output: the LAST `RESULT_TAIL_BYTES` bytes,
 /// cut at a character boundary (mirrors the TUI's bounded tail).
-fn output_tail(output: &str) -> String {
+/// Byte tail shared with the TUI's cold-restore replay: the manager pane
+/// rebuilds its tool rows from the persisted context and caps the result
+/// tails with the SAME bound the live bridge applied, so a replayed row
+/// renders byte-identically to the live one (the TUI re-bounds on apply —
+/// the two never disagree).
+pub fn output_tail(output: &str) -> String {
     if output.len() <= RESULT_TAIL_BYTES {
         return output.to_string();
     }
@@ -228,6 +233,8 @@ fn output_tail(output: &str) -> String {
 }
 
 /// One-line diff summary parsed from a serialized `fs_edit`-family result
+/// (shared with the TUI's cold-restore replay — the manager pane rebuilds
+/// its edit rows from the persisted context with the same summary).
 /// (a JSON array of per-target objects whose `diff` field is a unified
 /// diff). The LAST diff wins — one summary line per tool call, the same
 /// rule the ACP content extraction applies to multiple diff blocks. The
@@ -237,7 +244,7 @@ fn output_tail(output: &str) -> String {
 ///
 /// `None` for anything that is not an edit result with a diff (bash text,
 /// grep listings, read output — those are not file modifications).
-fn diff_summary_from_result(tool: String, output: &str) -> Option<ToolDiffSummary> {
+pub fn diff_summary_from_result(tool: String, output: &str) -> Option<ToolDiffSummary> {
     if !matches!(tool.as_str(), "fs_edit" | "fs_edit_lines" | "fs_ast_edit") {
         return None;
     }
