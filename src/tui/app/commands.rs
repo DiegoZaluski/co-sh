@@ -275,17 +275,18 @@ impl App {
         }
     }
 
-    /// Fail every IN-FLIGHT `agents_call` of the outgoing split's panes:
-    /// a pane whose set is being replaced or torn down has its turn
-    /// signal-stopped and its terminal `AgentsPaneDone` dropped against the
-    /// bumped epoch — its registry `serving` entry would otherwise outlive
-    /// the turn forever, keeping `has_outstanding_requests` true and
-    /// hanging the requester loop's busy-guard (the loop waits at its
-    /// natural-completion point for an answer that can never arrive).
-    /// Same-id survival (a fresh confirm keeping the `cosh` pane) is the
-    /// case `set_panes` cannot handle: the id exists in BOTH sets, so the
-    /// registry keeps the stale entry — failing here, keyed by the
-    /// OUTGOING set's ids, is the precise cut.
+    /// Fail the IN-FLIGHT `agents_call` of every OUTGOING pane that still
+    /// owns a turn (the reconcile below keeps the surviving panes and
+    /// signal-stops only the dropped ones): a dropped pane's terminal
+    /// `AgentsPaneDone` finds no pane to land in — its registry `serving`
+    /// entry would otherwise outlive the turn forever, keeping
+    /// `has_outstanding_requests` true and hanging the requester loop's
+    /// busy-guard (the loop waits at its natural-completion point for an
+    /// answer that can never arrive). Kept panes are untouched: their
+    /// turns keep running and their own terminal Done resolves the
+    /// request normally (failing them would kill a turn that just kept
+    /// streaming — the old behavior that cancelled every running agent on
+    /// any pane-set change). Teardown (no fresh set) fails everything.
     fn fail_outgoing_pane_requests(&self) {
         let ids: Vec<String> = either_split(&self.agents_split, &self.parked_agents_split)
             .map(|split| {
@@ -293,6 +294,7 @@ impl App {
                     .panes
                     .iter()
                     .enumerate()
+                    .filter(|(_, p)| p.running || p.stop_signal.is_some())
                     .filter_map(|(i, _)| split.pane_registry_id(i))
                     .collect()
             })
@@ -317,23 +319,40 @@ impl App {
     /// `AgentsPaneDone` against a stale epoch so the handler drops them
     /// instead of binding old sessions into the new set.
     fn set_agents_split(&mut self, panes: Option<Vec<crate::types::AgentPaneRef>>) {
-        // The cancelled turns' in-flight `agents_call` requests must fail
-        // NOW, keyed by the OUTGOING ids — after the swap their terminal
-        // Done is stale-dropped and could never resolve them (the stale
-        // id may even survive into the new set, where a blind completion
-        // could hit the WRONG turn's request).
+        // The DROPPED panes' in-flight `agents_call` requests must fail
+        // NOW, keyed by their ids — after the swap their terminal Done
+        // finds no pane to land in and could never resolve the request (a
+        // stale id may even survive into the new set, where a blind
+        // completion could hit the WRONG turn's request). Kept panes'
+        // requests stay in flight: their turns keep running.
         self.fail_outgoing_pane_requests();
         // The split slots' generation moves on EVERY replacement or teardown
-        // (see the `agents_pane_epoch` field doc): the outgoing set's
-        // cancelled turns deliver their terminal Done against the OLD epoch
-        // and the handler drops it — a stopped pane can never seed a
-        // replacement pane that merely shares the index.
+        // (see the `agents_pane_epoch` field doc). The pane-id routing (see
+        // the `AgentsPaneEvent::pane_id` doc) makes this gate secondary —
+        // events route by their pane's identity first — but it still cuts
+        // off every UNSTAMPED sender's delivery against a replaced set.
         self.agents_pane_epoch = self.agents_pane_epoch.wrapping_add(1);
-        // A split being REPLACED must signal-stop every old pane first.
-        // A discarded stop signal is one nobody will ever set again — its
-        // turn would run to completion, un-stoppable, and its late events
-        // would land in the NEW panes at the same indexes.
-        if let Some(old) = &mut self.agents_split {
+        // RECONCILE, not rebuild: a fresh confirm that keeps some of the
+        // current panes (the common "add N panes while agents are running"
+        // case) carries those pane OBJECTS over — timeline, running turn,
+        // stop signal, bound session, scroll state all survive.
+        // `reconciled_from` signal-stops only the panes the new set
+        // dropped. The rebuild-from-scratch this used to do killed every
+        // running turn on ANY pane-set change: the stop signal fired, the
+        // streams died, and the fresh panes painted empty chat — the
+        // split looked reset while the user only meant to add panes.
+        if let Some(agents) = &panes
+            && let Some(old) = self.agents_split.take()
+        {
+            self.agents_split =
+                Some(crate::routes::session::agents_split::AgentsSplitState::reconciled_from(
+                    old, agents,
+                ));
+        } else if let Some(old) = &mut self.agents_split {
+            // Teardown (`None`): every pane's turn stops with the split.
+            // A discarded stop signal is one nobody will ever set again —
+            // its turn would run to completion, un-stoppable, and its late
+            // events would land in whatever set later shares the indexes.
             for pane in &mut old.panes {
                 if let Some(signal) = &pane.stop_signal {
                     signal.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -357,9 +376,14 @@ impl App {
             }
             self.parked_agents_split = None;
         }
-        self.agents_split = panes
-            .clone()
-            .map(crate::routes::session::agents_split::AgentsSplitState::new);
+        // Only a teardown (or a replace with NO prior live split) still
+        // builds a fresh state here; a replace reconciled the surviving
+        // panes into the slot above.
+        if self.agents_split.is_none() {
+            self.agents_split = panes
+                .clone()
+                .map(crate::routes::session::agents_split::AgentsSplitState::new);
+        }
         let mode_open = self.agents_split.is_some();
         // The harness-side registry follows the pane set on EVERY change
         // (open, replace, close) — the `agents_call` tool's addressable ids

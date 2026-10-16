@@ -132,6 +132,7 @@ pub(super) fn ensure_pane_snapshot(app: &mut App, pane: usize) {
     }
     let agent = p.agent.clone();
     let session_id = p.session_id.clone();
+    let pane_id = p.id;
     p.snapshot_loading = true;
     if split.focused == Some(pane) {
         app.slash_menu.set_agent_commands(Vec::new());
@@ -155,11 +156,13 @@ pub(super) fn ensure_pane_snapshot(app: &mut App, pane: usize) {
         };
         let _ = event_tx.send(HarnessEvent::AgentsPaneEvent {
             pane,
+            pane_id,
             epoch,
             event: SubagentEvent::Commands { commands },
         });
         let _ = event_tx.send(HarnessEvent::AgentsPaneEvent {
             pane,
+            pane_id,
             epoch,
             event: SubagentEvent::ConfigOptions { options },
         });
@@ -504,6 +507,17 @@ impl App {
         ));
 
         let index = pane;
+        // The pane's stable identity, stamped into every event of THIS
+        // turn: the event handler routes by id (falling back to the epoch
+        // + index gate only when the id names no pane), so a pane set
+        // REBUILT around a still-running turn (a fresh picker confirm that
+        // keeps the pane) keeps receiving the stream at the pane's NEW
+        // index, while events of a pane the rebuild dropped find no pane
+        // and are dropped.
+        let pane_id = either_split(&self.agents_split, &self.parked_agents_split)
+            .and_then(|split| split.panes.get(pane))
+            .map(|p| p.id)
+            .unwrap_or_default();
         // Dispatch-time split-slot generation: stamped into every event of
         // THIS turn, so a slot swap while it runs (fresh confirm, switch,
         // close) invalidates its terminal delivery — the handler drops
@@ -527,6 +541,7 @@ impl App {
             std::thread::spawn(move || {
                 run_manager_turn(
                     index,
+                    pane_id,
                     epoch,
                     input,
                     signal,
@@ -570,6 +585,7 @@ impl App {
                                 Some(event) => {
                                     let _ = event_tx.send(HarnessEvent::AgentsPaneEvent {
                                         pane: index,
+                                        pane_id,
                                         epoch,
                                         event,
                                     });
@@ -591,6 +607,7 @@ impl App {
                 };
                 let _ = event_tx.send(HarnessEvent::AgentsPaneDone {
                     pane: index,
+                    pane_id,
                     epoch,
                     output,
                     stop_reason,
@@ -746,9 +763,9 @@ impl App {
             .and_then(|split| split.panes.get_mut(pane))
             .map(|p| {
                 p.rehydrating = true;
-                p.agent.clone()
+                (p.agent.clone(), p.id)
             });
-        let Some(agent) = agent else {
+        let Some((agent, pane_id)) = agent else {
             return;
         };
         // The manager pane is NOT an ACP client — its bound session is a
@@ -792,7 +809,12 @@ impl App {
                 }
             }
             for event in events {
-                let _ = self.event_tx.send(HarnessEvent::AgentsPaneEvent { pane, epoch, event });
+                let _ = self.event_tx.send(HarnessEvent::AgentsPaneEvent {
+                    pane,
+                    pane_id,
+                    epoch,
+                    event,
+                });
             }
             if let Some(p) = self
                 .agents_split
@@ -803,6 +825,7 @@ impl App {
             }
             let _ = self.event_tx.send(HarnessEvent::AgentsPaneReplayed {
                 pane,
+                pane_id,
                 epoch,
                 ok: true,
                 error: String::new(),
@@ -836,6 +859,7 @@ impl App {
                             Some(event) => {
                                 let _ = event_tx.send(HarnessEvent::AgentsPaneEvent {
                                     pane,
+                                    pane_id,
                                     epoch,
                                     event,
                                 });
@@ -853,13 +877,14 @@ impl App {
             };
             let _ = event_tx.send(HarnessEvent::AgentsPaneReplayed {
                 pane,
+                pane_id,
                 epoch,
                 ok,
                 error,
             });
         });
         #[cfg(test)]
-        let _ = (agent, session_id, cwd, epoch, event_tx, tokio_handle);
+        let _ = (agent, session_id, cwd, pane_id, epoch, event_tx, tokio_handle);
     }
 
     /// Connector for the daemon pane: the session's own route (provider +
@@ -896,6 +921,7 @@ impl App {
 #[allow(clippy::too_many_arguments)]
 fn run_manager_turn(
     pane: usize,
+    pane_id: u64,
     epoch: u64,
     input: String,
     stop_signal: Arc<AtomicBool>,
@@ -915,6 +941,7 @@ fn run_manager_turn(
         Err(error) => {
             let _ = event_tx.send(HarnessEvent::AgentsPaneDone {
                 pane,
+                pane_id,
                 epoch,
                 output: error,
                 stop_reason: "error".to_string(),
@@ -944,6 +971,7 @@ fn run_manager_turn(
             Err(e) => {
                 let _ = event_tx.send(HarnessEvent::AgentsPaneDone {
                     pane,
+                    pane_id,
                     epoch,
                     output: format!("manager runtime: {e}"),
                     stop_reason: "error".to_string(),
@@ -1038,8 +1066,12 @@ fn run_manager_turn(
                         _ => Vec::new(),
                     };
                     for event in events {
-                        let _ =
-                            bridge_tx.send(HarnessEvent::AgentsPaneEvent { pane, epoch, event });
+                        let _ = bridge_tx.send(HarnessEvent::AgentsPaneEvent {
+                            pane,
+                            pane_id,
+                            epoch,
+                            event,
+                        });
                     }
                 }
             });
@@ -1071,6 +1103,7 @@ fn run_manager_turn(
             };
             let _ = event_tx.send(HarnessEvent::AgentsPaneDone {
                 pane,
+                pane_id,
                 epoch,
                 output,
                 stop_reason,
@@ -1091,6 +1124,7 @@ fn run_manager_turn(
         // nothing to stop).
         let _ = panic_tx.send(HarnessEvent::AgentsPaneDone {
             pane,
+            pane_id,
             epoch,
             output: "the manager turn panicked".to_string(),
             stop_reason: "error".to_string(),

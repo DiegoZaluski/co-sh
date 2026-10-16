@@ -1060,6 +1060,7 @@ async fn agents_pane_done_promotes_the_pane_binding_for_the_next_open() {
     app.event_tx
         .send(HarnessEvent::AgentsPaneDone {
             pane: 0,
+            pane_id: app.agents_split.as_ref().and_then(|s| s.panes.first()).map(|p| p.id).unwrap_or(0),
             epoch: app.agents_pane_epoch,
             output: "report one".into(),
             stop_reason: "end_turn".into(),
@@ -1092,6 +1093,7 @@ async fn agents_pane_done_promotes_the_pane_binding_for_the_next_open() {
     app.event_tx
         .send(HarnessEvent::AgentsPaneDone {
             pane: 0,
+            pane_id: app.agents_split.as_ref().and_then(|s| s.panes.first()).map(|p| p.id).unwrap_or(0),
             epoch: app.agents_pane_epoch,
             output: "report two".into(),
             stop_reason: "end_turn".into(),
@@ -1103,6 +1105,7 @@ async fn agents_pane_done_promotes_the_pane_binding_for_the_next_open() {
     app.event_tx
         .send(HarnessEvent::AgentsPaneDone {
             pane: 1,
+            pane_id: app.agents_split.as_ref().and_then(|s| s.panes.get(1)).map(|p| p.id).unwrap_or(0),
             epoch: app.agents_pane_epoch,
             output: "report three".into(),
             stop_reason: "end_turn".into(),
@@ -1134,6 +1137,207 @@ async fn agents_pane_done_promotes_the_pane_binding_for_the_next_open() {
     assert_eq!(split.panes[1].session_id.as_deref(), Some("sess-C"));
 }
 
+/// Adding panes to a split while agents are RUNNING must not kill the
+/// running turns nor wipe the visible chat: the fresh confirm carries the
+/// surviving pane OBJECTS over (timeline, running flag, stop signal, bound
+/// session), the new panes join at their picked positions, and every event
+/// of a surviving turn keeps landing in ITS pane (the stable pane-id
+/// routing). Before the reconcile, any pane-set change signal-stopped every
+/// running turn and rebuilt fresh empty panes — the streams died and the
+/// chat visually reset.
+#[tokio::test]
+async fn adding_panes_while_running_keeps_the_running_turns_and_chats() {
+    use cosh::harness::HarnessEvent;
+
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    let session_id = crate::session_store::generate_session_id();
+    app.state
+        .add_empty_session(session_id.clone(), "add panes".into(), 0);
+    app.state.current_session_id = Some(session_id);
+    app.open_agents_split(vec![crate::ui::agents_picker::AgentPick {
+        name: "claude".into(),
+        instances: 1,
+    }]);
+
+    // Pane 0 starts a turn and streams content.
+    app.agents_split.as_mut().unwrap().set_running(0, true);
+    let pane_id = app.agents_split.as_ref().unwrap().panes[0].id;
+    let epoch = app.agents_pane_epoch;
+    app.event_tx
+        .send(HarnessEvent::AgentsPaneEvent {
+            pane: 0,
+            pane_id,
+            epoch,
+            event: cosh_tools::subagent::events::SubagentEvent::Message {
+                text: "turn in flight".into(),
+            },
+        })
+        .ok();
+    app.poll_events();
+
+    // The user re-picks WITH MORE PANES while that turn is still running.
+    app.open_agents_split(vec![
+        crate::ui::agents_picker::AgentPick {
+            name: "claude".into(),
+            instances: 1,
+        },
+        crate::ui::agents_picker::AgentPick {
+            name: "kilo".into(),
+            instances: 1,
+        },
+    ]);
+    {
+        let split = app.agents_split.as_ref().unwrap();
+        assert_eq!(split.panes.len(), 2, "the fresh set has both panes");
+        assert_eq!(
+            split.panes[0].id, pane_id,
+            "the running pane's OBJECT survived the re-pick"
+        );
+        assert!(
+            split.panes[0].running,
+            "the running turn keeps running across the re-pick"
+        );
+        assert!(
+            !split.panes[0].activity.timeline.is_empty(),
+            "the running pane's chat survived the re-pick"
+        );
+        assert!(
+            !split.panes[1].running && split.panes[1].activity.timeline.is_empty(),
+            "the genuinely new pane starts fresh"
+        );
+    }
+
+    // The surviving turn's stream keeps landing in its pane (the routing
+    // goes through the pane id, not the index).
+    app.event_tx
+        .send(HarnessEvent::AgentsPaneEvent {
+            pane: 0,
+            pane_id,
+            epoch: app.agents_pane_epoch,
+            event: cosh_tools::subagent::events::SubagentEvent::Message {
+                text: "still streaming after the re-pick".into(),
+            },
+        })
+        .ok();
+    app.poll_events();
+    {
+        let split = app.agents_split.as_ref().unwrap();
+        let text: Vec<&str> = split.panes[0]
+            .activity
+            .timeline
+            .iter()
+            .filter_map(|e| match e {
+                crate::routes::session::right_panel::types::SubagentTimelineEntry::Message {
+                    text,
+                } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            text.iter()
+                .any(|t| t.contains("still streaming after the re-pick")),
+            "the surviving turn's stream follows its pane: {text:?}"
+        );
+    }
+
+    // The turn ENDS after the re-pick: its Done still applies to the
+    // surviving pane (session binding included).
+    app.event_tx
+        .send(HarnessEvent::AgentsPaneDone {
+            pane: 0,
+            pane_id,
+            epoch: app.agents_pane_epoch,
+            output: "report after re-pick".into(),
+            stop_reason: "end_turn".into(),
+            session: Some("sess-kept".into()),
+        })
+        .ok();
+    app.poll_events();
+    {
+        let split = app.agents_split.as_ref().unwrap();
+        assert!(
+            !split.panes[0].running,
+            "the Done closed the surviving turn"
+        );
+        assert_eq!(
+            split.panes[0].session_id.as_deref(),
+            Some("sess-kept"),
+            "the Done binds the surviving pane's session"
+        );
+        let panes = app
+            .state
+            .current_session()
+            .unwrap()
+            .agents_panes
+            .clone()
+            .unwrap();
+        assert_eq!(
+            panes[0],
+            crate::types::AgentPaneRef::Bound {
+                agent: "claude".into(),
+                session_id: "sess-kept".into(),
+            },
+            "the surviving pane's binding promotes from its own turn's Done"
+        );
+    }
+
+    // A DROPPED pane's late events find no pane: shrinking the set must not
+    // let a removed turn's stream leak into the pane that took its index.
+    app.agents_split.as_mut().unwrap().set_running(1, false);
+    let dropped_id = {
+        // Re-grow the set once more so a pane EXISTS at index 1, then drop
+        // it with the next confirm while its (synthetic) turn is marked.
+        app.open_agents_split(vec![
+            crate::ui::agents_picker::AgentPick {
+                name: "claude".into(),
+                instances: 1,
+            },
+            crate::ui::agents_picker::AgentPick {
+                name: "kilo".into(),
+                instances: 1,
+            },
+        ]);
+        let split = app.agents_split.as_ref().unwrap();
+        split.panes[1].id
+    };
+    app.agents_split.as_mut().unwrap().set_running(1, true);
+    app.open_agents_split(vec![crate::ui::agents_picker::AgentPick {
+        name: "claude".into(),
+        instances: 1,
+    }]);
+    assert_eq!(app.agents_split.as_ref().unwrap().panes[0].id, pane_id);
+    app.event_tx
+        .send(HarnessEvent::AgentsPaneEvent {
+            pane: 1,
+            pane_id: dropped_id,
+            epoch: app.agents_pane_epoch,
+            event: cosh_tools::subagent::events::SubagentEvent::Message {
+                text: "dropped pane leak".into(),
+            },
+        })
+        .ok();
+    app.poll_events();
+    {
+        let split = app.agents_split.as_ref().unwrap();
+        assert_eq!(split.panes.len(), 1);
+        assert!(
+            !split.panes[0]
+                .activity
+                .timeline
+                .iter()
+                .any(|e| matches!(
+                    e,
+                    crate::routes::session::right_panel::types::SubagentTimelineEntry::Message {
+                        text
+                    } if text.contains("dropped pane leak")
+                )),
+            "a dropped pane's late event must not leak into the kept pane"
+        );
+    }
+}
+
 /// Esc out of the `/agents` mode PARKS the split: the pane objects (streams,
 /// drafts, running flags) move to the background slot untouched, the
 /// metadata flips to `agents_mode_open: false` while KEEPING the pane set,
@@ -1160,6 +1364,7 @@ async fn parked_agents_split_survives_park_and_re_attach() {
     app.event_tx
         .send(HarnessEvent::AgentsPaneEvent {
             pane: 0,
+            pane_id: app.agents_split.as_ref().and_then(|s| s.panes.first()).map(|p| p.id).unwrap_or(0),
             epoch: app.agents_pane_epoch,
             event: cosh_tools::subagent::events::SubagentEvent::Message {
                 text: "still streaming".into(),
@@ -1189,6 +1394,7 @@ async fn parked_agents_split_survives_park_and_re_attach() {
     app.event_tx
         .send(HarnessEvent::AgentsPaneEvent {
             pane: 0,
+            pane_id: app.agents_split.as_ref().and_then(|s| s.panes.first()).map(|p| p.id).unwrap_or(0),
             epoch: app.agents_pane_epoch,
             event: cosh_tools::subagent::events::SubagentEvent::Message {
                 text: "parked stream".into(),
@@ -1404,9 +1610,11 @@ async fn stale_epoch_agents_pane_done_is_dropped() {
     }]);
 
     // A turn from the OLD pane set lands AFTER a fresh confirm replaced the
-    // slots: re-opening the split bumped the epoch, so the Done's pre-bump
-    // stamp is stale.
+    // slots: the OLD pane object was dropped by the re-pick, so its id
+    // answers to nothing anymore — the Done is dropped by the identity
+    // routing (and its pre-bump epoch stamp is stale too).
     let stale_epoch = app.agents_pane_epoch;
+    let stale_pane_id = app.agents_split.as_ref().unwrap().panes[0].id;
     app.open_agents_split(vec![crate::ui::agents_picker::AgentPick {
         name: "claude".into(),
         instances: 1,
@@ -1414,6 +1622,7 @@ async fn stale_epoch_agents_pane_done_is_dropped() {
     app.event_tx
         .send(HarnessEvent::AgentsPaneDone {
             pane: 0,
+            pane_id: stale_pane_id,
             epoch: stale_epoch,
             output: "stale report".into(),
             stop_reason: "end_turn".into(),
@@ -1459,6 +1668,7 @@ async fn stale_epoch_agents_pane_done_is_dropped() {
     app.event_tx
         .send(HarnessEvent::AgentsPaneDone {
             pane: 0,
+            pane_id: app.agents_split.as_ref().and_then(|s| s.panes.first()).map(|p| p.id).unwrap_or(0),
             epoch: app.agents_pane_epoch,
             output: "live report".into(),
             stop_reason: "end_turn".into(),
@@ -1553,6 +1763,7 @@ async fn reopening_the_split_rehydrates_bound_panes_with_empty_timelines() {
     app.event_tx
         .send(HarnessEvent::AgentsPaneEvent {
             pane: 0,
+            pane_id: app.agents_split.as_ref().and_then(|s| s.panes.first()).map(|p| p.id).unwrap_or(0),
             epoch,
             event: cosh_tools::subagent::events::SubagentEvent::UserMessage {
                 text: "what changed today?".into(),
@@ -1562,6 +1773,7 @@ async fn reopening_the_split_rehydrates_bound_panes_with_empty_timelines() {
     app.event_tx
         .send(HarnessEvent::AgentsPaneEvent {
             pane: 0,
+            pane_id: app.agents_split.as_ref().and_then(|s| s.panes.first()).map(|p| p.id).unwrap_or(0),
             epoch,
             event: cosh_tools::subagent::events::SubagentEvent::Message {
                 text: "the answer from yesterday".into(),
@@ -1572,6 +1784,7 @@ async fn reopening_the_split_rehydrates_bound_panes_with_empty_timelines() {
     app.event_tx
         .send(HarnessEvent::AgentsPaneReplayed {
             pane: 0,
+            pane_id: app.agents_split.as_ref().and_then(|s| s.panes.first()).map(|p| p.id).unwrap_or(0),
             epoch,
             ok: true,
             error: String::new(),
@@ -1649,6 +1862,7 @@ async fn a_failed_replay_marks_the_pane_instead_of_silence() {
     app.event_tx
         .send(HarnessEvent::AgentsPaneReplayed {
             pane: 0,
+            pane_id: app.agents_split.as_ref().and_then(|s| s.panes.first()).map(|p| p.id).unwrap_or(0),
             epoch,
             ok: false,
             error: "ACP session/load failed: session gone".into(),
@@ -1795,6 +2009,7 @@ async fn a_user_prompt_echoes_into_the_pane_timeline() {
     app.event_tx
         .send(HarnessEvent::AgentsPaneDone {
             pane: 0,
+            pane_id: app.agents_split.as_ref().and_then(|s| s.panes.first()).map(|p| p.id).unwrap_or(0),
             epoch,
             output: "first answer".into(),
             stop_reason: "end_turn".into(),
@@ -1857,6 +2072,7 @@ async fn a_session_model_event_lands_on_the_pane() {
     app.event_tx
         .send(HarnessEvent::AgentsPaneEvent {
             pane: 0,
+            pane_id: app.agents_split.as_ref().and_then(|s| s.panes.first()).map(|p| p.id).unwrap_or(0),
             epoch: app.agents_pane_epoch,
             event: cosh_tools::subagent::events::SubagentEvent::SessionModel {
                 model: Some("kilo/nvidia/nemotron-3-ultra-550b-a55b:free".into()),
@@ -1923,6 +2139,7 @@ async fn a_usage_event_lands_on_the_pane() {
     app.event_tx
         .send(HarnessEvent::AgentsPaneEvent {
             pane: 0,
+            pane_id: app.agents_split.as_ref().and_then(|s| s.panes.first()).map(|p| p.id).unwrap_or(0),
             epoch: app.agents_pane_epoch,
             event: cosh_tools::subagent::events::SubagentEvent::Usage {
                 context_window: 100_000,
@@ -2208,6 +2425,7 @@ async fn a_rebooted_cosh_pane_replays_its_session_from_the_store() {
     app.event_tx
         .send(HarnessEvent::AgentsPaneDone {
             pane: 0,
+            pane_id: app.agents_split.as_ref().and_then(|s| s.panes.first()).map(|p| p.id).unwrap_or(0),
             epoch: app.agents_pane_epoch,
             output: "the report".into(),
             stop_reason: "end_turn".into(),
