@@ -10,3 +10,4 @@ pub mod sparkle;
 pub mod spinner;
 pub mod spinner_highlight;
 pub mod wall;
+pub mod prompt_message_box;

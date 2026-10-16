@@ -21,7 +21,7 @@ use ratatui::style::{Color, Modifier, Style};
 
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 
-use self::tool_render::{blank_border_chars, left_border_chars};
+use self::tool_render::blank_border_chars;
 use cosh_tui::core::lib::border::BorderSidesConfig;
 use cosh_tui::core::lib::rgba::{ColorInput, RGBA, ansi256_index_to_rgb};
 use cosh_tui::core::renderable::Renderable;
@@ -2144,30 +2144,10 @@ impl SessionView {
         part_heights: Option<&[u16]>,
         streaming: bool,
     ) {
-        let mut border_box = BoxRenderable::new();
-        // The `│` rails sit on the chat background like the prompt box:
-        // the panel band is painted separately, one column short of each rail.
-        border_box.set_border_color(Some(agent_color.into()));
-        border_box.set_border_sides(BorderSidesConfig {
-            left: true,
-            top: false,
-            right: true,
-            bottom: false,
-        });
-        border_box.set_custom_border_chars(left_border_chars());
-        border_box.render_self(buf, area);
-
-        let mut bg_box = BoxRenderable::new();
-        bg_box.set_background_color(Some(theme.background_panel.into()));
-        // The band stops one column short of the left/right edges so the `│`
-        // rails sit on the chat background, mirroring the prompt box.
-        let bg_area = Rect::new(
-            area.x + 1,
-            area.y,
-            area.width.saturating_sub(2),
-            area.height,
-        );
-        bg_box.render_self(buf, bg_area);
+        // The sent-prompt frame: extracted verbatim into
+        // `component::prompt_message_box` so the `/agents` pane mirrors the
+        // EXACT same box (byte-identical by the component's own test).
+        crate::component::prompt_message_box::render(buf, area, agent_color, theme);
 
         let x_off = area.x + 3;
         let max_w = area.width.saturating_sub(6);
@@ -2227,32 +2207,9 @@ impl SessionView {
         let max_w = area.width.saturating_sub(6).max(2);
 
         if is_error {
-            let mut border_box = BoxRenderable::new();
-            // The `│` rails sit on the chat background like the prompt
-            // box: the panel band is painted separately, one column short of
-            // each.
-            border_box.set_border_color(Some(theme.error.into()));
-            border_box.set_border_sides(BorderSidesConfig {
-                left: true,
-                top: false,
-                right: true,
-                bottom: false,
-            });
-            border_box.set_custom_border_chars(left_border_chars());
-            border_box.render_self(buf, area);
-
-            let mut bg_box = BoxRenderable::new();
-            bg_box.set_background_color(Some(theme.background_panel.into()));
-            // The band stops one column short of the left/right edges so the
-            // `│` rails sit on the chat background, mirroring the prompt
-            // box.
-            let bg_area = Rect::new(
-                area.x + 1,
-                area.y,
-                area.width.saturating_sub(2),
-                area.height,
-            );
-            bg_box.render_self(buf, bg_area);
+            // The sent-prompt frame in the error tone — the SAME extracted
+            // component the user message uses.
+            crate::component::prompt_message_box::render(buf, area, theme.error, theme);
 
             let error_style = Style::default()
                 .fg(rgba_color(theme.text_muted))
