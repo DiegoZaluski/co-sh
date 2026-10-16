@@ -647,6 +647,13 @@ pub enum DialogType {
         /// Whether the clicked message is a user message (assistant messages
         /// keep Copy-only).
         is_user_message: bool,
+        /// The `/agents` PANE dispatch context: `(pane, timeline_index,
+        /// user_ordinal)` when the dialog was opened from a pane input
+        /// click. `None` = the chat's own path (message_id keys the
+        /// action); `Some` = `run_pane_message_action` keys the action
+        /// positionally (pane timeline entry ↔ pane session's k-th user
+        /// message — pane entries carry no store ids).
+        pane_action: Option<(usize, usize, Option<usize>)>,
     },
 
     /// `/undo`: versioned `/tmp` snapshots taken before each revert. A bare
@@ -856,11 +863,13 @@ impl std::fmt::Debug for DialogType {
                 message_id,
                 preview,
                 is_user_message,
+                pane_action,
             } => f
                 .debug_struct("MessageActions")
                 .field("message_id", message_id)
                 .field("preview", preview)
                 .field("is_user_message", is_user_message)
+                .field("pane_action", pane_action)
                 .finish(),
             Self::UndoList {
                 session_id,
@@ -2675,6 +2684,7 @@ impl DialogState {
                 message_id: _,
                 preview,
                 is_user_message,
+                pane_action: _,
             } => {
                 let selection = if *is_user_message {
                     instance.selected.min(2)

@@ -96,6 +96,7 @@ async fn message_actions_keyboard_cycles_three_options() {
         message_id: "u2".into(), // A user message
         preview: "second".into(),
         is_user_message: true,
+        pane_action: None,
     });
     assert!(app.handle_message_actions_dialog_key(KeyCode::Down));
     assert_eq!(app.dialog.current().unwrap().selected, 1);
@@ -201,6 +202,7 @@ async fn message_actions_dialog_renders_title_and_options() {
         message_id: "u2".into(), // A user message
         preview: "second".into(),
         is_user_message: true,
+        pane_action: None,
     });
     let theme = app.theme.clone();
     let mut buf = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 80, 24));
@@ -232,6 +234,7 @@ async fn message_actions_older_user_message_shows_all_options() {
         message_id: "u1".into(), // Not the last user message
         preview: "hello world".into(),
         is_user_message: true,
+        pane_action: None,
     });
     let theme = app.theme.clone();
     let mut buf = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 80, 24));
@@ -292,6 +295,7 @@ async fn message_actions_single_user_message_shows_all_options() {
         message_id: "u1".into(), // A user message
         preview: "only message".into(),
         is_user_message: true,
+        pane_action: None,
     });
     let theme = app.theme.clone();
     let mut buf = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 80, 24));
@@ -349,6 +353,7 @@ async fn message_actions_older_user_message_keyboard_cycles_three_options() {
         message_id: "u1".into(),
         preview: "hello world".into(),
         is_user_message: true,
+        pane_action: None,
     });
     // Down cycles through all 3 options (Revert/Copy/Fork).
     assert!(app.handle_message_actions_dialog_key(KeyCode::Down));

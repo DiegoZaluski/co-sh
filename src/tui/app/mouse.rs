@@ -145,18 +145,37 @@ impl App {
                         // anchor; the FIRST press already focused the pane,
                         // so Ctrl+O and the double-click stay in sync).
                         const DOUBLE_CLICK: Duration = Duration::from_millis(400);
-                        let double = self
-                            .last_pane_click
-                            .take_if(|(pane, at)| {
-                                *pane == index && at.elapsed() <= DOUBLE_CLICK
-                            })
-                            .is_some();
+                        // A click on a pane's INPUT box (the sent-prompt
+                        // box) is a deliberate target — never a maximize
+                        // gesture: the double-click detector MUST NOT
+                        // consume it. Without this guard a user re-clicking
+                        // inside the box within 400ms (e.g. aiming at the
+                        // smaller box) has the press swallowed by
+                        // `toggle_maximized` instead of landing — the
+                        // "needs several clicks" report. Focus and the box
+                        // click coexist: both fire below as usual.
+                        let on_input_box = self.agents_split.as_ref().is_some_and(|split| {
+                            split
+                                .panes
+                                .get(index)
+                                .is_some_and(|pane| pane.input_box_at(rect, x, y).is_some())
+                        });
+                        let double = !on_input_box
+                            && self
+                                .last_pane_click
+                                .take_if(|(pane, at)| {
+                                    *pane == index && at.elapsed() <= DOUBLE_CLICK
+                                })
+                                .is_some();
                         if double
                             && let Some(split) = &mut self.agents_split
                         {
                             split.toggle_maximized();
                             return Ok(true);
                         }
+                        // A box click also CONSUMES any pending double-click
+                        // memory (a box press is never part of a maximize
+                        // sequence), then re-arms the tracker for panes.
                         self.last_pane_click = Some((index, Instant::now()));
                         if let Some(split) = &mut self.agents_split {
                             split.focused = Some(index);
@@ -166,6 +185,16 @@ impl App {
                             // resolved through the pane's render scroll.
                             if split.has_selection() {
                                 split.cancel_selection();
+                            }
+                            // A press ON the input box arms the action
+                            // candidate (the chat's
+                            // pending_message_action contract: Down arms,
+                            // a drag-less Up fires); a press elsewhere
+                            // drops any stale candidate.
+                            if on_input_box {
+                                split.click_input_at(x, y);
+                            } else {
+                                split.clear_input_action();
                             }
                             let content_y = split
                                 .panes
@@ -198,11 +227,12 @@ impl App {
                         if let Some(split) = &mut self.agents_split
                             && split.has_selection()
                         {
+                            let was_drag = split.is_drag();
                             // Copy only a REAL drag range (the chat's
                             // rule: a bare click never copies the one
                             // glyph under it); either way the selection
                             // is consumed here.
-                            if split.is_drag() {
+                            if was_drag {
                                 let text = split.extract_selected_text();
                                 if !text.is_empty() {
                                     crate::util::selection::copy_selection(
@@ -212,6 +242,15 @@ impl App {
                                 }
                             }
                             split.cancel_selection();
+                            // A drag-less release over the armed input box
+                            // FIRES the click: the Message Actions dialog
+                            // (Revert/Fork/Copy on the pane session), the
+                            // chat's pending_message_action contract.
+                            if !was_drag
+                                && let Some((pane, hit)) = split.take_input_action()
+                            {
+                                self.open_pane_message_actions(pane, hit);
+                            }
                             return Ok(true);
                         }
                     }
@@ -1152,6 +1191,13 @@ impl App {
                         // Corner hints (f1/f2/f3/f4) light white under the
                         // cursor — hover focus, equal for every hint.
                         self.state.right_panel.set_hint_hover(x, y);
+                    } else if let Some(split) = self.agents_split.as_mut() {
+                        // The /agents split owns the session surface: the
+                        // chat's hover must never stay lit under the panes,
+                        // and the input-box hover (the click cue) is the
+                        // split's own contract.
+                        self.session_view.clear_hover();
+                        let _changed = split.update_hover(x, y);
                     } else {
                         // The cursor left the right panel: no hint stays lit.
                         self.state.right_panel.clear_hint_hover();
@@ -1421,14 +1467,30 @@ impl App {
                             DialogType::MessageActions {
                                 message_id,
                                 is_user_message,
+                                pane_action,
                                 ..
                             } => {
-                                let max_options = if *is_user_message { 3 } else { 1 };
+                                let max_options = usize::from(*is_user_message) * 2 + 1;
                                 let selected = d.selected.min(max_options - 1);
                                 let action = App::message_action_index(selected, *is_user_message);
+                                // Copy EVERYTHING out of the immutable
+                                // `d` borrow before popping the dialog.
                                 let message_id = message_id.clone();
+                                let is_user_message = *is_user_message;
+                                let pane_action = *pane_action;
                                 self.dialog.pop();
-                                self.run_message_action(action, &message_id);
+                                match pane_action {
+                                    Some((pane, timeline_index, user_ordinal)) => {
+                                        self.run_pane_message_action(
+                                            action,
+                                            pane,
+                                            user_ordinal,
+                                            timeline_index,
+                                            is_user_message,
+                                        );
+                                    }
+                                    None => self.run_message_action(action, &message_id),
+                                }
                                 return Ok(true);
                             }
                             DialogType::UndoList {
@@ -1687,6 +1749,8 @@ impl App {
                         message_id,
                         preview,
                         is_user_message,
+                        // The chat's own path: the action keys by message_id.
+                        pane_action: None,
                     });
                     self.session_view.hovered_msg_idx = None;
                 }
