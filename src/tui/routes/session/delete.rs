@@ -26,6 +26,7 @@ use std::sync::atomic::Ordering;
 
 use crate::app::App;
 use crate::types::SessionStatus;
+use crate::ui::toast::{ToastOptions, ToastVariant};
 
 /// Decide whether deleting `session_id` must stop a running agent loop.
 ///
@@ -75,7 +76,28 @@ impl App {
     /// raises the flag, drops the loop-owned senders, and clears the owner
     /// record plus the in-flight stream marker so late harness events can
     /// detect the owner is gone instead of touching the viewed session.
-    pub fn delete_session(&mut self, session_id: &str) {
+    /// Returns `false` — without touching anything — when the session is
+    /// still linked as a `/agents` pane of a live parent session: the pane's
+    /// context belongs to the parent, so deleting it out from under the
+    /// parent would orphan the binding (the parent would resume a session
+    /// that no longer exists). Deleting the PARENT is always allowed and is
+    /// exactly what frees its panes: the linkage lives in the parent's
+    /// `agents_panes`, so once the parent is tombstoned the pane sessions
+    /// are unreferenced and deletable like any other.
+    pub fn delete_session(&mut self, session_id: &str) -> bool {
+        if self
+            .session_store
+            .linked_agents_pane_sessions()
+            .contains(session_id)
+        {
+            self.toast_state.show(ToastOptions {
+                title: Some("Delete".to_string()),
+                message: "Session in use by a /agents pane".to_string(),
+                variant: ToastVariant::Warning,
+                duration_ms: 4000,
+            });
+            return false;
+        }
         // Only a live `Working` loop can be stopped. `Retry` is the terminal
         // state left by `HarnessEvent::Error` (thread already exited via
         // `handle_loop_end(false)`), so it must not raise the stop signal.
@@ -122,6 +144,7 @@ impl App {
         // no-op when this process never held the lock).
         self.session_store.release_session_lock(session_id);
         self.session_store.delete_session(session_id);
+        true
     }
 
     /// Delete every session of the current working directory.
@@ -134,6 +157,11 @@ impl App {
     /// the store tombstone cannot drift from the single-delete semantics.
     /// The ids are cloned first: `delete_session` mutates
     /// `state.session_summaries` while we iterate it.
+    ///
+    /// The pane gate cannot refuse anything here: "all" includes the
+    /// parents, and deleting a parent frees its panes. A pane whose parent
+    /// is deleted LATER in the iteration is simply retried after the first
+    /// pass — by then every linkage is gone.
     pub fn delete_all_sessions(&mut self) {
         let ids: Vec<String> = self
             .state
@@ -141,7 +169,13 @@ impl App {
             .iter()
             .map(|s| s.session_id.clone())
             .collect();
-        for id in ids {
+        let mut deferred = Vec::new();
+        for id in &ids {
+            if !self.delete_session(id) {
+                deferred.push(id.clone());
+            }
+        }
+        for id in deferred {
             self.delete_session(&id);
         }
     }
@@ -304,6 +338,117 @@ mod tests {
             app.stream_msg_id.is_none(),
             "BUG TUI-G: stream_msg_id survives delete; late events can hit wrong session"
         );
+    }
+
+    // ── /agents pane linkage: a pane session is not deletable on its own ──
+
+    fn app_with_pane_linkage(parent_id: &str, pane_id: &str) -> App {
+        let mut app = App::new("/tmp".to_string());
+        let mut parent = crate::types::Session {
+            id: parent_id.to_string(),
+            title: "host".into(),
+            created_at: 0,
+            messages: Vec::new(),
+            title_generated: false,
+            provider: None,
+            model: None,
+            reasoning: None,
+            agents_panes: Some(vec![crate::types::AgentPaneRef::Bound {
+                agent: "cosh".into(),
+                session_id: pane_id.to_string(),
+            }]),
+            agents_mode_open: false,
+            ctx_ids: std::collections::HashMap::new(),
+        };
+        let pane = crate::types::Session {
+            id: pane_id.to_string(),
+            title: "agents manager".into(),
+            ..crate::types::Session {
+                id: String::new(),
+                title: String::new(),
+                created_at: 0,
+                messages: Vec::new(),
+                title_generated: false,
+                provider: None,
+                model: None,
+                reasoning: None,
+                agents_panes: None,
+                agents_mode_open: false,
+                ctx_ids: std::collections::HashMap::new(),
+            }
+        };
+        parent.messages = Vec::new();
+        app.session_store = crate::session_store::SessionStore::with_dir(
+            std::env::temp_dir().join(format!("cosh-delete-test-{parent_id}")),
+            "testhash".into(),
+        );
+        app.session_store.save_session(&parent);
+        app.session_store.save_session(&pane);
+        app.state
+            .add_empty_session(parent_id.to_string(), "host".into(), 0);
+        app.state
+            .add_empty_session(pane_id.to_string(), "agents manager".into(), 0);
+        // `add_empty_session` seeds only the cache; the sidebar summaries
+        // are filled from it explicitly (mirrors the real switch paths).
+        app.state.ensure_session_summary(parent_id);
+        app.state.ensure_session_summary(pane_id);
+        app
+    }
+
+    /// The core rule: a session linked as a `/agents` pane of a live parent
+    /// refuses deletion — the parent's binding would resume a session that
+    /// no longer exists. Nothing is removed (state or store).
+    #[tokio::test]
+    async fn deleting_a_linked_pane_session_is_refused() {
+        let mut app = app_with_pane_linkage("8000", "8000-pane");
+        assert!(
+            !app.delete_session("8000-pane"),
+            "a pane session of a live parent must refuse deletion"
+        );
+        assert!(
+            app.state
+                .session_summaries
+                .iter()
+                .any(|s| s.session_id == "8000-pane"),
+            "the refused pane must stay in the sidebar"
+        );
+        assert!(
+            app.session_store.has_session("8000-pane"),
+            "the refused pane must stay in the store"
+        );
+        // The unrelated parent session deletes normally.
+        assert!(app.delete_session("8000"));
+    }
+
+    /// Deleting the parent frees the panes: the linkage lived in the
+    /// parent's `agents_panes`, so after the parent is gone the pane
+    /// session deletes like any other session.
+    #[tokio::test]
+    async fn deleting_the_parent_frees_its_pane_session() {
+        let mut app = app_with_pane_linkage("8100", "8100-pane");
+        assert!(app.delete_session("8100"));
+        assert!(
+            app.delete_session("8100-pane"),
+            "with the parent deleted, the pane session must be deletable"
+        );
+        assert!(!app.session_store.has_session("8100-pane"));
+    }
+
+    /// Delete-all must take the panes with the parents: a pane that comes
+    /// before its parent in the summary order is refused on the first pass
+    /// and retried after, so nothing pane-linked survives a delete-all.
+    #[tokio::test]
+    async fn delete_all_removes_linked_pane_sessions_too() {
+        // Sidebar order is id-descending; "9000-pane" sorts BEFORE "9000",
+        // so the first pass hits the pane while its parent is still alive.
+        let mut app = app_with_pane_linkage("9000", "9000-pane");
+        app.delete_all_sessions();
+        assert!(
+            !app.session_store.has_session("9000-pane"),
+            "delete-all must free the pane via its parent"
+        );
+        assert!(!app.session_store.has_session("9000"));
+        assert!(app.state.session_summaries.is_empty());
     }
 
     #[tokio::test]

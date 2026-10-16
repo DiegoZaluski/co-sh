@@ -1176,6 +1176,44 @@ impl SessionStore {
             .is_some_and(|branch| !branch.deleted)
     }
 
+    /// Every session id a LIVE parent session links into its `/agents` pane
+    /// set (`AgentPaneRef::Bound` inside `agents_panes`), across this CWD's
+    /// histories.
+    ///
+    /// The link lives ONLY in the parent: a pane session carries no
+    /// back-reference, so "is this session depended on?" is answered by
+    /// scanning the parents, never the session itself. Tombstoned parents
+    /// do not count — deleting the parent is exactly what frees its panes.
+    /// Unbound panes (`AgentPaneRef::Name`) link nothing: they never ran,
+    /// so there is no session behind them to protect.
+    pub fn linked_agents_pane_sessions(&self) -> HashSet<String> {
+        let mut linked = HashSet::new();
+        let Ok(entries) = std::fs::read_dir(&self.sessions_dir) else {
+            return linked;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Some((_, projection)) = self.load_history_path(&path) else {
+                continue;
+            };
+            for branch in projection
+                .branches
+                .values()
+                .filter(|branch| !branch.deleted)
+            {
+                for pane in branch.session.agents_panes.iter().flatten() {
+                    if let crate::types::AgentPaneRef::Bound { session_id, .. } = pane {
+                        linked.insert(session_id.clone());
+                    }
+                }
+            }
+        }
+        linked
+    }
+
     // ── Private helpers ───────────────────────────────────────────────────
 
     /// Build the absolute path for a session file within the current CWD subdirectory.
@@ -3077,8 +3115,7 @@ mod tests {
             format!("{now_ms}-4"),
             format!("{now_ms}-5"),
         ] {
-            let session =
-                make_test_session(&candidate, "Raced", vec![make_user_msg("m1", "hi")]);
+            let session = make_test_session(&candidate, "Raced", vec![make_user_msg("m1", "hi")]);
             store.save_session(&session);
             assert!(foreign.try_lock_session(&candidate));
         }
@@ -3864,6 +3901,74 @@ mod tests {
         assert!(!path.exists(), "no active branch remains: the file goes");
         assert!(store.load_session("6300-fork").is_none());
         assert!(store.load_session("6300").is_none());
+    }
+
+    // ── /agents pane linkage: the deletion gate's data source ──
+
+    /// A parent with bound panes reports exactly its pane session ids; an
+    /// unbound pane (`Name`) links nothing, and a tombstoned parent links
+    /// nothing either — deleting the parent is what frees its panes.
+    #[test]
+    fn linked_pane_sessions_reflects_only_live_bound_parents() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+
+        let mut parent = make_test_session("7000", "Parent", vec![]);
+        parent.agents_panes = Some(vec![
+            crate::types::AgentPaneRef::Bound {
+                agent: "cosh".into(),
+                session_id: "7000-pane".into(),
+            },
+            crate::types::AgentPaneRef::Name("claude".into()),
+        ]);
+        store.save_session(&parent);
+
+        let linked = store.linked_agents_pane_sessions();
+        assert!(
+            linked.contains("7000-pane"),
+            "the bound pane session must be reported"
+        );
+        assert_eq!(
+            linked.len(),
+            1,
+            "an unbound pane links nothing: only {{ agent, session_id }} counts"
+        );
+
+        // Deleting the parent frees the pane session: the linkage lived in
+        // the parent's `agents_panes`, and a tombstoned parent links nothing.
+        store.delete_session("7000");
+        assert!(
+            store.linked_agents_pane_sessions().is_empty(),
+            "a deleted parent must not keep guarding its panes"
+        );
+    }
+
+    /// The check scans ALL live branches of every history file, not just the
+    /// direct `session-{id}.jsonl` path: a forked parent's pane set must
+    /// guard just the same.
+    #[test]
+    fn linked_pane_sessions_sees_branches_beyond_the_direct_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+
+        let parent = make_test_session("7100", "Parent", vec![make_user_msg("msg-0", "one")]);
+        store.save_session(&parent);
+        let mut fork = parent.clone();
+        fork.id = "7100-fork".into();
+        fork.agents_panes = Some(vec![crate::types::AgentPaneRef::Bound {
+            agent: "codex".into(),
+            session_id: "7100-pane".into(),
+        }]);
+        assert!(store.fork_session("7100", "msg-0", &fork));
+        // The fork event's metadata carries no pane set, so the binding
+        // reaches the branch through the follow-up agents metadata delta
+        // (exactly how a live fork picks up its panes).
+        store.save_session(&fork);
+
+        assert!(
+            store.linked_agents_pane_sessions().contains("7100-pane"),
+            "a fork branch's pane set must count as a live linkage"
+        );
     }
 
     #[test]
