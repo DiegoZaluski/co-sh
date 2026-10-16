@@ -34,6 +34,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 
 use crate::component::budget::{budget_bar_style, budget_block, budget_pct_style};
+use crate::component::scroll_pill::ScrollPill;
 use crate::component::spinner::SpinnerState;
 use crate::routes::session::right_panel::subagent_theme_key;
 use crate::routes::session::right_panel::types::{
@@ -164,6 +165,10 @@ pub struct AgentPane {
     pub effective_scroll: u16,
     pub content_height: u16,
     pub body_height: u16,
+    /// Per-pane scroll-to-bottom pill (the shared `component::scroll_pill`):
+    /// same contract as the chat's pill, anchored to this pane's bottom row.
+    /// Clicking it re-engages `auto_follow` via `scroll_to_bottom`.
+    pub pill: ScrollPill,
 }
 
 /// The `/agents` prompt badge's data for one pane: what serves its
@@ -203,6 +208,7 @@ impl AgentPane {
             effective_scroll: 0,
             content_height: 0,
             body_height: 0,
+            pill: ScrollPill::new(),
         }
     }
 
@@ -345,6 +351,26 @@ impl AgentsSplitState {
     #[must_use]
     pub fn pane_count(&self) -> usize {
         self.panes.len()
+    }
+
+    /// Whether any pane's scroll pill animation is mid-flight (feeds the
+    /// live-render gate so the pop-in/retract completes without other input).
+    #[must_use]
+    pub fn pill_animating(&self) -> bool {
+        self.panes.iter().any(|p| p.pill.animating())
+    }
+
+    /// Click handler for the per-pane scroll pills: jumps the hit pane back
+    /// to the live tail and re-engages `auto_follow`. Returns true when a
+    /// pill consumed the click.
+    pub fn click_pill(&mut self, x: u16, y: u16) -> bool {
+        for pane in &mut self.panes {
+            if pane.pill.hit(x, y) {
+                pane.scroll_to_bottom();
+                return true;
+            }
+        }
+        false
     }
 
     /// Focus the pane bound to hotkey `ch`: `'0'` UNFOCUSES every pane
@@ -1016,7 +1042,13 @@ fn split_columns(x: u16, y: u16, total_w: u16, h: u16, count: usize) -> Vec<Rect
 
 /// Render the split view: compute the layout, record the hit rects on the
 /// state, then paint each pane (header + activity tail).
-pub fn render(buf: &mut Buffer, area: Rect, state: &mut AgentsSplitState, theme: &Theme) {
+pub fn render(
+    buf: &mut Buffer,
+    area: Rect,
+    state: &mut AgentsSplitState,
+    theme: &Theme,
+    delta_time: f64,
+) {
     let rects = compute_layout_with_maximized(state.pane_count(), area, state.maximized);
     state.pane_rects = rects.clone();
     // Every pane gets a region slot for THIS frame: panes that do not
@@ -1073,6 +1105,7 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &mut AgentsSplitState, theme:
             &mut live_keys,
             &mut pane_regions[i],
             select_span,
+            delta_time,
         );
     }
     block_cache.retain(|key, _| live_keys.contains(key));
@@ -1107,6 +1140,7 @@ fn render_pane(
     live_keys: &mut HashSet<String>,
     out_regions: &mut Vec<TextRegion>,
     select_span: Option<(i32, i32)>,
+    delta_time: f64,
 ) {
     if rect.width == 0 || rect.height == 0 {
         return;
@@ -1228,6 +1262,7 @@ fn render_pane(
         pane.effective_scroll = 0;
         pane.content_height = 0;
         pane.body_height = body_h;
+        pane.pill.clear();
         return;
     }
 
@@ -1332,6 +1367,19 @@ fn render_pane(
         content_row = line_end;
     }
     *out_regions = regions;
+    // Scroll-to-bottom pill, anchored to the pane's last body row (the
+    // shared component; per-pane state lives on `pane.pill`). Painted last
+    // so it sits above the activity lines.
+    let max = i32::from(content_height.saturating_sub(body_h));
+    pane.pill.render(
+        buf,
+        i32::from(scroll_y),
+        max,
+        rect.bottom().saturating_sub(1),
+        rect,
+        theme,
+        delta_time,
+    );
 }
 
 /// Union of a line's painted band `[skip, skip + paint)` with the
@@ -2321,7 +2369,7 @@ mod tests {
         );
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
-        render(&mut buf, area, &mut state, &theme);
+        render(&mut buf, area, &mut state, &theme, 0.0);
 
         // Sanity: the rail IS still painted (only the copy changes).
         let body_top = area.y + 1;
@@ -2377,6 +2425,44 @@ mod tests {
         }
     }
 
+    /// Per-pane scroll pill: a scrolled-up pane shows the shared `⮟`
+    /// component, and clicking it jumps back to the live tail (re-engaging
+    /// `auto_follow`) — the chat pill's contract, per pane.
+    #[test]
+    fn pane_pill_shows_when_scrolled_up_and_click_jumps_to_live() {
+        let theme = test_theme();
+        let mut state = AgentsSplitState::new(vec!["kilo".into()]);
+        seed_tall_pane(&mut state, 14);
+        let area = Rect::new(0, 0, 60, 10);
+        // Settle layout, then scroll away from the bottom.
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut state, &theme, 0.0);
+        assert!(state.panes[0].pill.area.is_none());
+        state.panes[0].auto_follow = false;
+        state.panes[0].scroll_y = 0;
+        // Drive frames with a real delta until the pop-in settles.
+        for _ in 0..20 {
+            buf = Buffer::empty(area);
+            render(&mut buf, area, &mut state, &theme, 1.0 / 60.0);
+        }
+        let rect = state.panes[0]
+            .pill
+            .area
+            .expect("pill must show while scrolled away");
+        let glyph = buf
+            .cell((rect.x + 2, rect.y))
+            .map(|cell| cell.symbol().to_string())
+            .unwrap_or_default();
+        // The last settled frame painted the glyph (buf is that frame).
+        assert_eq!(glyph, "\u{2B9F}", "pill glyph must be painted");
+        assert!(state.pill_animating() || state.panes[0].pill.progress() == 1.0);
+        // Clicking the pill's center jumps to live and re-engages follow.
+        assert!(state.click_pill(rect.x + 2, rect.y));
+        assert!(state.panes[0].auto_follow);
+        // A click outside any pill does nothing.
+        assert!(!state.click_pill(area.x, area.y));
+    }
+
     /// Selection regions cover the whole drag span even when it scrolled
     /// out of view: rows inside the span report regions during the frame
     /// (the chat rebuilds regions for the span on release instead — same
@@ -2388,7 +2474,7 @@ mod tests {
         seed_tall_pane(&mut state, 14);
         let area = Rect::new(0, 0, 60, 10);
         let mut buf = Buffer::empty(area);
-        render(&mut buf, area, &mut state, &theme);
+        render(&mut buf, area, &mut state, &theme, 0.0);
         let mut ys: Vec<i32> = state.pane_regions[0].iter().map(|r| r.y1).collect();
         ys.sort();
         ys.dedup();
@@ -2408,7 +2494,7 @@ mod tests {
         state.selection_focus_content_y = focus;
         state.drag_selection = Some((rect.x + 1, 2, rect.x + 30, 8));
         let mut buf2 = Buffer::empty(area);
-        render(&mut buf2, area, &mut state, &theme);
+        render(&mut buf2, area, &mut state, &theme, 0.0);
 
         let covered: Vec<i32> = state.pane_regions[0].iter().map(|r| r.y1).collect();
         for row in anchor..=focus {
@@ -2439,13 +2525,13 @@ mod tests {
         seed_tall_pane(&mut state, 14);
         let area = Rect::new(0, 0, 60, 10);
         let mut buf = Buffer::empty(area);
-        render(&mut buf, area, &mut state, &theme);
+        render(&mut buf, area, &mut state, &theme, 0.0);
         // Pin the viewport to the top and re-render: the rows below come
         // from scroll 0 (fresh panes sticky-follow to the bottom).
         state.panes[0].auto_follow = false;
         state.panes[0].scroll_y = 0;
         let mut buf = Buffer::empty(area);
-        render(&mut buf, area, &mut state, &theme);
+        render(&mut buf, area, &mut state, &theme, 0.0);
         let mut ys: Vec<i32> = state.pane_regions[0].iter().map(|r| r.y1).collect();
         ys.sort();
         ys.dedup();
@@ -2481,11 +2567,11 @@ mod tests {
             state.selection_focus_content_y = focus;
             state.drag_selection = Some((sx, 0, fx, 0));
             let mut sel = Buffer::empty(area);
-            render(&mut sel, area, state, theme);
+            render(&mut sel, area, state, theme, 0.0);
             state.selection_pane = None;
             state.drag_selection = None;
             let mut base = Buffer::empty(area);
-            render(&mut base, area, state, theme);
+            render(&mut base, area, state, theme, 0.0);
             changed_rows(&sel, &base, area)
         }
 
@@ -2532,7 +2618,7 @@ mod tests {
         };
 
         let mut buf = Buffer::empty(area);
-        render(&mut buf, area, &mut state, &theme);
+        render(&mut buf, area, &mut state, &theme, 0.0);
         let all: String = flat_text(&buf);
         // The first frame's glyph sits in pane 0's header row.
         assert!(
@@ -2546,9 +2632,9 @@ mod tests {
         // Two further renders consume the spinner's half-rate tick
         // (`advance` moves the frame every other tick): the glyph changes.
         let mut buf = Buffer::empty(area);
-        render(&mut buf, area, &mut state, &theme);
+        render(&mut buf, area, &mut state, &theme, 0.0);
         let mut buf = Buffer::empty(area);
-        render(&mut buf, area, &mut state, &theme);
+        render(&mut buf, area, &mut state, &theme, 0.0);
         let all2 = flat_text(&buf);
         assert!(
             !all2.contains(crate::component::spinner::SPINNER_FRAMES[0]),
@@ -2558,7 +2644,7 @@ mod tests {
         // A settled pane paints no spinner at all.
         state.panes[0].rehydrating = false;
         let mut buf = Buffer::empty(area);
-        render(&mut buf, area, &mut state, &theme);
+        render(&mut buf, area, &mut state, &theme, 0.0);
         let all3 = flat_text(&buf);
         assert!(
             !all3.contains(crate::component::spinner::SPINNER_FRAMES[0]),
@@ -2572,7 +2658,7 @@ mod tests {
         let mut state = AgentsSplitState::new(vec!["claude".into(), "kilo".into()]);
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
-        render(&mut buf, area, &mut state, &theme);
+        render(&mut buf, area, &mut state, &theme, 0.0);
 
         assert_eq!(state.pane_rects.len(), 2, "hit rects recorded for mouse");
 
@@ -2602,7 +2688,7 @@ mod tests {
         let mut state = AgentsSplitState::new(vec!["claude".into(), "kilo".into()]);
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
-        render(&mut buf, area, &mut state, &theme);
+        render(&mut buf, area, &mut state, &theme, 0.0);
 
         let claude_rect = state.pane_rects[0];
         let header_y = claude_rect.y;
@@ -2630,7 +2716,7 @@ mod tests {
         // formula the painter applies.
         assert_eq!(state.focus_hotkey('2'), Some(1));
         let mut buf = Buffer::empty(area);
-        render(&mut buf, area, &mut state, &theme);
+        render(&mut buf, area, &mut state, &theme, 0.0);
         let brand = RGBA::from_ints(0xD9, 0x77, 0x57, 255);
         let bg_lum = {
             let (r, g, b, _) = theme.background_element.to_ints();
@@ -2661,7 +2747,7 @@ mod tests {
         // Focus back to claude: the name takes the brand terracotta.
         state.focus_hotkey('1');
         let mut buf = Buffer::empty(area);
-        render(&mut buf, area, &mut state, &theme);
+        render(&mut buf, area, &mut state, &theme, 0.0);
         let cell = buf
             .cell((claude_rect.x + 1, header_y))
             .expect("claude 'c' cell");
@@ -2704,7 +2790,7 @@ mod tests {
         let mut state = AgentsSplitState::new(vec!["kilo".into()]);
         state.panes[0].activity.usage = Some((100_000, 9_612));
         let mut buf = Buffer::empty(area);
-        render(&mut buf, area, &mut state, &theme);
+        render(&mut buf, area, &mut state, &theme, 0.0);
         let row = row_text(&buf);
         let cols: Vec<char> = row.chars().collect();
         let block = "9,612 / 100,000 tok  \u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}  9%";
@@ -2752,7 +2838,7 @@ mod tests {
         let mut state = AgentsSplitState::new(vec!["kilo".into()]);
         state.panes[0].activity.usage = Some((100_000, 95_000));
         let mut buf = Buffer::empty(area);
-        render(&mut buf, area, &mut state, &theme);
+        render(&mut buf, area, &mut state, &theme, 0.0);
         let row = row_text(&buf);
         assert!(
             row.ends_with("95,000 / 100,000 tok  \u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2591} 95% "),
@@ -2769,7 +2855,7 @@ mod tests {
         // No snapshot: the name keeps the whole row, no budget anywhere.
         let mut state = AgentsSplitState::new(vec!["kilo".into()]);
         let mut buf = Buffer::empty(area);
-        render(&mut buf, area, &mut state, &theme);
+        render(&mut buf, area, &mut state, &theme, 0.0);
         let row = row_text(&buf);
         let cols: Vec<char> = row.chars().collect();
         assert!(
@@ -2805,7 +2891,7 @@ mod tests {
         let mut state = AgentsSplitState::new(vec!["kilo".into()]);
         state.panes[0].activity.usage = Some((100_000, 9_612));
         let mut buf = Buffer::empty(area);
-        render(&mut buf, area, &mut state, &theme);
+        render(&mut buf, area, &mut state, &theme, 0.0);
         let row = row_text(&buf, 30);
         let cols: Vec<char> = row.chars().collect();
         let compact: Vec<char> = "9.6k/100k 9%".chars().collect();
@@ -2844,7 +2930,7 @@ mod tests {
         let mut state = AgentsSplitState::new(vec!["kilo".into()]);
         state.panes[0].activity.usage = Some((100_000, 9_612));
         let mut buf = Buffer::empty(area);
-        render(&mut buf, area, &mut state, &theme);
+        render(&mut buf, area, &mut state, &theme, 0.0);
         let row = row_text(&buf, 12);
         assert!(!row.contains('%'), "no budget at all: {row:?}");
         assert_eq!(
@@ -2863,7 +2949,7 @@ mod tests {
         let mut state = AgentsSplitState::new(vec!["kilo".into()]);
         state.panes[0].activity.usage = Some((100_000, 9_612));
         let mut buf = Buffer::empty(area);
-        render(&mut buf, area, &mut state, &theme);
+        render(&mut buf, area, &mut state, &theme, 0.0);
         let row: String = (0..40)
             .map(|x| {
                 buf.cell((x, 0))
@@ -2895,7 +2981,7 @@ mod tests {
         assert_eq!(state.focus_hotkey('2'), Some(1));
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
-        render(&mut buf, area, &mut state, &theme);
+        render(&mut buf, area, &mut state, &theme, 0.0);
 
         let rect = state.pane_rects[1];
         let header_y = rect.y;
@@ -2955,7 +3041,7 @@ mod tests {
         }
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
-        render(&mut buf, area, &mut state, &theme);
+        render(&mut buf, area, &mut state, &theme, 0.0);
 
         // The effective window content rows the render measured.
         let pane = &state.panes[0];
@@ -3041,7 +3127,7 @@ mod tests {
         );
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
-        render(&mut buf, area, &mut state, &theme);
+        render(&mut buf, area, &mut state, &theme, 0.0);
 
         let all: String = (0..24)
             .map(|y| {

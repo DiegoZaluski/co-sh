@@ -4,6 +4,7 @@ pub mod budget;
 pub mod cursor;
 pub mod list_dialog;
 pub mod prompt;
+pub mod scroll_pill;
 pub mod rag_input;
 pub mod search_bar;
 pub mod sparkle;

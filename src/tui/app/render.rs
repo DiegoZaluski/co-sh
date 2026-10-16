@@ -123,6 +123,11 @@ impl App {
         // other live source (idle session, mid-history scroll): otherwise the
         // animation would freeze on a half-drawn frame until the next event.
         live = live || self.session_view.pill_animating();
+        live = live
+            || self
+                .agents_split
+                .as_ref()
+                .is_some_and(|split| split.pill_animating());
         // Keep the lightweight landing and empty-session logo animations
         // moving even when there is no input or agent activity.
         #[cfg(feature = "home")]
@@ -882,6 +887,7 @@ impl App {
                                 inset_area,
                                 split,
                                 &self.theme,
+                                delta_time,
                             );
                             // Drag auto-scroll advances once per frame, right
                             // after the panes laid out (the same placement the

@@ -37,6 +37,7 @@ use self::tool_render::ToolRenderState;
 use crate::config::TuiConfig;
 use crate::state::AppState;
 use crate::theme::{Theme, rgba_color};
+use crate::component::scroll_pill::ScrollPill;
 use crate::types::{
     AgentColors, CompactionPart, FilePart, InstallPart, Message, MessageRole, Part, ReasoningPart,
     SessionStatus, ToolPart, ToolStatus,
@@ -472,15 +473,10 @@ pub struct SessionView {
     is_applying_sticky_scroll: bool,
 
     // ── Scroll-to-bottom pill (jump back to the live content) ──────────────────
-    /// Screen rect the pill was last drawn in (`None` while hidden). The mouse
-    /// dispatcher hit-tests THIS, so a click always lands on exactly what was
-    /// drawn — no recomputed geometry to drift out of sync.
-    pub pill_area: Option<Rect>,
-    /// 0..=1 slide/opacity progress (1 = fully settled). Advanced by
-    /// `render_pill_overlay` itself, so the animation can never disagree with
-    /// what the last frame actually painted; `clear_pill` parks it at 0 when
-    /// an inline dialog hides the prompt or another route takes over.
-    pill_progress: f32,
+    /// Shared `⮟` pill component (see `component::scroll_pill`). The mouse
+    /// dispatcher hit-tests `pill.area`, so a click always lands on exactly
+    /// what was drawn. Kept `pub` for the dispatcher/tests.
+    pub pill: ScrollPill,
 
     // ── Scroll accumulator (fractional smoothing, like OpenCode) ───────────────
     scroll_accumulator_y: f64,
@@ -819,25 +815,7 @@ fn config_token(config: &TuiConfig) -> u64 {
 }
 
 impl SessionView {
-    // ── Scroll-to-bottom pill tuning ───────────────────────────────────────────
-    /// Content rows between the viewport bottom and the content end at which
-    /// the pill appears. One viewport page of reading distance stays pill-free
-    /// (the keyboard ScrollToBottom flow already covers that), while a genuine
-    /// drift — or the agent outrunning a slow reader — shows it.
-    const PILL_APPEAR_ROWS: i32 = 3;
-    /// Time the slide/opacity pop-in takes (seconds). Time-based, not
-    /// per-frame: the render loop oscillates between 30 and 60 fps (frame
-    /// pacer hysteresis), and a per-frame step made the pill land in ~3
-    /// frames at 60 fps but ~6 at 30 — visibly different speeds for the same
-    /// gesture. Dividing the real frame delta by these durations keeps the
-    /// animation's wall-clock speed identical at either cadence.
-    const PILL_POP_IN_SECS: f32 = 0.12;
-    /// Retract is slightly faster than the pop-in so the button never
-    /// lingers once the user is back at the bottom.
-    const PILL_FADE_OUT_SECS: f32 = 0.06;
-    /// How many rows above the settled spot the pill starts its slide from
-    /// (quadratic-eased, so it lands while still translucent).
-    const PILL_SLIDE_ROWS: f32 = 2.0;
+    // ── Scroll-to-bottom pill tuning lives in `component::scroll_pill` ──────────
 
     pub fn new() -> Self {
         Self {
@@ -864,8 +842,7 @@ impl SessionView {
             last_content_height: 0,
             cached_total_height: 0,
             is_applying_sticky_scroll: false,
-            pill_area: None,
-            pill_progress: 0.0,
+            pill: ScrollPill::new(),
             scroll_accumulator_y: 0.0,
             scroll_accel: 3.0,
             msg_height_cache: Vec::new(),
@@ -4081,24 +4058,19 @@ impl SessionView {
     /// live-render gate in `App::render` so the animation completes even with
     /// no other live source and no pending input events).
     pub fn pill_animating(&self) -> bool {
-        self.pill_progress > 0.0 && self.pill_progress < 1.0
+        self.pill.animating()
     }
 
     /// Animation progress of the pill (0 hidden … 1 settled). Exposed for
     /// tests and for callers reasoning about the live-render gate.
     pub fn pill_progress(&self) -> f32 {
-        self.pill_progress
+        self.pill.progress()
     }
 
     /// Drop the pill's hit rect and park the animation at rest (e.g. while an
-    /// inline dialog replaces the prompt). Progress must not be left
-    /// mid-flight: `pill_animating()` keeps the run loop redrawing, so a
-    /// frozen value would busy-loop behind a dialog that never repaints the
-    /// pill. When the dialog closes, the next frame re-runs the pop-in if the
-    /// viewport is still away from the bottom.
+    /// inline dialog replaces the prompt). See `ScrollPill::clear`.
     pub fn clear_pill(&mut self) {
-        self.pill_area = None;
-        self.pill_progress = 0.0;
+        self.pill.clear();
     }
 
     /// Draw the scroll-to-bottom pill — a small `⮟` button centered just above
@@ -4110,10 +4082,7 @@ impl SessionView {
     /// bottom — sticky or not — never sees it, so the normal auto-scroll
     /// behavior is untouched. `App::render` calls this after every other
     /// inline layer so the pill is never buried under the prompt, pending
-    /// queues, dialogs or the slash menu. Clicks are hit-tested against
-    /// [`Self::pill_area`] — the painted rect while the pill is active
-    /// (during the retract the glyph fades out but the rect is already gone:
-    /// a fading-out button is not a button).
+    /// queues, dialogs or the slash menu.
     pub fn render_pill_overlay(
         &mut self,
         buf: &mut Buffer,
@@ -4124,79 +4093,15 @@ impl SessionView {
     ) {
         let viewport_h = i32::from(area.height);
         let max_scroll = (self.total_height - viewport_h).max(0);
-        let from_bottom = max_scroll - self.scroll_y.min(max_scroll);
-
-        // While the viewport is away from the live content the pill is
-        // "active": it slides/fades in and is clickable. Once the user is
-        // back within the threshold the animation only RETRACTS — the glyph
-        // keeps fading (natural exit), but the hit rect is gone from the
-        // first retract frame.
-        let active = from_bottom > Self::PILL_APPEAR_ROWS;
-        // Progress advances by the REAL frame delta (time-based), not a
-        // per-frame constant — see the duration constants above.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let dt = delta_time.max(0.0) as f32;
-        if !active && self.pill_progress > 0.0 {
-            self.pill_progress = (self.pill_progress - dt / Self::PILL_FADE_OUT_SECS).max(0.0);
-        } else if active && self.pill_progress < 1.0 {
-            self.pill_progress = (self.pill_progress + dt / Self::PILL_POP_IN_SECS).min(1.0);
-        }
-        let t = self.pill_progress;
-        if t <= 0.0 {
-            self.pill_area = None;
-            return;
-        }
-
-        // Geometry: centered horizontally on the row the caller pinned (the
-        // spinner's line — directly above the pending strip / prompt). Pinning
-        // here instead of the viewport's bottom edge keeps the arrow on the
-        // same line as the spinner: the layout pushes the spinner upward when
-        // it appears, but the pill must not ride along.
-        let pad_x = 2u16;
-        let pill_w = 1 + pad_x * 2; // `⮟` plus symmetric padding
-        if area.width < pill_w || area.height < 2 {
-            self.pill_area = None;
-            return;
-        }
-        let cx = area.x + area.width.saturating_sub(pill_w) / 2;
-        // Quadratic-eased slide: the pill lands on its final row while still
-        // translucent instead of snapping into place at the end of the fade.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let slide = ((1.0 - t) * (1.0 - t) * Self::PILL_SLIDE_ROWS).round() as u16;
-        // The caller's anchor is authoritative (the spinner's line). Only the
-        // slide clamps toward the viewport's top — the anchor itself must
-        // never be re-clamped to the viewport's bottom edge, or the one-row
-        // viewport shrink caused by the spinner appearing would drag the pill
-        // back up again.
-        let y = anchor_y.saturating_sub(slide).max(area.y);
-
-        // Hit rect only while active: during the retract the glyph fades but
-        // clicks pass through — the rect the dispatcher hit-tests must never
-        // outlive the button's active state.
-        self.pill_area = active.then(|| Rect::new(cx, y, pill_w, 1));
-
-        // Fake translucency (ratatui has no real alpha — same pre-blending
-        // trick as the slash menu): the glyph fades in from the terminal
-        // background as progress rises. No fill is painted — the arrow is the
-        // whole button, and cells it does not occupy keep the transcript's
-        // own background (set_style only patches the channels it carries).
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let blend = |fg: RGBA, bg: RGBA| -> RGBA {
-            let (fr, fg_g, fb, _) = fg.to_ints();
-            let (br, bg_g, bb, _) = bg.to_ints();
-            let mix = |f: u8, b: u8| (f32::from(f) * t + f32::from(b) * (1.0 - t)).round() as u8;
-            RGBA::from_ints(mix(fr, br), mix(fg_g, bg_g), mix(fb, bb), 255)
-        };
-        let glyph_fg = blend(theme.primary, theme.background);
-        // Bold so the lone arrow reads slightly thicker — a one-cell button
-        // needs the weight to look clickable.
-        let style = Style::default()
-            .fg(rgba_color(glyph_fg))
-            .add_modifier(Modifier::BOLD);
-        if let Some(cell) = buf.cell_mut((cx.saturating_add(pad_x), y)) {
-            cell.set_char('\u{2B9F}');
-            cell.set_style(style);
-        }
+        self.pill.render(
+            buf,
+            self.scroll_y,
+            max_scroll,
+            anchor_y,
+            area,
+            theme,
+            delta_time,
+        );
     }
 
     #[allow(
