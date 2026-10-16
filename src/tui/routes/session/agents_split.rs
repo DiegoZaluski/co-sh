@@ -94,11 +94,31 @@ const GAP: u16 = 1;
 /// turns that are genuinely gone.
 pub const PANE_IDLE_WATCHDOG: Duration = Duration::from_secs(600);
 
+/// Monotonic generator for [`AgentPane::id`]: every pane a process ever
+/// builds carries a fresh id, so an event can be routed to ITS pane even
+/// after the pane set was rebuilt around it (a fresh picker confirm that
+/// keeps some panes and adds more must not orphan a running turn's
+/// stream). Starts at 1: `0` stays reserved for "never assigned" (the
+/// derived `Default`), which no live pane ever carries.
+static NEXT_PANE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+#[must_use]
+fn next_pane_id() -> u64 {
+    NEXT_PANE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// One agent pane: identity, live activity stream and lifecycle state.
 #[derive(Debug, Clone, Default)]
 pub struct AgentPane {
     /// Agent CLI name (`"claude"`, `"kilo"`, …). The daemon pane is `"cosh"`.
-    pub agent: String,    /// Structured live transcript, REUSED from the right panel's
+    pub agent: String,
+    /// Stable identity of THIS pane object, stamped by [`AgentPane::new`]
+    /// and carried unchanged by every pane-set rebuild that keeps the pane
+    /// (`AgentsSplitState::reconciled_from`). Every pane event is stamped
+    /// with it at dispatch; the event handler routes by id and drops
+    /// whatever no pane answers to — a stream can never land in a
+    /// replacement pane that merely shares the index.
+    pub id: u64,    /// Structured live transcript, REUSED from the right panel's
     /// `SubagentActivity` so Message/Thought chunks coalesce and tool-call
     /// patches apply exactly like the existing sub-agent box.
     pub activity: SubagentActivity,
@@ -199,6 +219,7 @@ impl AgentPane {
     pub fn new(agent: String) -> Self {
         Self {
             agent,
+            id: next_pane_id(),
             activity: SubagentActivity::default(),
             running: false,
             last_activity: None,
@@ -413,6 +434,95 @@ impl AgentsSplitState {
             }
         }
         false
+    }
+
+    /// The index of the pane carrying `id`, if any — the event router's
+    /// identity check. `None` when no pane answers to the id (it left the
+    /// set, or the set was rebuilt without it): the caller drops the event.
+    #[must_use]
+    pub fn pane_index_by_id(&self, id: u64) -> Option<usize> {
+        self.panes.iter().position(|p| p.id == id)
+    }
+
+    /// Reconcile THIS split against a fresh picker set: every surviving
+    /// pane (same agent, in occurrence order — the k-th fresh occurrence of
+    /// an agent adopts the k-th old occurrence of the same agent, the same
+    /// binding-inheritance rule `open_agents_split` applies to the
+    /// metadata) keeps its pane OBJECT — timeline, running turn, stop
+    /// signal, bound session, scroll state — and is re-laid at its new
+    /// index; genuinely new panes are built fresh. Only the per-frame
+    /// caches and the selection state reset (the new layout invalidates
+    /// them; the next render rebuilds the caches from the surviving
+    /// timelines).
+    ///
+    /// Panes the fresh set dropped are NOT carried and are signal-stopped
+    /// here (their turn was cancelled with their slot; a discarded stop
+    /// signal is one nobody will ever set again): their ids answer to
+    /// nothing, so their late events are dropped by the handler — a
+    /// removed pane cannot leak its stream into a replacement that shares
+    /// the index.
+    #[must_use]
+    pub fn reconciled_from(mut old: Self, agents: &[crate::types::AgentPaneRef]) -> Self {
+        // Which OLD panes the fresh set keeps (occurrence matching below):
+        // the rest are signal-stopped before the move.
+        let mut kept = vec![false; old.panes.len()];
+        let mut fresh: Vec<AgentPane> = Vec::with_capacity(agents.len());
+        let mut seen: HashMap<&str, usize> = HashMap::new();
+        for agent_ref in agents {
+            let name = agent_ref.agent();
+            if name.is_empty() {
+                continue;
+            }
+            let k = seen.entry(name).or_insert(0);
+            // The k-th occurrence among ALL old panes of the agent, in
+            // order — the same matching `open_agents_split` applies to the
+            // persisted bindings.
+            let mut nth = *k;
+            let mut picked: Option<usize> = None;
+            for (i, p) in old.panes.iter().enumerate() {
+                if p.agent == name && nth == 0 {
+                    picked = Some(i);
+                    break;
+                }
+                if p.agent == name {
+                    nth -= 1;
+                }
+            }
+            *k += 1;
+            match picked {
+                Some(i) => {
+                    kept[i] = true;
+                    fresh.push(old.panes[i].clone());
+                }
+                None => fresh.push(AgentPane::from_ref(agent_ref)),
+            }
+        }
+        for (i, pane) in old.panes.iter_mut().enumerate() {
+            if !kept[i] {
+                if let Some(signal) = &pane.stop_signal {
+                    signal.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                pane.running = false;
+            }
+        }
+        Self {
+            panes: fresh,
+            focused: Some(0),
+            maximized: None,
+            pane_rects: Vec::new(),
+            block_cache: old.block_cache,
+            diff_cells: old.diff_cells,
+            selection_pane: None,
+            drag_selection: None,
+            selection_anchor_content_y: 0,
+            selection_focus_content_y: 0,
+            pane_regions: Vec::new(),
+            is_auto_scrolling: false,
+            auto_scroll_accumulator: 0.0,
+            auto_scroll_speed: 0.0,
+            hovered_input: None,
+            pending_input_action: None,
+        }
     }
 
     /// Focus the pane bound to hotkey `ch`: `'0'` UNFOCUSES every pane

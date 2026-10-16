@@ -159,6 +159,16 @@ pub enum HarnessEvent {
     AgentsPaneEvent {
         /// Index into `App::agents_split`'s panes (0 = the `cosh` daemon).
         pane: usize,
+        /// Stable identity of the pane object this turn was dispatched to
+        /// (`AgentPane::id`). The event handler routes by THIS, not the
+        /// index: a pane set rebuilt around a still-running turn (a fresh
+        /// picker confirm that keeps the pane) keeps the pane's id, so the
+        /// stream follows the pane to its new index — and a pane the
+        /// rebuild dropped carries an id no pane answers to, so its events
+        /// are dropped instead of corrupting a replacement's timeline.
+        /// `0` = never assigned (tests / unstamped senders); those fall
+        /// back to the epoch + index gate.
+        pane_id: u64,
         /// Dispatch-time split-slot generation (see the variant doc).
         epoch: u64,
         /// The typed event, the same shape the right-panel sub-agent box
@@ -175,6 +185,9 @@ pub enum HarnessEvent {
     AgentsPaneDone {
         /// Index into `App::agents_split`'s panes.
         pane: usize,
+        /// Stable identity of the pane object the turn ran in (see
+        /// `AgentsPaneEvent::pane_id`).
+        pane_id: u64,
         /// Dispatch-time split-slot generation (see the variant doc).
         epoch: u64,
         /// The final report; an errored turn carries the error text instead.
@@ -195,6 +208,9 @@ pub enum HarnessEvent {
     AgentsPaneReplayed {
         /// Index into `App::agents_split`'s panes.
         pane: usize,
+        /// Stable identity of the pane object the replay runs for (see
+        /// `AgentsPaneEvent::pane_id`).
+        pane_id: u64,
         /// Dispatch-time split-slot generation (see the variant doc).
         epoch: u64,
         /// Whether the replay completed (false = the failure reason).

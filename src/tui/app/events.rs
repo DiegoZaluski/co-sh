@@ -276,15 +276,34 @@ impl App {
                 // turn running) is an equal sink: the stream follows the
                 // pane objects, not the screen.
                 HarnessEvent::AgentsPaneEvent {
-                    pane,
+                    mut pane,
+                    pane_id,
                     epoch,
                     event,
                 } => {
-                    // A stale epoch means the pane's set was replaced or
-                    // torn down while the turn was being cancelled: drop
-                    // the event (the replacement pane owns the index now).
-                    if epoch != self.agents_pane_epoch {
-                        continue;
+                    // Route by the pane's stable identity FIRST: a pane set
+                    // rebuilt around a running turn (a fresh picker confirm
+                    // that keeps the pane) moved the pane to a new index —
+                    // the id still finds it, so the stream follows the pane
+                    // instead of dying or corrupting a replacement. The
+                    // epoch gate below only judges events that name no live
+                    // pane.
+                    match either_split(&self.agents_split, &self.parked_agents_split)
+                        .and_then(|split| split.pane_index_by_id(pane_id))
+                    {
+                        Some(resolved) => pane = resolved,
+                        // The pane is gone (dropped by a rebuild, or the
+                        // whole set torn down): its turn was cancelled with
+                        // it — the event must never land in a replacement
+                        // pane that merely shares the index.
+                        None if pane_id != 0 => continue,
+                        // Unstamped senders (`pane_id == 0` — the zero is
+                        // reserved, no live pane carries it): the split
+                        // generation still guards them — a stale epoch means
+                        // the set was replaced or torn down while the turn
+                        // was being cancelled.
+                        None if epoch != self.agents_pane_epoch => continue,
+                        None => {}
                     }
                     let target =
                         either_split_mut(&mut self.agents_split, &mut self.parked_agents_split);
@@ -347,20 +366,30 @@ impl App {
                 // appended to the pane's activity so it is the last thing
                 // visible; the session id seeds the pane's next resume.
                 HarnessEvent::AgentsPaneDone {
-                    pane,
+                    mut pane,
+                    pane_id,
                     epoch,
                     output,
                     stop_reason,
                     session,
                 } => {
-                    // A stale epoch means the pane's set was replaced or
-                    // torn down while this turn was being cancelled: the
-                    // terminal report is the OLD pane's — it must never
-                    // seed a replacement pane's session id, seal the
-                    // retargeted mirror, or bind into the CURRENT
-                    // session's metadata under a same-named pane. Drop it.
-                    if epoch != self.agents_pane_epoch {
-                        continue;
+                    // The same identity routing the streamed events apply:
+                    // the Done belongs to the pane its id names. A rebuilt
+                    // set that kept the pane retargets the index (the turn
+                    // SURVIVED the re-pick — its report lands in the pane's
+                    // new slot); a pane the rebuild dropped delivers
+                    // nothing — its terminal report must never seed a
+                    // replacement pane's session id, seal the retargeted
+                    // mirror, or bind into the CURRENT session's metadata
+                    // under a same-named pane. The epoch gate only judges
+                    // unstamped senders.
+                    match either_split(&self.agents_split, &self.parked_agents_split)
+                        .and_then(|split| split.pane_index_by_id(pane_id))
+                    {
+                        Some(resolved) => pane = resolved,
+                        None if pane_id != 0 => continue,
+                        None if epoch != self.agents_pane_epoch => continue,
+                        None => {}
                     }
                     // A pane whose turn was already force-closed (the
                     // Ctrl+X interrupt's synthetic Done, issue 5) or reset
@@ -456,13 +485,23 @@ impl App {
                 // usual, so a toast would only shout at a degraded,
                 // self-healing state.
                 HarnessEvent::AgentsPaneReplayed {
-                    pane,
+                    mut pane,
+                    pane_id,
                     epoch,
                     ok,
                     error,
                 } => {
-                    if epoch != self.agents_pane_epoch {
-                        continue;
+                    // Identity routing, same as the streamed events: the
+                    // replay belongs to the pane its id names, wherever a
+                    // rebuild moved it. The epoch gate only judges
+                    // unstamped senders.
+                    match either_split(&self.agents_split, &self.parked_agents_split)
+                        .and_then(|split| split.pane_index_by_id(pane_id))
+                    {
+                        Some(resolved) => pane = resolved,
+                        None if pane_id != 0 => continue,
+                        None if epoch != self.agents_pane_epoch => continue,
+                        None => {}
                     }
                     let target =
                         either_split_mut(&mut self.agents_split, &mut self.parked_agents_split);
