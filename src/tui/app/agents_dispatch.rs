@@ -127,7 +127,10 @@ pub(super) fn ensure_pane_snapshot(app: &mut App, pane: usize) {
     let Some(p) = split.panes.get_mut(pane) else {
         return;
     };
-    if p.agent == DAEMON_LABEL || p.commands.is_some() || p.snapshot_loading {
+    if p.agent == DAEMON_LABEL
+        || (p.commands.is_some() && p.config_options.is_some())
+        || p.snapshot_loading
+    {
         return;
     }
     let agent = p.agent.clone();
