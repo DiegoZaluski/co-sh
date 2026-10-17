@@ -274,7 +274,11 @@ impl App {
         // Resolve the target session + message BEFORE touching anything:
         // the split may be live OR parked, and a non-cosh pane has no
         // store session (its actions degrade to Copy-only until phase 2).
-        let split = match self.agents_split.as_ref().or(self.parked_agents_split.as_ref()) {
+        let split = match self
+            .agents_split
+            .as_ref()
+            .or(self.parked_agents_split.as_ref())
+        {
             Some(split) => split,
             None => return,
         };
@@ -357,7 +361,6 @@ impl App {
         self.run_pane_session_action(action, &session_id, &message_id, idx, is_user, pane);
     }
 
-
     /// Open the Message Actions dialog for a `/agents` pane input click
     /// (the pane-side counterpart of the chat's pending_message_action
     /// handler). The hit carries the identity: a USER echo maps to the
@@ -368,24 +371,36 @@ impl App {
         pane: usize,
         hit: crate::routes::session::agents_split::InputBoxHit,
     ) {
-        let is_user = hit.user_ordinal.is_some();
-        let Some(split) = self.agents_split.as_ref().or(self.parked_agents_split.as_ref())
+        let Some(split) = self
+            .agents_split
+            .as_ref()
+            .or(self.parked_agents_split.as_ref())
         else {
             return;
         };
-        // The dialog's preview: the raw timeline text (what was sent).
-        let preview_text = split
-            .input_text(pane, &hit)
-            .unwrap_or_default();
-        let preview = super::super::dialog_preview_text(&preview_text);
-        self.dialog.replace(crate::ui::dialogs::DialogType::MessageActions {
-            // No store message id for a pane timeline entry: the ordinal
-            // rides in `pane_ordinal`, the timeline entry in `pane_index`.
-            message_id: String::new(),
-            preview,
-            is_user_message: is_user,
-            pane_action: Some((pane, hit.timeline_index, hit.user_ordinal)),
+        // Revert/Fork act on the pane's OWN STORED session — only a bound
+        // cosh pane has one. An ACP pane's user echo resolves no store
+        // message (its session id is the agent's, not a store id — phase-2
+        // territory), and an unbound pane never ran: offering the actions
+        // there only produced a refusal toast on execute ("could not be
+        // loaded" / "no stored session"), which read as a bug instead of a
+        // scope limit. Those clicks offer Copy only — the honest menu.
+        let offers_session_actions = split.panes.get(pane).is_some_and(|p| {
+            p.agent == crate::routes::session::agents_split::DAEMON_LABEL && p.session_id.is_some()
         });
+        let is_user = hit.user_ordinal.is_some() && offers_session_actions;
+        // The dialog's preview: the raw timeline text (what was sent).
+        let preview_text = split.input_text(pane, &hit).unwrap_or_default();
+        let preview = super::super::dialog_preview_text(&preview_text);
+        self.dialog
+            .replace(crate::ui::dialogs::DialogType::MessageActions {
+                // No store message id for a pane timeline entry: the ordinal
+                // rides in `pane_ordinal`, the timeline entry in `pane_index`.
+                message_id: String::new(),
+                preview,
+                is_user_message: is_user,
+                pane_action: Some((pane, hit.timeline_index, hit.user_ordinal)),
+            });
     }
 
     /// The pane-session Revert/Fork core — the chat's `run_message_action`
@@ -456,13 +471,17 @@ impl App {
                         match part {
                             crate::types::Part::Text(text) => {
                                 if matches!(message.role, crate::types::MessageRole::User) {
-                                    events.push(cosh_tools::subagent::events::SubagentEvent::UserMessage {
-                                        text: text.text.clone(),
-                                    });
+                                    events.push(
+                                        cosh_tools::subagent::events::SubagentEvent::UserMessage {
+                                            text: text.text.clone(),
+                                        },
+                                    );
                                 } else {
-                                    events.push(cosh_tools::subagent::events::SubagentEvent::Message {
-                                        text: text.text.clone(),
-                                    });
+                                    events.push(
+                                        cosh_tools::subagent::events::SubagentEvent::Message {
+                                            text: text.text.clone(),
+                                        },
+                                    );
                                 }
                             }
                             crate::types::Part::Reasoning(reasoning) => {
@@ -539,12 +558,11 @@ impl App {
                 forked.title = format!("{} (fork)", session.title);
                 forked.created_at = created_at;
                 forked.title_generated = session.title_generated;
-                let kept_msg_ids: std::collections::HashSet<&str> = forked
-                    .messages
-                    .iter()
-                    .map(|m| m.id.as_str())
-                    .collect();
-                forked.ctx_ids.retain(|k, _| kept_msg_ids.contains(k.as_str()));
+                let kept_msg_ids: std::collections::HashSet<&str> =
+                    forked.messages.iter().map(|m| m.id.as_str()).collect();
+                forked
+                    .ctx_ids
+                    .retain(|k, _| kept_msg_ids.contains(k.as_str()));
                 self.session_store.save_session(&session);
                 if !self
                     .session_store
@@ -562,8 +580,18 @@ impl App {
                 let new_id = forked.id.clone();
                 self.state.add_session(forked);
                 self.finalize_stale_compaction_lines();
-                // The fork opens in the MAIN view (the chat's behavior):
-                // the pane keeps its own session untouched.
+                // The fork opens in the MAIN view — but the action fired
+                // FROM the /agents split: switching the session behind the
+                // split left the screen parked on the pane grid while the
+                // fork only existed behind it (the user saw a success toast
+                // and a screen that "did nothing"). Park the split first
+                // (turns, bindings and metadata survive; the mode closes
+                // honestly) and then switch: the fork takes the visible
+                // screen. The pane keeps its own session untouched either
+                // way.
+                if self.agents_split.is_some() || self.parked_agents_split.is_some() {
+                    self.park_agents_split();
+                }
                 self.state.right_panel =
                     crate::routes::session::right_panel::types::RightPanelState::new();
                 self.state.switch_to_session(new_id, &self.session_store);
