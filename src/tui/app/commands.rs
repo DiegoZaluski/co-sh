@@ -10,6 +10,28 @@ use crate::ui::agents_picker::AgentPick;
 use crate::ui::dialogs::DialogType;
 
 impl App {
+    /// The Command mode is HIDDEN while the /agents split owns the screen:
+    /// there the shared prompt is intercepted (the focused pane, or the
+    /// main-agent manager loop when unfocused — `dispatch_to_agents_split`),
+    /// so the plain-terminal shell mode would never run and its prompt
+    /// indicator would only mislead. Only the Command mode is hidden; Build,
+    /// Ask and Yolo keep cycling (they map onto real agent-loop behaviors
+    /// that also apply to the manager loop).
+    ///
+    /// Called from EVERY entry point that puts a split on the screen
+    /// (`open_agents_split` and `attach_parked_agents_split`): a session
+    /// persisted in Command mode can only re-enter the split through one of
+    /// them, so the invariant "no Command mode while a split is open" holds
+    /// without per-site checks. The demotion also updates the persisted
+    /// preference (same write the Tab cycle does) so an app restart inside
+    /// the split does not restore the hidden mode.
+    pub(super) fn hide_command_mode_for_split(&mut self) {
+        if self.state.mode == cosh::harness::Mode::Command {
+            self.state.mode = cosh::harness::Mode::Build;
+            self.setup.set_mode_selection(self.state.mode);
+        }
+    }
+
     /// Enter the `/agents` split-pane mode with the agents the picker
     /// confirmed, in the order they were marked. Each pick carries its own
     /// instance count: the pane list receives `instances` copies of the
@@ -76,6 +98,7 @@ impl App {
             }
         }
         self.set_agents_split(Some(panes));
+        self.hide_command_mode_for_split();
         self.prompt_view.focus();
     }
 
@@ -154,6 +177,7 @@ impl App {
             // otherwise, and a fresh probe seed when the cache is empty.
             super::agents_dispatch::ensure_pane_snapshot(self, 0);
             super::agents_dispatch::sync_slash_source(self);
+            self.hide_command_mode_for_split();
             self.prompt_view.focus();
             return true;
         }

@@ -1785,6 +1785,15 @@ impl App {
                         self.state.mode = match self.state.mode {
                             Mode::Build => Mode::Ask,
                             Mode::Ask => Mode::Yolo,
+                            // The Command mode is HIDDEN while the /agents
+                            // split owns the screen: the shared prompt is
+                            // intercepted there (focused pane, or the
+                            // main-agent manager loop when unfocused), so the
+                            // plain-terminal shell mode makes no sense. The
+                            // cycle wraps Yolo straight back to Build — the
+                            // other modes stay reachable for the phase after
+                            // this one.
+                            Mode::Yolo if self.agents_split.is_some() => Mode::Build,
                             Mode::Yolo => Mode::Command,
                             Mode::Command => Mode::Build,
                         };
