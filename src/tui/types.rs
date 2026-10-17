@@ -54,6 +54,22 @@ impl From<&str> for AgentPaneRef {
     }
 }
 
+/// One `/agents` pane the user HID (Backspace on the focused pane) but did
+/// NOT delete: the pane's durable identity plus the position it occupied in
+/// the visible pane list when it was hidden, so a later restore (Ctrl+Z)
+/// puts it back where it was. Hiding only moves a pane ref out of
+/// `Session::agents_panes` into `Session::agents_hidden` — the session file
+/// keeps the pane, its bound agent session is never deleted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HiddenPane {
+    /// The hidden pane's identity (agent CLI + bound session when it ran).
+    pub pane: AgentPaneRef,
+    /// Index the pane occupied in the visible list when it was hidden. Used
+    /// to re-insert it at (or as close as possible to) its old slot.
+    #[serde(default)]
+    pub index: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: String,
@@ -88,6 +104,14 @@ pub struct Session {
     /// with the session's regular saves.
     #[serde(default)]
     pub agents_mode_open: bool,
+    /// The `/agents` panes the user HID (Backspace on the focused pane) but
+    /// did NOT delete: a LIFO stack, last entry = most recently hidden.
+    /// Nothing is removed from the session history — hiding only moves a
+    /// pane ref out of `agents_panes` into this stack; Ctrl+Z pops the last
+    /// and re-inserts it at its recorded position. Persisted by metadata
+    /// deltas alongside `agents_panes`.
+    #[serde(default)]
+    pub agents_hidden: Vec<HiddenPane>,
     /// Legacy display bookkeeping: message id → context-manager item ids.
     /// New history boundaries are recorded as explicit context deltas, so a
     /// display-only save cannot erase the semantic view identity. This field
@@ -464,6 +488,7 @@ mod tests {
             reasoning: None,
             agents_panes: None,
             agents_mode_open: false,
+            agents_hidden: Vec::new(),
             ctx_ids: Default::default(),
             messages: vec![
                 Message {

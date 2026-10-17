@@ -2417,6 +2417,7 @@ async fn a_rebooted_cosh_pane_replays_its_session_from_the_store() {
         reasoning: None,
         agents_panes: None,
         agents_mode_open: false,
+        agents_hidden: Vec::new(),
         ctx_ids: std::collections::HashMap::new(),
     });
 
@@ -2729,4 +2730,77 @@ async fn prompt_drag_released_over_pane_copies_and_clears() {
         "the prompt text is what copies: {}",
         toast.message
     );
+}
+
+/// Hiding is a LIFO stack: two hides, then restore brings them back in
+/// reverse order at their recorded slots. Hiding never deletes the pane —
+/// the visible set shrinks, the hidden stack grows; restoring moves it back.
+#[tokio::test]
+async fn hiding_and_restoring_panes_is_lifo_and_never_deletes() {
+    use crate::ui::agents_picker::AgentPick;
+
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    let id = crate::session_store::generate_session_id();
+    app.state.add_empty_session(id.clone(), "panes".into(), 0);
+    app.state.current_session_id = Some(id);
+    app.open_agents_split(vec![
+        AgentPick {
+            name: "claude".into(),
+            instances: 1,
+        },
+        AgentPick {
+            name: "kilo".into(),
+            instances: 1,
+        },
+        AgentPick {
+            name: "cosh".into(),
+            instances: 1,
+        },
+    ]);
+
+    // Hide the middle pane, then the (new) middle one — stack [kilo, cosh].
+    app.agents_split.as_mut().unwrap().focused = Some(1);
+    app.hide_focused_agents_pane();
+    app.agents_split.as_mut().unwrap().focused = Some(1);
+    app.hide_focused_agents_pane();
+
+    {
+        let session = app.state.current_session().unwrap();
+        let panes = session.agents_panes.as_ref().unwrap();
+        assert_eq!(panes.len(), 1, "only the visible pane remains");
+        assert_eq!(panes[0].agent(), "claude");
+        assert_eq!(session.agents_hidden.len(), 2, "nothing was deleted");
+        assert_eq!(session.agents_hidden[0].pane.agent(), "kilo");
+        assert_eq!(
+            session.agents_hidden[1].pane.agent(),
+            "cosh",
+            "the most recently hidden sits on top"
+        );
+    }
+
+    // Restore: cosh first (LIFO), then kilo — both at their old index 1.
+    app.restore_last_hidden_agents_pane();
+    {
+        let session = app.state.current_session().unwrap();
+        assert_eq!(session.agents_hidden.len(), 1);
+        let panes = session.agents_panes.as_ref().unwrap();
+        assert_eq!(
+            panes.iter().map(|p| p.agent()).collect::<Vec<_>>(),
+            vec!["claude", "cosh"]
+        );
+    }
+    app.restore_last_hidden_agents_pane();
+    {
+        let session = app.state.current_session().unwrap();
+        assert!(session.agents_hidden.is_empty());
+        let panes = session.agents_panes.as_ref().unwrap();
+        assert_eq!(
+            panes.iter().map(|p| p.agent()).collect::<Vec<_>>(),
+            vec!["claude", "kilo", "cosh"]
+        );
+    }
+    // Nothing left to restore: a no-op, not a panic.
+    app.restore_last_hidden_agents_pane();
 }

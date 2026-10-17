@@ -312,6 +312,7 @@ async fn bench_e2e_agent_loop() {
             reasoning: None,
             agents_panes: None,
             agents_mode_open: false,
+            agents_hidden: Vec::new(),
             ctx_ids: Default::default(),
             messages,
         });

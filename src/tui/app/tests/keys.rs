@@ -1338,3 +1338,118 @@ async fn ctrl_x_is_inert_without_a_running_focused_pane() {
         "the split stays open (Ctrl+X is not a park/leave key)"
     );
 }
+
+/// Backspace on a focused pane (prompt blurred, the click contract) HIDES
+/// it — the pane leaves the visible set but is NOT deleted; Ctrl+Z restores
+/// the most recently hidden pane at its old slot and takes the focus. The
+/// prompt keeps its Backspace/Ctrl+Z whenever it holds the focus.
+#[tokio::test]
+async fn backspace_hides_the_focused_pane_and_ctrl_z_restores_it() {
+    use crate::ui::agents_picker::AgentPick;
+
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    app.open_agents_split(vec![
+        AgentPick {
+            name: "claude".into(),
+            instances: 1,
+        },
+        AgentPick {
+            name: "kilo".into(),
+            instances: 1,
+        },
+        AgentPick {
+            name: "cosh".into(),
+            instances: 1,
+        },
+    ]);
+    // Selecting a pane blurs the prompt (a pane click does this); simulate it.
+    app.prompt_view.blur();
+    app.process_key_event(mod_key(KeyCode::Char('2'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.agents_split.as_ref().and_then(|s| s.focused), Some(1));
+
+    // Backspace hides the focused pane.
+    app.process_key_event(mod_key(KeyCode::Backspace, KeyModifiers::NONE))
+        .unwrap();
+    {
+        let session = app.state.current_session().unwrap();
+        assert_eq!(
+            session.agents_panes.as_ref().unwrap().len(),
+            2,
+            "the pane is hidden, not deleted"
+        );
+        assert_eq!(session.agents_hidden.len(), 1);
+        assert_eq!(session.agents_hidden[0].pane.agent(), "kilo");
+        assert_eq!(session.agents_hidden[0].index, 1);
+    }
+    assert_eq!(app.agents_split.as_ref().unwrap().panes.len(), 2);
+
+    // Ctrl+Z restores it at its old index and focuses it.
+    app.process_key_event(mod_key(KeyCode::Char('z'), KeyModifiers::CONTROL))
+        .unwrap();
+    let session = app.state.current_session().unwrap();
+    assert_eq!(session.agents_panes.as_ref().unwrap().len(), 3);
+    assert!(session.agents_hidden.is_empty());
+    let split = app.agents_split.as_ref().unwrap();
+    assert_eq!(split.panes[1].agent, "kilo", "restored at its old slot");
+    assert_eq!(split.focused, Some(1), "the restored pane takes the focus");
+}
+
+/// The prompt keeps its own Backspace/Ctrl+Z: with the prompt FOCUSED the
+/// keys edit the draft and never hide/restore panes.
+#[tokio::test]
+async fn backspace_and_ctrl_z_edit_the_prompt_when_it_is_focused() {
+    use crate::ui::agents_picker::AgentPick;
+
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    app.open_agents_split(vec![
+        AgentPick {
+            name: "claude".into(),
+            instances: 1,
+        },
+        AgentPick {
+            name: "kilo".into(),
+            instances: 1,
+        },
+    ]);
+    // The split focuses the prompt; seed a draft.
+    app.prompt_view.focus();
+    app.prompt_view.handle_paste("a");
+    assert_eq!(app.prompt_view.input, "a");
+
+    // Backspace edits the draft — no pane is hidden.
+    app.process_key_event(mod_key(KeyCode::Backspace, KeyModifiers::NONE))
+        .unwrap();
+    assert!(app.prompt_view.input.is_empty());
+    assert!(
+        app.state
+            .current_session()
+            .unwrap()
+            .agents_hidden
+            .is_empty()
+    );
+
+    // Ctrl+Z is the prompt undo (restores the deleted char), not a pane
+    // restore: the visible set is unchanged.
+    app.process_key_event(mod_key(KeyCode::Char('z'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(app.prompt_view.input, "a");
+    assert_eq!(
+        app.state
+            .current_session()
+            .unwrap()
+            .agents_panes
+            .as_ref()
+            .unwrap()
+            .len(),
+        2
+    );
+}

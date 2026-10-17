@@ -18,6 +18,7 @@ fn app_with_user_message() -> App {
         reasoning: None,
         agents_panes: None,
         agents_mode_open: false,
+        agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
         messages: vec![
             Message {
@@ -275,6 +276,7 @@ async fn message_actions_single_user_message_shows_all_options() {
         reasoning: None,
         agents_panes: None,
         agents_mode_open: false,
+        agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
         messages: vec![Message {
             id: "u1".into(),

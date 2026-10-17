@@ -261,6 +261,21 @@ impl AgentPane {
         pane
     }
 
+    /// The persisted reference for THIS pane: the agent CLI plus the bound
+    /// session when the pane already ran. The inverse of [`Self::from_ref`],
+    /// used when a pane is HIDDEN (its ref moves into the session's hidden
+    /// stack) and when the visible set is written back to metadata.
+    #[must_use]
+    pub fn to_ref(&self) -> crate::types::AgentPaneRef {
+        match &self.session_id {
+            Some(session_id) => crate::types::AgentPaneRef::Bound {
+                agent: self.agent.clone(),
+                session_id: session_id.clone(),
+            },
+            None => crate::types::AgentPaneRef::Name(self.agent.clone()),
+        }
+    }
+
     /// Scroll the pane by `rows` (negative = up) against the LAST measured
     /// heights. Scrolling anywhere above the bottom un-pins follow; reaching
     /// the bottom re-engages it (the chat's `sync_manual_scroll_state`).
@@ -421,6 +436,66 @@ impl AgentsSplitState {
     #[must_use]
     pub fn pane_count(&self) -> usize {
         self.panes.len()
+    }
+
+    /// Remove and return the pane at `index` — the HIDE primitive (Backspace
+    /// on the focused pane). The pane's running turn is signal-stopped here
+    /// (its stream ends with its slot; a discarded stop signal is one nobody
+    /// will ever set again) and its late events are dropped by the id router,
+    /// exactly like a pane a rebuild dropped. The per-frame caches and the
+    /// selection state reset (the new layout invalidates them); the next
+    /// render rebuilds them from the surviving timelines. `None` when the
+    /// index is out of range.
+    pub fn remove_pane(&mut self, index: usize) -> Option<AgentPane> {
+        if index >= self.panes.len() {
+            return None;
+        }
+        let mut pane = self.panes.remove(index);
+        if let Some(signal) = &pane.stop_signal {
+            signal.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        pane.running = false;
+        // Focus follows the removal: the pane that took the freed slot keeps
+        // the focus; a removed FOCUSED pane clamps to the nearest survivor
+        // (or none when the split emptied).
+        self.focused = match self.focused {
+            None => None,
+            Some(f) if f == index => {
+                if self.panes.is_empty() {
+                    None
+                } else {
+                    Some(index.min(self.panes.len() - 1))
+                }
+            }
+            Some(f) if f > index => Some(f - 1),
+            Some(f) => Some(f),
+        };
+        self.maximized = None;
+        self.hovered_input = None;
+        self.pending_input_action = None;
+        self.selection_pane = None;
+        self.drag_selection = None;
+        self.pane_rects.clear();
+        self.pane_regions.clear();
+        self.stop_auto_scroll();
+        Some(pane)
+    }
+
+    /// Insert a pane at `index` (clamped to the end) — the RESTORE primitive
+    /// (Ctrl+Z on a hidden pane). The restored pane takes the focus and the
+    /// grid returns. Per-frame caches/selection reset like [`Self::remove_pane`].
+    pub fn insert_pane(&mut self, index: usize, pane: AgentPane) {
+        let at = index.min(self.panes.len());
+        self.panes.insert(at, pane);
+        self.focused = Some(at);
+        self.maximized = None;
+        self.hovered_input = None;
+        self.pending_input_action = None;
+        self.selection_pane = None;
+        self.drag_selection = None;
+        self.pane_rects.clear();
+        self.pane_regions.clear();
+        self.stop_auto_scroll();
     }
 
     /// Whether any pane's scroll pill animation is mid-flight (feeds the
@@ -3852,5 +3927,85 @@ mod zoom_tests {
         // Grid fallback for `None`.
         let grid = compute_layout_with_maximized(3, area, None);
         assert!(grid.iter().all(|r| r.width > 0));
+    }
+}
+
+#[cfg(test)]
+mod hide_tests {
+    use super::*;
+    use crate::types::AgentPaneRef;
+
+    fn split() -> AgentsSplitState {
+        AgentsSplitState::new(vec!["a".into(), "b".into(), "c".into()])
+    }
+
+    /// Removing a pane signal-stops its running turn (its stream ends with
+    /// its slot) and returns the pane object for the hidden stack.
+    #[test]
+    fn remove_pane_stops_the_turn_and_shifts_focus() {
+        let mut s = split();
+        let signal = Arc::new(AtomicBool::new(false));
+        s.panes[1].running = true;
+        s.panes[1].stop_signal = Some(signal.clone());
+        s.focused = Some(2);
+        let removed = s.remove_pane(1).expect("in range");
+        assert_eq!(removed.agent, "b");
+        assert!(!removed.running, "the removed pane is no longer running");
+        assert!(
+            signal.load(std::sync::atomic::Ordering::Relaxed),
+            "the removed pane's turn is stopped"
+        );
+        assert_eq!(s.panes.len(), 2);
+        assert_eq!(s.panes[0].agent, "a");
+        assert_eq!(s.panes[1].agent, "c");
+        // Focus was past the removal → shifts down one.
+        assert_eq!(s.focused, Some(1));
+        assert_eq!(s.maximized, None);
+        // Out of range is a no-op.
+        assert!(s.remove_pane(9).is_none());
+    }
+
+    /// Removing the FOCUSED pane clamps the focus to the nearest survivor;
+    /// emptying the split clears it.
+    #[test]
+    fn removing_the_focused_pane_clamps_the_focus() {
+        let mut s = split();
+        s.focused = Some(2);
+        s.remove_pane(2);
+        assert_eq!(s.focused, Some(1), "clamped to the new last pane");
+
+        let mut one = AgentsSplitState::new(vec!["a".into()]);
+        one.focused = Some(0);
+        one.remove_pane(0);
+        assert_eq!(one.focused, None, "an empty split has no focus");
+    }
+
+    /// Inserting a pane places it at (or clamped to) the requested index and
+    /// takes the focus — the restored pane is the one the user just acted on.
+    #[test]
+    fn insert_pane_places_and_focuses() {
+        let mut s = AgentsSplitState::new(vec!["a".into(), "c".into()]);
+        s.insert_pane(1, AgentPane::from_ref(&AgentPaneRef::Name("b".into())));
+        assert_eq!(s.panes.len(), 3);
+        assert_eq!(s.panes[1].agent, "b");
+        assert_eq!(s.focused, Some(1));
+
+        s.insert_pane(99, AgentPane::from_ref(&AgentPaneRef::Name("d".into())));
+        assert_eq!(s.panes.last().unwrap().agent, "d");
+        assert_eq!(s.focused, Some(3), "clamped past the end");
+    }
+
+    /// `to_ref` is the exact inverse of `from_ref`: a bound pane keeps its
+    /// session id, a fresh one stays a bare name.
+    #[test]
+    fn to_ref_round_trips_the_binding() {
+        let bound = AgentPaneRef::Bound {
+            agent: "claude".into(),
+            session_id: "s-1".into(),
+        };
+        assert_eq!(AgentPane::from_ref(&bound).to_ref(), bound);
+
+        let name = AgentPaneRef::Name("kilo".into());
+        assert_eq!(AgentPane::from_ref(&name).to_ref(), name);
     }
 }

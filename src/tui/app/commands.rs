@@ -92,14 +92,15 @@ impl App {
             // activity — do NOT touch the signals, do NOT clear running.
             self.parked_agents_split = Some(split);
         }
-        // Metadata: mode closed, pane set + bindings retained for the
-        // pre-marked re-entry. Synchronous: same quit-path rationale as
-        // set_agents_split.
-        let panes = self
+        // Metadata: mode closed, pane set + bindings (and the hidden stack)
+        // retained for the pre-marked re-entry. Synchronous: same quit-path
+        // rationale as set_agents_split.
+        let (panes, hidden) = self
             .state
             .current_session()
-            .and_then(|s| s.agents_panes.clone());
-        self.save_agents_metadata(panes, false);
+            .map(|s| (s.agents_panes.clone(), s.agents_hidden.clone()))
+            .unwrap_or_default();
+        self.save_agents_metadata(panes, false, hidden);
         // The registry follows the panes into the PARKED slot unchanged:
         // the split keeps serving `agents_call` with the mode closed (the
         // main agent coordinates while the user works the normal view).
@@ -123,11 +124,12 @@ impl App {
     pub(super) fn attach_parked_agents_split(&mut self) -> bool {
         if let Some(split) = self.parked_agents_split.take() {
             self.agents_split = Some(split);
-            let panes = self
+            let (panes, hidden) = self
                 .state
                 .current_session()
-                .and_then(|s| s.agents_panes.clone());
-            self.save_agents_metadata(panes, true);
+                .map(|s| (s.agents_panes.clone(), s.agents_hidden.clone()))
+                .unwrap_or_default();
+            self.save_agents_metadata(panes, true, hidden);
             // The registry follows the panes back onto the screen (same
             // set it parked with — the sync is a re-affirmation, matching
             // the mirrors' one below).
@@ -389,7 +391,10 @@ impl App {
         // (open, replace, close) — the `agents_call` tool's addressable ids
         // and the context block are rebuilt from it.
         self.sync_agents_pane_registry();
-        self.save_agents_metadata(panes, mode_open);
+        // A fresh confirm or a teardown REDEFINES the pane set, so any
+        // previously hidden panes are superseded: the hidden stack clears
+        // with it (park/attach keep the stack — they only toggle the mode).
+        self.save_agents_metadata(panes, mode_open, Vec::new());
         // A fresh pane set mirrors into the shared subagent list (the sync
         // also prunes mirrors of panes the new set no longer has). `None`
         // closes the mode: `close_agents_split` owns the mirror drop.
@@ -421,31 +426,143 @@ impl App {
         super::agents_dispatch::sync_slash_source(self);
     }
 
-    /// Record the session's `/agents` bookkeeping — the pane set (with its
-    /// bindings) AND whether the split-screen mode itself is open — and
-    /// persist through the store's normal diff pipeline (`diff_session`
-    /// emits a `MetadataDelta::Agents` only when the persisted pane set
-    /// actually changed). Both fields are written together so the parked
-    /// state (`mode_open = false`, pane set retained) is durable the same
-    /// way the open state is. SYNCHRONOUS on purpose: open/close is often
-    /// chained with quitting the app, and the async writer's queue has no
-    /// flush on the quit path — a fire-and-forget save could never land,
-    /// reopening the session with the wrong mode. The job is one tiny
-    /// metadata delta, so blocking the frame is negligible. No session
-    /// open (Home) → nothing.
+    /// Record the session's `/agents` bookkeeping — the visible pane set
+    /// (with its bindings), the LIFO stack of HIDDEN panes, AND whether the
+    /// split-screen mode itself is open — and persist through the store's
+    /// normal diff pipeline (`diff_session` emits a `MetadataDelta::Agents`
+    /// only when the persisted pane set, hidden stack or mode actually
+    /// changed). All three fields are written together so the parked state
+    /// (`mode_open = false`, pane set retained) is durable the same way the
+    /// open state is. SYNCHRONOUS on purpose: open/close is often chained
+    /// with quitting the app, and the async writer's queue has no flush on
+    /// the quit path — a fire-and-forget save could never land, reopening
+    /// the session with the wrong mode. The job is one tiny metadata delta,
+    /// so blocking the frame is negligible. No session open (Home) → nothing.
     fn save_agents_metadata(
         &mut self,
         panes: Option<Vec<crate::types::AgentPaneRef>>,
         mode_open: bool,
+        hidden: Vec<crate::types::HiddenPane>,
     ) {
         let Some(session) = self.state.current_session_mut() else {
             return;
         };
-        if session.agents_panes == panes && session.agents_mode_open == mode_open {
+        if session.agents_panes == panes
+            && session.agents_mode_open == mode_open
+            && session.agents_hidden == hidden
+        {
             return;
         }
         session.agents_panes = panes;
         session.agents_mode_open = mode_open;
+        session.agents_hidden = hidden;
+        let session = session.clone();
+        self.session_store.save_session(&session);
+    }
+
+    /// Hide the FOCUSED `/agents` pane (Backspace on the focused pane): move
+    /// it out of the visible split into the session's LIFO hidden stack
+    /// WITHOUT deleting anything. Its running turn is stopped (its stream
+    /// ends with its slot) and its bound agent session stays on disk — the
+    /// hidden stack keeps the ref, so a later Ctrl+Z rebuilds the pane and
+    /// rehydrates its transcript from the agent's own replay.
+    pub(super) fn hide_focused_agents_pane(&mut self) {
+        // The visible set must exist to record the hide against it.
+        if self
+            .state
+            .current_session()
+            .and_then(|s| s.agents_panes.as_ref())
+            .is_none()
+        {
+            return;
+        }
+        let Some(split) = self.agents_split.as_mut() else {
+            return;
+        };
+        let Some(index) = split.focused else {
+            return;
+        };
+        let Some(pane) = split.remove_pane(index) else {
+            return;
+        };
+        let pane_ref = pane.to_ref();
+        let Some(session) = self.state.current_session_mut() else {
+            return;
+        };
+        let Some(panes) = session.agents_panes.as_mut() else {
+            return;
+        };
+        if index < panes.len() {
+            panes.remove(index);
+        }
+        session.agents_hidden.push(crate::types::HiddenPane {
+            pane: pane_ref,
+            index,
+        });
+        self.save_current_agents_metadata();
+        // The registry drops the pane (its `agents_call` id no longer
+        // resolves) and the mirror follows it out of the shared list.
+        self.sync_agents_pane_registry();
+        self.sync_agents_pane_mirrors();
+        super::agents_dispatch::sync_slash_source(self);
+    }
+
+    /// Restore the most recently HIDDEN `/agents` pane (Ctrl+Z): pop the
+    /// session's hidden stack and re-insert the pane at (or as close as
+    /// possible to) its old position. A bound pane comes back with an empty
+    /// live timeline and rehydrates from its agent session. No-op when the
+    /// stack is empty or no split owns the screen.
+    pub(super) fn restore_last_hidden_agents_pane(&mut self) {
+        if self.agents_split.is_none() {
+            return;
+        }
+        let ready = self
+            .state
+            .current_session()
+            .is_some_and(|s| s.agents_panes.is_some() && !s.agents_hidden.is_empty());
+        if !ready {
+            return;
+        }
+        let Some(hidden) = self
+            .state
+            .current_session_mut()
+            .and_then(|s| s.agents_hidden.pop())
+        else {
+            return;
+        };
+        let index = {
+            let split = self.agents_split.as_mut().expect("split checked above");
+            let index = hidden.index.min(split.panes.len());
+            split.insert_pane(
+                index,
+                crate::routes::session::agents_split::AgentPane::from_ref(&hidden.pane),
+            );
+            index
+        };
+        if let Some(session) = self.state.current_session_mut()
+            && let Some(panes) = session.agents_panes.as_mut()
+        {
+            let at = index.min(panes.len());
+            panes.insert(at, hidden.pane);
+        }
+        self.save_current_agents_metadata();
+        self.sync_agents_pane_registry();
+        self.sync_agents_pane_mirrors();
+        // A bound pane returns with no live timeline — rehydrate it; the
+        // focus already sits on it, so the slash menu's source follows.
+        self.trigger_agents_pane_replays();
+        super::agents_dispatch::ensure_pane_snapshot(self, index);
+        super::agents_dispatch::sync_slash_source(self);
+    }
+
+    /// Persist the CURRENT session (its `/agents` pane set, hidden stack and
+    /// mode flag already mutated in place) through the store's normal diff
+    /// pipeline. Used by the hide/restore paths, which change the metadata
+    /// directly rather than through the open/close helpers.
+    fn save_current_agents_metadata(&mut self) {
+        let Some(session) = self.state.current_session() else {
+            return;
+        };
         let session = session.clone();
         self.session_store.save_session(&session);
     }
@@ -779,23 +896,25 @@ impl App {
         // set with a `None` delta. Focus stays untouched either way (a
         // sidebar switch must leave the prompt UNfocused — an automatic
         // restore never drives it).
-        match self
-            .state
-            .current_session()
-            .map(|s| (s.agents_panes.clone(), s.agents_mode_open))
-        {
-            Some((Some(panes), true)) => {
+        match self.state.current_session().map(|s| {
+            (
+                s.agents_panes.clone(),
+                s.agents_mode_open,
+                s.agents_hidden.clone(),
+            )
+        }) {
+            Some((Some(panes), true, hidden)) => {
                 self.agents_split = Some(
                     crate::routes::session::agents_split::AgentsSplitState::new(
                         panes.clone(),
                     ),
                 );
-                self.save_agents_metadata(Some(panes), true);
+                self.save_agents_metadata(Some(panes), true, hidden);
                 // A session left with the mode open carries `Bound` panes
                 // whose timelines died with the process — rehydrate them.
                 self.trigger_agents_pane_replays();
             }
-            Some((Some(panes), false)) => {
+            Some((Some(panes), false, _)) => {
                 self.parked_agents_split = Some(
                     crate::routes::session::agents_split::AgentsSplitState::new(panes),
                 );

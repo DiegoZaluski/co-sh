@@ -35,6 +35,7 @@ fn app_with_queues() -> App {
         reasoning: None,
         agents_panes: None,
         agents_mode_open: false,
+        agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
         messages: vec![],
     };
@@ -338,6 +339,7 @@ async fn edit_hint_is_dropped_when_submitting_from_another_session() {
         reasoning: None,
         agents_panes: None,
         agents_mode_open: false,
+        agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
         messages: vec![],
     };

@@ -48,6 +48,7 @@ fn test_state(msg: Message) -> AppState {
         reasoning: None,
         agents_panes: None,
         agents_mode_open: false,
+        agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
         messages: vec![msg],
     };
@@ -593,6 +594,7 @@ fn test_full_chat_history_performance() {
         reasoning: None,
         agents_panes: None,
         agents_mode_open: false,
+        agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
         messages,
     };
@@ -1664,6 +1666,7 @@ fn test_completed_bash_click_expands_while_new_content_streams() {
         reasoning: None,
         agents_panes: None,
         agents_mode_open: false,
+        agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
         messages: vec![bash_msg, stream_msg],
     };
@@ -1844,6 +1847,7 @@ fn test_completed_bash_click_expands_below_wrapped_message_with_matching_widths(
         reasoning: None,
         agents_panes: None,
         agents_mode_open: false,
+        agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
         messages: vec![
             Message {
@@ -2582,6 +2586,7 @@ fn state_with_bash_block(session_id: &str, line: &str) -> AppState {
         reasoning: None,
         agents_panes: None,
         agents_mode_open: false,
+        agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
         messages: vec![Message {
             id: format!("{session_id}-0"),
@@ -2695,6 +2700,7 @@ fn test_code_block_bottom_padding_not_overlapped() {
         reasoning: None,
         agents_panes: None,
         agents_mode_open: false,
+        agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
         messages: vec![code_msg, reply],
     };
@@ -2989,6 +2995,7 @@ fn seeding_the_call_seq_beyond_a_restored_session_prevents_cross_restart_collisi
         reasoning: None,
         agents_panes: None,
         agents_mode_open: false,
+        agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
         messages: vec![Message {
             id: "m1".into(),
@@ -3047,6 +3054,7 @@ fn seeding_the_call_seq_beyond_a_restored_session_prevents_cross_restart_collisi
         reasoning: None,
         agents_panes: None,
         agents_mode_open: false,
+        agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
         messages: vec![Message {
             id: "m2".into(),
@@ -3257,6 +3265,7 @@ fn bench_render_memory_growth_is_bounded() {
         reasoning: None,
         agents_panes: None,
         agents_mode_open: false,
+        agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
         messages: vec![bench_user_message(0)],
     };
@@ -3400,6 +3409,7 @@ fn bench_session_with_n_pairs(n: usize) -> Session {
         reasoning: None,
         agents_panes: None,
         agents_mode_open: false,
+        agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
         messages,
     }
@@ -3502,6 +3512,7 @@ fn bench_streaming_frame_time_vs_session_size() {
         reasoning: None,
         agents_panes: None,
         agents_mode_open: false,
+        agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
         messages: vec![bench_user_message(0)],
     };
@@ -3684,6 +3695,7 @@ fn bench_render_memory_growth_short() {
         reasoning: None,
         agents_panes: None,
         agents_mode_open: false,
+        agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
         messages: vec![bench_user_message(0)],
     };
@@ -3780,6 +3792,7 @@ fn bench_render_heaptrack_minimal() {
         reasoning: None,
         agents_panes: None,
         agents_mode_open: false,
+        agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
         messages: vec![bench_user_message(0)],
     };
@@ -4204,6 +4217,7 @@ fn test_state_msgs(msgs: Vec<Message>) -> AppState {
         reasoning: None,
         agents_panes: None,
         agents_mode_open: false,
+        agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
         messages: msgs,
     };
@@ -7053,6 +7067,7 @@ fn bench_long_session(n_pairs: usize) -> Session {
         reasoning: None,
         agents_panes: None,
         agents_mode_open: false,
+        agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
         messages,
     }
@@ -7340,6 +7355,7 @@ fn fully_visible_cache_fill_does_not_index_past_buffer_end() {
         reasoning: None,
         agents_panes: None,
         agents_mode_open: false,
+        agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
         messages: vec![
             // Tall: the real render far exceeds the 40-row buffer.

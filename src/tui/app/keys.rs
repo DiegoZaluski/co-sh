@@ -1994,6 +1994,19 @@ impl App {
                                 // Ctrl+Backspace = delete word before cursor
                                 if key.modifiers.contains(KeyModifiers::CONTROL) {
                                     self.prompt_view.delete_word_before_cursor();
+                                } else if self
+                                    .agents_split
+                                    .as_ref()
+                                    .is_some_and(|split| split.focused.is_some())
+                                    && !self.prompt_view.is_focused
+                                {
+                                    // /agents split, prompt blurred (a pane
+                                    // click blurred it): Backspace HIDES the
+                                    // focused pane — it leaves the visible
+                                    // set but is NOT deleted (Ctrl+Z
+                                    // restores it). The prompt keeps its
+                                    // Backspace whenever it holds the focus.
+                                    self.hide_focused_agents_pane();
                                 } else {
                                     self.prompt_view.backspace();
                                 }
@@ -2073,7 +2086,21 @@ impl App {
                                 // reports that transition, Ctrl+Y reapplies.
                                 if key.modifiers.contains(KeyModifiers::CONTROL) {
                                     if ch == 'z' {
-                                        self.prompt_undo();
+                                        // /agents split, prompt blurred, a
+                                        // pane hidden: Ctrl+Z restores the
+                                        // MOST RECENTLY hidden pane (LIFO).
+                                        // The prompt keeps its edit-history
+                                        // undo whenever it holds the focus.
+                                        if self.agents_split.is_some()
+                                            && !self.prompt_view.is_focused
+                                            && self.state.current_session().is_some_and(|session| {
+                                                !session.agents_hidden.is_empty()
+                                            })
+                                        {
+                                            self.restore_last_hidden_agents_pane();
+                                        } else {
+                                            self.prompt_undo();
+                                        }
                                         return Ok(false);
                                     }
                                     if ch == 'y' {
