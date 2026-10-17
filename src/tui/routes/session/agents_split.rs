@@ -1635,11 +1635,26 @@ fn render_pane(
     // input's top pad exists (it is not a frame decoration clamped away)
     // and the bottom pad is a margin the following output flows UNDER,
     // never over.
+    // The input blocks measure at the BLIT width (`input_block_w` below —
+    // the renderer wraps at the inset width, so the ceiling must count
+    // those rows, not a full-width wrap). Measuring at any other width
+    // under-counts a wrapped input by the rows the inset stole: the sticky
+    // bottom sits too high and the tail box's last rows fall below the
+    // ceiling — the band's bottom clipped while the hover highlight (the
+    // box's full span) still lit it, reading as "highlight taller than the
+    // band" and "the band lost its bottom row to the pane's padding".
+    let input_block_w = wrap_w.saturating_sub(INPUT_BOX_INSET_COLS * 2);
     let content_height: u16 = lines
         .iter()
         .map(|l| {
-            l.visual_rows(wrap_w)
-                .saturating_add(u16::from(is_input_line(l)) * INPUT_BOX_PAD_ROWS)
+            let rows = match l {
+                SubagentActivityLine::UserMessage { text, .. }
+                | SubagentActivityLine::AgentMessage { text, .. } => {
+                    activity_block_height(text, input_block_w)
+                }
+                _ => l.visual_rows(wrap_w),
+            };
+            rows.saturating_add(u16::from(is_input_line(l)) * INPUT_BOX_PAD_ROWS)
         })
         .fold(0u16, u16::saturating_add);
     let max_scroll = content_height.saturating_sub(view_h);
@@ -1677,14 +1692,16 @@ fn render_pane(
     let mut user_inputs: usize = 0;
     for (index, line) in lines.iter().enumerate() {
         let input = is_input_line(line);
-        // An input's markdown wraps INSIDE the box's 2-column breathing on
-        // each side (the chat's max_w = box width - 6): measure the block
-        // at the inset width, or the reserved rows would disagree with the
-        // drawn ones. Every other line keeps the pipeline width.
+        // An input's markdown wraps INSIDE the box's breathing (the blit's
+        // `block_w`): measure the block at the SAME width the renderer
+        // draws it at, or the reserved rows disagree with the drawn ones —
+        // the flow would overlap the next block by the stolen rows (a
+        // wrapped input's tail printed over the following output). Every
+        // other line keeps the pipeline width.
         let h = match line {
             SubagentActivityLine::UserMessage { text, .. }
             | SubagentActivityLine::AgentMessage { text, .. } => {
-                activity_block_height(text, wrap_w.saturating_sub(INPUT_BOX_INSET_COLS))
+                activity_block_height(text, input_block_w)
             }
             _ => line.visual_rows(wrap_w),
         };
@@ -2966,6 +2983,84 @@ mod tests {
                 assert_ne!(cell.symbol(), "b", "{label} row carries no content");
             }
         }
+    }
+
+    /// The tail input box's FULL flow extent survives the sticky bottom: a
+    /// wrapped input measures at the BLIT width (the inset steals two
+    /// columns on each side), so the scroll ceiling counts the rows the
+    /// renderer actually draws. The old full-width measurement under-counted
+    /// a wrapped prompt: the sticky bottom sat too high, the band's bottom
+    /// pad row clipped (the "sent band truncated by the pane's bottom
+    /// padding" report) while the hover highlight — the box's whole span —
+    /// still lit it (the "highlight taller than the band" report). The two
+    /// reports were one bug.
+    #[test]
+    fn tail_input_band_keeps_its_full_flow_extent_at_sticky_bottom() {
+        let theme = test_theme();
+        let mut state = AgentsSplitState::new(vec!["kilo".into()]);
+        state.echo_turn_input(0, "prompt um", true);
+        // A tall answer forces the sticky bottom onto the tail box.
+        let big = (0..40)
+            .map(|i| format!("linha de resposta numero {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        state.apply_event(0, &SubagentEvent::Message { text: big });
+        // A 55-char prompt: one row at the full width, TWO at the drawn
+        // width — the exact disagreement that clipped the band.
+        state.echo_turn_input(0, &"x".repeat(55), true);
+        let area = Rect::new(0, 0, 60, 14);
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut state, &theme, 0.0);
+
+        let rect = state.pane_rects[0];
+        let effective_scroll = state.panes[0].effective_scroll;
+        let hit = state.panes[0]
+            .input_rows
+            .last()
+            .expect("the tail input registered")
+            .clone();
+        // Sticky bottom: the box's LAST row (its bottom pad) must be the
+        // pane's last drawable body row — nothing clipped below the window
+        // (the row after it is the pane's own breathing row).
+        let last_row_screen =
+            i32::from(rect.y + 1) + hit.span.end - 1 - i32::from(effective_scroll);
+        assert_eq!(
+            last_row_screen,
+            i32::from(rect.bottom()) - 2,
+            "the band's bottom pad row sits on the last drawable body row"
+        );
+        // The hover highlight covers EXACTLY the painted band: the frame
+        // and the highlight derive from the same measured extent, so a
+        // drift — highlight taller or band shorter — is the bug either way.
+        let hover_row = hit.span.end - 1;
+        let hover_y = (i32::from(rect.y + 1) + hover_row - i32::from(effective_scroll)) as u16;
+        assert!(state.update_hover(rect.x + 4, hover_y), "hover registers");
+        let mut buf2 = Buffer::empty(area);
+        render(&mut buf2, area, &mut state, &theme, 0.0);
+
+        let element = theme.background_element;
+        let (er, eg, eb, _) = element.to_ints();
+        let hl_bg = ratatui::style::Color::Rgb(er, eg, eb);
+        let band_rows: Vec<u16> = hit
+            .span
+            .clone()
+            .filter_map(|row| {
+                let sy = i32::from(rect.y + 1) + row - i32::from(effective_scroll);
+                (sy >= i32::from(rect.y + 1) && sy < i32::from(rect.bottom() - 1))
+                    .then(|| u16::try_from(sy).unwrap_or(rect.y))
+            })
+            .collect();
+        let hl_rows: Vec<u16> = (rect.y + 1..rect.bottom() - 1)
+            .filter(|&y| {
+                (rect.x + 1..rect.right() - 1)
+                    .any(|x| buf2.cell((x, y)).map_or(false, |c| c.bg == hl_bg))
+            })
+            .collect();
+        assert!(!hl_rows.is_empty(), "hovering the tail box lights its rows");
+        assert_eq!(
+            hl_rows, band_rows,
+            "the hover highlight covers exactly the painted band"
+        );
     }
 
     /// The hover highlight (the click cue): a pane input box under the

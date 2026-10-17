@@ -507,3 +507,283 @@ async fn clicking_multiline_user_message_opens_message_actions_without_panicking
         "Message Actions must open for the user message"
     );
 }
+
+// ── Pane message actions (the /agents dispatch, commit 41ab38d) ────────
+
+/// An app with a cosh pane bound to a REAL stored session (the fork/revert
+/// targets): two turns persisted through the store, the pane echoing the
+/// same timeline.
+fn app_with_cosh_pane() -> App {
+    use crate::routes::session::agents_split::AgentsSplitState;
+    use crate::types::{AgentPaneRef, Message, MessageRole, Part, TextPart};
+    let mut app = App::new("/tmp".to_string());
+
+    // Persist the pane session through the store (a real JSONL history).
+    let now = 1_000u64;
+    let make = |id: &str, role: MessageRole, text: &str, at: u64| Message {
+        id: id.to_string(),
+        role,
+        parts: vec![Part::Text(TextPart {
+            text: text.to_string(),
+            synthetic: false,
+        })],
+        created_at: at,
+        agent: None,
+        model: None,
+    };
+    let session = crate::types::Session {
+        id: "pane-s".into(),
+        title: "pane".into(),
+        created_at: now,
+        title_generated: false,
+        provider: None,
+        model: None,
+        reasoning: None,
+        agents_panes: None,
+        agents_mode_open: false,
+        ctx_ids: Default::default(),
+        messages: vec![
+            make("m0", MessageRole::User, "first prompt", now),
+            make("m1", MessageRole::Assistant, "first answer", now + 1),
+            make("m2", MessageRole::User, "second prompt", now + 2),
+            make("m3", MessageRole::Assistant, "second answer", now + 3),
+        ],
+    };
+    app.session_store.save_session(&session);
+    app.state.add_session(session);
+    app.state.current_session_id = Some("main".into());
+    app.state
+        .add_empty_session("main".into(), "main".into(), now);
+
+    // The split: ONE cosh pane bound to the stored session.
+    let mut split = AgentsSplitState::new(vec![AgentPaneRef::Bound {
+        agent: "cosh".into(),
+        session_id: "pane-s".into(),
+    }]);
+    split.panes[0].session_id = Some("pane-s".into());
+    // Echo the timeline (user, agent, user, agent).
+    split.echo_turn_input(0, "first prompt", true);
+    split.apply_event(
+        0,
+        &cosh_tools::subagent::events::SubagentEvent::Message {
+            text: "first answer".into(),
+        },
+    );
+    split.echo_turn_input(0, "second prompt", true);
+    split.apply_event(
+        0,
+        &cosh_tools::subagent::events::SubagentEvent::Message {
+            text: "second answer".into(),
+        },
+    );
+    app.agents_split = Some(split);
+    app
+}
+
+#[tokio::test]
+async fn pane_fork_branches_the_pane_session_not_the_main_one() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = app_with_cosh_pane();
+    // Fork the pane's SECOND user prompt (ordinal 1): action 2 = Fork.
+    app.run_pane_message_action(2, 0, Some(1), 2, true);
+    let toast = app.toast_state.current.clone();
+    let toast = toast.map(|t| (t.title.unwrap_or_default(), t.message));
+    // The fork must NOT fail: no warning/error toast about the branch.
+    match &toast {
+        Some((title, message))
+            if title == "Fork"
+                && (message.contains("Could not") || message.contains("working")) =>
+        {
+            panic!("pane fork refused: {toast:?}");
+        }
+        _ => {}
+    }
+    // The fork was fired FROM the split: the split parked (mode closed,
+    // panes preserved) and the fork takes the VISIBLE view — switching the
+    // session behind an open split left the screen on the pane grid while
+    // the fork existed only behind it.
+    assert!(app.agents_split.is_none(), "the split parked on the fork");
+    assert!(
+        app.parked_agents_split.is_some(),
+        "the parked split keeps the panes"
+    );
+    let current = app.state.current_session().expect("a session is open");
+    assert!(
+        current.title.contains("(fork)"),
+        "the fork session is the visible one: {:?}",
+        current.title
+    );
+    // The fork branched off the PANE session: its messages are the pane's
+    // prefix through the second prompt (m0..m2), not the main session's.
+    let ids: Vec<&str> = current.messages.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, vec!["m0", "m1", "m2"], "fork keeps the pane's prefix");
+    // The fork session exists in the store too (survives restarts).
+    let summaries = app.state.session_summaries.clone();
+    assert!(
+        summaries.iter().any(|s| s.title.contains("(fork)")),
+        "a fork session was created: {summaries:?}"
+    );
+}
+
+/// Revert from a pane click truncates the PANE's stored session and rebuilds
+/// the pane's timeline from it — the main view's session stays untouched.
+#[tokio::test]
+async fn pane_revert_truncates_the_pane_session_and_rebuilds_the_timeline() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = app_with_cosh_pane();
+    // Revert the pane's SECOND user prompt (ordinal 1): action 0 = Revert.
+    app.run_pane_message_action(0, 0, Some(1), 2, true);
+    let toast = app.toast_state.current.clone().expect("a toast fired");
+    assert!(
+        toast.message.contains("reverted to this prompt"),
+        "pane revert succeeds; got: {:?}",
+        toast.message
+    );
+    // The store session was truncated through the second prompt.
+    let pane = app.session_store.load_session("pane-s").unwrap();
+    let ids: Vec<&str> = pane.messages.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, vec!["m0", "m1"], "the pane session lost m2 and m3");
+    // The pane's timeline was rebuilt from the truncated session.
+    let split = app.agents_split.as_ref().unwrap();
+    let timeline: Vec<bool> = split.panes[0]
+        .activity
+        .timeline
+        .iter()
+        .map(|e| matches!(e, crate::routes::session::right_panel::types::SubagentTimelineEntry::UserMessage { .. }))
+        .collect();
+    assert_eq!(
+        timeline,
+        vec![true, false],
+        "timeline rebuilt: prompt, answer"
+    );
+    // The main view's session never moved.
+    assert_eq!(app.state.current_session_id.as_deref(), Some("main"));
+}
+
+/// A pane with NO stored session (never ran, or an ACP agent) offers Copy
+/// only: Revert/Fork need the pane's own stored session (phase-2 for ACP),
+/// and offering them just produced a refusal toast on execute.
+#[tokio::test]
+async fn pane_dialog_offers_copy_only_without_a_stored_session() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    // An ACP pane that already ran (session id = the agent's, not a store id).
+    let mut app = app_with_cosh_pane();
+    let split = app.agents_split.as_mut().unwrap();
+    split.panes[0].agent = "opencode".into();
+    split.panes[0].session_id = Some("oc-agent-session".into());
+    let hit = crate::routes::session::agents_split::InputBoxHit {
+        span: 0..4,
+        timeline_index: 0,
+        user_ordinal: Some(0),
+    };
+    app.open_pane_message_actions(0, hit);
+    let d = app.dialog.current().unwrap();
+    let crate::ui::dialogs::DialogType::MessageActions {
+        is_user_message, ..
+    } = &d.dialog_type
+    else {
+        panic!("the message actions dialog opened");
+    };
+    assert!(
+        !is_user_message,
+        "an ACP pane's echo offers Copy only (no Revert/Fork)"
+    );
+
+    // A cosh pane bound to a REAL store session keeps all three options.
+    let mut app = app_with_cosh_pane();
+    let hit = crate::routes::session::agents_split::InputBoxHit {
+        span: 0..4,
+        timeline_index: 0,
+        user_ordinal: Some(0),
+    };
+    app.open_pane_message_actions(0, hit);
+    let d = app.dialog.current().unwrap();
+    let crate::ui::dialogs::DialogType::MessageActions {
+        is_user_message, ..
+    } = &d.dialog_type
+    else {
+        panic!("the message actions dialog opened");
+    };
+    assert!(
+        *is_user_message,
+        "a bound cosh pane's echo offers Revert/Fork/Copy"
+    );
+}
+
+/// The "pre-feature session" report: a session persisted BEFORE the
+/// actions feature (legacy single-line JSONL, no embedded context, no
+/// message boundaries) still forks from a pane bound to it. The store
+/// resolves the legacy branch, `context_selection` falls back to the
+/// id-keyed selection, and the fork lands as a store session — no refusal
+/// toast, no silent no-op.
+#[tokio::test]
+async fn pane_fork_works_on_a_legacy_prefeature_session() {
+    use crate::routes::session::agents_split::AgentsSplitState;
+    use crate::types::AgentPaneRef;
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let dir = tempfile::tempdir().unwrap();
+    let sessions_dir = dir.path().join("legacyhash");
+    std::fs::create_dir_all(&sessions_dir).unwrap();
+    std::fs::write(
+        sessions_dir.join("session-legacy1.jsonl"),
+        concat!(
+            r#"{"title":"pre-feature","title_generated":false,"created_at":1700000000000,"#,
+            r#""cwd":"/tmp","provider":null,"model":null,"reasoning":null,"context":null}"#,
+            "\n",
+            r#"{"Message":{"id":"msg-0","role":"user","parts":[{"type":"Text","text":"primeira pergunta","synthetic":false}],"created_at":1700000000000,"agent":null,"model":null,"ctx_ids":[]}}"#,
+            "\n",
+            r#"{"Message":{"id":"msg-1","role":"assistant","parts":[{"type":"Text","text":"primeira resposta","synthetic":false}],"created_at":1700000000001,"agent":null,"model":null,"ctx_ids":[]}}"#,
+            "\n",
+            r#"{"Message":{"id":"msg-2","role":"user","parts":[{"type":"Text","text":"segunda pergunta","synthetic":false}],"created_at":1700000000002,"agent":null,"model":null,"ctx_ids":[]}}"#,
+            "\n",
+            r#"{"Message":{"id":"msg-3","role":"assistant","parts":[{"type":"Text","text":"segunda resposta","synthetic":false}],"created_at":1700000000003,"agent":null,"model":null,"ctx_ids":[]}}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+
+    let mut app = App::new("/tmp".to_string());
+    let real_dir = app.session_store.sessions_dir().to_path_buf();
+    std::fs::copy(
+        sessions_dir.join("session-legacy1.jsonl"),
+        real_dir.join("session-legacy1.jsonl"),
+    )
+    .unwrap();
+    let loaded = app.session_store.load_session("legacy1");
+    assert!(loaded.is_some(), "the legacy session loads from its JSONL");
+    assert_eq!(loaded.unwrap().messages.len(), 4);
+
+    let mut split = AgentsSplitState::new(vec![AgentPaneRef::Bound {
+        agent: "cosh".into(),
+        session_id: "legacy1".into(),
+    }]);
+    split.panes[0].session_id = Some("legacy1".into());
+    split.echo_turn_input(0, "primeira pergunta", true);
+    split.echo_turn_input(0, "segunda pergunta", true);
+    app.agents_split = Some(split);
+
+    app.run_pane_message_action(2, 0, Some(1), 1, true);
+    let toast = app
+        .toast_state
+        .current
+        .clone()
+        .map(|t| (t.title.unwrap_or_default(), t.message));
+    match &toast {
+        Some((title, message))
+            if title == "Fork"
+                && (message.contains("Could not") || message.contains("working")) =>
+        {
+            panic!("legacy pane fork refused: {toast:?}");
+        }
+        _ => {}
+    }
+    let summaries = app.state.session_summaries.clone();
+    assert!(
+        summaries.iter().any(|s| s.title.contains("(fork)")),
+        "the legacy pane session forks: {summaries:?}"
+    );
+}

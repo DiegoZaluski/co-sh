@@ -174,6 +174,13 @@ impl SessionStore {
         self
     }
 
+    /// Test-visible sessions dir (tests copy fixture files into the SAME
+    /// dir the app's store watches — `load_history_for_branch` scans it).
+    #[cfg(test)]
+    pub fn sessions_dir(&self) -> &std::path::Path {
+        &self.sessions_dir
+    }
+
     /// Test-only store rooted at an explicit directory (lets integration
     /// tests drive the real load path against fixture session files).
     #[cfg(test)]
