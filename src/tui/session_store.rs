@@ -458,17 +458,19 @@ impl SessionStore {
             });
         }
         // The /agents split-pane mode: persisted like every other session
-        // metadata — a change in the pane set OR in whether the split
-        // SCREEN was left open emits one small delta (the flag distinguishes
-        // the restored screen from a parked set); a display-only save with
-        // nothing changed emits nothing.
+        // metadata — a change in the pane set, in the hidden-pane stack OR
+        // in whether the split SCREEN was left open emits one small delta
+        // (the flag distinguishes the restored screen from a parked set); a
+        // display-only save with nothing changed emits nothing.
         if current.session.agents_panes != requested.agents_panes
             || current.session.agents_mode_open != requested.agents_mode_open
+            || current.session.agents_hidden != requested.agents_hidden
         {
             deltas.push(Delta::Metadata {
                 change: MetadataDelta::Agents {
                     panes: requested.agents_panes.clone(),
                     mode_open: requested.agents_mode_open,
+                    hidden: requested.agents_hidden.clone(),
                 },
             });
         }
@@ -1209,6 +1211,16 @@ impl SessionStore {
                         linked.insert(session_id.clone());
                     }
                 }
+                // HIDDEN panes are still linked: hiding (Backspace) never
+                // deletes the pane, only moves it out of the visible set — a
+                // restore (Ctrl+Z) must still find its bound agent session on
+                // disk. Deleting the parent is what frees every pane,
+                // hidden ones included.
+                for hidden in &branch.session.agents_hidden {
+                    if let crate::types::AgentPaneRef::Bound { session_id, .. } = &hidden.pane {
+                        linked.insert(session_id.clone());
+                    }
+                }
             }
         }
         linked
@@ -1894,6 +1906,7 @@ mod tests {
             reasoning: None,
             agents_panes: None,
             agents_mode_open: false,
+            agents_hidden: Vec::new(),
             ctx_ids: HashMap::new(),
         }
     }
@@ -3969,6 +3982,52 @@ mod tests {
             store.linked_agents_pane_sessions().contains("7100-pane"),
             "a fork branch's pane set must count as a live linkage"
         );
+    }
+
+    /// The hidden-pane stack round-trips through the metadata delta pipeline,
+    /// and a HIDDEN bound pane still guards its agent session from deletion —
+    /// hiding (Backspace) never deletes the pane, only moves it out of the
+    /// visible set, so Ctrl+Z must still find its session on disk.
+    #[test]
+    fn hidden_panes_round_trip_and_stay_linked() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(&dir);
+
+        let mut session = make_test_session("7200", "Parent", vec![]);
+        session.agents_panes = Some(vec![crate::types::AgentPaneRef::Name("kilo".into())]);
+        session.agents_mode_open = true;
+        session.agents_hidden = vec![crate::types::HiddenPane {
+            pane: crate::types::AgentPaneRef::Bound {
+                agent: "claude".into(),
+                session_id: "7200-pane".into(),
+            },
+            index: 0,
+        }];
+        store.save_session(&session);
+
+        let loaded = store.load_session("7200").expect("reload");
+        assert_eq!(
+            loaded.agents_hidden, session.agents_hidden,
+            "the hidden stack must persist, not just live in memory"
+        );
+        assert_eq!(loaded.agents_panes, session.agents_panes);
+        assert!(
+            store.linked_agents_pane_sessions().contains("7200-pane"),
+            "a hidden bound pane must still guard its agent session"
+        );
+
+        // Un-hiding (moving it back to the visible set) keeps the linkage.
+        let mut restored = loaded;
+        restored.agents_hidden.clear();
+        restored.agents_panes = Some(vec![
+            crate::types::AgentPaneRef::Bound {
+                agent: "claude".into(),
+                session_id: "7200-pane".into(),
+            },
+            crate::types::AgentPaneRef::Name("kilo".into()),
+        ]);
+        store.save_session(&restored);
+        assert!(store.linked_agents_pane_sessions().contains("7200-pane"));
     }
 
     #[test]

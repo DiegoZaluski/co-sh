@@ -723,6 +723,7 @@ impl App {
             reasoning: None,
             agents_panes: None,
             agents_mode_open: false,
+            agents_hidden: Vec::new(),
             ctx_ids: std::collections::HashMap::new(),
         });
         if let Some(pane) = either_split_mut(&mut self.agents_split, &mut self.parked_agents_split)
@@ -1350,6 +1351,7 @@ fn persist_manager_session(
             reasoning: None,
             agents_panes: None,
             agents_mode_open: false,
+            agents_hidden: Vec::new(),
             ctx_ids: std::collections::HashMap::new(),
         }
     });

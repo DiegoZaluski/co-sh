@@ -358,6 +358,7 @@ mod tests {
                 session_id: pane_id.to_string(),
             }]),
             agents_mode_open: false,
+            agents_hidden: Vec::new(),
             ctx_ids: std::collections::HashMap::new(),
         };
         let pane = crate::types::Session {
@@ -374,6 +375,7 @@ mod tests {
                 reasoning: None,
                 agents_panes: None,
                 agents_mode_open: false,
+                agents_hidden: Vec::new(),
                 ctx_ids: std::collections::HashMap::new(),
             }
         };

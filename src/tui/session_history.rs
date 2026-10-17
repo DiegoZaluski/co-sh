@@ -168,6 +168,13 @@ pub(crate) enum MetadataDelta {
         panes: Option<Vec<crate::types::AgentPaneRef>>,
         #[serde(default)]
         mode_open: bool,
+        /// The LIFO stack of panes the user HID (Backspace) but did not
+        /// delete — carried alongside the visible `panes` so a Ctrl+Z
+        /// restores the most recently hidden pane. Older payloads default
+        /// to empty (nothing was ever hidden). UI-only bookkeeping — never
+        /// model-facing data.
+        #[serde(default)]
+        hidden: Vec<crate::types::HiddenPane>,
     },
 }
 
@@ -327,6 +334,7 @@ impl BranchProjection {
                 reasoning: metadata.reasoning,
                 agents_panes: None,
                 agents_mode_open: false,
+                agents_hidden: Vec::new(),
                 ctx_ids: HashMap::new(),
             },
             cwd: metadata.cwd,
@@ -932,9 +940,14 @@ fn apply_metadata(state: &mut BranchProjection, change: &MetadataDelta) {
             state.session.model = model.clone();
             state.session.reasoning = reasoning.clone();
         }
-        MetadataDelta::Agents { panes, mode_open } => {
+        MetadataDelta::Agents {
+            panes,
+            mode_open,
+            hidden,
+        } => {
             state.session.agents_panes = panes.clone();
             state.session.agents_mode_open = *mode_open;
+            state.session.agents_hidden = hidden.clone();
         }
     }
 }
@@ -1211,6 +1224,7 @@ pub(crate) fn parse_jsonl(session_id: &str, contents: &str) -> ParsedHistory {
             reasoning: header.reasoning,
             agents_panes: None,
             agents_mode_open: false,
+            agents_hidden: Vec::new(),
             ctx_ids: HashMap::new(),
         };
         for stored in legacy_messages {
@@ -1794,5 +1808,91 @@ not-json"#;
             HistoryProjection::replay(None, &events),
             Err(ReplayError::MissingReference(_))
         ));
+    }
+
+    /// A `MetadataDelta::Agents` carrying a hidden stack replays into the
+    /// projection: the visible panes AND the hidden stack both land on the
+    /// session (hiding never deletes the pane — it only moves it here).
+    #[test]
+    fn agents_delta_replays_the_visible_set_and_the_hidden_stack() {
+        let hidden = vec![crate::types::HiddenPane {
+            pane: crate::types::AgentPaneRef::Bound {
+                agent: "claude".into(),
+                session_id: "sess-1".into(),
+            },
+            index: 1,
+        }];
+        let events = vec![
+            HistoryEvent::new(
+                1,
+                "root",
+                Delta::Genesis {
+                    metadata: metadata("root"),
+                },
+            ),
+            HistoryEvent::new(
+                2,
+                "root",
+                Delta::Metadata {
+                    change: MetadataDelta::Agents {
+                        panes: Some(vec![crate::types::AgentPaneRef::Name("kilo".into())]),
+                        mode_open: true,
+                        hidden: hidden.clone(),
+                    },
+                },
+            ),
+        ];
+        let projection = HistoryProjection::replay(None, &events).unwrap();
+        let session = &projection.branches["root"].session;
+        assert_eq!(
+            session.agents_panes,
+            Some(vec![crate::types::AgentPaneRef::Name("kilo".into())])
+        );
+        assert!(session.agents_mode_open);
+        assert_eq!(session.agents_hidden, hidden);
+    }
+
+    /// A payload written before the hidden stack existed (no `hidden` key)
+    /// replays as an empty stack — the visible set is untouched.
+    #[test]
+    fn legacy_agents_delta_without_hidden_defaults_to_empty() {
+        let event = HistoryEvent::new(
+            2,
+            "root",
+            Delta::Metadata {
+                change: MetadataDelta::Agents {
+                    panes: Some(vec![crate::types::AgentPaneRef::Name("kilo".into())]),
+                    mode_open: true,
+                    hidden: vec![],
+                },
+            },
+        );
+        // Drop the `hidden` key exactly as an older writer never emitted it.
+        let mut value = serde_json::to_value(&event).unwrap();
+        value["delta"]["change"]
+            .as_object_mut()
+            .unwrap()
+            .remove("hidden");
+        let legacy_event: HistoryEvent = serde_json::from_value(value).unwrap();
+        let events = vec![
+            HistoryEvent::new(
+                1,
+                "root",
+                Delta::Genesis {
+                    metadata: metadata("root"),
+                },
+            ),
+            legacy_event,
+        ];
+        let projection = HistoryProjection::replay(None, &events).unwrap();
+        let session = &projection.branches["root"].session;
+        assert_eq!(
+            session.agents_panes,
+            Some(vec![crate::types::AgentPaneRef::Name("kilo".into())])
+        );
+        assert!(
+            session.agents_hidden.is_empty(),
+            "no hidden key → empty stack"
+        );
     }
 }

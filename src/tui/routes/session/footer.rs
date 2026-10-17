@@ -171,6 +171,7 @@ mod tests {
             reasoning: None,
             agents_panes: None,
             agents_mode_open: false,
+            agents_hidden: Vec::new(),
             ctx_ids: Default::default(),
             messages: vec![],
         });

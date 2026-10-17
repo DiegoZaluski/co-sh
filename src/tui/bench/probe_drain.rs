@@ -79,6 +79,7 @@ async fn probe_drain_costs() {
             reasoning: None,
             agents_panes: None,
             agents_mode_open: false,
+            agents_hidden: Vec::new(),
             ctx_ids: Default::default(),
             messages,
         });
