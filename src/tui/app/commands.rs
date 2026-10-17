@@ -92,6 +92,11 @@ impl App {
             // activity — do NOT touch the signals, do NOT clear running.
             self.parked_agents_split = Some(split);
         }
+        // The MAIN-AGENT mirror belongs to the LIVE split screen only: with
+        // the mode parked the user is back in the normal session view (the
+        // transcript IS the main agent's view), so the mirror leaves with
+        // the mode and its projection resets.
+        self.close_main_mirror();
         // Metadata: mode closed, pane set + bindings (and the hidden stack)
         // retained for the pre-marked re-entry. Synchronous: same quit-path
         // rationale as set_agents_split.
@@ -162,6 +167,9 @@ impl App {
     pub(super) fn close_agents_split(&mut self) {
         self.set_agents_split(None);
         self.parked_agents_split = None;
+        // The MAIN-AGENT mirror leaves with the mode too (its projection
+        // resets; the next open starts fresh).
+        self.close_main_mirror();
         // The pane mirrors leave the shared subagent list with the mode:
         // they exist only while a split (live or parked) owns panes here.
         self.state.right_panel.drop_agents_pane_windows();

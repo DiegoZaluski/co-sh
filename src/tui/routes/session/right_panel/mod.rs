@@ -128,6 +128,15 @@ pub fn should_show_right_panel(terminal_width: u16, state: &RightPanelState) -> 
 
 /// Count visible sections and return a bitmask: todo, bash, subagent.
 fn count_sections(state: &RightPanelState) -> (bool, bool, bool) {
+    // MAIN-AGENT MIRROR SOLE OWNERSHIP: while the `/agents` mode's
+    // main-agent mirror is open, ALL normal-mode panel content is hidden —
+    // no todo section, no bash section — and the Subagent section renders
+    // exactly the mirror window (the ranking already pins the display to
+    // it). This is the agent-mode contract: the main agent owns the panel,
+    // normal chat-side artifacts stay out of it.
+    if state.main_mirror_open() {
+        return (false, false, true);
+    }
     let has_todos = !state.todos.is_empty();
     let has_bash = state
         .pty_sessions

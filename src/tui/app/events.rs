@@ -268,6 +268,18 @@ impl App {
         use crate::ui::toast::{ToastOptions, ToastVariant};
 
         while let Ok(event) = self.event_rx.try_recv() {
+            // MAIN-AGENT MIRROR: while the `/agents` split is open AND the
+            // main-agent mirror was explicitly opened (Ctrl+P), project
+            // main-loop events into the Right Panel's subagent-window
+            // viewer. A no-op otherwise (see `mirror_main_event`). The
+            // projection runs BEFORE the match because the chat handlers
+            // below consume the event by value. `running` follows the
+            // loop status AT ARRIVAL — the terminal arms below seal the
+            // mirror explicitly, before they flip the status.
+            self.mirror_main_event(
+                &event,
+                self.state.status == crate::types::SessionStatus::Working,
+            );
             match event {
                 // /agents split: a pane streamed a live event. The pane's
                 // own SubagentActivity does all the coalescing — the same
@@ -1457,6 +1469,9 @@ impl App {
                     context,
                     checkup_verdict,
                 } => {
+                    // The main-agent mirror seals its turn BEFORE the status
+                    // flips: success closes the marker as Completed.
+                    self.mirror_main_done(false);
                     // The decision model's audit of a heuristic guard stop:
                     // an improper stop is never silent.
                     // Record-everywhere, toast-on-disagreement: the verdict
@@ -1661,6 +1676,12 @@ impl App {
                 }
 
                 HarnessEvent::Stopped { context } => {
+                    // The main-agent mirror seals its interrupted turn as
+                    // Failed, with the interruption notice as the transcript's
+                    // last line (the same rule `close_turn` applies to a
+                    // failed pane turn) — BEFORE the status flips.
+                    self.mirror_main_message("The agent loop was stopped.");
+                    self.mirror_main_done(true);
                     self.state.status = SessionStatus::Idle;
                     self.agent_spinner = None;
                     self.stream_msg_id = None;
@@ -1863,6 +1884,14 @@ impl App {
                             duration_ms: 6000,
                         });
                     }
+                    // Push error as an assistant message so it appears inline in the chat
+                    let error_text = format!("Error: {message}");
+                    // The main-agent mirror records the loop error inline
+                    // (the same `Message` entry a failed pane turn shows)
+                    // and seals the turn as Failed — BEFORE the status
+                    // flips.
+                    self.mirror_main_message(&error_text);
+                    self.mirror_main_done(true);
                     self.state.status = SessionStatus::Retry {
                         message: message.clone(),
                         action: None,
@@ -1870,8 +1899,6 @@ impl App {
                     self.agent_spinner = None;
                     self.stream_msg_id = None;
 
-                    // Push error as an assistant message so it appears inline in the chat
-                    let error_text = format!("Error: {message}");
                     if let Some(session) = self.state.current_session_mut() {
                         if self.telemetry.enabled() {
                             self.session_telemetry.record_message();

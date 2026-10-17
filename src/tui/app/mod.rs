@@ -53,6 +53,11 @@ mod dialogs;
 pub(crate) mod events;
 mod gateway_recommendation;
 mod keys;
+/// Right Panel feed for the MAIN agent in `/agents` mode: translates main-
+/// loop `HarnessEvent`s into the `SubagentEvent`s the subagent window
+/// viewer already renders (the mirror is a display-only `PtySession` in
+/// `RightPanelState` fed exclusively through this module's hooks).
+mod main_mirror;
 mod mouse;
 mod paste_burst;
 mod prompt_correction;
@@ -321,6 +326,10 @@ pub struct App {
     /// when the session changes (the pane set lives on in the session
     /// metadata for a later rebuild).
     pub parked_agents_split: Option<crate::routes::session::agents_split::AgentsSplitState>,
+    /// Bridge state for the main-agent mirror (`app::main_mirror`): pairs
+    /// the synthesized tool-call ids of ONE main-agent turn with their
+    /// results. Reset per turn by the mirror's input/done hooks.
+    main_mirror_bridge: main_mirror::MirrorBridge,
     pub should_quit: bool,
     pub tokio_handle: Handle,
     pub event_tx: mpsc::UnboundedSender<HarnessEvent>,
@@ -754,6 +763,7 @@ impl App {
             transparent_background,
             session_view: SessionView::new(),
             sparkle: SparkleState::new(),
+            main_mirror_bridge: main_mirror::MirrorBridge::default(),
             #[cfg(feature = "home")]
             home_view: HomeView::new(),
             internal_tools_view: {
@@ -1629,17 +1639,30 @@ impl App {
             session_bottom.saturating_sub(area.y + 1),
         )
     }
-    /// Whether the right panel occupies the screen right now: the shared
-    /// content/width/user-hidden predicate AND the `/agents` split not
-    /// owning the main area — the split replaces the transcript at full
-    /// width, so the panel must not overlay it (the bound agents surface
-    /// in the panel in the NORMAL mode, which is where the spec places
-    /// them). Render (via `session_main_area`) and every mouse hit-test
-    /// route through THIS predicate, so the drawn layout and the hit
-    /// geometry can never disagree about the panel's presence.
+    /// Whether the right panel occupies the screen right now.
+    ///
+    /// - NORMAL mode (no `/agents` split): the shared content/width/
+    ///   user-hidden predicate — unchanged behavior.
+    /// - `/agents` mode: the panel shows ONLY when the main-agent mirror
+    ///   was explicitly opened (Ctrl+P). There is NO auto-open trigger in
+    ///   agent mode, and while the mirror is open it is the panel's SOLE
+    ///   OWNER: `count_sections` hides every normal-mode section (todo,
+    ///   bash) and the Subagent section renders exactly the mirror window.
+    ///   Closing the mirror (Ctrl+P again, or the mode parking/closing)
+    ///   removes the mirror and restores the panel exactly as it is today.
+    ///
+    /// Render (via `session_main_area`) and every mouse hit-test route
+    /// through THIS predicate, so the drawn layout and the hit geometry
+    /// can never disagree about the panel's presence.
     pub(crate) fn right_panel_visible(&self, terminal_width: u16) -> bool {
-        self.agents_split.is_none()
-            && should_show_right_panel(terminal_width, &self.state.right_panel)
+        if self.agents_split.is_some() {
+            // Agent mode: explicit open only, and the mirror must exist —
+            // the pane mirrors alone (bound windows in the shared list)
+            // never summon the panel over the split screen.
+            return self.main_mirror_open()
+                && should_show_right_panel(terminal_width, &self.state.right_panel);
+        }
+        should_show_right_panel(terminal_width, &self.state.right_panel)
     }
 
     /// Check if a mouse x-coordinate is within the right panel area — and

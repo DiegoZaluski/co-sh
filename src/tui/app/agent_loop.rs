@@ -269,6 +269,11 @@ impl App {
             self.session_view.scroll_to_bottom();
         }
 
+        // MAIN-AGENT MIRROR: echo the submitted prompt as the mirror's turn
+        // input (and reset the projection bridge for the new turn). A no-op
+        // while the mirror is closed or the `/agents` split is not open.
+        self.mirror_main_input(&msg);
+
         self.stop_signal.store(false, Ordering::Relaxed);
         self.state.status = crate::types::SessionStatus::Working;
         // Telemetry aggregate: one full user-request → final-answer cycle.

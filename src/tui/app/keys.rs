@@ -1405,10 +1405,28 @@ impl App {
                 }
                 Some(crate::keymap::Action::ToggleRightPanel) => {
                     // Ctrl+P: toggle the right panel open/closed.
-                    self.state.right_panel.toggle_hidden();
-                    if self.state.right_panel.user_hidden {
-                        // A hidden panel cannot hold keyboard focus.
-                        self.state.right_panel.panel_focus = None;
+                    //
+                    // `/agents` mode routes to the MAIN-AGENT mirror
+                    // instead: the panel has NO auto-open trigger here and
+                    // shows only when the main agent's mirror window was
+                    // explicitly opened. First press opens the mirror (and
+                    // the panel with it); a second press closes it AND the
+                    // panel, restoring the normal-mode panel state verbatim
+                    // (`user_hidden` is never flipped in agent mode, so a
+                    // later leave of the mode shows the panel exactly as
+                    // normal mode left it).
+                    if self.agents_split.is_some() {
+                        if self.main_mirror_open() {
+                            self.close_main_mirror();
+                        } else {
+                            self.open_main_mirror();
+                        }
+                    } else {
+                        self.state.right_panel.toggle_hidden();
+                        if self.state.right_panel.user_hidden {
+                            // A hidden panel cannot hold keyboard focus.
+                            self.state.right_panel.panel_focus = None;
+                        }
                     }
                 }
                 Some(crate::keymap::Action::ToggleUsage) => {

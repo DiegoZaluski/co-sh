@@ -877,6 +877,17 @@ pub struct PtySession {
     /// content that cannot move. `None` = recompute (and cache). Invalidated
     /// by every `apply` (a width change bypasses the cache entirely).
     pub(crate) activity_rows_cache: Option<(u16, u16)>,
+    /// This window is the MAIN-AGENT mirror of the `/agents` mode: it was
+    /// opened by `App::open_main_mirror` so the MAIN agent can be viewed
+    /// in the Right Panel through the same subagent window viewer while
+    /// the split owns the screen. Fed EXCLUSIVELY by
+    /// `RightPanelState::sync_main_mirror_event` (never the
+    /// `call_ref`/last-Running normal-subagent paths, which exclude it
+    /// like `bound` windows), never superseded (the per-CLI sweep skips
+    /// it), and NEVER listed: it is the Subagent section's sole owner, so
+    /// the list builders and `resolve_visible_subagents` ranking skip it
+    /// entirely — the section renders exactly this one window expanded.
+    pub(crate) main_mirror: bool,
     /// This window is a `/agents` PANE MIRROR: it was opened by the
     /// split-screen mode (pane `agents_pane`) to surface its agent in the
     /// shared subagent list, not spawned by a `subagent_call`. Mirrors are
@@ -910,6 +921,7 @@ impl PtySession {
             input_echo: None,
             call_ref: None,
             activity_rows_cache: None,
+            main_mirror: false,
             bound: false,
             agents_pane: None,
         }
@@ -2210,20 +2222,30 @@ impl RightPanelState {
     /// Whether the subagent section currently renders as a LIST: forced
     /// `Some(true)`, or automatic when >= 2 subagent sessions exist (a
     /// single subagent always renders expanded — the classic window view).
+    /// The MAIN-AGENT mirror overrides BOTH: while it exists the section is
+    /// ALWAYS the expanded window view — the mirror is the sole owner and
+    /// never appears in the list (the list builders exclude it), so neither
+    /// the pane mirrors' count nor a stale forced flag may flip the section
+    /// into a list that cannot display the main agent at all.
     pub(crate) fn subagent_list_active(&self) -> bool {
+        if self.main_mirror_open() {
+            return false;
+        }
         self.subagent_list_mode
-            .unwrap_or_else(|| self.pty_sessions.iter().filter(|s| s.is_subagent()).count() >= 2)
+            .unwrap_or_else(|| self.pty_sessions.iter().filter(|s| s.is_subagent() && !s.main_mirror).count() >= 2)
     }
 
     /// The chronological subagent list entries: `(pty_sessions index, is
     /// selected)`, oldest first (matches the chat flow — the newest work
-    /// is at the bottom, next to the live edge).
+    /// is at the bottom, next to the live edge). The MAIN-AGENT mirror is
+    /// excluded: it never appears in the list (it owns the section as the
+    /// one expanded window instead).
     pub(crate) fn subagent_list_entries(&self) -> Vec<(usize, bool)> {
         let selected = self.subagent_list_selected;
         self.pty_sessions
             .iter()
             .enumerate()
-            .filter(|(_, s)| s.is_subagent())
+            .filter(|(_, s)| s.is_subagent() && !s.main_mirror)
             .enumerate()
             .map(|(pos, (idx, _))| (idx, Some(pos) == selected))
             .collect()
@@ -2231,7 +2253,7 @@ impl RightPanelState {
 
     /// Select the previous list row (wrapping), scrolling it into view.
     pub(crate) fn subagent_list_select_prev(&mut self) {
-        let count = self.pty_sessions.iter().filter(|s| s.is_subagent()).count();
+        let count = self.pty_sessions.iter().filter(|s| s.is_subagent() && !s.main_mirror).count();
         if count == 0 {
             return;
         }
@@ -2243,7 +2265,7 @@ impl RightPanelState {
 
     /// Select the next list row (wrapping), scrolling it into view.
     pub(crate) fn subagent_list_select_next(&mut self) {
-        let count = self.pty_sessions.iter().filter(|s| s.is_subagent()).count();
+        let count = self.pty_sessions.iter().filter(|s| s.is_subagent() && !s.main_mirror).count();
         if count == 0 {
             return;
         }
@@ -2282,12 +2304,13 @@ impl RightPanelState {
     }
 
     /// The `pty_sessions` indices of every subagent session, in list order
-    /// (chronological, oldest first).
+    /// (chronological, oldest first). The MAIN-AGENT mirror is excluded —
+    /// it never appears in the list.
     pub(crate) fn subagent_session_indices(&self) -> Vec<usize> {
         self.pty_sessions
             .iter()
             .enumerate()
-            .filter(|(_, s)| s.is_subagent())
+            .filter(|(_, s)| s.is_subagent() && !s.main_mirror)
             .map(|(i, _)| i)
             .collect()
     }
@@ -2380,9 +2403,13 @@ impl RightPanelState {
     /// Return from an expanded subagent to the list (Ctrl+Alt+L, or Esc
     /// with the panel focused on the subagent section). No-op when the
     /// list is already active — the caller decides whether Esc falls
-    /// through to its other meanings.
+    /// through to its other meanings. ALSO a no-op while the MAIN-AGENT
+    /// mirror owns the section: the mirror never appears in the list (the
+    /// list builders exclude it), so a forced list view here would render
+    /// an empty Subagent box and make the mirror unreachable until the
+    /// next explicit Ctrl+P cycle re-folds the view.
     pub(crate) fn subagent_list_open(&mut self) -> bool {
-        if self.subagent_list_active() {
+        if self.subagent_list_active() || self.main_mirror_open() {
             return false;
         }
         self.subagent_list_mode = Some(true);
@@ -2411,7 +2438,7 @@ impl RightPanelState {
     /// but are never removed — the count only grows — this is a safety
     /// net for rehydration trimming).
     pub(crate) fn subagent_list_clamp(&mut self) {
-        let count = self.pty_sessions.iter().filter(|s| s.is_subagent()).count();
+        let count = self.pty_sessions.iter().filter(|s| s.is_subagent() && !s.main_mirror).count();
         if count == 0 {
             self.subagent_list_selected = None;
             self.subagent_list_scroll = 0;
@@ -2519,7 +2546,7 @@ impl RightPanelState {
             .pty_sessions
             .iter()
             .enumerate()
-            .filter(|(_, s)| s.is_subagent())
+            .filter(|(_, s)| s.is_subagent() && !s.main_mirror)
             .position(|(i, _)| i == idx);
         if let Some(pos) = pos
             && self.subagent_list_selected != Some(pos)
@@ -2547,6 +2574,16 @@ impl RightPanelState {
     /// call-site compatibility). Superseded sessions never enter the
     /// display — they are reachable only via navigation.
     pub(crate) fn resolve_visible_subagents(&mut self, _wrap_w: u16, _budget_rows: i32) {
+        // SOLE OWNER: while the main-agent mirror exists it IS the section —
+        // exactly one window (itself), outranking every normal candidate
+        // and never entering the ranking below (a normal subagent spawn or
+        // user focus must not displace it while the `/agents` mode holds
+        // the screen).
+        if let Some(mirror) = self.main_mirror_index() {
+            self.ensure_outputs_loaded(&[mirror]);
+            self.visible_subagents = vec![mirror];
+            return;
+        }
         // ONE pass over the sessions builds every per-queue view used
         // below (absolute index list + pinned state), instead of the
         // O(N) `queue_*` scans per candidate.
@@ -3338,11 +3375,12 @@ impl RightPanelState {
         if let Some(agent) = command.strip_prefix("subagent: ") {
             let prefix = format!("subagent: {agent}");
             for s in &mut self.pty_sessions {
-                // Pane mirrors are OUT: a `/agents` pane is a stable per-
-                // pane slot (its own routing identity), not a newer turn of
-                // this CLI's queue — a normal subagent spawn of the same
-                // agent must never evict it from the default display.
-                if s.command == prefix && s.is_finished() && !s.bound {
+                // Pane mirrors and the main-agent mirror are OUT: a `/agents`
+                // pane is a stable per-pane slot (its own routing identity)
+                // and the main-agent mirror is the Subagent section's sole
+                // owner — a normal subagent spawn of the same agent must
+                // never evict either from the default display.
+                if s.command == prefix && s.is_finished() && !s.bound && !s.main_mirror {
                     s.superseded = true;
                 }
             }
@@ -3581,6 +3619,172 @@ impl RightPanelState {
         }
     }
 
+    // ── Main-agent mirror (the `/agents` mode's Right Panel owner) ──────
+    //
+    // While the `/agents` split is open, the MAIN agent can be viewed in
+    // the Right Panel through the SAME subagent window viewer (F1). The
+    // mirror is a display-only `PtySession` fed EXCLUSIVELY by
+    // `app::main_mirror` (HarnessEvent → SubagentEvent projection); it is
+    // the SOLE OWNER of the Subagent section while it exists:
+    //
+    // - it never enters the subagent LIST (the list builders and the
+    //   ranking exclude `main_mirror` windows), unlike pane mirrors that
+    //   join the shared list;
+    // - normal subagent traffic never reaches it (`update_subagent_activity`
+    //   excludes it exactly like `bound` windows), and its own stream is
+    //   routed only through `sync_main_mirror_event`;
+    // - it is never superseded by a same-CLI spawn (the sweep excludes
+    //   it like `bound`).
+    //
+    // Closing resets the projection: the next open starts a fresh
+    // timeline from the then-current conversation (no backfill — the
+    // full transcript is the chat's job).
+
+    /// Absolute `pty_sessions` index of the main-agent mirror, if open.
+    pub(crate) fn main_mirror_index(&self) -> Option<usize> {
+        self.pty_sessions.iter().position(|s| s.main_mirror)
+    }
+
+    /// Open (idempotently) the main-agent mirror window. The mirror is a
+    /// running `subagent: cosh` window wearing the `main_mirror` marker —
+    /// the same shape a subagent window renders, so zero new rendering
+    /// code. Never superseded, never listed, never a normal-event target.
+    pub(crate) fn open_main_mirror_window(&mut self) {
+        if self.main_mirror_index().is_some() {
+            return;
+        }
+        self.next_pty_id += 1;
+        let id = format!("pty-{}", self.next_pty_id);
+        let mut session = PtySession::new(id, "subagent: cosh".to_string(), None);
+        session.main_mirror = true;
+        self.pty_sessions.push(session);
+        self.pty_gen = self.pty_gen.wrapping_add(1);
+        self.mark_activity(SectionKind::Subagent);
+    }
+
+    /// Feed ONE projected main-loop event into the mirror (a no-op when
+    /// closed). `running` flips the window's live/terminal marker; a
+    /// transition Running→finished here seals the transcript the same way
+    /// a pane-mirror turn end does (no re-seal churn while idle).
+    pub(crate) fn sync_main_mirror_event(&mut self, event: &SubagentEvent, running: bool) {
+        let Some(idx) = self.main_mirror_index() else {
+            return;
+        };
+        let session = &mut self.pty_sessions[idx];
+        let applied = session.subagent_activity.apply(event);
+        if applied {
+            session.activity_rows_cache = None;
+        }
+        let was_running = matches!(session.status, PtyStatus::Running);
+        if running {
+            if !was_running {
+                session.status = PtyStatus::Running;
+                self.pty_gen = self.pty_gen.wrapping_add(1);
+            } else if applied {
+                self.pty_gen = self.pty_gen.wrapping_add(1);
+            }
+        } else if was_running {
+            // The turn ended: flip the marker and freeze any InProgress
+            // tool rows that never got their result (same display-projection
+            // rule `sync_agents_pane_inner` applies).
+            session.status = PtyStatus::Completed;
+            if session
+                .subagent_activity
+                .timeline
+                .iter()
+                .any(|e| matches!(e, SubagentTimelineEntry::Tool(c) if c.status == ToolCallStatus::InProgress))
+            {
+                session.subagent_activity.seal(true, None);
+                session.activity_rows_cache = None;
+            }
+            self.pty_gen = self.pty_gen.wrapping_add(1);
+        } else if applied {
+            self.pty_gen = self.pty_gen.wrapping_add(1);
+        }
+        if applied {
+            self.mark_activity(SectionKind::Subagent);
+        }
+    }
+
+    /// Seal the mirror's terminal marker for the turn that just ended,
+    /// with `failed` coloring the final marker (Failed vs Completed).
+    /// Idempotent on an already-finished mirror (no gen churn).
+    pub(crate) fn finish_main_mirror(&mut self, failed: bool) {
+        let Some(idx) = self.main_mirror_index() else {
+            return;
+        };
+        let session = &mut self.pty_sessions[idx];
+        let was_running = matches!(session.status, PtyStatus::Running);
+        let next = if failed {
+            PtyStatus::Failed
+        } else {
+            PtyStatus::Completed
+        };
+        if !was_running && session.status == next {
+            return;
+        }
+        session.status = next;
+        if was_running
+            && session
+                .subagent_activity
+                .timeline
+                .iter()
+                .any(|e| matches!(e, SubagentTimelineEntry::Tool(c) if c.status == ToolCallStatus::InProgress))
+        {
+            // `seal(false, _)` on failure keeps every entry and fails the
+            // stuck rows; on success stuck rows complete (the result raced
+            // behind the closure) — the same rule the pane mirrors apply.
+            session.subagent_activity.seal(!failed, None);
+            session.activity_rows_cache = None;
+        }
+        self.pty_gen = self.pty_gen.wrapping_add(1);
+        self.mark_activity(SectionKind::Subagent);
+    }
+
+    /// Store (or clear) the mirror's verbatim turn input echo — the prompt
+    /// rendered above the timeline with the `│` input rail.
+    pub(crate) fn set_main_mirror_input_echo(&mut self, input: Option<&str>) {
+        let Some(idx) = self.main_mirror_index() else {
+            return;
+        };
+        let session = &mut self.pty_sessions[idx];
+        let next = input
+            .map(|i| bounded_tail(i.trim(), SUBAGENT_INPUT_ECHO_BYTES))
+            .filter(|i| !i.is_empty());
+        if session.input_echo != next {
+            session.input_echo = next;
+            self.pty_gen = self.pty_gen.wrapping_add(1);
+        }
+    }
+
+    /// Close the mirror. `reset` drops the projection entirely: the next
+    /// open starts a fresh timeline (the transcript is the chat's view).
+    pub(crate) fn close_main_mirror_window(&mut self, reset: bool) {
+        let Some(idx) = self.main_mirror_index() else {
+            return;
+        };
+        if reset {
+            self.pty_sessions.remove(idx);
+        } else {
+            self.pty_sessions[idx].main_mirror = false;
+        }
+        self.pty_gen = self.pty_gen.wrapping_add(1);
+        // Selection/pins index absolute positions — clamp defensively. A
+        // window click while the mirror was up may have left the panel
+        // focused on the mirror's own queue (`Agent("cosh")`): with the
+        // mirror gone that focus is stale — drop it with the rest.
+        self.panel_focus = None;
+        self.subagent_list_selected = None;
+        for nav in self.agent_navs.values_mut() {
+            nav.index = None;
+        }
+    }
+
+    /// Whether the main-agent mirror currently owns the Subagent section.
+    pub(crate) fn main_mirror_open(&self) -> bool {
+        self.main_mirror_index().is_some()
+    }
+
     /// Number of sessions in one agent's queue.
     pub(crate) fn queue_len(&self, agent: &str) -> usize {
         self.pty_sessions
@@ -3705,12 +3909,14 @@ impl RightPanelState {
     /// both spellings must match or an internal completion notification
     /// would never find its window (and the window would stay Running).
     fn is_window_of(session: &PtySession, agent: &str) -> bool {
-        // Pane mirrors are never normal subagent windows: the agent-hint
-        // fallback (and every caller of this predicate — meta, stream,
-        // completion, failure) must not graft `subagent_call` traffic into
-        // a `/agents` pane's mirror. Mirrors are fed exclusively through
-        // the pane-index sync.
+        // Pane mirrors and the main-agent mirror are never normal subagent
+        // windows: the agent-hint fallback (and every caller of this
+        // predicate — meta, stream, completion, failure) must not graft
+        // `subagent_call` traffic into a `/agents` pane's mirror or into
+        // the main-agent mirror. Each mirror is fed exclusively through
+        // its own sync (pane-index routed / `sync_main_mirror_event`).
         !session.bound
+            && !session.main_mirror
             && {
                 let cli = session.subagent_agent();
                 cli == Some(agent) || (agent == "internal" && cli == Some(""))
@@ -8102,5 +8308,132 @@ mod tests {
             "no mirrors left, bash window untouched"
         );
         assert!(state.pty_sessions.iter().any(|s| !s.is_subagent()));
+    }
+
+    // ---- main-agent mirror (the /agents mode's Right Panel owner) ----
+
+    /// The mirror opens once (idempotent), is the Subagent section's sole
+    /// owner in the ranking, never enters the list, and is immune to the
+    /// per-CLI supersede sweep and to normal subagent traffic.
+    #[test]
+    fn main_mirror_opens_once_owns_the_section_and_is_list_excluded() {
+        let mut state = RightPanelState::new();
+        state.open_main_mirror_window();
+        state.open_main_mirror_window();
+        assert_eq!(
+            state.pty_sessions.iter().filter(|s| s.main_mirror).count(),
+            1,
+            "re-opening must not stack mirror windows"
+        );
+
+        // Sole owner: exactly the mirror is visible, even with normal
+        // subagent windows and user focus present.
+        state.start_pty("subagent: kilo".to_string(), None);
+        state.panel_focus = Some(PanelFocus::Agent("kilo".into()));
+        state.resolve_visible_subagents(20, 100);
+        assert_eq!(state.visible_subagents, vec![0], "the mirror outranks every normal candidate");
+
+        // List exclusion: the mirror is invisible to the list builders and
+        // never flips the automatic list threshold.
+        assert!(
+            state
+                .subagent_list_entries()
+                .iter()
+                .all(|&(idx, _)| idx != 0),
+            "the mirror never appears in the list"
+        );
+        assert!(
+            !state.subagent_list_active(),
+            "one normal subagent + the mirror stay in the expanded window view"
+        );
+
+        // Supersede immunity: a finished mirror survives a same-CLI spawn.
+        state.finish_main_mirror(false);
+        state.start_pty("subagent: cosh".to_string(), None);
+        assert!(
+            !state.pty_sessions[0].superseded,
+            "a same-CLI subagent spawn never supersedes the main mirror"
+        );
+    }
+
+    /// The mirror's own sync applies events and seals the terminal marker;
+    /// normal subagent traffic (typed events and output appends) must
+    /// never land in it, and closing resets the projection.
+    #[test]
+    fn main_mirror_syncs_its_own_stream_only_and_resets_on_close() {
+        let mut state = RightPanelState::new();
+        state.open_main_mirror_window();
+        state.set_main_mirror_input_echo(Some("run the build"));
+        assert_eq!(
+            state.pty_sessions[0].input_echo.as_deref(),
+            Some("run the build")
+        );
+        state.sync_main_mirror_event(
+            &SubagentEvent::Message { text: "working".into() },
+            true,
+        );
+        state.sync_main_mirror_event(
+            &SubagentEvent::ToolCall {
+                id: "t1".into(),
+                title: "bash".into(),
+                kind: ToolKind::Execute,
+                status: ToolCallStatus::InProgress,
+                raw_input: None,
+                tool: Some("bash_run".into()),
+            },
+            true,
+        );
+        state.finish_main_mirror(false);
+        let mirror = &state.pty_sessions[0];
+        assert!(matches!(mirror.status, PtyStatus::Completed));
+        assert!(
+            mirror
+                .subagent_activity
+                .timeline
+                .iter()
+                .all(|e| !matches!(
+                    e,
+                    SubagentTimelineEntry::Tool(c) if c.status == ToolCallStatus::InProgress
+                )),
+            "closing the turn completes stuck tool rows"
+        );
+
+        // Normal traffic stays out: the last-Running fallback and the
+        // agent-hint fallback both exclude the mirror.
+        state.sync_main_mirror_event(&SubagentEvent::Message { text: "x".into() }, true);
+        state.start_pty("subagent: kilo".to_string(), None);
+        let kilo_idx = state
+            .pty_sessions
+            .iter()
+            .position(|s| !s.main_mirror && s.is_subagent())
+            .unwrap();
+        state.pty_sessions[kilo_idx].status = PtyStatus::Running;
+        let applied = state.update_subagent_activity(
+            &SubagentEvent::Message { text: "normal traffic".into() },
+            None,
+        );
+        assert!(applied, "the normal window received the event");
+        assert!(
+            state.pty_sessions[0]
+                .subagent_activity
+                .timeline
+                .iter()
+                .all(|e| !matches!(
+                    e,
+                    SubagentTimelineEntry::Message { text } if text.contains("normal traffic")
+                )),
+            "the mirror never absorbs normal subagent activity"
+        );
+
+        // Close resets: the window disappears entirely and the next open
+        // starts a fresh (empty) projection.
+        state.close_main_mirror_window(true);
+        assert!(state.main_mirror_index().is_none());
+        state.open_main_mirror_window();
+        assert!(
+            state.pty_sessions.last().unwrap().subagent_activity.timeline.is_empty()
+                && state.pty_sessions.last().unwrap().input_echo.is_none(),
+            "the next open starts a fresh projection"
+        );
     }
 }

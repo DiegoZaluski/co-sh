@@ -728,3 +728,154 @@ async fn spinner_activity_ignores_noise_deltas() {
         "working"
     );
 }
+
+/// The `/agents` mode's Right Panel contract, exercised through the real
+/// App: the main agent is the panel's SOLE owner — no agent LIST renders
+/// even with several pane mirrors alive (the pane count and a stale forced
+/// list flag are both overridden while the main mirror exists) — and the
+/// mirror opens showing the conversation the user ALREADY had with the main
+/// agent, not an empty window.
+#[tokio::test]
+async fn agents_mode_right_panel_shows_the_main_agent_not_a_list() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = app_with_fresh_session("agents panel");
+    // Prior dialog: the user talked to the main agent BEFORE entering the
+    // split mode (the exact reported condition for the mirror to already
+    // show something).
+    app.state
+        .current_session_mut()
+        .unwrap()
+        .messages
+        .push(crate::types::Message {
+            id: "m1".into(),
+            role: crate::types::MessageRole::User,
+            parts: vec![crate::types::Part::Text(crate::types::TextPart {
+                text: "what is the plan".into(),
+                synthetic: false,
+            })],
+            created_at: 0,
+            agent: None,
+            model: None,
+        });
+    app.state
+        .current_session_mut()
+        .unwrap()
+        .messages
+        .push(crate::types::Message {
+            id: "m2".into(),
+            role: crate::types::MessageRole::Assistant,
+            parts: vec![
+                crate::types::Part::Reasoning(crate::types::ReasoningPart {
+                    text: "thinking about it".into(),
+                    collapsed: false,
+                }),
+                crate::types::Part::Text(crate::types::TextPart {
+                    text: "here is the plan".into(),
+                    synthetic: false,
+                }),
+                crate::types::Part::Tool(crate::types::ToolPart {
+                    tool: "bash_run".into(),
+                    input: serde_json::json!({"command": "ls"}),
+                    output: Some("file.txt".into()),
+                    status: crate::types::ToolStatus::Completed,
+                    tool_call_id: Some("call-1".into()),
+                    is_start: false,
+                    is_streaming: false,
+                    cached_line_count: None,
+                    lsp_notes: None,
+                }),
+            ],
+            created_at: 1,
+            agent: None,
+            model: None,
+        });
+
+    // Enter the split mode with TWO panes: their mirrors used to push the
+    // section into the automatic list view (>= 2 subagents), which rendered
+    // an agent LIST instead of the main agent.
+    app.agents_split = Some(crate::routes::session::agents_split::AgentsSplitState::new(
+        vec![
+            crate::types::AgentPaneRef::Name("claude".into()),
+            crate::types::AgentPaneRef::Name("kilo".into()),
+        ],
+    ));
+    for (i, pane) in app
+        .state
+        .current_session()
+        .unwrap()
+        .agents_panes
+        .clone()
+        .unwrap_or_default()
+        .iter()
+        .enumerate()
+    {
+        let _ = pane;
+        app.state.right_panel.open_agents_pane_window(i, "pane");
+    }
+    // Even a stale FORCED list flag must not survive the sole ownership.
+    app.state.right_panel.subagent_list_mode = Some(true);
+
+    // Explicit open (Ctrl+P path): the mirror appears, expanded, with the
+    // prior conversation backfilled.
+    app.open_main_mirror();
+    assert!(app.main_mirror_open());
+    assert!(
+        !app.state.right_panel.subagent_list_active(),
+        "the mirror owns the section as the ONE expanded window — no list"
+    );
+    assert!(
+        app.right_panel_visible(120),
+        "the explicit open shows the panel in agent mode"
+    );
+    let mirror = &app.state.right_panel.pty_sessions
+        [app.state.right_panel.main_mirror_index().unwrap()];
+    let timeline = &mirror.subagent_activity.timeline;
+    assert!(
+        timeline.iter().any(|e| matches!(
+            e,
+            crate::routes::session::right_panel::types::SubagentTimelineEntry::UserMessage { text }
+                if text == "what is the plan"
+        )),
+        "the prior USER turn is in the mirror"
+    );
+    assert!(
+        timeline.iter().any(|e| matches!(
+            e,
+            crate::routes::session::right_panel::types::SubagentTimelineEntry::Message { text }
+                if text == "here is the plan"
+        )),
+        "the prior ASSISTANT answer is in the mirror"
+    );
+    assert!(
+        timeline.iter().any(|e| matches!(
+            e,
+            crate::routes::session::right_panel::types::SubagentTimelineEntry::Thought { .. }
+        )),
+        "the prior reasoning is in the mirror"
+    );
+    assert!(
+        timeline.iter().any(|e| matches!(
+            e,
+            crate::routes::session::right_panel::types::SubagentTimelineEntry::Tool(c)
+                if c.tool.as_deref() == Some("bash_run")
+                    && c.status == cosh_tools::subagent::events::ToolCallStatus::Completed
+        )),
+        "the prior tool call is in the mirror, sealed Completed"
+    );
+
+    // Closing restores the pre-open panel state verbatim (the list-mode
+    // flag the user left is NOT touched by the mirror lifecycle).
+    let list_mode_before = app.state.right_panel.subagent_list_mode;
+    app.close_main_mirror();
+    assert!(!app.main_mirror_open());
+    assert_eq!(
+        app.state.right_panel.subagent_list_mode,
+        list_mode_before,
+        "the mirror lifecycle leaves the list-mode state exactly as it was"
+    );
+    assert!(
+        app.state.right_panel.subagent_list_active(),
+        "without the mirror the pane mirrors' list returns — normal behavior"
+    );
+}
