@@ -357,6 +357,62 @@ impl App {
                         if let Some(split) = target {
                             split.set_agent_config_options(pane, options.clone());
                         }
+                    } else if let SubagentEvent::Modes { modes, current } = &event {
+                        // Pane chrome like `SessionModel`: the advertised
+                        // session modes cache on the pane (the client's own
+                        // mode maps onto one of them for the NEXT turn's
+                        // `session/set_mode` binding).
+                        if let Some(split) = target {
+                            split.set_agent_modes(pane, modes.clone(), current.clone());
+                        }
+                    } else if let SubagentEvent::PermissionRequest {
+                        call_id,
+                        title,
+                        kind,
+                        raw_input,
+                        options,
+                    } = &event
+                    {
+                        // The pane's OWN pending permission (the non-Yolo
+                        // modes route `session/request_permission` here):
+                        // the box opens over the pane and the user's answer
+                        // flows back through the pane's channel. Default
+                        // selection: the first allow-kind option (mirrors
+                        // the main dialog's "Allow Once" default). Two
+                        // guards keep the box honest:
+                        // - only a RUNNING pane opens a box (a request the
+                        //   turn thread emitted microseconds before the stop
+                        //   landed must not paint a dead box over an idle
+                        //   pane — the ACP handler already answered
+                        //   `Cancelled` on the closed channel);
+                        // - an existing pending request is never
+                        //   overwritten (a pipelined second request whose
+                        //   handler already got `Cancelled` would otherwise
+                        //   show a dead box and cross-wire the first
+                        //   request's answer).
+                        if let Some(split) = target
+                            && split.panes.get(pane).is_some_and(|p| p.running)
+                            && split.pending_permission(pane).is_none()
+                        {
+                            let selected = options
+                                .iter()
+                                .position(|o| o.kind == "allow_always")
+                                .or_else(|| {
+                                    options.iter().position(|o| o.kind == "allow_once")
+                                })
+                                .unwrap_or(0);
+                            split.set_pending_permission(
+                                pane,
+                                crate::routes::session::agents_split::PanePermissionRequest {
+                                    call_id: call_id.clone(),
+                                    title: title.clone(),
+                                    kind: *kind,
+                                    raw_input: raw_input.clone(),
+                                    options: options.clone(),
+                                    selected,
+                                },
+                            );
+                        }
                     } else if let Some(split) = target {
                         split.apply_event(pane, &event);
                     }
@@ -427,6 +483,11 @@ impl App {
                     if let Some(split) = target {
                         split.set_running(pane, false);
                         split.set_stop_signal(pane, None);
+                        // The turn is over: any still-pending permission
+                        // request belongs to a turn the ACP handler just
+                        // saw end (the closed receiver answers `Cancelled`
+                        // per the spec) — the box must not outlive it.
+                        split.clear_permission(pane);
                         if let (Some(id), Some(p)) = (binding.as_ref(), split.panes.get_mut(pane)) {
                             // The session id seeds the pane's next resume.
                             p.session_id = Some(id.clone());

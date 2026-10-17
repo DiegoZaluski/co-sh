@@ -26,7 +26,8 @@ use cosh_tui::core::lib::rgba::{ColorInput, RGBA};
 use cosh_tui::core::renderable::Renderable;
 use cosh_tui::core::renderables::markdown::MarkdownRenderable;
 use cosh_tools::subagent::events::{
-    AgentCommand, AgentConfigOption, PlanEntryStatus, SubagentEvent, ToolCallStatus,
+    AgentCommand, AgentConfigOption, AgentPermissionOption, AgentSessionMode, PanePermissionAnswer,
+    PlanEntryStatus, SubagentEvent, ToolCallStatus, ToolKind,
 };
 use cosh_tools::subagent::palette::{display_name, palette_for};
 use ratatui::buffer::Buffer;
@@ -114,6 +115,25 @@ fn next_pane_id() -> u64 {
     NEXT_PANE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
+/// A pane tool call awaiting the user's permission decision (the TUI's
+/// permission box, pane scoped): the ACP `session/request_permission`
+/// payload mirrored protocol-free.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PanePermissionRequest {
+    /// The awaiting tool call's id (patches its timeline row on the answer).
+    pub call_id: String,
+    /// The tool's title as the harness describes it.
+    pub title: String,
+    /// The tool's category (the row's icon).
+    pub kind: ToolKind,
+    /// The raw input JSON (the box's args row), when sent.
+    pub raw_input: Option<serde_json::Value>,
+    /// The options the agent offers, in wire order.
+    pub options: Vec<AgentPermissionOption>,
+    /// The currently highlighted option row (Up/Down navigation).
+    pub selected: usize,
+}
+
 /// One agent pane: identity, live activity stream and lifecycle state.
 #[derive(Debug, Clone, Default)]
 pub struct AgentPane {
@@ -175,6 +195,31 @@ pub struct AgentPane {
     /// free model where the harness's default is a paid-tier login wall)
     /// still apply.
     pub picked_config_ids: Vec<String>,
+    /// The agent's advertised session modes, from the turn's `Modes`
+    /// report (`session/new`/`resume`/`load` payload): the full list plus
+    /// the id the session starts in. The client maps its own harness mode
+    /// onto one of these ids (`agent_command_map::map_mode_to_agent`) and
+    /// the NEXT turn binds it through `session/set_mode` — per-connection
+    /// state, so the binding re-applies every turn like the config picks.
+    /// `None` = never reported; `Some(vec![])` = the agent advertises no
+    /// modes (bind nothing, like gemini).
+    pub agent_modes: Option<Vec<AgentSessionMode>>,
+    /// The id of the mode the session currently runs in, from the same
+    /// `Modes` report (or a later `CurrentModeUpdate`). Empty without modes.
+    pub mode_current: String,
+    /// A tool call of this pane AWAITING the user's permission decision
+    /// (the non-Yolo modes route `session/request_permission` to the TUI's
+    /// box). `None` = nothing pending. The box's answer flows back through
+    /// `permission_tx`; a turn's stop (Esc/Ctrl+X force-close) drops both
+    /// — the ACP handler answers `Cancelled` on the closed channel.
+    pub pending_permission: Option<PanePermissionRequest>,
+    /// The answer channel for [`Self::pending_permission`], handed over at
+    /// dispatch (non-Yolo modes). `Some` while the turn runs with
+    /// interactive permissions; the answer send is `Ok` regardless of the
+    /// receiver's state (the ACP handler has it until its turn ends).
+    pub permission_tx: Option<
+        tokio::sync::mpsc::UnboundedSender<PanePermissionAnswer>,
+    >,
     /// True while an on-demand snapshot probe for this pane is in flight
     /// (focus arrived with no cache): the slash menu shows its spinner row
     /// until the probe returns.
@@ -236,6 +281,10 @@ impl AgentPane {
             commands: None,
             config_options: None,
             picked_config_ids: Vec::new(),
+            agent_modes: None,
+            mode_current: String::new(),
+            pending_permission: None,
+            permission_tx: None,
             snapshot_loading: false,
             rehydrating: false,
             rehydrate_spinner: SpinnerState::new(),
@@ -668,10 +717,7 @@ impl AgentsSplitState {
     /// would oscillate expand/restore forever and the user could never
     /// leave the split with Esc).
     pub fn restore_maximized(&mut self) -> bool {
-        match self.maximized.take() {
-            Some(_) => true,
-            None => false,
-        }
+        self.maximized.take().is_some()
     }
 
     /// The currently focused pane, if any (`None` when the main agent
@@ -1106,6 +1152,16 @@ impl AgentsSplitState {
         }
     }
 
+    /// Store the pane's advertised session modes from a `Modes` report
+    /// (a live turn's session payload), replacing any earlier list.
+    /// Out-of-range panes are ignored.
+    pub fn set_agent_modes(&mut self, pane: usize, modes: Vec<AgentSessionMode>, current: String) {
+        if let Some(p) = self.panes.get_mut(pane) {
+            p.agent_modes = Some(modes);
+            p.mode_current = current;
+        }
+    }
+
     /// Flag pane `pane`'s snapshot probe as in flight (focus arrived with
     /// an empty cache). Out-of-range panes are ignored.
     pub fn set_snapshot_loading(&mut self, pane: usize, loading: bool) {
@@ -1241,6 +1297,62 @@ impl AgentsSplitState {
     pub fn set_stop_signal(&mut self, pane: usize, signal: Option<Arc<AtomicBool>>) {
         if let Some(p) = self.panes.get_mut(pane) {
             p.stop_signal = signal;
+        }
+    }
+
+    /// Attach (or drop) the pane's permission-answer channel at dispatch:
+    /// `Some(tx)` makes this turn's `session/request_permission` requests
+    /// surface on the TUI (the non-Yolo modes); `None` leaves the turn's
+    /// handler headless-auto-approving (the Yolo contract).
+    pub fn set_permission_tx(
+        &mut self,
+        pane: usize,
+        tx: Option<tokio::sync::mpsc::UnboundedSender<PanePermissionAnswer>>,
+    ) {
+        if let Some(p) = self.panes.get_mut(pane) {
+            p.permission_tx = tx;
+        }
+    }
+
+    /// Store a pane's pending permission request (the box opens for it).
+    /// Out-of-range panes are ignored.
+    pub fn set_pending_permission(&mut self, pane: usize, request: PanePermissionRequest) {
+        if let Some(p) = self.panes.get_mut(pane) {
+            p.pending_permission = Some(request);
+        }
+    }
+
+    /// The pane's pending permission request (the box's current data).
+    #[must_use]
+    pub fn pending_permission(&self, pane: usize) -> Option<&PanePermissionRequest> {
+        self.panes.get(pane).and_then(|p| p.pending_permission.as_ref())
+    }
+
+    /// Answer pane `pane`'s pending permission request: send through the
+    /// channel and clear the pending state. Returns whether a request was
+    /// actually pending (the caller only consumes the key then).
+    pub fn answer_pending_permission(&mut self, pane: usize, answer: PanePermissionAnswer) -> bool {
+        let Some(p) = self.panes.get_mut(pane) else {
+            return false;
+        };
+        let Some(_) = p.pending_permission.take() else {
+            return false;
+        };
+        if let Some(tx) = &p.permission_tx {
+            // `Err` = the receiver is gone (the turn already ended): nothing
+            // to answer — the drop IS the cancellation.
+            let _ = tx.send(answer);
+        }
+        true
+    }
+
+    /// Drop a pane's pending permission + answer channel without answering
+    /// (a force-closed turn: the ACP handler answers `Cancelled` on the
+    /// closed channel per the spec).
+    pub fn clear_permission(&mut self, pane: usize) {
+        if let Some(p) = self.panes.get_mut(pane) {
+            p.pending_permission = None;
+            p.permission_tx = None;
         }
     }
 }
@@ -1848,6 +1960,35 @@ fn render_pane(
         theme,
         delta_time,
     );
+
+    // ── Pending permission box (pane scoped) ──
+    // A tool call awaiting the user's decision paints ITS box over the
+    // pane's tail (bottom-anchored, like the main dialog sits over the
+    // prompt): the pane's stream is still the context, the box is the
+    // action. Every pane paints its own box; only the FOCUSED pane's box
+    // is sovereign (the keyboard and the click answer it, and only it).
+    if let Some(request) = &pane.pending_permission {
+        let dialog = crate::routes::session::permission::PanePermissionDialog {
+            tool: display_name(&pane.agent).to_string(),
+            description: request.title.clone(),
+            args: request
+                .raw_input
+                .as_ref()
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            options: request.options.iter().map(|o| o.name.clone()).collect(),
+            option_kinds: request.options.iter().map(|o| o.kind.clone()).collect(),
+            selected: request.selected,
+        };
+        let height = dialog.required_height(rect.width).min(rect.height);
+        let box_y = rect.bottom().saturating_sub(height);
+        let box_rect = Rect::new(rect.x, box_y, rect.width, height);
+        dialog.render(buf, box_rect, theme);
+        // Every pane paints its own box; the keyboard (and the click)
+        // answers only the FOCUSED pane's (`pane_permission_key` and the
+        // mouse router both target `focused`). A non-focused pane's box
+        // waits: switching focus answers it.
+    }
 }
 
 /// One clickable INPUT box of a pane, as registered by the last render:
@@ -2929,10 +3070,6 @@ mod tests {
         assert!(band_seen, "the panel band paints under the input");
     }
 
-    /// The frame TONE follows the speaker (kept dynamics): the USER's
-    /// echo wears the pane agent's BRAND color, an `agents_call` input
-    /// wears the theme's SECONDARY — the color alone tells WHO is speaking.
-    #[test]
     /// The sent box BREATHES like the chat's: a pad row above and below
     /// the content, painted by the frame (the chat's border+padding rows).
     #[test]
@@ -3053,7 +3190,7 @@ mod tests {
         let hl_rows: Vec<u16> = (rect.y + 1..rect.bottom() - 1)
             .filter(|&y| {
                 (rect.x + 1..rect.right() - 1)
-                    .any(|x| buf2.cell((x, y)).map_or(false, |c| c.bg == hl_bg))
+                    .any(|x| buf2.cell((x, y)).is_some_and(|c| c.bg == hl_bg))
             })
             .collect();
         assert!(!hl_rows.is_empty(), "hovering the tail box lights its rows");

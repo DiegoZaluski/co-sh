@@ -624,6 +624,19 @@ impl App {
                 }
             }
 
+            // The /agents pane's permission box (a pane tool call awaiting
+            // the user's decision — the non-Yolo modes route
+            // `session/request_permission` here): sovereign over every other
+            // handler, exactly like the main permission dialog below. Any
+            // key while a box is pending is consumed by it (Up/Down
+            // navigate, Enter picks, Esc cancels per the ACP spec); text
+            // keys are swallowed, never typed into the prompt behind it.
+            if self.agents_split.is_some()
+                && self.pane_permission_key(key.code)
+            {
+                return Ok(false);
+            }
+
             // Check permission dialog for keyboard navigation
             if self.permission_dialog.visible {
                 match key.code {

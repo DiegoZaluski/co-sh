@@ -121,6 +121,63 @@ impl App {
                 Some((index, rect))
             });
             if let Some((index, rect)) = target {
+                // A pending permission box owns the click FIRST (a button
+                // band over the pane's tail, like the scroll pill): only the
+                // FOCUSED pane's box is answerable; a click on another
+                // pane's box just focuses that pane (its box becomes
+                // answerable).
+                if matches!(event_type, MouseEventType::Down) && button == MouseButton::Left
+                    && self.agents_split.as_ref().is_some_and(|split| {
+                        split.pending_permission(index).is_some()
+                    })
+                {
+                    let clicked = self.agents_split.as_ref().and_then(|split| {
+                        let request = split.pending_permission(index)?;
+                        let dialog =
+                            crate::routes::session::permission::PanePermissionDialog {
+                                tool: String::new(),
+                                description: request.title.clone(),
+                                args: String::new(),
+                                options: request
+                                    .options
+                                    .iter()
+                                    .map(|o| o.name.clone())
+                                    .collect(),
+                                option_kinds: request
+                                    .options
+                                    .iter()
+                                    .map(|o| o.kind.clone())
+                                    .collect(),
+                                selected: request.selected,
+                            };
+                        dialog.clicked_option(y, rect)
+                    });
+                    if let Some(row) = clicked
+                        && self.agents_split.as_ref().is_some_and(|split| split.focused == Some(index))
+                    {
+                        let option_id = self
+                            .agents_split
+                            .as_ref()
+                            .and_then(|split| split.pending_permission(index))
+                            .and_then(|req| req.options.get(row))
+                            .map(|o| o.id.clone());
+                        if let Some(id) = option_id {
+                            if let Some(split) = self.agents_split.as_mut() {
+                                split.answer_pending_permission(
+                                    index,
+                                    cosh_tools::subagent::events::PanePermissionAnswer::Selected(
+                                        id,
+                                    ),
+                                );
+                            }
+                            return Ok(true);
+                        }
+                    }
+                    // Outside any option row (or a non-focused pane): fall
+                    // through — the focus/selection handling below runs and
+                    // the click focuses the pane (its box becomes
+                    // answerable).
+                }
                 // Per-pane scroll pill (the shared `⮟` component): a click
                 // jumps that pane back to the live tail and re-engages its
                 // auto-follow. Checked before focus/selection — the pill is

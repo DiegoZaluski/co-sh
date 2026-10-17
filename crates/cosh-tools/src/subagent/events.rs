@@ -45,7 +45,7 @@ pub enum ToolKind {
 }
 
 impl ToolKind {
-    fn from_acp(kind: schema::ToolKind) -> Self {
+    pub(crate) fn from_acp(kind: schema::ToolKind) -> Self {
         match kind {
             schema::ToolKind::Read => Self::Read,
             schema::ToolKind::Edit => Self::Edit,
@@ -242,6 +242,47 @@ pub struct AgentConfigOption {
     pub boolean: Option<bool>,
 }
 
+/// One session mode an agent operates in, mirrored from the ACP
+/// `SessionModeState` payloads (`session/new`, `session/resume`,
+/// `session/load`). The id is what the `session/set_mode` request selects;
+/// the name is the human label the harness gives it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSessionMode {
+    /// Stable mode id (what `session/set_mode` selects).
+    pub id: String,
+    /// Human-readable name of the mode, as the harness names it.
+    pub name: String,
+    /// Optional human-readable description of the mode.
+    pub description: Option<String>,
+}
+
+/// The user's answer to a pane permission request (what travels back
+/// through the pane's permission channel to the awaiting ACP handler).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PanePermissionAnswer {
+    /// The user picked one of the agent's offered options (its id).
+    Selected(String),
+    /// The user dismissed the box: the pending request is CANCELLED per the
+    /// ACP spec (a distinct semantic from an offered reject option — the
+    /// turn's harness decides what a cancellation means).
+    Cancel,
+}
+
+/// One option of a permission request: the id the
+/// `session/request_permission` response selects plus its human label and
+/// semantic kind (the box colors allow/reject choices by it).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentPermissionOption {
+    /// Stable option id (what the response selects).
+    pub id: String,
+    /// Human-readable label of the option (e.g. "Allow once").
+    pub name: String,
+    /// Semantic kind, mirrored from the ACP enum: `allow_once`,
+    /// `allow_always`, `reject_once`, `reject_always` (unknown kinds map
+    /// to `other`).
+    pub kind: String,
+}
+
 /// A typed event produced by a running sub-agent session.
 ///
 /// Everything the ACP `session/update` stream offers that the TUI can act
@@ -359,6 +400,41 @@ pub enum SubagentEvent {
     Mode {
         /// The id of the new mode.
         id: String,
+    },
+    /// A tool call AWAITS the user's permission decision. Emitted by the
+    /// ACP `session/request_permission` request when the client runs a
+    /// non-Yolo mode (the split's Yolo contract auto-approves instead —
+    /// see [`crate::subagent::acp`]'s permission handler). The TUI shows
+    /// its permission box for THIS pane; the user's answer flows back
+    /// through the pane's permission channel and selects the response
+    /// option. Timeline-visible like a tool call: the row shows the
+    /// awaiting state until the user answers.
+    PermissionRequest {
+        /// The awaiting tool call's id (patches it on the answer).
+        call_id: String,
+        /// The tool's title as the harness describes it.
+        title: String,
+        /// The tool's kind (the row's icon).
+        kind: ToolKind,
+        /// The raw input JSON (the TUI's detail rows), when sent.
+        raw_input: Option<serde_json::Value>,
+        /// The options the agent offers, in wire order: `(option id, label,
+        /// kind string)` — the client shows them as the box's rows and the
+        /// user's pick sends `option id` back.
+        options: Vec<AgentPermissionOption>,
+    },
+    /// The session's MODES were (re)published — the current mode plus the
+    /// full list of modes the agent can operate in. Pane chrome like
+    /// `SessionModel`/`Commands`: stored on the pane, never streamed into
+    /// the timeline. The client maps its own harness mode onto one of these
+    /// ids (a similarity match — no ACP contract fixes the spellings) and
+    /// binds it through `session/set_mode`; an agent that advertises no
+    /// modes (`None`/empty list, like gemini) simply gets none.
+    Modes {
+        /// The full mode list, in the harness's published order.
+        modes: Vec<AgentSessionMode>,
+        /// The id of the mode the session starts in.
+        current: String,
     },
     /// Session metadata (title) was set or changed.
     SessionInfo {

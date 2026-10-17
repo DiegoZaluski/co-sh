@@ -258,19 +258,27 @@ async fn run_session_drives_a_full_acp_turn_end_to_end() {
     let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel();
     let accumulated = Arc::new(Mutex::new(super::closure::TurnClosure::default()));
 
-    let (turn, _, (badge, streamed)) = tokio::join!(
+    let (turn, _, (badge, modes, streamed)) = tokio::join!(
         run_session(
             client_side,
             "hello from acp".to_string(),
             None,
             std::env::temp_dir(),
             &[],
+            None,
+            None,
             accumulated.clone(),
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             chunk_tx,
         ),
         agent_task,
-        async { (chunk_rx.recv().await, chunk_rx.recv().await) },
+        async {
+            (
+                chunk_rx.recv().await,
+                chunk_rx.recv().await,
+                chunk_rx.recv().await,
+            )
+        },
     );
 
     let (stop_reason, _session_id) = turn.unwrap();
@@ -287,6 +295,15 @@ async fn run_session_drives_a_full_acp_turn_end_to_end() {
             provider_label: None,
             reasoning: None,
         }
+    ));
+    // The MODE state follows the badge (this fixture advertises none — the
+    // empty event confirms the emission contract).
+    assert!(matches!(
+        modes.unwrap(),
+        SubagentEvent::Modes {
+            modes: empty,
+            current,
+        } if empty.is_empty() && current.is_empty()
     ));
     assert!(matches!(
         streamed.unwrap(),
@@ -451,19 +468,27 @@ async fn run_session_serves_fs_requests_and_auto_approves_permissions() {
     let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel();
     let accumulated = Arc::new(Mutex::new(super::closure::TurnClosure::default()));
 
-    let (turn, _, (badge, streamed)) = tokio::join!(
+    let (turn, _, (badge, modes, streamed)) = tokio::join!(
         run_session(
             client_side,
             "exercise handlers".to_string(),
             None,
             scratch.path().to_path_buf(),
             &[],
+            None,
+            None,
             accumulated.clone(),
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             chunk_tx,
         ),
         agent_task,
-        async { (chunk_rx.recv().await, chunk_rx.recv().await) },
+        async {
+            (
+                chunk_rx.recv().await,
+                chunk_rx.recv().await,
+                chunk_rx.recv().await,
+            )
+        },
     );
 
     let (stop_reason, _session_id) = turn.unwrap();
@@ -483,6 +508,15 @@ async fn run_session_serves_fs_requests_and_auto_approves_permissions() {
             provider_label: None,
             reasoning: None,
         }
+    ));
+    // The MODE state follows the badge (this fixture advertises none — the
+    // empty event confirms the emission contract).
+    assert!(matches!(
+        modes.unwrap(),
+        SubagentEvent::Modes {
+            modes: empty,
+            current,
+        } if empty.is_empty() && current.is_empty()
     ));
     assert!(matches!(
         streamed.unwrap(),
@@ -596,19 +630,27 @@ async fn run_session_selects_the_preferred_session_model() {
     // Bound to a local: the join!'s future borrows the picks, so they
     // cannot be an inline temporary (E0716).
     let preferred_picks = [("model".to_string(), PREFERRED.to_string())];
-    let (turn, _, (badge, streamed)) = tokio::join!(
+    let (turn, _, (badge, modes, streamed)) = tokio::join!(
         run_session(
             client_side,
             "check model".to_string(),
             None,
             std::env::temp_dir(),
             &preferred_picks,
+            None,
+            None,
             accumulated.clone(),
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             chunk_tx,
         ),
         agent_task,
-        async { (chunk_rx.recv().await, chunk_rx.recv().await) },
+        async {
+            (
+                chunk_rx.recv().await,
+                chunk_rx.recv().await,
+                chunk_rx.recv().await,
+            )
+        },
     );
 
     let (stop_reason, _session_id) = turn.unwrap();
@@ -625,6 +667,15 @@ async fn run_session_selects_the_preferred_session_model() {
             provider_label: None,
             reasoning: None
         } if model == PREFERRED && label == "Nemotron free"
+    ));
+    // The MODE state follows the badge (this fixture advertises none — the
+    // empty event confirms the emission contract).
+    assert!(matches!(
+        modes.unwrap(),
+        SubagentEvent::Modes {
+            modes: empty,
+            current,
+        } if empty.is_empty() && current.is_empty()
     ));
     assert!(matches!(
         streamed.unwrap(),
@@ -769,6 +820,8 @@ async fn run_session_maps_session_updates_into_typed_events() {
             None,
             std::env::temp_dir(),
             &[],
+            None,
+            None,
             accumulated.clone(),
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             chunk_tx,
@@ -787,14 +840,19 @@ async fn run_session_maps_session_updates_into_typed_events() {
     assert_eq!(
         events,
         vec![
-            // The badge leads: this fixture advertises no config options,
-            // so every slot is empty.
+            // The badge leads, followed by the MODE state (this fixture
+            // advertises no config options and no modes, so every slot is
+            // empty).
             SubagentEvent::SessionModel {
                 model: None,
                 model_label: None,
                 provider: None,
                 provider_label: None,
                 reasoning: None,
+            },
+            SubagentEvent::Modes {
+                modes: Vec::new(),
+                current: String::new(),
             },
             SubagentEvent::UserMessage {
                 text: "user-echo".to_string(),
@@ -2031,6 +2089,8 @@ async fn drive_turn(
             resume,
             std::env::temp_dir(),
             &[],
+            None,
+            None,
             accumulated.clone(),
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             chunk_tx,
@@ -2304,19 +2364,27 @@ async fn resumed_session_selects_the_preferred_session_model() {
     // Bound to a local: the join!'s future borrows the picks, so they
     // cannot be an inline temporary (E0716).
     let preferred_picks = [("model".to_string(), PREFERRED.to_string())];
-    let (turn, _, (badge, streamed)) = tokio::join!(
+    let (turn, _, (badge, modes, streamed)) = tokio::join!(
         run_session(
             client_side,
             "check resumed model".to_string(),
             Some("stored-9".to_string()),
             std::env::temp_dir(),
             &preferred_picks,
+            None,
+            None,
             accumulated.clone(),
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             chunk_tx,
         ),
         agent_task,
-        async { (chunk_rx.recv().await, chunk_rx.recv().await) },
+        async {
+            (
+                chunk_rx.recv().await,
+                chunk_rx.recv().await,
+                chunk_rx.recv().await,
+            )
+        },
     );
 
     let (stop_reason, session_id) = turn.unwrap();
@@ -2342,6 +2410,15 @@ async fn resumed_session_selects_the_preferred_session_model() {
             provider_label: None,
             reasoning: None
         } if model == PREFERRED && label == "Nemotron free"
+    ));
+    // The MODE state follows the badge (this fixture advertises none — the
+    // empty event confirms the emission contract).
+    assert!(matches!(
+        modes.unwrap(),
+        SubagentEvent::Modes {
+            modes: empty,
+            current,
+        } if empty.is_empty() && current.is_empty()
     ));
     assert!(matches!(
         streamed.unwrap(),
@@ -2458,6 +2535,8 @@ async fn run_session_cancels_the_remote_turn_on_the_stop_signal() {
             None,
             std::env::temp_dir(),
             &[],
+            None,
+            None,
             accumulated.clone(),
             stop_signal.clone(),
             chunk_tx,
@@ -2507,8 +2586,10 @@ async fn capture_real_opencode_stream_multi_tool() {
              crates/cosh-tools/src/subagent/ and count them. Think step by \
              step; narrate between the steps.",
             None,
-            // No user picks: the registry defaults apply.
+            // No user picks or mode binding: the registry defaults apply.
             &[],
+            None,
+            None,
             std::path::PathBuf::from("/home/inky/co-sh"),
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             chunk_tx,
@@ -2593,6 +2674,26 @@ async fn capture_real_opencode_stream_multi_tool() {
                 "kind": "ConfigOptions",
                 "options": options.iter().map(|o| serde_json::json!({
                     "id": o.id, "name": o.name, "current": o.current,
+                })).collect::<Vec<_>>(),
+            }),
+            SubagentEvent::Modes { modes, current } => serde_json::json!({
+                "kind": "Modes", "current": current,
+                "modes": modes.iter().map(|m| serde_json::json!({
+                    "id": m.id, "name": m.name,
+                })).collect::<Vec<_>>(),
+            }),
+            SubagentEvent::PermissionRequest {
+                call_id,
+                title,
+                kind,
+                raw_input,
+                options,
+            } => serde_json::json!({
+                "kind": "PermissionRequest", "call_id": call_id,
+                "title": title, "tool_kind": format!("{kind:?}"),
+                "raw_input": raw_input,
+                "options": options.iter().map(|o| serde_json::json!({
+                    "id": o.id, "name": o.name, "kind": o.kind,
                 })).collect::<Vec<_>>(),
             }),
             // No catch-all: a new SubagentEvent variant must be added here
@@ -2655,8 +2756,10 @@ async fn capture_real_opencode_stream() {
              (3) state how many lines the file has. Think step by step \
              before answering, then answer.",
             None,
-            // No user picks: the registry defaults apply.
+            // No user picks or mode binding: the registry defaults apply.
             &[],
+            None,
+            None,
             std::path::PathBuf::from("/home/inky/co-sh"),
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             chunk_tx,
@@ -2741,6 +2844,26 @@ async fn capture_real_opencode_stream() {
                 "kind": "ConfigOptions",
                 "options": options.iter().map(|o| serde_json::json!({
                     "id": o.id, "name": o.name, "current": o.current,
+                })).collect::<Vec<_>>(),
+            }),
+            SubagentEvent::Modes { modes, current } => serde_json::json!({
+                "kind": "Modes", "current": current,
+                "modes": modes.iter().map(|m| serde_json::json!({
+                    "id": m.id, "name": m.name,
+                })).collect::<Vec<_>>(),
+            }),
+            SubagentEvent::PermissionRequest {
+                call_id,
+                title,
+                kind,
+                raw_input,
+                options,
+            } => serde_json::json!({
+                "kind": "PermissionRequest", "call_id": call_id,
+                "title": title, "tool_kind": format!("{kind:?}"),
+                "raw_input": raw_input,
+                "options": options.iter().map(|o| serde_json::json!({
+                    "id": o.id, "name": o.name, "kind": o.kind,
                 })).collect::<Vec<_>>(),
             }),
             // No catch-all: a new SubagentEvent variant must be added here
@@ -2919,6 +3042,410 @@ fn session_model_info_empty_without_advertised_options() {
         SubagentEvent::SessionModel { model: None, .. }
     ));
 }
+// ── Session mode binding (session/set_mode before the prompt) ────────
+/// The client's mode binding: the fixture harness advertises TWO session
+/// modes in its `session/new` response (`code` current + `plan`), logs the
+/// `session/set_mode` request, and the turn must bind the requested mode id
+/// before prompting. The pane-chrome `Modes` event carries the advertised
+/// list, and a turn with a STALE mode id (the harness no longer advertises
+/// it) issues no `session/set_mode` at all — the skip is client-side.
+#[tokio::test(flavor = "current_thread")]
+async fn run_session_binds_the_requested_mode_before_prompting() {
+    use agent_client_protocol::schema::v1::{
+        AgentCapabilities, ContentBlock, ContentChunk, InitializeRequest, InitializeResponse,
+        NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, SessionId,
+        SessionMode, SessionModeState, SetSessionModeRequest, SetSessionModeResponse, TextContent,
+    };
+    use agent_client_protocol::{Agent as AgentRole, Channel, Responder};
+
+    let set_mode_log: RequestLog = Arc::default();
+    let set_mode_log_agent = set_mode_log.clone();
+    let prompt_log: RequestLog = Arc::default();
+    let prompt_log_agent = prompt_log.clone();
+    let prompt_log_agent_2 = prompt_log.clone();
+    // `code` current, with `code` and `plan` offered.
+    let mode_state = || {
+        SessionModeState::new(
+            agent_client_protocol::schema::v1::SessionModeId::new("code"),
+            vec![
+                SessionMode::new(
+                    agent_client_protocol::schema::v1::SessionModeId::new("code"),
+                    "Code",
+                ),
+                SessionMode::new(
+                    agent_client_protocol::schema::v1::SessionModeId::new("plan"),
+                    "Plan",
+                ),
+            ],
+        )
+    };
+
+    let (client_side, agent_side) = Channel::duplex();
+    let agent_task = tokio::spawn(async move {
+        let _ = AgentRole
+            .builder()
+            .name("mode-fixture")
+            .on_receive_request(
+                async move |request: InitializeRequest,
+                            responder: Responder<InitializeResponse>,
+                            _cx| {
+                    responder.respond(
+                        InitializeResponse::new(request.protocol_version)
+                            .agent_capabilities(AgentCapabilities::new()),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_request: NewSessionRequest,
+                            responder: Responder<NewSessionResponse>,
+                            _cx| {
+                    responder.respond(
+                        NewSessionResponse::new(SessionId::new("mode-fixture"))
+                            .modes(mode_state()),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |request: SetSessionModeRequest,
+                            responder: Responder<SetSessionModeResponse>,
+                            _cx| {
+                    set_mode_log_agent
+                        .lock()
+                        .unwrap()
+                        .push(format!("set-mode:{}", request.mode_id.0));
+                    responder.respond(SetSessionModeResponse::new())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |request: PromptRequest, responder: Responder<PromptResponse>, _cx| {
+                    prompt_log_agent
+                        .lock()
+                        .unwrap()
+                        .push(format!("prompt:{}", request.session_id.0));
+                    let _ = _cx.send_notification(SessionNotification::new(
+                        request.session_id.clone(),
+                        SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                            TextContent::new("mode-ok"),
+                        ))),
+                    ));
+                    responder.respond(PromptResponse::new(
+                        agent_client_protocol::schema::v1::StopReason::EndTurn,
+                    ))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_to(agent_side)
+            .await;
+    });
+
+    let accumulated = Arc::new(Mutex::new(super::closure::TurnClosure::default()));
+    let collector = |mut chunk_rx: tokio::sync::mpsc::UnboundedReceiver<SubagentEvent>| async move {
+        let mut events = Vec::new();
+        while let Some(event) = chunk_rx.recv().await {
+            events.push(event);
+        }
+        events
+    };
+
+    // Turn 1: the mapped mode id arrives from the TUI's similarity match —
+    // it MUST be bound before the prompt (the per-connection contract).
+    let (chunk_tx, chunk_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (turn1, _, events1) = tokio::join!(
+        run_session(
+            client_side,
+            "turn one".to_string(),
+            None,
+            std::env::temp_dir(),
+            &[],
+            Some("plan".to_string()),
+            None,
+            accumulated.clone(),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            chunk_tx,
+        ),
+        agent_task,
+        collector(chunk_rx),
+    );
+    let (stop_reason, _) = turn1.unwrap();
+    assert_eq!(stop_reason, "end_turn");
+    assert_eq!(
+        set_mode_log.lock().unwrap().as_slice(),
+        ["set-mode:plan"],
+        "the mapped mode must be bound through session/set_mode before prompting"
+    );
+    assert_eq!(prompt_log.lock().unwrap().as_slice(), ["prompt:mode-fixture"]);
+    // The pane-chrome Modes event leads the stream with the ADVERTISED list.
+    assert!(events1.iter().any(
+        |event| matches!(event, SubagentEvent::Modes { modes, current }
+            if current == "code"
+                && modes.len() == 2
+                && modes[0].id == "code"
+                && modes[1].id == "plan")
+    ));
+
+    // Turn 2: a STALE mapping — the harness no longer advertises `gone`.
+    // The skip is client-side: no `session/set_mode` reaches the wire (the
+    // log stays at turn 1's single entry) and the turn still completes.
+    let (client_side, agent_side) = Channel::duplex();
+    let agent_task = tokio::spawn(async move {
+        let _ = AgentRole
+            .builder()
+            .name("mode-fixture")
+            .on_receive_request(
+                async move |request: InitializeRequest,
+                            responder: Responder<InitializeResponse>,
+                            _cx| {
+                    responder.respond(
+                        InitializeResponse::new(request.protocol_version)
+                            .agent_capabilities(AgentCapabilities::new()),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_request: NewSessionRequest,
+                            responder: Responder<NewSessionResponse>,
+                            _cx| {
+                    responder.respond(
+                        NewSessionResponse::new(SessionId::new("mode-fixture"))
+                            .modes(mode_state()),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |request: PromptRequest, responder: Responder<PromptResponse>, _cx| {
+                    prompt_log_agent_2
+                        .lock()
+                        .unwrap()
+                        .push(format!("prompt:{}", request.session_id.0));
+                    responder.respond(PromptResponse::new(
+                        agent_client_protocol::schema::v1::StopReason::EndTurn,
+                    ))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_to(agent_side)
+            .await;
+    });
+    let (chunk_tx, _chunk_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (turn2, _, _) = tokio::join!(
+        run_session(
+            client_side,
+            "turn two".to_string(),
+            None,
+            std::env::temp_dir(),
+            &[],
+            Some("gone".to_string()),
+            None,
+            accumulated,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            chunk_tx,
+        ),
+        agent_task,
+        async {},
+    );
+    let (stop_reason, _) = turn2.unwrap();
+    assert_eq!(stop_reason, "end_turn");
+    // No second set-mode entry: the stale id never reached the wire.
+    assert_eq!(
+        set_mode_log.lock().unwrap().as_slice(),
+        ["set-mode:plan"],
+        "a stale mode id must be skipped client-side, without a request"
+    );
+    assert_eq!(prompt_log.lock().unwrap().as_slice().len(), 2);
+}
+
+// ── Permission routing (interactive box vs. headless auto-approve) ──
+/// The split's Yolo contract, made mode-aware: with a permission channel
+/// the `session/request_permission` request surfaces as a
+/// `PermissionRequest` event and AWAITS the user's pick — the selected
+/// option id goes back verbatim, a channel close / dismiss answers
+/// `Cancelled` per the spec. Without a channel the request is
+/// auto-approved (AllowAlways preferred over AllowOnce over first-listed).
+#[tokio::test(flavor = "current_thread")]
+async fn run_session_routes_permissions_by_mode() {
+    use agent_client_protocol::schema::v1::{
+        AgentCapabilities, InitializeRequest, InitializeResponse, NewSessionRequest,
+        NewSessionResponse, PermissionOption, PermissionOptionId, PermissionOptionKind,
+        PromptRequest, PromptResponse, RequestPermissionRequest, RequestPermissionOutcome,
+        RequestPermissionResponse, SessionId, SessionUpdate, ToolCall, ToolCallUpdate,
+        ToolCallUpdateFields, ToolKind,
+    };
+    use agent_client_protocol::{Agent as AgentRole, Channel, Responder};
+
+    let decision_log: RequestLog = Arc::default();
+    let decision_log_agent = decision_log.clone();
+    let (client_side, agent_side) = Channel::duplex();
+    let agent_task = tokio::spawn(async move {
+        let _ = AgentRole
+            .builder()
+            .name("perm-fixture")
+            .on_receive_request(
+                async move |request: InitializeRequest,
+                            responder: Responder<InitializeResponse>,
+                            _cx| {
+                    responder.respond(
+                        InitializeResponse::new(request.protocol_version)
+                            .agent_capabilities(AgentCapabilities::new()),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_request: NewSessionRequest,
+                            responder: Responder<NewSessionResponse>,
+                            _cx| {
+                    responder.respond(NewSessionResponse::new(SessionId::new("perm-fixture")))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_request: RequestPermissionRequest,
+                            responder: Responder<RequestPermissionResponse>,
+                            _cx| {
+                    // The client's own handler responds; the fixture only
+                    // keeps the dispatch loop alive here (a no-op respond is
+                    // never reached — but the handler must exist so the
+                    // request routes to the CLIENT, not the fixture).
+                    responder.respond(RequestPermissionResponse::new(
+                        RequestPermissionOutcome::Cancelled,
+                    ))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |request: PromptRequest, responder: Responder<PromptResponse>, cx| {
+                    // Announce the tool call, then ask for permission to
+                    // run it — the exact shape a real harness produces. The
+                    // request SPAWNS (`cx.spawn`): an inline send would
+                    // block the dispatch loop (the same contract the cancel
+                    // fixture documents), and the outcome is awaited before
+                    // the turn ends.
+                    let decision_log_agent = decision_log_agent.clone();
+                    let _ = cx.send_notification(SessionNotification::new(
+                        request.session_id.clone(),
+                        SessionUpdate::ToolCall(ToolCall::new(
+                            agent_client_protocol::schema::v1::ToolCallId::new("call-1"),
+                            "write the file",
+                        )
+                        .kind(ToolKind::Edit)),
+                    ));
+                    let connection = cx.clone();
+                    let _ = cx.spawn(async move {
+                        let decision = connection
+                            .send_request(RequestPermissionRequest::new(
+                                request.session_id.clone(),
+                                ToolCallUpdate::new(
+                                    agent_client_protocol::schema::v1::ToolCallId::new("call-1"),
+                                    ToolCallUpdateFields::new(),
+                                ),
+                                vec![
+                                    PermissionOption::new(
+                                        PermissionOptionId::new("opt-allow-always"),
+                                        "Allow always",
+                                        PermissionOptionKind::AllowAlways,
+                                    ),
+                                    PermissionOption::new(
+                                        PermissionOptionId::new("opt-allow-once"),
+                                        "Allow once",
+                                        PermissionOptionKind::AllowOnce,
+                                    ),
+                                    PermissionOption::new(
+                                        PermissionOptionId::new("opt-reject"),
+                                        "Reject",
+                                        PermissionOptionKind::RejectOnce,
+                                    ),
+                                ],
+                            ))
+                            .block_task()
+                            .await;
+                        // Log the OUTCOME: what the client actually picked —
+                        // the wire-level proof of the routing.
+                        decision_log_agent.lock().unwrap().push(match decision {
+                            Ok(response) => match response.outcome {
+                                RequestPermissionOutcome::Selected(selected) => {
+                                    format!("picked:{}", selected.option_id.0)
+                                }
+                                RequestPermissionOutcome::Cancelled => {
+                                    "picked:cancelled".to_string()
+                                }
+                                // `#[non_exhaustive]`: a future outcome
+                                // carries no name of its own here.
+                                _ => "picked:other".to_string(),
+                            },
+                            Err(e) => format!("failed:{e}"),
+                        });
+                        let _ = responder.respond(PromptResponse::new(
+                            agent_client_protocol::schema::v1::StopReason::EndTurn,
+                        ));
+                        Ok::<(), agent_client_protocol::Error>(())
+                    });
+                    Ok(())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_to(agent_side)
+            .await;
+    });
+
+    // INTERACTIVE: the channel rides the call; the user picks the FIRST
+    // option's id. The turn must surface the PermissionRequest event and
+    // complete only after the answer.
+    let (answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel();
+    let accumulated = Arc::new(Mutex::new(super::closure::TurnClosure::default()));
+    let (turn, _, ()) = tokio::join!(
+        run_session(
+            client_side,
+            "needs permission".to_string(),
+            None,
+            std::env::temp_dir(),
+            &[],
+            None,
+            Some(answer_rx),
+            accumulated.clone(),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            chunk_tx,
+        ),
+        agent_task,
+        async {
+            // Drain until the PermissionRequest lands, then answer with the
+            // allow-always option id (what the TUI's box does).
+            while let Some(event) = chunk_rx.recv().await {
+                if let SubagentEvent::PermissionRequest { options, .. } = &event {
+                    let id = options
+                        .iter()
+                        .find(|o| o.kind == "allow_always")
+                        .map(|o| o.id.clone())
+                        .expect("the allow-always option must be offered");
+                    let _ = answer_tx.send(
+                        super::events::PanePermissionAnswer::Selected(id),
+                    );
+                    return;
+                }
+            }
+        },
+    );
+    let (stop_reason, _) = turn.unwrap();
+    assert_eq!(stop_reason, "end_turn");
+    // The wire-level proof: the client answered the fixture's request and
+    // the fixture saw the picked option id (the allow-always one the
+    // drained event's first allow-kind option carries).
+    assert!(
+        decision_log
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| e == "picked:opt-allow-always"),
+        "the interactive turn must surface the request AND the user's pick must reach the agent (got {:?})",
+        decision_log.lock().unwrap()
+    );
+}
+
 // ── Lazy authentication (auth_required → authenticate → retry) ───────
 /// The lazy-auth contract: the client NEVER authenticates proactively.
 /// The fixture advertises an agent auth method and rejects the FIRST
@@ -3025,19 +3552,27 @@ async fn run_session_authenticates_lazily_only_after_auth_required() {
     });
     let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel();
     let accumulated = Arc::new(Mutex::new(super::closure::TurnClosure::default()));
-    let (turn, _, (_badge, streamed)) = tokio::join!(
+    let (turn, _, (_badge, modes, streamed)) = tokio::join!(
         run_session(
             client_side,
             "lazy auth please".to_string(),
             None,
             std::env::temp_dir(),
             &[],
+            None,
+            None,
             accumulated.clone(),
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             chunk_tx,
         ),
         agent_task,
-        async { (chunk_rx.recv().await, chunk_rx.recv().await) },
+        async {
+            (
+                chunk_rx.recv().await,
+                chunk_rx.recv().await,
+                chunk_rx.recv().await,
+            )
+        },
     );
     let (stop_reason, session_id) = turn.unwrap();
     assert_eq!(stop_reason, "end_turn");
@@ -3050,6 +3585,15 @@ async fn run_session_authenticates_lazily_only_after_auth_required() {
         auth_log.lock().unwrap().as_slice(),
         ["new-rejected", "authenticate:fixture-auth", "new", "PROMPT"],
     );
+    // The MODE state follows the badge (this fixture advertises none — the
+    // empty event confirms the emission contract).
+    assert!(matches!(
+        modes.unwrap(),
+        SubagentEvent::Modes {
+            modes: empty,
+            current,
+        } if empty.is_empty() && current.is_empty()
+    ));
     assert!(matches!(
         streamed.unwrap(),
         SubagentEvent::Message { text } if text == "authenticated turn"

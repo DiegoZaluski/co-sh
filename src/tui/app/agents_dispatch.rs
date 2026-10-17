@@ -28,6 +28,7 @@ use cosh_tools::subagent::events::{SubagentEvent, ToolCallStatus, ToolOutputBloc
 use super::App;
 use crate::routes::session::agents_split::{AgentsSplitState, DAEMON_LABEL};
 use cosh::setup::SkillsConfig;
+use crossterm::event::KeyCode;
 use crate::ui::toast::{ToastOptions, ToastVariant};
 
 /// Sync the slash menu's command source to the split's focus: a FOCUSED
@@ -147,14 +148,19 @@ pub(super) fn ensure_pane_snapshot(app: &mut App, pane: usize) {
     app.tokio_handle.spawn(async move {
         let result =
             cosh_tools::subagent::acp::session_snapshot(&agent, session_id, cwd).await;
-        let (commands, options) = match result {
-            Ok(snapshot) => (snapshot.commands, snapshot.config_options),
+        let (commands, options, modes, mode_current) = match result {
+            Ok(snapshot) => (
+                snapshot.commands,
+                snapshot.config_options,
+                snapshot.modes,
+                snapshot.current_mode,
+            ),
             Err(err) => {
                 let _ = event_tx.send(HarnessEvent::Toast {
                     message: format!("Command list for {agent} unavailable: {err}"),
                     variant: cosh::harness::events::ToastVariant::Info,
                 });
-                (Vec::new(), Vec::new())
+                (Vec::new(), Vec::new(), Vec::new(), String::new())
             }
         };
         let _ = event_tx.send(HarnessEvent::AgentsPaneEvent {
@@ -168,6 +174,15 @@ pub(super) fn ensure_pane_snapshot(app: &mut App, pane: usize) {
             pane_id,
             epoch,
             event: SubagentEvent::ConfigOptions { options },
+        });
+        let _ = event_tx.send(HarnessEvent::AgentsPaneEvent {
+            pane,
+            pane_id,
+            epoch,
+            event: SubagentEvent::Modes {
+                modes,
+                current: mode_current,
+            },
         });
     });
 }
@@ -283,11 +298,95 @@ impl App {
         p.running = false;
         p.last_activity = None;
         p.stop_signal = None;
+        // A force-closed turn drops its pending permission box and answer
+        // channel: the ACP handler answers `Cancelled` on the closed
+        // channel (the spec's contract for a cancelled turn's pending
+        // permission), so the agent-side request resolves cleanly.
+        split.clear_permission(pane);
         split.finish_turn(pane, reason, "cancelled");
         if let Some(id) = registry_id {
             cosh::harness::panes::fail_serving(&id, reason.to_string());
         }
         self.finish_agents_pane_mirror(pane, true);
+    }
+
+    /// Answer the FOCUSED pane's pending permission request from the
+    /// keyboard: navigate with Up/Down (the box's highlighted row lives on
+    /// the pane state), Enter sends the selected option's id, Esc sends
+    /// the ACP `Cancelled` semantic. Returns whether a box was pending —
+    /// the caller consumes the key only then (sovereign over the prompt
+    /// and every other handler, like the main dialog's gate).
+    pub(super) fn pane_permission_key(&mut self, key: KeyCode) -> bool {
+        let Some(focused) = self.agents_split.as_ref().and_then(|split| split.focused)
+        else {
+            return false;
+        };
+        let Some(request) = self.agents_split.as_ref().and_then(|split| {
+            split.pending_permission(focused)
+        }) else {
+            return false;
+        };
+        let count = request.options.len().max(1);
+        match key {
+            KeyCode::Up => {
+                let Some(split) = self.agents_split.as_mut() else {
+                    return true;
+                };
+                if let Some(p) = split.panes.get_mut(focused)
+                    && let Some(req) = p.pending_permission.as_mut()
+                {
+                    req.selected = (req.selected + count - 1) % count;
+                }
+                true
+            }
+            KeyCode::Down => {
+                let Some(split) = self.agents_split.as_mut() else {
+                    return true;
+                };
+                if let Some(p) = split.panes.get_mut(focused)
+                    && let Some(req) = p.pending_permission.as_mut()
+                {
+                    req.selected = (req.selected + 1) % count;
+                }
+                true
+            }
+            KeyCode::Enter => {
+                let option_id = request
+                    .options
+                    .get(request.selected)
+                    .map(|o| o.id.clone());
+                let Some(split) = self.agents_split.as_mut() else {
+                    return true;
+                };
+                match option_id {
+                    Some(id) => {
+                        split.answer_pending_permission(
+                            focused,
+                            cosh_tools::subagent::events::PanePermissionAnswer::Selected(id),
+                        );
+                    }
+                    None => {
+                        // No options offered: the only legal response is the
+                        // cancellation.
+                        split.answer_pending_permission(
+                            focused,
+                            cosh_tools::subagent::events::PanePermissionAnswer::Cancel,
+                        );
+                    }
+                }
+                true
+            }
+            KeyCode::Esc => {
+                if let Some(split) = self.agents_split.as_mut() {
+                    split.answer_pending_permission(
+                        focused,
+                        cosh_tools::subagent::events::PanePermissionAnswer::Cancel,
+                    );
+                }
+                true
+            }
+            _ => true,
+        }
     }
 
     /// Ctrl+X on the split (issue 5 recovery affordance): force-close the
@@ -430,6 +529,22 @@ impl App {
         else {
             return;
         };
+        // The client's harness mode mapped onto one of the pane's advertised
+        // ACP session modes (similarity stems, `agent_command_map`). The
+        // binding re-applies EVERY turn (per-connection session state), so
+        // the map result at dispatch time is what this turn binds. `None`:
+        // an unmapped cosh mode, or an agent that advertises no modes — the
+        // agent keeps its own current (the Command-mode omission's
+        // counterpart). Yolo deliberately maps to nothing: the split's
+        // auto-approve IS the Yolo contract, and the permission-widening
+        // agent modes are the same thing for free.
+        let own_mode = self.state.mode;
+        let mapped_mode = either_split(&self.agents_split, &self.parked_agents_split)
+            .and_then(|split| split.panes.get(pane))
+            .and_then(|p| p.agent_modes.as_ref())
+            .and_then(|modes| {
+                crate::routes::session::agent_command_map::map_mode_to_agent(own_mode, modes)
+            });
         let is_daemon = agent == DAEMON_LABEL;
         // The registry id this pane answers to while THIS turn runs. For the
         // manager pane it is the id `agents_call` would use to reach it; the
@@ -542,12 +657,37 @@ impl App {
             };
             let context = self.session_store.load_context(&cosh_session);
             let input = msg;
+            // The manager runs the user's real mode (the mapped ACP mode
+            // above only concerns EXTERNAL agents; this pane needs no
+            // mapping — it runs the actual harness). The permission channel
+            // rides the mode exactly like the ACP panes': a non-Yolo mode
+            // wires the harness loop's `PermissionRequest` events into the
+            // pane's permission box (the bridge maps them); Yolo keeps the
+            // throwaway channel (the loop auto-approves in Yolo mode
+            // without ever emitting the request — but a channel that goes
+            // nowhere is the safe default either way).
+            let permission_rx = if own_mode != cosh::harness::Mode::Yolo {
+                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                if let Some(split) =
+                    either_split_mut(&mut self.agents_split, &mut self.parked_agents_split)
+                {
+                    // The pane state holds the ONLY sender: the box's answer
+                    // reaches the manager turn through it (the receiver
+                    // below forwards to the harness loop's gate).
+                    split.set_permission_tx(pane, Some(tx));
+                }
+                Some(rx)
+            } else {
+                None
+            };
             std::thread::spawn(move || {
                 run_manager_turn(
                     index,
                     pane_id,
                     epoch,
                     input,
+                    own_mode,
+                    permission_rx,
                     signal,
                     own_registry_id,
                     daemon_connector.expect("manager pane carries its connector"),
@@ -567,6 +707,24 @@ impl App {
             // resumes the pane's stored session so the agent keeps its
             // context across prompts.
             let input = msg;
+            // The permission channel rides the MODE (the split's Yolo
+            // contract): a non-Yolo mode makes this turn's
+            // `session/request_permission` requests surface on the pane's
+            // permission box and await the user's pick; Yolo keeps the
+            // headless auto-approve. The pane state holds the ONLY sender
+            // (the box's answer reaches the turn through it); the receiver
+            // goes into the turn.
+            let permission_rx = if own_mode != cosh::harness::Mode::Yolo {
+                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                if let Some(split) =
+                    either_split_mut(&mut self.agents_split, &mut self.parked_agents_split)
+                {
+                    split.set_permission_tx(pane, Some(tx));
+                }
+                Some(rx)
+            } else {
+                None
+            };
             tokio_handle.spawn(async move {
                 let (chunk_tx, mut chunk_rx) =
                     tokio::sync::mpsc::unbounded_channel::<SubagentEvent>();
@@ -575,6 +733,8 @@ impl App {
                     &input,
                     resume,
                     &picks,
+                    mapped_mode.as_deref(),
+                    permission_rx,
                     cwd,
                     signal,
                     chunk_tx,
@@ -941,6 +1101,10 @@ fn run_manager_turn(
     pane_id: u64,
     epoch: u64,
     input: String,
+    mode: cosh::harness::Mode,
+    permission_rx: Option<tokio::sync::mpsc::UnboundedReceiver<
+        cosh_tools::subagent::events::PanePermissionAnswer,
+    >>,
     stop_signal: Arc<AtomicBool>,
     own_registry_id: Option<String>,
     connector: Result<Connector, String>,
@@ -1001,15 +1165,62 @@ fn run_manager_turn(
         };
         rt.block_on(async move {
             let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
-            let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+            // The manager loop's permission channel: with a TUI-connected
+            // receiver the answers forwarded below reach the loop's
+            // permission gate; without one (Yolo) the throwaway pair keeps
+            // the loop self-contained.
+            let (manager_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
             let (loop_tx, mut loop_rx) =
                 tokio::sync::mpsc::unbounded_channel::<cosh::harness::HarnessEvent>();
+
+            // The TUI's answer → the manager loop's permission action. The
+            // mapping mirrors the main dialog's semantics: the first
+            // allow-kind option the agent offered selects `Allow`/
+            // `AllowOnce` per its kind; the cancel semantic denies.
+            if let Some(mut permission_rx) = permission_rx {
+                let forward_perm_tx = manager_perm_tx.clone();
+                tokio::spawn(async move {
+                    while let Some(answer) = permission_rx.recv().await {
+                        // The manager's own box offers exactly the three
+                        // options the bridge synthesized (`allow`,
+                        // `allow_once`, `deny`) — matched EXACTLY, never by
+                        // substring (a label like "don't always allow" must
+                        // not read as an allow). An unknown id denies: an
+                        // option this build didn't offer has no trustworthy
+                        // allow semantics.
+                        let action = match answer {
+                            cosh_tools::subagent::events::PanePermissionAnswer::Selected(id) => {
+                                match id.as_str() {
+                                    "allow" => cosh::harness::PermissionAction::Allow,
+                                    "deny" => cosh::harness::PermissionAction::Deny,
+                                    // `allow_once` AND any unknown id: the
+                                    // once-grant cannot be replayed across
+                                    // tools, so the blast radius stays one
+                                    // call.
+                                    _ => cosh::harness::PermissionAction::AllowOnce,
+                                }
+                            }
+                            cosh_tools::subagent::events::PanePermissionAnswer::Cancel => {
+                                cosh::harness::PermissionAction::Deny
+                            }
+                        };
+                        // `Err` = the loop already ended: nothing to answer.
+                        let _ = forward_perm_tx.send(action);
+                    }
+                });
+            }
 
             let cwd = std::env::current_dir()
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|_| ".".to_string());
+            // The user's REAL harness mode, not a hardcoded one: the cosh
+            // pane IS the own harness, so Build/Ask/Yolo carry their natural
+            // semantics (guardrails, permission dialogs, instructions) into
+            // the pane exactly as the main loop would run them. (It used to
+            // be Yolo unconditionally — Yolo is the split's working default,
+            // but the mode the user cycled to is the honest state.)
             let mut manager = cosh::harness::Harness::new(connector, &cwd, disabled)
-                .with_mode(cosh::harness::Mode::Yolo)
+                .with_mode(mode)
                 // PANE instructions, not the manager's: this loop IS a pane
                 // doing delegated work — its deliverable is the task report,
                 // never further coordination (the replication bug: manager
@@ -1079,6 +1290,52 @@ fn run_manager_turn(
                                 info.total_tokens,
                                 info.max_tokens,
                             )]
+                        }
+                        HarnessEvent::PermissionRequest {
+                            tool,
+                            description,
+                            args,
+                        } => {
+                            // The loop awaits a permission decision: the
+                            // pane's box opens (the SAME
+                            // `SubagentEvent::PermissionRequest` the ACP
+                            // panes emit — one UI answers both). The
+                            // synthetic call id is unique per request (the
+                            // box answers through the pane's channel, not
+                            // by patching a row).
+                            static MANAGER_CALL: std::sync::atomic::AtomicU64 =
+                                std::sync::atomic::AtomicU64::new(1);
+                            let call_id = format!(
+                                "manager-perm-{}",
+                                MANAGER_CALL.fetch_add(
+                                    1,
+                                    std::sync::atomic::Ordering::Relaxed,
+                                )
+                            );
+                            vec![SubagentEvent::PermissionRequest {
+                                call_id,
+                                title: description,
+                                kind: cosh_tools::subagent::events::ToolKind::Execute,
+                                raw_input: serde_json::json!({ "tool": tool, "args": args })
+                                    .into(),
+                                options: vec![
+                                    cosh_tools::subagent::events::AgentPermissionOption {
+                                        id: "allow".to_string(),
+                                        name: "Allow".to_string(),
+                                        kind: "allow_always".to_string(),
+                                    },
+                                    cosh_tools::subagent::events::AgentPermissionOption {
+                                        id: "allow_once".to_string(),
+                                        name: "Allow Once".to_string(),
+                                        kind: "allow_once".to_string(),
+                                    },
+                                    cosh_tools::subagent::events::AgentPermissionOption {
+                                        id: "deny".to_string(),
+                                        name: "Deny".to_string(),
+                                        kind: "reject_once".to_string(),
+                                    },
+                                ],
+                            }]
                         }
                         _ => Vec::new(),
                     };

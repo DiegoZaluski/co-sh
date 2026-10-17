@@ -76,7 +76,7 @@ use agent_client_protocol::schema::v1::{
     SelectedPermissionOutcome, SessionConfigId, SessionConfigKind, SessionConfigOption,
     SessionConfigOptionCategory, SessionConfigSelect, SessionConfigSelectOptions,
     SessionConfigValueId, SessionId, SessionNotification, SetSessionConfigOptionRequest,
-    StopReason, TextContent, WriteTextFileRequest, WriteTextFileResponse,
+    SetSessionModeRequest, StopReason, TextContent, WriteTextFileRequest, WriteTextFileResponse,
 };
 use agent_client_protocol::{
     AcpAgent, Agent as AcpRole, Client, ConnectionTo, Error as AcpError, ErrorCode, LineDirection,
@@ -574,7 +574,13 @@ pub fn validate_agent(agent: &str) -> Result<(), String> {
 /// 3. Streams typed [`SubagentEvent`]s through `chunk_tx` (for the TUI)
 ///    while feeding the message text to the turn's closure
 ///    ([`TurnClosure`](crate::subagent::closure::TurnClosure)).
-/// 4. Returns `(final_report, stop_reason, Option<session_id>)` when
+/// 4. Permission handling is MODE-AWARE: `permission_rx: Some(rx)` makes
+///    every `session/request_permission` surface as a
+///    [`SubagentEvent::PermissionRequest`] and AWAIT the user's option pick
+///    on that channel (the TUI's permission box). `None` keeps the
+///    headless auto-approve (the Yolo contract — the split ran every pane
+///    YOLO by design long before modes mapped).
+/// 5. Returns `(final_report, stop_reason, Option<session_id>)` when
 ///    the turn ends — the report is the message written after the LAST
 ///    tool call, with a fallback to the last completed message — and the
 ///    session id only when it ended protocol-clean
@@ -596,11 +602,16 @@ pub fn validate_agent(agent: &str) -> Result<(), String> {
 /// Panics if the internal mutex protecting the output buffer is poisoned
 /// (only possible if another thread panicked while holding the lock).
 #[allow(clippy::unwrap_used)]
+#[allow(clippy::too_many_arguments)]
 pub async fn call(
     agent: &str,
     input: &str,
     resume: Option<String>,
     picks: &[(String, String)],
+    mode: Option<&str>,
+    permission_rx: Option<tokio::sync::mpsc::UnboundedReceiver<
+        super::events::PanePermissionAnswer,
+    >>,
     cwd: PathBuf,
     stop_signal: Arc<AtomicBool>,
     chunk_tx: tokio::sync::mpsc::UnboundedSender<SubagentEvent>,
@@ -633,6 +644,7 @@ pub async fn call(
     let accumulated: Arc<Mutex<super::closure::TurnClosure>> =
         Arc::new(Mutex::new(super::closure::TurnClosure::default()));
     let input = input.to_string();
+    let mode = mode.map(str::to_string);
 
     // The turn runs to completion with NO time limit: a sub-agent may work
     // for hours and the only legitimate way to end it is the user's stop
@@ -651,6 +663,8 @@ pub async fn call(
                     resume,
                     cwd,
                     &picks,
+                    mode,
+                    permission_rx,
                     accumulated,
                     stop_signal,
                     chunk_tx,
@@ -841,6 +855,10 @@ where
 struct SnapshotCollector {
     commands: Option<Vec<super::events::AgentCommand>>,
     config_options: Option<Vec<super::events::AgentConfigOption>>,
+    /// `(current mode id, the full mode list)`. Does NOT gate the probe's
+    /// completion — modes are optional protocol state (gemini advertises
+    /// none), so an absent slot must not hold the probe open.
+    modes: Option<(String, Vec<super::events::AgentSessionMode>)>,
 }
 
 /// Whether the collector already holds BOTH probe results.
@@ -856,16 +874,18 @@ fn snapshot_complete(collector: &SnapshotCollector) -> bool {
 async fn wait_for_snapshot(
     collector: &Mutex<SnapshotCollector>,
     timeout: Duration,
-) -> (Vec<super::events::AgentCommand>, Vec<super::events::AgentConfigOption>) {
+) -> (
+    Vec<super::events::AgentCommand>,
+    Vec<super::events::AgentConfigOption>,
+    Vec<super::events::AgentSessionMode>,
+    String,
+) {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         {
             let collected = collector.lock().unwrap_or_else(|e| e.into_inner());
             if snapshot_complete(&collected) {
-                return (
-                    collected.commands.clone().unwrap_or_default(),
-                    collected.config_options.clone().unwrap_or_default(),
-                );
+                return snapshot_parts(&collected);
             }
         }
         if tokio::time::Instant::now() >= deadline {
@@ -874,9 +894,27 @@ async fn wait_for_snapshot(
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let collected = collector.lock().unwrap_or_else(|e| e.into_inner());
+    snapshot_parts(&collected)
+}
+
+/// The collector's snapshot as plain parts (modes default empty).
+fn snapshot_parts(
+    collected: &SnapshotCollector,
+) -> (
+    Vec<super::events::AgentCommand>,
+    Vec<super::events::AgentConfigOption>,
+    Vec<super::events::AgentSessionMode>,
+    String,
+) {
+    let (current, modes) = collected
+        .modes
+        .clone()
+        .unwrap_or_else(|| (String::new(), Vec::new()));
     (
         collected.commands.clone().unwrap_or_default(),
         collected.config_options.clone().unwrap_or_default(),
+        modes,
+        current,
     )
 }
 
@@ -888,6 +926,10 @@ pub struct SessionSnapshot {
     pub commands: Vec<super::events::AgentCommand>,
     /// The session's config options (model, provider, thought level, …).
     pub config_options: Vec<super::events::AgentConfigOption>,
+    /// Every mode the agent can operate in (empty when it advertises none).
+    pub modes: Vec<super::events::AgentSessionMode>,
+    /// The id of the mode the session starts in (empty without modes).
+    pub current_mode: String,
 }
 
 /// Probe an agent's session ON DEMAND: connect, `session/load`/`resume`
@@ -1040,10 +1082,8 @@ where
             // config options (when the response carries them) fill the
             // config slot without waiting for a notification.
             let support = session_resume_support(&init.agent_capabilities);
-            let (session, config_options) =
-                open_or_resume_session(&connection, session_id, &cwd, support).await?;
-            let options: Option<Vec<schema::SessionConfigOption>> = config_options;
-            if let Some(options) = options {
+            let open = open_or_resume_session(&connection, session_id, &cwd, support).await?;
+            if let Some(options) = open.config_options {
                 collector
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
@@ -1051,15 +1091,20 @@ where
                     options.iter().map(super::events::mirror_config_option).collect(),
                 );
             }
-            let _ = session; // the probe does not re-bind anything
+            if let Some((current, modes)) = &open.modes {
+                collector.lock().unwrap_or_else(|e| e.into_inner()).modes =
+                    Some((current.clone(), modes.clone()));
+            }
 
             // Collect window: give the harness time to publish its command
             // list around the handshake/resume.
-            let (commands, config) =
+            let (commands, config, modes, current_mode) =
                 wait_for_snapshot(&collector, Duration::from_secs(3)).await;
             Ok(SessionSnapshot {
                 commands,
                 config_options: config,
+                modes,
+                current_mode,
             })
         })
         .await
@@ -1108,12 +1153,45 @@ enum SessionResumeSupport {
 ///
 /// Only a failed `session/new` is fatal — the turn cannot proceed without
 /// a session.
+/// What the session came back with: the id, its config options and its
+/// MODE state. `modes` mirrors the ACP `SessionModeState` the harness
+/// carries in `session/new` / `session/resume` / `session/load` — the
+/// current mode id plus every mode the agent can operate in. `None` when
+/// the harness advertises no modes at all (gemini), so the client knows
+/// mode binding is unavailable rather than merely empty.
+pub(crate) struct SessionOpen {
+    pub session_id: SessionId,
+    pub config_options: Option<Vec<SessionConfigOption>>,
+    /// `(current mode id, the full mode list)`; `None` when the harness
+    /// advertises no modes at all.
+    pub modes: Option<(String, Vec<super::events::AgentSessionMode>)>,
+}
+
+/// Mirror one ACP [`SessionModeState`] into the protocol-free tuple:
+/// `(current mode id, the full mode list)`.
+pub(crate) fn mirror_modes(
+    state: &schema::SessionModeState,
+) -> (String, Vec<super::events::AgentSessionMode>) {
+    (
+        state.current_mode_id.0.to_string(),
+        state
+            .available_modes
+            .iter()
+            .map(|m| super::events::AgentSessionMode {
+                id: m.id.0.to_string(),
+                name: m.name.clone(),
+                description: m.description.clone(),
+            })
+            .collect(),
+    )
+}
+
 async fn open_or_resume_session(
     connection: &ConnectionTo<AcpRole>,
     resume: Option<String>,
     cwd: &Path,
     support: SessionResumeSupport,
-) -> Result<(SessionId, Option<Vec<SessionConfigOption>>), AcpError> {
+) -> Result<SessionOpen, AcpError> {
     // Exhaustive over (resume, support): no `unreachable!()` arm — the
     // `None`-support and no-id cases fall through to `session/new` below.
     match (resume, support) {
@@ -1125,10 +1203,14 @@ async fn open_or_resume_session(
                 ))
                 .block_task()
                 .await;
-            match response.map(|r: ResumeSessionResponse| (r.config_options,)) {
-                Ok((config_options,)) => {
+            match response.map(|r: ResumeSessionResponse| (r.config_options, r.modes)) {
+                Ok((config_options, modes)) => {
                     log::debug!("sub-agent ACP session resumed: {id}");
-                    return Ok((SessionId::new(id), config_options));
+                    return Ok(SessionOpen {
+                        session_id: SessionId::new(id),
+                        config_options,
+                        modes: modes.as_ref().map(mirror_modes),
+                    });
                 }
                 Err(e) => {
                     // Stale id (harness restart) or a resume quirk: fall
@@ -1149,10 +1231,14 @@ async fn open_or_resume_session(
                 ))
                 .block_task()
                 .await;
-            match response.map(|r: LoadSessionResponse| (r.config_options,)) {
-                Ok((config_options,)) => {
+            match response.map(|r: LoadSessionResponse| (r.config_options, r.modes)) {
+                Ok((config_options, modes)) => {
                     log::debug!("sub-agent ACP session loaded: {id}");
-                    return Ok((SessionId::new(id), config_options));
+                    return Ok(SessionOpen {
+                        session_id: SessionId::new(id),
+                        config_options,
+                        modes: modes.as_ref().map(mirror_modes),
+                    });
                 }
                 Err(e) => {
                     log::warn!(
@@ -1176,7 +1262,11 @@ async fn open_or_resume_session(
         .block_task()
         .await
         .map_err(|e| wrap_acp_failure("ACP session/new failed", e))?;
-    Ok((session.session_id, session.config_options))
+    Ok(SessionOpen {
+        session_id: session.session_id,
+        config_options: session.config_options,
+        modes: session.modes.as_ref().map(mirror_modes),
+    })
 }
 
 /// Lazy ACP authentication: after an `auth_required` rejection, send
@@ -1317,6 +1407,50 @@ async fn apply_session_picks(
     Ok(())
 }
 
+/// Bind the session to ONE of the agent's advertised modes — the client's
+/// harness mode mapped onto a `SessionModeId` (the TUI does the mapping; see
+/// the app's mode-map). `Some(mode_id)` only when the harness actually
+/// advertises that id in its `SessionModeState`; `None` skips the request
+/// entirely (an agent without modes — gemini — binds nothing, like every
+/// unmapped mode).
+///
+/// Runs BEFORE the prompt, right after `apply_session_picks` (ACP session
+/// state is per-connection: a set on a disposable connection dies with it,
+/// so this re-runs before every prompt exactly like the config picks). An
+/// `auth_required` rejection triggers one lazy-authentication attempt and a
+/// retry (the same ladder `apply_session_picks` climbs).
+///
+/// # Errors
+///
+/// Returns the `session/set_mode` failure (after the auth ladder) — the
+/// caller decides whether that aborts the turn.
+async fn apply_session_mode(
+    connection: &ConnectionTo<AcpRole>,
+    session_id: &SessionId,
+    mode_id: Option<&str>,
+) -> Result<(), AcpError> {
+    let Some(mode_id) = mode_id else {
+        return Ok(());
+    };
+    let request = connection
+        .send_request(SetSessionModeRequest::new(
+            session_id.clone(),
+            agent_client_protocol::schema::v1::SessionModeId::new(mode_id),
+        ))
+        .block_task()
+        .await;
+    match request {
+        Ok(_) => Ok(()),
+        Err(auth_error) if auth_error.code == ErrorCode::AuthRequired => {
+            // NOTE: the auth methods live at the call site (they belong to
+            // the `initialize` response, not this function's inputs); the
+            // ladder therefore lives in the caller — see `run_session`.
+            Err(auth_error)
+        }
+        Err(e) => Err(wrap_acp_failure("ACP session/set_mode failed", e)),
+    }
+}
+
 /// Read the session's badge triple from its ACP config options: the
 /// effective model id (+ human label, when the harness names the value),
 /// the serving provider (+ label, when a `provider` option is advertised
@@ -1444,6 +1578,10 @@ pub(crate) async fn run_session<T>(
     resume: Option<String>,
     cwd: PathBuf,
     picks: &[(String, String)],
+    mode: Option<String>,
+    permission_rx: Option<tokio::sync::mpsc::UnboundedReceiver<
+        super::events::PanePermissionAnswer,
+    >>,
     accumulated: Arc<Mutex<super::closure::TurnClosure>>,
     stop_signal: Arc<AtomicBool>,
     chunk_tx: tokio::sync::mpsc::UnboundedSender<SubagentEvent>,
@@ -1469,6 +1607,21 @@ where
     let read_root = cwd.clone();
     #[cfg(not(unix))]
     let write_root = cwd.clone();
+
+    // Permission handling is MODE-AWARE (the mode mapping made the split's
+    // modes real): with a permission channel the `session/request_permission`
+    // request surfaces to the TUI (its box) and AWAITS the user's pick;
+    // without one it stays the headless auto-approve (the Yolo contract —
+    // the split ran every pane YOLO by design long before modes mapped).
+    //
+    // The receiver rides an `Arc<Mutex<Option<_>>>` because the SDK invokes
+    // the permission handler per request over the same captured state: each
+    // request takes the channel out, awaits one answer, and puts it back.
+    let permission_rx = std::sync::Arc::new(std::sync::Mutex::new(permission_rx));
+    // The permission handler's own captures (each closure below moves its
+    // clones — the originals stay for the prompt race further down).
+    let permission_tx = chunk_tx.clone();
+    let permission_stop = stop_signal.clone();
 
     // Route the transport through the generic connection machinery. The
     // subprocess launcher gets stderr line logging; in-memory test channels
@@ -1500,48 +1653,149 @@ where
             },
             on_receive_notification!(),
         )
-        // Headless automation: auto-approve (YOLO style), so the sub-agent
-        // never blocks on a dialog nobody can answer. Option ORDER is
-        // harness-defined — some harnesses list reject-like choices first —
-        // so an explicit allow-kind option is preferred over "first option"
-        // whenever one exists. With no options, cancel the request per the
-        // spec.
-        .on_receive_request(
+        // Permission handling is MODE-AWARE (the mode mapping made the
+        // split's modes real): with a permission channel the request
+        // surfaces to the TUI (its box) and AWAITS the user's pick; without
+        // one it stays the headless auto-approve (the Yolo contract — the
+        // split ran every pane YOLO by design long before modes mapped).
+        //
+        // Auto-approve preference order: AllowAlways first, then AllowOnce —
+        // both approve, but Always avoids the same prompt coming back for
+        // every later call. Without any allow-kind option, the first listed
+        // option is picked as a last resort; its kind is logged so a
+        // reject-like auto-approval is visible in debug output. With no
+        // options at all, cancel per the spec.
+        //
+        // The receiver rides a Mutex<Option<_>> because the SDK invokes this
+        // handler per request over the same captured state: each request
+        // takes the channel out, awaits one answer, and puts it back.
+            .on_receive_request(
             async move |request: RequestPermissionRequest, responder, _connection| {
-                // Explicit preference order: AllowAlways first, then
-                // AllowOnce — both auto-approve, but Always avoids the same
-                // prompt coming back for every later call. Without any
-                // allow-kind option, the first listed option is picked as a
-                // last resort; its kind is logged so a reject-like auto-
-                // approval is visible in debug output.
-                let selected = request
-                    .options
-                    .iter()
-                    .find(|option| option.kind == PermissionOptionKind::AllowAlways)
-                    .or_else(|| {
-                        request
-                            .options
-                            .iter()
-                            .find(|option| option.kind == PermissionOptionKind::AllowOnce)
-                    })
-                    .or_else(|| request.options.first());
-                match selected {
-                    Some(option) => {
+                let interactive = permission_rx
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_some();
+                if !interactive {
+                    let selected = request
+                        .options
+                        .iter()
+                        .find(|option| option.kind == PermissionOptionKind::AllowAlways)
+                        .or_else(|| {
+                            request
+                                .options
+                                .iter()
+                                .find(|option| option.kind == PermissionOptionKind::AllowOnce)
+                        })
+                        .or_else(|| request.options.first());
+                    return match selected {
+                        Some(option) => {
+                            log::debug!(
+                                "sub-agent permission auto-approved: option '{}' (kind {:?}) for tool call {}",
+                                option.option_id.0,
+                                option.kind,
+                                request.tool_call.tool_call_id.0
+                            );
+                            responder.respond(RequestPermissionResponse::new(
+                                RequestPermissionOutcome::Selected(
+                                    SelectedPermissionOutcome::new(option.option_id.clone()),
+                                ),
+                            ))
+                        }
+                        None => responder.respond(RequestPermissionResponse::new(
+                            RequestPermissionOutcome::Cancelled,
+                        )),
+                    };
+                }
+                // INTERACTIVE: mirror the request into a typed event (the TUI
+                // opens its permission box for this pane) and await the
+                // user's option pick. The await is raced against the shared
+                // stop signal — a triggered stop must respond `Cancelled`
+                // per the spec (the pending permission dies with the turn).
+                let fields = &request.tool_call.fields;
+                let permission_event = SubagentEvent::PermissionRequest {
+                    call_id: request.tool_call.tool_call_id.0.to_string(),
+                    title: fields.title.clone().unwrap_or_else(|| {
+                        "tool call awaiting permission".to_string()
+                    }),
+                    kind: fields
+                        .kind
+                        .map(super::events::ToolKind::from_acp)
+                        .unwrap_or(super::events::ToolKind::Unknown),
+                    raw_input: fields.raw_input.clone(),
+                    options: request
+                        .options
+                        .iter()
+                        .map(|option| super::events::AgentPermissionOption {
+                            id: option.option_id.0.to_string(),
+                            name: option.name.clone(),
+                            kind: match option.kind {
+                                PermissionOptionKind::AllowOnce => "allow_once".to_string(),
+                                PermissionOptionKind::AllowAlways => "allow_always".to_string(),
+                                PermissionOptionKind::RejectOnce => "reject_once".to_string(),
+                                PermissionOptionKind::RejectAlways => "reject_always".to_string(),
+                                // `#[non_exhaustive]`: a future kind carries
+                                // no name of its own here — the option still
+                                // shows, just unclassified.
+                                _ => "other".to_string(),
+                            },
+                        })
+                        .collect(),
+                };
+                let _ = permission_tx.send(permission_event);
+
+                // Take the channel out for THIS request (one answer), put it
+                // back afterwards so later requests of the same turn reuse it.
+                let mut rx = permission_rx
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take();
+                let answer = async {
+                    match rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => None,
+                    }
+                };
+                let stop_wait = async {
+                    while !permission_stop.load(Ordering::Relaxed) {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                };
+                let picked = tokio::select! {
+                    answer = answer => answer,
+                    () = stop_wait => None,
+                };
+                // The channel returns to the handler state regardless of the
+                // answer's shape: a later request of the same turn needs it.
+                *permission_rx.lock().unwrap_or_else(|e| e.into_inner()) = rx;
+                match picked {
+                    // The user picked one of the agent's own options; the id
+                    // goes back verbatim.
+                    Some(super::events::PanePermissionAnswer::Selected(option_id)) => {
                         log::debug!(
-                            "sub-agent permission auto-approved: option '{}' (kind {:?}) for tool call {}",
-                            option.option_id.0,
-                            option.kind,
+                            "sub-agent permission granted by user: option '{option_id}' for tool call {}",
                             request.tool_call.tool_call_id.0
                         );
                         responder.respond(RequestPermissionResponse::new(
                             RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
-                                option.option_id.clone(),
+                                agent_client_protocol::schema::v1::PermissionOptionId::new(
+                                    option_id,
+                                ),
                             )),
                         ))
                     }
-                    None => responder.respond(RequestPermissionResponse::new(
-                        RequestPermissionOutcome::Cancelled,
-                    )),
+                    // The user dismissed the box, the channel closed (the
+                    // pane's turn was force-closed), or the stop signal fired:
+                    // the spec REQUIRES `Cancelled` for a pending permission on
+                    // a cancelled turn.
+                    answer => {
+                        log::debug!(
+                            "sub-agent permission cancelled ({answer:?}): tool call {}",
+                            request.tool_call.tool_call_id.0
+                        );
+                        responder.respond(RequestPermissionResponse::new(
+                            RequestPermissionOutcome::Cancelled,
+                        ))
+                    }
                 }
             },
             on_receive_request!(),
@@ -1596,7 +1850,7 @@ where
             // authentication attempt precedes the retry. A harness that
             // manages auth itself advertises no methods, and the retry
             // path then simply re-surfaces its own error message.
-            let (session_id, config_options) =
+            let opened =
                 match open_or_resume_session(
                     &connection,
                     resume.clone(),
@@ -1605,7 +1859,7 @@ where
                 )
                 .await
                 {
-                    Ok(session) => session,
+                    Ok(open) => open,
                     Err(auth_error)
                         if auth_error.code == ErrorCode::AuthRequired =>
                     {
@@ -1625,6 +1879,7 @@ where
                     }
                     Err(auth_error) => return Err(auth_error),
                 };
+            let session_id = opened.session_id;
 
 // Re-apply the pane's config picks inside THIS turn's own
             // connection — per-connection state dies with the connection
@@ -1636,9 +1891,13 @@ where
             // so the picks apply to them too. An `auth_required`
             // rejection triggers one lazy-authentication attempt (see
             // [`authenticate_on_auth_required`]) before the retry.
-            let picks_applied =
-                apply_session_picks(&connection, &session_id, config_options.as_deref(), picks)
-                    .await;
+            let picks_applied = apply_session_picks(
+                &connection,
+                &session_id,
+                opened.config_options.as_deref(),
+                picks,
+            )
+            .await;
             match picks_applied {
                 Ok(()) => {}
                 Err(auth_error) if auth_error.code == ErrorCode::AuthRequired => {
@@ -1651,7 +1910,7 @@ where
                     apply_session_picks(
                         &connection,
                         &session_id,
-                        config_options.as_deref(),
+                        opened.config_options.as_deref(),
                         picks,
                     )
                     .await?;
@@ -1669,7 +1928,58 @@ where
                 .find(|(id, _)| id == "model")
                 .map(|(_, value)| value.as_str())
                 .unwrap_or("");
-            let _ = model_tx.send(session_model_info(config_options.as_deref(), preferred_model));
+            let _ =
+                model_tx.send(session_model_info(opened.config_options.as_deref(), preferred_model));
+
+            // Bind the client's harness mode onto one of the agent's
+            // advertised modes BEFORE the prompt (per-connection session
+            // state, exactly like the picks). The caller resolved its own
+            // mode id against the modes a PREVIOUS turn's `Modes` event
+            // advertised; this side only verifies the agent still offers it
+            // — a stale mapping (the agent dropped the mode) is skipped, a
+            // transport rejection aborts the turn. `None` (no mapped mode)
+            // binds nothing: gemini advertises no modes, and an unmapped
+            // cosh mode keeps the agent's own current.
+            if let Some(mode_id) = mode.as_deref()
+                && opened
+                    .modes
+                    .as_ref()
+                    .is_some_and(|(_, modes)| modes.iter().any(|m| m.id == mode_id))
+            {
+                let mode_applied = apply_session_mode(&connection, &session_id, Some(mode_id)).await;
+                match mode_applied {
+                    Ok(()) => {}
+                    Err(auth_error) if auth_error.code == ErrorCode::AuthRequired => {
+                        authenticate_on_auth_required(
+                            &connection,
+                            &init.auth_methods,
+                            &auth_error,
+                        )
+                        .await?;
+                        apply_session_mode(&connection, &session_id, Some(mode_id)).await?;
+                    }
+                    Err(auth_error) => return Err(auth_error),
+                }
+            }
+
+            // The pane's MODE state: what the harness advertises (and starts
+            // in) rides the turn's event stream as pane chrome, so the TUI
+            // can map its own mode onto one of these ids and bind it through
+            // `session/set_mode` on a later turn. Emitted even when the
+            // harness advertises none (an empty event) so a pane that once
+            // held modes drops them when the agent stops offering them.
+            let _ = model_tx.send(SubagentEvent::Modes {
+                modes: opened
+                    .modes
+                    .as_ref()
+                    .map(|(_, modes)| modes.clone())
+                    .unwrap_or_default(),
+                current: opened
+                    .modes
+                    .as_ref()
+                    .map(|(current, _)| current.clone())
+                    .unwrap_or_default(),
+            });
 
             let prompt_request = connection
                 .send_request(PromptRequest::new(

@@ -1679,8 +1679,12 @@ impl Tools for CoshTools {
                                 &call_input,
                                 resume,
                                 // The subagent_call tool carries no user
-                                // config picks: the registry defaults apply.
+                                // config picks, mode binding or permission
+                                // channel: the registry defaults apply and
+                                // permissions stay headless-auto-approved.
                                 &[],
+                                None,
+                                None,
                                 cwd,
                                 stop_signal,
                                 chunk_tx,
@@ -1809,8 +1813,12 @@ impl Tools for CoshTools {
                         &call_input,
                         resume,
                         // The subagent_call tool carries no user
-                        // config picks: the registry defaults apply.
+                        // config picks, mode binding or permission
+                        // channel: the registry defaults apply and
+                        // permissions stay headless-auto-approved.
                         &[],
+                        None,
+                        None,
                         cwd,
                         stop_signal,
                         chunk_tx,

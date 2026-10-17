@@ -208,8 +208,12 @@ async fn correct_with_acp(
         agent,
         request,
         None,
-        // No user picks on the correction path: the registry defaults apply.
+        // No user picks, mode binding or permission channel on the
+        // correction path: the registry defaults apply and permissions
+        // stay headless-auto-approved.
         &[],
+        None,
+        None,
         cwd,
         cancelled,
         chunk_tx,
