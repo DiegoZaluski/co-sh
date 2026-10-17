@@ -102,6 +102,86 @@ impl Default for Setup {
 
 // Categories
 
+/// Which agent-loop spinner animation the prompt row plays (`/spinner`).
+/// Purely decorative: every style exposes the same surface the loop drives
+/// (`new`/`advance`/`set_activity`/`set_mode_color`/`update_theme`/`width`
+/// /`render`/`reset`/`is_initialized`), so the choice never changes
+/// behavior — only what the user watches while the agent works.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SpinnerStyle {
+    /// The bass equalizer: bars pulsing on waves + updrafts + floor holds,
+    /// topped with a percussive kick beat.
+    #[default]
+    Bass,
+    /// The original Elder-Futhark runic scramble with a two-color gradient.
+    Runes,
+    /// The opencode Knight-Rider scanner: a bright lead with an alpha-fade
+    /// trail sweeping the row back and forth (blocks style).
+    Opencode,
+    /// The crush scramble: the exact charmbracelet/crush working indicator
+    /// (15-column rune band cycling an HCL gradient).
+    Crush,
+    /// The classic braille wheel (`⠋⠙⠹…`) the in-app busy indicators use.
+    Classic,
+}
+
+impl SpinnerStyle {
+    /// Every style, in dialog display order. Keep in sync with the enum.
+    pub const ALL: [SpinnerStyle; 5] = [
+        SpinnerStyle::Bass,
+        SpinnerStyle::Runes,
+        SpinnerStyle::Opencode,
+        SpinnerStyle::Crush,
+        SpinnerStyle::Classic,
+    ];
+
+    /// Stable id persisted in `setup.json` (`appearance.spinner`).
+    pub fn id(self) -> &'static str {
+        match self {
+            SpinnerStyle::Runes => "runes",
+            SpinnerStyle::Bass => "bass",
+            SpinnerStyle::Opencode => "opencode",
+            SpinnerStyle::Crush => "crush",
+            SpinnerStyle::Classic => "classic",
+        }
+    }
+
+    /// Parse a persisted id (or a menu spelling). Unknown → `None`.
+    pub fn from_id(id: &str) -> Option<Self> {
+        match id.to_lowercase().as_str() {
+            "runes" => Some(SpinnerStyle::Runes),
+            "bass" => Some(SpinnerStyle::Bass),
+            "opencode" => Some(SpinnerStyle::Opencode),
+            "crush" => Some(SpinnerStyle::Crush),
+            "classic" => Some(SpinnerStyle::Classic),
+            _ => None,
+        }
+    }
+
+    /// Human label shown in the `/spinner` list.
+    pub fn label(self) -> &'static str {
+        match self {
+            SpinnerStyle::Runes => "runes",
+            SpinnerStyle::Bass => "bass",
+            SpinnerStyle::Opencode => "opencode",
+            SpinnerStyle::Crush => "crush",
+            SpinnerStyle::Classic => "classic",
+        }
+    }
+
+    /// One-line description shown next to the label in the `/spinner` list.
+    pub fn description(self) -> &'static str {
+        match self {
+            SpinnerStyle::Runes => "Runic scramble with gradient",
+            SpinnerStyle::Bass => "Equalizer bars on a bass beat (default)",
+            SpinnerStyle::Opencode => "Knight-Rider scanner sweep (opencode)",
+            SpinnerStyle::Crush => "Scrambled band on an HCL gradient (crush)",
+            SpinnerStyle::Classic => "Classic braille wheel",
+        }
+    }
+}
+
 /// Theme, bell, and visual preferences.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -117,6 +197,9 @@ pub struct Appearance {
     /// `/anim` toggle: show the animated chat-logo on the empty-session
     /// landing screen. When off, the static `LOGO_CHAT` is drawn instead.
     pub anim_enabled: bool,
+    /// `/spinner` pick: which agent-loop spinner animation plays above the
+    /// prompt. Decorative only — see [`SpinnerStyle`].
+    pub spinner: SpinnerStyle,
 }
 
 impl Default for Appearance {
@@ -126,6 +209,7 @@ impl Default for Appearance {
             bell_enabled: true,
             transparent_background: false,
             anim_enabled: false,
+            spinner: SpinnerStyle::default(),
         }
     }
 }

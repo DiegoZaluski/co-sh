@@ -43,9 +43,10 @@ impl App {
         self.prompt_correction_active = true;
         self.prompt_correction_cancel
             .store(false, std::sync::atomic::Ordering::Relaxed);
-        self.prompt_correction_spinner = Some(crate::component::agent_spinner::AgentSpinner::new(
+        self.prompt_correction_spinner = Some(crate::component::any_spinner::AnySpinner::new(
             "",
             &self.theme,
+            self.setup.appearance.spinner,
         ));
         self.prompt_correction_task = Some(self.tokio_handle.spawn(async move {
             let result = run_prompt_corrector_fallbacks(

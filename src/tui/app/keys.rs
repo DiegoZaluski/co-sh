@@ -406,6 +406,11 @@ impl App {
                 return Ok(false);
             }
 
+            // Check the spinner-style dialog (standalone, like tool-call)
+            if self.is_spinner_dialog_visible() && self.handle_spinner_dialog_key(key.code) {
+                return Ok(false);
+            }
+
             // Check the /agents standardized config box (standalone, like
             // tool-call): the focused pane's own ACP config options.
             if self.is_agent_config_dialog_visible()

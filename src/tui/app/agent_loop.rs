@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use super::App;
-use crate::component::agent_spinner::AgentSpinner;
+use crate::component::any_spinner::AnySpinner as AgentSpinner;
 use crate::routes::session::queue_choice::QueueTarget;
 use crate::types::SessionStatus;
 use cosh::harness::HarnessEvent;
@@ -285,6 +285,7 @@ impl App {
         self.agent_spinner = Some(AgentSpinner::new(
             crate::types::AgentActivity::Working.label(),
             &self.theme,
+            self.setup.appearance.spinner,
         ));
 
         let event_tx = self.event_tx.clone();
@@ -833,6 +834,7 @@ impl App {
         self.agent_spinner = Some(AgentSpinner::new(
             crate::types::AgentActivity::for_tool("bash_run").label(),
             &self.theme,
+            self.setup.appearance.spinner,
         ));
         // The PTY panel entry is created by the ToolCall event handler below
         // (exactly like an agent-loop bash_run) — starting it here too would

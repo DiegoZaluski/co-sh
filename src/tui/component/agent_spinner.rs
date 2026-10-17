@@ -42,14 +42,15 @@ const AVAILABLE_RUNES: &[char] = &[
 /// Status glyph sequences: the animation shown after the status text. Each
 /// agent activity continuously cycles its own sequence while active; the
 /// runic scramble is unaffected. Switching activity restarts the new
-/// sequence from its first glyph.
-const WORKING_FRAMES: &[&str] = &["·", "•", "●", "•", "·"];
-const PONDERING_FRAMES: &[&str] = &["+", "×", "+", "·", "·"];
-const SEARCHING_FRAMES: &[&str] = &["›", "»", "›"];
-const RECALLING_FRAMES: &[&str] = &["↶", "↺", "↶"];
+/// sequence from its first glyph. Shared verbatim with the sibling
+/// spinner components (`agent_spinner_bass`, `agent_spinner_opencode`).
+pub const WORKING_FRAMES: &[&str] = &["·", "•", "●", "•", "·"];
+pub const PONDERING_FRAMES: &[&str] = &["+", "×", "+", "·", "·"];
+pub const SEARCHING_FRAMES: &[&str] = &["›", "»", "›"];
+pub const RECALLING_FRAMES: &[&str] = &["↶", "↺", "↶"];
 
 /// The glyph sequence owned by an agent activity.
-const fn activity_frames(activity: AgentActivity) -> &'static [&'static str] {
+pub const fn activity_frames(activity: AgentActivity) -> &'static [&'static str] {
     match activity {
         AgentActivity::Working => WORKING_FRAMES,
         AgentActivity::Pondering => PONDERING_FRAMES,

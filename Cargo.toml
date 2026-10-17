@@ -151,7 +151,7 @@ version = "0.1"
 
 [dependencies.xxhash-rust]
 version = "0.8"
-features = ["xxh32", "xxh64"]
+features = ["xxh3", "xxh32", "xxh64"]
 
 # OS entropy for telemetry identifiers (audit F04): no time/address-derived
 # fallbacks — when entropy is unavailable the telemetry event is dropped.

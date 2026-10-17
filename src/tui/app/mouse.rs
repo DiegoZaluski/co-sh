@@ -923,6 +923,9 @@ impl App {
                             DialogType::ToolCallList { .. } => {
                                 self.handle_tool_call_dialog_key(KeyCode::Up);
                             }
+                            DialogType::SpinnerList { .. } => {
+                                self.handle_spinner_dialog_key(KeyCode::Up);
+                            }
                             DialogType::AgentConfigList { .. } => {
                                 self.handle_agent_config_dialog_key(KeyCode::Up);
                             }
@@ -1016,6 +1019,9 @@ impl App {
                             }
                             DialogType::ToolCallList { .. } => {
                                 self.handle_tool_call_dialog_key(KeyCode::Down);
+                            }
+                            DialogType::SpinnerList { .. } => {
+                                self.handle_spinner_dialog_key(KeyCode::Down);
                             }
                             DialogType::AgentConfigList { .. } => {
                                 self.handle_agent_config_dialog_key(KeyCode::Down);
@@ -1465,6 +1471,10 @@ impl App {
                             }
                             DialogType::ToolCallList { .. } => {
                                 self.handle_tool_call_dialog_key(KeyCode::Enter);
+                                return Ok(true);
+                            }
+                            DialogType::SpinnerList { .. } => {
+                                self.handle_spinner_dialog_key(KeyCode::Enter);
                                 return Ok(true);
                             }
                             DialogType::AgentConfigList { .. } => {

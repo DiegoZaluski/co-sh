@@ -1210,6 +1210,8 @@ impl App {
             });
             self.setup.appearance.anim_enabled = self.anim_enabled;
             self.setup.save();
+        } else if cmd.name == "spinner" {
+            self.open_spinner_dialog();
         } else {
             let cmd_name = format!("/{} ", cmd.name);
             self.prompt_view.set_draft(cmd_name);

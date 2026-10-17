@@ -147,6 +147,10 @@ impl SlashMenu {
                 desc: "Toggle chat animation".into(),
             },
             SlashCommand {
+                name: "spinner".into(),
+                desc: "Set spinner animation".into(),
+            },
+            SlashCommand {
                 name: "toolcall".into(),
                 desc: "Set tool call mode".into(),
             },

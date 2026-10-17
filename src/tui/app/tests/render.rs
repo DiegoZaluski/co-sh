@@ -458,7 +458,7 @@ async fn scroll_to_bottom_pill_stays_put_when_the_spinner_appears() {
     use crossterm::event::{KeyModifiers, MouseEvent as CMouse, MouseEventKind as CKind};
     use ratatui::{Terminal, backend::TestBackend};
 
-    use crate::component::agent_spinner::AgentSpinner;
+    use crate::component::any_spinner::AnySpinner as AgentSpinner;
     use crate::types::{Message, MessageRole, Part, TextPart};
 
     let _home = HOME_LOCK.lock();
@@ -507,7 +507,7 @@ async fn scroll_to_bottom_pill_stays_put_when_the_spinner_appears() {
     // The agent loop starts: the spinner appears on the line above the
     // prompt, shrinking the transcript viewport by one row.
     app.state.status = crate::types::SessionStatus::Working;
-    app.agent_spinner = Some(AgentSpinner::new("Working", &app.theme));
+    app.agent_spinner = Some(AgentSpinner::new("Working", &app.theme, cosh::setup::SpinnerStyle::Bass));
     terminal.draw(|f| app.render(f, 0.016)).unwrap();
 
     let after = app
@@ -527,7 +527,7 @@ async fn scroll_to_bottom_pill_stays_put_when_the_spinner_appears() {
 async fn prompt_correction_spinner_yields_to_the_agent_loop_spinner() {
     use ratatui::{Terminal, backend::TestBackend};
 
-    use crate::component::agent_spinner::AgentSpinner;
+    use crate::component::any_spinner::AnySpinner as AgentSpinner;
 
     let _home = HOME_LOCK.lock();
     isolate_home();
@@ -538,7 +538,7 @@ async fn prompt_correction_spinner_yields_to_the_agent_loop_spinner() {
     app.state.current_session_id = Some(id);
     app.prompt_view.input = "correct this text".into();
     app.prompt_correction_active = true;
-    app.prompt_correction_spinner = Some(AgentSpinner::new("", &app.theme));
+    app.prompt_correction_spinner = Some(AgentSpinner::new("", &app.theme, cosh::setup::SpinnerStyle::Bass));
 
     let (w, h) = (80u16, 24u16);
     app.set_test_size(w, h);
@@ -567,7 +567,7 @@ async fn prompt_correction_spinner_yields_to_the_agent_loop_spinner() {
     );
 
     app.state.status = crate::types::SessionStatus::Working;
-    app.agent_spinner = Some(AgentSpinner::new("Working", &app.theme));
+    app.agent_spinner = Some(AgentSpinner::new("Working", &app.theme, cosh::setup::SpinnerStyle::Bass));
     terminal.draw(|frame| app.render(frame, 0.016)).unwrap();
     let rendered: String = terminal
         .backend()

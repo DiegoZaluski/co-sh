@@ -5,6 +5,7 @@ mod message_actions;
 mod model;
 mod provider_key;
 mod queue_actions;
+mod spinner;
 mod text_input;
 mod theme;
 mod tool_call;

@@ -541,6 +541,7 @@ fn app_with_cosh_pane() -> App {
         reasoning: None,
         agents_panes: None,
         agents_mode_open: false,
+        agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
         messages: vec![
             make("m0", MessageRole::User, "first prompt", now),

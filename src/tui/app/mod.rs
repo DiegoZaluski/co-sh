@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use cosh::harness::HarnessEvent;
 use cosh_tui::core::lib::rgba::RGBA;
 
-use crate::component::agent_spinner::AgentSpinner;
+use crate::component::any_spinner::AnySpinner as AgentSpinner;
 use crate::component::prompt::PromptView;
 use crate::component::sparkle::SparkleState;
 use crate::config::{LlmConfig, TuiConfig};

@@ -79,6 +79,30 @@ const WOBBLE_PHASE_STEP: f32 = 2.3;
 /// so the upper range varies independently while the floor stays calm.
 const WOBBLE_AMPLITUDE: f32 = 0.22;
 
+// ── Kick (bumbo) ───────────────────────────────────────────────────────────
+// A percussive pulse layered on top of the waves: every beat the whole row
+// takes a sharp hit that decays exponentially, weighted from the left edge
+// (where the bass lives) toward the right. This is what turns the
+// continuous waves into something that reads as *music* — a tempo.
+
+/// Frames between kicks. At 30 fps, 23 → ~78 BPM, a laid-back groove.
+const KICK_INTERVAL: u32 = 23;
+
+/// Frames the kick takes to reach full force (a sharp, drum-like attack).
+const KICK_ATTACK_FRAMES: f32 = 1.5;
+
+/// Exponential decay constant of the kick, in frames. Larger → the hit
+/// rings longer; small values keep it a tight thump.
+const KICK_DECAY_FRAMES: f32 = 5.0;
+
+/// Peak lift a kick adds to the row at full force.
+const KICK_AMPLITUDE: f32 = 0.35;
+
+/// How much of the kick each further column loses. 0.08 → the leftmost bar
+/// takes the full hit while the last bar barely feels it, like a kick drum
+/// panned to the bass side.
+const KICK_FALLOFF_PER_COLUMN: f32 = 0.08;
+
 /// Length of one random updraft segment, in frames (~0.5 s at 30 fps).
 /// A new random lift target is drawn at every segment boundary.
 const UPDRAFT_INTERVAL: u32 = 15;
@@ -559,6 +583,28 @@ impl AgentSpinnerBass {
         from + (to - from) * p
     }
 
+    /// Percussive kick lift for bar `col` at frame `frame`, in
+    /// `[0.0, KICK_AMPLITUDE]`.
+    ///
+    /// A steady beat: every `KICK_INTERVAL` frames the row takes a sharp
+    /// hit — a fast attack (`KICK_ATTACK_FRAMES`) followed by an
+    /// exponential decay (`KICK_DECAY_FRAMES`), exactly like a drum hit.
+    /// Each further column to the right feels the hit proportionally less
+    /// (`KICK_FALLOFF_PER_COLUMN`), so the punch is anchored on the left
+    /// side of the row where the bass lives.
+    #[allow(clippy::cast_precision_loss)]
+    fn kick(&self, col: usize, frame: u32) -> f32 {
+        let into_beat = (frame % KICK_INTERVAL) as f32;
+        // Fast attack, then exponential decay.
+        let envelope = if into_beat < KICK_ATTACK_FRAMES {
+            into_beat / KICK_ATTACK_FRAMES
+        } else {
+            (-(into_beat - KICK_ATTACK_FRAMES) / KICK_DECAY_FRAMES).exp()
+        };
+        let falloff = (1.0 - KICK_FALLOFF_PER_COLUMN * col as f32).max(0.0);
+        KICK_AMPLITUDE * envelope * falloff
+    }
+
     /// Normalized height of bar `col` at frame `frame`, in `[0.0, 1.0]`.
     ///
     /// When the bar is floor-held it is pinned dead still just above the
@@ -586,7 +632,8 @@ impl AgentSpinnerBass {
             * (t * (WOBBLE_WAVE_FREQUENCY + WOBBLE_FREQUENCY_STEP * i) + i * WOBBLE_PHASE_STEP)
                 .sin();
         let updraft = base * self.updraft(col, frame);
-        (base + wobble + updraft).clamp(0.0, 1.0)
+        let kick = self.kick(col, frame);
+        (base + wobble + updraft + kick).clamp(0.0, 1.0)
     }
 
     /// Height actually displayed for bar `col` at frame `frame`, in
@@ -905,8 +952,12 @@ mod tests {
         // tall bar deviates visibly — i.e. the upper group moves
         // independently. Floor-held bars are skipped: they are pinned by
         // design, so their deviation from the wave says nothing about the
+        // wobble. The kick is added to the bound for low bars: by design a
+        // beat hits the whole row (including resting bars) — that shared
+        // percussive lift is what reads as a tempo, not as independent
         // wobble.
-        let max_low_deviation = (WOBBLE_AMPLITUDE + UPDRAFT_AMPLITUDE) * 0.25;
+        let max_low_deviation =
+            (WOBBLE_AMPLITUDE + UPDRAFT_AMPLITUDE) * 0.25 + KICK_AMPLITUDE + 1e-4;
         let mut saw_big_deviation = false;
         for frame in 0..600u32 {
             for col in 0..NUM_BARS {

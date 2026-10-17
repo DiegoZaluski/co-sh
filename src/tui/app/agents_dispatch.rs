@@ -504,9 +504,10 @@ impl App {
         // (same running flag, pane-index routed).
         self.sync_agents_pane_mirrors();
         self.agent_activity = crate::types::AgentActivity::Working;
-        self.agent_spinner = Some(crate::component::agent_spinner::AgentSpinner::new(
+        self.agent_spinner = Some(crate::component::any_spinner::AnySpinner::new(
             crate::types::AgentActivity::Working.label(),
             &self.theme,
+            self.setup.appearance.spinner,
         ));
 
         let index = pane;

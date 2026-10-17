@@ -1,5 +1,9 @@
 pub mod agent_spinner;
 pub mod agent_spinner_bass;
+pub mod agent_spinner_classic;
+pub mod agent_spinner_crush;
+pub mod agent_spinner_opencode;
+pub mod any_spinner;
 pub mod budget;
 pub mod cursor;
 pub mod list_dialog;

@@ -568,9 +568,10 @@ async fn spinner_label_follows_agent_activity() {
     // it spawns the real harness thread): fresh spinner with the default
     // label, animation state untouched by later label changes.
     app.agent_activity = crate::types::AgentActivity::Working;
-    app.agent_spinner = Some(crate::component::agent_spinner::AgentSpinner::new(
+    app.agent_spinner = Some(crate::component::any_spinner::AnySpinner::new(
         crate::types::AgentActivity::Working.label(),
         &app.theme,
+        cosh::setup::SpinnerStyle::Bass,
     ));
     for _ in 0..40 {
         app.agent_spinner.as_mut().unwrap().advance();
@@ -680,9 +681,10 @@ async fn spinner_activity_ignores_noise_deltas() {
         .add_empty_session(id.clone(), "noise".into(), 0);
     app.state.current_session_id = Some(id);
     app.agent_activity = crate::types::AgentActivity::Working;
-    app.agent_spinner = Some(crate::component::agent_spinner::AgentSpinner::new(
+    app.agent_spinner = Some(crate::component::any_spinner::AnySpinner::new(
         crate::types::AgentActivity::Working.label(),
         &app.theme,
+        cosh::setup::SpinnerStyle::Bass,
     ));
     for _ in 0..40 {
         app.agent_spinner.as_mut().unwrap().advance();
