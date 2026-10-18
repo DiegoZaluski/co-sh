@@ -1068,12 +1068,7 @@ impl App {
             // pane freed (or idled all along) dispatch here — the frame tick
             // is the only guaranteed heartbeat, so a request can never wait
             // on a pane event that never comes while every pane idles.
-            // The pane watchdog runs BESIDE it (same heartbeat): a pane
-            // `running` with no event for the watchdog window is
-            // force-closed first, so a recovered pane can immediately take
-            // its queued work in this same frame (issue 5).
             if self.agents_split.is_some() || self.parked_agents_split.is_some() {
-                self.reconcile_pane_watchdog();
                 self.serve_agents_pane_queues();
             }
 

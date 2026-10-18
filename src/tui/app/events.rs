@@ -460,7 +460,7 @@ impl App {
                         None => {}
                     }
                     // A pane whose turn was already force-closed (the
-                    // Ctrl+X interrupt's synthetic Done, issue 5) or reset
+                    // Ctrl+X interrupt's synthetic Done) or reset
                     // by a slot swap is NOT running: a late real Done from
                     // the winding-down turn thread must not append a
                     // second closure into the timeline, rebind a session,

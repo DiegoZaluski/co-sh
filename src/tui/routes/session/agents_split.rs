@@ -20,7 +20,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use cosh_tui::core::lib::rgba::{ColorInput, RGBA};
 use cosh_tui::core::renderable::Renderable;
@@ -92,16 +91,6 @@ const AUTO_SCROLL_SPEED_FAST: f64 = 72.0;
 /// Gap cells (1 column / 1 row) between neighbouring panes.
 const GAP: u16 = 1;
 
-/// How long a pane may stay `running` without ANY event (stream, tool
-/// update, terminal Done) before the frame-tick watchdog force-closes its
-/// turn (issue 5): a turn whose thread died or whose provider connection
-/// silently stalled otherwise pins the pane's spinner forever, the
-/// dispatch gate refuses every new prompt, and nothing can recover it.
-/// Generous on purpose — a long tool call (a big build, a slow ACP turn
-/// with no chunk yet) stays far under it; the watchdog only fires on
-/// turns that are genuinely gone.
-pub const PANE_IDLE_WATCHDOG: Duration = Duration::from_secs(600);
-
 /// Monotonic generator for [`AgentPane::id`]: every pane a process ever
 /// builds carries a fresh id, so an event can be routed to ITS pane even
 /// after the pane set was rebuilt around it (a fresh picker confirm that
@@ -151,13 +140,6 @@ pub struct AgentPane {
     pub activity: SubagentActivity,
     /// Whether a sub-agent turn is currently running in this pane.
     pub running: bool,
-    /// Last time this pane showed ANY sign of life while `running`: the
-    /// dispatch itself (`set_running(true)`), a streamed event
-    /// (`apply_event`) or the terminal report. `None` when idle. The
-    /// frame-tick watchdog reads it (`stale_panes`): a pane `running`
-    /// with no activity for [`PANE_IDLE_WATCHDOG`] is force-closed —
-    /// its turn thread died or stalled with no way to report.
-    pub last_activity: Option<Instant>,
     /// A cold-restore replay pass is IN FLIGHT for this pane (its bound
     /// session is being rehydrated through `session/load`). While set, a
     /// user prompt is refused with a toast (the pane's history is still
@@ -274,7 +256,6 @@ impl AgentPane {
             id: next_pane_id(),
             activity: SubagentActivity::default(),
             running: false,
-            last_activity: None,
             stop_signal: None,
             session_id: None,
             session_info: None,
@@ -1075,26 +1056,6 @@ impl AgentsSplitState {
         self.panes.iter().any(|p| p.running)
     }
 
-    /// Indexes of panes whose turn is STALE for the watchdog (issue 5):
-    /// `running` with no event of any kind for longer than
-    /// [`PANE_IDLE_WATCHDOG`] — the turn thread died or stalled without a
-    /// way to report. A pane whose `last_activity` is `None` while
-    /// `running` (should not happen — the dispatch stamps it) counts as
-    /// stale from the check, never from zero.
-    #[must_use]
-    pub fn stale_panes(&self, now: Instant) -> Vec<usize> {
-        self.panes
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| {
-                p.running
-                    && p.last_activity
-                        .is_none_or(|t| now.duration_since(t) >= PANE_IDLE_WATCHDOG)
-            })
-            .map(|(i, _)| i)
-            .collect()
-    }
-
     /// Whether any pane is still rehydrating its replayed history.
     #[must_use]
     pub fn any_rehydrating(&self) -> bool {
@@ -1105,11 +1066,6 @@ impl AgentsSplitState {
     /// range panes are ignored: every pane incl. daemon is ordinary here.
     pub fn apply_event(&mut self, pane: usize, event: &SubagentEvent) {
         if let Some(p) = self.panes.get_mut(pane) {
-            // Any sign of life pushes the watchdog back (issue 5): a
-            // streaming turn is never stale, however long it runs.
-            if p.running {
-                p.last_activity = Some(Instant::now());
-            }
             p.activity.apply(event);
         }
     }
@@ -1284,12 +1240,9 @@ impl AgentsSplitState {
     }
 
     /// Set the running flag of pane `pane` (out-of-range panes ignored).
-    /// Starting a turn stamps the watchdog baseline: the pane is alive
-    /// from dispatch, before its first event (issue 5).
     pub fn set_running(&mut self, pane: usize, running: bool) {
         if let Some(p) = self.panes.get_mut(pane) {
             p.running = running;
-            p.last_activity = running.then(Instant::now);
         }
     }
 

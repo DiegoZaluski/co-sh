@@ -383,10 +383,11 @@ pub fn complete_request(pane: &str, output: Result<String, String>) -> Option<&'
 }
 
 /// Fail a pane's IN-FLIGHT request, if any: the pane's turn was force-
-/// recovered (watchdog) or reset without completing — a leftover serving
-/// entry would keep [`has_outstanding_requests`] true forever and hang the
-/// requester's busy-guard at its natural-completion point. Queued (not yet
-/// served) requests are kept: the recovered pane can still serve them.
+/// closed (the Ctrl+X interrupt) or reset without completing — a leftover
+/// serving entry would keep [`has_outstanding_requests`] true forever and
+/// hang the requester's busy-guard at its natural-completion point.
+/// Queued (not yet served) requests are kept: the freed pane can still
+/// serve them.
 pub fn fail_serving(pane: &str, error: String) {
     let mut state = registry().lock().unwrap_or_else(|p| p.into_inner());
     if let Some(request) = state.serving.remove(pane) {

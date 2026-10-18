@@ -1270,7 +1270,7 @@ async fn ctrl_x_force_closes_a_stuck_focused_pane_turn() {
         "the pane accepts a new dispatch (signal cleared)"
     );
     assert!(
-        !split.panes[1].running && split.panes[1].last_activity.is_none(),
+        !split.panes[1].running,
         "the sibling pane is untouched"
     );
     assert!(
