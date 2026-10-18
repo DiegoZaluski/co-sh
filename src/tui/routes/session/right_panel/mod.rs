@@ -3017,8 +3017,10 @@ mod tests {
     /// CONSTRAINED viewport (inner_h smaller than the content — scroll
     /// active, clip bands live) with hostile event shapes mixed in: tool
     /// updates carrying diffs, plan replacements, multi-line titles (tool
-    /// rows are NOT sanitized), long markdown with fences, and a message
-    /// long enough to trip `bounded_tail`.
+    /// rows are NOT sanitized), long markdown with fences, and an oversized
+    /// message (the live tail grows UNBOUNDED under the flow contract —
+    /// it only compresses to its 8k archival tail on demotion/seal, so
+    /// this exercises a taller-than-8k block in the paint walk).
     #[test]
     fn constrained_viewport_hostile_events_paint_without_overlap() {
         use cosh_tools::subagent::events::{SubagentEvent, ToolCallStatus, ToolKind};

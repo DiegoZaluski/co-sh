@@ -1085,12 +1085,17 @@ fn bounded_tail(text: &str, max: usize) -> String {
 
 /// Maximum bytes kept of one tool call's output tail.
 const SUBAGENT_TOOL_TAIL_BYTES: usize = 4_000;
-/// Maximum bytes kept of one transcript text entry (message or thought).
-/// Chunks coalesce into one growing entry; the tail survives so the box
-/// shows the most recent text while the final report keeps everything.
-/// The bound applies to the coalesced entry AND to a freshly started one
-/// (a single chunk may itself exceed the cap — ACP does not bound
-/// `ContentBlock::Text`).
+/// Maximum bytes kept of one timeline text entry (message or thought) in
+/// its ARCHIVAL phase. Chunks coalesce into one growing LIVE entry that is
+/// deliberately NOT bounded here — the growing block must grow in HEIGHT
+/// so the scroll follows its tail exactly like the main chat's reasoning
+/// (see [`SubagentActivity::coalesce_stream_chunk`], the "sliding window"
+/// regression note). The archival bound applies when the entry STOPS
+/// streaming: demoted from the tail by a newer entry
+/// ([`SubagentActivity::push_entry`]) or sealed at turn end
+/// ([`SubagentActivity::seal`]). The bound applies to a freshly started
+/// entry too (a single chunk may itself exceed the cap — ACP does not
+/// bound `ContentBlock::Text`).
 const SUBAGENT_TEXT_ENTRY_BYTES: usize = 8_000;
 /// Maximum bytes kept of the echoed main-agent prompt (`PtySession
 /// ::input_echo`). The old in-string echo was implicitly capped by the
@@ -1381,10 +1386,15 @@ impl SubagentActivity {
                 .iter()
                 .rposition(|e| matches!(e, SubagentTimelineEntry::Message { .. }))
         {
-            // Same raw stream on both sides: the entry is the message's
-            // bounded TAIL, the body its full text, so containment holds on
-            // the normal path — and degrades to KEEPING the entry, never to
-            // losing content.
+            // Same raw stream on both sides: the entry holds the message's
+            // UNCLAMPED live text (the flow contract — no demotion happened
+            // since it streamed), the body its full text, so containment
+            // holds on the normal path — and degrades to KEEPING the entry,
+            // never to losing content. A body carrying only the entry's
+            // eventual 8k tail would flip the check to "kept" (the answer
+            // would print twice): no current caller does that —
+            // `seal_completed` receives the full final output before any
+            // truncation.
             let in_body = match (&self.timeline[pos], report_body) {
                 (SubagentTimelineEntry::Message { text }, Some(body)) => {
                     body.contains(text.trim())
@@ -1405,6 +1415,12 @@ impl SubagentActivity {
                     ToolCallStatus::Failed
                 };
             }
+            // Archival phase: the turn ended, every entry stops streaming.
+            // The live tail grew UNBOUNDED while it streamed (the flow
+            // contract); now it compresses to its 8k archival tail — a
+            // discrete, one-time layout step, the same shape every other
+            // entry already carries. Idempotent (a no-op under the cap).
+            Self::clamp_entry_text(entry);
         }
     }
 
@@ -1475,7 +1491,17 @@ impl SubagentActivity {
             _ => None,
         }) {
             acc.push_str(text);
-            *acc = bounded_tail(acc, SUBAGENT_TEXT_ENTRY_BYTES);
+            // The LIVE tail is NEVER bounded here: the growing entry must
+            // keep growing in HEIGHT, exactly like the chat's `Reasoning`
+            // part (the whole text is kept and re-measured every frame).
+            // Bounding a coalescing entry turns it into a SLIDING WINDOW —
+            // every delta cuts the head and appends the tail, the block's
+            // height stays capped, the scroll stops moving, the content
+            // above stays static, and the reasoning text slides UP inside
+            // its own constant-height band and vanishes at the block's top
+            // edge instead of expurging the flow above it (the "reasoning
+            // rolando e sumindo" pane bug). The 8k archival bound applies
+            // when the entry STOPS streaming — see `push_entry` and `seal`.
             return true;
         }
         // Whitespace-only chunks never OPEN an entry: an invisible blank row
@@ -1488,23 +1514,48 @@ impl SubagentActivity {
         if text.trim().is_empty() {
             return false;
         }
-        // A freshly started entry is bounded too: a single chunk may itself
-        // exceed the cap (ACP does not bound `ContentBlock::Text`).
+        // The birth chunk is NOT clamped: the entry opens as the live tail
+        // and must keep its full content (a single oversized delta included)
+        // so the block grows with it, exactly like the chat. The archival
+        // clamp lands when the entry is DEMOTED (see `push_entry`) or the
+        // turn seals (see `seal`).
         self.push_entry(match kind {
             StreamKind::Agent => SubagentTimelineEntry::Message {
-                text: bounded_tail(text, SUBAGENT_TEXT_ENTRY_BYTES),
+                text: text.to_string(),
             },
             StreamKind::Thought => SubagentTimelineEntry::Thought {
-                text: bounded_tail(text, SUBAGENT_TEXT_ENTRY_BYTES),
+                text: text.to_string(),
             },
             StreamKind::User => SubagentTimelineEntry::UserMessage {
-                text: bounded_tail(text, SUBAGENT_TEXT_ENTRY_BYTES),
+                text: text.to_string(),
             },
             StreamKind::AgentInput => SubagentTimelineEntry::AgentMessage {
-                text: bounded_tail(text, SUBAGENT_TEXT_ENTRY_BYTES),
+                text: text.to_string(),
             },
         });
         true
+    }
+
+    /// Apply the archival 8k bound to ONE timeline entry's text payload.
+    /// Tool/plan entries carry no free text to bound. The bound marks the
+    /// entry's ARCHIVAL phase — see [`Self::push_entry`] and [`Self::seal`]
+    /// for where it applies; the LIVE tail is never clamped here.
+    ///
+    /// The asymmetry is intentional: stream chunks open their entry
+    /// UNCLAMPED at birth ([`Self::coalesce_stream_chunk`] — the growing
+    /// block must grow in height like the chat) and clamp only when they
+    /// STOP streaming, while `open_turn_input`'s inputs arrive WHOLE (never
+    /// streamed, never coalesced) and are clamped at birth directly there.
+    fn clamp_entry_text(entry: &mut SubagentTimelineEntry) {
+        match entry {
+            SubagentTimelineEntry::Message { text }
+            | SubagentTimelineEntry::Thought { text }
+            | SubagentTimelineEntry::UserMessage { text }
+            | SubagentTimelineEntry::AgentMessage { text } => {
+                *text = bounded_tail(text, SUBAGENT_TEXT_ENTRY_BYTES);
+            }
+            SubagentTimelineEntry::Tool(_) | SubagentTimelineEntry::Plan { .. } => {}
+        }
     }
 
     /// Append one transcript entry, bounding the timeline: a very long turn
@@ -1512,6 +1563,17 @@ impl SubagentActivity {
     /// dropped (the box shows the live mini-chat; the final report still
     /// carries the complete content once the turn ends).
     fn push_entry(&mut self, entry: SubagentTimelineEntry) {
+        // The entry being DEMOTED from the tail position ends its streamed
+        // phase at this exact moment: whatever it accumulated live (and
+        // grew unbounded — the flow contract above) compresses to its
+        // 8k tail here, ONCE, as a discrete step — the same archive shape
+        // every other entry in the timeline carries. The NEW entry is NOT
+        // clamped at birth: it is the live tail now and must keep its full
+        // first chunk (a single oversized delta included) so the block
+        // grows with its whole content, like the chat.
+        if let Some(prev) = self.timeline.last_mut() {
+            Self::clamp_entry_text(prev);
+        }
         self.timeline.push(entry);
         while self.timeline.len() > SUBAGENT_TIMELINE_MAX_ENTRIES {
             self.timeline.remove(0);
@@ -3987,7 +4049,9 @@ impl RightPanelState {
                 Some(agent) => {
                     matches!(s.status, PtyStatus::Running) && Self::is_window_of(s, agent)
                 }
-                None => matches!(s.status, PtyStatus::Running) && !s.bound,
+                None => {
+                    matches!(s.status, PtyStatus::Running) && !s.bound && !s.main_mirror
+                }
             })
         } else {
             None
@@ -4081,7 +4145,9 @@ impl RightPanelState {
                 Some(agent) => {
                     matches!(s.status, PtyStatus::Running) && Self::is_window_of(s, agent)
                 }
-                None => matches!(s.status, PtyStatus::Running) && !s.bound,
+                None => {
+                    matches!(s.status, PtyStatus::Running) && !s.bound && !s.main_mirror
+                }
             })
         } else {
             None
@@ -4196,7 +4262,9 @@ impl RightPanelState {
                 Some(agent) => {
                     matches!(s.status, PtyStatus::Running) && Self::is_window_of(s, agent)
                 }
-                None => matches!(s.status, PtyStatus::Running) && !s.bound,
+                None => {
+                    matches!(s.status, PtyStatus::Running) && !s.bound && !s.main_mirror
+                }
             })
         } else {
             None
@@ -4285,9 +4353,14 @@ impl RightPanelState {
                 }
             }
             // The ref matched nothing at all (pre-ref emitters, rehydrated
-            // sessions): fall back to the last Running subagent.
+            // sessions): fall back to the last Running subagent. The
+            // main-agent mirror is excluded exactly like the pane mirrors —
+            // normal subagent traffic must never reach it.
             None => self.pty_sessions.iter().rposition(|s| {
-                matches!(s.status, PtyStatus::Running) && s.is_subagent() && !s.bound
+                matches!(s.status, PtyStatus::Running)
+                    && s.is_subagent()
+                    && !s.bound
+                    && !s.main_mirror
             }),
         };
         if let Some(idx) = target {
@@ -5921,12 +5994,16 @@ mod tests {
     }
 
     #[test]
-    fn subagent_text_entries_are_bounded() {
+    fn subagent_live_tail_grows_unbounded_and_clamps_only_on_demotion() {
         let mut state = RightPanelState::new();
         state.start_pty("subagent: opencode".to_string(), None);
-        // Many chunks (each 15 bytes): 600 × 15 = 9000 bytes — past the
-        // 8000-byte cap, so only the bounded tail survives (chunks coalesce
-        // into one growing transcript entry).
+        // Many chunks (each 15 bytes): 600 × 15 = 9000 bytes coalescing
+        // into one growing LIVE entry. The live tail is deliberately NOT
+        // bounded — the block must grow in HEIGHT so the scroll follows
+        // its tail like the main chat's reasoning (the pane flow bug: a
+        // clamped coalescing entry became a sliding window whose height
+        // never changed, so the text slid up inside its own band instead
+        // of expurging the flow above).
         for i in 0..600 {
             state.update_subagent_activity(
                 &SubagentEvent::Thought {
@@ -5936,26 +6013,78 @@ mod tests {
             );
         }
         let activity = &state.pty_sessions[0].subagent_activity;
-        // ONE coalesced entry, not 500 of them.
+        // ONE coalesced entry, not 500 of them — and it holds the WHOLE
+        // stream (both ends), taller than the archival cap.
         assert_eq!(activity.timeline.len(), 1);
-        let thought = match &activity.timeline[0] {
+        let live = match &activity.timeline[0] {
             SubagentTimelineEntry::Thought { text } => text.clone(),
             other => panic!("expected a thought entry, got {other:?}"),
         };
-        assert!(thought.len() <= SUBAGENT_TEXT_ENTRY_BYTES);
-        // The TAIL survives — the newest chunk is present.
-        assert!(thought.contains("thought-000499"));
-        assert!(!thought.contains("thought-000000"));
+        assert!(live.len() > SUBAGENT_TEXT_ENTRY_BYTES);
+        assert!(live.contains("thought-000000"));
+        assert!(live.contains("thought-000499"));
+
+        // The entry stops streaming the moment a NEW entry takes the tail:
+        // it compresses to its 8k ARCHIVAL tail in that one discrete step.
+        state.update_subagent_activity(
+            &SubagentEvent::Message {
+                text: "the answer".to_string(),
+            },
+            None,
+        );
+        let activity = &state.pty_sessions[0].subagent_activity;
+        assert_eq!(activity.timeline.len(), 2);
+        let archived = match &activity.timeline[0] {
+            SubagentTimelineEntry::Thought { text } => text.clone(),
+            other => panic!("expected a thought entry, got {other:?}"),
+        };
+        assert!(archived.len() <= SUBAGENT_TEXT_ENTRY_BYTES);
+        // The TAIL survives the archival clamp — the newest chunk is kept,
+        // the oldest bytes are gone.
+        assert!(archived.contains("thought-000499"));
+        assert!(!archived.contains("thought-000000"));
     }
 
     #[test]
-    fn subagent_single_oversized_chunk_is_bounded_when_it_starts_a_new_entry() {
+    fn subagent_seal_clamps_every_entry_to_its_archival_tail() {
         let mut state = RightPanelState::new();
         state.start_pty("subagent: opencode".to_string(), None);
-        // A single chunk LARGER than the cap must be clamped on arrival,
-        // even when it opens a NEW entry (the previous last entry is a tool
-        // call, so coalescing does not apply) — ACP does not bound
-        // `ContentBlock::Text`.
+        // A long live stream with no later entry to demote it: the tail
+        // stays unbounded while the turn runs...
+        for i in 0..700 {
+            state.update_subagent_activity(
+                &SubagentEvent::Thought {
+                    text: format!("think-{i:06} "),
+                },
+                None,
+            );
+        }
+        // ...and the turn ends. `seal` is the archival boundary: every
+        // entry compresses to its 8k tail exactly once.
+        state.update_subagent_activity(
+            &SubagentEvent::Message {
+                text: "final report".to_string(),
+            },
+            None,
+        );
+        let activity = &state.pty_sessions[0].subagent_activity;
+        for entry in &activity.timeline {
+            if let SubagentTimelineEntry::Thought { text } = entry {
+                assert!(text.len() <= SUBAGENT_TEXT_ENTRY_BYTES);
+                assert!(text.contains("think-000699"));
+                assert!(!text.contains("think-000000"));
+            }
+        }
+    }
+
+    #[test]
+    fn subagent_single_oversized_chunk_is_bounded_when_demoted() {
+        let mut state = RightPanelState::new();
+        state.start_pty("subagent: opencode".to_string(), None);
+        // A single chunk LARGER than the cap opens a new entry UNBOUNDED
+        // while it is the live tail (ACP does not bound
+        // `ContentBlock::Text`) — the archival clamp lands when the entry
+        // is demoted by the next one.
         state.update_subagent_activity(&tool_call_event("c1", "Reading a"), None);
         state.update_subagent_activity(
             &SubagentEvent::Message {
@@ -5965,18 +6094,31 @@ mod tests {
         );
         let activity = &state.pty_sessions[0].subagent_activity;
         assert_eq!(activity.timeline.len(), 2);
-        let message = match &activity.timeline[1] {
+        let live = match &activity.timeline[1] {
             SubagentTimelineEntry::Message { text } => text.clone(),
             other => panic!("expected a message entry, got {other:?}"),
         };
-        assert!(message.len() <= SUBAGENT_TEXT_ENTRY_BYTES);
-        // Same guarantee for a Thought chunk that opens a new entry.
+        assert!(live.len() > SUBAGENT_TEXT_ENTRY_BYTES);
+
+        // A different-kind chunk (a Thought) takes the tail: the oversized
+        // message is DEMOTED and compresses to its 8k tail. (A same-kind
+        // chunk would only coalesce into it — demotion is what clamps.)
         state.update_subagent_activity(
-            &SubagentEvent::Message {
-                text: "again".to_string(),
+            &SubagentEvent::Thought {
+                text: "seed".to_string(),
             },
             None,
         );
+        let activity = &state.pty_sessions[0].subagent_activity;
+        assert_eq!(activity.timeline.len(), 3);
+        let archived = match &activity.timeline[1] {
+            SubagentTimelineEntry::Message { text } => text.clone(),
+            other => panic!("expected a message entry, got {other:?}"),
+        };
+        assert!(archived.len() <= SUBAGENT_TEXT_ENTRY_BYTES);
+        // Same guarantee for an oversized Thought that is then demoted by
+        // a Message: it coalesces into the "seed" entry first (growing
+        // unbounded while live), and the next entry clamps it.
         state.update_subagent_activity(
             &SubagentEvent::Thought {
                 text: "y".repeat(SUBAGENT_TEXT_ENTRY_BYTES + 5_000),
@@ -5984,11 +6126,24 @@ mod tests {
             None,
         );
         let activity = &state.pty_sessions[0].subagent_activity;
-        let thought = match activity.timeline.last() {
+        let live_thought = match activity.timeline.last() {
             Some(SubagentTimelineEntry::Thought { text }) => text.clone(),
             other => panic!("expected a thought entry, got {other:?}"),
         };
-        assert!(thought.len() <= SUBAGENT_TEXT_ENTRY_BYTES);
+        assert!(live_thought.len() > SUBAGENT_TEXT_ENTRY_BYTES);
+        state.update_subagent_activity(
+            &SubagentEvent::Message {
+                text: "done".to_string(),
+            },
+            None,
+        );
+        let activity = &state.pty_sessions[0].subagent_activity;
+        assert_eq!(activity.timeline.len(), 4);
+        let archived_thought = match &activity.timeline[2] {
+            SubagentTimelineEntry::Thought { text } => text.clone(),
+            other => panic!("expected a thought entry, got {other:?}"),
+        };
+        assert!(archived_thought.len() <= SUBAGENT_TEXT_ENTRY_BYTES);
     }
 
     #[test]
