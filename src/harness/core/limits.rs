@@ -1,0 +1,57 @@
+//! Tuning knobs, loop-detection bounds and internal marker constants.
+
+/// Maximum consecutive tool-call failures before aborting the agent loop.
+pub(super) const MAX_TOOL_RETRIES: usize = 10;
+
+/// Maximum total agent-loop iterations (tool calls + responses) before
+/// the harness stops the loop as a safety net against runaway tool-calling.
+///
+/// 20 was too low for real multi-step work (editing files, running tests,
+/// searching) — the loop force-stopped mid-task with a misleading `Done`.
+pub(crate) const MAX_ITERATIONS: u64 = 100;
+
+/// Loop-detection window: the number of recent tool-call iterations watched
+/// for a repeated identical interaction, mirroring crush's
+/// `loopDetectionWindowSize`. Detection only fires once the window is full
+/// (at least this many tool-calling iterations have happened).
+pub(super) const LOOP_DETECTION_WINDOW_SIZE: usize = 10;
+
+/// Loop-detection threshold: an identical tool+input+result signature seen
+/// more than this many times within the window stops the loop, mirroring
+/// crush's `loopDetectionMaxRepeats`. Catches a model hammering the exact
+/// same failing call long before it burns tokens up to `MAX_ITERATIONS`.
+pub(super) const LOOP_DETECTION_MAX_REPEATS: usize = 5;
+
+/// Tools disabled inside the internal sub-agent harness (the merged
+/// `subagent_call` internal path). The tools are removed from the
+/// sub-agent's schema AND extractor, so the model never even sees them:
+/// - `ask_questions` — needs a human in the loop; the sub-agent is headless
+///   and would hang waiting for an answer;
+/// - `stop_agent_loop` — the sub-agent's ONLY deliverable is its final text
+///   report. If it could stop the loop directly, a model might call it as
+///   its last action without writing the report (the caller would receive
+///   nothing). Blocked so the loop can only end with a written answer.
+///
+/// Add future blocklist entries here.
+pub(crate) const SUBAGENT_BLOCKED_TOOLS: &[&str] = &["ask_questions", "stop_agent_loop"];
+
+/// Chunk interpolated into the `subagent_call` tool description (via
+/// [`SubAgent::set_note`]) so the model learns — naturally, inside the
+/// description prose — that omitting `agent` routes the call to an
+/// internal agent instead of an external CLI.
+pub(super) const SUBAGENT_INTERNAL_NOTE: &str = "When the `agent` argument is omitted or empty, an internal agent runs \
+     the task instead — it starts with an empty context, runs in auto-approve \
+     mode, persists nothing, and returns only its final report.";
+
+/// Internal marker returned by stream functions when the user presses Esc
+/// to stop the current generation. Compared by identity (constant), not by
+/// string value — prevents the fallback retry from misinterpreting a user
+/// cancellation as a connector error.
+pub(crate) const INTERRUPTED_MARKER: &str = "__cosh_interrupted__";
+
+/// Internal marker returned by a stream function when the provider rejected
+/// the request because the prompt exceeds its context window. Compared by
+/// identity (constant), like [`INTERRUPTED_MARKER`] — the harness drains one
+/// tool chain and retries when it sees this. `pub(crate)` so tests can
+/// simulate the overflow through the mock paths.
+pub(crate) const CONTEXT_WINDOW_MARKER: &str = "__cosh_context_window_exceeded__";
