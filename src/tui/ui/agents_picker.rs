@@ -6,7 +6,7 @@ use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 
-use crate::component::cursor::{Cursor, CursorState};
+use crate::component::cursor::{Cursor, paint_cursor_cell};
 use crate::theme::{Theme, contrast_color, rgba_color};
 use crate::util::draw::draw_text_line_compact;
 use crate::util::list_selection::ListSelection;
@@ -613,16 +613,10 @@ impl AgentsPicker {
         }
         let search_x = header_x;
         let search_w = header_w;
-        let caret = |cell: &mut ratatui::buffer::Cell| match cursor_state {
-            CursorState::On => {
-                cell.set_char('\u{2588}');
-                cell.set_style(Style::default().fg(rgba_color(theme.primary)).bg(fill));
-            }
-            CursorState::Off | CursorState::Blur => {
-                // Semi-transparent cursor with medium shade character
-                cell.set_char('\u{2592}');
-                cell.set_style(Style::default().fg(muted).bg(fill));
-            }
+        let caret = |cell: &mut ratatui::buffer::Cell| {
+            // Transparent style: the glyph under the caret stays visible
+            // (same look as the chat prompt cursor).
+            paint_cursor_cell(cell, cursor_state, fill, rgba_color(theme.text), muted);
         };
         if self.filter.is_empty() {
             draw_text_line_compact(
@@ -1320,14 +1314,11 @@ mod tests {
 
         // Empty filter: "Search" placeholder with the caret over its first
         // character (box: 50×8, x = 25, y = 16 → search row y = 17). The
-        // caret literally REPLACES the placeholder's first glyph, like the
-        // /models dialog does.
+        // caret uses the shared transparent style: the placeholder's glyph
+        // stays put (colors invert around it), like the chat prompt.
         let cell = buf.cell((25 + 4, 17)).unwrap();
         let symbol = cell.symbol().to_string();
-        assert!(
-            symbol == "\u{2588}" || symbol == "\u{2592}",
-            "caret over the placeholder: {symbol}"
-        );
+        assert_eq!(symbol, "S", "caret over the placeholder keeps its glyph");
 
         // Typed filter: the caret parks right after the text. The narrower
         // listing shrinks the box (4 → 2 rows: height 8 → 6), so the search

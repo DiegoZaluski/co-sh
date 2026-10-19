@@ -648,8 +648,10 @@ async fn registration_form_selection_highlight_paints_selected_cells() {
     let buf = terminal.backend().buffer().clone();
     let theme = app.theme.clone();
 
-    // Chars 1..4 ("xit") highlighted; char 0 ('e') untouched.
-    for (dx, expected) in [(1u16, true), (2, true), (3, true), (0, false), (4, false)] {
+    // Chars 1..4 ("xit") highlighted; char 0 ('e') untouched. Cell +4 also
+    // carries the transparent cursor parked at the drag point: its inverted
+    // style paints the same bg=theme.text as the selection highlight.
+    for (dx, expected) in [(1u16, true), (2, true), (3, true), (0, false), (4, true)] {
         let bg = buf
             .cell((content_x + dx, value_y))
             .map(|c| c.bg)

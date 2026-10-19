@@ -9,7 +9,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
-use crate::component::cursor::{Cursor, CursorState};
+use crate::component::cursor::{Cursor, CursorState, paint_cursor_cell};
 use crate::component::wall;
 use crate::logo::ChatLogo;
 use crate::lsp_colors;
@@ -1516,27 +1516,26 @@ impl PromptView {
             && cursor_x < input_area.right()
             && let Some(cell) = buf.cell_mut((cursor_x, cursor_y))
         {
-            let dimmed_style = Style::default()
-                .fg(rgba_color(theme.text_muted))
-                .bg(rgba_color(theme.background));
+            // Transparent cursor (the shared look): invert the cell colors so
+            // the character under the caret stays visible; Off/Blur dims it.
+            let state = self.cursor.current_state(now);
             if self.is_focused {
-                match self.cursor.current_state(now) {
-                    CursorState::On => {
-                        // ON: transparent cursor (invert colors)
-                        cell.set_style(
-                            Style::default()
-                                .fg(rgba_color(theme.background))
-                                .bg(rgba_color(theme.text)),
-                        );
-                    }
-                    CursorState::Off | CursorState::Blur => {
-                        // OFF/Blur: dimmed visible state
-                        cell.set_style(dimmed_style);
-                    }
-                }
+                paint_cursor_cell(
+                    cell,
+                    state,
+                    rgba_color(theme.background),
+                    rgba_color(theme.text),
+                    rgba_color(theme.text_muted),
+                );
             } else {
                 // Unfocused: always show dimmed
-                cell.set_style(dimmed_style);
+                paint_cursor_cell(
+                    cell,
+                    CursorState::Blur,
+                    rgba_color(theme.background),
+                    rgba_color(theme.text),
+                    rgba_color(theme.text_muted),
+                );
             }
         }
     }

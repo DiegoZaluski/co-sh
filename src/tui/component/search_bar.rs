@@ -3,7 +3,7 @@ use std::time::SystemTime;
 use ratatui::buffer::Buffer;
 use ratatui::style::Style;
 
-use crate::component::cursor::{Cursor, CursorState};
+use crate::component::cursor::{Cursor, paint_cursor_cell};
 use crate::theme::{Theme, rgba_color};
 use crate::util::draw::draw_text_line;
 
@@ -43,10 +43,6 @@ impl SearchBar {
         &self.filter
     }
 
-    fn cursor_visible(&self, now: SystemTime) -> bool {
-        matches!(self.cursor.current_state(now), CursorState::On)
-    }
-
     pub fn render(&self, buf: &mut Buffer, x: u16, y: u16, width: u16, theme: &Theme) {
         let bg_color = rgba_color(theme.background);
         let now = SystemTime::now();
@@ -57,8 +53,6 @@ impl SearchBar {
                 cell.set_style(Style::default().bg(bg_color));
             }
         }
-
-        let cursor_vis = self.cursor_visible(now);
 
         if self.filter.is_empty() {
             let search_label = "Search";
@@ -73,23 +67,17 @@ impl SearchBar {
                     .bg(bg_color),
             );
 
-            // Cursor positioned over the first character of the placeholder
+            // Cursor positioned over the first character of the placeholder.
+            // Transparent style: the glyph under the caret stays visible.
             let cursor_state = self.cursor.current_state(now);
             if let Some(cell) = buf.cell_mut((x, y)) {
-                match cursor_state {
-                    CursorState::On => {
-                        cell.set_char('\u{2588}');
-                        cell.set_style(Style::default().fg(rgba_color(theme.primary)).bg(bg_color));
-                    }
-                    CursorState::Off | CursorState::Blur => {
-                        cell.set_char('\u{2592}');
-                        cell.set_style(
-                            Style::default()
-                                .fg(rgba_color(theme.text_muted))
-                                .bg(bg_color),
-                        );
-                    }
-                }
+                paint_cursor_cell(
+                    cell,
+                    cursor_state,
+                    bg_color,
+                    rgba_color(theme.text),
+                    rgba_color(theme.text_muted),
+                );
             }
         } else {
             draw_text_line(
@@ -105,17 +93,14 @@ impl SearchBar {
             if cursor_x < x + width
                 && let Some(cell) = buf.cell_mut((cursor_x, y))
             {
-                if cursor_vis {
-                    cell.set_char('\u{2588}');
-                    cell.set_style(Style::default().fg(rgba_color(theme.primary)).bg(bg_color));
-                } else {
-                    cell.set_char('\u{2592}');
-                    cell.set_style(
-                        Style::default()
-                            .fg(rgba_color(theme.text_muted))
-                            .bg(bg_color),
-                    );
-                }
+                // Transparent style: the glyph under the caret stays visible.
+                paint_cursor_cell(
+                    cell,
+                    self.cursor.current_state(now),
+                    bg_color,
+                    rgba_color(theme.text),
+                    rgba_color(theme.text_muted),
+                );
             }
         }
     }

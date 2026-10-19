@@ -8,7 +8,7 @@ use ratatui::style::Style;
 use cosh_tools::question::types::{AnswerItem, QuestionItem, QuestionType};
 use cosh_tui::core::types::MouseEvent;
 
-use super::super::super::component::cursor::{Cursor, CursorState};
+use super::super::super::component::cursor::{Cursor, paint_cursor_cell};
 use super::super::super::theme::Theme;
 use crate::component::wall;
 use crate::theme::rgba_color;
@@ -2425,22 +2425,17 @@ impl QuestionDialog {
                         if cx <= text_x + field_w as u16
                             && let Some(cell) = buf.cell_mut((cx, option_y))
                         {
-                            match self.cursor.current_state(now) {
-                                CursorState::On => {
-                                    // Invert the cell so the character under
-                                    // the cursor stays visible (like the chat
-                                    // prompt). At the end of the text this
-                                    // renders as a solid block.
-                                    cell.set_style(
-                                        Style::default().fg(bg).bg(rgba_color(theme.text)),
-                                    );
-                                }
-                                CursorState::Off | CursorState::Blur => {
-                                    cell.set_style(
-                                        Style::default().fg(rgba_color(theme.text_muted)).bg(bg),
-                                    );
-                                }
-                            }
+                            // Transparent style: the character under the
+                            // cursor stays visible (like the chat prompt).
+                            // At the end of the text this renders as a
+                            // solid block.
+                            paint_cursor_cell(
+                                cell,
+                                self.cursor.current_state(now),
+                                bg,
+                                rgba_color(theme.text),
+                                rgba_color(theme.text_muted),
+                            );
                         }
                     }
                 }
@@ -2869,16 +2864,15 @@ impl QuestionDialog {
                 if cx <= text_x + field_w as u16
                     && let Some(cell) = buf.cell_mut((cx, y))
                 {
-                    match self.cursor.current_state(now) {
-                        CursorState::On => {
-                            cell.set_style(Style::default().fg(bg).bg(rgba_color(theme.text)));
-                        }
-                        CursorState::Off | CursorState::Blur => {
-                            cell.set_style(
-                                Style::default().fg(rgba_color(theme.text_muted)).bg(bg),
-                            );
-                        }
-                    }
+                    // Transparent style: the character under the cursor
+                    // stays visible (like the chat prompt cursor).
+                    paint_cursor_cell(
+                        cell,
+                        self.cursor.current_state(now),
+                        bg,
+                        rgba_color(theme.text),
+                        rgba_color(theme.text_muted),
+                    );
                 }
             }
         }

@@ -1,5 +1,8 @@
 use std::time::SystemTime;
 
+use ratatui::buffer::Cell;
+use ratatui::style::{Color, Style};
+
 /// Represents the current visual state of a cursor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorState {
@@ -14,9 +17,10 @@ pub enum CursorState {
 /// A reusable cursor component with configurable focus/blur behavior and blink timing.
 ///
 /// The cursor tracks input activity and blink timing, returning a [`CursorState`]
-/// that callers use to apply their own styling logic. This allows different rendering
-/// strategies (e.g., invert style, block character, dimmed/hidden) while sharing the
-/// same blink and focus semantics.
+/// that callers feed to [`paint_cursor_cell`] — the ONE shared look: on On the
+/// cell's colors are inverted so the glyph under the caret stays visible, and on
+/// Off/Blur the glyph is dimmed. All cursor sites (chat prompt, search bars,
+/// dialog inputs, the RAG URL field, pickers) render through it.
 ///
 /// # Blur behavior
 ///
@@ -81,5 +85,34 @@ impl Cursor {
 impl Default for Cursor {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Paint a single cursor cell in the chat prompt's "transparent" style:
+/// the character already on the cell keeps its glyph and gets its colors
+/// inverted (text color becomes the background, background becomes the
+/// foreground), so the character under the cursor stays readable.
+///
+/// This is the ONE shared cursor look — every component that renders a
+/// `Cursor` (search bars, dialog inputs, the RAG URL field, pickers) calls
+/// this instead of stamping a `█`/`▒` block glyph that would erase the
+/// character beneath it.
+///
+/// - `On`: color inversion — the underlying glyph shows through.
+/// - `Off`/`Blur`: dimmed tint — same glyph, muted foreground.
+pub fn paint_cursor_cell(
+    cell: &mut Cell,
+    state: CursorState,
+    background: Color,
+    text: Color,
+    muted: Color,
+) {
+    match state {
+        CursorState::On => {
+            cell.set_style(Style::default().fg(background).bg(text));
+        }
+        CursorState::Off | CursorState::Blur => {
+            cell.set_style(Style::default().fg(muted).bg(background));
+        }
     }
 }

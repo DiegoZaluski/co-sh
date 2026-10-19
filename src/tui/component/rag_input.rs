@@ -4,7 +4,7 @@ use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 
-use crate::component::cursor::{Cursor, CursorState};
+use crate::component::cursor::{Cursor, paint_cursor_cell};
 use crate::theme::{Theme, rgba_color};
 
 use cosh_tui::core::lib::unicode_util;
@@ -279,16 +279,9 @@ impl RagInput {
             if self.is_focused {
                 let state = self.cursor.current_state(now);
                 if let Some(cell) = buf.cell_mut((text_x, text_y)) {
-                    match state {
-                        CursorState::On => {
-                            cell.set_char('\u{2588}');
-                            cell.set_style(Style::default().fg(rgba_color(theme.primary)).bg(bg));
-                        }
-                        CursorState::Off | CursorState::Blur => {
-                            cell.set_char('\u{2592}');
-                            cell.set_style(Style::default().fg(muted).bg(bg));
-                        }
-                    }
+                    // Transparent style: the glyph under the caret stays
+                    // visible (same look as the chat prompt cursor).
+                    paint_cursor_cell(cell, state, bg, rgba_color(theme.text), muted);
                 }
             }
         } else {
@@ -343,18 +336,9 @@ impl RagInput {
                 if cursor_line < total_rows && cursor_x < right_x {
                     let state = self.cursor.current_state(now);
                     if let Some(cell) = buf.cell_mut((cursor_x, cursor_y)) {
-                        match state {
-                            CursorState::On => {
-                                cell.set_char('\u{2588}');
-                                cell.set_style(
-                                    Style::default().fg(rgba_color(theme.primary)).bg(bg),
-                                );
-                            }
-                            CursorState::Off | CursorState::Blur => {
-                                cell.set_char('\u{2592}');
-                                cell.set_style(Style::default().fg(muted).bg(bg));
-                            }
-                        }
+                        // Transparent style: the glyph under the caret stays
+                        // visible (same look as the chat prompt cursor).
+                        paint_cursor_cell(cell, state, bg, rgba_color(theme.text), muted);
                     }
                 }
             }

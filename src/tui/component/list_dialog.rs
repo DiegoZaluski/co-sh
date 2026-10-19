@@ -34,7 +34,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
-use crate::component::cursor::{Cursor, CursorState};
+use crate::component::cursor::{Cursor, CursorState, paint_cursor_cell};
 use crate::theme::{Theme, rgba_color};
 use crate::util::draw::draw_text_line_compact;
 use cosh_tui::core::lib::rgba::RGBA;
@@ -541,9 +541,9 @@ pub fn render_chrome_raw(
     }
 }
 
-/// One blinking cursor cell on the Search line: solid primary while the
-/// cursor is On, the muted medium shade otherwise (the ModelList's
-/// two-state cursor, extracted with the chrome).
+/// One blinking cursor cell on the Search line, painted with the shared
+/// transparent cursor style (the glyph under the caret stays visible — the
+/// chat prompt's look, extracted with the chrome).
 fn draw_search_cursor(
     buf: &mut Buffer,
     cell_x: u16,
@@ -553,16 +553,13 @@ fn draw_search_cursor(
     bg: Color,
 ) {
     if let Some(cell) = buf.cell_mut((cell_x, y)) {
-        match cursor_state {
-            CursorState::On => {
-                cell.set_char('\u{2588}');
-                cell.set_style(Style::default().fg(rgba_color(theme.primary)).bg(bg));
-            }
-            CursorState::Off | CursorState::Blur => {
-                cell.set_char('\u{2592}');
-                cell.set_style(Style::default().fg(rgba_color(theme.text_muted)).bg(bg));
-            }
-        }
+        paint_cursor_cell(
+            cell,
+            cursor_state,
+            bg,
+            rgba_color(theme.text),
+            rgba_color(theme.text_muted),
+        );
     }
 }
 

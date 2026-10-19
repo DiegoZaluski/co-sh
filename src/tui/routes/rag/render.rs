@@ -10,7 +10,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 
-use crate::component::cursor::{Cursor, CursorState};
+use crate::component::cursor::{Cursor, paint_cursor_cell};
 use crate::theme::{Theme, rgba_color};
 use crate::util::draw::draw_text_line;
 use crate::util::markdown::render_markdown;
@@ -135,25 +135,21 @@ fn draw_input_cursor_at(
     theme: &Theme,
     fg: Color,
     muted: Color,
-    primary: Color,
 ) {
     if col > pad_w {
         return;
     }
     if let Some(cell) = buf.cell_mut((pad + col, y)) {
-        match cursor.current_state(now) {
-            CursorState::On => {
-                cell.set_style(Style::default().fg(primary).bg(fg));
-            }
-            CursorState::Off | CursorState::Blur => {
-                cell.set_char('\u{2592}');
-                cell.set_style(
-                    Style::default()
-                        .fg(muted)
-                        .bg(rgba_color(theme.background_element)),
-                );
-            }
-        }
+        // Transparent style: the glyph under the caret stays visible
+        // (same look as the chat prompt cursor).
+        let state = cursor.current_state(now);
+        paint_cursor_cell(
+            cell,
+            state,
+            rgba_color(theme.background_element),
+            fg,
+            muted,
+        );
     }
 }
 
@@ -713,7 +709,6 @@ impl RagView {
                 theme,
                 fg,
                 muted,
-                primary,
             );
         }
         if let Some(sel) = &self.field_selection
@@ -786,7 +781,6 @@ impl RagView {
                 theme,
                 fg,
                 muted,
-                primary,
             );
         }
         if let Some(sel) = &self.field_selection

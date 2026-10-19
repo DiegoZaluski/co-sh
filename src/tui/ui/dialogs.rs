@@ -11,7 +11,7 @@ use cosh_tui::core::renderable::Renderable;
 use cosh_tui::core::renderables::r#box::BoxRenderable;
 use cosh_tui::core::types::{MouseButton, MouseEvent, MouseEventType};
 
-use crate::component::cursor::{Cursor, CursorState};
+use crate::component::cursor::{Cursor, paint_cursor_cell};
 use crate::component::list_dialog::{self, FilterState, ListRow, MouseHit};
 use crate::component::spinner::SpinnerState;
 use crate::theme::{Theme, rgba_color};
@@ -367,16 +367,14 @@ fn render_rename_session_dialog(
     if cursor_x < content_x + content_w
         && let Some(cell) = buf.cell_mut((cursor_x, input_y))
     {
-        match cursor_state {
-            CursorState::On => {
-                cell.set_char('\u{2588}');
-                cell.set_style(Style::default().fg(rgba_color(theme.primary)).bg(bg_color));
-            }
-            CursorState::Off | CursorState::Blur => {
-                cell.set_char('\u{2592}');
-                cell.set_style(Style::default().fg(Color::Rgb(60, 60, 60)).bg(bg_color));
-            }
-        }
+        // Transparent style: the glyph under the caret stays visible.
+        paint_cursor_cell(
+            cell,
+            cursor_state,
+            bg_color,
+            rgba_color(theme.text),
+            rgba_color(theme.text_muted),
+        );
     }
 
     // Bottom hint row ("enter" highlighted + muted "submit"), one blank
@@ -3646,22 +3644,14 @@ fn render_text_input_dialog(
     if cursor_x < input_x + content_w
         && let Some(cell) = buf.cell_mut((cursor_x, input_y))
     {
-        match cursor_state {
-            CursorState::On => {
-                // ON: block cursor with primary color
-                cell.set_char('\u{2588}');
-                cell.set_style(
-                    Style::default()
-                        .fg(rgba_color(theme.primary))
-                        .bg(bg_element),
-                );
-            }
-            CursorState::Off | CursorState::Blur => {
-                // OFF/Blur: semi-transparent cursor
-                cell.set_char('\u{2592}');
-                cell.set_style(Style::default().fg(Color::Rgb(60, 60, 60)).bg(bg_element));
-            }
-        }
+        // Transparent style: the glyph under the caret stays visible.
+        paint_cursor_cell(
+            cell,
+            cursor_state,
+            bg_element,
+            rgba_color(theme.text),
+            rgba_color(theme.text_muted),
+        );
     }
 }
 // ── Multi-field registration panel (hooks, MCP servers) ─────────────────
@@ -4057,20 +4047,15 @@ fn render_form_panel(
                 if cx < content_x + content_w
                     && let Some(cell) = buf.cell_mut((cx, row_y))
                 {
-                    match cursor_state {
-                        CursorState::On => {
-                            cell.set_char('\u{2588}');
-                            cell.set_style(
-                                Style::default().fg(rgba_color(theme.primary)).bg(bg_color),
-                            );
-                        }
-                        CursorState::Off | CursorState::Blur => {
-                            cell.set_char('\u{2592}');
-                            cell.set_style(
-                                Style::default().fg(Color::Rgb(60, 60, 60)).bg(bg_color),
-                            );
-                        }
-                    }
+                    // Transparent style: the glyph under the caret stays
+                    // visible (same look as the chat prompt cursor).
+                    paint_cursor_cell(
+                        cell,
+                        cursor_state,
+                        bg_color,
+                        rgba_color(theme.text),
+                        rgba_color(theme.text_muted),
+                    );
                 }
             }
         }
