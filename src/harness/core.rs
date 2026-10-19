@@ -277,6 +277,157 @@ pub(crate) const INTERRUPTED_MARKER: &str = "__cosh_interrupted__";
 /// simulate the overflow through the mock paths.
 pub(crate) const CONTEXT_WINDOW_MARKER: &str = "__cosh_context_window_exceeded__";
 
+/// Fingerprint of ONE wire request: the model it was sent to, the system
+/// prompt hash and the per-message hash chain — the exact material the
+/// provider's exact-prefix cache keys on. See [`PrefixCacheProbe`].
+struct RequestFingerprint {
+    model: String,
+    system_hash: u64,
+    message_hashes: Vec<u64>,
+}
+
+/// Exact-prefix cache probe (diagnostics, zero behavioral effect).
+///
+/// Providers cache the request prefix byte-exactly: valid up to the FIRST
+/// divergent byte, re-billed after it. This probe fingerprints every agent
+/// request and compares it with the previous one from the SAME model; the
+/// first divergent position classifies the cache outcome:
+///
+/// - system prompt diverged (position 0) → the whole conversation prefix
+///   is re-billed — counted in `full_breaks` (the pathological case this
+///   probe exists to catch: dynamic content interpolated into the header);
+/// - the message HISTORY diverged before its last message → mid-history
+///   mutation, cache lost from there on — counted in `mid_history_mutations`
+///   (also pathological: history items are append-only by design);
+/// - the history SHRANK → compaction/revert rewrote it legitimately —
+///   counted separately in `history_shrinks`, never conflated with the
+///   pathological counters;
+/// - divergence at the last message (steering/tail blocks churn per
+///   request) or a pure append → the cached prefix stays valid, not
+///   counted;
+/// - zero divergence → the same request re-sent (mid-stream retry), the
+///   cache is fully valid, not counted.
+///
+/// Everything is MEASURED, never inferred: a counter only moves when the
+/// previous fingerprint actually diverges at that position, so heuristic
+/// false positives ("the TODO block changed, therefore the cache broke")
+/// are impossible by construction. Two caveats to keep the counters honest:
+/// the probe is keyed by model — a model switch resets the snapshot instead
+/// of comparing incompatible prefixes — and `MID_HISTORY_MUTATION` also
+/// counts USER-driven history rewrites (revert/fork/session restore), which
+/// the probe cannot distinguish from a model-side mutation; read that
+/// counter with the session's user actions in mind.
+///
+/// Hashes chain `xxh3_64_with_seed` over the fields every provider sees
+/// (role, content, tool-call identity, tool-result id, image payloads).
+/// `thinking_blocks`/`thought_signature` are deliberately excluded: they are
+/// immutable per item (write-once at the item's birth, replayed verbatim),
+/// so a divergence confined to them cannot occur in a live session — and
+/// including them would couple the probe to per-provider wire quirks.
+#[derive(Default)]
+struct PrefixCacheProbe {
+    previous: Option<RequestFingerprint>,
+    requests_compared: u64,
+    full_breaks: u64,
+    mid_history_mutations: u64,
+    history_shrinks: u64,
+}
+
+impl PrefixCacheProbe {
+    /// Hash one wire message: role → content → tool-call identity → tool
+    /// result id → image payloads, chained seeds (wire-visible fields only).
+    fn message_hash(message: &ChatMessage) -> u64 {
+        use xxhash_rust::xxh3::xxh3_64_with_seed;
+        let mut h = xxh3_64_with_seed(message.role.as_bytes(), 0);
+        h = xxh3_64_with_seed(message.content.as_deref().unwrap_or("").as_bytes(), h);
+        if let Some(calls) = &message.tool_calls {
+            for call in calls {
+                h = xxh3_64_with_seed(call.id.as_bytes(), h);
+                h = xxh3_64_with_seed(call.function.name.as_bytes(), h);
+                h = xxh3_64_with_seed(call.function.arguments.as_bytes(), h);
+            }
+        }
+        if let Some(id) = &message.tool_call_id {
+            h = xxh3_64_with_seed(id.as_bytes(), h);
+        }
+        if let Some(images) = &message.images {
+            for image in images {
+                h = xxh3_64_with_seed(image.media_type.as_bytes(), h);
+                h = xxh3_64_with_seed(image.data.as_bytes(), h);
+            }
+        }
+        h
+    }
+
+    /// Fingerprint one request.
+    fn fingerprint(model: &str, system: &str, messages: &[ChatMessage]) -> RequestFingerprint {
+        use xxhash_rust::xxh3::xxh3_64;
+        RequestFingerprint {
+            model: model.to_string(),
+            system_hash: xxh3_64(system.as_bytes()),
+            message_hashes: messages.iter().map(Self::message_hash).collect(),
+        }
+    }
+
+    /// Compare the new fingerprint with the previous one, classify the
+    /// cache outcome, advance the counters and log one line. The new
+    /// fingerprint always becomes the previous one afterwards.
+    fn record(&mut self, fingerprint: RequestFingerprint) {
+        let Some(previous) = self.previous.take() else {
+            // First request of this probe: nothing to compare, just seed.
+            log::info!(
+                target: "cosh::harness",
+                "prefix cache probe: seeded (model={}, messages={})",
+                fingerprint.model,
+                fingerprint.message_hashes.len(),
+            );
+            self.previous = Some(fingerprint);
+            return;
+        };
+        self.requests_compared += 1;
+        let verdict;
+        if fingerprint.model != previous.model {
+            // Incompatible prefix: reset the snapshot, classify nothing.
+            verdict = "model_switch";
+        } else if fingerprint.system_hash != previous.system_hash {
+            verdict = "FULL_BREAK";
+            self.full_breaks += 1;
+        } else {
+            let common = previous.message_hashes.len().min(fingerprint.message_hashes.len());
+            let divergence = (0..common)
+                .find(|&i| previous.message_hashes[i] != fingerprint.message_hashes[i]);
+            verdict = match divergence {
+                None if fingerprint.message_hashes.len() == previous.message_hashes.len() => {
+                    "identical_retry"
+                }
+                None => "append",
+                Some(_i) if fingerprint.message_hashes.len() < previous.message_hashes.len() => {
+                    self.history_shrinks += 1;
+                    "history_shrunk"
+                }
+                Some(i) if i + 1 == common => "tail_change",
+                Some(_) => {
+                    self.mid_history_mutations += 1;
+                    "MID_HISTORY_MUTATION"
+                }
+            };
+        }
+        log::info!(
+            target: "cosh::harness",
+            "prefix cache probe: verdict={verdict} msgs {}→{} system_changed={} | \
+             totals: compared={} full_breaks={} mid_history={} shrinks={}",
+            previous.message_hashes.len(),
+            fingerprint.message_hashes.len(),
+            fingerprint.system_hash != previous.system_hash,
+            self.requests_compared,
+            self.full_breaks,
+            self.mid_history_mutations,
+            self.history_shrinks,
+        );
+        self.previous = Some(fingerprint);
+    }
+}
+
 /// How many times a generic (non-context-window) summarizer error is retried
 /// before the harness gives up and surfaces a TUI notification.
 const MAX_COMPACTION_RETRIES: usize = 3;
@@ -726,12 +877,16 @@ pub struct Harness {
     /// same mistake blindly.
     correction_memory: CorrectionMemory,
     /// Remaining natural-stop continuations granted by the deterministic
-    /// nudges (reasoning-only retry, empty-response retry, cut tool-call
-    /// retry, open-plan nudge), per agent loop. Independent of
+    /// nudges (reasoning-only retry, empty-response retry), per agent loop.
+    /// Independent of
     /// `MAX_ITERATIONS` (which bounds ALL continuations): the nudges must
     /// stay scarce so a model that keeps insisting on stopping with open
     /// work still terminates visibly instead of looping to 100.
     stop_nudges_left: u32,
+
+    /// Exact-prefix cache probe: the previous request's fingerprint and the
+    /// running counters. See [`PrefixCacheProbe`].
+    prefix_cache_probe: PrefixCacheProbe,
     /// Test-only record of every reasoning promotion the natural-stop gate
     /// performed, so tests can pin the one-turn promotion contract without
     /// intercepting the request wire. `pub(crate)` under `cfg(test)` only:
@@ -918,6 +1073,7 @@ impl Harness {
             last_finish_reason: None,
             last_stream_unfinished: false,
             stop_nudges_left: 3,
+            prefix_cache_probe: PrefixCacheProbe::default(),
             #[cfg(test)]
             promoted_reasoning_log: Vec::new(),
             correction_memory: CorrectionMemory::new(5),
@@ -1469,21 +1625,14 @@ impl Harness {
                 }
             }
         }
-        // The /agents panes block rides at the END of the header (an
-        // appendix, never a prefix insertion — the providers' exact-prefix
-        // caches stay valid). Registered ONLY when panes exist: with no
-        // agents the header stays byte-identical with the pre-feature one,
-        // and nothing is interpolated for something that does not exist.
-        // A PANE loop (own pane id bound) skips it too: coordination is the
-        // top-level agent's job — a pane must not see the addressable pane
-        // set, let alone re-delegate (the replication bug `with_own_pane_id`
-        // documents).
-        if self.panes_own_id.is_none()
-            && super::panes::has_panes()
-            && let Some(block) = super::panes::context_block()
-        {
-            let _ = writeln!(out, "{block}");
-        }
+        // NOTE: the /agents panes listing does NOT live in the header
+        // anymore. It moved to the context manager's TAIL (see
+        // `ContextManager::set_panes_block`): the system prompt is prefix
+        // position 0, so a pane binding/unbinding re-rendered this block
+        // mid-session and invalidated the provider's exact-prefix cache
+        // for the WHOLE conversation on every such change. The tail costs
+        // only itself — the same contract the corrections and TODO blocks
+        // already follow.
 
         self.context_manager.set_last_tool_set(current);
 
@@ -1654,6 +1803,18 @@ impl Harness {
     fn build_chat_context(&mut self) -> String {
         self.context_manager
             .set_correction_block(self.correction_memory.format());
+        // Mirror the /agents panes listing into the context manager's TAIL
+        // (rendered between the corrections and the TODO block). Rebuilt
+        // per request: a pane bind/unbind changes only the tail, never the
+        // system prompt — the exact-prefix cache of the whole conversation
+        // stays valid. A PANE loop mirrors nothing: coordination is the
+        // top-level agent's job (the replication bug `with_own_pane_id`
+        // documents) — the pane must not see the addressable pane set.
+        self.context_manager.set_panes_block(if self.panes_own_id.is_none() {
+            super::panes::context_block()
+        } else {
+            None
+        });
         self.header_context.clone()
     }
 
@@ -1732,6 +1893,16 @@ impl Harness {
             Some(request) => request,
             None => return false,
         };
+        // Compaction accounting (file log, target `cosh::harness::context`):
+        // the compaction request's own size — a summary call that re-sends
+        // most of the session is itself a large bill. Logged before the
+        // first summarizer attempt so trigger loops are visible.
+        log::info!(
+            target: "cosh::harness::context",
+            "llm compaction: prompt_bytes={} system_bytes={}",
+            request.prompt.len(),
+            request.system.len(),
+        );
         if self
             .summarization_request_overflow(&request.system, &request.prompt)
             .is_some()
@@ -3277,6 +3448,19 @@ impl Harness {
         // stream end proves the response was CUT, whatever `finish_reason`
         // claims.
         self.last_stream_unfinished = extractor.has_unfinished_stream();
+        // Stream accounting (file log, target `cosh::harness`): what THIS
+        // attempt produced — streamed token count, reasoning bytes, finish
+        // reason and the cut flag. The reasoning bytes are the promotion
+        // fuel: if the reasoning-only veto fires repeatedly on the same
+        // turn, this line shows how much thinking gets re-sent each retry.
+        log::info!(
+            target: "cosh::harness",
+            "stream done: tokens={} reasoning_bytes={} finish_reason={:?} cut={}",
+            token_count,
+            self.attempt_reasoning.len(),
+            self.last_finish_reason,
+            self.last_stream_unfinished,
+        );
 
         // log::debug!("stream_chat_with_messages DONE total_tokens={token_count}");
         self.emit_usage(&mut stream).await;
@@ -4307,6 +4491,34 @@ impl Harness {
                 let _ = tx.send(HarnessEvent::BeginAssistant);
                 let messages = self.context_manager.build_messages(&current_input);
                 let tokens_before_attempt = self.context_manager.display_info().total_tokens;
+                // Wire-side accounting (file log, target `cosh::harness`):
+                // the request's message count and the total serialized size
+                // of the messages array + system prompt — the closest cheap
+                // proxy for what the provider actually bills. The
+                // per-iteration steering message (`current_input`) is logged
+                // separately so a runaway nudge ("continue with...") is
+                // visible at a glance.
+                log::info!(
+                    target: "cosh::harness",
+                    "request wire: iteration={} messages={} system_bytes={} steering_bytes={} est_total_bytes={}",
+                    iteration,
+                    messages.len(),
+                    system_context.len(),
+                    current_input.len(),
+                    system_context.len()
+                        + current_input.len()
+                        + messages.iter().map(|m| m.content.as_deref().unwrap_or("").len()).sum::<usize>(),
+                );
+                // Exact-prefix cache probe: fingerprint this request and
+                // classify the cache outcome against the previous one from
+                // the same model (measured divergence, never inferred).
+                self.prefix_cache_probe.record(
+                    PrefixCacheProbe::fingerprint(
+                        self.connector.model().unwrap_or("?"),
+                        &system_context,
+                        &messages,
+                    ),
+                );
                 let attempt = self
                     .stream_chat_with_messages(&system_context, &messages, |event| {
                         match event {
@@ -5416,6 +5628,10 @@ impl Harness {
                         });
                     }
                     // log::debug!("run_agent_loop TRUNCATED (finish reason {reason}) — continuing");
+                    log::info!(
+                        target: "cosh::harness",
+                        "continuation: truncated-stream retry (finish reason {reason}) — full context will be re-sent with a cut-off nudge"
+                    );
                     current_input = "Your previous response was cut off before completion. \
                          Please continue exactly where you left off."
                         .to_string();
@@ -5424,7 +5640,7 @@ impl Harness {
 
                 // Deterministic stop-veto layer (no decision model required).
                 // The provider's `stop` describes the RESPONSE, not the TASK:
-                // three shapes prove the turn is not actually finished, and
+                // two shapes prove the turn is not actually finished, and
                 // each grants a continuation that consumes one scarce nudge
                 // (bounded per loop, independent of MAX_ITERATIONS) so a model
                 // that keeps insisting on stopping still terminates visibly.
@@ -5445,7 +5661,8 @@ impl Harness {
                         self.promoted_reasoning_log.push(reasoning.clone());
                         log::info!(
                             target: "laya",
-                            "natural-stop gate: reasoning-only stream (finish reason {reason}) — continuing, reasoning promoted for one turn"
+                            "natural-stop gate: reasoning-only stream (finish reason {reason}) — continuing, reasoning promoted for one turn ({bytes} bytes)",
+                            bytes = reasoning.len()
                         );
                         current_input = format!(
                             "[Harness note: your previous response ended right after your \
@@ -5467,30 +5684,6 @@ impl Harness {
                         current_input =
                             "Your previous response was empty. Continue with your work."
                                 .to_string();
-                        continue;
-                    }
-                    // (3) Open plan: pending or in-progress tasks remain, so
-                    // the task is not done even though the response ended
-                    // cleanly. Same rule the loop already applies to
-                    // outstanding pane requests and background sub-agents.
-                    if self.context_manager.plan_has_open_tasks() {
-                        self.stop_nudges_left -= 1;
-                        let tasks = self.context_manager.open_plan_tasks();
-                        log::info!(
-                            target: "laya",
-                            "natural-stop gate: stop with {} open plan task(s) — continuing",
-                            tasks.len()
-                        );
-                        let list = tasks
-                            .iter()
-                            .map(|t| format!("- {t}"))
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        current_input = format!(
-                            "[Harness note: the plan still has {} open task(s). Continue \
-                             with the next one — do not ask whether to continue.]\n{list}",
-                            tasks.len()
-                        );
                         continue;
                     }
                 }
@@ -6491,6 +6684,7 @@ impl Harness {
             last_finish_reason: None,
             last_stream_unfinished: false,
             stop_nudges_left: 3,
+            prefix_cache_probe: PrefixCacheProbe::default(),
             #[cfg(test)]
             promoted_reasoning_log: Vec::new(),
             correction_memory: CorrectionMemory::new(5),

@@ -2348,8 +2348,8 @@ async fn a_mid_stream_reset_discards_the_failed_attempts_reasoning() {
 //
 // The provider's `finish_reason` describes the RESPONSE, not the TASK. The
 // gate below vetoes a claimed-clean stop (`stop`/`end_turn` with no pending
-// tools) in exactly three provable shapes, each consuming one scarce nudge:
-// reasoning-only streams, empty responses, and stops with an open plan.
+// tools) in exactly two provable shapes, each consuming one scarce nudge:
+// reasoning-only streams and empty responses.
 // Mocks mirror the real provider wire: reasoning deltas accumulate exactly
 // like Anthropic's `thinking` / OpenAI `reasoning` deltas, and the finish
 // frames are the normalized values the SDK produces (see
@@ -2419,113 +2419,6 @@ async fn natural_stop_gate_retries_a_bare_empty_response() {
         }
         _ => panic!("expected a closure item at index 1: {items:?}"),
     }
-}
-
-#[tokio::test]
-async fn natural_stop_gate_continues_when_the_plan_still_has_open_tasks() {
-    // The plan has a pending task; the model nevertheless ends a clean text
-    // turn with `stop`. The gate must veto the stop with the open-plan nudge
-    // (the same rule the loop already applies to outstanding pane requests
-    // and background sub-agents), then the continuation completes.
-    // The plan cannot be completed from inside the test (no plan tool in
-    // the test harness), so every stop with the open plan consumes one
-    // nudge. Queue 4 streams: the first three stops are vetoed, the fourth
-    // exhausts the budget and the stop stands — proving BOTH that the gate
-    // vetoes stops with an open plan AND that it stays bounded.
-    let mut h = Harness::new_test()
-        .with_mock_streams(vec![
-            Ok(vec!["starting ", "work"]),
-            Ok(vec!["continuing ", "work"]),
-            Ok(vec!["still ", "working"]),
-            Ok(vec!["final ", "answer"]),
-        ])
-        .with_mock_finish_reason(Some("stop"));
-
-    use cosh_tools::plan::types::{TodoItem, TodoStatus};
-    h.context_manager.set_todo_list(cosh_tools::plan::types::TodoList {
-        items: vec![TodoItem {
-            id: "task-1".into(),
-            description: "write the report".into(),
-            status: TodoStatus::Pending,
-            depends_on: Vec::new(),
-        }],
-    });
-
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
-    let stop_signal = Arc::new(AtomicBool::new(false));
-
-    h.run_agent_loop("do the work", tx, answer_rx, perm_rx, stop_signal)
-        .await;
-
-    // The first stop was vetoed (the first stream's text cannot be the
-    // Closure — the loop continued), the nudges eventually ran out, and the
-    // turn ended with the LAST stream's text as the Closure. Each vetoed
-    // turn records its own Assistant item, so the Closure is the LAST item.
-    let items: Vec<ContextItem> = h.context_manager.items_snapshot();
-    match items.last() {
-        Some(ContextItem::Closure { content, .. }) => {
-            assert_eq!(
-                content, "final answer",
-                "the earlier stops must have been vetoed; the loop only ends after \
-                 the nudge budget with the final stream"
-            );
-        }
-        other => panic!("expected a trailing closure item, got {other:?}"),
-    }
-    assert_eq!(
-        items
-            .iter()
-            .filter(|i| matches!(i, ContextItem::Assistant { .. }))
-            .count(),
-        3,
-        "the three vetoed stops must each be recorded as ordinary assistant turns"
-    );
-}
-
-#[tokio::test]
-async fn natural_stop_gate_bounded_three_nudges_then_visible_done() {
-    // A model that INSISTS on stopping while the plan stays open must still
-    // terminate: 3 nudges, then the natural stop stands. The Done event is
-    // the same terminal event as every legitimate completion — visible, not
-    // a hang.
-    let mut h = Harness::new_test().with_mock_streams(vec![
-        Ok(vec!["stop 1"]),
-        Ok(vec!["stop 2"]),
-        Ok(vec!["stop 3"]),
-        Ok(vec!["stop 4"]),
-    ]);
-
-    use cosh_tools::plan::types::{TodoItem, TodoStatus};
-    h.context_manager.set_todo_list(cosh_tools::plan::types::TodoList {
-        items: vec![TodoItem {
-            id: "task-1".into(),
-            description: "never finished".into(),
-            status: TodoStatus::Pending,
-            depends_on: Vec::new(),
-        }],
-    });
-
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
-    let stop_signal = Arc::new(AtomicBool::new(false));
-    let handle = tokio::spawn(async move {
-        h.run_agent_loop("do the work", tx, answer_rx, perm_rx, stop_signal)
-            .await;
-    });
-    let events = pump_terminal_events(rx).await;
-    handle.abort();
-
-    assert_eq!(
-        events
-            .iter()
-            .filter(|e| matches!(e, HarnessEvent::Done { .. }))
-            .count(),
-        1,
-        "the loop must terminate visibly after the nudge budget, events={events:?}"
-    );
 }
 
 #[tokio::test]

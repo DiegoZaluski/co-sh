@@ -457,6 +457,21 @@ pub struct ContextManager {
     /// Memoized token estimate of [`Self::correction_block`], kept in sync by
     /// [`Self::set_correction_block`] so `total_tokens` stays O(1).
     correction_block_tokens: usize,
+    /// The /agents panes listing, mirrored by the harness right after
+    /// `format_header_context` (the same per-request mirror contract as
+    /// [`Self::correction_block`]). Rendered in [`Self::build_messages`]'s
+    /// tail BETWEEN the corrections and the TODO block. Why the tail and
+    /// not the system prompt: the system prompt is prefix position 0 — a
+    /// pane binding/unbinding re-renders this block mid-session, and any
+    /// byte change at position 0 invalidates the provider's exact-prefix
+    /// cache for the WHOLE conversation (system → history). At the tail a
+    /// change only costs the tail itself, the same contract the TODO and
+    /// corrections blocks already follow. Like them, it is not an item:
+    /// re-mirrored per request, never compacted, never persisted.
+    panes_block: Option<String>,
+    /// Memoized token estimate of [`Self::panes_block`], kept in sync by
+    /// [`Self::set_panes_block`] so `total_tokens` stays O(1).
+    panes_block_tokens: usize,
     /// Transient rehydration signal, never authoritative or persisted state.
     todo_restore_pending: bool,
     /// Handoff/tool-set consistency check: applied to every summary at
@@ -586,6 +601,8 @@ impl ContextManager {
             todo: TodoContext::new(),
             correction_block: None,
             correction_block_tokens: 0,
+            panes_block: None,
+            panes_block_tokens: 0,
             todo_restore_pending: false,
             summary_annotator: None,
             cached_items_tokens: 0,
@@ -713,20 +730,6 @@ impl ContextManager {
     /// The protected plan projection, including empty or completed plans.
     pub fn todo_list(&self) -> Option<&TodoList> {
         self.todo.list()
-    }
-
-    /// Whether the mirrored plan still holds pending or in-progress tasks —
-    /// the deterministic "work is not done" signal the agent loop's
-    /// natural-stop gate consults before honoring a provider stop.
-    pub(crate) fn plan_has_open_tasks(&self) -> bool {
-        self.todo.has_open_tasks()
-    }
-
-    /// Descriptions of the plan's open tasks (pending / in progress), in
-    /// list order — the material the natural-stop gate's continuation nudge
-    /// names. Empty for a fresh/cleared mirror and for a terminal plan.
-    pub(crate) fn open_plan_tasks(&self) -> Vec<String> {
-        self.todo.open_task_descriptions()
     }
 
     /// Consume a restore request, including an explicit reset for absent plans.
@@ -1689,6 +1692,67 @@ impl ContextManager {
     /// harness already owns via [`add_user`](Self::add_user)).
     pub fn build_messages(&self, current_input: &str) -> Vec<ChatMessage> {
         let mut messages = Vec::with_capacity(self.items.len() + 1);
+        // Token-source breakdown (file log, target `cosh::harness::context`):
+        // per-item-type counts and estimated tokens over the VISIBLE window —
+        // the exact material this request is about to send. The point of the
+        // log is answering "what is eating the budget" from the wire side:
+        // if the request carries far more than the session shows, the delta
+        // lives here (hidden items leaking, oversized tool results, a
+        // runaway steering message).
+        if log::log_enabled!(log::Level::Info) {
+            // Byte sizes, NOT re-tokenized token estimates: the token cache
+            // (`cached_items_tokens`) exists precisely to avoid an
+            // O(session-tokens) re-encode per request, and this diagnostic
+            // must not defeat it. Bytes are free (they are already in
+            // memory) and sufficient to spot what is eating the request —
+            // the provider bills tokens, and bytes track them linearly.
+            let mut counts = [0usize; 8];
+            let mut bytes = [0usize; 8];
+            let mut hidden_count = 0usize;
+            for it in &self.items {
+                let (slot, size) = match it {
+                    ContextItem::User { original, .. } => (0, original.len()),
+                    ContextItem::Assistant { original, .. } => (1, original.len()),
+                    ContextItem::ToolCall { name, arguments, .. } => (2, name.len() + arguments.len()),
+                    ContextItem::ToolResult { content, .. } => (3, content.len()),
+                    ContextItem::Closure { content, .. } => (4, content.len()),
+                    ContextItem::Compaction { summary, .. } => (5, summary.len()),
+                    ContextItem::Error { content, .. } => (6, content.len()),
+                    ContextItem::UserCommand { content, .. } => (6, content.len()),
+                };
+                counts[slot] += 1;
+                bytes[slot] += size;
+                if self.is_hidden(it) {
+                    hidden_count += 1;
+                }
+            }
+            let largest_tool_result = bytes[3];
+            log::info!(
+                target: "cosh::harness::context",
+                "request breakdown: items={} hidden={} steering_len={} | \
+                 user={}B/{} assistant={}B/{} toolcall={}B/{} \
+                 toolresult={}B/{} closure={}B/{} compaction={}B/{} \
+                 display-only={}B/{} | largest_type_toolresult_bytes={}",
+                self.items.len(),
+                hidden_count,
+                current_input.len(),
+                bytes[0],
+                counts[0],
+                bytes[1],
+                counts[1],
+                bytes[2],
+                counts[2],
+                bytes[3],
+                counts[3],
+                bytes[4],
+                counts[4],
+                bytes[5],
+                counts[5],
+                bytes[6],
+                counts[6],
+                largest_tool_result,
+            );
+        }
         // Visibility filter FIRST (O(1) per item — boundary compare + hash
         // lookup): pre-compaction and individually hidden items never reach
         // the model. Then skip leading tool results — a `tool` message right
@@ -1814,6 +1878,19 @@ impl ContextManager {
                 existing.push_str(corrections);
             } else {
                 tail_block = Some(corrections.to_string());
+            }
+        }
+        // The /agents panes listing sits BETWEEN the corrections and the
+        // TODO block: pane set/bind changes churn per pane lifecycle, so
+        // they must never touch the system prompt (prefix position 0 — the
+        // exact-prefix cache of the WHOLE conversation dies with any byte
+        // change there). At the tail a change only costs the tail itself.
+        if let Some(panes) = self.panes_block.as_deref() {
+            if let Some(existing) = tail_block.as_mut() {
+                existing.push_str("\n\n");
+                existing.push_str(panes);
+            } else {
+                tail_block = Some(panes.to_string());
             }
         }
         if let Some(block) = self.todo.text() {
@@ -1964,6 +2041,18 @@ impl ContextManager {
         };
         self.correction_block_tokens = self
             .correction_block
+            .as_deref()
+            .map_or(0, |block| self.encoding.estimate(block));
+    }
+
+    /// Mirror the /agents panes listing block for the next request (tail
+    /// rendering — see the field docs). `None`/empty clears the block: a
+    /// session without panes renders nothing (byte-identical tail with
+    /// the pre-feature one).
+    pub fn set_panes_block(&mut self, text: Option<String>) {
+        self.panes_block = text.filter(|t| !t.trim().is_empty());
+        self.panes_block_tokens = self
+            .panes_block
             .as_deref()
             .map_or(0, |block| self.encoding.estimate(block));
     }
@@ -2161,6 +2250,7 @@ impl ContextManager {
         self.cached_items_tokens
             .saturating_add(self.todo.tokens(self.encoding))
             .saturating_add(self.correction_block_tokens)
+            .saturating_add(self.panes_block_tokens)
     }
 
     /// Whether the model must not see this raw item: it is behind a legacy
