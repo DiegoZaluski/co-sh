@@ -2,8 +2,9 @@
 //! hardcoded explanation streamed into the chat, and the install run with
 //! progress events.
 //!
-//! Lives in the BINARY (not the lib): it depends on the setup config
-//! (`cosh::setup`), the TUI event channel and the `onnx` feature.
+//! Lives in the library, gated behind the `onnx` feature: it depends on
+//! the setup config (`crate::setup`), the harness event channel and the
+//! `onnx` feature.
 //! The mirror repo id lives HERE via setup.json (`model_decision.hub`) —
 //! the `cosh-onnx` crate receives it as a parameter and carries no
 //! default.
@@ -15,9 +16,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use cosh::harness::events::{HarnessEvent, WeightsInstallEvent};
+use crate::harness::events::{HarnessEvent, WeightsInstallEvent};
 #[cfg(feature = "onnx")]
-use cosh::setup::{DecisionHub, DecisionModel};
+use crate::setup::{DecisionHub, DecisionModel};
 
 /// The graph candidates, quantized first (the mirror may not ship the
 /// int8 twin yet — the installer falls back to fp32).
@@ -31,7 +32,7 @@ const GRAPHS: &[&str] = &["laya.int8.onnx", "laya.onnx"];
 /// audit is the capability shipping TODAY, not the model's definition —
 /// because the same weights may classify preferences or other signals
 /// tomorrow.
-pub(crate) fn explanation(display_name: &str) -> String {
+pub fn explanation(display_name: &str) -> String {
     format!(
         "I'm fetching {name} — a small classifier that runs entirely on your machine.\
 \n\n\
@@ -51,7 +52,7 @@ bar below tracks it. After that it works silently on every turn.",
 /// One install target resolved from the setup config: which repo, which
 /// checkpoint inside it, which revision pin.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct WeightsTarget {
+pub struct WeightsTarget {
     /// The mirror repo id (the effective one: env override applied).
     pub repo: String,
     /// The checkpoint's subfolder inside the mirror (`None` = repo root).
@@ -72,8 +73,8 @@ impl WeightsTarget {
     /// serde round-trip of the configured kind) is the whole point of the
     /// mirror indirection: the daemon's loader cache-probes the mirror
     /// snapshot the installer filled, and never touches the upstream repos.
-    pub fn to_kind(&self) -> cosh::daemon::decision::Kind {
-        cosh::daemon::decision::Kind::Custom {
+    pub fn to_kind(&self) -> crate::daemon::decision::Kind {
+        crate::daemon::decision::Kind::Custom {
             repo: self.repo.clone(),
             subfolder: self.subfolder.clone(),
         }
@@ -90,7 +91,7 @@ impl WeightsTarget {
 /// pointing at a different hub repo never carries it — a stale mirror SHA
 /// would 404 against that repo and permanently disable the audit.
 #[cfg(feature = "onnx")]
-pub(crate) fn resolve_target(model: &DecisionModel, hub: &DecisionHub) -> Option<WeightsTarget> {
+pub fn resolve_target(model: &DecisionModel, hub: &DecisionHub) -> Option<WeightsTarget> {
     let repo = hub.effective_repo();
     // The pin is repo-scoped (DecisionHub::pin_for): it applies only when
     // the target's repo is the one the SHA was resolved from.
@@ -141,7 +142,7 @@ pub(crate) fn resolve_target(model: &DecisionModel, hub: &DecisionHub) -> Option
 
 /// Is the target already fully cached (no download needed)?
 #[cfg(feature = "onnx")]
-pub(crate) fn is_cached(target: &WeightsTarget) -> bool {
+pub fn is_cached(target: &WeightsTarget) -> bool {
     cosh_onnx::hub::cache_status(
         &target.repo,
         target.subfolder.as_deref(),
@@ -173,7 +174,7 @@ const fn cached_event() -> WeightsInstallEvent {
 /// agent runtime must never block on a download). Fails with the error
 /// message — the caller fails the turn's audit open, never the turn.
 #[cfg(feature = "onnx")]
-pub(crate) async fn ensure_installed(
+pub async fn ensure_installed(
     target: WeightsTarget,
     event_tx: tokio::sync::mpsc::UnboundedSender<HarnessEvent>,
 ) -> Result<Option<String>, String> {

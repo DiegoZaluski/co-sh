@@ -67,10 +67,8 @@ use crate::config::TuiConfig;
 use crate::state::AppState;
 use crate::theme::{Theme, rgba_color};
 use crate::component::scroll_pill::ScrollPill;
-use crate::types::{
-    AgentColors, CompactionPart, FilePart, InstallPart, Message, MessageRole, Part, ReasoningPart,
-    SessionStatus, ToolPart, ToolStatus,
-};
+use crate::agent_colors::AgentColors;
+use crate::types::{CompactionPart, FilePart, InstallPart, Message, MessageRole, Part, ReasoningPart, SessionStatus, ToolPart, ToolStatus, };
 use std::time::Instant;
 
 

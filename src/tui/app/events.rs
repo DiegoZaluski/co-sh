@@ -11,7 +11,7 @@ use crate::component::spinner_highlight::HighlightSpinner;
 use crate::notification;
 use crate::routes::session::delete::terminated_loop_save_target;
 use crate::routes::session::queue_choice::QueueTarget;
-use crate::session_store::is_valid_session;
+use crate::session::store::is_valid_session;
 use crate::types::{Part, Session, SessionStatus};
 use crate::ui::dialogs::DialogType;
 use cosh::harness::HarnessEvent;
@@ -2004,7 +2004,7 @@ impl App {
                             .state
                             .session_cache
                             .get(&id)
-                            .is_some_and(crate::session_store::is_valid_session);
+                            .is_some_and(crate::session::store::is_valid_session);
                         if should_save && let Some(session) = self.state.session_cache.get_mut(&id)
                         {
                             match context {

@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use xxhash_rust::xxh64::xxh64;
 
-use crate::session_history::{HistoryProjection, parse_jsonl};
+use crate::session::history::{HistoryProjection, parse_jsonl};
 
 const FORMAT: u32 = 1;
 const LEAF_BYTES: usize = 16 * 1024;
@@ -522,7 +522,7 @@ pub(crate) fn force_checkpoint(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session_history::{
+    use crate::session::history::{
         BranchMetadata, Delta, HistoryEvent, MessageDelta, MetadataDelta, Reference,
     };
     use crate::types::{Message, MessageRole, Part, TextPart};

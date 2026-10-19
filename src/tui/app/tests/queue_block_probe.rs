@@ -4,7 +4,7 @@
 
 use super::{App, HOME_LOCK, isolate_home};
 use crate::routes::session::queue_choice::QueueTarget;
-use crate::session_store::generate_session_id;
+use crate::session::store::generate_session_id;
 use crate::types::{Message, MessageRole, Part, SessionStatus, TextPart, ToolPart, ToolStatus};
 use ratatui::{Terminal, backend::TestBackend};
 

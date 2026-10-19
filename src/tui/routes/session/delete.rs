@@ -380,7 +380,7 @@ mod tests {
             }
         };
         parent.messages = Vec::new();
-        app.session_store = crate::session_store::SessionStore::with_dir(
+        app.session_store = crate::session::store::SessionStore::with_dir(
             std::env::temp_dir().join(format!("cosh-delete-test-{parent_id}")),
             "testhash".into(),
         );

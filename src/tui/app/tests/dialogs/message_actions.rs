@@ -449,7 +449,7 @@ async fn clicking_multiline_user_message_opens_message_actions_without_panicking
         ),
     )
     .unwrap();
-    let store = crate::session_store::SessionStore::with_dir(sessions_dir, "crashhash".into());
+    let store = crate::session::store::SessionStore::with_dir(sessions_dir, "crashhash".into());
 
     let mut app = App::new("/tmp".to_string());
     app.state.session_summaries = store.list_sessions();

@@ -4,7 +4,7 @@ use std::num::NonZeroUsize;
 use lru::LruCache;
 
 use crate::routes::session::right_panel::types::RightPanelState;
-use crate::session_store::SessionSummary;
+use crate::session::store::SessionSummary;
 use crate::types::{
     FilePart, Message, MessageRole, Part, ReasoningPart, Session, SessionStatus, TextPart,
     ToolPart, ToolStatus,
@@ -212,7 +212,7 @@ impl AppState {
     pub fn ensure_session_cached(
         &mut self,
         session_id: &str,
-        store: &crate::session_store::SessionStore,
+        store: &crate::session::store::SessionStore,
     ) -> bool {
         if self.session_cache.contains(session_id) {
             return true;
@@ -257,7 +257,7 @@ impl AppState {
     pub fn switch_to_session(
         &mut self,
         session_id: String,
-        store: &crate::session_store::SessionStore,
+        store: &crate::session::store::SessionStore,
     ) -> bool {
         // Refuse a session another process already holds open, BEFORE any
         // state mutation: the switch must be all-or-nothing.
@@ -270,7 +270,7 @@ impl AppState {
             let should_save = self
                 .session_cache
                 .get(oid)
-                .is_some_and(crate::session_store::is_valid_session);
+                .is_some_and(crate::session::store::is_valid_session);
             if should_save {
                 // Reborrow to avoid borrow conflict with ensure_session_summary
                 if let Some(session) = self.session_cache.get(oid) {

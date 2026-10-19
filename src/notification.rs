@@ -19,7 +19,7 @@ use std::sync::OnceLock;
 static ICON_PATH: OnceLock<PathBuf> = OnceLock::new();
 
 /// Raw PNG bytes of the cosh logo icon (128×128), embedded at compile time.
-const ICON_BYTES: &[u8] = include_bytes!("../../assets/cosh-icon.png");
+const ICON_BYTES: &[u8] = include_bytes!("../assets/cosh-icon.png");
 
 /// Return the path to the cosh icon, extracting it from the binary on first
 /// call.  The icon is written to an XDG-compliant cache directory

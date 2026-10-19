@@ -76,7 +76,7 @@ async fn incomplete_right_drag_never_starts_a_correction_request() {
     let _guard = HOME_LOCK.lock();
     isolate_home();
     let mut app = App::new("/tmp".to_string());
-    let id = crate::session_store::generate_session_id();
+    let id = crate::session::store::generate_session_id();
     app.state.add_empty_session(id.clone(), "session".into(), 0);
     app.state.current_session_id = Some(id);
     app.prompt_view.input = "texto".into();

@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
-use cosh::harness::context::{ContextItem, ContextManagerState, MapReduceState, SplitState};
+use crate::harness::context::{ContextItem, ContextManagerState, MapReduceState, SplitState};
 use cosh_tools::plan::types::TodoList;
 use serde::{Deserialize, Serialize};
 
@@ -84,6 +84,9 @@ pub(crate) struct BranchMetadata {
 }
 
 impl BranchMetadata {
+    /// The bin tolerated unused helpers via a root-level allow; keep the
+    /// same tolerance here without silencing the whole library.
+    #[allow(dead_code)]
     pub(crate) fn from_session(session: &Session, cwd: String) -> Self {
         Self {
             session_id: session.id.clone(),

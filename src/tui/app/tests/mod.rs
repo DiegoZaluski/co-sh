@@ -1,6 +1,6 @@
 use super::{App, message_prompt_text};
 use crate::routes::session::right_panel::RIGHT_PANEL_WIDTH;
-use crate::session_store::generate_session_id;
+use crate::session::store::generate_session_id;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// Plain key event (no modifiers) for driving text inputs in tests.

@@ -277,7 +277,7 @@ impl ContextItem {
 /// full history stays on disk for revert/fork at any point of the session —
 /// the model's view is exactly what the markers say.
 ///
-/// Persistence is the TUI's concern (`session_store`): it compares this
+/// Persistence is the session store's concern (`session::store`): it compares this
 /// transport projection with the replayed branch and appends fine-grained
 /// context deltas. This value is never an authoritative on-disk snapshot.
 /// The field is keyed by MODEL, not provider: the

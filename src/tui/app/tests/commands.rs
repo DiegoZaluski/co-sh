@@ -16,7 +16,7 @@ async fn compaction_progress_targets_the_running_box_and_final_output_replaces_s
     use crate::types::{Message, MessageRole, Part, TextPart};
     use cosh::harness::events::{LlmCompactionEvent, LlmCompactionPhase};
     let mut app = App::new("/tmp".to_string());
-    let id = crate::session_store::generate_session_id();
+    let id = crate::session::store::generate_session_id();
     app.state
         .add_empty_session(id.clone(), "compaction".into(), 0);
     app.state.current_session_id = Some(id);
@@ -311,7 +311,7 @@ async fn slash_new_claims_the_fresh_session_lock_against_a_foreign_process() {
 
     // A foreign cosh process (independent store, same data dir) must be
     // REFUSED: the claim exists from the moment of creation.
-    let foreign = crate::session_store::SessionStore::new();
+    let foreign = crate::session::store::SessionStore::new();
     assert!(
         !foreign.try_lock_session(&session_id),
         "a session created via /new must be locked against every other process \
@@ -353,7 +353,7 @@ async fn slash_new_hands_off_the_previous_session_lock() {
         .current_session_id
         .clone()
         .expect("a session was selected");
-    let foreign = crate::session_store::SessionStore::new();
+    let foreign = crate::session::store::SessionStore::new();
     assert!(
         !foreign.try_lock_session(&previous_id),
         "precondition: the current session is locked by this process"
@@ -411,7 +411,7 @@ async fn slash_new_id_is_unique_per_claim() {
             "two /new sessions in the same millisecond must not share an id"
         );
         // The CURRENT session carries this process's open-lock.
-        let foreign = crate::session_store::SessionStore::new();
+        let foreign = crate::session::store::SessionStore::new();
         assert!(
             !foreign.try_lock_session(&id),
             "the current session must carry this process's open-lock"
@@ -419,7 +419,7 @@ async fn slash_new_id_is_unique_per_claim() {
         // Every PREVIOUS session's claim was handed off by this /new —
         // a fresh foreign process can claim it right now.
         for prev in &superseded {
-            let released = crate::session_store::SessionStore::new();
+            let released = crate::session::store::SessionStore::new();
             assert!(
                 released.try_lock_session(prev),
                 "a superseded session's open-lock must be handed off when \
@@ -651,7 +651,7 @@ async fn slash_menu_scrolls_so_the_selection_stays_visible() {
     use ratatui::layout::Rect;
     let mut buf = Buffer::empty(Rect::new(0, 0, 80, 24));
     let unique_agents = app.state.unique_agents();
-    let agent_colors = crate::types::AgentColors::from_theme(&app.theme);
+    let agent_colors = crate::agent_colors::AgentColors::from_theme(&app.theme);
     let mode_color = crate::component::prompt::agent_mode_color(
         &app.theme,
         &agent_colors,
@@ -1022,7 +1022,7 @@ async fn agents_pane_done_promotes_the_pane_binding_for_the_next_open() {
     let mut app = App::new("/tmp".to_string());
     // One session, split open with a fresh pick list: claude ×2, cosh last
     // (the daemon pane exists ONLY because the user marked it).
-    let session_id = crate::session_store::generate_session_id();
+    let session_id = crate::session::store::generate_session_id();
     app.state
         .add_empty_session(session_id.clone(), "pane binding".into(), 0);
     // add_empty_session registers the model but does NOT select it — the
@@ -1152,7 +1152,7 @@ async fn adding_panes_while_running_keeps_the_running_turns_and_chats() {
     let _guard = HOME_LOCK.lock();
     isolate_home();
     let mut app = App::new("/tmp".to_string());
-    let session_id = crate::session_store::generate_session_id();
+    let session_id = crate::session::store::generate_session_id();
     app.state
         .add_empty_session(session_id.clone(), "add panes".into(), 0);
     app.state.current_session_id = Some(session_id);
@@ -1348,7 +1348,7 @@ async fn parked_agents_split_survives_park_and_re_attach() {
     let _guard = HOME_LOCK.lock();
     isolate_home();
     let mut app = App::new("/tmp".to_string());
-    let session_id = crate::session_store::generate_session_id();
+    let session_id = crate::session::store::generate_session_id();
     app.state
         .add_empty_session(session_id.clone(), "park".into(), 0);
     app.state.current_session_id = Some(session_id);
@@ -1483,7 +1483,7 @@ async fn session_switch_restores_the_mode_only_when_it_was_left_open() {
     // suffixed because `generate_session_id` is a bare millisecond
     // timestamp: three rapid calls in one test can collide, and
     // `add_empty_session` would silently overwrite the earlier cache entry.
-    let unique = |tag: &str| format!("{}-{tag}", crate::session_store::generate_session_id());
+    let unique = |tag: &str| format!("{}-{tag}", crate::session::store::generate_session_id());
     let a = unique("a");
     app.state.add_empty_session(a.clone(), "open mode".into(), 0);
     app.state.current_session_id = Some(a.clone());
@@ -1554,7 +1554,7 @@ async fn fresh_confirm_supersedes_the_parked_split() {
     let _guard = HOME_LOCK.lock();
     isolate_home();
     let mut app = App::new("/tmp".to_string());
-    let session_id = crate::session_store::generate_session_id();
+    let session_id = crate::session::store::generate_session_id();
     app.state
         .add_empty_session(session_id.clone(), "supersede".into(), 0);
     app.state.current_session_id = Some(session_id);
@@ -1600,7 +1600,7 @@ async fn stale_epoch_agents_pane_done_is_dropped() {
     let _guard = HOME_LOCK.lock();
     isolate_home();
     let mut app = App::new("/tmp".to_string());
-    let session_id = crate::session_store::generate_session_id();
+    let session_id = crate::session::store::generate_session_id();
     app.state
         .add_empty_session(session_id.clone(), "stale epoch".into(), 0);
     app.state.current_session_id = Some(session_id);
@@ -1716,7 +1716,7 @@ async fn reopening_the_split_rehydrates_bound_panes_with_empty_timelines() {
     let _guard = HOME_LOCK.lock();
     isolate_home();
     let mut app = App::new("/tmp".to_string());
-    let session_id = crate::session_store::generate_session_id();
+    let session_id = crate::session::store::generate_session_id();
     app.state
         .add_empty_session(session_id.clone(), "rehydrate".into(), 0);
     app.state.current_session_id = Some(session_id);
@@ -1836,7 +1836,7 @@ async fn a_failed_replay_marks_the_pane_instead_of_silence() {
     let _guard = HOME_LOCK.lock();
     isolate_home();
     let mut app = App::new("/tmp".to_string());
-    let session_id = crate::session_store::generate_session_id();
+    let session_id = crate::session::store::generate_session_id();
     app.state
         .add_empty_session(session_id.clone(), "replay fail".into(), 0);
     app.state.current_session_id = Some(session_id);
@@ -1910,7 +1910,7 @@ async fn a_prompt_to_a_rehydrating_pane_is_refused_with_a_toast() {
     let _guard = HOME_LOCK.lock();
     isolate_home();
     let mut app = App::new("/tmp".to_string());
-    let session_id = crate::session_store::generate_session_id();
+    let session_id = crate::session::store::generate_session_id();
     app.state
         .add_empty_session(session_id.clone(), "rehydrating gate".into(), 0);
     app.state.current_session_id = Some(session_id);
@@ -1973,7 +1973,7 @@ async fn a_user_prompt_echoes_into_the_pane_timeline() {
     let _guard = HOME_LOCK.lock();
     isolate_home();
     let mut app = App::new("/tmp".to_string());
-    let session_id = crate::session_store::generate_session_id();
+    let session_id = crate::session::store::generate_session_id();
     app.state
         .add_empty_session(session_id.clone(), "input echo".into(), 0);
     app.state.current_session_id = Some(session_id);
@@ -2046,7 +2046,7 @@ async fn a_session_model_event_lands_on_the_pane() {
     let _guard = HOME_LOCK.lock();
     isolate_home();
     let mut app = App::new("/tmp".to_string());
-    let session_id = crate::session_store::generate_session_id();
+    let session_id = crate::session::store::generate_session_id();
     app.state
         .add_empty_session(session_id.clone(), "pane badge".into(), 0);
     app.state.current_session_id = Some(session_id);
@@ -2112,7 +2112,7 @@ async fn a_usage_event_lands_on_the_pane() {
     let _guard = HOME_LOCK.lock();
     isolate_home();
     let mut app = App::new("/tmp".to_string());
-    let session_id = crate::session_store::generate_session_id();
+    let session_id = crate::session::store::generate_session_id();
     app.state
         .add_empty_session(session_id.clone(), "pane budget".into(), 0);
     app.state.current_session_id = Some(session_id);
@@ -2182,7 +2182,7 @@ async fn agents_call_serves_a_queued_cosh_pane_end_to_end() {
     app.llm_config.provider.clear();
     app.llm_config.model = None;
     app.router_view.fallbacks.clear();
-    let session_id = crate::session_store::generate_session_id();
+    let session_id = crate::session::store::generate_session_id();
     app.state
         .add_empty_session(session_id.clone(), "cosh queue".into(), 0);
     app.state.current_session_id = Some(session_id);
@@ -2264,7 +2264,7 @@ async fn a_rebooted_cosh_pane_replays_its_session_from_the_store() {
     let _guard = HOME_LOCK.lock();
     isolate_home();
     let mut app = App::new("/tmp".to_string());
-    let session_id = crate::session_store::generate_session_id();
+    let session_id = crate::session::store::generate_session_id();
     app.state
         .add_empty_session(session_id.clone(), "cosh pane restore".into(), 0);
     app.state.current_session_id = Some(session_id);
@@ -2440,7 +2440,7 @@ async fn a_main_initiated_pane_report_wakes_the_idle_main_agent() {
     isolate_home();
     let mut app = App::new("/tmp".to_string());
     app.gateway_declined = true;
-    let session_id = crate::session_store::generate_session_id();
+    let session_id = crate::session::store::generate_session_id();
     app.state
         .add_empty_session(session_id.clone(), "wake promise".into(), 0);
     app.state.current_session_id = Some(session_id);
@@ -2501,7 +2501,7 @@ async fn a_user_initiated_pane_turn_never_wakes_the_main_agent() {
     let _guard = HOME_LOCK.lock();
     isolate_home();
     let mut app = App::new("/tmp".to_string());
-    let session_id = crate::session_store::generate_session_id();
+    let session_id = crate::session::store::generate_session_id();
     app.state
         .add_empty_session(session_id.clone(), "harmony".into(), 0);
     app.state.current_session_id = Some(session_id);
@@ -2542,7 +2542,7 @@ async fn a_manager_initiated_pane_report_never_wakes_the_main_agent() {
     let _guard = HOME_LOCK.lock();
     isolate_home();
     let mut app = App::new("/tmp".to_string());
-    let session_id = crate::session_store::generate_session_id();
+    let session_id = crate::session::store::generate_session_id();
     app.state
         .add_empty_session(session_id.clone(), "manager tag".into(), 0);
     app.state.current_session_id = Some(session_id);
@@ -2585,7 +2585,7 @@ async fn prompt_drag_released_over_pane_copies_and_clears() {
     isolate_home();
     let mut app = App::new("/tmp".to_string());
     app.set_test_size(100, 40);
-    let session_id = crate::session_store::generate_session_id();
+    let session_id = crate::session::store::generate_session_id();
     app.state
         .add_empty_session(session_id.clone(), "sel".into(), 0);
     app.state.current_session_id = Some(session_id);
@@ -2643,7 +2643,7 @@ async fn hiding_and_restoring_panes_is_lifo_and_never_deletes() {
     let _guard = HOME_LOCK.lock();
     isolate_home();
     let mut app = App::new("/tmp".to_string());
-    let id = crate::session_store::generate_session_id();
+    let id = crate::session::store::generate_session_id();
     app.state.add_empty_session(id.clone(), "panes".into(), 0);
     app.state.current_session_id = Some(id);
     app.open_agents_split(vec![

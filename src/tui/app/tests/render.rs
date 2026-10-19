@@ -358,7 +358,7 @@ async fn scroll_to_bottom_pill_jumps_back_and_rehides() {
     isolate_home();
 
     let mut app = App::new("/tmp".to_string());
-    let id = crate::session_store::generate_session_id();
+    let id = crate::session::store::generate_session_id();
     app.state.add_empty_session(id.clone(), "long".into(), 0);
     app.state.current_session_id = Some(id);
     if let Some(s) = app.state.current_session_mut() {
@@ -465,7 +465,7 @@ async fn scroll_to_bottom_pill_stays_put_when_the_spinner_appears() {
     isolate_home();
 
     let mut app = App::new("/tmp".to_string());
-    let id = crate::session_store::generate_session_id();
+    let id = crate::session::store::generate_session_id();
     app.state.add_empty_session(id.clone(), "long".into(), 0);
     app.state.current_session_id = Some(id);
     if let Some(s) = app.state.current_session_mut() {
@@ -533,7 +533,7 @@ async fn prompt_correction_spinner_yields_to_the_agent_loop_spinner() {
     isolate_home();
 
     let mut app = App::new("/tmp".to_string());
-    let id = crate::session_store::generate_session_id();
+    let id = crate::session::store::generate_session_id();
     app.state.add_empty_session(id.clone(), "session".into(), 0);
     app.state.current_session_id = Some(id);
     app.prompt_view.input = "correct this text".into();

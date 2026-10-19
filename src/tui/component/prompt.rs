@@ -15,7 +15,8 @@ use crate::logo::ChatLogo;
 use crate::lsp_colors;
 use crate::state::AppState;
 use crate::theme::{Theme, rgba_color};
-use crate::types::{AgentColors, MessageRole, Part, Session};
+use crate::agent_colors::AgentColors;
+use crate::types::{MessageRole, Part, Session};
 use crate::util::draw::draw_text_line;
 use crate::util::edit_history::{EditHistory, EditKind, RedoOutcome, UndoOutcome};
 

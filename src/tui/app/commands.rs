@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 use super::App;
 use super::BUG_REPORT_URL;
 use super::agents_dispatch::either_split;
-use crate::session_store::format_session_timestamp;
+use crate::session::store::format_session_timestamp;
 use crate::ui::agents_picker::AgentPick;
 use crate::ui::dialogs::DialogType;
 
@@ -805,7 +805,7 @@ impl App {
             // Single lookup: persist only when the cached session holds
             // real dialog.
             if let Some(session) = self.state.session_cache.get(&id)
-                && crate::session_store::is_valid_session(session)
+                && crate::session::store::is_valid_session(session)
             {
                 self.session_store.save_session_async(session);
             }

@@ -1,9 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-use cosh_tui::core::lib::rgba::RGBA;
-
-use crate::theme::Theme;
-
 /// One persisted pane of the `/agents` split: which agent CLI it runs and —
 /// once the pane completed a turn — WHICH ACP session to resume, so a
 /// reopened session (or app) continues the SAME agent context instead of
@@ -408,30 +404,6 @@ pub enum SessionStatus {
     },
 }
 
-pub struct AgentColors {
-    palette: Vec<RGBA>,
-}
-
-impl AgentColors {
-    pub fn from_theme(theme: &Theme) -> Self {
-        Self {
-            palette: vec![
-                theme.secondary,
-                theme.accent,
-                theme.success,
-                theme.warning,
-                theme.primary,
-                theme.error,
-                theme.info,
-            ],
-        }
-    }
-
-    pub fn get(&self, name: &str, unique_agents: &[String]) -> RGBA {
-        let index = unique_agents.iter().position(|a| a == name).unwrap_or(0);
-        self.palette[index % self.palette.len()]
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -448,6 +420,7 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)] // parity with the bin's former root-level allow
     fn reasoning(text: &str) -> Part {
         Part::Reasoning(ReasoningPart {
             text: text.to_string(),
@@ -686,20 +659,4 @@ mod tests {
         assert!(serde_json::from_str::<AgentPaneRef>(r#"{"agent":"claude"}"#).is_err());
     }
 
-    #[test]
-    fn from_ref_seeds_the_session_id_only_for_bound_panes() {
-        let bound = AgentPaneRef::Bound {
-            agent: "kilo".to_string(),
-            session_id: "resume-me".to_string(),
-        };
-        let pane = crate::routes::session::agents_split::AgentPane::from_ref(&bound);
-        assert_eq!(pane.agent, "kilo");
-        assert_eq!(pane.session_id.as_deref(), Some("resume-me"));
-
-        // Fresh pick: unbound.
-        let fresh = AgentPaneRef::Name("kilo".to_string());
-        let pane = crate::routes::session::agents_split::AgentPane::from_ref(&fresh);
-        assert_eq!(pane.agent, "kilo");
-        assert!(pane.session_id.is_none());
-    }
 }

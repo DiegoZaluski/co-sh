@@ -1,6 +1,6 @@
 use super::{App, HOME_LOCK, isolate_home};
 use crate::app::session_affinity_id;
-use crate::session_store::generate_session_id;
+use crate::session::store::generate_session_id;
 
 /// The affinity id derived from a chat session id must be opaque,
 /// deterministic and non-identifying: the same session always produces the
@@ -39,7 +39,7 @@ async fn loop_end_promotes_unconsumed_next_request_to_next_loop() {
     let _guard = HOME_LOCK.lock();
     isolate_home();
     let mut app = App::new("/tmp".to_string());
-    let id = crate::session_store::generate_session_id();
+    let id = crate::session::store::generate_session_id();
     app.state.add_empty_session(
         id.clone(),
         "promotion test".into(),
@@ -91,7 +91,7 @@ async fn loop_end_orphaned_next_request_becomes_first_next_loop_candidate() {
     let _guard = HOME_LOCK.lock();
     isolate_home();
     let mut app = App::new("/tmp".to_string());
-    let id = crate::session_store::generate_session_id();
+    let id = crate::session::store::generate_session_id();
     app.state.add_empty_session(
         id.clone(),
         "orphan test".into(),
@@ -134,7 +134,7 @@ async fn mid_stream_reset_never_eats_the_previous_iteration_transcript() {
     use cosh::harness::HarnessEvent;
 
     let mut app = App::new("/tmp".to_string());
-    let id = crate::session_store::generate_session_id();
+    let id = crate::session::store::generate_session_id();
     app.state.add_empty_session(
         id.clone(),
         "reset test".into(),
@@ -267,7 +267,7 @@ async fn resuming_without_a_ctx_file_warns_and_starts_with_empty_context() {
     // session files into the real user data dir.
     let dir = tempfile::tempdir().unwrap();
     app.session_store =
-        crate::session_store::SessionStore::with_dir(dir.path().to_path_buf(), "testhash".into());
+        crate::session::store::SessionStore::with_dir(dir.path().to_path_buf(), "testhash".into());
     let id = generate_session_id();
     app.state.add_empty_session(
         id.clone(),
@@ -368,7 +368,7 @@ async fn resuming_with_a_ctx_file_stays_silent() {
     // session files into the real user data dir.
     let dir = tempfile::tempdir().unwrap();
     app.session_store =
-        crate::session_store::SessionStore::with_dir(dir.path().to_path_buf(), "testhash".into());
+        crate::session::store::SessionStore::with_dir(dir.path().to_path_buf(), "testhash".into());
     let id = format!("{}-ctx", generate_session_id());
     app.state.add_empty_session(
         id.clone(),
@@ -554,7 +554,7 @@ async fn spinner_label_follows_agent_activity() {
     use cosh::harness::HarnessEvent;
 
     let mut app = App::new("/tmp".to_string());
-    let id = crate::session_store::generate_session_id();
+    let id = crate::session::store::generate_session_id();
     app.state
         .add_empty_session(id.clone(), "activity".into(), 0);
     app.state.current_session_id = Some(id);
@@ -676,7 +676,7 @@ async fn spinner_activity_ignores_noise_deltas() {
     use cosh::harness::HarnessEvent;
 
     let mut app = App::new("/tmp".to_string());
-    let id = crate::session_store::generate_session_id();
+    let id = crate::session::store::generate_session_id();
     app.state
         .add_empty_session(id.clone(), "noise".into(), 0);
     app.state.current_session_id = Some(id);

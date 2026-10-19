@@ -44,10 +44,10 @@ use chrono::Datelike;
 use serde::Serialize;
 use xxhash_rust::xxh32::xxh32;
 
-use cosh::harness::context::{ContextItem, ContextManagerState, MapReduceState};
-use cosh::harness::events::{HarnessEvent, ToastVariant};
+use crate::harness::context::{ContextItem, ContextManagerState, MapReduceState};
+use crate::harness::events::{HarnessEvent, ToastVariant};
 
-use crate::session_history::{
+use crate::session::history::{
     BranchMetadata, BranchProjection, ContextBoundary, ContextDelta, Delta, HistoryEvent,
     HistoryProjection, MessageDelta, MetadataDelta, Reference, context_groups,
 };
@@ -123,6 +123,8 @@ pub struct SessionStore {
     /// (e.g. `~/.local/share/cosh/sessions/{hash}/`).
     sessions_dir: PathBuf,
     /// The hash of the current working directory.
+    /// Parity with the bin's former root-level `#![allow(dead_code)]`.
+    #[allow(dead_code)]
     cwd_hash: String,
     /// Optional UI channel: lock-contention notifications surface as toasts.
     notify: Option<tokio::sync::mpsc::UnboundedSender<HarnessEvent>>,
@@ -146,13 +148,13 @@ pub struct SessionStore {
 impl SessionStore {
     /// Create a new `SessionStore`, resolving the CWD and creating the
     /// per-CWD sessions directory. Honours `COSH_DATA_DIR` (test isolation;
-    /// see `cosh::setup::data_dir_override`).
+    /// see `crate::setup::data_dir_override`).
     ///
     /// # Panics
     /// Panics if the data directory cannot be determined (no override AND
     /// `ProjectDirs` fails, e.g. no `$HOME` set).
     pub fn new() -> Self {
-        let sessions_dir = cosh::setup::data_dir_override()
+        let sessions_dir = crate::setup::data_dir_override()
             .join("sessions")
             .join(compute_cwd_hash());
         std::fs::create_dir_all(&sessions_dir).ok();
@@ -176,15 +178,15 @@ impl SessionStore {
 
     /// Test-visible sessions dir (tests copy fixture files into the SAME
     /// dir the app's store watches — `load_history_for_branch` scans it).
-    #[cfg(test)]
     pub fn sessions_dir(&self) -> &std::path::Path {
         &self.sessions_dir
     }
 
     /// Test-only store rooted at an explicit directory (lets integration
     /// tests drive the real load path against fixture session files).
-    #[cfg(test)]
-    pub(crate) fn with_dir(sessions_dir: std::path::PathBuf, cwd_hash: String) -> Self {
+    /// Bin tests consume it too, so it is compiled unconditionally now that
+    /// the store lives in the library.
+    pub fn with_dir(sessions_dir: std::path::PathBuf, cwd_hash: String) -> Self {
         std::fs::create_dir_all(&sessions_dir).ok();
         Self {
             sessions_dir,
@@ -197,15 +199,15 @@ impl SessionStore {
     }
 
     /// Test-only: shorten the lock wait so contention tests finish fast.
-    #[cfg(test)]
-    pub(crate) fn with_lock_wait(mut self, lock_wait: Duration) -> Self {
+    /// Compiled unconditionally (bin tests use it).
+    pub fn with_lock_wait(mut self, lock_wait: Duration) -> Self {
         self.lock_wait = lock_wait;
         self
     }
 
     /// Test-only: route notifications into a channel the test owns.
-    #[cfg(test)]
-    pub(crate) fn with_test_notify(
+    /// Compiled unconditionally (bin tests use it).
+    pub fn with_test_notify(
         mut self,
         notify: tokio::sync::mpsc::UnboundedSender<HarnessEvent>,
     ) -> Self {
@@ -593,7 +595,7 @@ impl SessionStore {
     }
 
     fn load_history_path(&self, path: &std::path::Path) -> Option<(String, HistoryProjection)> {
-        crate::session_snapshots::load(path)
+        crate::session::snapshots::load(path)
             .map_err(|error| {
                 log::warn!("failed to load session history {}: {error}", path.display());
             })
@@ -1598,7 +1600,7 @@ fn append_events(
     // Snapshots are a rebuildable acceleration structure. Once the event
     // append is durable, a failed snapshot must not report a failed action
     // (retrying a successful revert would produce a second undo record).
-    if let Err(error) = crate::session_snapshots::checkpoint(path) {
+    if let Err(error) = crate::session::snapshots::checkpoint(path) {
         log::warn!("session snapshot deferred for {}: {error}", path.display());
     }
     Ok(())
@@ -1715,7 +1717,7 @@ pub fn format_session_timestamp(ms: u64) -> String {
 mod tests {
     use super::*;
     use crate::types::{Message, Part, ReasoningPart, TextPart, ToolPart, ToolStatus};
-    use cosh::harness::context::{ContextItem, SplitState};
+    use crate::harness::context::{ContextItem, SplitState};
 
     #[test]
     fn versioned_view_survives_display_only_mapping_loss_and_restores_hidden() {
@@ -1755,13 +1757,13 @@ mod tests {
             vec![1, 2]
         );
         assert!(selected.hidden.contains(&2));
-        let mut manager = cosh::harness::context::ContextManager::new(1_000);
+        let mut manager = crate::harness::context::ContextManager::new(1_000);
         manager.restore_state(&selected);
         let model = serde_json::to_string(&manager.build_messages("")).unwrap();
         assert!(!model.contains("discard secret"));
         assert!(!model.contains("already hidden"));
-        crate::session_snapshots::force_checkpoint(&path).unwrap();
-        crate::session_snapshots::evict(&path);
+        crate::session::snapshots::force_checkpoint(&path).unwrap();
+        crate::session::snapshots::evict(&path);
         assert!(store.rollback_session(&session.id, "v1"));
         let restored = store.load_context(&session.id).unwrap();
         assert_eq!(
@@ -2064,7 +2066,7 @@ mod tests {
         context.items.push_back(ContextItem::Compaction {
             id: 3,
             summary: "checkpoint".into(),
-            covered_ranges: vec![cosh::harness::context::ContextItemRange {
+            covered_ranges: vec![crate::harness::context::ContextItemRange {
                 start_id: 1,
                 end_id: 2,
             }],
@@ -2555,7 +2557,7 @@ mod tests {
             "the boundary cleared with its anchor"
         );
         // The surviving history reaches the model again.
-        let mut cm = cosh::harness::context::ContextManager::new(100_000);
+        let mut cm = crate::harness::context::ContextManager::new(100_000);
         cm.restore_state(&loaded);
         assert_eq!(cm.build_messages("").len(), 1);
     }
@@ -2599,7 +2601,7 @@ mod tests {
     /// staging so an interrupted split resumes where it stopped.
     #[test]
     fn split_buffer_appends_are_incremental_and_replay_exactly() {
-        use cosh::harness::context::ContextManager;
+        use crate::harness::context::ContextManager;
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(&dir);
         let mut manager = ContextManager::new(4_000);
@@ -3471,7 +3473,7 @@ mod tests {
 
         // The visibility markers are live: the restored manager hides the
         // pre-compaction item from the model.
-        let mut cm = cosh::harness::context::ContextManager::new(100_000);
+        let mut cm = crate::harness::context::ContextManager::new(100_000);
         cm.restore_state(&loaded);
         let msgs = cm.build_messages("");
         assert_eq!(msgs.len(), 1, "item 1 is behind the boundary");
@@ -3533,7 +3535,7 @@ mod tests {
             window: 64_000,
             buffer_tokens: 2,
         });
-        let mut staging_manager = cosh::harness::context::ContextManager::new(128);
+        let mut staging_manager = crate::harness::context::ContextManager::new(128);
         staging_manager.add_user(&"map source ".repeat(200));
         assert!(staging_manager.begin_map_reduce(128));
         changed.map_reduce = staging_manager.save_state().map_reduce;
@@ -3580,7 +3582,7 @@ mod tests {
     fn context_manager_lifecycle_round_trips_as_history_deltas() {
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(&dir);
-        let mut manager = cosh::harness::context::ContextManager::new(100_000);
+        let mut manager = crate::harness::context::ContextManager::new(100_000);
         manager.add_user("prompt");
         manager.add_assistant("answer", true);
         manager.close_loop();
@@ -3634,12 +3636,12 @@ mod tests {
                 summary,
                 covered_ranges,
             }) if summary == "compacted"
-                && covered_ranges == &[cosh::harness::context::ContextItemRange {
+                && covered_ranges == &[crate::harness::context::ContextItemRange {
                     start_id: 1,
                     end_id: 2,
                 }]
         ));
-        let mut replayed = cosh::harness::context::ContextManager::new(1);
+        let mut replayed = crate::harness::context::ContextManager::new(1);
         replayed.restore_state(&restored);
         let messages = replayed.build_messages("");
         assert_eq!(messages.len(), 1);
@@ -3683,7 +3685,7 @@ mod tests {
             &restored.items[1],
             ContextItem::ToolResult { content, .. } if content == "complete immutable payload"
         ));
-        let mut manager = cosh::harness::context::ContextManager::new(100_000);
+        let mut manager = crate::harness::context::ContextManager::new(100_000);
         manager.restore_state(&restored);
         let messages = manager.build_messages("");
         assert!(
@@ -4227,7 +4229,7 @@ mod tests {
         // The persisted context records keep the reasoning OUT of the model
         // context.
         let state = store.load_context("6000").unwrap();
-        let mut cm = cosh::harness::context::ContextManager::new(100_000);
+        let mut cm = crate::harness::context::ContextManager::new(100_000);
         cm.restore_state(&state);
         let msgs = cm.build_messages("");
         assert!(
@@ -4329,7 +4331,7 @@ mod tests {
 
         // The restored snapshot keeps the error OUT of the model context.
         let state = store.load_context("8100").unwrap();
-        let mut cm = cosh::harness::context::ContextManager::new(100_000);
+        let mut cm = crate::harness::context::ContextManager::new(100_000);
         cm.restore_state(&state);
         let msgs = cm.build_messages("");
         assert_eq!(msgs.len(), 1, "only the user prompt reaches the model");
@@ -4530,7 +4532,7 @@ mod tests {
 
     #[test]
     fn legacy_fragment_restart_appends_whole_item_staging_without_rewriting_history() {
-        use cosh::harness::context::ContextManager;
+        use crate::harness::context::ContextManager;
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(&dir);
         let session = make_test_session(
@@ -4614,7 +4616,7 @@ mod tests {
 
     #[test]
     fn unverified_staging_migration_only_appends_and_preserves_committed_checkpoints() {
-        use cosh::harness::context::ContextManager;
+        use crate::harness::context::ContextManager;
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(&dir);
         let session = make_test_session("staging-upgrade", "Upgrade", vec![]);
@@ -4661,7 +4663,7 @@ mod tests {
 
     #[test]
     fn map_reduce_progress_checkpoint_and_branches_replay_from_one_immutable_history() {
-        use cosh::harness::context::ContextManager;
+        use crate::harness::context::ContextManager;
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(&dir);
         let mut manager = ContextManager::new(2_000);
@@ -4861,7 +4863,7 @@ mod tests {
             ContextItem::Compaction {
                 id: 2,
                 summary: "the anchor".into(),
-                covered_ranges: vec![cosh::harness::context::ContextItemRange {
+                covered_ranges: vec![crate::harness::context::ContextItemRange {
                     start_id: 1,
                     end_id: 1,
                 }],
@@ -4878,7 +4880,7 @@ mod tests {
         assert_eq!(reverted.items.len(), 1);
         assert_eq!(reverted.items[0].id(), 1);
         assert_eq!(reverted.visible_from, None, "the anchor is gone");
-        let mut cm = cosh::harness::context::ContextManager::new(100_000);
+        let mut cm = crate::harness::context::ContextManager::new(100_000);
         cm.restore_state(&reverted);
         let msgs = cm.build_messages("");
         assert_eq!(msgs.len(), 1);
@@ -4892,7 +4894,7 @@ mod tests {
         let child = store.load_context("7400-child").unwrap();
         assert_eq!(child.items.len(), 2);
         assert_eq!(child.visible_from, None);
-        let mut child_manager = cosh::harness::context::ContextManager::new(100_000);
+        let mut child_manager = crate::harness::context::ContextManager::new(100_000);
         child_manager.restore_state(&child);
         let messages = child_manager.build_messages("");
         assert_eq!(messages.len(), 1, "the checkpoint covers its source");
@@ -4936,7 +4938,7 @@ mod tests {
 
     #[test]
     fn map_reduce_staging_write_amplification_measurement() {
-        use cosh::harness::context::ContextManager;
+        use crate::harness::context::ContextManager;
         let dir = tempfile::tempdir().unwrap();
         let store = test_store(&dir);
         let mut manager = ContextManager::new(2_000);

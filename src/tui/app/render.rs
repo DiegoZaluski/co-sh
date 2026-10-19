@@ -852,7 +852,7 @@ impl App {
                     }
 
                     let unique_agents = self.state.unique_agents();
-                    let agent_colors = crate::types::AgentColors::from_theme(&self.theme);
+                    let agent_colors = crate::agent_colors::AgentColors::from_theme(&self.theme);
                     // End-cap color for the pending-queue strip: the current
                     // harness mode's hue (same one the prompt's mode
                     // indicator paints with).
@@ -1129,7 +1129,7 @@ impl App {
             // Its borders and selection follow the current harness mode's
             // color, like the prompt's own rails.
             let unique_agents = self.state.unique_agents();
-            let agent_colors = crate::types::AgentColors::from_theme(&self.theme);
+            let agent_colors = crate::agent_colors::AgentColors::from_theme(&self.theme);
             let mode_color = crate::component::prompt::agent_mode_color(
                 &self.theme,
                 &agent_colors,
@@ -1258,7 +1258,7 @@ impl App {
             return;
         }
         let unique_agents = self.state.unique_agents();
-        let agent_colors = crate::types::AgentColors::from_theme(&self.theme);
+        let agent_colors = crate::agent_colors::AgentColors::from_theme(&self.theme);
         let cap_color = crate::component::prompt::agent_mode_color(
             &self.theme,
             &agent_colors,

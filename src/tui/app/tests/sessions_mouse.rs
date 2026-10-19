@@ -1,7 +1,7 @@
 use super::{App, HOME_LOCK, isolate_home};
 use crate::left_panel::LEFT_PANEL_WIDTH;
 use crate::left_panel::Mode;
-use crate::session_store::generate_session_id;
+use crate::session::store::generate_session_id;
 use crate::types::{Message, MessageRole, Part, TextPart};
 use crate::ui::dialogs::DialogType;
 use crossterm::event::{
@@ -61,7 +61,7 @@ fn build_many() -> App {
     for i in 0..40 {
         app.state
             .session_summaries
-            .push(crate::session_store::SessionSummary {
+            .push(crate::session::store::SessionSummary {
                 session_id: format!("history-{i}"),
                 title: format!("session {i}"),
                 created_at: i as u64,
@@ -102,7 +102,7 @@ fn build_small() -> App {
     for i in 0..3 {
         app.state
             .session_summaries
-            .push(crate::session_store::SessionSummary {
+            .push(crate::session::store::SessionSummary {
                 session_id: format!("history-{i}"),
                 title: format!("session {i}"),
                 created_at: i as u64,
@@ -473,7 +473,7 @@ async fn click_on_a_session_locked_elsewhere_shows_a_toast_that_survives_the_tit
     // A foreign cosh process holds the session open: an independent store
     // claiming the same session id takes the kernel lock on the same
     // session-{id}.lock file, so the app's own claim must fail.
-    let foreign = crate::session_store::SessionStore::new();
+    let foreign = crate::session::store::SessionStore::new();
     assert!(foreign.try_lock_session("history-0"));
 
     // Click the title (row 2, x=6 — inside "session 0"'s span).
@@ -671,7 +671,7 @@ async fn hover_over_session_row_moves_the_selection_on_home() {
     for i in 0..3 {
         app.state
             .session_summaries
-            .push(crate::session_store::SessionSummary {
+            .push(crate::session::store::SessionSummary {
                 session_id: format!("history-{i}"),
                 title: format!("session {i}"),
                 created_at: i as u64,

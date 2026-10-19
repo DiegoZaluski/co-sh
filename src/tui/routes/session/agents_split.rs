@@ -2572,11 +2572,32 @@ fn highlight_selection(buf: &mut Buffer, state: &AgentsSplitState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::AgentPaneRef;
     use crate::routes::session::right_panel::types::SubagentTimelineEntry;
     use crate::theme::ThemeRegistry;
 
     fn test_theme() -> Theme {
         ThemeRegistry::new().default_theme().clone()
+    }
+
+    /// `from_ref` seeds the ACP session id only for bound panes; a fresh
+    /// pick stays sessionless. (Moved from the former tui/types.rs tests —
+    /// it exercises `AgentPane`, which lives here.)
+    #[test]
+    fn from_ref_seeds_the_session_id_only_for_bound_panes() {
+        let bound = AgentPaneRef::Bound {
+            agent: "kilo".to_string(),
+            session_id: "resume-me".to_string(),
+        };
+        let pane = AgentPane::from_ref(&bound);
+        assert_eq!(pane.agent, "kilo");
+        assert_eq!(pane.session_id.as_deref(), Some("resume-me"));
+
+        // Fresh pick: unbound.
+        let fresh = AgentPaneRef::Name("kilo".to_string());
+        let pane = AgentPane::from_ref(&fresh);
+        assert_eq!(pane.agent, "kilo");
+        assert!(pane.session_id.is_none());
     }
 
     /// Layout invariants for one (n, area) pair: exact pane count, containment,

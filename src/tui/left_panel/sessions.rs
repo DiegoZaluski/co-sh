@@ -6,7 +6,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 
 use crate::left_panel::layout::SessionListLayout;
-use crate::session_store::SessionSummary;
+use crate::session::store::SessionSummary;
 use crate::theme::{Theme, rgba_color};
 use crate::types::SessionStatus;
 use crate::util::draw::draw_text_line;

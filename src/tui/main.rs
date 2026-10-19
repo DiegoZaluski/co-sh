@@ -1,31 +1,24 @@
 #![allow(dead_code)]
 
+mod agent_colors;
 mod app;
 mod component;
-mod config;
-mod fallback;
 mod keymap;
 mod left_panel;
 mod logo;
 mod lsp_colors;
-mod notification;
 mod routes;
-mod session_history;
-mod session_snapshots;
-mod session_store;
 mod state;
 mod theme;
 mod transcript_export;
-mod types;
 mod ui;
-mod update;
-mod usage;
 mod util;
-/// The weights installer's application side (config → install → events).
-/// Only meaningful with the ONNX engine: without the feature the decision
-/// model cannot load, so the module compiles empty.
+// Application modules that live in the library now (moved out of the TUI);
+// aliased at the bin root so `crate::x` paths in the app keep resolving.
+use cosh::{config, fallback, notification, session, types, update, usage};
+
 #[cfg(feature = "onnx")]
-mod weights;
+use cosh::weights;
 
 #[cfg(test)]
 #[path = "test/rag_abort.rs"]

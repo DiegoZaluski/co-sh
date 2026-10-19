@@ -1094,7 +1094,7 @@ fn run_manager_turn(
     skills_config: SkillsConfig,
     session_id: String,
     context: Option<cosh::harness::ContextManagerState>,
-    store: crate::session_store::SessionStore,
+    store: crate::session::store::SessionStore,
     event_tx: tokio::sync::mpsc::UnboundedSender<HarnessEvent>,
 ) {
     let connector = match connector {
@@ -1571,7 +1571,7 @@ fn manager_context_display(
 /// replace its display messages with the fresh projection, and enqueue the
 /// save with the context snapshot. A missing shell (first turn) builds one.
 fn persist_manager_session(
-    store: &crate::session_store::SessionStore,
+    store: &crate::session::store::SessionStore,
     session_id: &str,
     display: Vec<(crate::types::MessageRole, String, Option<String>)>,
     context: cosh::harness::ContextManagerState,

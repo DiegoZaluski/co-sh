@@ -38,7 +38,7 @@ use crate::routes::session::queue_choice::QueueTarget;
 use crate::routes::session::right_panel::{RIGHT_PANEL_WIDTH, should_show_right_panel};
 use crate::routes::settings::SettingsView;
 use crate::routes::tools::InternalToolsView;
-use crate::session_store::SessionStore;
+use crate::session::store::SessionStore;
 use crate::state::AppState;
 use crate::theme::{Theme, ThemeRegistry};
 use crate::types::SessionStatus;

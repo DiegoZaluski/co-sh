@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use cosh::harness::context::ContextManager;
 
-use crate::session_store::SessionStore;
+use crate::session::store::SessionStore;
 use crate::types::Session;
 
 /// Export the CURRENT agent-visible transcript of `session` as Markdown into
