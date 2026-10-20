@@ -322,6 +322,12 @@ impl App {
         } else {
             fallbacks
         };
+        // The recipe consumes the fallback chain as plain (provider, model)
+        // pairs.
+        let fallbacks: Vec<(String, String)> = fallbacks
+            .into_iter()
+            .map(|fb| (fb.provider, fb.model))
+            .collect();
         let stop_signal = self.stop_signal.clone();
         let input = msg;
         let cwd = self.state.working_directory.clone();
@@ -356,16 +362,13 @@ impl App {
 
         let mut disabled_tools = self.internal_tools_view.disabled.clone();
 
-        // Manager mode: while the `/agents` split is OPEN, the MAIN agent
-        // is the session's coordinator (its unfocused `Ctrl+0` target): it
-        // runs with the manager instructions and the manager tool set —
-        // read tools plus `bash_run`, never the workspace-mutating tools.
-        // With the split parked or closed the loop is the plain
-        // normal-mode agent again.
-        let manager_mode = self.agents_split.is_some();
-        if manager_mode {
-            disabled_tools = super::agents_dispatch::manager_disabled_tools(&disabled_tools);
-        }
+        // Ctrl+0 (no pane focused) does NOT change this loop: the main
+        // agent runs its own mode's normal prompt and tool set whether or
+        // not the `/agents` split is open — the manager/pane prompts and
+        // the coordinator blocklist are gone. Coordination stays available
+        // through `agents_call`, and the anti-replication invariants live
+        // in the harness itself (`with_own_pane_id` + the dispatch guards),
+        // never in the main loop's assembly.
 
         // Registered MCP servers (Settings screen → setup.json). Cloned
         // into the agent thread; the boot `connect_all` isolates
@@ -387,13 +390,6 @@ impl App {
         // once per assembly — fail-open disables the audit on load error.
         #[cfg(feature = "onnx")]
         let checkup_config = self.setup.decision.clone();
-        // The explanation streamed during a lazy weights install (only when
-        // a download actually ran this turn). Added to the agent context
-        // right after the state restore below — the TUI already rendered it
-        // as an assistant message, so both sides agree.
-        #[cfg(feature = "onnx")]
-        let mut weights_explanation: Option<String> = None;
-
         // RAG recall context
         // 1) Description suffix (what the model sees in the tool doc)
         #[cfg(feature = "embed")]
@@ -427,327 +423,80 @@ impl App {
 
         std::thread::spawn(move || {
             use std::panic::AssertUnwindSafe;
-            use std::sync::OnceLock;
-            use tokio::runtime::Runtime;
 
-            // One runtime for the whole process, not one per turn: the LSP
-            // singleton's ingestion/auto-discovery tasks and the language
-            // servers' transport tasks must outlive individual turns — a
-            // per-turn runtime would kill them (and, via `kill_on_drop`, the
-            // server processes) the moment a turn ends.
-            static RUNTIME: OnceLock<Runtime> = OnceLock::new();
-            let rt = RUNTIME.get_or_init(|| Runtime::new().expect("shared agent runtime"));
+            let rt = super::harness_recipe::agent_runtime();
 
             let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
                 rt.block_on(async {
-                    use cosh::harness::Harness;
-                    use cosh_sdk::connector::Connector;
+                    use super::harness_recipe::{HarnessAssembly, assemble, run_assembled_loop};
 
-                    let connector;
-                    let mut remaining: Vec<(String, String)> = Vec::new();
-                    // Apply the session-level prompt-cache settings to every
-                    // connector this loop builds: TTL/retention choices,
-                    // the cache-affinity key, the retention choice and the
-                    // session-affinity headers. Each field is only read by
-                    // the caller that implements it (Claude TTL, OpenAI
-                    // key/retention, `x-session-affinity` routing), so
-                    // applying them unconditionally is safe across fallback
-                    // families. The session-affinity headers pin the whole
-                    // session to one cache-warm backend (Charm Hyper et al.).
-                    let apply_cache = |c: Connector| {
-                        let c = c.with_prompt_cache_ttl_1h(anthropic_ttl_1h);
-                        let c = match &cache_key {
-                            Some(id) => c.with_prompt_cache_key(id),
-                            None => c,
-                        };
-                        let c = match &cache_key {
-                            Some(id) => c.with_session_id(super::session_affinity_id(id)),
-                            None => c,
-                        };
-                        match &openai_cache_retention {
-                            Some(retention) => c.with_prompt_cache_retention(retention),
-                            None => c,
+                    // ONE assembly recipe (harness_recipe.rs): the connector,
+                    // cache headers, MCP, RAG, effective-context budget and
+                    // skills are decided here and built by the shared
+                    // assembler — the main loop adds only its own session
+                    // identity (the mode's normal prompt comes with the
+                    // mode; no instruction override).
+                    let assembly = HarnessAssembly {
+                        provider,
+                        model,
+                        reasoning,
+                        tool_call_mode,
+                        base_url,
+                        local_base_urls,
+                        fallbacks,
+                        summarization_models,
+                        cwd,
+                        mode,
+                        disabled_tools,
+                        // The mode's OWN instructions (None = the harness
+                        // applies the mode's default prompt): manager-mode
+                        // overrides are gone — Ctrl+0 with no focused pane
+                        // runs the plain normal-mode agent, coordination
+                        // rides `agents_call` and the anti-replication
+                        // invariants live in the harness itself.
+                        instructions: None,
+                        anthropic_ttl_1h,
+                        openai_cache_retention,
+                        cache_key,
+                        mcp_config,
+                        skills_config,
+                        effective_context,
+                        #[cfg(feature = "onnx")]
+                        checkup: Some(checkup_config),
+                        #[cfg(feature = "embed")]
+                        recall: Some((recall_suffix, recall_dbs)),
+                        ctx_state,
+                        // The MAIN loop: MAIN requester tag, owns no pane
+                        // (keeps `agents_call`).
+                        as_manager: false,
+                        own_pane_id: None,
+                    };
+
+                    let mut harness = match assemble(assembly, &event_tx).await {
+                        Ok(harness) => harness,
+                        // An assembly failure IS the turn's error: surface
+                        // it through the same channel the loop's own errors
+                        // ride (the pane closes its turn with it instead).
+                        Err(message) => {
+                            let _ = event_tx.send(HarnessEvent::Error {
+                                message,
+                                context: None,
+                                checkup_verdict: None,
+                            });
+                            return;
                         }
                     };
-                    if model.as_deref() == Some("auto") {
-                        let mut last_err = String::new();
-                        let mut found = None;
-                        for (i, fb) in fallbacks.iter().enumerate() {
-                            match Connector::new(&fb.provider) {
-                                Ok(c) => {
-                                    let mut c =
-                                        c.with_model(&fb.model).with_tool_call_mode(tool_call_mode);
-                                    // Honor a configured local server URL for
-                                    // this fallback provider, if any.
-                                    if let Some(url) = local_base_urls.get(&fb.provider) {
-                                        c = c.with_base_url(url.clone());
-                                    }
-                                    // The user chose a reasoning effort for
-                                    // auto mode — apply it, mapped onto the
-                                    // closest level THIS model accepts (a
-                                    // model without the knob drops it). The
-                                    // harness re-resolves per model on every
-                                    // fallback switch.
-                                    if let Some(r) = reasoning.as_deref()
-                                        && let Some(resolved) =
-                                            cosh_sdk::connector::resolve_reasoning_effort(
-                                                &fb.model,
-                                                r,
-                                                Some("cosh/cache"),
-                                            )
-                                    {
-                                        c = c.with_reasoning_effort(resolved);
-                                    }
-                                    found = Some((apply_cache(c), i));
-                                    break;
-                                }
-                                Err(e) => {
-                                    last_err = format!("connector for {}: {e}", fb.provider);
-                                }
-                            }
-                        }
-                        match found {
-                            Some((c, idx)) => {
-                                remaining = fallbacks[idx + 1..]
-                                    .iter()
-                                    .map(|fb| (fb.provider.clone(), fb.model.clone()))
-                                    .collect();
-                                connector = c;
-                            }
-                            None => {
-                                let _ = event_tx.send(HarnessEvent::Error {
-                                    message: format!("auto: no fallback available ({last_err})"),
-                                    context: None,
-                                    checkup_verdict: None,
-                                });
-                                return;
-                            }
-                        }
-                    } else {
-                        match Connector::new(&provider) {
-                            Ok(c) => {
-                                let with_model = if let Some(ref m) = model {
-                                    c.with_model(m)
-                                } else {
-                                    c
-                                };
-                                // Honor a configured local server URL.
-                                let with_model = if let Some(ref url) = base_url {
-                                    with_model.with_base_url(url.clone())
-                                } else {
-                                    with_model
-                                };
-                                // Apply the user's tool-call mode (native /
-                                // inline) — the two delivery paths are
-                                // mutually exclusive at the request level.
-                                let with_model = with_model.with_tool_call_mode(tool_call_mode);
-                                let with_model = if let Some(ref r) = reasoning {
-                                    // Map the chosen level onto the closest
-                                    // one the model actually accepts (e.g.
-                                    // "medium" on a low/high-only model) —
-                                    // never send a knob that would 400 or be
-                                    // silently ignored.
-                                    let effective = model
-                                        .as_deref()
-                                        .and_then(|m| {
-                                            cosh_sdk::connector::resolve_reasoning_effort(
-                                                m,
-                                                r,
-                                                Some("cosh/cache"),
-                                            )
-                                        })
-                                        .unwrap_or_else(|| r.clone());
-                                    with_model.with_reasoning_effort(effective)
-                                } else {
-                                    with_model
-                                };
-                                connector = apply_cache(with_model);
-                            }
-                            Err(e) => {
-                                let _ = event_tx.send(HarnessEvent::Error {
-                                    message: format!("connector: {e}"),
-                                    context: None,
-                                    checkup_verdict: None,
-                                });
-                                return;
-                            }
-                        }
-                    }
 
-                    let mut harness = Harness::new(connector, &cwd, disabled_tools)
-                        .with_mode(mode)
-                        .with_fallbacks(remaining)
-                        .with_summarization_models(summarization_models)
-                        .with_local_base_urls(local_base_urls)
-                        .with_skills(skills_config.to_skills())
-                        .with_mcp_config(mcp_config)
-                        .with_effective_context(effective_context);
-                    // Manager mode (the `/agents` split is open): the main
-                    // loop coordinates the panes through `agents_call`
-                    // instead of building — same instructions + tool set
-                    // as a cosh-pane manager turn.
-                    if manager_mode {
-                        harness =
-                            harness.with_instructions(cosh::harness::core::INSTRUCTIONS_MANAGER);
-                    }
-
-                    // The decision-model audit seam (`harness::checkup`),
-                    // attached over the SHARED decision daemon: the model
-                    // (graph + ORT session) is resident in one daemon
-                    // process every cosh instance talks to, instead of one
-                    // per-process resident per open app. The daemon loads
-                    // the model on the first decide (with its own retry
-                    // window), so assembly never blocks on a load; any
-                    // daemon failure is a per-review fail-open, and the
-                    // loop behaves exactly as without the model. The
-                    // harness never chooses which model to load; a future
-                    // consumer of the engine passes its own kind the same
-                    // way.
-                    #[cfg(feature = "onnx")]
-                    if checkup_config.termination.enabled {
-                        use cosh::daemon::decision::{IpcCheckup, Kind};
-                        use cosh::harness::events::{HarnessEvent, ToastVariant};
-
-                        // The audit's kind resolves through the WEIGHTS
-                        // MIRROR: the installer fills the shared hf-hub
-                        // cache (cache-first, lazy — only when this turn's
-                        // checkup is enabled and the checkpoint is not
-                        // cached yet), and the daemon's loader probes that
-                        // snapshot. The daemon kind is `Custom` over the
-                        // mirror checkpoint, NOT the configured kind — the
-                        // named kinds name the MIRROR's subfolders now.
-                        let attach_kind = |kind: Kind, harness: Harness| -> Harness {
-                            let checkup = IpcCheckup::new(kind);
-                            harness
-                                .with_checkup(std::sync::Arc::new(checkup))
-                                .with_checkup_min_confidence(
-                                    checkup_config.termination.min_confidence,
-                                )
-                        };
-                        let invalid_setup = || {
-                            // Invalid config is a broken SETUP, not a turn
-                            // failure: toast and assemble WITHOUT the
-                            // audit (fail-open) — never abort the turn.
-                            let _ = event_tx.send(HarnessEvent::Toast {
-                                message: "Termination checkup enabled but the model config \
-                                          is invalid; the audit is disabled."
-                                    .to_string(),
-                                variant: ToastVariant::Warning,
-                            });
-                        };
-                        match crate::weights::resolve_target(
-                            &checkup_config.model,
-                            &checkup_config.hub,
-                        ) {
-                            Some(target) => {
-                                match crate::weights::ensure_installed(
-                                    target.clone(),
-                                    event_tx.clone(),
-                                )
-                                .await
-                                {
-                                    // Installed (or already cached): the
-                                    // daemon loads the mirror snapshot the
-                                    // installer filled.
-                                    Ok(explanation) => {
-                                        weights_explanation = explanation;
-                                        harness = attach_kind(target.to_kind(), harness);
-                                    }
-                                    // Download failed: fail-open — toast
-                                    // (the Failed event already toasted)
-                                    // and assemble WITHOUT the audit.
-                                    Err(_) => {}
-                                }
-                            }
-                            // No mirror target (a local checkpoint, or a
-                            // config the resolver can't turn into one):
-                            // keep the plain serde conversion so a local
-                            // Custom kind still reaches the daemon.
-                            None => {
-                                let wire_kind: Option<Kind> =
-                                    serde_json::to_value(&checkup_config.model)
-                                        .ok()
-                                        .and_then(|v| serde_json::from_value(v).ok());
-                                match wire_kind {
-                                    Some(kind) => harness = attach_kind(kind, harness),
-                                    None => invalid_setup(),
-                                }
-                            }
-                        }
-                    }
-
-                    // Connect MCP servers before the header snapshot: the
-                    // first extractor/native-tools view must see them.
-                    if let Err(err) = harness.connect_mcp().await {
-                        use cosh::harness::events::{HarnessEvent, ToastVariant};
-                        let _ = event_tx.send(HarnessEvent::Toast {
-                            message: format!("MCP config invalid: {err}"),
-                            variant: ToastVariant::Warning,
-                        });
-                    }
-                    // Per-server connection failures are isolated by the
-                    // manager — surface them: a failed server used to show
-                    // only as a silent footer count with no explanation.
-                    // Detail (including which credential failed and why)
-                    // lives in the snapshot's `last_error`; this toast is
-                    // the pointer, one per failing server.
-                    let failed: Vec<cosh::mcp::ServerSnapshot> = harness
-                        .mcp_snapshots()
-                        .into_iter()
-                        .filter(|s| matches!(s.status, cosh::mcp::ServerStatus::Failed))
-                        .collect();
-                    if !failed.is_empty() {
-                        use cosh::harness::events::{HarnessEvent, ToastVariant};
-                        let detail: String = failed
-                            .iter()
-                            .map(|s| {
-                                format!(
-                                    "  · {}: {}",
-                                    s.name,
-                                    s.last_error.as_deref().unwrap_or("unknown error")
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        let _ = event_tx.send(HarnessEvent::Toast {
-                            message: format!(
-                                "{} MCP server(s) failed to connect:\n{detail}",
-                                failed.len()
-                            ),
-                            variant: ToastVariant::Error,
-                        });
-                    }
-
-                    // Restore the authoritative context from the session
-                    // file's context records. No context — no history; the
-                    // display transcript is never fed to the model.
-                    if let Some(ref state) = ctx_state {
-                        harness.context_manager.restore_state(state);
-                    }
-                    // The weights installer's explanation: the TUI already
-                    // rendered it as a real assistant message — record the
-                    // SAME text here so the model's history agrees with the
-                    // transcript. NOT closable: it is context, not a turn
-                    // that may close the loop.
-                    #[cfg(feature = "onnx")]
-                    if let Some(explanation) = weights_explanation.as_deref() {
-                        harness.context_manager.add_assistant(explanation, false);
-                    }
-                    #[cfg(feature = "embed")]
-                    harness.set_recall_context(recall_suffix);
-                    #[cfg(feature = "embed")]
-                    harness.set_recall_dbs(recall_dbs);
-                    harness.format_header_context();
-                    harness
-                        .run_agent_loop_with_queued_input(
-                            &input,
-                            event_tx,
-                            answer_rx,
-                            perm_rx,
-                            stop_signal,
-                            queued_input.clone(),
-                        )
-                        .await;
+                    run_assembled_loop(
+                        &mut harness,
+                        &input,
+                        event_tx,
+                        answer_rx,
+                        perm_rx,
+                        stop_signal,
+                        Some(queued_input.clone()),
+                    )
+                    .await;
                 });
             }));
 

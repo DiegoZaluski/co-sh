@@ -395,6 +395,30 @@ pub fn fail_serving(pane: &str, error: String) {
     }
 }
 
+/// Fail ALL of a pane's outstanding requests — in-flight AND queued — and
+/// drop the pane from the registry entirely. For a pane set that dies as a
+/// WHOLE (a session switch, the app quitting): the pane will never serve
+/// anything again in this process, so a leftover queued request would hang
+/// its requester's busy-guard forever (`has_outstanding_requests` stuck
+/// true with nobody left to dispatch it) — the same terminal state a
+/// leftover serving entry causes, one step earlier in the pipeline. Unlike
+/// [`fail_serving`] (single in-flight turn) and [`set_panes`] (set
+/// replacement, where surviving panes keep serving), this is the
+/// point-of-no-return failure.
+pub fn fail_pane(pane: &str, error: String) {
+    let mut state = registry().lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(request) = state.serving.remove(pane) {
+        fail_wait(&mut state, &request.id, error.clone());
+    }
+    if let Some(queue) = state.queues.remove(pane) {
+        for request in queue {
+            fail_wait(&mut state, &request.id, error.clone());
+        }
+    }
+    state.panes.retain(|p| p.id != pane);
+    state.deliveries.retain(|d| d.pane != pane);
+}
+
 /// Cancel every outstanding request from `requester` whose wait is still
 /// unresolved: the pane queue entries are dropped and the waiters resolve
 /// with the failure. Called on the requester loop's stop (Esc) — a stopped
@@ -660,6 +684,50 @@ mod tests {
         );
         let answer = block_on(async move { rx.await.expect("sender alive") });
         assert_eq!(answer, Ok("done".to_string()));
+    }
+
+    /// The point-of-no-return failure (a session switch / going Home): a
+    /// pane that will never serve again must lose its in-flight AND queued
+    /// requests — every waiter unblocks with the failure, the pane leaves
+    /// the registry (`has_panes` drops), and no queued entry survives to
+    /// hang a busy-guard (`has_outstanding_requests` false) or be served
+    /// cross-session by a later pane reusing the same id.
+    #[test]
+    fn fail_pane_clears_every_outstanding_request_and_the_descriptor() {
+        let _g = lock();
+        set_panes(vec![pane("claude", "claude", false)]);
+        // One in-flight (the App dispatched it) + one still queued wait,
+        // and one background request parked for its drain.
+        let inflight = enqueue("claude", "working on it", MAIN, ReplyMode::Wait).unwrap();
+        let queued = enqueue("claude", "waiting its turn", MAIN, ReplyMode::Wait).unwrap();
+        let queued_rx = queued.receiver.expect("wait mode carries a receiver");
+        assert!(pop_next_request("claude").is_some(), "dispatched");
+        let background = enqueue("claude", "fire and forget", MAIN, ReplyMode::Background).unwrap();
+
+        fail_pane("claude", "the session switched away".to_string());
+
+        // Every waiter resolved with the failure — the tool's `select!`
+        // unblocks instead of hanging.
+        assert_eq!(
+            block_on(async move {
+                inflight.receiver.expect("wait").await.expect("sender alive")
+            }),
+            Err("the session switched away".to_string())
+        );
+        assert_eq!(
+            block_on(async move {
+                queued_rx.await.expect("sender alive")
+            }),
+            Err("the session switched away".to_string())
+        );
+        // Nothing outstanding on either side, nothing drainable, no pane.
+        assert!(!has_outstanding_requests(MAIN));
+        assert!(take_ready_deliveries(MAIN).is_empty());
+        assert!(!has_panes());
+        assert!(
+            enqueue("claude", "again", MAIN, ReplyMode::Wait).is_err(),
+            "the dead pane id no longer resolves"
+        );
     }
 
     #[test]
