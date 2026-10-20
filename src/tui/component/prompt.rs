@@ -326,14 +326,27 @@ impl PromptView {
     /// Navigate up through user messages from the current session.
     /// `user_msgs` should be the text of all user messages in the session,
     /// oldest first (index 0 = first message).
+    ///
+    /// `history_index` is only reset by typing/sending, so it can survive a
+    /// session switch and arrive here pointing past the NEW session's
+    /// history (browse high in a long session, switch to a short one, press
+    /// Ctrl+Up). Clamp the carried index into range before indexing — the
+    /// single guard that covers every switch path (keyboard, mouse, fork
+    /// and revert dialogs), each of which leaves the draft untouched.
     pub fn history_up(&mut self, user_msgs: &[String]) {
         if user_msgs.is_empty() {
             return;
         }
+        let last = i32::try_from(user_msgs.len()).unwrap_or(i32::MAX) - 1;
         if self.history_index == -1 {
-            self.history_index = i32::try_from(user_msgs.len()).unwrap_or(i32::MAX) - 1;
+            self.history_index = last;
         } else if self.history_index > 0 {
             self.history_index -= 1;
+        }
+        // A carried index may already exceed the new session's history:
+        // clamp it to the oldest entry instead of indexing out of bounds.
+        if self.history_index > last {
+            self.history_index = last;
         }
         self.input = user_msgs[usize::try_from(self.history_index).unwrap_or(0)].clone();
         self.cursor_pos = self.input.len();
@@ -344,6 +357,14 @@ impl PromptView {
     pub fn history_down(&mut self, user_msgs: &[String]) {
         if self.history_index == -1 {
             return;
+        }
+        let last = i32::try_from(user_msgs.len()).unwrap_or(i32::MAX) - 1;
+        // Same clamp as `history_up`: an index carried across a session
+        // switch may already sit past this session's history. Rather than
+        // step one further out of range, resume from the oldest entry so
+        // the walk down continues within the new session.
+        if self.history_index > last {
+            self.history_index = last;
         }
         self.history_index += 1;
         if self.history_index >= i32::try_from(user_msgs.len()).unwrap_or(i32::MAX) {

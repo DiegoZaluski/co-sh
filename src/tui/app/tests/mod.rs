@@ -50,6 +50,8 @@ fn isolate_home() {
 }
 
 mod agent_loop;
+mod agents_click_probe;
+mod history_panic_probe;
 mod commands;
 mod cost;
 mod dialogs;

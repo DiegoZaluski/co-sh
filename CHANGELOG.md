@@ -100,6 +100,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed a panic (index out of range) that froze the TUI when pressing
+  Ctrl+Up right after switching to a session with fewer messages: the
+  prompt's history-navigation index survived the switch and indexed past
+  the end of the shorter history. Both history navigation directions now
+  clamp the carried index into range. Covered by regression tests in
+  `tui::app::tests::history_panic_probe`.
 - Setup settings no longer vanish during sessions. `setup.json` saves were
   a plain whole-file rewrite with no locking: two cosh processes running
   side by side performed a lost update (the last save silently discarded
