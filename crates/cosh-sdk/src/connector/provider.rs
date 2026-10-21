@@ -3,7 +3,7 @@
 //!
 use keyring::Entry;
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{LazyLock, Mutex, PoisonError, RwLock};
 use zeroize::Zeroizing;
 
 /// Default keyring service under which cosh stores its API keys.
@@ -594,6 +594,144 @@ pub fn get_provider(name: &str) -> Option<&'static ProviderConfig> {
         .iter()
         .find(|(key, _)| *key == name)
         .map(|(_, config)| config)
+        .or_else(|| custom_provider_lookup(name))
+}
+
+/// User-registered provider endpoints (Settings → Integrations → Custom
+/// providers). Registration leaks its [`ProviderConfig`] once per explicit
+/// save (same contract as the ACP agent registry) and stores the
+/// `&'static` pointer: registry replaces drop only the pointer Vec, never
+/// a config another caller may still hold.
+static CUSTOM_PROVIDERS: RwLock<Vec<&'static ProviderConfig>> = RwLock::new(Vec::new());
+
+/// Look a name up in the user-registered table only. The built-in table
+/// always wins (checked first in [`get_provider`]), so this never shadows.
+fn custom_provider_lookup(name: &str) -> Option<&'static ProviderConfig> {
+    CUSTOM_PROVIDERS
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .copied()
+        .find(|cfg| cfg.name == name)
+}
+
+/// Register the user-registered provider set (Settings save path).
+/// `entries` maps base URL → family per provider name. Names must be
+/// single words (they key the model picker and routing config), must not
+/// collide with a built-in name even in different case, must not duplicate
+/// each other, and the base URL must parse as `http(s)`. Any violation
+/// rejects the whole call, so a typo can never shadow a built-in or hide a
+/// sibling.
+///
+/// Keys resolve through the shared keyring path under the provider's own
+/// name (`cosh` service, `<NAME>_API_KEY` env var) — the same storage the
+/// API-key dialog writes.
+///
+/// # Errors
+///
+/// Returns an error when a name is empty or multi-word, duplicates a
+/// built-in provider, duplicates another entry in the same call (even in
+/// different case), or a base URL is not a valid http(s) URL. A rejected
+/// call leaves the registry untouched; configs leaked before the
+/// violation stay leaked (bounded by the call's size, unreachable from
+/// any lookup — same tolerance as the ACP agent registry).
+pub fn register_custom_providers(
+    entries: Vec<(String, String, Family)>,
+) -> Result<(), String> {
+    let mut configs: Vec<&'static ProviderConfig> = Vec::with_capacity(entries.len());
+    for (name, base_url, family) in entries {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("Provider name is required.".into());
+        }
+        if name.split_whitespace().count() != 1 {
+            return Err(format!("'{name}' must be a single word (it is the provider id the model picker and routing config use)."));
+        }
+        if PROVIDERS
+            .iter()
+            .any(|(key, _)| key.eq_ignore_ascii_case(name))
+        {
+            return Err(format!(
+                "'{name}' is a built-in provider and cannot be registered again."
+            ));
+        }
+        // Case-insensitive among customs too: `corp` and `CORP` would
+        // otherwise both derive the same `<NAME>_API_KEY` credential and
+        // silently fight over it.
+        if configs.iter().any(|cfg| cfg.name.eq_ignore_ascii_case(name)) {
+            return Err(format!("'{name}' is registered more than once."));
+        }
+        let url = reqwest::Url::parse(base_url.trim())
+            .map_err(|_| format!("'{name}' base URL is not a valid URL."))?;
+        if !matches!(url.scheme(), "http" | "https") {
+            return Err(format!(
+                "'{name}' base URL must be http(s) (got '{}').",
+                url.scheme()
+            ));
+        }
+        // Family gating: the connector ships one wire implementation per
+        // Family variant. Only OpenAI-compatible endpoints are accepted
+        // today; a new family becomes registrable when its caller lands.
+        if family != Family::OpenAICompatible {
+            return Err(format!(
+                "'{name}': family {family:?} has no connector support yet."
+            ));
+        }
+        // Leak the whole config: the registry stores `&'static` pointers,
+        // so every handed-out reference stays valid even after a later
+        // replace swaps the Vec (one leak per explicit user save, the same
+        // contract the ACP agent registry uses — never in a loop).
+        configs.push(Box::leak(Box::new(ProviderConfig {
+            name: Box::leak(name.to_string().into_boxed_str()),
+            family,
+            base_url: Box::leak(base_url.trim().to_string().into_boxed_str()),
+            default_model: "",
+            needs_extra_headers: false,
+            local: false,
+        })));
+    }
+    *CUSTOM_PROVIDERS
+        .write()
+        .unwrap_or_else(PoisonError::into_inner) = configs;
+    Ok(())
+}
+
+/// Names of the user-registered custom providers (registration order), for
+/// callers that enumerate providers beyond the built-in table — the model
+/// picker offers a custom endpoint once its credential resolves.
+#[must_use]
+pub fn custom_provider_names() -> Vec<&'static str> {
+    CUSTOM_PROVIDERS
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .map(|cfg| cfg.name)
+        .collect()
+}
+
+/// Delete a custom provider's keyring credential (Settings removal path):
+/// the `<NAME>_API_KEY` entry under the cosh service, plus its cached
+/// value. A missing entry is success — forgetting an endpoint that never
+/// had a key saved is a no-op, not an error.
+///
+/// # Errors
+///
+/// Returns the keyring error when the credential exists but cannot be
+/// deleted (locked store, platform failure).
+pub fn forget_provider_key(provider: &str) -> Result<(), keyring::Error> {
+    let env_var = custom_provider_env_var(provider);
+    let result = match Entry::new(COSH_SERVICE, &env_var) {
+        Ok(entry) => match entry.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(err) => Err(err),
+        },
+        Err(keyring::Error::NoEntry) => Ok(()),
+        Err(err) => Err(err),
+    };
+    if result.is_ok() {
+        invalidate_api_key(&env_var);
+    }
+    result
 }
 
 /// Keyring first, environment second — the shared resolution used for both
@@ -616,11 +754,37 @@ fn resolve_env_var_key(service: &str, env_var: &str) -> Option<String> {
         })
 }
 
+/// The API-key variable derived for a custom provider: `<NAME>_API_KEY`,
+/// uppercased with hyphens mapped to underscores so the identifier is a
+/// valid shell/env name. The single derivation — `get_api_key` and
+/// [`forget_provider_key`] must agree, or a saved key would resolve under
+/// one spelling and be purged under another.
+#[must_use]
+pub fn custom_provider_env_var(provider: &str) -> String {
+    format!(
+        "{}_API_KEY",
+        provider.to_ascii_uppercase().replace('-', "_")
+    )
+}
+
 pub fn get_api_key(provider: &str, service: Option<&str>) -> Option<String> {
-    let env_var = API_KEY_ENVS
+    // Custom providers resolve under a stable derived variable
+    // (`<NAME>_API_KEY`, uppercased like every table entry) without
+    // leaking a string per call — this runs on every request. The env var
+    // stays a fallback: the keyring (written by the API-key dialog) is
+    // consulted first under the same name.
+    let custom_env = custom_provider_env_var(provider);
+    let env_var: &str = API_KEY_ENVS
         .iter()
         .find(|(key, _)| *key == provider)
-        .map_or("OPENAI_API_KEY", |(_, var)| *var);
+        .map_or_else(
+            || if custom_provider_lookup(provider).is_some() {
+                custom_env.as_str()
+            } else {
+                "OPENAI_API_KEY"
+            },
+            |(_, var)| *var,
+        );
 
     // The OS keyring is the authoritative store for keys saved explicitly
     // through the app (ADD Provider). Prefer it over the process environment
@@ -646,12 +810,22 @@ pub fn get_api_key(provider: &str, service: Option<&str>) -> Option<String> {
     None
 }
 
-/// Return all known provider names.
+/// Return all known provider names: the built-in registry plus every
+/// user-registered custom provider (registry order, then registration
+/// order).
 ///
 /// Useful for enumerating providers in the TUI front-end or for batch
 /// operations (e.g. fetching model lists from every provider).
 pub fn known_providers() -> impl Iterator<Item = &'static str> {
-    PROVIDERS.iter().map(|(name, _)| *name)
+    let mut names: Vec<&'static str> = PROVIDERS.iter().map(|(name, _)| *name).collect();
+    names.extend(
+        CUSTOM_PROVIDERS
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(|cfg| cfg.name),
+    );
+    names.into_iter()
 }
 
 /// Whether a provider runs a local model server (`localhost`) with no API

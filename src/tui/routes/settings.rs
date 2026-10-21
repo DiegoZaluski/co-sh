@@ -39,6 +39,14 @@ const BOX_PAD: usize = 2;
 /// Reorder/remove controls drawn on summarizer-model rows. Render and the
 /// mouse hit zones must agree on this width.
 const SUMMARIZER_CONTROLS: &str = "[ ↑ ] [ ↓ ] [ × ]";
+/// The 🗑 remove glyph drawn at the right edge of MCP/ACP sub-rows. The
+/// hit zone is TWO columns — glyph + the cleared cell after it — the same
+/// width the sessions list reserves (`SessionListLayout::TRASH_W`), so
+/// emoji-wide terminals still land inside the target.
+const TRASH_GLYPH: &str = "🗑";
+/// Columns the 🗑 slot occupies (glyph + cleared cell), mirroring the
+/// sessions list's `TRASH_W`.
+const TRASH_W: u16 = 2;
 
 // Catalog
 
@@ -63,6 +71,11 @@ enum SettingKind {
     ModelList,
     /// Registered MCP servers with their Add action.
     ServerList,
+    /// User-registered ACP harnesses with their Add action.
+    AcpAgentList,
+    /// User-registered custom LLM providers (endpoint URL + API family)
+    /// with their Add action.
+    ProviderList,
     /// Boolean switch flipped in place on activation.
     Switch(SwitchAction),
     /// Value row rendered as "label: value"; activation opens an input box.
@@ -208,17 +221,32 @@ const ENVIRONMENT: SettingsSection = SettingsSection {
     ],
 };
 
-// External capability sources (stdio/HTTP tool servers today; plugins, ACP
-// and similar integrations would land here). Kept semantically separate
-// from Environment (local workspace tooling) so future items have a home.
+// External capability sources (stdio/HTTP tool servers and ACP agent
+// harnesses today; plugins and similar integrations would land here).
+// Kept semantically separate from Environment (local workspace tooling) so
+// future items have a home.
 const INTEGRATIONS: SettingsSection = SettingsSection {
     title: "Integrations",
-    items: &[SettingsItem {
-        id: "mcp",
-        label: "MCP servers",
-        description: "External tool servers connected over stdio or HTTP",
-        kind: SettingKind::ServerList,
-    }],
+    items: &[
+        SettingsItem {
+            id: "mcp",
+            label: "MCP servers",
+            description: "External tool servers connected over stdio or HTTP",
+            kind: SettingKind::ServerList,
+        },
+        SettingsItem {
+            id: "acp_agents",
+            label: "ACP agents",
+            description: "Custom sub-agent harnesses launched over the Agent Client Protocol",
+            kind: SettingKind::AcpAgentList,
+        },
+        SettingsItem {
+            id: "custom_providers",
+            label: "Custom providers",
+            description: "OpenAI-compatible LLM endpoints registered by URL and API family",
+            kind: SettingKind::ProviderList,
+        },
+    ],
 };
 
 const GENERAL: SettingsSection = SettingsSection {
@@ -283,9 +311,6 @@ fn cache_choice_value(id: &str, setup: &Setup) -> Option<String> {
         } else {
             truncate(&setup.skills.dirs.join(":"), COMMAND_PREVIEW_LEN * 2)
         }),
-        // The MCP category row renders as a count, never a ✔/✗ switch:
-        // toggling belongs to the individual server rows below it.
-        "mcp" => Some(format!("{} configured", setup.mcp.servers.len())),
         #[cfg(feature = "onnx")]
         // The row renders "label: value" instead of the ✔/✗ switch, so the
         // value carries BOTH the audit state and the checkpoint identity.
@@ -437,6 +462,104 @@ pub fn validate_hook(
     })
 }
 
+/// Validate one ACP harness form submission and build its persisted entry.
+///
+/// Rules mirror the registry's own constraints: the name is a single word
+/// (it keys the `subagent_call` tool's agent enum) and must not shadow a
+/// built-in agent or another registered entry; the command must be a
+/// non-empty launch line (`command args…`). `editing` is the index being
+/// edited — that entry is exempt from the duplicate-name check so an edit
+/// can keep its own name.
+///
+/// # Errors
+///
+/// Returns a human-readable reason when the form cannot be saved.
+pub fn validate_acp_agent(
+    name: &str,
+    command: &str,
+    existing: &[cosh::setup::AcpAgentEntry],
+    editing: Option<usize>,
+) -> Result<cosh::setup::AcpAgentEntry, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Name is required.".into());
+    }
+    if name.split_whitespace().count() != 1 {
+        return Err("Name must be a single word (it is the agent id the model calls).".into());
+    }
+    if cosh_tools::subagent::acp::ACP_AGENTS
+        .iter()
+        .any(|agent| agent.name.eq_ignore_ascii_case(name))
+    {
+        return Err(format!(
+            "“{name}” is a built-in agent; pick a different name."
+        ));
+    }
+    if existing
+        .iter()
+        .enumerate()
+        .any(|(i, entry)| entry.name == name && Some(i) != editing)
+    {
+        return Err(format!("An agent named “{name}” is already registered."));
+    }
+    let command = command.trim();
+    if command.is_empty() {
+        return Err("Command is required.".into());
+    }
+    Ok(cosh::setup::AcpAgentEntry {
+        name: name.to_string(),
+        command: command.to_string(),
+    })
+}
+
+/// Validate one custom provider registration (name, base URL, family).
+/// The family is free text on the form and normalized here; only
+/// `openai-compatible` is accepted today — the error names the supported
+/// families so a future variant is discoverable from the form itself.
+/// Mirrors [`validate_acp_agent`]: single-word name, no duplicate among the
+/// user's entries; built-in collisions and URL shape are the SDK
+/// registry's authority (checked on save before anything persists).
+pub fn validate_custom_provider(
+    name: &str,
+    base_url: &str,
+    family: &str,
+    existing: &[cosh::setup::CustomProviderEntry],
+    editing: Option<usize>,
+) -> Result<cosh::setup::CustomProviderEntry, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Name is required.".into());
+    }
+    if name.split_whitespace().count() != 1 {
+        return Err("Name must be a single word (it is the id the model picker uses).".into());
+    }
+    if existing
+        .iter()
+        .enumerate()
+        .any(|(i, entry)| entry.name.eq_ignore_ascii_case(name) && Some(i) != editing)
+    {
+        return Err(format!("A provider named “{name}” is already registered."));
+    }
+    if base_url.trim().is_empty() {
+        return Err("Base URL is required.".into());
+    }
+    let family = match family.trim().to_ascii_lowercase().as_str() {
+        "openai-compatible" | "openai" | "openai_compatible" => {
+            cosh::setup::CustomProviderFamily::OpenAiCompatible
+        }
+        other => {
+            return Err(format!(
+                "Family “{other}” is not supported yet. Supported: openai-compatible."
+            ));
+        }
+    };
+    Ok(cosh::setup::CustomProviderEntry {
+        name: name.to_string(),
+        base_url: base_url.trim().to_string(),
+        family,
+    })
+}
+
 // Screen model
 
 /// A selectable row of the Settings screen. Sub-rows exist only while their
@@ -460,6 +583,15 @@ pub enum SettingsRow {
     McpServer(usize),
     /// Register a new MCP server.
     AddMcpServer,
+    /// User-registered ACP harness (index into `setup.acp_agents`).
+    AcpAgent(usize),
+    /// Register a new ACP harness.
+    AddAcpAgent,
+    /// User-registered custom LLM provider (index into
+    /// `setup.custom_providers`).
+    Provider(usize),
+    /// Register a new custom provider.
+    AddProvider,
 }
 
 /// Every rendered line with its vertical offset from the content top.
@@ -498,6 +630,14 @@ enum Line {
         index: usize,
     },
     AddMcpServer,
+    AcpAgent {
+        index: usize,
+    },
+    AddAcpAgent,
+    Provider {
+        index: usize,
+    },
+    AddProvider,
 }
 
 impl Line {
@@ -514,6 +654,10 @@ impl Line {
             Line::AddHook { event } => Some(SettingsRow::AddHook { event }),
             Line::McpServer { index } => Some(SettingsRow::McpServer(*index)),
             Line::AddMcpServer => Some(SettingsRow::AddMcpServer),
+            Line::AcpAgent { index } => Some(SettingsRow::AcpAgent(*index)),
+            Line::AddAcpAgent => Some(SettingsRow::AddAcpAgent),
+            Line::Provider { index } => Some(SettingsRow::Provider(*index)),
+            Line::AddProvider => Some(SettingsRow::AddProvider),
             Line::Title | Line::SectionBorder { .. } | Line::Blank | Line::Description(_) => None,
         }
     }
@@ -627,6 +771,38 @@ fn build_layout(setup: &Setup, width: u16) -> Vec<LayoutLine> {
                     });
                     y += 1;
                 }
+                // Same always-visible shape: one row per user-registered
+                // ACP harness plus the Add action.
+                SettingKind::AcpAgentList => {
+                    for index in 0..setup.acp_agents.len() {
+                        lines.push(LayoutLine {
+                            y,
+                            line: Line::AcpAgent { index },
+                        });
+                        y += 1;
+                    }
+                    lines.push(LayoutLine {
+                        y,
+                        line: Line::AddAcpAgent,
+                    });
+                    y += 1;
+                }
+                // Same always-visible shape: one row per user-registered
+                // custom provider plus the Add action.
+                SettingKind::ProviderList => {
+                    for index in 0..setup.custom_providers.len() {
+                        lines.push(LayoutLine {
+                            y,
+                            line: Line::Provider { index },
+                        });
+                        y += 1;
+                    }
+                    lines.push(LayoutLine {
+                        y,
+                        line: Line::AddProvider,
+                    });
+                    y += 1;
+                }
                 // Switches and choices are a single toggle row.
                 _ => {}
             }
@@ -667,7 +843,18 @@ fn mcp_server_preview(entry: &cosh::mcp::McpServerEntry) -> String {
     truncate(&target, COMMAND_PREVIEW_LEN)
 }
 
-fn selectable_rows(setup: &Setup) -> Vec<SettingsRow> {
+/// One-line launch preview for an ACP agent row: the registered command.
+fn acp_agent_preview(entry: &cosh::setup::AcpAgentEntry) -> String {
+    truncate(&entry.command, COMMAND_PREVIEW_LEN)
+}
+
+/// One-line target preview for a custom provider row: the endpoint's base
+/// URL (the family lives in the form, not the list).
+fn provider_preview(entry: &cosh::setup::CustomProviderEntry) -> String {
+    truncate(&entry.base_url, COMMAND_PREVIEW_LEN)
+}
+
+pub(crate) fn selectable_rows(setup: &Setup) -> Vec<SettingsRow> {
     // Width-independent: only non-selectable description rows wrap, so the
     // selectable order (and every saved selection index) never changes with
     // the terminal width.
@@ -700,11 +887,25 @@ pub enum SettingsAction {
         event: &'static str,
         index: Option<usize>,
     },
+    /// The 🗑 glyph was clicked on an MCP server or ACP agent row; the
+    /// caller removes the selected row's entry (keyring purge / registry
+    /// re-publish included) and saves.
+    RemoveSelected,
     /// An MCP server was enabled/disabled; caller must `setup.save()`.
     /// Takes effect on the next agent loop (the manager connects at boot).
     McpToggled,
     /// Open the MCP registration wizard (name → endpoint → timeout).
     OpenMcpForm,
+    /// Open the ACP registration form: blank when `index` is `None`,
+    /// prefilled with the entry for editing when `Some`.
+    OpenAcpFormFor {
+        index: Option<usize>,
+    },
+    /// Open the custom provider registration form: blank when `index` is
+    /// `None`, prefilled with the entry for editing when `Some`.
+    OpenProviderFormFor {
+        index: Option<usize>,
+    },
     /// Open the cache-duration input box for `setting` (a Settings-item id:
     /// "anthropic_cache_ttl" / "openai_cache_retention").
     OpenCacheInput {
@@ -855,6 +1056,23 @@ impl SettingsView {
         area: Rect,
         setup: &mut Setup,
     ) -> Option<SettingsAction> {
+        // The caller has already moved the selection onto the clicked row,
+        // so the sub-row 🗑 glyph test runs against the selected row — the
+        // same "selection first, then hit zone" contract the summarizer
+        // controls below use.
+        if matches!(
+            selectable_rows(setup).get(self.selection.selected_index),
+            Some(SettingsRow::McpServer(_))
+                | Some(SettingsRow::AcpAgent(_))
+                | Some(SettingsRow::Provider(_))
+        ) {
+            let max_row_w = max_row_width(setup, area.width) as u16;
+            let box_x = area.x + (area.width.saturating_sub(max_row_w)) / 2;
+            let row_x = box_x + BOX_PAD as u16;
+            if trash_hit(mouse.x, box_x, max_row_w, row_x) {
+                return Some(SettingsAction::RemoveSelected);
+            }
+        }
         if matches!(
             selectable_rows(setup).get(self.selection.selected_index),
             Some(SettingsRow::SummarizationModel(_))
@@ -978,6 +1196,14 @@ impl SettingsView {
                     SettingKind::ServerList => {
                         return Some(SettingsAction::OpenMcpForm);
                     }
+                    // Same contract as MCP: the category row opens the
+                    // registration form; the sub-rows open their own edit.
+                    SettingKind::AcpAgentList => {
+                        return Some(SettingsAction::OpenAcpFormFor { index: None });
+                    }
+                    SettingKind::ProviderList => {
+                        return Some(SettingsAction::OpenProviderFormFor { index: None });
+                    }
                 }
                 self.selection.clamp(selectable_rows(setup).len());
                 Some(SettingsAction::ToggleSaved)
@@ -997,6 +1223,22 @@ impl SettingsView {
                 Some(SettingsAction::McpToggled)
             }
             SettingsRow::AddMcpServer => Some(SettingsAction::OpenMcpForm),
+            // An ACP sub-row opens the form prefilled for editing; the
+            // category and Add rows open it blank.
+            SettingsRow::AcpAgent(index) => Some(SettingsAction::OpenAcpFormFor {
+                index: Some(*index),
+            }),
+            SettingsRow::AddAcpAgent => {
+                Some(SettingsAction::OpenAcpFormFor { index: None })
+            }
+            // A provider sub-row opens the form prefilled for editing; the
+            // category and Add rows open it blank.
+            SettingsRow::Provider(index) => Some(SettingsAction::OpenProviderFormFor {
+                index: Some(*index),
+            }),
+            SettingsRow::AddProvider => {
+                Some(SettingsAction::OpenProviderFormFor { index: None })
+            }
         }
     }
 
@@ -1015,6 +1257,43 @@ impl SettingsView {
             return None;
         }
         let removed = setup.mcp.servers.remove(index);
+        let rows = selectable_rows(setup);
+        self.selection.clamp(rows.len());
+        Some(removed.name)
+    }
+
+    /// Remove the user-registered ACP harness selected in the settings list,
+    /// if any. Returns the removed entry's name for the caller's toast.
+    pub fn remove_selected_acp_agent(&mut self, setup: &mut Setup) -> Option<String> {
+        let rows = selectable_rows(setup);
+        let index = match rows.get(self.selection.selected_index) {
+            Some(SettingsRow::AcpAgent(index)) => *index,
+            _ => return None,
+        };
+        if index >= setup.acp_agents.len() {
+            return None;
+        }
+        let removed = setup.acp_agents.remove(index);
+        let rows = selectable_rows(setup);
+        self.selection.clamp(rows.len());
+        Some(removed.name)
+    }
+
+    /// Remove the custom provider selected in the settings list, if any.
+    /// Returns the removed entry's name so the caller can purge its
+    /// keyring credential (an orphaned `<NAME>_API_KEY` entry would
+    /// otherwise outlive the registration and keep a live secret for an
+    /// endpoint that no longer exists).
+    pub fn remove_selected_custom_provider(&mut self, setup: &mut Setup) -> Option<String> {
+        let rows = selectable_rows(setup);
+        let index = match rows.get(self.selection.selected_index) {
+            Some(SettingsRow::Provider(index)) => *index,
+            _ => return None,
+        };
+        if index >= setup.custom_providers.len() {
+            return None;
+        }
+        let removed = setup.custom_providers.remove(index);
         let rows = selectable_rows(setup);
         self.selection.clamp(rows.len());
         Some(removed.name)
@@ -1074,6 +1353,29 @@ impl SettingsView {
         self.selection.clamp(rows.len());
         let selected_idx = self.selection.selected_index;
         let offset = self.viewport_offset(area, setup);
+        // Column alignment for the MCP/ACP sub-lists: the target/launch
+        // preview starts at ONE shared column — after the list's longest
+        // name plus a two-column gap — instead of a dash-separated run-on
+        // after each name.
+        let mcp_name_w = setup
+            .mcp
+            .servers
+            .iter()
+            .map(|e| e.name.chars().count())
+            .max()
+            .unwrap_or(0) as u16;
+        let acp_name_w = setup
+            .acp_agents
+            .iter()
+            .map(|e| e.name.chars().count())
+            .max()
+            .unwrap_or(0) as u16;
+        let provider_name_w = setup
+            .custom_providers
+            .iter()
+            .map(|e| e.name.chars().count())
+            .max()
+            .unwrap_or(0) as u16;
 
         let mut inside_box = false;
         for line in &layout {
@@ -1191,6 +1493,23 @@ impl SettingsView {
                     }
 
                     let enabled = is_enabled(item, setup);
+                    // List headers have no toggle of their own.
+                    if matches!(
+                        item.kind,
+                        SettingKind::ServerList
+                            | SettingKind::AcpAgentList
+                            | SettingKind::ProviderList
+                    ) {
+                        draw_text(
+                            buf,
+                            item.label,
+                            row_x + 2,
+                            y,
+                            area,
+                            Style::default().fg(if is_selected { primary } else { fg }),
+                        );
+                        continue;
+                    }
                     let symbol = if enabled { "✔" } else { "✗" };
                     let sym_color = if enabled { Color::Green } else { Color::Red };
 
@@ -1251,6 +1570,15 @@ impl SettingsView {
                     let Some(entry) = setup.mcp.servers.get(*index) else {
                         continue;
                     };
+                    // 🗑 remove glyph hugs the box's right inner edge (the
+                    // summarizer rows' controls slot); name and preview are
+                    // truncated so neither can run under the glyph.
+                    let trash_x = trash_x_for_row(box_x, max_w as u16, row_x);
+                    // The name is capped at the SHARED column width, so a
+                    // long name cannot spill into the preview column and
+                    // break the alignment the list is built around.
+                    let name_room = mcp_name_w as usize;
+                    let name = truncate(&entry.name, name_room);
                     let symbol = if entry.enabled { "✔" } else { "✗" };
                     let sym_color = if entry.enabled {
                         Color::Green
@@ -1267,15 +1595,21 @@ impl SettingsView {
                     );
                     draw_text(
                         buf,
-                        &entry.name,
+                        &name,
                         row_x + 4,
                         y,
                         area,
                         Style::default().fg(if is_selected { primary } else { fg }),
                     );
-                    let preview = format!(" — {}", mcp_server_preview(entry));
-                    let name_x = (row_x + 4).saturating_add(entry.name.chars().count() as u16);
-                    draw_text(buf, &preview, name_x, y, area, Style::default().fg(muted));
+                    // The target preview starts at the SHARED column (the
+                    // longest name in the list + gap), never after a dash.
+                    let col_x = (row_x + 4 + mcp_name_w + 2).min(trash_x.saturating_sub(1));
+                    let preview = truncate(
+                        &mcp_server_preview(entry),
+                        (trash_x.saturating_sub(col_x).saturating_sub(1)) as usize,
+                    );
+                    draw_text(buf, &preview, col_x, y, area, Style::default().fg(muted));
+                    draw_trash(buf, trash_x, y, area, muted);
                 }
                 Line::AddMcpServer => {
                     let idx = rows
@@ -1288,6 +1622,129 @@ impl SettingsView {
                     draw_text(
                         buf,
                         "+ Add server",
+                        row_x + 4,
+                        y,
+                        area,
+                        Style::default().fg(if is_selected { primary } else { muted }),
+                    );
+                }
+                Line::AcpAgent { index } => {
+                    let idx = rows
+                        .iter()
+                        .position(|r| matches!(r, SettingsRow::AcpAgent(i) if i == index));
+                    let is_selected = idx == Some(selected_idx);
+                    if !in_window(idx, visible, self.selection.scroll_offset) {
+                        continue;
+                    }
+                    let Some(entry) = setup.acp_agents.get(*index) else {
+                        continue;
+                    };
+                    // Availability is a PATH fact, not a toggle: instead of
+                    // a switch glyph, an installed agent renders in the
+                    // normal text color and a MISSING one in muted — the
+                    // same "present vs. unavailable" treatment the tool
+                    // description uses, and visually distinct from the
+                    // ✔/✗ toggles above. The name keeps the sub-row indent
+                    // (+4) shared with the other lists and "+ Add agent".
+                    let installed =
+                        cosh_tools::subagent::acp::custom_agent_installed(&entry.name);
+                    let name_color = if installed { fg } else { muted };
+                    // 🗑 remove glyph hugs the box's right inner edge (the
+                    // summarizer rows' controls slot); name and preview are
+                    // truncated so neither can run under the glyph.
+                    let trash_x = trash_x_for_row(box_x, max_w as u16, row_x);
+                    // The name is capped at the SHARED column width, so a
+                    // long name cannot spill into the preview column and
+                    // break the alignment the list is built around.
+                    let name_room = acp_name_w as usize;
+                    let name = truncate(&entry.name, name_room);
+                    draw_text(
+                        buf,
+                        &name,
+                        row_x + 4,
+                        y,
+                        area,
+                        Style::default().fg(if is_selected { primary } else { name_color }),
+                    );
+                    // The launch preview starts at the SHARED column (the
+                    // longest name in the list + gap), never after a dash.
+                    let col_x = (row_x + 4 + acp_name_w + 2).min(trash_x.saturating_sub(1));
+                    let preview = truncate(
+                        &acp_agent_preview(entry),
+                        (trash_x.saturating_sub(col_x).saturating_sub(1)) as usize,
+                    );
+                    draw_text(buf, &preview, col_x, y, area, Style::default().fg(muted));
+                    draw_trash(buf, trash_x, y, area, muted);
+                }
+                Line::AddAcpAgent => {
+                    let idx = rows
+                        .iter()
+                        .position(|r| matches!(r, SettingsRow::AddAcpAgent));
+                    let is_selected = idx == Some(selected_idx);
+                    if !in_window(idx, visible, self.selection.scroll_offset) {
+                        continue;
+                    }
+                    draw_text(
+                        buf,
+                        "+ Add agent",
+                        row_x + 4,
+                        y,
+                        area,
+                        Style::default().fg(if is_selected { primary } else { muted }),
+                    );
+                }
+                Line::Provider { index } => {
+                    let idx = rows
+                        .iter()
+                        .position(|r| matches!(r, SettingsRow::Provider(i) if i == index));
+                    let is_selected = idx == Some(selected_idx);
+                    if !in_window(idx, visible, self.selection.scroll_offset) {
+                        continue;
+                    }
+                    let Some(entry) = setup.custom_providers.get(*index) else {
+                        continue;
+                    };
+                    // Reachability is a key fact, not a toggle: like the
+                    // ACP list, an endpoint with a resolvable credential
+                    // renders in the normal text color and one without in
+                    // muted — no ✔/✗ glyph. The name keeps the sub-row
+                    // indent (+4) shared with the other lists.
+                    let keyring_ready = cosh_sdk::connector::has_api_key(&entry.name);
+                    let name_color = if keyring_ready { fg } else { muted };
+                    // 🗑 remove glyph hugs the box's right inner edge; name
+                    // and preview are truncated so neither can run under it.
+                    let trash_x = trash_x_for_row(box_x, max_w as u16, row_x);
+                    // Shared column width across the list (longest name +
+                    // gap), so no name can spill into the preview column.
+                    let name_room = provider_name_w as usize;
+                    let name = truncate(&entry.name, name_room);
+                    draw_text(
+                        buf,
+                        &name,
+                        row_x + 4,
+                        y,
+                        area,
+                        Style::default().fg(if is_selected { primary } else { name_color }),
+                    );
+                    let col_x = (row_x + 4 + provider_name_w + 2).min(trash_x.saturating_sub(1));
+                    let preview = truncate(
+                        &provider_preview(entry),
+                        (trash_x.saturating_sub(col_x).saturating_sub(1)) as usize,
+                    );
+                    draw_text(buf, &preview, col_x, y, area, Style::default().fg(muted));
+                    draw_trash(buf, trash_x, y, area, muted);
+                }
+                Line::AddProvider => {
+                    let idx = rows
+                        .iter()
+                        .position(|r| matches!(r, SettingsRow::AddProvider));
+                    let is_selected = idx == Some(selected_idx);
+                    if !in_window(idx, visible, self.selection.scroll_offset) {
+                        continue;
+                    }
+                    draw_text(
+                        buf,
+                        "+ Add provider",
                         row_x + 4,
                         y,
                         area,
@@ -1352,14 +1809,64 @@ fn max_row_width(setup: &Setup, width: u16) -> usize {
             width = width.max(4 + "+ Add hook".len());
         }
     }
-    // MCP server rows (indented like hook sub-rows).
+    // MCP server rows (indented like hook sub-rows). The preview column
+    // starts after the list's longest name + gap (the render's shared
+    // column), and runs to the 🗑 slot at the box's right inner edge —
+    // mirror the drawn widths exactly or the contour can clip a row.
+    let mcp_name_w = setup
+        .mcp
+        .servers
+        .iter()
+        .map(|e| e.name.chars().count())
+        .max()
+        .unwrap_or(0);
     for entry in &setup.mcp.servers {
-        // Full drawn line: indent + "✔ " + name + " — target…".
-        let len =
-            4 + 1 + entry.name.chars().count() + 3 + mcp_server_preview(entry).chars().count();
+        let len = 4
+            + mcp_name_w
+            + 2
+            + truncate(&mcp_server_preview(entry), COMMAND_PREVIEW_LEN)
+                .chars()
+                .count()
+            + TRASH_W as usize;
         width = width.max(len.min(width_cap));
     }
     width = width.max(4 + "+ Add server".len());
+    // ACP agent rows (same indent, same shared preview column).
+    let acp_name_w = setup
+        .acp_agents
+        .iter()
+        .map(|e| e.name.chars().count())
+        .max()
+        .unwrap_or(0);
+    for entry in &setup.acp_agents {
+        let len = 4
+            + acp_name_w
+            + 2
+            + truncate(&acp_agent_preview(entry), COMMAND_PREVIEW_LEN)
+                .chars()
+                .count()
+            + TRASH_W as usize;
+        width = width.max(len.min(width_cap));
+    }
+    width = width.max(4 + "+ Add agent".len());
+    // Custom provider rows (same indent, same shared preview column).
+    let provider_name_w = setup
+        .custom_providers
+        .iter()
+        .map(|e| e.name.chars().count())
+        .max()
+        .unwrap_or(0);
+    for entry in &setup.custom_providers {
+        let len = 4
+            + provider_name_w
+            + 2
+            + truncate(&provider_preview(entry), COMMAND_PREVIEW_LEN)
+                .chars()
+                .count()
+            + TRASH_W as usize;
+        width = width.max(len.min(width_cap));
+    }
+    width = width.max(4 + "+ Add provider".len());
     // The contour must enclose the padded content: plus the breathing room
     // on each side, so `╭…╮` extends past the widest drawn row.
     width + 2 * BOX_PAD
@@ -1367,6 +1874,33 @@ fn max_row_width(setup: &Setup, width: u16) -> usize {
 
 fn visible_rows(area: Rect) -> usize {
     area.height.saturating_sub(3) as usize
+}
+
+/// Where the 🗑 slot sits on a sub-row: hugging the box's right inner
+/// edge (the summarizer rows' controls slot), the slot's width before the
+/// contour's wall.
+fn trash_x_for_row(box_x: u16, max_w: u16, row_x: u16) -> u16 {
+    (box_x + max_w)
+        .saturating_sub(TRASH_W + BOX_PAD as u16)
+        .max(row_x)
+}
+
+/// Draw the 🗑 remove glyph at `(x, y)` and clear the cell after it — one
+/// span drives both writes and the hit-test, so a visible glyph is always
+/// clickable and vice versa (the sessions-list contract).
+fn draw_trash(buf: &mut Buffer, x: u16, y: u16, area: Rect, muted: Color) {
+    draw_text(buf, TRASH_GLYPH, x, y, area, Style::default().fg(muted));
+    if let Some(cell) = buf.cell_mut(((x + TRASH_GLYPH.width() as u16).min(x + TRASH_W - 1), y)) {
+        cell.set_char(' ');
+        cell.set_style(Style::default());
+    }
+}
+
+/// Hit-test a click against a sub-row's 🗑 slot: the exact columns the
+/// slot occupies — never a half-row region (the sessions-list contract).
+pub fn trash_hit(mouse_x: u16, box_x: u16, max_w: u16, row_x: u16) -> bool {
+    let trash_x = trash_x_for_row(box_x, max_w, row_x);
+    mouse_x >= trash_x && mouse_x < trash_x + TRASH_W
 }
 
 fn draw_text(buf: &mut Buffer, text: &str, x: u16, y: u16, area: Rect, style: Style) {
@@ -1631,7 +2165,9 @@ mod tests {
 
         // Flat catalog order: summarization (+ Add action), hooks, then the
         // cache/environment/integrations/general items. MCP's Add action
-        // sits inside its Integrations box, BEFORE the General items.
+        // sits inside its Integrations box, BEFORE the General items; the
+        // ACP list follows it (always visible like the MCP Add row, even
+        // with nothing registered yet).
         let disabled = setup_with_hooks(false, &[("a", "cmd a")]);
         assert_eq!(
             selectable_rows(&disabled),
@@ -1648,6 +2184,10 @@ mod tests {
                 cat("lsp"),
                 cat("mcp"),
                 SettingsRow::AddMcpServer,
+                cat("acp_agents"),
+                SettingsRow::AddAcpAgent,
+                cat("custom_providers"),
+                SettingsRow::AddProvider,
                 cat("telemetry"),
             ])
         );
@@ -1682,6 +2222,10 @@ mod tests {
                 cat("lsp"),
                 cat("mcp"),
                 SettingsRow::AddMcpServer,
+                cat("acp_agents"),
+                SettingsRow::AddAcpAgent,
+                cat("custom_providers"),
+                SettingsRow::AddProvider,
                 cat("telemetry"),
             ])
         );

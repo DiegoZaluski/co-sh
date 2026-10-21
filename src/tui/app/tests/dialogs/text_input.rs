@@ -142,11 +142,16 @@ async fn hook_input_click_positions_cursor() {
     });
 
     // Derive geometry from the SAME terminal size the app will use when
-    // handling the click.
+    // handling the click — including the panel's width demand, which the
+    // app reads from the open dialog (the hook hint widens the panel
+    // past the 56-column base).
     let term = app.terminal_size();
+    let demand = app.dialog.current().map_or(0, |d| {
+        crate::ui::dialogs::dialog_panel_demand(Some(&d.dialog_type))
+    });
     let values = ["", "", "exit 2", ""];
     let (_, dialog_y, _, _, content_x, cols) =
-        crate::ui::dialogs::form_panel_metrics(term, &values);
+        crate::ui::dialogs::form_panel_metrics(term, demand, &values);
     let cmd_value_row =
         crate::ui::dialogs::form_field_geometries(dialog_y, &values, cols)[2].value_y;
     use crossterm::event::{
@@ -410,10 +415,15 @@ fn form_mouse(
 }
 
 /// Value-row geometry of a hook form field, derived from the SAME
-/// terminal size the app uses when handling the mouse.
+/// terminal size the app uses when handling the mouse — including the
+/// panel's width demand read from the open dialog.
 fn hook_field_row(app: &App, values: &[&str], field: usize) -> (u16, u16) {
     let term = app.terminal_size();
-    let (_, dialog_y, _, _, content_x, cols) = crate::ui::dialogs::form_panel_metrics(term, values);
+    let demand = app.dialog.current().map_or(0, |d| {
+        crate::ui::dialogs::dialog_panel_demand(Some(&d.dialog_type))
+    });
+    let (_, dialog_y, _, _, content_x, cols) =
+        crate::ui::dialogs::form_panel_metrics(term, demand, values);
     let value_y = crate::ui::dialogs::form_field_geometries(dialog_y, values, cols)[field].value_y;
     (content_x, value_y)
 }

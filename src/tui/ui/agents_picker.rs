@@ -148,8 +148,10 @@ impl Default for AgentsPicker {
 impl AgentsPicker {
     /// Build the picker from the crate's agent registry: the synthetic `cosh`
     /// daemon entry on top, then every registered ACP harness with its
-    /// installation status from [`cosh_tools::subagent::acp::detect_installed`]
-    /// (cached, so repeated opens are free).
+    /// installation status. Built-in availability comes from the cached
+    /// [`cosh_tools::subagent::acp::detect_installed`] snapshot; user-
+    /// registered harnesses are probed on demand, so an entry added in
+    /// Settings while the app runs shows up here without a restart.
     #[must_use]
     pub fn new() -> Self {
         let installed = cosh_tools::subagent::acp::detect_installed();
@@ -159,14 +161,15 @@ impl AgentsPicker {
             selected: false,
             instances: String::new(),
         }];
-        entries.extend(cosh_tools::subagent::acp::ACP_AGENTS.iter().map(|agent| {
-            AgentEntry {
-                name: agent.name.to_string(),
-                installed: installed.contains(&agent.name),
+        entries.extend(cosh_tools::subagent::acp::all_agent_names().into_iter().map(
+            |name| AgentEntry {
+                name: name.to_string(),
+                installed: installed.contains(&name)
+                    || cosh_tools::subagent::acp::custom_agent_installed(name),
                 selected: false,
                 instances: String::new(),
-            }
-        }));
+            },
+        ));
         Self {
             visible: false,
             entries,
@@ -1028,9 +1031,9 @@ mod tests {
     fn mouse_click_toggles_the_clicked_row() {
         let mut picker = picker();
         let area = picker_area();
-        // Full registry: 9 entries → box height = 9+4 = 13, y = (40-13)/2 =
-        // 13; list rows start at +3 → y = 16, 17, … Click y = 17 → row 1.
-        let action = picker.handle_mouse(&mouse(MouseEventType::Up, 30, 17), area);
+        // Full registry: 11 entries → box height = 11+4 = 15, y = (40-15)/2
+        // = 12; list rows start at +3 → y = 15, 16, … Click y = 16 → row 1.
+        let action = picker.handle_mouse(&mouse(MouseEventType::Up, 30, 16), area);
 
         assert_eq!(action, AgentsPickerAction::Toggled);
         assert!(picker.entries[1].selected);
@@ -1086,18 +1089,18 @@ mod tests {
         let mut buf = Buffer::empty(area);
         picker.render(&mut buf, area, &theme, SystemTime::now());
 
-        // Full registry: 9 entries → box 50×13 centered in 100×40 →
-        // x = 25, y = 13. Title row = 13, search row = 14, first list
-        // row = 16.
+        // Full registry: 11 entries → box 50×15 centered in 100×40 →
+        // x = 25, y = 12. Title row = 12, search row = 13, first list
+        // row = 15.
         let title: String = (0..area.width)
-            .filter_map(|x| buf.cell((x, 13)).map(|c| c.symbol().to_string()))
+            .filter_map(|x| buf.cell((x, 12)).map(|c| c.symbol().to_string()))
             .collect();
         assert!(title.contains("Select agents"), "title row: {title}");
         // The dialogs' header hint: a muted "esc", not a shortcut billboard.
         assert!(title.contains("esc"), "esc hint on the header row: {title}");
 
         let search_row: String = (0..area.width)
-            .filter_map(|x| buf.cell((x, 14)).map(|c| c.symbol().to_string()))
+            .filter_map(|x| buf.cell((x, 13)).map(|c| c.symbol().to_string()))
             .collect();
         // The placeholder shows as "earch": the blinking caret replaces the
         // placeholder's first glyph, exactly like the /models dialog.
@@ -1107,13 +1110,13 @@ mod tests {
         );
 
         let first_row: String = (0..area.width)
-            .filter_map(|x| buf.cell((x, 16)).map(|c| c.symbol().to_string()))
+            .filter_map(|x| buf.cell((x, 15)).map(|c| c.symbol().to_string()))
             .collect();
         assert!(first_row.contains('●'), "marked ● on cursor row: {first_row}");
         assert!(first_row.contains("cosh"), "agent name on cursor row: {first_row}");
 
         let second_row: String = (0..area.width)
-            .filter_map(|x| buf.cell((x, 17)).map(|c| c.symbol().to_string()))
+            .filter_map(|x| buf.cell((x, 16)).map(|c| c.symbol().to_string()))
             .collect();
         assert!(second_row.contains('○'), "unmarked ○ on the next row: {second_row}");
     }
@@ -1197,7 +1200,7 @@ mod tests {
 
     #[test]
     fn box_respects_the_terminal_height_clamp_like_models() {
-        let picker = picker(); // full registry: 9 entries
+        let picker = picker(); // full registry: 11 entries
         // 10-row terminal: the /models clamp gives ≤ 6 list rows → box 10.
         let short = Rect::new(0, 0, 100, 10);
         let box_rect = picker.dialog_box(short);

@@ -51,6 +51,8 @@
 //! | `devin` | `devin acp` |
 //! | `claude` | `npx -y @agentclientprotocol/claude-agent-acp@latest` (official adapter) |
 //! | `codex` | `npx -y @agentclientprotocol/codex-acp@latest` (official adapter) |
+//! | `copilot` | `copilot --acp` |
+//! | `qwen` | `qwen --acp` |
 //!
 //! # Adding new agents
 //!
@@ -62,8 +64,8 @@
 use std::iter;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, RwLock};
+use std::time::{Duration, Instant};
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1 as schema;
@@ -130,6 +132,43 @@ impl Agent {
         parts.push(self.command);
         parts.extend_from_slice(self.args);
         parts.join(" ")
+    }
+
+    /// Build an agent from a user-registered launch line (`command args…`,
+    /// the same shape the ACP registry documents for custom agents). The
+    /// command becomes the spawn binary and every remaining word an
+    /// argument — the exact convention the static [`ACP_AGENTS`] table
+    /// uses, so a user line behaves identically to a built-in entry.
+    ///
+    /// The parsed words are leaked into `&'static str`s: [`Agent`] is a
+    /// `Copy` type of static strings, and re-registration happens only on
+    /// setup edits — a handful of short strings per edit, never in a loop.
+    #[must_use]
+    pub fn from_launch_line(name: &str, launch: &str) -> Option<Self> {
+        let launch = launch.trim();
+        if name.trim().is_empty() || launch.is_empty() {
+            return None;
+        }
+        let leak =
+            |s: &str| Box::leak(s.to_string().into_boxed_str()) as &'static str;
+        // The whole word slice is leaked too, so `split_first` refs outlive
+        // this call the same way the strings do.
+        let words: &'static [&'static str] = Box::leak(
+            launch
+                .split_whitespace()
+                .map(leak)
+                .collect::<Vec<&'static str>>()
+                .into_boxed_slice(),
+        );
+        let (command, args) = words.split_first()?;
+        Some(Self {
+            name: leak(name),
+            command,
+            args,
+            requires: std::slice::from_ref(command),
+            install_hint: "",
+            model: "",
+        })
     }
 }
 
@@ -207,7 +246,175 @@ pub const ACP_AGENTS: &[Agent] = &[
         install_hint: "Install: npm install -g @openai/codex (the ACP adapter runs via npx). More: https://developers.openai.com/codex",
         model: "",
     },
+    Agent {
+        name: "copilot",
+        // GitHub Copilot CLI is ACP-native: `copilot --acp` speaks the
+        // protocol over stdio (public preview, per the GitHub changelog).
+        command: "copilot",
+        args: &["--acp"],
+        requires: &["copilot"],
+        install_hint: "Install: npm install -g @github/copilot. Then: copilot (sign in on first run). More: https://github.com/features/copilot/cli/",
+        model: "",
+    },
+    Agent {
+        name: "qwen",
+        // Qwen Code (Alibaba's Gemini-CLI fork) is ACP-native via the
+        // `--acp` flag; `--experimental-skills` is the registry's
+        // documented launch line.
+        command: "qwen",
+        args: &["--acp"],
+        requires: &["qwen"],
+        install_hint: "Install: npm install -g @qwen-code/qwen-code. More: https://github.com/QwenLM/qwen-code",
+        model: "",
+    },
 ];
+/// User-registered ACP harnesses (Settings → Integrations → ACP agents),
+/// held as owned [`Agent`] values whose strings were leaked into
+/// `&'static str`s by [`Agent::from_launch_line`]. Every lookup helper
+/// (registry, validation, installation detection, launch) merges these with
+/// the built-in [`ACP_AGENTS`] table; a user entry may NOT shadow a
+/// built-in name (the registrar rejects duplicates, so the merge can never
+/// hide a conflict).
+///
+/// The registry is process-global by design: the harness's tool description
+/// is built once per agent loop, while setup edits land between agent
+/// loops — each loop rebuilds its harness, so a freshly saved registration
+/// is picked up by the next loop and the `subagent_call` description stays
+/// consistent with what it can spawn.
+static CUSTOM_AGENTS: RwLock<Vec<Agent>> = RwLock::new(Vec::new());
+/// Replace the user-registered agent set (Settings save path). `entries`
+/// maps agent name → launch command (`command args…`). Names must be single
+/// words (they key the `subagent_call` tool's agent enum), must not collide
+/// with a built-in name even in different case, and must not duplicate each
+/// other; violations are rejected with an error, so a typo can never
+/// silently shadow a built-in or hide a sibling.
+///
+/// # Errors
+///
+/// Returns an error when a name is empty or multi-word, duplicates a
+/// built-in agent, or duplicates another entry in the same call.
+pub fn register_custom_agents(entries: &[(String, String)]) -> Result<(), String> {
+    let mut agents = Vec::with_capacity(entries.len());
+    for (name, launch) in entries {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("Agent name is required.".into());
+        }
+        if name.split_whitespace().count() != 1 {
+            return Err(format!(
+                "'{name}' must be a single word (it is the agent id the model calls)."
+            ));
+        }
+        if ACP_AGENTS
+            .iter()
+            .any(|a| a.name.eq_ignore_ascii_case(name))
+        {
+            return Err(format!(
+                "'{name}' is a built-in agent and cannot be registered again."
+            ));
+        }
+        if agents.iter().any(|a: &Agent| a.name == name) {
+            return Err(format!("'{name}' is registered more than once."));
+        }
+        let agent = Agent::from_launch_line(name, launch).ok_or_else(|| {
+            format!("'{name}' needs a launch command, e.g. my-agent --acp.")
+        })?;
+        agents.push(agent);
+    }
+    *CUSTOM_AGENTS
+        .write()
+        .unwrap_or_else(PoisonError::into_inner) = agents;
+    // A fresh registration invalidates the probe cache: the entry the user
+    // just saved (or removed) must not show a stale installed glyph.
+    invalidate_custom_probe_cache();
+    Ok(())
+}
+
+/// Load the persisted registrations at startup, tolerating individual bad
+/// entries: each invalid entry is skipped and reported, the valid ones are
+/// still published. The interactive save path keeps the strict all-or-
+/// nothing contract ([`register_custom_agents`]) because there the user
+/// gets immediate feedback; a hand-edited `setup.json` must not disable
+/// every working harness because one entry rotted (e.g. a name that a
+/// later cosh release turned into a built-in).
+///
+/// Returns one message per skipped entry, in entry order (empty when all
+/// entries were accepted).
+#[must_use]
+pub fn register_custom_agents_lossy(entries: &[(String, String)]) -> Vec<String> {
+    let mut kept: Vec<(String, String)> = Vec::with_capacity(entries.len());
+    let mut rejected: Vec<String> = Vec::new();
+    for (name, launch) in entries {
+        let probe: &[(String, String)] = &kept;
+        if let Err(error) = register_probe(probe, name, launch) {
+            rejected.push(error);
+        } else {
+            // Store the TRIMMED name: `register_probe` validates the
+            // trimmed form, so the re-check below must see the same
+            // strings or a whitespace-padded duplicate would slip through
+            // probing and then fail the strict pass (publishing nothing).
+            kept.push((name.trim().to_string(), launch.clone()));
+        }
+    }
+    if let Err(error) = register_custom_agents(&kept) {
+        // Can't happen: every kept entry passed the same checks above
+        // against the same predecessor set. Fail closed rather than
+        // publishing a partially validated set.
+        rejected.push(error);
+        return rejected;
+    }
+    rejected
+}
+
+/// Validate one entry against the entries accepted before it (the shared
+/// kernel of [`register_custom_agents`] and [`register_custom_agents_lossy`]).
+fn register_probe(
+    accepted: &[(String, String)],
+    name: &str,
+    launch: &str,
+) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Agent name is required.".into());
+    }
+    if name.split_whitespace().count() != 1 {
+        return Err(format!(
+            "'{name}' must be a single word (it is the agent id the model calls)."
+        ));
+    }
+    if ACP_AGENTS
+        .iter()
+        .any(|a| a.name.eq_ignore_ascii_case(name))
+    {
+        return Err(format!(
+            "'{name}' is a built-in agent and cannot be registered again."
+        ));
+    }
+    if accepted.iter().any(|(kept, _)| kept == name) {
+        return Err(format!("'{name}' is registered more than once."));
+    }
+    if Agent::from_launch_line(name, launch).is_none() {
+        return Err(format!("'{name}' needs a launch command, e.g. my-agent --acp."));
+    }
+    Ok(())
+}
+
+/// Look up a registered agent (built-ins first, then user registrations).
+#[must_use]
+pub fn find_agent(agent: &str) -> Option<Agent> {
+    ACP_AGENTS
+        .iter()
+        .find(|a| a.name == agent)
+        .copied()
+        .or_else(|| {
+            CUSTOM_AGENTS
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .iter()
+                .find(|a| a.name == agent)
+                .copied()
+        })
+}
 
 /// Build the [`AcpAgent`] launcher for a registered agent.
 ///
@@ -326,6 +533,8 @@ fn windows_script_launcher(_args: &[String]) -> Option<Vec<String>> {
 }
 
 /// Return installation / configuration guidance for a given agent.
+/// User-registered agents carry no canned guidance (their entry IS the
+/// configuration), so only built-ins resolve to text.
 #[must_use]
 pub fn install_hint(agent: &str) -> &'static str {
     ACP_AGENTS
@@ -348,6 +557,90 @@ pub fn detect_installed() -> &'static Vec<&'static str> {
             .map(|agent| agent.name)
             .collect()
     })
+}
+
+/// Whether the user-registered `agent` has every required binary in PATH.
+/// Answers come from a short-TTL cache (see [`custom_installed_cached`])
+/// invalidated on every re-registration, so repeated renders stay cheap
+/// while a save/remove is still reflected immediately.
+#[must_use]
+pub fn custom_agent_installed(agent: &str) -> bool {
+    custom_installed_cached().contains(&agent)
+}
+
+/// Every registered agent name, built-ins first, then user registrations in
+/// registration order. The single source of the `subagent_call` tool's
+/// agent enum and the pickers' listings, so a setup-registered harness is
+/// offered exactly where a built-in one is.
+#[must_use]
+pub fn all_agent_names() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = ACP_AGENTS.iter().map(|a| a.name).collect();
+    names.extend(
+        CUSTOM_AGENTS
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(|a| a.name),
+    );
+    names
+}
+
+/// Names of every registered agent whose required binaries are all in PATH,
+/// built-ins answered from the cached [`detect_installed`] snapshot (one
+/// PATH scan per process) and user registrations probed on demand.
+#[must_use]
+pub fn installed_agents_snapshot() -> Vec<&'static str> {
+    let cached = detect_installed();
+    all_agent_names()
+        .into_iter()
+        .filter(|name| cached.contains(name) || custom_agent_installed(name))
+        .collect()
+}
+
+/// How long a PATH probe for user-registered harnesses stays valid. Short
+/// on purpose: the Settings screen re-renders on every keystroke and each
+/// row shows an installed/missing glyph, so without a TTL every redraw
+/// would stat every registered binary.
+const CUSTOM_PROBE_TTL: Duration = Duration::from_secs(2);
+
+/// Cached PATH-probe answer for user-registered agents: the probe time and
+/// the names whose binaries were all found. Invalidated on every
+/// re-registration so a save/remove is not shadowed by a stale glyph.
+static CUSTOM_PROBE_CACHE: Mutex<Option<(Instant, Vec<&'static str>)>> = Mutex::new(None);
+
+/// Cached PATH probe results for user-registered agents, refreshed at most
+/// once per [`CUSTOM_PROBE_TTL`].
+fn custom_installed_cached() -> Vec<&'static str> {
+    {
+        let cache = CUSTOM_PROBE_CACHE
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some((probed_at, names)) = cache.as_ref()
+            && probed_at.elapsed() < CUSTOM_PROBE_TTL
+        {
+            return names.clone();
+        }
+    }
+    let names: Vec<&'static str> = CUSTOM_AGENTS
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .filter(|agent| agent.requires.iter().all(|bin| binary_in_path(bin)))
+        .map(|agent| agent.name)
+        .collect();
+    *CUSTOM_PROBE_CACHE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = Some((Instant::now(), names.clone()));
+    names
+}
+
+/// Drop the user-registration PATH-probe cache. Called after every
+/// successful re-registration so a save/remove is reflected on the next
+/// render instead of serving the stale [`CUSTOM_PROBE_TTL`]-old answer.
+fn invalidate_custom_probe_cache() {
+    *CUSTOM_PROBE_CACHE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = None;
 }
 
 /// Validate-then-serve path sandbox (non-Unix fallback, and the unit-test
@@ -541,26 +834,26 @@ pub(crate) fn stop_reason_str(reason: StopReason) -> String {
     }
 }
 
-/// Validate that `agent` is registered in [`ACP_AGENTS`].
+/// Validate that `agent` is registered (built-in table or user registry).
 ///
 /// # Errors
 ///
 /// Returns an error if the agent name is not found.
 pub fn validate_agent(agent: &str) -> Result<(), String> {
-    if ACP_AGENTS.iter().any(|entry| entry.name == agent) {
+    if find_agent(agent).is_some() {
         Ok(())
     } else {
-        let supported: Vec<&str> = ACP_AGENTS.iter().map(|a| a.name).collect();
         Err(format!(
             "Unsupported agent '{agent}'. Supported agents (ACP): {}. Use bash_run for shell commands.",
-            supported.join(", "),
+            all_agent_names().join(", "),
         ))
     }
 }
 
 /// Call a sub-agent harness over ACP and return its final output.
 ///
-/// 1. Looks up `agent` in [`ACP_AGENTS`] to get the ACP launch command.
+/// 1. Looks up `agent` (built-in table or user registry) via [`find_agent`]
+///    to get the ACP launch command.
 /// 2. Runs a full ACP client turn (see the [module docs](self)):
 ///    `initialize` → `session/new` (or, when resuming,
 ///    `session/resume`/`session/load`, falling back to `session/new` on any
@@ -617,10 +910,7 @@ pub async fn call(
     chunk_tx: tokio::sync::mpsc::UnboundedSender<SubagentEvent>,
 ) -> Result<(String, String, Option<String>), String> {
     validate_agent(agent)?;
-    let entry = ACP_AGENTS
-        .iter()
-        .find(|a| a.name == agent)
-        .ok_or_else(|| format!("unknown agent '{agent}'"))?;
+    let entry = find_agent(agent).ok_or_else(|| format!("unknown agent '{agent}'"))?;
     // The caller's picks win — the /agents config box writes the user's
     // choices into the pane's config cache and every turn re-applies them
     // (`apply_session_picks`), so the choices survive. A model-less pick
@@ -632,7 +922,7 @@ pub async fn call(
         owned.push(("model".to_string(), entry.model.to_string()));
     }
     let picks = owned;
-    let launcher = agent_launcher(entry)?
+    let launcher = agent_launcher(&entry)?
         // Surface harness stderr in the logs to ease debugging of
         // unauthenticated/failed launches.
         .with_debug(|line, direction| {
@@ -730,11 +1020,8 @@ pub async fn replay(
     chunk_tx: tokio::sync::mpsc::UnboundedSender<SubagentEvent>,
 ) -> Result<(), String> {
     validate_agent(agent)?;
-    let entry = ACP_AGENTS
-        .iter()
-        .find(|a| a.name == agent)
-        .ok_or_else(|| format!("unknown agent '{agent}'"))?;
-    let launcher = agent_launcher(entry)?
+    let entry = find_agent(agent).ok_or_else(|| format!("unknown agent '{agent}'"))?;
+    let launcher = agent_launcher(&entry)?
         .with_debug(|line, direction| {
             if matches!(direction, LineDirection::Stderr) {
                 log::debug!("subagent ACP stderr: {line}");
@@ -955,10 +1242,7 @@ pub async fn session_snapshot(
     cwd: PathBuf,
 ) -> Result<SessionSnapshot, String> {
     validate_agent(agent)?;
-    let entry = ACP_AGENTS
-        .iter()
-        .find(|a| a.name == agent)
-        .ok_or_else(|| format!("unknown agent '{agent}'"))?;
+    let entry = find_agent(agent).ok_or_else(|| format!("unknown agent '{agent}'"))?;
     // The harnesses validate `cwd` as an ABSOLUTE path (claude-code ACP
     // rejects `session/new` with a relative one — "must be an absolute
     // path"). The TUI stores the working directory as the user typed it,
@@ -966,7 +1250,7 @@ pub async fn session_snapshot(
     // canonicalize here; an unresolvable path keeps the original and fails
     // at the harness with the same clarity as before.
     let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
-    let launcher = agent_launcher(entry)?
+    let launcher = agent_launcher(&entry)?
         .with_debug(|line, direction| {
             if matches!(direction, LineDirection::Stderr) {
                 log::debug!("subagent ACP stderr: {line}");

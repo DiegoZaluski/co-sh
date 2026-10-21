@@ -2018,13 +2018,27 @@ impl App {
                     Some(crate::routes::settings::SettingsAction::McpToggled) => {
                         self.setup.save();
                     }
+                    Some(crate::routes::settings::SettingsAction::RemoveSelected) => {
+                        self.remove_selected_settings_entry();
+                    }
                     Some(crate::routes::settings::SettingsAction::TelemetryToggled) => {
                         // Consent persisted; the facade re-resolves it
                         // (env override + CI hard-off) on next launch.
                         self.setup.save();
+                        self.toast_restart_required("Telemetry");
                     }
                     Some(crate::routes::settings::SettingsAction::OpenMcpForm) => {
                         self.open_mcp_form();
+                    }
+                    Some(
+                        crate::routes::settings::SettingsAction::OpenAcpFormFor { index },
+                    ) => {
+                        self.open_acp_form(index);
+                    }
+                    Some(
+                        crate::routes::settings::SettingsAction::OpenProviderFormFor { index },
+                    ) => {
+                        self.open_provider_form(index);
                     }
                     None => {}
                 }

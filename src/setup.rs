@@ -46,6 +46,19 @@ pub struct Setup {
     /// Registered MCP servers (empty when the user never added one, so
     /// legacy files without the section keep loading unchanged).
     pub mcp: McpConfig,
+    /// User-registered ACP sub-agent harnesses (Settings screen). Each entry
+    /// maps a public agent name to its launch command (`command args…`, the
+    /// ACP registry's own convention). Empty when the user never registered
+    /// one, so legacy files without the section keep loading unchanged.
+    #[serde(default)]
+    pub acp_agents: Vec<AcpAgentEntry>,
+    /// User-registered LLM provider endpoints (Settings screen). Each entry
+    /// maps a public provider name to its base URL and API family — the
+    /// same declarative shape Goose's custom providers use. Empty when the
+    /// user never registered one, so legacy files without the section keep
+    /// loading unchanged.
+    #[serde(default)]
+    pub custom_providers: Vec<CustomProviderEntry>,
     /// Terminal editor used by the file explorer (Ctrl+F). Empty: fall back
     /// to the first available of `nvim`, `vim`, `nano`.
     pub editor: String,
@@ -91,6 +104,8 @@ impl Default for Setup {
             decision: DecisionConfig::default(),
             lsp: true,
             mcp: McpConfig::default(),
+            acp_agents: Vec::new(),
+            custom_providers: Vec::new(),
             editor: String::new(),
             telemetry: true,
             effective_context: false,
@@ -599,6 +614,75 @@ pub struct SkillsConfig {
     pub include: Vec<String>,
 }
 
+/// One user-registered ACP sub-agent harness (Settings → Integrations →
+/// ACP agents; `setup.json` → `acp_agents`). The name is what the model
+/// sees in the `subagent_call` tool's agent enum; the launch command uses
+/// the ACP registry's own `command args…` convention, so a registered line
+/// behaves exactly like a built-in entry.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcpAgentEntry {
+    /// Public agent name used by the LLM in `subagent_call`. Must be a
+    /// single word (it keys the tool enum) and must not shadow a built-in.
+    pub name: String,
+    /// Launch command, `command args…` (e.g. `my-agent --acp`).
+    pub command: String,
+}
+
+/// One user-registered LLM provider endpoint (Settings → Integrations →
+/// Custom providers; `setup.json` → `custom_providers`). The same
+/// declarative shape Goose's custom providers use: a display name, the
+/// endpoint's base URL, and the API family the endpoint speaks.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CustomProviderEntry {
+    /// Public provider name the user picks in the model picker. Must be a
+    /// single word and must not shadow a built-in registry name.
+    pub name: String,
+    /// The endpoint's base URL (e.g. `https://api.company.com/v1`).
+    pub base_url: String,
+    /// Which wire protocol the endpoint speaks. Serialized as a stable
+    /// string; unknown values from a newer config round-trip to an error
+    /// surfaced to the user rather than silently rerouting the traffic.
+    pub family: CustomProviderFamily,
+}
+
+/// The API family of a user-registered provider endpoint. Only
+/// OpenAI-compatible endpoints are accepted today; the enum exists so the
+/// persisted schema and every match site are already family-aware — adding
+/// a family later is one variant plus its connector arm, not a
+/// restructure.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CustomProviderFamily {
+    /// OpenAI Chat Completions wire format (`/chat/completions` under the
+    /// base URL) — the family most gateways, proxies and local servers
+    /// speak (Groq, OpenRouter, vLLM, LiteLLM, …).
+    #[default]
+    OpenAiCompatible,
+}
+
+impl CustomProviderFamily {
+    /// The wire label the user types in the registration form and reads in
+    /// the settings list (the serde representation, kept in one place).
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::OpenAiCompatible => "openai-compatible",
+        }
+    }
+
+    /// The connector dispatch tag for this family. The round-trip is total
+    /// today; a new variant without a mapping fails the registration with
+    /// a clear error instead of silently rerouting the traffic.
+    #[must_use]
+    pub fn sdk_family(self) -> cosh_sdk::connector::Family {
+        match self {
+            Self::OpenAiCompatible => cosh_sdk::connector::Family::OpenAICompatible,
+        }
+    }
+}
+
 impl SkillsConfig {
     /// The default source directory (`~/.skills`).
     #[must_use]
@@ -1039,6 +1123,12 @@ impl Setup {
         if section_differs(&self.mcp, &baseline.mcp) {
             merged.mcp = self.mcp.clone();
         }
+        if section_differs(&self.acp_agents, &baseline.acp_agents) {
+            merged.acp_agents = self.acp_agents.clone();
+        }
+        if section_differs(&self.custom_providers, &baseline.custom_providers) {
+            merged.custom_providers = self.custom_providers.clone();
+        }
         // Flat fields compare directly (no section wrapper).
         if self.lsp != baseline.lsp {
             merged.lsp = self.lsp;
@@ -1053,6 +1143,48 @@ impl Setup {
             merged.effective_context = self.effective_context;
         }
         merged
+    }
+
+    /// The user-registered ACP agent harnesses (`setup.json` →
+    /// `acp_agents`), as `(name, launch command)` pairs in registration
+    /// order — the exact shape [`cosh_tools::subagent::acp
+    /// ::register_custom_agents`] consumes.
+    #[must_use]
+    pub fn acp_agent_pairs(&self) -> Vec<(String, String)> {
+        self.acp_agents
+            .iter()
+            .map(|entry| (entry.name.clone(), entry.command.clone()))
+            .collect()
+    }
+
+    /// Replace the user-registered ACP agent set and persist.
+    pub fn set_acp_agents(&mut self, agents: Vec<AcpAgentEntry>) {
+        self.acp_agents = agents;
+        self.save();
+    }
+
+    /// The configured custom providers as (name, base URL, family) tuples,
+    /// the shape the SDK registry's registrar consumes.
+    #[must_use]
+    pub fn custom_provider_triples(
+        &self,
+    ) -> Vec<(String, String, crate::setup::CustomProviderFamily)> {
+        self.custom_providers
+            .iter()
+            .map(|entry| {
+                (
+                    entry.name.clone(),
+                    entry.base_url.clone(),
+                    entry.family,
+                )
+            })
+            .collect()
+    }
+
+    /// Replace the user-registered custom provider set and persist.
+    pub fn set_custom_providers(&mut self, providers: Vec<CustomProviderEntry>) {
+        self.custom_providers = providers;
+        self.save();
     }
 
     /// The configured base URL for a local provider, if the user saved one

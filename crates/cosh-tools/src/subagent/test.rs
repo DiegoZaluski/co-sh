@@ -1051,6 +1051,8 @@ fn invocation_matches_documented_acp_commands() {
         ("kilo", "kilo acp"),
         ("cline", "cline --acp"),
         ("devin", "devin acp"),
+        ("copilot", "copilot --acp"),
+        ("qwen", "qwen --acp"),
         (
             "claude",
             "npx -y @agentclientprotocol/claude-agent-acp@latest",
