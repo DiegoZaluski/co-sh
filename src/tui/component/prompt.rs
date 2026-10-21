@@ -426,17 +426,30 @@ impl PromptView {
         self.correction_selection = for_correction;
     }
 
-    /// A correction request is valid only when the drag covers every byte of
-    /// the visible prompt. Mouse offsets are character boundaries, so this
-    /// exact byte check also safely covers UTF-8 input.
+    /// A correction request is valid when the drag covers the whole trimmed
+    /// prompt. Mouse offsets are character boundaries, so this byte check
+    /// also safely covers UTF-8 input.
+    ///
+    /// The coverage is measured against the TRIMMED content, not the raw
+    /// byte range: LLM-assisted typing and IMEs routinely leave a stray
+    /// trailing (or leading) space in the input, and an exact `0..len()`
+    /// match invalidates the correction for something a `.trim()` would
+    /// have solved — the user dragged over every visible character, the
+    /// whitespace is not content.
     pub fn has_complete_correction_selection(&self) -> bool {
         if !self.correction_selection || self.input.is_empty() {
+            return false;
+        }
+        let trim_start = self.input.len() - self.input.trim_start().len();
+        let trim_end = self.input.trim_end().len();
+        if trim_start >= trim_end {
+            // Whitespace-only prompt: nothing to correct.
             return false;
         }
         matches!(
             (self.sel_start, self.sel_end),
             (Some(start), Some(end))
-                if start.min(end) == 0 && start.max(end) == self.input.len()
+                if start.min(end) <= trim_start && start.max(end) >= trim_end
         )
     }
 
@@ -1731,6 +1744,41 @@ mod tests {
 
         view.clear_selection();
         assert!(!view.correction_selection);
+        assert!(!view.has_complete_correction_selection());
+    }
+
+    #[test]
+    fn correction_selection_tolerates_surrounding_whitespace() {
+        // A stray trailing/leading space in the input must NOT invalidate a
+        // drag that covers the whole visible prompt — the whitespace is not
+        // content (IMEs and pasted text leave one behind routinely).
+        let mut view = PromptView::new();
+        view.input = "  corrija esse texto ".into();
+        let len = view.input.len();
+        let trim_start = len - view.input.trim_start().len();
+        let trim_end = view.input.trim_end().len();
+
+        // Drag over the exact trimmed range: complete.
+        view.begin_selection(trim_start, true);
+        view.sel_end = Some(trim_end);
+        assert!(view.has_complete_correction_selection());
+
+        // Full 0..len drag over a trailing space: complete (the old exact
+        // byte match accepted this too — keep it).
+        view.begin_selection(0, true);
+        view.sel_end = Some(len);
+        assert!(view.has_complete_correction_selection());
+
+        // Missing a real character at the tail: still incomplete.
+        view.begin_selection(trim_start, true);
+        let before_last = view.input.floor_char_boundary(trim_end - 1);
+        view.sel_end = Some(before_last);
+        assert!(!view.has_complete_correction_selection());
+
+        // Whitespace-only prompt: nothing to correct.
+        view.input = "   ".into();
+        view.begin_selection(0, true);
+        view.sel_end = Some(view.input.len());
         assert!(!view.has_complete_correction_selection());
     }
 

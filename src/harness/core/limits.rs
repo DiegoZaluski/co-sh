@@ -10,6 +10,19 @@ pub(super) const MAX_TOOL_RETRIES: usize = 10;
 /// searching) — the loop force-stopped mid-task with a misleading `Done`.
 pub(crate) const MAX_ITERATIONS: u64 = 100;
 
+/// Natural-stop gate budget: how many continuations the deterministic veto
+/// layer (reasoning-only retry, empty-response retry) may grant per agent
+/// loop. An agent loop runs for hours and each veto is a REAL provider cut
+/// the model must recover from — 3 proved too tight: a model prone to
+/// reasoning-only `stop` streams (e.g. glm-5.3-flash) exhausts the budget
+/// mid-task and the loop then accepts the bare `stop` silently (Done with
+/// `checkup_verdict: None`, no toast, no trace). 10 is the measured starting
+/// point: generous enough to absorb a streak of degenerate stops, still
+/// scarce enough that a model insisting on stopping terminates visibly
+/// instead of looping to `MAX_ITERATIONS`. If the silent-exhaustion pattern
+/// resurfaces, raise this — never remove the bound.
+pub(crate) const STOP_NUDGE_BUDGET: u32 = 10;
+
 /// Loop-detection window: the number of recent tool-call iterations watched
 /// for a repeated identical interaction, mirroring crush's
 /// `loopDetectionWindowSize`. Detection only fires once the window is full

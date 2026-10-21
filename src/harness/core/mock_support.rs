@@ -43,7 +43,7 @@ impl Harness {
             last_failed_raw: String::new(),
             last_finish_reason: None,
             last_stream_unfinished: false,
-            stop_nudges_left: 3,
+            stop_nudges_left: super::limits::STOP_NUDGE_BUDGET,
             prefix_cache_probe: PrefixCacheProbe::default(),
             #[cfg(test)]
             promoted_reasoning_log: Vec::new(),

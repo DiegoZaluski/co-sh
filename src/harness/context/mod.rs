@@ -742,7 +742,15 @@ impl ContextManager {
 
     /// Add a user prompt. Protected by construction: its original text stays
     /// verbatim until the LLM compaction folds it into the general summary.
+    ///
+    /// A whitespace-only text is NOT a turn: LLMs and steering paths can hand
+    /// over a bare `" "`, and recording it would bloat the context AND the
+    /// session JSONL with a trivially-droppable item (the same contract the
+    /// agent loop's natural-stop gate and the TUI's token filter keep).
     pub fn add_user(&mut self, text: &str) {
+        if text.trim().is_empty() {
+            return;
+        }
         let id = self.next_id();
         self.push_item(ContextItem::User {
             id,
@@ -756,7 +764,11 @@ impl ContextManager {
     /// completions). Identical to [`Self::add_user`] in every model-visible
     /// way; the only difference is provenance (`ContextItem::User::synthetic`),
     /// so consumers that need the USER'S OWN intent can filter these out.
+    /// Same whitespace-only guard as [`Self::add_user`].
     pub fn add_synthetic_user(&mut self, text: &str) {
+        if text.trim().is_empty() {
+            return;
+        }
         let id = self.next_id();
         self.push_item(ContextItem::User {
             id,
@@ -837,12 +849,22 @@ impl ContextManager {
     /// the item's birth, never mutated in place afterwards (the context
     /// deltas serialize whole changed items — incremental appends would
     /// re-emit the item on every save).
+    ///
+    /// A whitespace-only text is NOT recorded (same guard as
+    /// [`Self::add_user`]): a bare `" "` answer would bloat the context and
+    /// the session JSONL, and as a closable item it would become a Closure
+    /// of one space. The agent loop already skips this call for
+    /// whitespace-only responses; the guard here is the last line of
+    /// defense for every other caller.
     pub fn add_assistant_with_reasoning(
         &mut self,
         text: &str,
         closable: bool,
         reasoning: Option<&str>,
     ) {
+        if text.trim().is_empty() {
+            return;
+        }
         let id = self.next_id();
         self.push_item(ContextItem::Assistant {
             id,
@@ -851,7 +873,8 @@ impl ContextManager {
             // An EMPTY reasoning is indistinguishable from "no reasoning":
             // normalize to None so the item stays byte-identical to a
             // reasoning-less one (no `"reasoning": ""` key in the deltas).
-            reasoning: reasoning.map(str::to_string).filter(|r| !r.is_empty()),
+            // Whitespace-only reasoning normalizes the same way.
+            reasoning: reasoning.map(str::to_string).filter(|r| !r.trim().is_empty()),
         });
     }
 

@@ -13,6 +13,7 @@ use crate::harness::tools::CoshTools;
 use super::{
     ContextManager, CorrectionMemory, Harness, MAX_CONTEXT_TOKENS, Mode, PrefixCacheProbe,
     PromptSystem, SUBAGENT_INTERNAL_NOTE, build_lsp, default_harness_tools,
+    limits::STOP_NUDGE_BUDGET,
 };
 
 impl Harness {
@@ -54,7 +55,7 @@ impl Harness {
             last_failed_raw: String::new(),
             last_finish_reason: None,
             last_stream_unfinished: false,
-            stop_nudges_left: 3,
+            stop_nudges_left: STOP_NUDGE_BUDGET,
             prefix_cache_probe: PrefixCacheProbe::default(),
             #[cfg(test)]
             promoted_reasoning_log: Vec::new(),

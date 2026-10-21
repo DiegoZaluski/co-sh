@@ -158,7 +158,7 @@ impl Harness {
         let mut iteration = 0u64;
         // Fresh nudge budget per agent loop: a harness reused across loops
         // must not inherit the previous turn's exhausted budget.
-        self.stop_nudges_left = 3;
+        self.stop_nudges_left = super::limits::STOP_NUDGE_BUDGET;
 
         // Whether ANY tool ran this turn. A turn with zero tool dispatches
         // is a pure text exchange — the request was answerable directly, so
@@ -565,7 +565,11 @@ impl Harness {
                     // — total amnesia about the interrupted exchange. Marked
                     // non-closable: a truncated turn is not a final answer
                     // and must never be promoted to a Closure.
-                    if !assistant_response.is_empty() {
+                    // Whitespace-only partial output is not worth recording
+                    // either (same trim contract as the normal record site
+                    // below — and `add_assistant_with_reasoning` now drops it
+                    // anyway, which would consume the reasoning into a no-op).
+                    if !assistant_response.trim().is_empty() {
                         // Same DISPLAY-ONLY reasoning contract as the normal
                         // record site: the user watched this thinking render
                         // before the stop — it must survive a reboot too.
@@ -723,8 +727,17 @@ impl Harness {
             // calls are recorded separately as structural items during dispatch;
             // an output that carried a tool call stays structural too — only
             // pure text is closable.
+            //
+            // Whitespace-only is NOT a response: LLMs routinely emit a bare
+            // `" "` token (the TUI drops it before opening a bubble — see
+            // `tui/app/events.rs`), so without the trim it would (a) record a
+            // `" "` item that bloats the context AND the session JSONL, and
+            // (b) slip PAST the natural-stop gate below (which also trims),
+            // turning a degenerate cut into a Closure of one space. Skipping
+            // the record keeps `attempt_reasoning` intact for the gate's
+            // one-shot promotion.
             let had_tools = self.has_pending_tools();
-            if !assistant_response.is_empty() {
+            if !assistant_response.trim().is_empty() {
                 // The attempt's reasoning rides the item (DISPLAY-ONLY — see
                 // `ContextItem::Assistant::reasoning`); `take` because the
                 // accumulator is cleared per attempt and the next stream
@@ -1633,11 +1646,15 @@ impl Harness {
                     // produced thinking deltas but zero answer text (the
                     // accumulator is only drained when a non-empty response
                     // is recorded, so it still holds the thinking here).
+                    // `trim().is_empty()`: a bare whitespace token (e.g. a
+                    // lone `" "` after the thinking block) is NOT an answer —
+                    // without the trim it would render as a Closure of one
+                    // space and the gate would never fire.
                     // Promote the reasoning into the ONE-SHOT steering message
                     // so the next request reuses it instead of re-deriving
                     // it; steering is per-iteration state, so the promotion
                     // vanishes from the very next turn.
-                    if assistant_response.is_empty() && !self.attempt_reasoning.is_empty() {
+                    if assistant_response.trim().is_empty() && !self.attempt_reasoning.is_empty() {
                         self.stop_nudges_left -= 1;
                         let reasoning = std::mem::take(&mut self.attempt_reasoning);
                         #[cfg(test)]
@@ -1657,8 +1674,9 @@ impl Harness {
                     }
                     // (2) Empty response with no reasoning at all: a bare cut
                     // (or a degenerate empty completion) — never a finished
-                    // turn.
-                    if assistant_response.is_empty() {
+                    // turn. Same `trim()` contract as (1): whitespace-only
+                    // counts as empty here too.
+                    if assistant_response.trim().is_empty() {
                         self.stop_nudges_left -= 1;
                         log::info!(
                             target: "laya",
@@ -1683,7 +1701,9 @@ impl Harness {
                 if let Some(checkup) = self.checkup.as_ref()
                     // An empty final response is a degenerate review input
                     // for the decision model — treat it as a plain stop.
-                    && !assistant_response.is_empty()
+                    // `trim()`: a whitespace-only "answer" is equally
+                    // degenerate (same contract as the gate above).
+                    && !assistant_response.trim().is_empty()
                     // A cycle with no tool dispatches is a pure text
                     // exchange: the request was answerable directly, so the
                     // final text is complete by construction and there is
