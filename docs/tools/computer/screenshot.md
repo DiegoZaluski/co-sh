@@ -21,8 +21,8 @@ screenshot(metadata, ComputerScreenshot) -> Result<ScreenshotOutput, String>
 |---|---|
 | `{}` | The full desktop. |
 | `{"region": [x, y, w, h]}` | One display region, display pixels, origin top-left. |
-| `{"app": "Reports"}` | Only the pixels under the app's window. |
-| `{"surface": "taskbar"}` | Only a shell surface's region — [`surface`](surface.md). |
+| `{"app": "Reports", "selector": "…"}` | The pixels under the matched element (element capture REQUIRES `selector`). |
+| `{"surface": "taskbar", "selector": "…"}` | The pixels under a shell surface element — [`surface`](surface.md) — (requires `selector`). |
 
 **Annotation** is the second axis, and it is *gated*: pass
 `"annotate": true` (requires an app scope) and the capture draws a labeled
@@ -36,6 +36,22 @@ B7  button[name='Export']  button 'Export'
 
 That selector is copy-ready for [`act`](act.md) / [`control`](control.md) —
 visual grounding without ever doing pixel math.
+
+## Keep the pixels: `save_path`
+
+Any capture form can ALSO write the PNG to disk — pass `save_path`
+(relative paths resolve against cosh's working directory; the file is
+overwritten, parent directories are created):
+
+```
+ScreenshotOutput.saved_to: "shot.png"     // echoed as provided
+```
+
+The output names the file in `saved_to` (the JSON result the harness
+plate shows) and the image STILL returns inline — saving is for the
+user's report/pipes, never a reason the model loses sight of the pixels.
+Outside any project root the harness asks for approval before the write
+(inside-root saves are free).
 
 ## The coordinate mapping (when you DO need pixels)
 
@@ -64,6 +80,10 @@ resort for node-less canvas targets (see [`control`](control.md)).
 - **Comma alternations are rejected up front** (`"button, link"`): `:nth(k)`
   would bind to the last clause only, so the legend would label a box with a
   selector that resolves elsewhere.
+- **`save_path` is an echo, not a resolution** — the returned `saved_to`
+  carries the path exactly as the call issued it (only the filesystem
+  operations trim surrounding whitespace); nothing is canonicalized or
+  absolutized behind your back.
 - Coordinates in tool calls always refer to the **delivered** image — never
   the original screen size.
 

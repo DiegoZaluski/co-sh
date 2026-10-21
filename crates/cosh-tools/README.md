@@ -11,7 +11,7 @@ Tools crate for [cosh](https://github.com/DiegoZaluski/co-sh) — a coding agent
 
 - **Sandboxed file editing** — reads carry a `file_hash` that writes must verify; edits are anchored on hashline tags with per-target errors, plus fuzzy-equivalent matching and AST-based structural rewrites (`ast-grep` + `tree-sitter`). Every write records a version for session rollback.
 - **Path guarding** — all paths are denied until the project root is set; write and read-only allow/blocklists, and kernel-pinned sandboxing (`openat` + `O_NOFOLLOW`) on Unix.
-- **Accessibility-tree-first computer tools** — observe and drive native desktop apps through the OS accessibility tree ([`xa11y`](https://crates.io/crates/xa11y)), with screenshots and synthetic input as support. Works on X11 and Wayland.
+- **Accessibility-tree-first computer tools** — observe and drive native desktop apps through the OS accessibility tree ([`xa11y`](https://crates.io/crates/xa11y)), with screenshots and synthetic input as support. Works on Windows (UIA), macOS, and Linux (X11 and Wayland).
 - **Streaming bash** — stdout/stderr streamed as chunks with exit codes, PTY mode, timeouts, and pre-spawn security validation.
 - **ACP subagents** — dispatch to external agent harnesses (Gemini, Claude, Codex, Cline, Devin, Goose, OpenCode, Kilo) or an internal nested harness, with session resume and streamed turns.
 - **LSP integration** — definitions, references, renames, call hierarchy and passive diagnostics feedback on touched files.
@@ -26,7 +26,7 @@ Tools crate for [cosh](https://github.com/DiegoZaluski/co-sh) — a coding agent
 | `bash` | `bash_run` |
 | `find` | `find_glob`, `find_grep` |
 | `lsp` | `lsp_definitions`, `lsp_references`, `lsp_symbols`, `lsp_rename`, `lsp_hover`, `lsp_code_actions`, … |
-| `computer` | `computer_apps`, `computer_snapshot`, `computer_act`, `computer_control`, `computer_screenshot`, `computer_wait` |
+| `computer` | `computer_apps`, `computer_snapshot`, `computer_act`, `computer_control`, `computer_screenshot`, `computer_wait`, `computer_windows` |
 | `web` | `web_fetch`, `web_search` |
 | `skills` | `skills_list`, `skills_read`, `skills_read_asset`, `skills_match_skills` |
 | `subagent` | `subagent_call` |
@@ -65,7 +65,7 @@ More examples in [`examples/`](https://github.com/DiegoZaluski/co-sh/tree/main/c
 ## Requirements
 
 - Rust 2024 edition (≥ 1.85)
-- The `computer` module needs an OS accessibility stack (X11 or Wayland)
+- The `computer` module needs an OS accessibility stack — Windows UIA, macOS AX, or Linux X11/Wayland
 - External agent CLIs only if dispatching to them via `subagent_call`
 
 ## Related crates

@@ -113,5 +113,6 @@ fn sample_output() -> ScreenshotOutput {
         omitted: Vec::new(),
         truncated: 0,
         images: Vec::new(),
+        saved_to: None,
     }
 }

@@ -143,6 +143,19 @@ pub async fn screenshot(input: &ComputerScreenshot) -> Result<ScreenshotOutput, 
     if input.nth.is_some() && input.selector.is_none() && !input.annotate {
         return Err("computer_screenshot: `nth` requires `selector`".into());
     }
+    if input
+        .save_path
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(str::is_empty)
+    {
+        return Err(
+            "computer_screenshot: `save_path` cannot be blank — give the file path \
+             where the PNG bytes are written (relative paths resolve against \
+             cosh's working directory)"
+                .into(),
+        );
+    }
 
     let input = input.clone();
     tokio::task::spawn_blocking(move || screenshot_blocking(&input))
@@ -156,6 +169,31 @@ fn screenshot_blocking(input: &ComputerScreenshot) -> Result<ScreenshotOutput, S
     } else {
         plain_blocking(input)
     }
+}
+
+/// Persist PNG bytes to `save_path`, creating parent directories as
+/// needed. The CALLER-ISSUED path is echoed back verbatim (surrounding
+/// whitespace is stripped for the I/O only — the `saved_to` field reports
+/// the path exactly as the model named it); canonicalizing it would report
+/// a path the model did not issue (difference without a purpose). The
+/// image ALSO stays inline: the harness replays it in the conversation, so
+/// saving to disk never costs the model its eyes on the screen.
+///
+/// # Errors
+///
+/// Returns `Err` when the parent directory cannot be created or the file
+/// itself cannot be written (missing permission, full disk).
+pub(crate) fn save_png(path: &str, png: &[u8]) -> Result<String, String> {
+    const TOOL: &str = "computer_screenshot";
+    let target = std::path::Path::new(path.trim());
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            format!("{TOOL}: save_path: cannot create parent directory for `{path}`: {e}")
+        })?;
+    }
+    std::fs::write(target, png)
+        .map_err(|e| format!("{TOOL}: save_path: cannot write `{path}`: {e}"))?;
+    Ok(path.to_string())
 }
 
 /// Annotated capture: boxes + tags drawn on the matched elements, legend
@@ -197,6 +235,10 @@ fn annotated_blocking(input: &ComputerScreenshot) -> Result<ScreenshotOutput, St
     let png = shot
         .to_png()
         .map_err(|e| super::errors::render("computer_screenshot", "encode PNG", &e))?;
+    let saved_to = match &input.save_path {
+        Some(path) => Some(save_png(path, &png)?),
+        None => None,
+    };
 
     Ok(ScreenshotOutput {
         width: shot.width,
@@ -227,6 +269,7 @@ fn annotated_blocking(input: &ComputerScreenshot) -> Result<ScreenshotOutput, St
             .collect(),
         truncated: annotated.truncated,
         images: vec![ImageBlock::png(&png)],
+        saved_to,
     })
 }
 
@@ -302,6 +345,10 @@ fn plain_blocking(input: &ComputerScreenshot) -> Result<ScreenshotOutput, String
     let png = capture
         .to_png()
         .map_err(|e| super::errors::render("computer_screenshot", "encode PNG", &e))?;
+    let saved_to = match &input.save_path {
+        Some(path) => Some(save_png(path, &png)?),
+        None => None,
+    };
     let image = ImageBlock::png(&png);
 
     Ok(ScreenshotOutput {
@@ -314,6 +361,7 @@ fn plain_blocking(input: &ComputerScreenshot) -> Result<ScreenshotOutput, String
         omitted: Vec::new(),
         truncated: 0,
         images: vec![image],
+        saved_to,
     })
 }
 
@@ -371,6 +419,9 @@ pub fn screenshot_tool_result(tool_call_id: &str, output: &ScreenshotOutput) -> 
         output.desktop_scale.0,
         output.desktop_scale.1,
     );
+    if let Some(saved) = &output.saved_to {
+        let _ = writeln!(text, "saved to: {saved}");
+    }
     if !output.legend.is_empty() {
         text.push_str(
             "\n\nAnnotated elements — act on a box by passing its \

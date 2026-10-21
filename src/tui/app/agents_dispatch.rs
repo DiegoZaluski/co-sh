@@ -207,8 +207,8 @@ pub(super) fn manager_disabled_tools(user_disabled: &HashSet<String>) -> HashSet
 ///   — workspace writes;
 /// - `lsp_rename`, `lsp_restart`, `lsp_code_actions` — the mutating half
 ///   of the language-server tools (navigation/hover stay);
-/// - `computer_act`, `computer_control` — desktop control (screenshots
-///   and snapshots stay);
+/// - `computer_act`, `computer_control`, `computer_windows` — desktop
+///   control (screenshots, snapshots and window LISTINGS stay);
 /// - `ask_questions` — needs a human in the loop; the manager is headless;
 /// - `stop_agent_loop` — the manager's ONLY deliverable is its final text
 ///   report (the harness's own sub-agent blocklist).
@@ -223,6 +223,7 @@ pub(super) const MANAGER_BLOCKED_TOOLS: &[&str] = &[
     "lsp_code_actions",
     "computer_act",
     "computer_control",
+    "computer_windows",
     "ask_questions",
     "stop_agent_loop",
 ];

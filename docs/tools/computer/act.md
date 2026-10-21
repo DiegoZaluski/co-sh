@@ -36,16 +36,20 @@ if the previous succeeded, and the output joins the per-step reports with
 
 ## Keyboard steps inside an act chain
 
-A step with `key`/`text` (or a bare `wait`) is a KEYBOARD/WAIT step — no
-selector, typing goes into whatever holds keyboard focus. That is the
-validator split to internalize:
+A step with `key`/`text`/`hold`/`release` (or a bare `wait`) is a
+KEYBOARD/WAIT step — no selector, typing goes into whatever holds keyboard
+focus. That is the validator split to internalize:
 
 - **semantic steps** carry `selector` + action — validated by the semantic
   validator (payload checks run BEFORE dispatch, so a malformed call fails
   fast instead of auto-waiting for an element that was never the problem);
-- **keyboard steps** carry `key`/`text`/`held` — validated by the shared
-  [keyboard engine](keyboard.md) as the chain walks.
+- **keyboard steps** carry `key`/`text`/`held`/`hold`/`release` — validated
+  by the shared [keyboard engine](keyboard.md) as the chain walks.
 
+`hold` / `release` are the press-hold-across-steps pair: `hold: ["shift"]`
+presses keys and keeps them down (a second hold of a down key just
+re-presses it), `release: ["shift"]` lifts them — and a `release` of a key
+nothing held is harmless, so the pair cannot desync into an error.
 Feeding a keyboard step to the semantic validator is itself an error whose
 guidance names the right engine. And because `act` has no pointer, a chain
 that needs typing into a NEW field either uses `set_value` (which targets

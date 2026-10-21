@@ -72,6 +72,18 @@ mix.
 Modifiers ride on the step: `held: ["ctrl"]` turns a click into ctrl+click,
 or a key into a chord — see [keyboard](keyboard.md) for the alias table.
 
+## Holding keys across steps and calls
+
+`hold: ["shift"]` presses keys NOW and keeps them down across the rest of
+the chain — for shift-selected text by keyboard (click the anchor, `hold`
+shift, arrow through, `release` shift), drag-modified interactions, and
+nested compose sequences. Its pair `release: ["shift"]` lifts keys again;
+pressing an already-down key just re-presses it, and releasing a key
+nothing held is harmless, so the pair cannot desync into an error.
+`hold`/`release` are standalone steps (no `key`/`text`/pointer fields on
+the same step); inside [act](act.md) chains they take no target, and a
+chain whose FIRST step is a hold needs an element step to own the approval.
+
 ## Inline waits
 
 A standalone step `{"wait": 600}` pauses the chain — for the dialog a menu

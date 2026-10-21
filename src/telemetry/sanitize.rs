@@ -139,6 +139,7 @@ pub fn normalize_tool(name: &str) -> &'static str {
         | "computer_snapshot"
         | "computer_wait"
         | "computer_screenshot"
+        | "computer_windows"
         | "computer_act"
         | "computer_control" => "computer",
         "lsp_definitions"

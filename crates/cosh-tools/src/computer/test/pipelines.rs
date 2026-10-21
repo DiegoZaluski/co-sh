@@ -636,7 +636,7 @@ mod tests {
     fn validation_requires_selector_and_one_app_scope() {
         let input = ComputerWait::default();
         let err = validate(&input).unwrap_err();
-        assert!(err.contains("`selector` is required"), "err: {err}");
+        assert!(err.contains("requires `selector`"), "err: {err}");
 
         let input = ComputerWait {
             selector: Some("button".into()),
@@ -653,6 +653,179 @@ mod tests {
         };
         let err = validate(&input).unwrap_err();
         assert!(err.contains("not both"), "err: {err}");
+    }
+
+    /// The VALUE mode: requires a selector, mutually exclusive with `state`
+    /// and with its sibling (`value` vs `value_contains`).
+    #[test]
+    fn value_mode_rules() {
+        let no_selector = ComputerWait {
+            name: Some("Safari".into()),
+            value: Some("100%".into()),
+            ..Default::default()
+        };
+        let err = validate(&no_selector).unwrap_err();
+        assert!(
+            err.contains("`value`/`value_contains` requires `selector`"),
+            "err: {err}"
+        );
+
+        let with_state = ComputerWait {
+            name: Some("Safari".into()),
+            selector: Some("progress_bar".into()),
+            value: Some("100%".into()),
+            state: Some(WaitState::Visible),
+            ..Default::default()
+        };
+        let err = validate(&with_state).unwrap_err();
+        assert!(err.contains("OR the state"), "err: {err}");
+
+        let both_siblings = ComputerWait {
+            name: Some("Safari".into()),
+            selector: Some("status".into()),
+            value: Some("a".into()),
+            value_contains: Some("b".into()),
+            ..Default::default()
+        };
+        let err = validate(&both_siblings).unwrap_err();
+        assert!(err.contains("not both"), "err: {err}");
+
+        let contains_ok = ComputerWait {
+            name: Some("Safari".into()),
+            selector: Some("status".into()),
+            value_contains: Some("Done".into()),
+            ..Default::default()
+        };
+        assert!(validate(&contains_ok).is_ok(), "`value_contains` is its own mode");
+    }
+
+    /// The EVENT mode: app-scoped only — every element field is rejected;
+    /// without an event the input still needs a selector.
+    #[test]
+    fn event_mode_rules() {
+        use crate::computer::types::WaitEvent;
+
+        let valid = ComputerWait {
+            name: Some("Safari".into()),
+            event: Some(WaitEvent::WindowOpened),
+            ..Default::default()
+        };
+        assert!(validate(&valid).is_ok(), "an event wait is selector-free");
+
+        let with_selector = ComputerWait {
+            selector: Some("window".into()),
+            event: Some(WaitEvent::WindowOpened),
+            ..Default::default()
+        };
+        let err = validate(&with_selector).unwrap_err();
+        assert!(
+            err.contains("`event` wait is app-scoped") && err.contains("`selector`"),
+            "err: {err}"
+        );
+
+        for extra in [
+            ComputerWait { state: Some(WaitState::Visible), event: Some(WaitEvent::FocusChanged), ..Default::default() },
+            ComputerWait { value: Some("x".into()), event: Some(WaitEvent::FocusChanged), ..Default::default() },
+            ComputerWait { value_contains: Some("x".into()), event: Some(WaitEvent::FocusChanged), ..Default::default() },
+            ComputerWait { nth: Some(1), event: Some(WaitEvent::FocusChanged), ..Default::default() },
+        ] {
+            let err = validate(&extra).unwrap_err();
+            assert!(
+                err.contains("`event` wait is app-scoped"),
+                "event excludes element fields: {err}"
+            );
+        }
+
+        // No event, no selector: the plain-selector requirement still holds.
+        let bare_event_less = ComputerWait {
+            name: Some("Safari".into()),
+            state: None,
+            value: None,
+            value_contains: None,
+            event: None,
+            ..Default::default()
+        };
+        let err = validate(&bare_event_less).unwrap_err();
+        assert!(err.contains("requires `selector`"), "err: {err}");
+    }
+
+    /// Every wire event variant maps onto a distinct xa11y EventKind.
+    #[test]
+    fn event_mapping_is_total_and_matched_broadly() {
+        use crate::computer::types::WaitEvent;
+        use crate::computer::wait::{event_kind, event_matches};
+
+        let all = [
+            WaitEvent::WindowOpened,
+            WaitEvent::WindowClosed,
+            WaitEvent::WindowActivated,
+            WaitEvent::WindowDeactivated,
+            WaitEvent::FocusChanged,
+            WaitEvent::ValueChanged,
+            WaitEvent::TextChanged,
+            WaitEvent::NameChanged,
+            WaitEvent::StateChanged,
+            WaitEvent::StructureChanged,
+            WaitEvent::SelectionChanged,
+            WaitEvent::MenuOpened,
+            WaitEvent::MenuClosed,
+            WaitEvent::Announcement,
+        ];
+        for event in all {
+            let _kind = event_kind(event); // mapping must compile-time-cover all arms
+        }
+        // Any delivered StateChanged (any payload) counts as state_changed.
+        let delivered = xa11y::EventKind::StateChanged {
+            flag: xa11y::StateFlag::Checked,
+            value: false,
+        };
+        assert!(event_matches(&event_kind(WaitEvent::StateChanged), &delivered));
+        // Other kinds match exactly and nothing else.
+        assert!(!event_matches(
+            &event_kind(WaitEvent::WindowOpened),
+            &xa11y::EventKind::WindowClosed
+        ));
+        assert!(event_matches(
+            &event_kind(WaitEvent::WindowClosed),
+            &xa11y::EventKind::WindowClosed
+        ));
+    }
+
+    /// The wire kind echoes the SAME token vocabulary the `event` request
+    /// used (serde snake_case) — including the placeholder payload which
+    /// `state_changed` waits accept as match-any. The result JSON is flat
+    /// (untagged): no `Event`/`State` wrapper key may leak onto the wire.
+    #[test]
+    fn event_wire_kind_roundtrips_and_serializes_flat() {
+        use crate::computer::types::{WaitedEvent, WaitedEventTarget, WaitResult};
+        use crate::computer::wait::event_kind_wire;
+
+        // The echo vocabulary is the SERDE token of `WaitEvent`
+        // (`announcement`) — a delivered kind matches the request token.
+        assert_eq!(
+            event_kind_wire(&xa11y::EventKind::Announcement),
+            "announcement"
+        );
+
+        let result = WaitResult::Event(WaitedEvent {
+            kind: "announcement".to_string(),
+            app: "Reports".to_string(),
+            pid: Some(42),
+            element: Some(WaitedEventTarget {
+                role: "status_bar".to_string(),
+                name: Some("progress".to_string()),
+                value: None,
+            }),
+        });
+        let json = serde_json::to_string(&result).expect("serializable");
+        assert!(
+            json.contains("\"kind\":\"announcement\"") && json.contains("\"app\":\"Reports\""),
+            "flat event JSON: {json}"
+        );
+        assert!(
+            !json.contains("\"Event\"") && !json.contains("\"State\""),
+            "untagged: {json}"
+        );
     }
 
     #[test]
@@ -790,5 +963,51 @@ mod tests {
             locator.count().map(|n| n >= 1).unwrap_or(false),
             "mock fixture lost its check_box — update the wait tests' fixture assumptions"
         );
+    }
+}
+
+/// Extractor-level wait coverage: `event` is a string enum and
+/// `value_contains` a plain string — a stringified `pid` must still
+/// repair alongside them, against the hand-written description schema.
+#[cfg(test)]
+mod wait_extraction_tests {
+    use cosh_sdk::extract_action::{
+        ExtractAction, NativeToolCall, StreamAction, ToolSchema,
+    };
+
+    use crate::computer::types::{ComputerWait, WaitEvent};
+    use crate::computer::Computer;
+
+    fn schema(description: &serde_json::Value) -> ToolSchema {
+        ToolSchema {
+            name: description["name"]
+                .as_str()
+                .expect("description has a name")
+                .to_string(),
+            input_schema: description["inputSchema"].clone(),
+            example_args: None,
+        }
+    }
+
+    #[test]
+    fn wait_event_and_value_fields_repair_and_deserialize() {
+        let mut ex = ExtractAction::new();
+        ex.add_tool(schema(&Computer::new().description_wait));
+        let call = NativeToolCall {
+            id: "call_v1".into(),
+            name: "computer_wait".into(),
+            arguments: r#"{"pid": "42", "event": "menu_opened"}"#.into(),
+            thought_signature: String::new(),
+        };
+        let repaired = match ex.register_native_call(&call) {
+            StreamAction::ToolCall(tc) => tc,
+            other => panic!("event wait must repair, got {other:?}"),
+        };
+        assert_eq!(ex.take_tool_failures(), 0, "repair, not rejection");
+
+        let input: ComputerWait =
+            serde_json::from_value(repaired.arguments.clone()).expect("must deserialize");
+        assert_eq!(input.pid, Some(42));
+        assert_eq!(input.event, Some(WaitEvent::MenuOpened));
     }
 }

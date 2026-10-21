@@ -278,4 +278,186 @@ mod keyboard_tests {
         let parsed = parse_keys(&held, TOOL).expect("two modifiers parse");
         assert_eq!(parsed, vec![Key::Shift, Key::Ctrl]);
     }
+
+    /// `hold`/`release` name parsing (`parse_hold_keys`): MODIFIER aliases
+    /// first, ordinary key names after — a hold may latch any key an app
+    /// listens to while it is down, not only modifiers.
+    #[test]
+    fn hold_names_parse_modifiers_and_plain_keys() {
+        let names = ["meta".to_string(), "shift".to_string(), "space".to_string()];
+        let parsed = crate::computer::keyboard::parse_hold_keys(&names, TOOL)
+            .expect("modifier + plain key parse");
+        assert_eq!(parsed, vec![Key::Meta, Key::Shift, Key::Space]);
+
+        // An unknown name is a key error, not a modifier error — the set
+        // is broader than `held`'s.
+        let err = crate::computer::keyboard::parse_hold_keys(&["hyper".into()], TOOL)
+            .expect_err("unknown key name");
+        assert!(!err.contains("expected shift, ctrl"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod hold_release_validation_tests {
+    use crate::computer::act::{chain_needs_sim, validate_step as act_validate, validate_chain as act_chain};
+    use crate::computer::control::validate_chain;
+    use crate::computer::types::{ComputerAct, ComputerControl};
+
+    fn ctrl_step() -> ComputerControl {
+        ComputerControl::default()
+    }
+
+    /// A bare `hold` is valid; adding any other field (pointer OR keyboard
+    /// OR wait) breaks its standalone contract.
+    #[test]
+    fn hold_is_valid_alone_and_rejects_every_other_field() {
+        let hold_only = ComputerControl {
+            hold: Some(vec!["ctrl".into()]),
+            ..ctrl_step()
+        };
+        assert!(validate_chain(&hold_only, 8).is_ok());
+
+        for step in [
+            ComputerControl { hold: Some(vec!["ctrl".into()]), wait: Some(5), ..ctrl_step() },
+            ComputerControl {
+                hold: Some(vec!["ctrl".into()]),
+                key: Some("a".into()),
+                ..ctrl_step()
+            },
+            ComputerControl {
+                hold: Some(vec!["ctrl".into()]),
+                x: Some(1),
+                y: Some(1),
+                ..ctrl_step()
+            },
+            ComputerControl {
+                hold: Some(vec!["ctrl".into()]),
+                release: Some(vec!["ctrl".into()]),
+                ..ctrl_step()
+            },
+        ] {
+            let err = validate_chain(&step, 8).expect_err("hold stays standalone");
+            assert!(err.contains("standalone") || err.contains("not both"), "{err}");
+        }
+    }
+
+    #[test]
+    fn release_mirrors_holds_validation() {
+        let release_only = ComputerControl {
+            release: Some(vec!["shift".into(), "a".into()]),
+            ..ctrl_step()
+        };
+        assert!(validate_chain(&release_only, 8).is_ok());
+
+        let empty = ComputerControl {
+            release: Some(Vec::new()),
+            ..ctrl_step()
+        };
+        let err = validate_chain(&empty, 8).unwrap_err();
+        assert!(err.contains("at least one key name"), "{err}");
+
+        let unknown = ComputerControl {
+            release: Some(vec!["hyper".into()]),
+            ..ctrl_step()
+        };
+        assert!(validate_chain(&unknown, 8).is_err(), "unknown key name must fail");
+    }
+
+    #[test]
+    fn act_hold_accepts_chaining_but_stays_non_composite() {
+        // hold + then: the chaining continues after the keys are down.
+        let chained = ComputerAct {
+            hold: Some(vec!["shift".into()]),
+            then: Some(Box::new(ComputerAct {
+                key: Some("down".into()),
+                ..ComputerAct::default()
+            })),
+            ..ComputerAct::default()
+        };
+        assert!(act_chain(&chained, 8).is_ok(), "hold chains through then");
+        assert!(act_validate(&chained).is_ok(), "hold chains through then");
+
+        // A hold WITH a semantic payload is rejected.
+        let mixed = ComputerAct {
+            hold: Some(vec!["shift".into()]),
+            selector: Some("button".into()),
+            action: None,
+            ..ComputerAct::default()
+        };
+        let err = act_validate(&mixed).unwrap_err();
+        assert!(err.contains("standalone"), "{err}");
+    }
+
+    #[test]
+    fn act_hold_and_release_report_one_message() {
+        // hold + release in ONE step fails through the standalone arm
+        // naming `release` — the same message shape computer_control
+        // reports, never a tool-specific "not both" wording.
+        let both = ComputerAct {
+            hold: Some(vec!["shift".into()]),
+            release: Some(vec!["shift".into()]),
+            ..ComputerAct::default()
+        };
+        let err = act_validate(&both).unwrap_err();
+        assert!(err.contains("standalone"), "{err}");
+        assert!(err.contains("`release`"), "{err}");
+    }
+
+    #[test]
+    fn act_hold_only_chain_needs_the_simulator() {
+        let hold_only = ComputerAct {
+            hold: Some(vec!["ctrl".into()]),
+            ..ComputerAct::default()
+        };
+        assert!(
+            chain_needs_sim(&hold_only),
+            "a hold step must guarantee a simulator for its run_step dispatch"
+        );
+    }
+}
+
+/// `hold`/`release` are string arrays; a model may also deliver one
+/// string-encoded (`"hold": "[\"shift\"]"`) — both must reach the tool
+/// deserializer as `Vec<String>`.
+#[cfg(test)]
+mod hold_release_extraction_tests {
+    use cosh_sdk::extract_action::{
+        ExtractAction, NativeToolCall, StreamAction, ToolSchema,
+    };
+
+    use crate::computer::types::ComputerControl;
+    use crate::computer::Computer;
+
+    fn schema(description: &serde_json::Value) -> ToolSchema {
+        ToolSchema {
+            name: description["name"]
+                .as_str()
+                .expect("description has a name")
+                .to_string(),
+            input_schema: description["inputSchema"].clone(),
+            example_args: None,
+        }
+    }
+
+    #[test]
+    fn hold_and_release_arrays_repair_and_deserialize() {
+        let mut ex = ExtractAction::new();
+        ex.add_tool(schema(&Computer::new().description_control));
+        let call = NativeToolCall {
+            id: "call_c1".into(),
+            name: "computer_control".into(),
+            arguments: r#"{"hold": "[\"shift\"]", "release": ["ctrl"]}"#.into(),
+            thought_signature: String::new(),
+        };
+        let repaired = match ex.register_native_call(&call) {
+            StreamAction::ToolCall(tc) => tc,
+            other => panic!("hold/release arrays must repair, got {other:?}"),
+        };
+        assert_eq!(ex.take_tool_failures(), 0, "repair, not rejection");
+
+        let input: ComputerControl =
+            serde_json::from_value(repaired.arguments.clone()).expect("must deserialize");
+        assert_eq!(input.hold, Some(vec!["shift".to_string()]));
+        assert_eq!(input.release, Some(vec!["ctrl".to_string()]));
+    }
 }

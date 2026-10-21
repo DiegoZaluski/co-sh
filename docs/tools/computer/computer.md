@@ -10,7 +10,8 @@ on:
 | [`apps`](apps.md) | List running applications, or resolve which element holds keyboard focus. |
 | [`snapshot`](snapshot.md) | Read an application's accessibility tree as an outline or JSON. |
 | [`screenshot`](screenshot.md) | Capture the desktop — optionally drawing boxes on elements and returning copy-ready selectors. |
-| [`wait`](wait.md) | Block until an element reaches a state; time out with a diagnosis. |
+| [`windows`](windows.md) | List an application's windows and manage ONE of them (activate, minimize, close, move…). |
+| [`wait`](wait.md) | Block until an element reaches a state, a value lands, or an event arrives; time out with a diagnosis. |
 | [`act`](act.md) | Invoke an element's semantic action layer (press, toggle, set_value, …). |
 | [`control`](control.md) | Chain pointer and keyboard steps — real clicks, real typing. |
 | [`surface`](surface.md) | Target the desktop itself: menu bar, taskbar, tray, flyouts. |
@@ -35,8 +36,9 @@ around it:
    [`computer_control`](control.md) when you need a real OS click (the one
    reliable way to move keyboard focus) or raw pointer work.
 4. **Wait** for the consequence — [`computer_wait`](wait.md) blocks on the
-   element state you expect (a dialog appearing, a spinner detaching) instead
-   of re-polling in a loop.
+   element state you expect (a dialog appearing, a spinner detaching), a
+   VALUE landing (`value: "100%"`), or a GRAPHICAL EVENT
+   (`event: "window_opened"`) instead of re-polling in a loop.
 
 ```rust,ignore
 use cosh_tools::computer::{Computer, types::*};
@@ -112,6 +114,12 @@ never via pixels). Input tools are gated by mode:
 Failures are never bare errors — [`errors`](errors.md) renders each failure
 with the next-step guidance and, for waits, the last observed state.
 
+Window management is split the same way: [`computer_windows`](windows.md)
+LISTING is read-only (all modes, no dialog); its `action` form
+(minimize/close/move/…) counts as state-changing and asks in Build mode
+like the input tools do. A `computer_screenshot` `save_path` outside the
+project root asks the same way (inside-root saves are free).
+
 ---
 
 ## Layout
@@ -123,6 +131,7 @@ The source tree is the index:
 | `apps.rs` | [apps.md](apps.md) | `cargo run --example computer-apps` |
 | `snapshot.rs` | [snapshot.md](snapshot.md) | `cargo run --example computer-snapshot` |
 | `screenshot.rs` | [screenshot.md](screenshot.md) | `cargo run --example computer-screenshot` |
+| `windows.rs` | [windows.md](windows.md) | — (fixture-driven: `cargo test -p cosh-tools -- computer::test::windows`) |
 | `wait.rs` | [wait.md](wait.md) | `cargo run --example computer-wait` |
 | `act.rs` (the touch engine) | [act.md](act.md) | `cargo run --example computer-act` |
 | `control.rs` | [control.md](control.md) | `cargo run --example computer-control` |

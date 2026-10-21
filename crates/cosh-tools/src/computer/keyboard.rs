@@ -78,6 +78,41 @@ pub fn run_wait_step(wait_ms: u64) -> String {
     format!("waited {wait_ms} ms")
 }
 
+/// Execute ONE validated `hold` step: press every key DOWN and leave it
+/// held. The keys keep their state in the OS keyboard engine across steps
+/// and calls — a later `release` with the same names puts them back up.
+/// Order is honored: listed first = pressed first.
+pub fn run_hold_step(
+    sim: &xa11y::InputSim,
+    names: &[String],
+    tool: &str,
+) -> Result<String, String> {
+    let keys = parse_hold_keys(names, tool)?;
+    for (name, key) in names.iter().zip(keys.iter().cloned()) {
+        sim.keyboard()
+            .down(key)
+            .map_err(|e| super::errors::render(tool, &format!("hold {name}"), &e))?;
+    }
+    Ok(format!("holding {}", names.join(",")))
+}
+
+/// Execute ONE validated `release` step: release every key a previous
+/// `hold` left down. Releasing a key that is not held is a no-op on every
+/// platform, so this is forgiving by construction.
+pub fn run_release_step(
+    sim: &xa11y::InputSim,
+    names: &[String],
+    tool: &str,
+) -> Result<String, String> {
+    let keys = parse_hold_keys(names, tool)?;
+    for (name, key) in names.iter().zip(keys.iter().cloned()) {
+        sim.keyboard()
+            .up(key)
+            .map_err(|e| super::errors::render(tool, &format!("release {name}"), &e))?;
+    }
+    Ok(format!("released {}", names.join(",")))
+}
+
 /// Parse a key name into a [`Key`].
 ///
 /// Named keys are matched case-insensitively; a single CHARACTER is taken
@@ -141,6 +176,24 @@ pub fn parse_keys(names: &[String], tool: &str) -> Result<Vec<Key>, String> {
             other => Err(format!(
                 "{tool}: unknown modifier `{other}` (expected shift, ctrl, alt or meta)"
             )),
+        })
+        .collect()
+}
+
+/// Parse names for `hold`/`release` step arrays: MODIFIER names first
+/// (same aliases as `held`), then any ordinary key name — unlike `held`,
+/// which takes modifiers only, a `hold` may keep any key down (an app that
+/// latches `space` or `enter` while open). Errors name the accepted set:
+/// "modifier or key".
+pub fn parse_hold_keys(names: &[String], tool: &str) -> Result<Vec<Key>, String> {
+    names
+        .iter()
+        .map(|n| match n.to_ascii_lowercase().as_str() {
+            "shift" => Ok(Key::Shift),
+            "ctrl" | "control" => Ok(Key::Ctrl),
+            "alt" | "option" => Ok(Key::Alt),
+            "meta" | "cmd" | "command" | "super" | "win" => Ok(Key::Meta),
+            _ => parse_key(n, tool),
         })
         .collect()
 }

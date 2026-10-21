@@ -16,7 +16,7 @@ use cosh_tools::{
         Computer,
         types::{
             ComputerAct, ComputerApps, ComputerControl, ComputerScreenshot, ComputerSnapshot,
-            ComputerWait,
+            ComputerWait, ComputerWindows,
         },
     },
     find::{Find, GlobCallOptions, GlobMatchCallback, GrepMatchCallback},
@@ -471,11 +471,14 @@ impl CoshTools {
         // between capture and use). apps/snapshot are structural (accessibility
         // tree), so they are position-independent by definition. computer_wait
         // is likewise read-only: it sends no input and blocks on a state
-        // check, so it stays exposed here too.
+        // check, so it stays exposed here too. computer_windows is exposed
+        // for LISTING windows (read-only); its `action` form finds approval
+        // through guardrails, which deny it in Ask mode.
         v.push(self.computer.description_apps.clone());
         v.push(self.computer.description_snapshot.clone());
         v.push(self.computer.description_wait.clone());
         v.push(self.computer.description_screenshot.clone());
+        v.push(self.computer.description_windows.clone());
         if let Some(lsp) = &self.lsp {
             v.push(lsp.description_definitions.clone());
             v.push(lsp.description_references.clone());
@@ -599,9 +602,10 @@ impl CoshTools {
             include_schema,
         );
         // Ask mode exposes the READ-ONLY observation tools of the computer
-        // set (apps/snapshot/screenshot/wait) — no synthetic input, so they
-        // are as safe as a web search. act/control stay out (they need
-        // approval even in Build mode).
+        // set (apps/snapshot/screenshot/wait/windows-list) — no synthetic
+        // input, so they are as safe as a web search. act/control stay out
+        // (they need approval even in Build mode); computer_windows' action
+        // form is guarded by guardrails instead.
         write_tool_if_enabled(
             out,
             disabled_tools,
@@ -624,6 +628,12 @@ impl CoshTools {
             out,
             disabled_tools,
             &self.computer.description_screenshot,
+            include_schema,
+        );
+        write_tool_if_enabled(
+            out,
+            disabled_tools,
+            &self.computer.description_windows,
             include_schema,
         );
     }
@@ -665,12 +675,13 @@ impl CoshTools {
         v.push(extract_schema(&self.skills.description_read_asset));
         v.push(extract_schema(&self.skills.description_match_skills));
         // Ask mode exposes the READ-ONLY observation tools of the computer
-        // set (apps/snapshot/screenshot) — mirroring
+        // set (apps/snapshot/screenshot/wait/windows) — mirroring
         // `tool_descriptions_filtered`/`write_tool_descriptions_filtered`.
         v.push(extract_schema(&self.computer.description_apps));
         v.push(extract_schema(&self.computer.description_snapshot));
         v.push(extract_schema(&self.computer.description_wait));
         v.push(extract_schema(&self.computer.description_screenshot));
+        v.push(extract_schema(&self.computer.description_windows));
         if let Some(lsp) = &self.lsp {
             v.push(extract_schema(&lsp.description_definitions));
             v.push(extract_schema(&lsp.description_references));
@@ -934,6 +945,7 @@ impl Tools for CoshTools {
         write_single_tool(out, &self.computer.description_snapshot, true);
         write_single_tool(out, &self.computer.description_wait, true);
         write_single_tool(out, &self.computer.description_screenshot, true);
+        write_single_tool(out, &self.computer.description_windows, true);
         write_single_tool(out, &self.computer.description_act, true);
         write_single_tool(out, &self.computer.description_control, true);
         if let Some(lsp) = &self.lsp {
@@ -979,6 +991,7 @@ impl Tools for CoshTools {
         v.push(self.computer.description_snapshot.clone());
         v.push(self.computer.description_wait.clone());
         v.push(self.computer.description_screenshot.clone());
+        v.push(self.computer.description_windows.clone());
         v.push(self.computer.description_act.clone());
         v.push(self.computer.description_control.clone());
         if let Some(lsp) = &self.lsp {
@@ -1023,6 +1036,7 @@ impl Tools for CoshTools {
         v.push(extract_schema(&self.computer.description_snapshot));
         v.push(extract_schema(&self.computer.description_wait));
         v.push(extract_schema(&self.computer.description_screenshot));
+        v.push(extract_schema(&self.computer.description_windows));
         v.push(extract_schema(&self.computer.description_act));
         v.push(extract_schema(&self.computer.description_control));
         if let Some(lsp) = &self.lsp {
@@ -1983,6 +1997,13 @@ impl Tools for CoshTools {
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner()) =
                     (!output.images.is_empty()).then(|| output.images.clone());
+                serde_json::to_string(&output).map_err(|e| e.to_string())
+            }
+
+            "computer_windows" => {
+                let input: ComputerWindows =
+                    serde_json::from_value(args).map_err(|e| e.to_string())?;
+                let output = self.computer.windows(&input).await?;
                 serde_json::to_string(&output).map_err(|e| e.to_string())
             }
 

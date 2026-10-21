@@ -92,6 +92,7 @@ outline/JSON), `elements: usize` (rendered count — tells "small tree" from
 | `nth` | `Option<usize>` | Ignored when annotating (the legend covers every match). |
 | `annotate` | `bool` | Default `false`. Requires an app scope; mutually exclusive with `region`. |
 | `max_width` | `Option<u32>` | Delivery budget (default 1568) — the mapping below absorbs the downscale. |
+| `save_path` | `Option<String>` | ALSO write the PNG here (verbatim echo in `saved_to`; parent dirs created, file overwritten). |
 | `timeout_ms` | `Option<u64>` | App-resolution timeout (default 3000). |
 | `surface` | `Option<SurfaceKind>` | Capture a shell surface's region. |
 
@@ -102,7 +103,8 @@ outline/JSON), `elements: usize` (rendered count — tells "small tree" from
 `legend: Vec<LegendEntryOutput>` (annotation boxes only),
 `omitted: Vec<OmissionOutput>` (matched but undrawable, with the reason),
 `truncated: usize` (matches dropped by the annotation cap of 100 — narrow
-`selector` when it bites), and `images: Vec<ImageBlock>` (the inline base64
+`selector` when it bites), `saved_to: Option<String>` (the `save_path`
+echo, verbatim), and `images: Vec<ImageBlock>` (the inline base64
 PNG for the multimodal channel). Mapping:
 
 ```text
@@ -118,27 +120,45 @@ desktop = desktop_origin + image_coord × desktop_scale
 
 ## `wait`
 
-### Input — `ComputerWait`
+### Input — `ComputerWait` (three mutually exclusive modes)
 
 | Field | Type | Meaning |
 |---|---|---|
 | `name` / `pid` | `Option<…>` | The app to watch — exactly one. |
-| `selector` | `Option<String>` | The element to watch. |
+| `selector` | `Option<String>` | The element to watch (state / value modes). |
 | `nth` | `Option<usize>` | 1-based match index (default 1). |
-| `state` | `Option<WaitState>` | The condition (default `visible`). |
-| `timeout_ms` | `Option<u64>` | Default 10 000, hard cap 60 000. |
-| `surface` | `Option<SurfaceKind>` | Watch a shell surface's tree. |
+| `state` | `Option<WaitState>` | Element condition (default `visible`). |
+| `value` | `Option<String>` | VALUE mode: wait until the element's value EQUALS this (requires `selector`; excludes `state`). |
+| `value_contains` | `Option<String>` | VALUE mode: wait until the value CONTAINS this substring (requires `selector`; excludes `state`; and excludes `value`). |
+| `event` | `Option<WaitEvent>` | EVENT mode: subscribe to a graphical event, app-scoped — excludes `selector`/`nth`/`state`/`value`/`value_contains`. |
+| `timeout_ms` | `Option<u64>` | Default 10 000, hard cap 60 000; the app lookup shares the budget. |
+| `surface` — NOT supported here | — | `wait` is app-scoped only. |
 
 `WaitState` — the eight conditions: `Attached`, `Detached`, `Visible`,
 `Hidden`, `Enabled`, `Disabled`, `Focused`, `Unfocused` (same tokens as the
 [snapshot](snapshot.md) state flags). `detached`/`hidden` tolerate absence;
 the others can only be met by an element that exists.
 
-### Output — `WaitOutput`
+`WaitEvent` — `window_opened` (default), `window_closed`,
+`window_activated`, `window_deactivated`, `focus_changed`, `value_changed`,
+`text_changed`, `name_changed`, `state_changed`, `structure_changed`,
+`selection_changed`, `menu_opened`, `menu_closed`, `announcement`.
 
-`met: bool`, `elapsed_ms: u64`, `observed: String` (the element's state at
-resolution time). On timeout the error carries the platform's
+### Output — `WaitResult` (untagged enum)
+
+| Variant | Shape |
+|---|---|
+| `State(WaitOutput)` | State / value modes. |
+| `Event(WaitedEvent)` | Event mode. |
+
+`WaitOutput` — `met: bool`, `elapsed_ms: u64`, `observed: WaitObservation`
+(`attached` + optional `visible`/`enabled`/`focused`: the element's state
+at resolution time). On timeout the error carries the platform's
 `Diagnosis` — see [`errors`](errors.md).
+
+`WaitedEvent` — `kind: String` (same snake_case vocabulary as `event`),
+`app: String`, `pid: Option<u32>`, `element: Option<WaitedEventTarget>`
+(`role`, `name`, `value` of the element the event was about).
 
 ---
 
@@ -157,7 +177,7 @@ resolution time). On timeout the error carries the platform's
 | `range` | `Option<[u32; 2]>` | `select_text` — 0-based, end EXCLUSIVE. |
 | `timeout_ms` | `Option<u64>` | Auto-wait for actionability (default 3000). |
 | `surface` | `Option<SurfaceKind>` | Shell-surface scope. |
-| `key` / `held` / `text` / `wait` | keyboard fields | Keyboard/wait steps — no `selector`; see [keyboard](keyboard.md). |
+| `key` / `held` / `text` / `wait` / `hold` / `release` | keyboard fields | Keyboard/wait/hold steps — no `selector`; see [keyboard](keyboard.md). |
 | `then` | `Option<Box<ComputerAct>>` | Next step, run only if this one succeeded. |
 
 `ActAction` — `press`, `focus`, `blur`, `toggle`, `select`, `expand`,
@@ -192,6 +212,8 @@ resolution time). On timeout the error carries the platform's
 | `held` | `Option<Vec<String>>` | Modifier chord. |
 | `key` | `Option<String>` | Keyboard step — no pointer fields. |
 | `text` | `Option<String>` | Literal typing — rejects `held`. |
+| `hold` | `Option<Vec<String>>` | Press these keys and KEEP them down (standalone step; re-pressing a down key is harmless). |
+| `release` | `Option<Vec<String>>` | Lift keys again (release of a key nothing held is harmless). |
 | `wait` | `Option<u64>` | Inline pause, ms (cap 10 000). |
 | `then` | `Option<Box<ComputerControl>>` | Next step (shell `&&` semantics). |
 
@@ -200,6 +222,45 @@ resolution time). On timeout the error carries the platform's
 `sent: String` — the joined per-step report
 (`click \`text_field[name='Filename']\` → typed "quarterly-report" →
 waited 600 ms → pressed enter`).
+
+---
+
+## `windows`
+
+### Input — `ComputerWindows` (list mode / manage mode)
+
+| Field | Type | Meaning |
+|---|---|---|
+| `name` / `pid` | `Option<…>` | The target app — exactly one. |
+| `selector` | `Option<String>` | ONE window or dialog (e.g. `dialog[name='Erasing…']`) — the action's target (default: first window); narrows the listing. |
+| `nth` | `Option<usize>` | 1-based match index (default 1). |
+| `action` | `Option<WindowAction>` | Omitted = LIST; set = perform it on the selected window. |
+| `x`, `y` | `Option<i32>` | `move` payload — new top-left (both REQUIRED for move). |
+| `width`, `height` | `Option<u32>` | `resize` payload — new OUTER size (both REQUIRED for resize). |
+| `timeout_ms` | `Option<u64>` | App-resolution timeout (default 3000). |
+
+`WindowAction` — `activate`, `minimize`, `maximize`,
+`enter_fullscreen`, `restore`, `close`, `move`, `resize`.
+
+### Output — `WindowsResult` (untagged enum)
+
+| Variant | Shape |
+|---|---|
+| `List(WindowsOutput)` | No `action`. |
+| `Manage(WindowManageOutput)` | An `action` ran. |
+
+`WindowsOutput` — `app: String`, `pid: Option<u32>`,
+`windows: Vec<WindowInfo>`, `count: usize`.
+
+`WindowManageOutput` — `action: String` (wire name), `window:
+Option<WindowInfo>` (state AFTER the action; `null` after `close`).
+Unrecognized actions not listed above are the platform's — they render as
+ordinary [errors](errors.md).
+
+| Struct | Fields |
+|---|---|
+| `WindowInfo` | `role: String` (`window`/`dialog`), `name: Option<String>`, `bounds: Option<WindowBounds>`, `active`/`minimized`/`maximized`/`fullscreen`: `Option<bool>` (`null` = the platform does not say; Linux AT-SPI never reports `maximized`) |
+| `WindowBounds` | `x: i32`, `y: i32`, `width: u32`, `height: u32` (desktop pixels) |
 
 ---
 
