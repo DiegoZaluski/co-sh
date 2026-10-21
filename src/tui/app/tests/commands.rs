@@ -2249,7 +2249,7 @@ async fn agents_call_serves_a_queued_cosh_pane_end_to_end() {
     let mut app = App::new("/tmp".to_string());
     // Contract: this test drives `serve_agents_pane_queues` → `dispatch_to_pane`,
     // which spawns a manager turn thread. Neutralize the daemon route so
-    // `run_manager_turn` returns its error immediately (the recipe's
+    // `run_manager_turn` returns its error immediately (the assembly's
     // `build_connector` fails before building a runtime) instead of ever
     // touching the network or $HOME — no live turn thread is left behind,
     // regardless of any provider in the ambient environment.

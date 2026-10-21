@@ -555,9 +555,9 @@ impl App {
         }
         // The pane's assembly inputs come from the SAME user config the
         // main loop reads: the session route (provider + model, `auto`
-        // resolved through the full fallback chain by the recipe) plus the
+        // resolved through the full fallback chain by the assembly) plus the
         // router's fallbacks. The old hand-cut subset forced Native and
-        // froze the first fallback — the recipe honors the user's choices.
+        // froze the first fallback — the assembly honors the user's choices.
         // An EMPTY provider degrades to the router's first fallback (the
         // deleted `daemon_connector`'s behavior): an unconfigured route
         // must not fail the pane when a working fallback exists.
@@ -589,7 +589,7 @@ impl App {
             .collect();
         let local_base_urls = self.configured_local_base_urls();
         let skills_config = self.setup.skills.clone();
-        // The SAME user knobs the main loop's assembly reads (the recipe's
+        // The SAME user knobs the main loop's assembly reads (the assembly's
         // contract): reasoning effort, tool-call delivery mode, cache
         // settings, MCP servers, the effective-context budget and RAG —
         // cloned before the turn thread moves in.
@@ -601,7 +601,7 @@ impl App {
         let openai_cache_retention = self.setup.openai_cache_retention().map(String::from);
         let mcp_config = self.setup.mcp.clone();
         let effective_context = self.setup.effective_context;
-        // No configured RAG databases → `recall: None`: the recipe hides
+        // No configured RAG databases → `recall: None`: the assembly hides
         // the `recall_search` tool entirely (the main loop's
         // `maybe_disable_recall_tool` contract) instead of carrying a tool
         // whose description promises databases that do not exist.
@@ -692,7 +692,7 @@ impl App {
                 None
             };
             std::thread::spawn(move || {
-                // The pane's ONE assembly: the recipe's inputs, with the
+                // The pane's ONE assembly: the assembly's inputs, with the
                 // pane's declared deviations from the main loop — the
                 // mode's normal prompt minus the self-review loop, the
                 // MANAGER requester tag, the bound pane id (strips
@@ -700,7 +700,7 @@ impl App {
                 // nobody pumps a pane queue), NO decision audit (not
                 // distributed) and the pane's OWN session id as the
                 // cache-affinity key.
-                let assembly = super::harness_recipe::HarnessAssembly {
+                let assembly = super::harness_assembly::HarnessAssembly {
                     provider: daemon_route
                         .as_ref()
                         .map(|(p, _)| p.clone())
@@ -1125,7 +1125,7 @@ impl App {
 }
 
 /// One daemon-pane turn: the pane's harness assembled through the ONE
-/// recipe (`harness_recipe::assemble`), whose plain event stream is bridged
+/// assembly (`harness_assembly::assemble`), whose plain event stream is bridged
 /// into the SAME typed `SubagentEvent` stream the external ACP panes emit —
 /// both pane flavors render identically. The final report (the loop's
 /// closure) arrives as `AgentsPaneDone`.
@@ -1139,7 +1139,7 @@ fn run_manager_turn(
         cosh_tools::subagent::events::PanePermissionAnswer,
     >>,
     stop_signal: Arc<AtomicBool>,
-    assembly: super::harness_recipe::HarnessAssembly,
+    assembly: super::harness_assembly::HarnessAssembly,
     session_id: String,
     store: crate::session::store::SessionStore,
     event_tx: tokio::sync::mpsc::UnboundedSender<HarnessEvent>,
@@ -1152,12 +1152,12 @@ fn run_manager_turn(
     let panic_session = session_id.clone();
 
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // THE shared process runtime (`harness_recipe::agent_runtime`), not
+        // THE shared process runtime (`harness_assembly::agent_runtime`), not
         // a per-turn current_thread one: the pane now assembles MCP (and
-        // may touch the LSP singleton) through the SAME recipe as the main
+        // may touch the LSP singleton) through the SAME assembly as the main
         // loop, and transports spawned on a per-turn runtime would be
         // killed (kill_on_drop) the moment the turn ends.
-        let rt = super::harness_recipe::agent_runtime();
+        let rt = super::harness_assembly::agent_runtime();
         rt.block_on(async move {
             let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
             // The manager loop's permission channel: with a TUI-connected
@@ -1168,7 +1168,7 @@ fn run_manager_turn(
             let (loop_tx, mut loop_rx) =
                 tokio::sync::mpsc::unbounded_channel::<cosh::harness::HarnessEvent>();
 
-            // THE recipe (`harness_recipe::assemble`): the pane assembles
+            // THE assembly (`harness_assembly::assemble`): the pane assembles
             // through the SAME path the main loop does — connector with the
             // user's tool-call mode + reasoning resolution, prompt-cache
             // headers keyed to the PANE's own session, MCP boot, RAG,
@@ -1177,7 +1177,7 @@ fn run_manager_turn(
             // pane id, no queued input, no audit). An assembly failure
             // closes the pane's turn with it instead of an Error event (the
             // pane has its own Done contract, not the main chat's).
-            let mut manager = match super::harness_recipe::assemble(assembly, &event_tx).await {
+            let mut manager = match super::harness_assembly::assemble(assembly, &event_tx).await {
                 Ok(manager) => manager,
                 Err(error) => {
                     let _ = event_tx.send(HarnessEvent::AgentsPaneDone {
@@ -1332,7 +1332,7 @@ fn run_manager_turn(
                 }
             });
 
-            super::harness_recipe::run_assembled_loop(
+            super::harness_assembly::run_assembled_loop(
                 &mut manager,
                 &input,
                 loop_tx,

@@ -27,7 +27,6 @@ crate::const_str_joined! {
             "- If the request can be completed correctly without using any tool, answer directly.\n",
             "- Avoid unnecessary narration or descriptions of obvious actions.\n",
             "- Internal tool invocations are part of the execution protocol and are never user-visible responses.\n",
-            "- When the current user request has been fully completed and no further action is required, invoke `stop_agent_loop`.\n",
             "- When the work is fully complete, say so explicitly: open the final response with a completion phrase such as `All done` or `Work finished`, followed by a brief, direct summary of what was done — do not pad the report with leftover ideas.\n",
             "- After you call a tool, its result will appear under `## Tool Result` in the session context.\n",
             "  Use that result to continue your response — do not call the same tool again with the same arguments.\n",
@@ -48,8 +47,7 @@ crate::const_str_joined! {
             "- If yes, call `subagent_call` for a review (correctness, security, performance, maintainability).\n",
             "- Purely cosmetic changes (comments, formatting, typos, docs) cannot affect behavior — skip the review.\n",
             "- When in doubt, review.\n",
-            "- Fix any critical issues the subagent finds, then request another review; repeat until only minor issues remain.\n",
-            "- Only invoke `stop_agent_loop` when no critical issues remain (or when no review was needed).\n"
+            "- Fix any critical issues the subagent finds, then request another review; repeat until only minor issues remain.\n"
         ]
     ]
 }
@@ -70,7 +68,6 @@ pub const INSTRUCTIONS_ASK: &str = concat!(
     "- Ask clarifying questions whenever the user's intent is ambiguous or required information is missing.\n",
     "- Use a tool only when it is required to inspect code, documentation, or other relevant information needed to answer correctly.\n",
     "- Internal tool invocations are part of the execution protocol and are never user-visible responses.\n",
-    "- When the discussion has naturally concluded and no further exploration is required, invoke `stop_agent_loop`.\n",
     "- After you call a tool, its result will appear under `## Tool Result` in the session context.\n",
     "  Use that result to continue your discussion — do not call the same tool again with the same arguments.\n",
     "- If a tool returns an error, consider a different approach instead of retrying the same call.\n"

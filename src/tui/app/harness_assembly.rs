@@ -1,4 +1,4 @@
-//! THE harness assembly recipe.
+//! THE harness assembly.
 //!
 //! One place builds every loop-bearing [`Harness`] in the TUI: the main
 //! agent loop and the `/agents` cosh pane both assemble through
@@ -19,7 +19,7 @@
 //! an error report). One-shot non-loop users of `Harness::chat` (the
 //! prompt corrector) and the nested internal sub-agent are deliberately
 //! NOT assembled here: they are different use cases with their own
-//! contracts, not subsets of this recipe.
+//! contracts, not subsets of this assembly.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -56,7 +56,7 @@ pub(crate) struct HarnessAssembly {
     /// map below covers the fallback providers).
     pub base_url: Option<String>,
     pub local_base_urls: std::collections::HashMap<String, String>,
-    /// The full fallback list (provider, model) — the recipe splits it
+    /// The full fallback list (provider, model) — the assembly splits it
     /// into primary + remaining for `auto`, or uses it as the harness's
     /// fallback chain for a concrete model.
     pub fallbacks: Vec<(String, String)>,
@@ -203,7 +203,7 @@ fn build_connector(
     Ok((apply_cache(with_model), Vec::new()))
 }
 
-/// Assemble the loop's harness through the ONE recipe: connector →
+/// Assemble the loop's harness through the ONE assembly: connector →
 /// harness → (audit) → MCP boot → context restore → RAG → header. Every
 /// failure here is RETURNED (the caller decides how its surface reports
 /// it); non-fatal degradation (MCP server failures, audit fail-open)

@@ -47,7 +47,7 @@ use crate::ui::toast::ToastState;
 
 mod agent_loop;
 mod agents_dispatch;
-mod harness_recipe;
+mod harness_assembly;
 mod commands;
 mod compaction;
 mod dialogs;

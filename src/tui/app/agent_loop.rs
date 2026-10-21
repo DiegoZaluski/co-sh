@@ -322,7 +322,7 @@ impl App {
         } else {
             fallbacks
         };
-        // The recipe consumes the fallback chain as plain (provider, model)
+        // The assembly consumes the fallback chain as plain (provider, model)
         // pairs.
         let fallbacks: Vec<(String, String)> = fallbacks
             .into_iter()
@@ -424,13 +424,13 @@ impl App {
         std::thread::spawn(move || {
             use std::panic::AssertUnwindSafe;
 
-            let rt = super::harness_recipe::agent_runtime();
+            let rt = super::harness_assembly::agent_runtime();
 
             let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
                 rt.block_on(async {
-                    use super::harness_recipe::{HarnessAssembly, assemble, run_assembled_loop};
+                    use super::harness_assembly::{HarnessAssembly, assemble, run_assembled_loop};
 
-                    // ONE assembly recipe (harness_recipe.rs): the connector,
+                    // ONE assembly (harness_assembly.rs): the connector,
                     // cache headers, MCP, RAG, effective-context budget and
                     // skills are decided here and built by the shared
                     // assembler — the main loop adds only its own session
