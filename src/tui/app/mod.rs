@@ -637,6 +637,35 @@ impl App {
         let theme_registry = ThemeRegistry::new();
         let setup = cosh::setup::Setup::load();
 
+        // Publish the user-registered ACP harnesses into the sub-agent
+        // registry BEFORE any harness (or its tool description) is built:
+        // the enum the model sees must match what `subagent_call` can
+        // actually spawn. Bad entries never block startup — each invalid
+        // stored registration is skipped with its own warning and the
+        // working ones are still published (an all-or-nothing failure here
+        // would disable every harness because one entry rotted).
+        for error in
+            cosh_tools::subagent::acp::register_custom_agents_lossy(&setup.acp_agent_pairs())
+        {
+            log::warn!("user-registered ACP agent skipped: {error}");
+        }
+
+        // Publish the user-registered custom providers into the connector
+        // registry before any connector (or model listing) is built: the
+        // model picker and every `Connector::new` resolve through the same
+        // merged table. Bad entries never block startup — the registrar is
+        // all-or-nothing by contract, so a single rotted entry surfaces as
+        // one warning and the built-in registry keeps working.
+        if let Err(error) = cosh_sdk::connector::register_custom_providers(
+            setup
+                .custom_provider_triples()
+                .into_iter()
+                .map(|(name, base_url, family)| (name, base_url, family.sdk_family()))
+                .collect(),
+        ) {
+            log::warn!("user-registered providers not published: {error}");
+        }
+
         // Load saved fallback chain from setup config
         let saved_fallbacks = fallback::load_fallbacks(&setup);
         let saved_prompt_corrector_fallbacks = fallback::load_prompt_corrector_fallbacks(&setup);

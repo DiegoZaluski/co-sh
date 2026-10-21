@@ -237,6 +237,35 @@ const PALETTES: &[(&str, AgentPalette)] = &[
             hard_stop: None,
         },
     ),
+    // GitHub Copilot: the mark's Copilot gray (#24292F on light) reads as
+    // pure black in practice, same call as Block's goose and Cline — on
+    // the pane's dark background the TUI's contrast floor lifts it toward
+    // the readable foreground instead of letting it dissolve.
+    (
+        "copilot",
+        AgentPalette {
+            primary: Rgb::from_parts(0x24, 0x29, 0x2F),
+            secondary: None,
+            tertiary: None,
+            quaternary: None,
+            accent: None,
+            hard_stop: None,
+        },
+    ),
+    // Qwen (Alibaba): the logo's purple-violet gradient — the wordmark
+    // and the app icon both lead with the same violet. Source: the
+    // qwen-code repo's own favicon / brand assets.
+    (
+        "qwen",
+        AgentPalette {
+            primary: Rgb::from_parts(0x61, 0x2E, 0xD1),
+            secondary: None,
+            tertiary: None,
+            quaternary: None,
+            accent: None,
+            hard_stop: None,
+        },
+    ),
 ];
 
 /// The palette of agent `name`, or `None` when the catalog does not know

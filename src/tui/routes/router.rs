@@ -386,11 +386,13 @@ impl RouterView {
 
     /// All registered ACP agents, installed harnesses first so the usable
     /// options lead the list. No filter: the registry is small and fixed.
-    fn acp_agents_ordered(&self) -> Vec<&'static cosh_tools::subagent::acp::Agent> {
+    fn acp_agents_ordered(&self) -> Vec<cosh_tools::subagent::acp::Agent> {
         let installed = cosh_tools::subagent::acp::detect_installed();
-        let (mut present, mut missing): (Vec<_>, Vec<_>) = cosh_tools::subagent::acp::ACP_AGENTS
-            .iter()
-            .partition(|agent| installed.contains(&agent.name));
+        let (mut present, mut missing): (Vec<_>, Vec<_>) =
+            cosh_tools::subagent::acp::all_agent_names()
+                .into_iter()
+                .filter_map(cosh_tools::subagent::acp::find_agent)
+                .partition(|agent| installed.contains(&agent.name));
         present.append(&mut missing);
         present
     }
@@ -744,20 +746,20 @@ impl RouterView {
                 prompt_choices.y,
                 prompt_choices.width,
                 ACP_LIST_TOP_OFFSET
-                    + cosh_tools::subagent::acp::ACP_AGENTS.len() as u16
+                    + cosh_tools::subagent::acp::all_agent_names().len() as u16
                     + ROUTER_SECTION_GAP,
             ),
             prompt_models: Rect::new(
                 prompt_choices.x,
                 prompt_choices.y
                     + ACP_LIST_TOP_OFFSET
-                    + cosh_tools::subagent::acp::ACP_AGENTS.len() as u16
+                    + cosh_tools::subagent::acp::all_agent_names().len() as u16
                     + ROUTER_SECTION_GAP,
                 prompt_choices.width,
                 prompt_choices
                     .height
                     .saturating_sub(ACP_LIST_TOP_OFFSET + 1)
-                    .saturating_sub(cosh_tools::subagent::acp::ACP_AGENTS.len() as u16),
+                    .saturating_sub(cosh_tools::subagent::acp::all_agent_names().len() as u16),
             ),
             prompt_fallbacks,
         }
@@ -820,7 +822,8 @@ impl RouterView {
                     let text = acp_row_text(
                         "  ",
                         agent.name,
-                        cosh_tools::subagent::acp::detect_installed().contains(&agent.name),
+                        cosh_tools::subagent::acp::installed_agents_snapshot()
+                            .contains(&agent.name),
                     );
                     if click_lands_on_text(mouse.x, choice_x, &text) {
                         self.selected_acp_agent = agent_index;
@@ -1063,7 +1066,7 @@ impl RouterView {
             acp_title_style,
         );
 
-        let installed = cosh_tools::subagent::acp::detect_installed();
+        let installed = cosh_tools::subagent::acp::installed_agents_snapshot();
         let acp_list_top = layout.prompt_acp.y + ACP_LIST_TOP_OFFSET;
         for (index, agent) in self.acp_agents_ordered().into_iter().enumerate() {
             let y = acp_list_top + index as u16;

@@ -2,11 +2,12 @@
 //! process-lifetime keyring cache, and the local-provider registry.
 
 use super::super::{
-    clear_api_key_cache, detect_provider, get_api_key, get_provider, has_api_key,
-    invalidate_api_key, is_local_provider, known_local_providers, known_providers,
-    normalize_local_base_url,
+    clear_api_key_cache, custom_provider_names, detect_provider, forget_provider_key, get_api_key,
+    get_provider, has_api_key, invalidate_api_key, is_local_provider, known_local_providers,
+    known_providers, normalize_local_base_url, register_custom_providers, COSH_SERVICE,
 };
 use super::common::{ENV_LOCK, EnvGuard};
+use crate::connector::Family;
 
 /// `has_api_key` reports `true` when the provider's env var is set.
 #[tokio::test]
@@ -225,4 +226,123 @@ fn normalize_local_base_url_adds_v1_when_bare() {
         normalize_local_base_url("nope", "http://127.0.0.1:1"),
         "http://127.0.0.1:1"
     );
+}
+
+/// Registry tests share one process-global table, so they serialize on
+/// this lock (the same pattern `ENV_LOCK` uses for env-backed state).
+static REGISTRY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// A registered custom provider resolves through `get_provider` with its
+/// own leaked base URL, appears in `known_providers`, and is not local.
+/// Env-backed (the derived `<NAME>_API_KEY` var), so it takes `ENV_LOCK`
+/// like every other env-mutating test.
+#[tokio::test]
+async fn custom_provider_lookup_round_trip() {
+    let _env = ENV_LOCK.lock().await;
+    let _lock = REGISTRY_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    register_custom_providers(vec![(
+        "corp-proxy".into(),
+        "https://litellm.corp:4000/v1".into(),
+        Family::OpenAICompatible,
+    )])
+    .expect("valid registration");
+
+    let cfg = get_provider("corp-proxy").expect("custom provider registered");
+    assert_eq!(cfg.base_url, "https://litellm.corp:4000/v1");
+    assert_eq!(cfg.family, Family::OpenAICompatible);
+    assert!(!is_local_provider("corp-proxy"));
+    assert!(known_providers().any(|p| p == "corp-proxy"));
+    assert!(custom_provider_names().contains(&"corp-proxy"));
+
+    // The derived env var resolves: `<NAME>_API_KEY`.
+    let _guard = EnvGuard::set("CORP_PROXY_API_KEY", "sk-corp");
+    assert!(has_api_key("corp-proxy"));
+
+    // Reset so other tests never see this registration.
+    register_custom_providers(Vec::new()).unwrap();
+}
+
+/// A custom provider must never shadow a built-in: the registrar rejects
+/// the whole call (case-insensitive built-in collision), and the built-in
+/// config still wins in `get_provider`.
+#[test]
+fn custom_provider_cannot_shadow_builtin() {
+    let _lock = REGISTRY_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let err = register_custom_providers(vec![(
+        "OpenAI".into(),
+        "https://evil.corp/v1".into(),
+        Family::OpenAICompatible,
+    )])
+    .expect_err("built-in collision must be rejected");
+    assert!(err.contains("built-in"), "unexpected error: {err}");
+    // The built-in config is untouched.
+    assert_eq!(get_provider("openai").unwrap().base_url, "https://api.openai.com/v1");
+
+    // Duplicates among the same call are rejected too.
+    let dup = register_custom_providers(vec![
+        (
+            "corp-proxy".into(),
+            "https://a.corp/v1".into(),
+            Family::OpenAICompatible,
+        ),
+        (
+            "corp-proxy".into(),
+            "https://b.corp/v1".into(),
+            Family::OpenAICompatible,
+        ),
+    ])
+    .expect_err("duplicate registration must be rejected");
+    assert!(dup.contains("more than once"), "unexpected error: {dup}");
+    register_custom_providers(Vec::new()).unwrap();
+}
+
+/// Malformed registrations are rejected with actionable errors: empty and
+/// multi-word names, non-URL and non-http(s) base URLs, unsupported
+/// families. A rejected call must not register anything.
+#[test]
+fn custom_provider_registration_rejections() {
+    let _lock = REGISTRY_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Defensive reset: a sibling test that died mid-body (assertion panic
+    // before its own reset) must not leak its registration into here.
+    register_custom_providers(Vec::new()).unwrap();
+    let cases = [
+        ("", "https://ok.corp/v1", Family::OpenAICompatible, "required"),
+        ("two words", "https://ok.corp/v1", Family::OpenAICompatible, "single word"),
+        ("no-url", "not a url", Family::OpenAICompatible, "valid url"),
+        ("bad-scheme", "ftp://files.corp", Family::OpenAICompatible, "http(s)"),
+        ("no-family", "https://ok.corp/v1", Family::Claude, "connector support"),
+    ];
+    for (name, url, family, fragment) in cases {
+        let err = register_custom_providers(vec![(name.into(), url.into(), family)])
+            .expect_err("invalid registration must be rejected");
+        assert!(
+            err.to_lowercase().contains(fragment),
+            "error for {name:?} should mention {fragment:?}: {err}"
+        );
+        assert!(
+            get_provider(if name.is_empty() { "no-url" } else { name }).is_none()
+                || name == "no-url",
+            "a rejected registration must not leak into the registry"
+        );
+    }
+    assert!(custom_provider_names().is_empty());
+    register_custom_providers(Vec::new()).unwrap();
+}
+
+/// The removal path's keyring cleanup: a missing credential is a no-op
+/// success; `forget_provider_key` must never fail on an endpoint that
+/// never had a key. Skipped (vacuously true) when the machine has no
+/// usable credential store at all — a headless CI's `get_password` fails
+/// with a platform error, not `NoEntry`, and there is nothing to assert
+/// there.
+#[test]
+fn forget_provider_key_missing_entry_is_ok() {
+    let probe = keyring::Entry::new(COSH_SERVICE, "COSH_PROBE_NO_SUCH_KEY")
+        .and_then(|entry| entry.get_password());
+    if let Err(err) = &probe {
+        if !matches!(err, keyring::Error::NoEntry) {
+            return;
+        }
+    }
+    forget_provider_key("never-registered-endpoint").expect("missing entry is success");
 }

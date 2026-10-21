@@ -36,6 +36,8 @@
 //! | `devin` | `devin acp` |
 //! | `claude` | `npx -y @agentclientprotocol/claude-agent-acp@latest` (official adapter) |
 //! | `codex` | `npx -y @agentclientprotocol/codex-acp@latest` (official adapter) |
+//! | `copilot` | `copilot --acp` |
+//! | `qwen` | `qwen --acp` |
 
 pub mod acp;
 /// Brand palettes of the supported ACP sub-agents, for the TUI to paint
@@ -177,12 +179,22 @@ impl SubAgent {
     ///
     /// # Panics
     ///
-    /// Panics if an agent returned by `detect_installed()` is not present
-    /// in [`ACP_AGENTS`](acp::ACP_AGENTS). This is a logic invariant —
-    /// detection only returns names that exist in the table.
+    /// Panics if an agent returned by [`acp::all_agent_names`] is not present
+    /// in either the built-in table or the user-registered registry. This is
+    /// a logic invariant — the name list only returns registered agents.
     #[allow(clippy::expect_used, clippy::format_collect)]
     fn build_tool_description(note: &str) -> ToolDescription {
-        let installed = acp::detect_installed();
+        // Installation is cached for built-ins and checked on demand for
+        // user registrations; every name here exists in the registries.
+        let registered = acp::all_agent_names();
+        let installed: Vec<&str> = registered
+            .iter()
+            .copied()
+            .filter(|name| {
+                acp::detect_installed().contains(name)
+                    || acp::custom_agent_installed(name)
+            })
+            .collect();
 
         // The note lands as the tail of the FIRST paragraph, so it reads as
         // part of the instructions ("...return its output. When the `agent`
@@ -231,17 +243,17 @@ impl SubAgent {
                  {usage}"
             )
         } else {
+            // Two ALIGNED columns — agent name, then its launch line — no
+            // markdown backticks: the width is the longest name in the
+            // list, so every invocation starts on the same column.
+            let name_w = installed.iter().map(|name| name.len()).max().unwrap_or(0);
             let agents_desc = installed
                 .iter()
                 .map(|name| {
-                    // SAFETY: `name` comes from detect_installed() which only
-                    // returns entries present in ACP_AGENTS.
-                    let entry = acp::ACP_AGENTS
-                        .iter()
-                        .find(|a| a.name == *name)
-                        .expect("installed agent must be in ACP_AGENTS");
+                    let entry = acp::find_agent(name)
+                        .expect("installed agent must be registered");
                     let invocation = entry.invocation();
-                    format!("- `{name}` → `{invocation}`\n")
+                    format!("- {name:<name_w$}  {invocation}\n", name_w = name_w)
                 })
                 .collect::<String>();
 
@@ -256,9 +268,9 @@ impl SubAgent {
         let enum_values: Vec<serde_json::Value> = if installed.is_empty() {
             // Even with no agents detected, keep the full enum so the
             // LLM can still attempt the tool if we missed one.
-            acp::ACP_AGENTS
+            acp::all_agent_names()
                 .iter()
-                .map(|a| serde_json::Value::String(a.name.to_string()))
+                .map(|name| serde_json::Value::String((*name).to_string()))
                 .collect()
         } else {
             installed

@@ -907,18 +907,11 @@ impl App {
                     {
                         self.setup.save();
                     } else if operation == "remove"
-                        && let Some(name) = self
-                            .settings_view
-                            .remove_selected_mcp_server(&mut self.setup)
+                        && self.remove_selected_settings_entry()
                     {
-                        // Purge the keyring credential too: a forgotten
-                        // server must not leave a live secret behind.
-                        // Failures are non-fatal — the entry is gone either
-                        // way, and the store may be locked.
-                        if let Err(err) = cosh::mcp::auth::forget_key(&name) {
-                            log::warn!("keyring cleanup for removed MCP server failed: {}", err);
-                        }
-                        self.setup.save();
+                        // Removal (keyring purge / registry re-publish)
+                        // happened inside the shared helper; nothing else
+                        // to do here.
                     }
                     return Ok(false);
                 }
@@ -988,13 +981,34 @@ impl App {
                             Some(crate::routes::settings::SettingsAction::McpToggled) => {
                                 self.setup.save();
                             }
+                            // Exhaustiveness only: `RemoveSelected` is
+                            // produced by the 🗑 glyph click
+                            // (`activate_mouse`) alone — Enter on an
+                            // MCP/ACP row opens the edit form, it never
+                            // removes.
+                            Some(crate::routes::settings::SettingsAction::RemoveSelected) => {}
                             Some(crate::routes::settings::SettingsAction::TelemetryToggled) => {
                                 // Consent persisted; the facade re-resolves it
                                 // (env override + CI hard-off) on next launch.
                                 self.setup.save();
+                                self.toast_restart_required("Telemetry");
                             }
                             Some(crate::routes::settings::SettingsAction::OpenMcpForm) => {
                                 self.open_mcp_form();
+                            }
+                            Some(
+                                crate::routes::settings::SettingsAction::OpenAcpFormFor {
+                                    index,
+                                },
+                            ) => {
+                                self.open_acp_form(index);
+                            }
+                            Some(
+                                crate::routes::settings::SettingsAction::OpenProviderFormFor {
+                                    index,
+                                },
+                            ) => {
+                                self.open_provider_form(index);
                             }
                             None => {}
                         }
@@ -1002,6 +1016,25 @@ impl App {
                     }
                     KeyCode::Esc => {
                         self.show_settings = false;
+                        return Ok(false);
+                    }
+                    // Backspace on an MCP/ACP row mirrors the 🗑 glyph click
+                    // (the sessions-list pairing). It must come BEFORE the
+                    // fallthrough so the prompt editor never eats the key,
+                    // and only claims it on rows the removal applies to —
+                    // everywhere else Backspace still edits the prompt.
+                    KeyCode::Backspace
+                        if matches!(
+                            crate::routes::settings::selectable_rows(&self.setup)
+                                .get(self.settings_view.selection.selected_index),
+                            Some(
+                                crate::routes::settings::SettingsRow::McpServer(_)
+                                    | crate::routes::settings::SettingsRow::AcpAgent(_)
+                                    | crate::routes::settings::SettingsRow::Provider(_)
+                            )
+                        ) =>
+                    {
+                        self.remove_selected_settings_entry();
                         return Ok(false);
                     }
                     _ => {}

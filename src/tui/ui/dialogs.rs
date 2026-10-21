@@ -611,6 +611,46 @@ pub enum DialogType {
         /// [`DragSelection`].
         selection: Option<DragSelection<usize>>,
     },
+    /// ACP harness registration form (Settings → Integrations → ACP
+    /// agents): the same panel mechanics as [`DialogType::McpForm`] with
+    /// two fields — the public agent name and its `command args…` launch
+    /// line. `editing` targets an existing `setup.acp_agents` entry (the
+    /// form opens prefilled); `None` creates one.
+    AcpForm {
+        /// Index of the entry being edited, or `None` when creating one.
+        editing: Option<usize>,
+        name: String,
+        command: String,
+        /// Active field: 0 name · 1 command.
+        field: usize,
+        cursor_pos: usize,
+        /// Mouse drag selection on the active field; `None` when nothing
+        /// is selected. Anchor/end come from [`form_panel_hit_field`] so
+        /// they sit on char boundaries. The field-agnostic kernel is
+        /// [`DragSelection`].
+        selection: Option<DragSelection<usize>>,
+    },
+    /// Custom LLM provider registration form (Settings → Integrations →
+    /// Custom providers): the same panel mechanics as [`DialogType::AcpForm`]
+    /// with three fields — the public provider name, the endpoint's base
+    /// URL, and the API family (free text, validated on save; only
+    /// `openai-compatible` is accepted today). `editing` targets an
+    /// existing `setup.custom_providers` entry (the form opens prefilled);
+    /// `None` creates one.
+    ProviderForm {
+        /// Index of the entry being edited, or `None` when creating one.
+        editing: Option<usize>,
+        name: String,
+        base_url: String,
+        /// Family as the user typed it (`openai-compatible` today).
+        family: String,
+        /// Active field: 0 name · 1 base URL · 2 family.
+        field: usize,
+        cursor_pos: usize,
+        /// Mouse drag selection on the active field; same kernel as the
+        /// other registration forms ([`DragSelection`]).
+        selection: Option<DragSelection<usize>>,
+    },
     /// Rename the current session: a text prompt prefilled with the current
     /// title, Enter applies, Esc cancels.
     RenameSession {
@@ -840,6 +880,40 @@ impl std::fmt::Debug for DialogType {
                 .field("cursor_pos", cursor_pos)
                 .field("selection", selection)
                 .finish(),
+            Self::AcpForm {
+                editing,
+                name,
+                command,
+                field,
+                cursor_pos,
+                selection,
+            } => f
+                .debug_struct("AcpForm")
+                .field("editing", editing)
+                .field("name", name)
+                .field("command", command)
+                .field("field", field)
+                .field("cursor_pos", cursor_pos)
+                .field("selection", selection)
+                .finish(),
+            Self::ProviderForm {
+                editing,
+                name,
+                base_url,
+                family,
+                field,
+                cursor_pos,
+                selection,
+            } => f
+                .debug_struct("ProviderForm")
+                .field("editing", editing)
+                .field("name", name)
+                .field("base_url", base_url)
+                .field("family", family)
+                .field("field", field)
+                .field("cursor_pos", cursor_pos)
+                .field("selection", selection)
+                .finish(),
             Self::RenameSession { input, cursor_pos } => f
                 .debug_struct("RenameSession")
                 .field("input", input)
@@ -1003,6 +1077,8 @@ impl DialogState {
 
         let x = mouse.x;
         let y_click = mouse.y;
+        // Panel width demand, computed before the mutable match borrow.
+        let panel_demand = dialog_panel_demand(Some(&instance.dialog_type));
 
         match &mut instance.dialog_type {
             DialogType::Alert { message: _ } => {
@@ -1558,7 +1634,16 @@ impl DialogState {
                     command.as_str(),
                     timeout.as_str(),
                 ];
-                focus_form_field(area, x, y_click, &values, field, cursor_pos, selection)
+                focus_form_field(
+                    area,
+                    x,
+                    y_click,
+                    panel_demand,
+                    &values,
+                    field,
+                    cursor_pos,
+                    selection,
+                )
             }
             DialogType::McpForm {
                 name,
@@ -1575,7 +1660,57 @@ impl DialogState {
                     timeout.as_str(),
                     api_key.as_str(),
                 ];
-                focus_form_field(area, x, y_click, &values, field, cursor_pos, selection)
+                focus_form_field(
+                    area,
+                    x,
+                    y_click,
+                    panel_demand,
+                    &values,
+                    field,
+                    cursor_pos,
+                    selection,
+                )
+            }
+            DialogType::AcpForm {
+                name,
+                command,
+                field,
+                cursor_pos,
+                selection,
+                ..
+            } => {
+                let values = [name.as_str(), command.as_str()];
+                focus_form_field(
+                    area,
+                    x,
+                    y_click,
+                    panel_demand,
+                    &values,
+                    field,
+                    cursor_pos,
+                    selection,
+                )
+            }
+            DialogType::ProviderForm {
+                name,
+                base_url,
+                family,
+                field,
+                cursor_pos,
+                selection,
+                ..
+            } => {
+                let values = [name.as_str(), base_url.as_str(), family.as_str()];
+                focus_form_field(
+                    area,
+                    x,
+                    y_click,
+                    panel_demand,
+                    &values,
+                    field,
+                    cursor_pos,
+                    selection,
+                )
             }
             DialogType::RenameSession { .. } => {
                 // Click outside the borderless prompt panel → dismiss
@@ -2338,6 +2473,71 @@ impl DialogState {
                     mcp_field_hint,
                     mcp_field_placeholder,
                     mcp_field_mask,
+                    &values,
+                    *field,
+                    *cursor_pos,
+                    *selection,
+                );
+            }
+            DialogType::AcpForm {
+                editing,
+                name,
+                command,
+                field,
+                cursor_pos,
+                selection,
+            } => {
+                let title = if editing.is_some() {
+                    "Edit ACP agent"
+                } else {
+                    "Add ACP agent"
+                };
+                let values = [name.as_str(), command.as_str()];
+                render_form_panel(
+                    buf,
+                    area,
+                    theme,
+                    now,
+                    &instance.cursor,
+                    title,
+                    "Agent Client Protocol · Enter saves",
+                    acp_field_label,
+                    acp_field_hint,
+                    acp_field_placeholder,
+                    acp_field_mask,
+                    &values,
+                    *field,
+                    *cursor_pos,
+                    *selection,
+                );
+            }
+            DialogType::ProviderForm {
+                editing,
+                name,
+                base_url,
+                family,
+                field,
+                cursor_pos,
+                selection,
+            } => {
+                let title = if editing.is_some() {
+                    "Edit provider"
+                } else {
+                    "Add provider"
+                };
+                let values = [name.as_str(), base_url.as_str(), family.as_str()];
+                render_form_panel(
+                    buf,
+                    area,
+                    theme,
+                    now,
+                    &instance.cursor,
+                    title,
+                    "Custom LLM endpoint · Enter saves",
+                    provider_field_label,
+                    provider_field_hint,
+                    provider_field_placeholder,
+                    provider_field_mask,
                     &values,
                     *field,
                     *cursor_pos,
@@ -3678,6 +3878,67 @@ fn hook_field_mask(_field: usize) -> bool {
     false
 }
 
+/// Per-field secrecy for the ACP form: nothing is secret (name + launch
+/// command), show all values.
+fn acp_field_mask(_field: usize) -> bool {
+    false
+}
+
+/// Per-field secrecy for the provider form: nothing is secret (name, URL,
+/// family), show all values.
+fn provider_field_mask(_field: usize) -> bool {
+    false
+}
+
+fn provider_field_label(field: usize) -> &'static str {
+    match field {
+        0 => "Name",
+        1 => "Base URL",
+        _ => "Family",
+    }
+}
+
+fn provider_field_hint(field: usize) -> &'static str {
+    match field {
+        0 => "single word · the id the model picker and routing use",
+        1 => "e.g. https://api.company.com/v1",
+        _ => "openai-compatible (only family supported today)",
+    }
+}
+
+/// Ghost text drawn while a field is empty. Short on purpose: it must fit
+/// the panel's single empty row without affecting geometry.
+fn provider_field_placeholder(field: usize) -> &'static str {
+    match field {
+        0 => "e.g. company-proxy",
+        1 => "e.g. https://litellm.corp:4000/v1",
+        _ => "openai-compatible",
+    }
+}
+
+fn acp_field_label(field: usize) -> &'static str {
+    match field {
+        0 => "Name",
+        _ => "Command",
+    }
+}
+
+fn acp_field_hint(field: usize) -> &'static str {
+    match field {
+        0 => "single word · the model sees it in subagent_call",
+        _ => "command args... · the binary must speak ACP over stdio",
+    }
+}
+
+/// Ghost text drawn while a field is empty. Short on purpose: it must fit
+/// the panel's single empty row without affecting geometry.
+fn acp_field_placeholder(field: usize) -> &'static str {
+    match field {
+        0 => "e.g. copilot-cli",
+        _ => "e.g. my-agent --acp",
+    }
+}
+
 fn mcp_field_hint(field: usize) -> &'static str {
     match field {
         0 => "local label shown in the footer · e.g. docs",
@@ -3721,9 +3982,90 @@ fn hook_field_hint(field: usize) -> &'static str {
     }
 }
 
-/// Panel width — matches the other text-input dialogs.
-pub(crate) fn form_panel_dialog_w(area: Rect) -> u16 {
-    56u16.min(area.width.saturating_sub(8)).max(30)
+/// Panel width: 56-column floor, grown to fit the panel's static
+/// single-line rows when they need more (the demand comes from
+/// [`dialog_panel_demand`]); clamped to the terminal. Field values are
+/// excluded on purpose — they wrap onto extra rows instead of widening
+/// the panel, keeping the cursor grid stable while typing.
+pub(crate) fn form_panel_width(area: Rect, demand: usize) -> u16 {
+    let wanted = demand.saturating_add(4).max(56) as u16; // +2-cell margin per side
+    wanted.min(area.width.saturating_sub(8)).max(30)
+}
+
+/// Widest single row a panel draws, from its one-line parts. The per-field
+/// label row is marker + 1 gap + hint (the render's layout). Shared by
+/// [`dialog_panel_demand`] (dialog-keyed) and `render_form_panel` (which
+/// holds the same parts as parameters).
+fn panel_static_demand(
+    title: &str,
+    subtitle: &str,
+    label: fn(usize) -> &'static str,
+    hint: fn(usize) -> &'static str,
+    placeholder: fn(usize) -> &'static str,
+    field_count: usize,
+) -> usize {
+    let label_rows =
+        (0..field_count).map(|field| format!(" {} ", label(field)).chars().count() + 1 + hint(field).chars().count());
+    let placeholders = (0..field_count).map(|field| placeholder(field).chars().count());
+    let esc_row = title.chars().count() + 1 + 3; // title + gap + "esc"
+    [esc_row, subtitle.chars().count()]
+        .into_iter()
+        .chain(label_rows)
+        .chain(placeholders)
+        .max()
+        .unwrap_or(0)
+}
+
+/// Width (columns) the panel's static single-line rows demand: the widest
+/// among the title+esc header, the subtitle, each label+hint row and each
+/// placeholder. `None` (no panel open) yields 0 → the base width. Field
+/// values never participate — they wrap instead of widening the panel.
+pub(crate) fn dialog_panel_demand(dialog: Option<&DialogType>) -> usize {
+    let Some(dialog) = dialog else {
+        return 0;
+    };
+    match dialog {
+        DialogType::HookInput { event, .. } => {
+            let subtitle = if *event == "PostToolUse" {
+                "PostToolUse · runs after each tool call"
+            } else {
+                "PreToolUse · runs before each tool call"
+            };
+            panel_static_demand(
+                "Add Hook",
+                subtitle,
+                hook_field_label,
+                hook_field_hint,
+                hook_field_placeholder,
+                4,
+            )
+        }
+        DialogType::McpForm { .. } => panel_static_demand(
+            "Add MCP server",
+            "stdio or Streamable HTTP · Enter saves",
+            mcp_field_label,
+            mcp_field_hint,
+            mcp_field_placeholder,
+            4,
+        ),
+        DialogType::AcpForm { .. } => panel_static_demand(
+            "Add ACP agent",
+            "Agent Client Protocol · Enter saves",
+            acp_field_label,
+            acp_field_hint,
+            acp_field_placeholder,
+            2,
+        ),
+        DialogType::ProviderForm { .. } => panel_static_demand(
+            "Add provider",
+            "Custom LLM endpoint · Enter saves",
+            provider_field_label,
+            provider_field_hint,
+            provider_field_placeholder,
+            3,
+        ),
+        _ => 0,
+    }
 }
 
 pub(crate) const fn form_panel_content_w(panel_w: u16) -> u16 {
@@ -3769,8 +4111,12 @@ pub(crate) fn form_field_geometries(
 
 /// Shared geometry for a registration panel:
 /// `(x, y, w, h, content_x, content_w)`. Mirrors [`render_form_panel`].
-pub(crate) fn form_panel_metrics(area: Rect, fields: &[&str]) -> (u16, u16, u16, u16, u16, usize) {
-    let w = form_panel_dialog_w(area);
+pub(crate) fn form_panel_metrics(
+    area: Rect,
+    demand: usize,
+    fields: &[&str],
+) -> (u16, u16, u16, u16, u16, usize) {
+    let w = form_panel_width(area, demand);
     let cols = form_panel_content_w(w) as usize;
     let field_rows: u16 = fields
         .iter()
@@ -3815,12 +4161,13 @@ fn hook_marker_fg(theme: &Theme) -> Color {
 /// char grid the renderer paints.
 pub(crate) fn form_panel_hit_field(
     area: Rect,
+    demand: usize,
     fields: &[&str],
     x: u16,
     y: u16,
 ) -> Option<(usize, Option<usize>)> {
     let (dialog_x, dialog_y, dialog_w, dialog_h, content_x, cols) =
-        form_panel_metrics(area, fields);
+        form_panel_metrics(area, demand, fields);
     let inside_panel =
         x >= dialog_x && x < dialog_x + dialog_w && y >= dialog_y && y < dialog_y + dialog_h;
     if !inside_panel {
@@ -3857,16 +4204,18 @@ pub(crate) fn byte_at_char(value: &str, char_idx: usize) -> usize {
 /// outside the panel dismisses, inside focuses the clicked field (labels)
 /// and moves the insertion point (value rows); a click is a new caret, so
 /// any drag selection dies here. Padding just consumes.
+#[allow(clippy::too_many_arguments)]
 fn focus_form_field(
     area: Rect,
     x: u16,
     y_click: u16,
+    demand: usize,
     values: &[&str],
     field: &mut usize,
     cursor_pos: &mut usize,
     selection: &mut Option<DragSelection<usize>>,
 ) -> DialogAction {
-    let (dialog_x, dialog_y, dialog_w, dialog_h, ..) = form_panel_metrics(area, values);
+    let (dialog_x, dialog_y, dialog_w, dialog_h, ..) = form_panel_metrics(area, demand, values);
     let inside = x >= dialog_x
         && x < dialog_x + dialog_w
         && y_click >= dialog_y
@@ -3876,7 +4225,9 @@ fn focus_form_field(
         // rule as the other text-input dialogs).
         return DialogAction::Dismissed;
     }
-    if let Some((clicked_field, char_idx)) = form_panel_hit_field(area, values, x, y_click) {
+    if let Some((clicked_field, char_idx)) =
+        form_panel_hit_field(area, demand, values, x, y_click)
+    {
         *field = clicked_field;
         *cursor_pos = match char_idx {
             Some(ci) => byte_at_char(values[clicked_field], ci),
@@ -3916,8 +4267,16 @@ fn render_form_panel(
     cursor_pos: usize,
     selection: Option<DragSelection<usize>>,
 ) {
+    let demand = panel_static_demand(
+        title,
+        subtitle,
+        label,
+        hint,
+        placeholder,
+        fields.len(),
+    );
     let (dialog_x, dialog_y, dialog_w, dialog_h, content_x, cols) =
-        form_panel_metrics(area, fields);
+        form_panel_metrics(area, demand, fields);
     let content_w = cols as u16;
     let geoms = form_field_geometries(dialog_y, fields, cols);
 
@@ -4146,23 +4505,36 @@ mod hook_panel_tests {
     fn hit_field_maps_labels_and_value_rows() {
         let area = Rect::new(0, 0, 80, 30);
         let values = ["block rm", "", "exit 2", ""];
-        let (dialog_x, dialog_y, _, _, content_x, cols) = form_panel_metrics(area, &values);
+        let demand = dialog_panel_demand(None);
+        let (dialog_x, dialog_y, _, _, content_x, cols) = form_panel_metrics(area, demand, &values);
         let geoms = form_field_geometries(dialog_y, &values, cols);
 
         // Label row focuses the field without moving the cursor.
         assert_eq!(
-            form_panel_hit_field(area, &values, content_x + 2, geoms[0].label_y),
+            form_panel_hit_field(
+                area,
+                demand,
+                &values,
+                content_x + 2,
+                geoms[0].label_y,
+            ),
             Some((0, None))
         );
         // Value row positions the cursor at the clicked character.
         let col_of_x = 3usize; // third char of "exit 2"
         assert_eq!(
-            form_panel_hit_field(area, &values, content_x + col_of_x as u16, geoms[2].value_y),
+            form_panel_hit_field(
+                area,
+                demand,
+                &values,
+                content_x + col_of_x as u16,
+                geoms[2].value_y,
+            ),
             Some((2, Some(col_of_x)))
         );
         // Padding inside the panel is not a field.
         assert_eq!(
-            form_panel_hit_field(area, &values, dialog_x + 1, dialog_y + 1),
+            form_panel_hit_field(area, demand, &values, dialog_x + 1, dialog_y + 1),
             None
         );
     }
@@ -4183,7 +4555,11 @@ mod hook_panel_tests {
         });
         let area = Rect::new(0, 0, 80, 30);
         let values = ["", "", "exit 2", ""];
-        let (_dialog_x, dialog_y, _, _, content_x, cols) = form_panel_metrics(area, &values);
+        let demand = state
+            .stack
+            .last()
+            .map_or(0, |d| dialog_panel_demand(Some(&d.dialog_type)));
+        let (_dialog_x, dialog_y, _, _, content_x, cols) = form_panel_metrics(area, demand, &values);
 
         // Click the Command value row at the 'i' column.
         let cmd_geom_row = form_field_geometries(dialog_y, &values, cols)[2].value_y;
@@ -4226,7 +4602,8 @@ mod hook_panel_tests {
     fn margins_and_wrap_grow_the_panel() {
         let area = Rect::new(0, 0, 80, 60);
         let single = ["", "", "", ""];
-        let (_, _, _, h_single, _, cols) = form_panel_metrics(area, &single);
+        let demand = dialog_panel_demand(None);
+        let (_, _, _, h_single, _, cols) = form_panel_metrics(area, demand, &single);
 
         // Every field carries label + top/bottom margins.
         assert_eq!(h_single as usize, 5 + 4 * (3 + 1));
@@ -4234,7 +4611,7 @@ mod hook_panel_tests {
         // A value one char past `cols` adds exactly one wrapped row (+margin).
         let long = format!("a{}", "b".repeat(cols));
         let wrapped = ["", "", long.as_str(), ""];
-        let (_, _, _, h_wrapped, _, _) = form_panel_metrics(area, &wrapped);
+        let (_, _, _, h_wrapped, _, _) = form_panel_metrics(area, demand, &wrapped);
         assert_eq!(h_wrapped, h_single + 1);
     }
 
@@ -4281,8 +4658,22 @@ mod hook_panel_tests {
         // Each render focuses a different field: the focused one carries
         // the cursor block over its first cell, so only unfocused rows are
         // asserted character-exact.
-        let empty = ["", "", ""];
-        let (_, dialog_y, _, _, content_x, cols) = form_panel_metrics(area, &empty);
+        // All four MCP fields: the render's width demand comes from the
+        // fields it receives, so the grid above (McpForm demand, which
+        // includes the API-key hint's pull) only matches with the full set.
+        let empty = ["", "", "", ""];
+        // The grid is derived from the MCP form's demand, not the base
+        // width — its API-key hint widens the panel past 56 columns.
+        let demand = dialog_panel_demand(Some(&DialogType::McpForm {
+            name: String::new(),
+            endpoint: String::new(),
+            timeout: String::new(),
+            api_key: String::new(),
+            field: 0,
+            cursor_pos: 0,
+            selection: None,
+        }));
+        let (_, dialog_y, _, _, content_x, cols) = form_panel_metrics(area, demand, &empty);
         let geoms = form_field_geometries(dialog_y, &empty, cols);
 
         let mut buf = Buffer::empty(area);
@@ -4303,8 +4694,8 @@ mod hook_panel_tests {
 
         // Typed values replace the ghost text entirely (focus the middle
         // field so the asserted rows carry no cursor block).
-        let filled = ["docs", "my-server", "45"];
-        let (_, dialog_y, _, _, content_x, cols) = form_panel_metrics(area, &filled);
+        let filled = ["docs", "my-server", "45", ""];
+        let (_, dialog_y, _, _, content_x, cols) = form_panel_metrics(area, demand, &filled);
         let geoms = form_field_geometries(dialog_y, &filled, cols);
         let mut buf = Buffer::empty(area);
         render(&mut buf, &filled, 1, 0);

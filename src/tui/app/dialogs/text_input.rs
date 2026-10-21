@@ -226,7 +226,10 @@ impl App {
     pub(in crate::app) fn is_registration_form_open(&self) -> bool {
         matches!(
             self.dialog.current().map(|d| &d.dialog_type),
-            Some(DialogType::HookInput { .. }) | Some(DialogType::McpForm { .. })
+            Some(DialogType::HookInput { .. })
+                | Some(DialogType::McpForm { .. })
+                | Some(DialogType::AcpForm { .. })
+                | Some(DialogType::ProviderForm { .. })
         )
     }
 
@@ -271,6 +274,29 @@ impl App {
                 cursor_pos,
                 selection,
             } => match [name, endpoint, timeout, api_key].into_iter().nth(*field) {
+                Some(line) => (line, cursor_pos, selection, *field),
+                None => return,
+            },
+            DialogType::AcpForm {
+                name,
+                command,
+                field,
+                cursor_pos,
+                selection,
+                ..
+            } => match [name, command].into_iter().nth(*field) {
+                Some(line) => (line, cursor_pos, selection, *field),
+                None => return,
+            },
+            DialogType::ProviderForm {
+                name,
+                base_url,
+                family,
+                field,
+                cursor_pos,
+                selection,
+                ..
+            } => match [name, base_url, family].into_iter().nth(*field) {
                 Some(line) => (line, cursor_pos, selection, *field),
                 None => return,
             },
@@ -327,6 +353,37 @@ impl App {
                             .and_then(|sel| sel.slice_of(*field, line))
                             .unwrap_or_else(|| line.to_string())
                     }),
+                DialogType::AcpForm {
+                    name,
+                    command,
+                    field,
+                    selection,
+                    ..
+                } => [name, command]
+                    .get(*field)
+                    .copied()
+                    .map(|line| {
+                        selection
+                            .as_ref()
+                            .and_then(|sel| sel.slice_of(*field, line))
+                            .unwrap_or_else(|| line.to_string())
+                    }),
+                DialogType::ProviderForm {
+                    name,
+                    base_url,
+                    family,
+                    field,
+                    selection,
+                    ..
+                } => [name, base_url, family]
+                    .get(*field)
+                    .copied()
+                    .map(|line| {
+                        selection
+                            .as_ref()
+                            .and_then(|sel| sel.slice_of(*field, line))
+                            .unwrap_or_else(|| line.to_string())
+                    }),
                 _ => None,
             },
             None => None,
@@ -349,6 +406,8 @@ impl App {
         let selection = match &mut d.dialog_type {
             DialogType::HookInput { selection, .. } => selection,
             DialogType::McpForm { selection, .. } => selection,
+            DialogType::AcpForm { selection, .. } => selection,
+            DialogType::ProviderForm { selection, .. } => selection,
             _ => return false,
         };
         selection.take().is_some()
@@ -360,7 +419,7 @@ impl App {
     /// and outside clicks return false so the existing click dispatch
     /// (focus/dismiss) runs untouched.
     pub(in crate::app) fn start_form_selection_at(&mut self, x: u16, y: u16) -> bool {
-        use crate::ui::dialogs::{byte_at_char, form_panel_hit_field};
+        use crate::ui::dialogs::{byte_at_char, dialog_panel_demand, form_panel_hit_field};
         let area = self.terminal_size();
         let hit: Option<(usize, usize)> = match self.dialog.current() {
             Some(d) => match &d.dialog_type {
@@ -377,7 +436,8 @@ impl App {
                         command.as_str(),
                         timeout.as_str(),
                     ];
-                    form_panel_hit_field(area, &values, x, y)
+                    let demand = dialog_panel_demand(Some(&d.dialog_type));
+                    form_panel_hit_field(area, demand, &values, x, y)
                         .and_then(|(f, ci)| ci.map(|c| (f, byte_at_char(values[f], c))))
                 }
                 DialogType::McpForm {
@@ -393,7 +453,29 @@ impl App {
                         timeout.as_str(),
                         api_key.as_str(),
                     ];
-                    form_panel_hit_field(area, &values, x, y)
+                    let demand = dialog_panel_demand(Some(&d.dialog_type));
+                    form_panel_hit_field(area, demand, &values, x, y)
+                        .and_then(|(f, ci)| ci.map(|c| (f, byte_at_char(values[f], c))))
+                }
+                DialogType::AcpForm {
+                    name,
+                    command,
+                    ..
+                } => {
+                    let values = [name.as_str(), command.as_str()];
+                    let demand = dialog_panel_demand(Some(&d.dialog_type));
+                    form_panel_hit_field(area, demand, &values, x, y)
+                        .and_then(|(f, ci)| ci.map(|c| (f, byte_at_char(values[f], c))))
+                }
+                DialogType::ProviderForm {
+                    name,
+                    base_url,
+                    family,
+                    ..
+                } => {
+                    let values = [name.as_str(), base_url.as_str(), family.as_str()];
+                    let demand = dialog_panel_demand(Some(&d.dialog_type));
+                    form_panel_hit_field(area, demand, &values, x, y)
                         .and_then(|(f, ci)| ci.map(|c| (f, byte_at_char(values[f], c))))
                 }
                 _ => None,
@@ -419,6 +501,18 @@ impl App {
                 selection: sel,
                 ..
             } => Some((active, cursor, sel)),
+            DialogType::AcpForm {
+                field: active,
+                cursor_pos: cursor,
+                selection: sel,
+                ..
+            } => Some((active, cursor, sel)),
+            DialogType::ProviderForm {
+                field: active,
+                cursor_pos: cursor,
+                selection: sel,
+                ..
+            } => Some((active, cursor, sel)),
             _ => None,
         };
         let Some((active, cursor, sel)) = slots else {
@@ -437,6 +531,12 @@ impl App {
     /// follows the drag end. Returns false when no selection is active.
     pub(in crate::app) fn extend_form_selection_at(&mut self, x: u16, y: u16) -> bool {
         let area = self.terminal_size();
+        let demand = self
+            .dialog
+            .current()
+            .map_or(0, |d| {
+                crate::ui::dialogs::dialog_panel_demand(Some(&d.dialog_type))
+            });
         let target: Option<(usize, usize)> = match self.dialog.current() {
             Some(d) => match &d.dialog_type {
                 DialogType::HookInput {
@@ -456,7 +556,7 @@ impl App {
                     values.get(sel.field()).map(|_| {
                         (
                             sel.field(),
-                            form_extend_byte(area, &values, sel.field(), x, y),
+                            form_extend_byte(area, demand, &values, sel.field(), x, y),
                         )
                     })
                 }
@@ -477,7 +577,36 @@ impl App {
                     values.get(sel.field()).map(|_| {
                         (
                             sel.field(),
-                            form_extend_byte(area, &values, sel.field(), x, y),
+                            form_extend_byte(area, demand, &values, sel.field(), x, y),
+                        )
+                    })
+                }
+                DialogType::AcpForm {
+                    name,
+                    command,
+                    selection: Some(sel),
+                    ..
+                } => {
+                    let values = [name.as_str(), command.as_str()];
+                    values.get(sel.field()).map(|_| {
+                        (
+                            sel.field(),
+                            form_extend_byte(area, demand, &values, sel.field(), x, y),
+                        )
+                    })
+                }
+                DialogType::ProviderForm {
+                    name,
+                    base_url,
+                    family,
+                    selection: Some(sel),
+                    ..
+                } => {
+                    let values = [name.as_str(), base_url.as_str(), family.as_str()];
+                    values.get(sel.field()).map(|_| {
+                        (
+                            sel.field(),
+                            form_extend_byte(area, demand, &values, sel.field(), x, y),
                         )
                     })
                 }
@@ -498,6 +627,16 @@ impl App {
                 ..
             } => Some((cursor, sel)),
             DialogType::McpForm {
+                cursor_pos: cursor,
+                selection: sel,
+                ..
+            } => Some((cursor, sel)),
+            DialogType::AcpForm {
+                cursor_pos: cursor,
+                selection: sel,
+                ..
+            } => Some((cursor, sel)),
+            DialogType::ProviderForm {
                 cursor_pos: cursor,
                 selection: sel,
                 ..
@@ -555,6 +694,35 @@ impl App {
                             .as_ref()
                             .and_then(|sel| sel.slice_of(*field, line))
                     }),
+                DialogType::AcpForm {
+                    name,
+                    command,
+                    field,
+                    selection,
+                    ..
+                } => [name, command]
+                    .get(*field)
+                    .copied()
+                    .and_then(|line| {
+                        selection
+                            .as_ref()
+                            .and_then(|sel| sel.slice_of(*field, line))
+                    }),
+                DialogType::ProviderForm {
+                    name,
+                    base_url,
+                    family,
+                    field,
+                    selection,
+                    ..
+                } => [name, base_url, family]
+                    .get(*field)
+                    .copied()
+                    .and_then(|line| {
+                        selection
+                            .as_ref()
+                            .and_then(|sel| sel.slice_of(*field, line))
+                    }),
                 _ => None,
             },
             None => None,
@@ -586,7 +754,10 @@ impl App {
         }
         let is_form = matches!(
             self.dialog.current().map(|d| &d.dialog_type),
-            Some(DialogType::HookInput { .. }) | Some(DialogType::McpForm { .. })
+            Some(DialogType::HookInput { .. })
+                | Some(DialogType::McpForm { .. })
+                | Some(DialogType::AcpForm { .. })
+                | Some(DialogType::ProviderForm { .. })
         );
         if !is_form {
             return false;
@@ -612,8 +783,11 @@ impl App {
                 }
             }
             _ => {
+                let demand = crate::ui::dialogs::dialog_panel_demand(
+                    self.dialog.current().map(|d| &d.dialog_type),
+                );
                 let cols = crate::ui::dialogs::form_panel_content_w(
-                    crate::ui::dialogs::form_panel_dialog_w(self.terminal_size()),
+                    crate::ui::dialogs::form_panel_width(self.terminal_size(), demand),
                 ) as usize;
                 if let Some(d) = self.dialog.current_mut() {
                     match &mut d.dialog_type {
@@ -650,6 +824,37 @@ impl App {
                             key,
                             cols,
                         ),
+                        DialogType::AcpForm {
+                            name,
+                            command,
+                            field,
+                            cursor_pos,
+                            selection,
+                            ..
+                        } => drive_form_edit(
+                            [name, command],
+                            field,
+                            cursor_pos,
+                            selection,
+                            key,
+                            cols,
+                        ),
+                        DialogType::ProviderForm {
+                            name,
+                            base_url,
+                            family,
+                            field,
+                            cursor_pos,
+                            selection,
+                            ..
+                        } => drive_form_edit(
+                            [name, base_url, family],
+                            field,
+                            cursor_pos,
+                            selection,
+                            key,
+                            cols,
+                        ),
                         _ => false,
                     }
                 } else {
@@ -666,21 +871,208 @@ impl App {
 
     /// Validate and persist whichever registration form is open.
     fn save_registration_form(&mut self) -> bool {
-        let is_hook = matches!(
-            self.dialog.current().map(|d| &d.dialog_type),
-            Some(DialogType::HookInput { .. })
-        );
-        let is_mcp = matches!(
-            self.dialog.current().map(|d| &d.dialog_type),
-            Some(DialogType::McpForm { .. })
-        );
-        if is_hook {
-            self.save_hook_input_dialog()
-        } else if is_mcp {
-            self.save_mcp_form_dialog()
-        } else {
-            false
+        match self.dialog.current().map(|d| &d.dialog_type) {
+            Some(DialogType::HookInput { .. }) => self.save_hook_input_dialog(),
+            Some(DialogType::McpForm { .. }) => self.save_mcp_form_dialog(),
+            Some(DialogType::AcpForm { .. }) => self.save_acp_form_dialog(),
+            Some(DialogType::ProviderForm { .. }) => self.save_provider_form_dialog(),
+            _ => false,
         }
+    }
+
+    /// Validate and persist the custom provider registration box. Invalid
+    /// input keeps the dialog open with an error toast (the shared
+    /// registration-form contract). On success the setup is saved and the
+    /// provider is published into the process-wide provider registry
+    /// immediately, so the change reaches the running app without waiting
+    /// for a restart.
+    pub(in crate::app) fn save_provider_form_dialog(&mut self) -> bool {
+        let Some(d) = self.dialog.current() else {
+            return false;
+        };
+        let DialogType::ProviderForm {
+            editing,
+            name,
+            base_url,
+            family,
+            ..
+        } = &d.dialog_type
+        else {
+            return false;
+        };
+        let entry = match crate::routes::settings::validate_custom_provider(
+            name,
+            base_url,
+            family,
+            &self.setup.custom_providers,
+            *editing,
+        ) {
+            Ok(entry) => entry,
+            Err(message) => {
+                self.toast_form_error("Provider not saved", message);
+                return false;
+            }
+        };
+        // Validate the whole prospective set against the SDK registry
+        // before touching anything: the registry's checks (single word, no
+        // built-in collision, http(s) URL) are the final authority, and a
+        // set it would reject must never be persisted — otherwise the
+        // entry would sit in setup.json skipped-with-a-warning at every
+        // startup while the form reported success.
+        let mut prospective = self.setup.custom_providers.clone();
+        match editing {
+            Some(i) if *i < prospective.len() => prospective[*i] = entry.clone(),
+            _ => prospective.push(entry.clone()),
+        }
+        let entries = prospective
+            .into_iter()
+            .map(|provider| (provider.name, provider.base_url, provider.family.sdk_family()))
+            .collect();
+        if let Err(error) = cosh_sdk::connector::register_custom_providers(entries) {
+            self.toast_form_error("Provider not saved", error);
+            return false;
+        }
+        // Published (the call above already swapped the process registry).
+        match editing {
+            Some(i) if *i < self.setup.custom_providers.len() => {
+                let mut providers = self.setup.custom_providers.clone();
+                providers[*i] = entry;
+                self.setup.set_custom_providers(providers);
+            }
+            _ => {
+                let mut providers = self.setup.custom_providers.clone();
+                providers.push(entry);
+                self.setup.set_custom_providers(providers);
+            }
+        }
+        self.toast_form_success(
+            "Provider saved",
+            "The endpoint is offered in the model picker on the next agent loop.".to_string(),
+        );
+        true
+    }
+
+    /// Open the custom provider registration box: blank for creation,
+    /// prefilled with the current values when editing the entry at `index`.
+    pub(in crate::app) fn open_provider_form(&mut self, index: Option<usize>) {
+        let (editing, name, base_url, family) = index
+            .and_then(|i| self.setup.custom_providers.get(i))
+            .map_or(
+                (
+                    None,
+                    String::new(),
+                    String::new(),
+                    cosh::setup::CustomProviderFamily::default().label().to_string(),
+                ),
+                |entry| {
+                    (
+                        Some(index.expect("entry exists implies index")),
+                        entry.name.clone(),
+                        entry.base_url.clone(),
+                        entry.family.label().to_string(),
+                    )
+                },
+            );
+        self.dialog.show(DialogType::ProviderForm {
+            editing,
+            name,
+            base_url,
+            family,
+            field: 0,
+            cursor_pos: 0,
+            selection: None,
+        });
+    }
+
+    /// Validate and persist the ACP harness registration box. Invalid input
+    /// keeps the dialog open with an error toast (the shared registration-
+    /// form contract). On success the setup is saved and the harness is
+    /// published into the process-wide ACP registry immediately, so the
+    /// change reaches the running app without waiting for a restart.
+    pub(in crate::app) fn save_acp_form_dialog(&mut self) -> bool {
+        let Some(d) = self.dialog.current() else {
+            return false;
+        };
+        let DialogType::AcpForm {
+            editing,
+            name,
+            command,
+            ..
+        } = &d.dialog_type
+        else {
+            return false;
+        };
+        let entry = match crate::routes::settings::validate_acp_agent(
+            name,
+            command,
+            &self.setup.acp_agents,
+            *editing,
+        ) {
+            Ok(entry) => entry,
+            Err(message) => {
+                self.toast_form_error("Agent not saved", message);
+                return false;
+            }
+        };
+        // Validate the whole prospective set against the registry before
+        // touching anything: the registry's checks (single word, no
+        // case-variant built-in collision) are the final authority, and a
+        // set it would reject must never be persisted — otherwise the entry
+        // would sit in setup.json skipped-with-a-warning at every startup
+        // while the form reported success.
+        let mut prospective = self.setup.acp_agents.clone();
+        match editing {
+            Some(i) if *i < prospective.len() => prospective[*i] = entry.clone(),
+            _ => prospective.push(entry.clone()),
+        }
+        let prospective_pairs: Vec<(String, String)> = prospective
+            .iter()
+            .map(|agent| (agent.name.clone(), agent.command.clone()))
+            .collect();
+        if let Err(error) =
+            cosh_tools::subagent::acp::register_custom_agents(&prospective_pairs)
+        {
+            self.toast_form_error("Agent not saved", error);
+            return false;
+        }
+        // Published (the call above already swapped the process registry).
+        match editing {
+            Some(i) if *i < self.setup.acp_agents.len() => {
+                self.setup.acp_agents[*i] = entry;
+            }
+            _ => self.setup.acp_agents.push(entry),
+        }
+        self.setup.save();
+        self.toast_form_success(
+            "ACP agent saved",
+            "The harness is offered to the model on the next agent loop.".to_string(),
+        );
+        true
+    }
+
+    /// Open the ACP harness registration box: blank for creation, prefilled
+    /// with the current values when editing the entry at `index`.
+    pub(in crate::app) fn open_acp_form(&mut self, index: Option<usize>) {
+        let (editing, name, command) = index
+            .and_then(|i| self.setup.acp_agents.get(i))
+            .map_or(
+                (None, String::new(), String::new()),
+                |entry| {
+                    (
+                        Some(index.expect("entry exists implies index")),
+                        entry.name.clone(),
+                        entry.command.clone(),
+                    )
+                },
+            );
+        self.dialog.show(DialogType::AcpForm {
+            editing,
+            name,
+            command,
+            field: 0,
+            cursor_pos: 0,
+            selection: None,
+        });
     }
 
     /// Validate and persist the hook registration box. Invalid input keeps
@@ -964,6 +1356,8 @@ impl App {
             }
             DialogType::HookInput { .. } => self.save_hook_input_dialog(),
             DialogType::McpForm { .. } => self.save_mcp_form_dialog(),
+            DialogType::AcpForm { .. } => self.save_acp_form_dialog(),
+            DialogType::ProviderForm { .. } => self.save_provider_form_dialog(),
             _ => false,
         }
     }
@@ -973,9 +1367,18 @@ impl App {
 /// clicked character inside its wrapped value rows, 0 above them and the
 /// line end below them (mirrors the create-db drag clamping). `field`
 /// always indexes `values` — the caller only extends the anchored field.
-fn form_extend_byte(area: Rect, values: &[&str], field: usize, x: u16, y: u16) -> usize {
-    use crate::ui::dialogs::{byte_at_char, form_field_geometries, form_panel_metrics};
-    let (_, dialog_y, _, _, content_x, cols) = form_panel_metrics(area, values);
+fn form_extend_byte(
+    area: Rect,
+    demand: usize,
+    values: &[&str],
+    field: usize,
+    x: u16,
+    y: u16,
+) -> usize {
+    use crate::ui::dialogs::{
+        byte_at_char, form_field_geometries, form_panel_metrics,
+    };
+    let (_, dialog_y, _, _, content_x, cols) = form_panel_metrics(area, demand, values);
     let g = &form_field_geometries(dialog_y, values, cols)[field];
     let value = values[field];
     if y < g.value_y {
@@ -1025,6 +1428,85 @@ impl App {
             variant: ToastVariant::Success,
             duration_ms: 4000,
         });
+    }
+
+    /// Generic "this setting needs a restart" toast, shared by any setting
+    /// the running process cannot re-read (the value is resolved once at
+    /// startup and never again). Generic on purpose — a future restart-only
+    /// setting calls the same helper rather than growing its own copy.
+    pub(in crate::app) fn toast_restart_required(&mut self, title: &str) {
+        use crate::ui::toast::{ToastOptions, ToastVariant};
+        self.toast_state.show(ToastOptions {
+            title: Some(title.into()),
+            message: "Restart cosh for this to take effect.".into(),
+            variant: ToastVariant::Info,
+            duration_ms: 10_000,
+        });
+    }
+
+    /// Remove the entry selected in the settings list — an MCP server (its
+    /// keyring credential is purged too) or a user-registered ACP agent
+    /// (the process registry is re-published without it). Shared by the
+    /// Delete/Backspace key path and the 🗑 glyph click, exactly the
+    /// sessions-list pairing. Returns whether anything was removed.
+    pub(in crate::app) fn remove_selected_settings_entry(&mut self) -> bool {
+        if let Some(name) = self
+            .settings_view
+            .remove_selected_mcp_server(&mut self.setup)
+        {
+            // Purge the keyring credential too: a forgotten server must
+            // not leave a live secret behind. Failures are non-fatal —
+            // the entry is gone either way, and the store may be locked.
+            if let Err(err) = cosh::mcp::auth::forget_key(&name) {
+                log::warn!("keyring cleanup for removed MCP server failed: {}", err);
+            }
+            self.setup.save();
+            return true;
+        }
+        if self
+            .settings_view
+            .remove_selected_acp_agent(&mut self.setup)
+            .is_some()
+        {
+            self.setup.save();
+            // Re-publish the surviving set immediately so the removed
+            // harness stops being offered without a restart. Lossy — the
+            // same tolerance as boot: one stale entry (e.g. a name that no
+            // longer validates) must not sink the whole re-publish and
+            // leave the just-removed agent still offered.
+            let dropped = cosh_tools::subagent::acp::register_custom_agents_lossy(
+                &self.setup.acp_agent_pairs(),
+            );
+            for err in dropped {
+                log::warn!("re-publishing user-registered ACP agents: {err}");
+            }
+            return true;
+        }
+        if let Some(name) = self
+            .settings_view
+            .remove_selected_custom_provider(&mut self.setup)
+        {
+            // Purge the keyring credential too: a forgotten endpoint must
+            // not leave a live secret behind (same contract as MCP).
+            if let Err(err) = cosh_sdk::connector::forget_provider_key(&name) {
+                log::warn!("keyring cleanup for removed provider failed: {}", err);
+            }
+            self.setup.save();
+            // Re-publish the surviving set immediately so the removed
+            // endpoint stops being offered without a restart. Lossy — the
+            // same tolerance as boot.
+            if let Err(err) = cosh_sdk::connector::register_custom_providers(
+                self.setup
+                    .custom_provider_triples()
+                    .into_iter()
+                    .map(|(name, base_url, family)| (name, base_url, family.sdk_family()))
+                    .collect(),
+            ) {
+                log::warn!("re-publishing user-registered providers: {err}");
+            }
+            return true;
+        }
+        false
     }
 
     /// Validate and persist the MCP registration form. `build_mcp_entry`

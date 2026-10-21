@@ -53,6 +53,14 @@ impl App {
             }
         }
 
+        // User-registered custom providers: same credential rule as the
+        // built-in cloud endpoints (keyring first, then `<NAME>_API_KEY`).
+        for provider in cosh_sdk::connector::custom_provider_names() {
+            if cosh_sdk::connector::has_api_key(provider) && !active.contains(&provider) {
+                active.push(provider);
+            }
+        }
+
         // Local providers: configured URL wins; otherwise the registry's
         // default endpoint. Probe each distinct endpoint only once.
         let mut endpoints: std::collections::HashSet<String> = std::collections::HashSet::new();

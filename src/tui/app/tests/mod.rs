@@ -63,6 +63,7 @@ mod provider_login;
 mod providers;
 mod queue_block_probe;
 mod rag;
+mod restart_toast;
 mod render;
 mod router_mouse;
 mod sessions_mouse;
