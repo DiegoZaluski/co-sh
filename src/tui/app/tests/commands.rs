@@ -2779,3 +2779,97 @@ async fn hiding_and_restoring_panes_is_lifo_and_never_deletes() {
     // Nothing left to restore: a no-op, not a panic.
     app.restore_last_hidden_agents_pane();
 }
+
+/// Hiding the LAST visible pane closes the mode entirely (the main chat
+/// returns — an empty split screen shows nothing) while the hidden stack
+/// survives, and a restore re-opens the split with the pane back.
+#[tokio::test]
+async fn hiding_the_last_pane_auto_closes_and_restore_reopens() {
+    use crate::ui::agents_picker::AgentPick;
+
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    let id = crate::session::store::generate_session_id();
+    app.state.add_empty_session(id.clone(), "last".into(), 0);
+    app.state.current_session_id = Some(id);
+    app.open_agents_split(vec![AgentPick {
+        name: "claude".into(),
+        instances: 1,
+    }]);
+    app.agents_split.as_mut().unwrap().focused = Some(0);
+    app.hide_focused_agents_pane();
+
+    {
+        // The split auto-closed: no live state, the mode is closed and the
+        // visible set is GONE (`None` — an empty `Some` would be rebuilt
+        // as a paneless split by the re-entry/restore paths).
+        assert!(app.agents_split.is_none(), "the empty split left the screen");
+        let session = app.state.current_session().unwrap();
+        assert!(!session.agents_mode_open, "the mode follows the screen");
+        assert!(
+            session.agents_panes.is_none(),
+            "the visible set is gone, not an empty list"
+        );
+        assert_eq!(session.agents_hidden.len(), 1, "the pane is restorable");
+    }
+
+    // Ctrl+Z re-opens the split and brings the pane back.
+    app.restore_last_hidden_agents_pane();
+    {
+        let session = app.state.current_session().unwrap();
+        assert!(session.agents_mode_open, "the mode re-opens with the pane");
+        assert!(session.agents_hidden.is_empty());
+        let panes = session.agents_panes.as_ref().unwrap();
+        assert_eq!(panes.len(), 1);
+        assert_eq!(panes[0].agent(), "claude");
+    }
+    let split = app.agents_split.as_ref().expect("the split is back");
+    assert_eq!(split.pane_count(), 1);
+    assert_eq!(split.panes[0].agent, "claude");
+}
+
+/// The LEGACY emptied-split metadata (`agents_panes = Some([])`, persisted
+/// by builds before the auto-close fix) must not resurrect an empty
+/// split screen: a `/agents` re-entry on such a session opens the PICKER
+/// (the initial state), not a paneless chat-like mode.
+#[tokio::test]
+async fn legacy_empty_pane_set_opens_the_picker_not_an_empty_split() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    let id = crate::session::store::generate_session_id();
+    app.state.add_empty_session(id.clone(), "legacy".into(), 0);
+    app.state.current_session_id = Some(id.clone());
+    // Persisted BEFORE the fix: an empty visible set, mode closed.
+    {
+        let session = app.state.current_session_mut().unwrap();
+        session.agents_panes = Some(Vec::new());
+        session.agents_mode_open = false;
+    }
+    // A session-switch round-trip must not park the empty set: the session
+    // comes back to the NORMAL chat.
+    app.switch_session_locked(&id);
+    assert!(
+        app.parked_agents_split.is_none(),
+        "an empty persisted set parks nothing"
+    );
+    assert!(app.agents_split.is_none(), "the mode stays closed");
+
+    // A live-but-empty parked split (the legacy in-memory shape) is not
+    // re-attachable either: the picker opens instead.
+    app.parked_agents_split =
+        Some(crate::routes::session::agents_split::AgentsSplitState::new(Vec::new()));
+    assert!(
+        !app.attach_parked_agents_split(),
+        "an empty parked split is not re-attachable"
+    );
+    assert!(app.parked_agents_split.is_none());
+
+    // Sanity: a NON-empty parked split still re-attaches.
+    app.parked_agents_split = Some(crate::routes::session::agents_split::AgentsSplitState::new(
+        vec![crate::types::AgentPaneRef::Name("claude".into())],
+    ));
+    assert!(app.attach_parked_agents_split(), "a real set re-attaches");
+    assert_eq!(app.agents_split.as_ref().unwrap().pane_count(), 1);
+}

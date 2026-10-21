@@ -1370,6 +1370,14 @@ pub fn compute_layout_with_maximized(
 /// The normal grid: the bin-packing heuristic.
 #[must_use]
 fn compute_layout_grid(pane_count: usize, area: Rect) -> Vec<Rect> {
+    // Guard the division below (`usable / pane_count`): a caller can reach
+    // here with 0 panes — `compute_layout` gates 0/1, but
+    // `compute_layout_with_maximized` does not, and `render` passes
+    // `state.pane_count()` straight through (a split whose every pane was
+    // hidden must layout as an empty frame, not panic).
+    if pane_count == 0 {
+        return Vec::new();
+    }
 
     // Every pane is an equal participant: the single-row test uses the FULL
     // pane count (the daemon is not subtracted), so its block is one of the

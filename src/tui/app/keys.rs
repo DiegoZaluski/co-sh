@@ -2168,10 +2168,17 @@ impl App {
                                         // /agents split, prompt blurred, a
                                         // pane hidden: Ctrl+Z restores the
                                         // MOST RECENTLY hidden pane (LIFO).
-                                        // The prompt keeps its edit-history
+                                        // An auto-closed split (its last
+                                        // pane was hidden) has no live
+                                        // state — the restore RE-OPENS it,
+                                        // so no live split is required,
+                                        // only no parked one (a parked
+                                        // split owns the set; the old
+                                        // early-return applies there). The
+                                        // prompt keeps its edit-history
                                         // undo whenever it holds the focus.
-                                        if self.agents_split.is_some()
-                                            && !self.prompt_view.is_focused
+                                        if !self.prompt_view.is_focused
+                                            && self.parked_agents_split.is_none()
                                             && self.state.current_session().is_some_and(|session| {
                                                 !session.agents_hidden.is_empty()
                                             })

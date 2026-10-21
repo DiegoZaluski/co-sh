@@ -150,6 +150,16 @@ impl App {
     /// Returns `true` when a parked split took the screen (the caller then
     /// skips opening the picker).
     pub(super) fn attach_parked_agents_split(&mut self) -> bool {
+        // A PARKED split with NO panes is not a re-attachable state: it is
+        // the legacy shape an emptied split persisted before the auto-close
+        // fix (`agents_panes = Some([])`). Re-attaching it verbatim would
+        // put an EMPTY split screen up (a chat-like nothing) — the exact
+        // symptom this guards against. Drop it and let the caller open the
+        // PICKER instead: the user sees the initial-state list, never an
+        // empty mode.
+        if self.parked_agents_split.as_ref().is_some_and(|s| s.panes.is_empty()) {
+            self.parked_agents_split = None;
+        }
         if let Some(split) = self.parked_agents_split.take() {
             self.agents_split = Some(split);
             let (panes, hidden) = self
@@ -548,6 +558,10 @@ impl App {
         let Some(pane) = split.remove_pane(index) else {
             return;
         };
+        // Hiding the LAST visible pane ends the mode: the split screen has
+        // nothing left to show, so the main chat returns — the natural
+        // close-the-last-pane behavior — instead of an empty grid.
+        let emptied = split.panes.is_empty();
         let pane_ref = pane.to_ref();
         let Some(session) = self.state.current_session_mut() else {
             return;
@@ -562,11 +576,35 @@ impl App {
             pane: pane_ref,
             index,
         });
+        if emptied {
+            // The metadata follows the screen: the mode is CLOSED and the
+            // visible set is GONE (`None`, not an empty list — an empty
+            // `Some` would be rebuilt as a paneless split by the session
+            // restore/`/agents` re-entry paths, an empty chat-like screen
+            // instead of the picker). The HIDDEN STACK stays — Ctrl+Z can
+            // still bring the pane back (it re-opens the split).
+            session.agents_mode_open = false;
+            session.agents_panes = None;
+        }
         self.save_current_agents_metadata();
         // The registry drops the pane (its `agents_call` id no longer
         // resolves) and the mirror follows it out of the shared list.
         self.sync_agents_pane_registry();
         self.sync_agents_pane_mirrors();
+        if emptied {
+            // The leave-the-mode epilogue (the same one park/close run):
+            // the empty live state is dropped, the main-agent mirror leaves
+            // with the screen, the pane mirrors drop with the mode, an idle
+            // app loses the stale spinner and the slash menu serves the
+            // cosh set again. The HIDDEN STACK is untouched — restore rides
+            // `restore_last_hidden_agents_pane`.
+            self.agents_split = None;
+            self.close_main_mirror();
+            self.state.right_panel.drop_agents_pane_windows();
+            if self.state.status != crate::types::SessionStatus::Working {
+                self.agent_spinner = None;
+            }
+        }
         super::agents_dispatch::sync_slash_source(self);
     }
 
@@ -576,8 +614,28 @@ impl App {
     /// live timeline and rehydrates from its agent session. No-op when the
     /// stack is empty or no split owns the screen.
     pub(super) fn restore_last_hidden_agents_pane(&mut self) {
+        // A split whose every visible pane was hidden AUTO-CLOSED (the
+        // `hide_focused_agents_pane` emptied branch): the mode is off and
+        // the persisted set is `None` — the restore RE-OPENS the split
+        // fresh (empty set, no persisted bindings to inherit), the popped
+        // pane joins it below. Nothing to restore against (no hidden
+        // stack): inert, in a normal session too.
         if self.agents_split.is_none() {
-            return;
+            let ready = self
+                .state
+                .current_session()
+                .is_some_and(|s| !s.agents_hidden.is_empty());
+            if !ready {
+                return;
+            }
+            self.agents_split =
+                Some(crate::routes::session::agents_split::AgentsSplitState::new(Vec::new()));
+            if let Some(session) = self.state.current_session_mut() {
+                session.agents_mode_open = true;
+                session.agents_panes = Some(Vec::new());
+            }
+            self.hide_command_mode_for_split();
+            self.prompt_view.focus();
         }
         let ready = self
             .state
@@ -998,9 +1056,17 @@ impl App {
                 self.trigger_agents_pane_replays();
             }
             Some((Some(panes), false, _)) => {
-                self.parked_agents_split = Some(
-                    crate::routes::session::agents_split::AgentsSplitState::new(panes),
-                );
+                // An EMPTY persisted set is the legacy emptied-split shape
+                // (pre-auto-close): it is NOT a parkable set — a rebuilt
+                // parked split would hold no panes and a later re-attach
+                // would put an empty split screen up. Skip the park: the
+                // session comes back to the NORMAL chat, a later `/agents`
+                // opens the picker (the initial state).
+                if !panes.is_empty() {
+                    self.parked_agents_split = Some(
+                        crate::routes::session::agents_split::AgentsSplitState::new(panes),
+                    );
+                }
             }
             _ => {}
         }
