@@ -1571,10 +1571,12 @@ fn render_pane(
     if rect.width == 0 || rect.height == 0 {
         return;
     }
-    // Background fill: a whisper lighter than the base background — just
-    // enough to separate the pane from the transcript without a visible
-    // contrast edge. background (#07070A) → #0A0A0D.
-    let bg = Style::default().bg(rgba_color(RGBA::from_hex("#0A0A0D")));
+    // Background fill: a whisper lighter than the theme's OWN background
+    // (the lift is derived per theme in `theme.rs`, so a light theme
+    // lifts off its light background too) — just enough to separate the
+    // pane from the transcript without a visible contrast edge. cosh:
+    // background (#07070A) → #0A0A0D.
+    let bg = Style::default().bg(rgba_color(theme.agents_pane_background()));
     for y in rect.y..rect.bottom() {
         for x in rect.x..rect.right() {
             if let Some(cell) = buf.cell_mut((x, y)) {
@@ -1757,7 +1759,7 @@ fn render_pane(
     let theme_key = subagent_theme_key(theme);
     // Same whisper-lighter background for markdown blocks so they merge
     // with the pane instead of floating as distinct boxes.
-    let tint = RGBA::from_hex("#0A0A0D");
+    let tint = theme.agents_pane_background();
     let mut regions: Vec<TextRegion> = Vec::new();
     let mut content_row: u16 = 0;
     // The running USER-input ordinal: the k-th user echo of the timeline

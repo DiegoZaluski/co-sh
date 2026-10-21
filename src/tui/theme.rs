@@ -90,6 +90,33 @@ pub fn blend_color(fg: Color, bg: Color, amount: f64) -> Color {
 /// maintained coincidence.
 pub const MUTED_LIFT: f32 = 0.25;
 
+/// How far the `/agents` split pane's background floats above the theme
+/// background, expressed as a fraction of the 0–255 channel scale.
+/// Calibrated on the cosh reference pair — background `#07070A` → pane
+/// `#0A0A0D`, a +3 step per channel — the lift is `3/255` (~1.2%) of the
+/// scale, the same whisper in every theme: the fill derives from each
+/// theme's OWN `background` (a light theme lifts off its light
+/// background exactly as far as a dark one lifts off black) instead of
+/// cosh's dark tone staying hardcoded in the painter.
+pub const AGENTS_PANE_LIFT: f32 = 3.0 / 255.0;
+
+impl Theme {
+    /// Background fill of an `/agents` split pane: this theme's
+    /// `background` lifted by [`AGENTS_PANE_LIFT`] per channel,
+    /// saturating at 255. Fully opaque (alpha 255) — the fill exists for
+    /// a visible-but-whisper separation, which a transparent answer
+    /// (`rgba_color` maps alpha 0 to `Color::Reset`) could never give.
+    pub fn agents_pane_background(&self) -> RGBA {
+        let lift = |c: u8| {
+            (f32::from(c) + AGENTS_PANE_LIFT * 255.0)
+                .round()
+                .min(255.0) as u8
+        };
+        let (r, g, b, _) = self.background.to_ints();
+        RGBA::from_ints(lift(r), lift(g), lift(b), 255)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Theme {
     pub background: RGBA,
@@ -832,5 +859,36 @@ mod tests {
             rgba_color(RGBA::from_ints(0x07, 0x07, 0x0a, 255)),
             Color::Rgb(0x07, 0x07, 0x0a)
         );
+    }
+
+    #[test]
+    fn agents_pane_background_lifts_each_theme_off_its_own_background() {
+        let registry = ThemeRegistry::new();
+        // COSH is the calibration pair: the derived fill must reproduce
+        // the exact tone the painter used to hardcode (background
+        // `#07070A` → pane `#0A0A0D`, a +3 step per channel).
+        let cosh = registry.get("cosh").expect("cosh is registered").clone();
+        assert_eq!(cosh.background, RGBA::from_ints(0x07, 0x07, 0x0a, 255));
+        assert_eq!(
+            cosh.agents_pane_background(),
+            RGBA::from_ints(0x0a, 0x0a, 0x0d, 255)
+        );
+        // Every theme derives its own step from its OWN background:
+        // exactly background +3 per channel (AGENTS_PANE_LIFT on the
+        // 0–255 scale), opaque, so the whisper separation keeps the panes
+        // visible on dark AND near-white backgrounds alike.
+        for def in &registry.themes {
+            let (pr, pg, pb, pa) = def.theme.agents_pane_background().to_ints();
+            let (br, bg_, bb, _) = def.theme.background.to_ints();
+            assert_eq!(pa, 255, "{}: the pane fill is opaque", def.name);
+            for (p, b, what) in [(pr, br, "red"), (pg, bg_, "green"), (pb, bb, "blue")] {
+                assert_eq!(
+                    p,
+                    b.saturating_add(3),
+                    "{}: the pane's {what} channel lifts the background by 3",
+                    def.name
+                );
+            }
+        }
     }
 }
