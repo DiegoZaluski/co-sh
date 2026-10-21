@@ -1,14 +1,12 @@
 //! Dispatch for the `/agents` split-pane mode: one submitted prompt goes to
 //! the FOCUSED pane — or, when `Ctrl+0` left NO pane focused, to the MAIN
-//! agent itself (the normal-mode loop, running as manager while the split
-//! is open). External agent CLIs each get an independent ACP turn
-//! (`cosh_tools::subagent::acp::call` — the same one-shot contract the prompt
-//! corrector uses); each cosh pane (the app's own manager pane, at any split
-//! position) runs the MAIN agent itself
-//! as the session's MANAGER on its own real cosh session — persisted in the
-//! session store (visible in the history panel) with the
-//! `INSTRUCTIONS_MANAGER` system prompt, and without the file-writing tools
-//! a coordinator never needs.
+//! agent itself (the normal-mode loop, unchanged). External agent CLIs each
+//! get an independent ACP turn (`cosh_tools::subagent::acp::call` — the
+//! same one-shot contract the prompt corrector uses); each cosh pane (at
+//! any split position) runs the MAIN agent itself on its own real cosh
+//! session — persisted in the session store (visible in the history panel)
+//! with the mode's normal prompt minus the self-review loop, and without
+//! the workspace-mutating tools delegated work never needs.
 //!
 //! Routing identity: each pane owns its event channel, so pane INDEX
 //! replaces the `call_ref` the harness tool path would provide. Events
@@ -21,12 +19,10 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use cosh::harness::events::HarnessEvent;
-use cosh_sdk::connector::{Connector, ToolCallMode};
 use cosh_tools::subagent::events::{SubagentEvent, ToolCallStatus, ToolOutputBlock};
 
 use super::App;
 use crate::routes::session::agents_split::{AgentsSplitState, DAEMON_LABEL};
-use cosh::setup::SkillsConfig;
 use crossterm::event::KeyCode;
 use crate::ui::toast::{ToastOptions, ToastVariant};
 
@@ -186,12 +182,11 @@ pub(super) fn ensure_pane_snapshot(app: &mut App, pane: usize) {
     });
 }
 
-/// The manager tool set: a base disabled set PLUS the workspace-mutating
-/// tools a coordinator never touches. The single constructor behind BOTH
-/// manager loops — the MAIN loop's manager mode (`start_agent_loop`,
-/// based on the user's own disabled tools) and the cosh-pane manager turn
-/// below (based on an empty set: the pane is a fresh harness without user
-/// preferences) — so the two managers can never drift apart.
+/// The pane tool set: the user's disabled set PLUS the workspace-mutating
+/// tools delegated work never touches. The single constructor behind the
+/// cosh-pane turn below (called with an empty base set: the pane is a fresh
+/// harness without user preferences) — the MAIN loop applies only its own
+/// `internal_tools_view` (the manager-mode blocklist is gone).
 pub(super) fn manager_disabled_tools(user_disabled: &HashSet<String>) -> HashSet<String> {
     user_disabled
         .iter()
@@ -199,18 +194,18 @@ pub(super) fn manager_disabled_tools(user_disabled: &HashSet<String>) -> HashSet
         .chain(MANAGER_BLOCKED_TOOLS.iter().map(|tool| (*tool).to_string()))
         .collect()
 }
-/// Tools no manager loop ever sees: neither a cosh-pane manager turn nor
-/// the MAIN agent while the `/agents` split is open. The manager reads,
-/// searches, runs commands and coordinates its panes — it must not edit
-/// the workspace or mutate anything outside the pane coordination:
+/// Tools no cosh pane ever sees: delegated work reads, searches, runs
+/// commands and reports back — it must not edit the workspace or mutate
+/// anything outside its deliverable:
 /// - `fs_write`, `fs_edit`, `fs_edit_lines`, `fs_ast_edit`, `fs_rollback`
 ///   — workspace writes;
 /// - `lsp_rename`, `lsp_restart`, `lsp_code_actions` — the mutating half
 ///   of the language-server tools (navigation/hover stay);
 /// - `computer_act`, `computer_control` — desktop control (screenshots
 ///   and snapshots stay);
-/// - `ask_questions` — needs a human in the loop; the manager is headless;
-/// - `stop_agent_loop` — the manager's ONLY deliverable is its final text
+/// - `ask_questions` — needs a human in the loop; a delegated pane is
+///   headless;
+/// - `stop_agent_loop` — the pane's ONLY deliverable is its final text
 ///   report (the harness's own sub-agent blocklist).
 pub(super) const MANAGER_BLOCKED_TOOLS: &[&str] = &[
     "fs_write",
@@ -414,9 +409,8 @@ impl App {
         };
         let Some(focused) = split.focused else {
             // Unfocused (`Ctrl+0`): the message goes to the MAIN agent —
-            // the normal-mode loop on the current session, which runs
-            // with the manager instructions + tool set while the split
-            // is open (see `start_agent_loop`).
+            // the plain normal-mode loop on the current session (unchanged
+            // by the split; no manager prompt or tool set).
             self.submit_prompt_message(msg);
             return;
         };
@@ -559,8 +553,24 @@ impl App {
         {
             split.echo_turn_input(pane, &msg, !from_agent);
         }
-        let daemon_connector = if is_daemon {
-            Some(self.daemon_connector())
+        // The pane's assembly inputs come from the SAME user config the
+        // main loop reads: the session route (provider + model, `auto`
+        // resolved through the full fallback chain by the assembly) plus the
+        // router's fallbacks. The old hand-cut subset forced Native and
+        // froze the first fallback — the assembly honors the user's choices.
+        // An EMPTY provider degrades to the router's first fallback (the
+        // deleted `daemon_connector`'s behavior): an unconfigured route
+        // must not fail the pane when a working fallback exists.
+        let daemon_route = if is_daemon {
+            let provider = self.llm_config.provider.trim().to_string();
+            if provider.is_empty() {
+                self.router_view
+                    .fallbacks
+                    .first()
+                    .map(|fb| (fb.provider.clone(), Some(fb.model.clone())))
+            } else {
+                Some((provider, self.llm_config.model.clone()))
+            }
         } else {
             None
         };
@@ -579,6 +589,28 @@ impl App {
             .collect();
         let local_base_urls = self.configured_local_base_urls();
         let skills_config = self.setup.skills.clone();
+        // The SAME user knobs the main loop's assembly reads (the assembly's
+        // contract): reasoning effort, tool-call delivery mode, cache
+        // settings, MCP servers, the effective-context budget and RAG —
+        // cloned before the turn thread moves in.
+        let self_llm_reasoning = self.llm_config.reasoning.clone();
+        let self_tool_call_mode = self.llm_config.tool_call_mode;
+        let self_base_urls = local_base_urls.clone();
+        let cwd_string = self.state.working_directory.clone();
+        let anthropic_ttl_1h = self.setup.anthropic_cache_ttl_1h();
+        let openai_cache_retention = self.setup.openai_cache_retention().map(String::from);
+        let mcp_config = self.setup.mcp.clone();
+        let effective_context = self.setup.effective_context;
+        // No configured RAG databases → `recall: None`: the assembly hides
+        // the `recall_search` tool entirely (the main loop's
+        // `maybe_disable_recall_tool` contract) instead of carrying a tool
+        // whose description promises databases that do not exist.
+        #[cfg(feature = "embed")]
+        let recall_inputs = if self.rag_view.registry.dbs.is_empty() {
+            None
+        } else {
+            Some((self.recall_suffix(), self.recall_dbs_vec()))
+        };
         // The manager session's persistence rides a CLONE: the turn thread
         // outlives the &mut self borrow.
         let store = self.session_store.clone();
@@ -624,14 +656,13 @@ impl App {
         let epoch = self.agents_pane_epoch;
         let event_tx = self.event_tx.clone();
         if is_daemon {
-            // The manager pane: the MAIN agent itself, running as the
-            // session's coordinator on its OWN cosh session — a real,
-            // persisted session (visible in the history panel, openable
-            // like any other), not a throwaway nested harness. The
-            // manager's instructions tell it to delegate; its tool set
-            // keeps bash/inspection but drops the file-writing tools. The
-            // session was bound by the pre-flight above (a second ensure
-            // would just re-read it), so this only unwraps.
+            // The cosh pane: the MAIN agent itself, running delegated work
+            // on its OWN cosh session — a real, persisted session (visible
+            // in the history panel, openable like any other), not a
+            // throwaway nested harness. Its tool set keeps
+            // bash/inspection but drops the workspace-mutating tools.
+            // The session was bound by the pre-flight above (a second
+            // ensure would just re-read it), so this only unwraps.
             let Some(cosh_session) = manager_session else {
                 return;
             };
@@ -661,22 +692,70 @@ impl App {
                 None
             };
             std::thread::spawn(move || {
+                // The pane's ONE assembly: the assembly's inputs, with the
+                // pane's declared deviations from the main loop — the
+                // mode's normal prompt minus the self-review loop, the
+                // MANAGER requester tag, the bound pane id (strips
+                // `agents_call`), NO queued input (one-input-per-turn:
+                // nobody pumps a pane queue), NO decision audit (not
+                // distributed) and the pane's OWN session id as the
+                // cache-affinity key.
+                let assembly = super::harness_assembly::HarnessAssembly {
+                    provider: daemon_route
+                        .as_ref()
+                        .map(|(p, _)| p.clone())
+                        .unwrap_or_default(),
+                    model: daemon_route.as_ref().and_then(|(_, m)| m.clone()),
+                    reasoning: self_llm_reasoning.clone(),
+                    tool_call_mode: self_tool_call_mode,
+                    base_url: daemon_route
+                        .as_ref()
+                        .and_then(|(p, _)| self_base_urls.get(p).cloned()),
+                    local_base_urls: local_base_urls.clone(),
+                    fallbacks: fallbacks.clone(),
+                    summarization_models: summarization_models.clone(),
+                    cwd: cwd_string.clone(),
+                    mode: own_mode,
+                    disabled_tools: manager_disabled_tools(&std::collections::HashSet::new()),
+                    // The MODE's normal prompt minus the self-review loop:
+                    // a pane does delegated work whose deliverable is the
+                    // task report — it does not run the review sub-agent
+                    // (`subagent_call` is foreground-only here and a pane
+                    // must not nest reviews over its delegator's head).
+                    // Build/Yolo/Command map to the Build BASE (the full
+                    // Build prompt minus `INSTRUCTIONS_BUILD_SELF_REVIEW`);
+                    // Ask never had a review section, so it stays whole.
+                    instructions: Some(match own_mode {
+                        cosh::harness::Mode::Build
+                        | cosh::harness::Mode::Yolo
+                        | cosh::harness::Mode::Command => {
+                            cosh::harness::core::INSTRUCTIONS_BUILD_BASE
+                        }
+                        cosh::harness::Mode::Ask => cosh::harness::core::INSTRUCTIONS_ASK,
+                    }),
+                    anthropic_ttl_1h,
+                    openai_cache_retention: openai_cache_retention.clone(),
+                    cache_key: Some(cosh_session.clone()),
+                    mcp_config: mcp_config.clone(),
+                    skills_config: skills_config.clone(),
+                    effective_context,
+                    #[cfg(feature = "onnx")]
+                    checkup: None,
+                    #[cfg(feature = "embed")]
+                    recall: recall_inputs.clone(),
+                    ctx_state: context,
+                    as_manager: true,
+                    own_pane_id: own_registry_id,
+                };
                 run_manager_turn(
                     index,
                     pane_id,
                     epoch,
                     input,
-                    own_mode,
                     permission_rx,
                     signal,
-                    own_registry_id,
-                    daemon_connector.expect("manager pane carries its connector"),
-                    fallbacks,
-                    summarization_models,
-                    local_base_urls,
-                    skills_config,
+                    assembly,
                     cosh_session,
-                    context,
                     store,
                     event_tx,
                 );
@@ -1043,79 +1122,28 @@ impl App {
         #[cfg(test)]
         let _ = (agent, session_id, cwd, pane_id, epoch, event_tx, tokio_handle);
     }
-
-    /// Connector for the daemon pane: the session's own route (provider +
-    /// model), falling back to the router's first fallback for the symbolic
-    /// `auto` — the same resolution the prompt corrector applies, minus its
-    /// hard error on an unresolved route (the daemon degrades to an error
-    /// report in its pane instead of blocking the whole fan-out).
-    fn daemon_connector(&self) -> Result<Connector, String> {
-        let provider = self.llm_config.provider.trim().to_string();
-        let model = self.llm_config.model.clone().unwrap_or_default();
-        let (provider, model) = if provider.is_empty() || model.is_empty() || model == "auto" {
-            match self.router_view.fallbacks.first() {
-                Some(fb) => (fb.provider.clone(), fb.model.clone()),
-                None => return Err("no provider configured for the cosh daemon".into()),
-            }
-        } else {
-            (provider, model)
-        };
-        let mut connector = Connector::new(&provider).map_err(|e| e.to_string())?;
-        connector = connector.with_model(&model);
-        if let Some(url) = self.base_url_for(&provider) {
-            connector = connector.with_base_url(url);
-        }
-        connector = connector.with_tool_call_mode(ToolCallMode::Native);
-        Ok(connector)
-    }
 }
 
-/// One daemon-pane turn: a nested cosh harness (Yolo, sub-agent
-/// instructions, delegator blocklist) whose plain event stream is bridged
+/// One daemon-pane turn: the pane's harness assembled through the ONE
+/// assembly (`harness_assembly::assemble`), whose plain event stream is bridged
 /// into the SAME typed `SubagentEvent` stream the external ACP panes emit —
-/// both pane flavors render identically. The final report (the nested
-/// loop's closure) arrives as `AgentsPaneDone`.
+/// both pane flavors render identically. The final report (the loop's
+/// closure) arrives as `AgentsPaneDone`.
 #[allow(clippy::too_many_arguments)]
 fn run_manager_turn(
     pane: usize,
     pane_id: u64,
     epoch: u64,
     input: String,
-    mode: cosh::harness::Mode,
     permission_rx: Option<tokio::sync::mpsc::UnboundedReceiver<
         cosh_tools::subagent::events::PanePermissionAnswer,
     >>,
     stop_signal: Arc<AtomicBool>,
-    own_registry_id: Option<String>,
-    connector: Result<Connector, String>,
-    fallbacks: Vec<(String, String)>,
-    summarization_models: Vec<(String, String)>,
-    local_base_urls: std::collections::HashMap<String, String>,
-    skills_config: SkillsConfig,
+    assembly: super::harness_assembly::HarnessAssembly,
     session_id: String,
-    context: Option<cosh::harness::ContextManagerState>,
     store: crate::session::store::SessionStore,
     event_tx: tokio::sync::mpsc::UnboundedSender<HarnessEvent>,
 ) {
-    let connector = match connector {
-        Ok(connector) => connector,
-        Err(error) => {
-            let _ = event_tx.send(HarnessEvent::AgentsPaneDone {
-                pane,
-                pane_id,
-                epoch,
-                output: error,
-                stop_reason: "error".to_string(),
-                // The manager session was already minted and its shell
-                // persisted by the pre-flight — the binding must reach the
-                // metadata even on a failed first turn, or a reboot would
-                // rebuild the pane UNBOUND (issue 6).
-                session: Some(session_id),
-            });
-            return;
-        }
-    };
-    let disabled: HashSet<String> = manager_disabled_tools(&HashSet::new());
     // The panic path (outside the closure) still needs a sender: the
     // original moves into the closure below. The session id is cloned for
     // the same reason — the panic Done must carry the binding too (issue 6:
@@ -1124,25 +1152,12 @@ fn run_manager_turn(
     let panic_session = session_id.clone();
 
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let rt = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => rt,
-            Err(e) => {
-                let _ = event_tx.send(HarnessEvent::AgentsPaneDone {
-                    pane,
-                    pane_id,
-                    epoch,
-                    output: format!("manager runtime: {e}"),
-                    stop_reason: "error".to_string(),
-                    // Same as the connector failure above: the session
-                    // shell exists, the binding must persist (issue 6).
-                    session: Some(session_id),
-                });
-                return;
-            }
-        };
+        // THE shared process runtime (`harness_assembly::agent_runtime`), not
+        // a per-turn current_thread one: the pane now assembles MCP (and
+        // may touch the LSP singleton) through the SAME assembly as the main
+        // loop, and transports spawned on a per-turn runtime would be
+        // killed (kill_on_drop) the moment the turn ends.
+        let rt = super::harness_assembly::agent_runtime();
         rt.block_on(async move {
             let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
             // The manager loop's permission channel: with a TUI-connected
@@ -1153,10 +1168,41 @@ fn run_manager_turn(
             let (loop_tx, mut loop_rx) =
                 tokio::sync::mpsc::unbounded_channel::<cosh::harness::HarnessEvent>();
 
+            // THE assembly (`harness_assembly::assemble`): the pane assembles
+            // through the SAME path the main loop does — connector with the
+            // user's tool-call mode + reasoning resolution, prompt-cache
+            // headers keyed to the PANE's own session, MCP boot, RAG,
+            // effective-context budget, skills — with its role declared as
+            // parameters (pane instructions, MANAGER requester tag, bound
+            // pane id, no queued input, no audit). An assembly failure
+            // closes the pane's turn with it instead of an Error event (the
+            // pane has its own Done contract, not the main chat's).
+            let mut manager = match super::harness_assembly::assemble(assembly, &event_tx).await {
+                Ok(manager) => manager,
+                Err(error) => {
+                    let _ = event_tx.send(HarnessEvent::AgentsPaneDone {
+                        pane,
+                        pane_id,
+                        epoch,
+                        output: error,
+                        stop_reason: "error".to_string(),
+                        // The manager session was already minted and its
+                        // shell persisted by the pre-flight — the binding
+                        // must reach the metadata even on a failed first
+                        // turn, or a reboot would rebuild the pane UNBOUND
+                        // (issue 6).
+                        session: Some(session_id),
+                    });
+                    return;
+                }
+            };
+
             // The TUI's answer → the manager loop's permission action. The
             // mapping mirrors the main dialog's semantics: the first
             // allow-kind option the agent offered selects `Allow`/
             // `AllowOnce` per its kind; the cancel semantic denies.
+            // Spawned AFTER the assemble: on an assembly failure the
+            // forwarder would park forever on the receiver (a task leak).
             if let Some(mut permission_rx) = permission_rx {
                 let forward_perm_tx = manager_perm_tx.clone();
                 tokio::spawn(async move {
@@ -1189,50 +1235,6 @@ fn run_manager_turn(
                     }
                 });
             }
-
-            let cwd = std::env::current_dir()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| ".".to_string());
-            // The user's REAL harness mode, not a hardcoded one: the cosh
-            // pane IS the own harness, so Build/Ask/Yolo carry their natural
-            // semantics (guardrails, permission dialogs, instructions) into
-            // the pane exactly as the main loop would run them. (It used to
-            // be Yolo unconditionally — Yolo is the split's working default,
-            // but the mode the user cycled to is the honest state.)
-            let mut manager = cosh::harness::Harness::new(connector, &cwd, disabled)
-                .with_mode(mode)
-                // PANE instructions, not the manager's: this loop IS a pane
-                // doing delegated work — its deliverable is the task report,
-                // never further coordination (the replication bug: manager
-                // instructions + `agents_call` made one delegation from the
-                // main agent fan out to every sibling cosh pane).
-                .with_instructions(cosh::harness::core::INSTRUCTIONS_PANE)
-                // The manager loop's pane requests are tagged MANAGER: a
-                // background pane report drains ONLY here, never into the
-                // main chat loop's context. (Moot since the pane lost
-                // `agents_call` — the tag routes nothing anymore — but it
-                // keeps the loop outside the MAIN drain path by typing.)
-                .as_manager()
-                // Bind the pane id this loop runs in, so `agents_call`
-                // refuses to target its own running pane (self-call
-                // deadlock) while sibling cosh panes stay addressable.
-                .with_own_pane_id(own_registry_id)
-                // Foreground-only for `subagent_call` (gated on the
-                // requester tag inside the dispatch arm): a background
-                // sub-agent task spawned here would park its completion
-                // notification for a loop that never drains it.
-                .with_fallbacks(fallbacks)
-                .with_summarization_models(summarization_models)
-                .with_local_base_urls(local_base_urls)
-                .with_skills(skills_config.to_skills());
-            // Restore the manager session's authoritative context: the pane
-            // IS a real cosh session (visible in the history panel), so its
-            // model context survives across app restarts exactly like the
-            // main session's does.
-            if let Some(state) = context {
-                manager.context_manager.restore_state(&state);
-            }
-            manager.format_header_context();
 
             // Bridge: manager-loop events → typed SubagentEvents → the pane
             // channel. Same mapping the harness's internal sub-agent uses,
@@ -1330,9 +1332,20 @@ fn run_manager_turn(
                 }
             });
 
-            manager
-                .run_agent_loop(&input, loop_tx, answer_rx, perm_rx, stop_signal)
-                .await;
+            super::harness_assembly::run_assembled_loop(
+                &mut manager,
+                &input,
+                loop_tx,
+                answer_rx,
+                perm_rx,
+                stop_signal,
+                // NO queued input: the pane's input model is one-input-per-
+                // turn (the pane registry queues `agents_call` requests
+                // FIFO); nobody pumps a pane queue, so a shared queue here
+                // would only strand messages.
+                None,
+            )
+            .await;
 
             // The report is the loop's closure (its last post-tool-call
             // message); a stopped turn closes without one.

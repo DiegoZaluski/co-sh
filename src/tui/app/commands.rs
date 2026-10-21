@@ -341,6 +341,37 @@ impl App {
         }
     }
 
+    /// The point-of-no-return variant: EVERY pane of the outgoing split
+    /// (running or idle) loses its in-flight AND queued `agents_call`
+    /// requests, and the pane leaves the registry. For a whole-set death —
+    /// a session switch, going Home — the outgoing panes will never serve
+    /// anything again in this process: a leftover queued request would
+    /// hang its requester's busy-guard forever (`has_outstanding_requests`
+    /// stuck true with nobody left to dispatch it — the harness loop's
+    /// pre-Done wait spins eternally), and a request whose id COLLIDES
+    /// with the incoming session's panes (same agent name) would be served
+    /// cross-session. Must run BEFORE the slots swap, keyed by the
+    /// outgoing ids; the caller re-syncs the registry to the incoming set
+    /// afterwards.
+    fn fail_whole_outgoing_pane_set(&self) {
+        let ids: Vec<String> = either_split(&self.agents_split, &self.parked_agents_split)
+            .map(|split| {
+                split
+                    .panes
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, _)| split.pane_registry_id(i))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for id in ids {
+            cosh::harness::panes::fail_pane(
+                &id,
+                "the session switched away — this pane's set is gone".into(),
+            );
+        }
+    }
+
     /// The state-only core of open/close: signal-stop every pane of the
     /// outgoing split, swap the pane set, persist mode + pane set on the
     /// session and reconcile the shared spinner. Does NOT touch prompt
@@ -837,7 +868,14 @@ impl App {
         // in-flight `agents_call` requests fail first, keyed by the outgoing
         // ids — the stale-dropped Done can never resolve them (see
         // `fail_outgoing_pane_requests`).
-        self.fail_outgoing_pane_requests();
+        // A whole-set death (session switch / Home): every outgoing pane
+        // loses its in-flight AND queued `agents_call` requests and leaves
+        // the registry — the incoming set re-syncs it below. Without this
+        // the registry keeps the old session's panes: a queued request
+        // nobody will ever dispatch hangs the requester's busy-guard
+        // forever, and a colliding id (same agent name) would be served by
+        // the NEW session's pane — cross-session injection.
+        self.fail_whole_outgoing_pane_set();
         self.agents_pane_epoch = self.agents_pane_epoch.wrapping_add(1);
         for split in self
             .agents_split
@@ -856,6 +894,12 @@ impl App {
         // included (a switch keeps the panel and drops/rebuilds mirrors
         // explicitly instead).
         self.state.right_panel = crate::routes::session::right_panel::types::RightPanelState::new();
+        // The registry follows the outgoing set out: it must stay EMPTY at
+        // Home (no session, no panes) — `has_panes()` false means the next
+        // harness build carries no `agents_call` tool and no stale panes
+        // context block, and `has_outstanding_requests` can no longer stick
+        // true with nobody left to dispatch a queued request.
+        self.sync_agents_pane_registry();
     }
 
     /// Switch to a session, refusing the switch when it is already open in
@@ -899,7 +943,14 @@ impl App {
         // `agents_call` requests fail first, keyed by the outgoing ids —
         // the stale-dropped Done can never resolve them (see
         // `fail_outgoing_pane_requests`).
-        self.fail_outgoing_pane_requests();
+        // A whole-set death (session switch / Home): every outgoing pane
+        // loses its in-flight AND queued `agents_call` requests and leaves
+        // the registry — the incoming set re-syncs it below. Without this
+        // the registry keeps the old session's panes: a queued request
+        // nobody will ever dispatch hangs the requester's busy-guard
+        // forever, and a colliding id (same agent name) would be served by
+        // the NEW session's pane — cross-session injection.
+        self.fail_whole_outgoing_pane_set();
         self.agents_pane_epoch = self.agents_pane_epoch.wrapping_add(1);
         for split in self
             .agents_split
@@ -953,6 +1004,13 @@ impl App {
             }
             _ => {}
         }
+        // The registry follows the NEW session's rebuilt slots (the missing
+        // half of the fix above): the whole-set failure emptied it, so a
+        // session restored WITH panes re-registers them and a session with
+        // none leaves the registry empty — `has_panes()` false, no
+        // `agents_call` tool on the next harness build, no stale context
+        // block, and `has_outstanding_requests` can no longer stick true.
+        self.sync_agents_pane_registry();
         // The NEW session's rebuilt slots mirror into the shared list the
         // same way a fresh open does (idle panes, no running turns — the
         // old session's turns were stopped above).

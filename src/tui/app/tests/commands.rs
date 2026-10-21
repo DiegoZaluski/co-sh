@@ -1546,6 +1546,80 @@ async fn session_switch_restores_the_mode_only_when_it_was_left_open() {
     assert!(app.parked_agents_split.is_none());
 }
 
+/// The `agents_call` hang (user report: the main agent called a pane and the
+/// call never came back): a WHOLE-SET death — a session switch — must fail
+/// the outgoing panes' in-flight AND queued `agents_call` requests and
+/// re-sync the registry to the incoming session's set. The old switch path
+/// only failed IN-FLIGHT requests and never re-synced: a queued request of
+/// the OLD session stayed in the registry with nobody left to dispatch it
+/// (`serve_agents_pane_queues` is gated off without a split), so the main
+/// loop's pre-Done busy-guard (`has_outstanding_requests`) spun eternally —
+/// the harness hung even though no pane existed anymore. A colliding id
+/// (same agent name) would even be served by the NEW session's pane.
+#[tokio::test]
+async fn session_switch_fails_outstanding_pane_requests_and_resyncs_the_registry() {
+    use cosh::harness::panes::{self, ReplyMode};
+
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    let unique = |tag: &str| format!("{}-{tag}", crate::session::store::generate_session_id());
+
+    // Session A: a split with a cosh pane; a queued `agents_call` request
+    // nobody has dispatched yet (the pane is idle — the frame tick would
+    // serve it, but the switch races ahead of it).
+    let a = unique("a");
+    app.state.add_empty_session(a.clone(), "with panes".into(), 0);
+    app.state.current_session_id = Some(a.clone());
+    app.open_agents_split(vec![crate::ui::agents_picker::AgentPick {
+        name: "cosh".into(),
+        instances: 1,
+    }]);
+    app.sync_agents_pane_registry();
+    let handle = panes::enqueue("cosh", "delegated work", panes::MAIN, ReplyMode::Wait)
+        .expect("cosh pane is addressable");
+    let rx = handle.receiver.expect("wait mode carries a receiver");
+    assert!(panes::has_queued_request("cosh"), "request queued");
+    assert!(panes::has_outstanding_requests(panes::MAIN));
+
+    // Session B: NO pane set — the plainest hang reproduction: after the
+    // switch nothing can ever dispatch the old request.
+    let b = unique("b");
+    app.state.add_empty_session(b.clone(), "no panes".into(), 0);
+    assert!(app.switch_session_locked(&b));
+    assert!(app.agents_split.is_none());
+    assert!(app.parked_agents_split.is_none());
+
+    // THE FIX: the queued request failed (the waiter unblocked with the
+    // failure instead of hanging forever) and the registry is EMPTY —
+    // `has_panes` false means the next harness build registers no
+    // `agents_call` tool at all.
+    let answer = rx.await.expect("sender alive");
+    assert!(
+        answer.is_err(),
+        "the queued request must fail on a session switch, not hang: {answer:?}"
+    );
+    assert!(
+        !panes::has_outstanding_requests(panes::MAIN),
+        "no outstanding request may survive a session switch (the busy-guard would spin forever)"
+    );
+    assert!(
+        !panes::has_panes(),
+        "the outgoing pane set must leave the registry — no session, no panes"
+    );
+
+    // A session WITH panes re-registers them: the incoming set is what the
+    // registry serves, never the old session's leftovers.
+    app.state.current_session_id = Some(a.clone());
+    assert!(app.switch_session_locked(&a));
+    let ids: Vec<String> = panes::list_panes().into_iter().map(|p| p.id).collect();
+    assert!(
+        ids.contains(&"cosh".to_string()),
+        "pane re-registered: {ids:?}"
+    );
+    assert!(panes::has_panes());
+}
+
 /// A FRESH picker confirm supersedes a parked split of the same session:
 /// the replaced panes' stop signals fire (their turn can't stream into a
 /// pane of the new list), the parked slot empties.
@@ -2174,11 +2248,11 @@ async fn agents_call_serves_a_queued_cosh_pane_end_to_end() {
     isolate_home();
     let mut app = App::new("/tmp".to_string());
     // Contract: this test drives `serve_agents_pane_queues` → `dispatch_to_pane`,
-    // which spawns a manager turn thread. Neutralize the daemon connector so
-    // `run_manager_turn` returns its error immediately (`daemon_connector`
-    // fails before building a runtime) instead of ever touching the network or
-    // $HOME — no live turn thread is left behind, regardless of any provider
-    // in the ambient environment.
+    // which spawns a manager turn thread. Neutralize the daemon route so
+    // `run_manager_turn` returns its error immediately (the assembly's
+    // `build_connector` fails before building a runtime) instead of ever
+    // touching the network or $HOME — no live turn thread is left behind,
+    // regardless of any provider in the ambient environment.
     app.llm_config.provider.clear();
     app.llm_config.model = None;
     app.router_view.fallbacks.clear();

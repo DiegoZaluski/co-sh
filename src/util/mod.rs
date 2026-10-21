@@ -1,3 +1,4 @@
+pub mod const_str;
 pub mod logger;
 
 use tiktoken_rs::CoreBPE;

@@ -797,8 +797,8 @@ async fn esc_over_expanded_subagent_folds_and_stays_in_session_when_idle() {
 }
 
 /// `Ctrl+0` is the MAIN-agent hotkey: it unfocuses every /agents pane, so
-/// the shared prompt targets the normal-mode loop (running as manager
-/// while the split is open). This pins the CSI-u delivery shape
+/// the shared prompt targets the plain normal-mode loop (unchanged by the
+/// split). This pins the CSI-u delivery shape
 /// (`Char('0')` + CONTROL — what kitty-protocol terminals send once the
 /// app negotiates `REPORT_ALL_KEYS_AS_ESCAPE_CODES`): the focus MUST
 /// clear even with a draft typed, and a pane hotkey must re-focus after.
