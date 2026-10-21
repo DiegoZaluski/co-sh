@@ -940,6 +940,20 @@ impl App {
                         let max_w = inner_area.width.saturating_sub(6);
 
                         if let Some(session) = self.state.current_session() {
+                            // Sync the height caches first: this path runs
+                            // between render frames, and a message appended
+                            // since the last paint (agent emitted one
+                            // mid-drag) would otherwise leave
+                            // `msg_height_cache` shorter than the session's
+                            // messages and panic the region walk below.
+                            // PaintedOnly keeps the painted-geometry contract:
+                            // it only rebuilds on structural staleness.
+                            self.session_view.sync_layout_for_selection(
+                                session,
+                                max_w,
+                                &self.config,
+                                self.state.status == crate::types::SessionStatus::Working,
+                            );
                             // Build regions for the whole content span between
                             // anchor and focus, not just the currently visible
                             // window — the drag may have auto-scrolled across

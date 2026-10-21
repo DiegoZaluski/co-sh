@@ -1,6 +1,33 @@
 use super::*;
 
 impl SessionView {
+    /// Bring the width-dependent height caches in sync for the mouse-up
+    /// drag-copy path. `app/mouse.rs` reaches `build_text_regions_for_content_range`
+    /// without a prior render pass, so a message appended since the last frame
+    /// (e.g. the agent emitted one mid-drag) would otherwise leave
+    /// `msg_height_cache` shorter than `session.messages` and panic the region
+    /// walk on a direct index. `PaintedOnly` still rebuilds on STRUCTURAL
+    /// staleness (message count grew / width / config / session changed),
+    /// which is exactly the case that panics; it skips the per-frame content
+    /// re-estimate that would desync hover geometry.
+    pub fn sync_layout_for_selection(
+        &mut self,
+        session: &crate::types::Session,
+        max_w: u16,
+        config: &TuiConfig,
+        streaming: bool,
+    ) {
+        self.ensure_height_caches_fresh(
+            session,
+            max_w,
+            config,
+            HeightCacheMode::PaintedOnly,
+            streaming,
+        );
+    }
+}
+
+impl SessionView {
     #[allow(clippy::too_many_lines, clippy::cast_sign_loss)]
     pub fn build_text_regions(
         &mut self,
@@ -104,6 +131,19 @@ impl SessionView {
         let mut y = walk_start;
 
         for (idx, msg) in session.messages.iter().enumerate().skip(first_vis) {
+            // Messages appended after the last cache build (e.g. the agent
+            // emitted one mid-drag) have no measured height yet when the
+            // mouse-up copy path (`build_text_regions_for_content_range`)
+            // runs against the PAINTED layout. The selection's content range
+            // is computed entirely from that painted layout, so the appended
+            // messages' rows lie beyond it and can hold no selected rows —
+            // stop the walk instead of indexing past `msg_height_cache`
+            // (index-out-of-bounds panic). App callers sync the caches first
+            // via `sync_layout_for_selection`; this guard stays as
+            // defense-in-depth for the appended-only tail.
+            if idx >= self.msg_height_cache.len() {
+                break;
+            }
             if idx > first_vis {
                 y += 1;
             }
