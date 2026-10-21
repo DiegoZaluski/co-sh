@@ -100,6 +100,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed the chat prompt's mouse copy selection dying when the drag left
+  the prompt box. Drag ownership was re-derived per drag event from the
+  current pointer row, so a drag anchored at the prompt's tail — the only
+  direction that extends a selection from the end of the text — handed the
+  gesture to the chat's drag extraction the moment the pointer dropped
+  below the box; the release then copied the chat region and the prompt
+  kept a zero-length anchor, making the tail impossible to copy without
+  re-anchoring at the head or mid-text. A prompt-anchored press now owns
+  its whole gesture: the drag keeps extending while the pointer is over
+  the prompt rows, rows outside the visible text window clamp to the
+  nearest text edge (standard editor drag semantics), and the release is
+  consumed by the prompt's copy path even when it lands outside the box.
+  The same anchor-ownership contract covers the right-button correction
+  drag. Covered by gesture regression tests driven through the real mouse
+  pipeline in `tui::app::tests::prompt_selection_mouse`.
+- The `[Pasted ~N lines]` placeholder color no longer leaks into the
+  text around it. The paste color was decided per wrapped line, so any
+  line that merely overlapped the placeholder — ordinary text typed after
+  it on the same line, or the line's wrapped continuation — was painted
+  entirely in the placeholder color. The paint decision is now per glyph,
+  driven by the exact byte ranges the placeholders occupy in the draft,
+  and every occurrence of a duplicated placeholder gets its own range.
+  Covered by cell-level regression tests in the prompt component.
 - Fixed a panic (index out of range) that froze the TUI when pressing
   Ctrl+Up right after switching to a session with fewer messages: the
   prompt's history-navigation index survived the switch and indexed past

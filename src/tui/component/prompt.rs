@@ -1007,6 +1007,33 @@ impl PromptView {
         }
     }
 
+    /// Drag variant of [`Self::char_pos_at_mouse`]: rows OUTSIDE the visible
+    /// text window clamp to the nearest text edge (standard editor drag
+    /// semantics) instead of missing — a drag anchored at the prompt's tail
+    /// keeps extending to the very end of the draft when the pointer drops
+    /// below the window (the only direction that grows a tail selection).
+    /// Plain presses never route through here: a click on the border, label
+    /// or cap rows must stay inert (no cursor jump, no anchor).
+    pub fn drag_pos_at_mouse(&self, x: u16, y: u16, area: Rect) -> Option<usize> {
+        if self.input.is_empty() {
+            return None;
+        }
+        let text_start = area.y + 1; // first content line
+        let eff_cap = area
+            .height
+            .saturating_sub(BASE_H + AGENT_H + CAP_H + FOOTER_H)
+            .max(1);
+        let n = Self::wrapped_lines(&self.input, area.width.saturating_sub(6) as usize).len();
+        let bottom = text_start + n.min(eff_cap as usize) as u16;
+        if y >= bottom {
+            return Some(self.input.len());
+        }
+        if y < text_start {
+            return Some(0);
+        }
+        self.char_pos_at_mouse(x, y, area)
+    }
+
     /// Render the prompt and draw the cursor — blinking when focused, dimmed when blurred.
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub fn render(
@@ -1110,24 +1137,22 @@ impl PromptView {
         // `│` like the slash menu.
         let max_line_w = input_area.width.saturating_sub(6) as u16;
 
-        // Pre-compute which visual lines overlap with pasted virtual-text placeholders.
-        // Uses cumulative byte-offset tracking (same approach as `char_pos_at_mouse`)
-        // instead of pointer arithmetic, which is fragile across string reallocations.
-        let mut is_paste_line = vec![false; display_lines.len()];
+        // Pre-compute every byte range the paste placeholders occupy in the
+        // draft — ALL occurrences of each virtual text (duplicated
+        // placeholders are independent ranges). The placeholder color paints
+        // per GLYPH below: the ordinary text around a placeholder keeps the
+        // base style even when they share a wrapped line. The old per-line
+        // overlap test painted whole lines and leaked the placeholder color
+        // into the surrounding text.
+        let mut paste_ranges: Vec<(usize, usize)> = Vec::new();
         if !display_placeholder {
-            let mut line_byte_start = 0usize;
-            for (i, line) in display_lines.iter().enumerate() {
-                let line_byte_end = line_byte_start + line.len();
-                for part in &self.pasted_parts {
-                    if let Some(vt_pos) = self.input.find(&part.virtual_text) {
-                        let vt_end = vt_pos + part.virtual_text.len();
-                        if line_byte_start < vt_end && line_byte_end > vt_pos {
-                            is_paste_line[i] = true;
-                            break;
-                        }
-                    }
+            for part in &self.pasted_parts {
+                let mut from = 0usize;
+                while let Some(rel) = self.input[from..].find(&part.virtual_text) {
+                    let pos = from + rel;
+                    paste_ranges.push((pos, pos + part.virtual_text.len()));
+                    from = pos + part.virtual_text.len();
                 }
-                line_byte_start = line_byte_end;
             }
         }
 
@@ -1142,17 +1167,26 @@ impl PromptView {
                 Style::default().fg(rgba_color(theme.text))
             };
 
-            if is_paste_line[idx] {
-                draw_text_line(
-                    buf,
-                    line,
-                    x_off,
-                    ly,
-                    max_line_w,
-                    base_style.fg(rgba_color(theme.secondary)),
-                );
-            } else {
-                draw_text_line(buf, line, x_off, ly, max_line_w, base_style);
+            draw_text_line(buf, line, x_off, ly, max_line_w, base_style);
+
+            // Recolor ONLY the glyphs that fall inside a placeholder range.
+            // Wrapped-line slices are sub-slices of `input`, so pointer
+            // arithmetic gives the exact byte offset of every glyph.
+            if !paste_ranges.is_empty() && !line.is_empty() {
+                let input_start = self.input.as_ptr() as usize;
+                let line_byte_start = line.as_ptr() as usize - input_start;
+                let secondary = rgba_color(theme.secondary);
+                for (col, (within, _)) in line.char_indices().enumerate() {
+                    let byte = line_byte_start + within;
+                    if paste_ranges.iter().any(|&(s, e)| byte >= s && byte < e) {
+                        let cx = x_off + col as u16;
+                        if cx < input_area.right()
+                            && let Some(cell) = buf.cell_mut((cx, ly))
+                        {
+                            cell.set_fg(secondary);
+                        }
+                    }
+                }
             }
         }
 
@@ -1712,6 +1746,298 @@ mod tests {
         assert_eq!(view.cursor_pos, view.input.len());
         assert!(view.pasted_parts.is_empty());
         assert!(!view.has_selection());
+    }
+
+    #[test]
+    fn char_pos_at_mouse_maps_the_wrapped_tail_of_a_multibyte_history_prompt() {
+        // Regression: a prompt pulled with Ctrl+Up (history) that wraps into
+        // several visual lines carries multi-byte UTF-8 characters. A drag
+        // that starts mid-way (or at the tail) of a later visual line used to
+        // resolve to a non-char-boundary byte offset (raw column arithmetic),
+        // so `begin_selection`/`sel_end` anchored INSIDE a character: the
+        // subsequent `selected_text` slice panicked or returned garbage, and
+        // the copy of the tail of the text was impossible.
+        let mut view = PromptView::new();
+        // Multi-byte content that wraps: each visual line below the width
+        // starts mid-word, and `á`/`é` are 2 bytes in UTF-8.
+        view.input = "ação explícaçãó ".repeat(12);
+        let text_w = 20usize;
+
+        // Click at the very tail of the LAST wrapped line: the offset must be
+        // the exact input end (a valid boundary), not len+col drift.
+        let lines = PromptView::wrapped_lines(&view.input, text_w);
+        let area = Rect::new(0, 0, (text_w + 6) as u16, 40);
+        let last_line = lines.last().unwrap();
+        let tail_col = last_line.chars().count();
+        let y = (1 + (lines.len() - 1)) as u16;
+        let pos = view
+            .char_pos_at_mouse(3 + tail_col as u16, y, area)
+            .expect("tail click maps inside the input");
+        assert!(
+            view.input.is_char_boundary(pos),
+            "tail click must land on a char boundary (got {pos})"
+        );
+
+        // Click at the tail of EVERY wrapped line: each resolved offset must
+        // be a char boundary and monotonic — the anchors a drag needs.
+        let mut prev = 0usize;
+        for (i, line) in lines.iter().enumerate() {
+            let col = line.chars().count();
+            let pos = view
+                .char_pos_at_mouse(3 + col as u16, (1 + i) as u16, area)
+                .unwrap_or_else(|| panic!("line {i} tail click must map"));
+            assert!(
+                view.input.is_char_boundary(pos),
+                "line {i} tail offset {pos} must be a char boundary"
+            );
+            assert!(
+                pos >= prev,
+                "line {i} tail offset {pos} regressed below line {}'s {prev}",
+                i.wrapping_sub(1)
+            );
+            prev = pos;
+        }
+        assert_eq!(prev, view.input.len(), "the last line's tail is the input end");
+
+        // A mid-line click must also stay on a boundary and point AT the
+        // character under the mouse (the byte offset of its start).
+        let mid_line = &lines[lines.len() / 2];
+        let mid_col = mid_line.chars().count() / 2;
+        let li = lines.len() / 2;
+        let pos = view
+            .char_pos_at_mouse(3 + mid_col as u16, (1 + li) as u16, area)
+            .expect("mid click maps");
+        assert!(
+            view.input.is_char_boundary(pos),
+            "mid click must land on a char boundary (got {pos})"
+        );
+    }
+
+    #[test]
+    fn selection_over_a_multibyte_wrapped_prompt_slices_char_safe_and_expands_placeholders() {
+        // Regression: with multi-byte content, `selected_text` used to slice
+        // at raw byte offsets produced by the mouse mapping — the tail
+        // selection (the copy that matters most) either panicked on a
+        // non-boundary slice or silently clipped the text.
+        let mut view = PromptView::new();
+        view.input = "ação explícaçãó ".repeat(12);
+        let text_w = 20usize;
+        let lines = PromptView::wrapped_lines(&view.input, text_w);
+        let area = Rect::new(0, 0, (text_w + 6) as u16, 40);
+
+        // Drag from the tail of the second-to-last line to the very end of
+        // the input (the "copy the tail" gesture).
+        let anchor_line = lines.len() - 2;
+        let anchor_col = lines[anchor_line].chars().count();
+        let start = view
+            .char_pos_at_mouse(3 + anchor_col as u16, (1 + anchor_line) as u16, area)
+            .expect("anchor maps");
+        view.begin_selection(start, false);
+        view.sel_end = Some(view.input.len());
+
+        let copied = view.selected_text();
+        assert!(
+            view.input.ends_with(&copied),
+            "a tail selection must copy the actual tail, got {copied:?}"
+        );
+        assert!(
+            !copied.is_empty(),
+            "a tail drag must not collapse to an empty copy"
+        );
+        assert_eq!(
+            view.expand_pasted_text(&copied),
+            copied,
+            "no placeholders in this draft: copy must pass through unchanged"
+        );
+
+        // The inverted direction (drag up) yields the same text.
+        view.begin_selection(view.input.len(), false);
+        view.sel_end = Some(start);
+        assert_eq!(view.selected_text(), copied, "drag direction must not matter");
+    }
+
+    #[test]
+    fn selection_drag_across_a_pasted_placeholder_copies_the_expanded_text() {
+        // Regression: a selection spanning a compressed-paste placeholder
+        // must copy the EXPANDED text and never panic on the byte→char
+        // conversion of the virtual-text range.
+        let mut view = PromptView::new();
+        view.handle_paste("primeira linha\nsegunda linha\nterceira linha");
+        assert_eq!(view.input, "[Pasted ~3 lines]");
+        view.type_char(' ');
+        view.type_char('f');
+        view.type_char('i');
+        view.type_char('m');
+
+        // Full-range drag: selection covers the placeholder + typed tail.
+        view.begin_selection(0, false);
+        view.sel_end = Some(view.input.len());
+        let copied = view.selected_text();
+        assert_eq!(
+            copied, "primeira linha\nsegunda linha\nterceira linha fim",
+            "the copy must expand the placeholder to the real content"
+        );
+
+        // A drag anchored at the TAIL (end → start, like grabbing the end of
+        // the prompt and pulling back over the placeholder).
+        view.begin_selection(view.input.len(), false);
+        view.sel_end = Some(0);
+        assert_eq!(view.selected_text(), copied);
+    }
+
+    /// Map every rendered prompt glyph cell to its byte offset in `input`:
+    /// `(x, y, byte)`. Uses the same cumulative line tracking as the render
+    /// (each wrapped line is a contiguous slice of `input`), so the test can
+    /// assert a style against the exact draft byte under the cell.
+    fn prompt_cells_by_byte(view: &PromptView, area: Rect) -> Vec<(u16, u16, usize)> {
+        let text_w = area.width.saturating_sub(6) as usize;
+        let lines = PromptView::wrapped_lines(&view.input, text_w);
+        let x_off = area.x + 3;
+        let mut cells = Vec::new();
+        let mut line_byte_start = 0usize;
+        for (i, line) in lines.iter().enumerate() {
+            let y = area.y + 1 + i as u16;
+            for (within, _) in line.char_indices() {
+                let byte = line_byte_start + within;
+                let col = view.input[line_byte_start..=byte].chars().count() - 1;
+                cells.push((x_off + col as u16, y, byte));
+            }
+            line_byte_start += line.len();
+        }
+        assert_eq!(line_byte_start, view.input.len(), "lines cover the input");
+        cells
+    }
+
+    #[test]
+    fn paste_placeholder_color_stays_inside_the_placeholder() {
+        // Regression: the `[Pasted ~N lines]` placeholder's secondary color
+        // leaked into the surrounding text — the paint decision was made per
+        // WRAPPED LINE, so any line that merely overlapped the placeholder
+        // (including a line sharing it with ordinary text typed after it)
+        // was painted entirely in the placeholder color.
+        use crate::theme::ThemeRegistry;
+
+        let theme = ThemeRegistry::new().default_theme().clone();
+        let state = AppState::new();
+
+        // Ordinary text BEFORE the paste (cursor at the end), the placeholder
+        // itself, then more ordinary text typed after it: both neighbors sit
+        // on the placeholder's own visual line.
+        let mut view = PromptView::new();
+        for ch in "head ".chars() {
+            view.type_char(ch);
+        }
+        view.handle_paste("linha um\nlinha dois\nlinha três");
+        for ch in " tail".chars() {
+            view.type_char(ch);
+        }
+        let placeholder = "[Pasted ~3 lines]";
+        let ph_start = view.input.find(placeholder).unwrap();
+        let ph_end = ph_start + placeholder.len();
+        assert_eq!(
+            &view.input[ph_start..ph_end],
+            placeholder,
+            "the placeholder sits mid-draft"
+        );
+
+        let area = Rect::new(0, 0, 80, 10);
+        let mut buf = Buffer::empty(area);
+        view.render(
+            &mut buf,
+            area,
+            &state,
+            &theme,
+            &AgentColors::from_theme(&theme),
+            &[],
+            SystemTime::now(),
+            "",
+            "",
+            None,
+            None,
+            0.0,
+            false,
+        );
+
+        let secondary = rgba_color(theme.secondary);
+        let text_fg = rgba_color(theme.text);
+        for (x, y, byte) in prompt_cells_by_byte(&view, area) {
+            let cell = &buf[(x, y)];
+            let want = if (ph_start..ph_end).contains(&byte) {
+                secondary
+            } else {
+                text_fg
+            };
+            assert_eq!(
+                cell.fg, want,
+                "byte {byte} (cell {x},{y}) must wear the color of its own segment"
+            );
+        }
+    }
+
+    #[test]
+    fn paste_placeholder_color_does_not_leak_to_wrapped_neighbors() {
+        // Regression (second half): the leak also crossed WRAPPED lines —
+        // when the line holding the placeholder wrapped, the continuation
+        // line inherited the paste color because the decision was a per-line
+        // overlap test.
+        use crate::theme::ThemeRegistry;
+
+        let theme = ThemeRegistry::new().default_theme().clone();
+        let state = AppState::new();
+
+        // A narrow box forces the run of x's after the placeholder to wrap:
+        // the placeholder's line holds its tail and the next line is
+        // ordinary text entirely.
+        let mut view = PromptView::new();
+        view.handle_paste("linha um\nlinha dois\nlinha três");
+        for _ in 0..24 {
+            view.type_char('x');
+        }
+        assert!(view.input.starts_with("[Pasted ~3 lines]"));
+
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+        view.render(
+            &mut buf,
+            area,
+            &state,
+            &theme,
+            &AgentColors::from_theme(&theme),
+            &[],
+            SystemTime::now(),
+            "",
+            "",
+            None,
+            None,
+            0.0,
+            false,
+        );
+
+        let placeholder = "[Pasted ~3 lines]";
+        let ph_start = 0usize;
+        let ph_end = placeholder.len();
+        let secondary = rgba_color(theme.secondary);
+        let text_fg = rgba_color(theme.text);
+
+        // The draft must actually wrap (otherwise the test proves nothing).
+        let text_w = area.width.saturating_sub(6) as usize;
+        assert!(
+            PromptView::wrapped_lines(&view.input, text_w).len() > 1,
+            "the draft must wrap for this regression to be exercised"
+        );
+
+        for (x, y, byte) in prompt_cells_by_byte(&view, area) {
+            let cell = &buf[(x, y)];
+            let want = if (ph_start..ph_end).contains(&byte) {
+                secondary
+            } else {
+                text_fg
+            };
+            assert_eq!(
+                cell.fg, want,
+                "byte {byte} (cell {x},{y}) must wear the color of its own segment"
+            );
+        }
     }
 
     #[test]

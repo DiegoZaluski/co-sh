@@ -525,6 +525,14 @@ pub struct App {
     /// that started in the chat can never act on the left panel (a stray
     /// click there could otherwise launch the editor).
     press_started_in_sidebar: bool,
+    /// Whether the current left press began INSIDE the prompt area. A
+    /// prompt drag keeps its owner for the whole gesture: the selection
+    /// keeps extending while the pointer is over the prompt rows, and the
+    /// release is consumed by the prompt's copy path instead of falling
+    /// through to the chat's drag extraction (the old per-event re-derivation
+    /// handed the drag to the chat the moment the pointer left the box, which
+    /// destroyed every selection anchored at the prompt's tail).
+    press_started_in_prompt: bool,
     /// Whether the last release was a drag (moved since the press). Set in
     /// the release handler, consulted by the left panel dispatch below it.
     release_was_drag: bool,
@@ -533,6 +541,11 @@ pub struct App {
     /// Set when a mouse Up was a drag (even if it selected nothing), so the
     /// session click dispatch skips opening Message Actions.
     mouse_up_was_drag: bool,
+    /// Test-only record of the last prompt-selection copy the mouse release
+    /// performed: gesture tests assert the copied TEXT without touching the
+    /// real (often absent, on CI) clipboard.
+    #[cfg(test)]
+    last_prompt_copy: Option<String>,
     /// A left press that began on the scroll-to-bottom pill: the matching
     /// release is swallowed so the chat content under the pill's row never
     /// sees the click (the pill is gone by then — the jump re-attached the
@@ -896,10 +909,13 @@ impl App {
             usage_store,
             usage_next_id,
             mouse_down_pos: None,
+            press_started_in_prompt: false,
             press_started_in_sidebar: false,
             release_was_drag: false,
             mouse_drag_active: false,
             mouse_up_was_drag: false,
+            #[cfg(test)]
+            last_prompt_copy: None,
             scroll_pill_pressed: false,
             drag_selection: None,
             live_requested: false,

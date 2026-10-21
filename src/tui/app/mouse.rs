@@ -418,6 +418,11 @@ impl App {
                     return Ok(true);
                 }
                 self.mouse_down_pos = Some((x, y));
+                // NOTE: `press_started_in_prompt` is NOT armed here — it is
+                // armed by the anchor blocks below, only when a prompt text
+                // anchor was actually created (a click on the box's
+                // border/label rows or on the left padding creates none, and
+                // that press keeps behaving as an ordinary chat press).
                 self.press_started_in_sidebar = x < LEFT_PANEL_WIDTH;
                 self.release_was_drag = false;
                 self.mouse_drag_active = false;
@@ -452,6 +457,14 @@ impl App {
                     self.state.right_panel.panel_focus = None;
                     if let Some(pos) = self.prompt_view.char_pos_at_mouse(x, y, prompt_area) {
                         self.prompt_view.begin_selection(pos, false);
+                        // The anchor was really created: the drag belongs to
+                        // the prompt for its WHOLE life, even when the pointer
+                        // leaves the box (below it, the only direction that
+                        // extends from the prompt's tail). Re-deriving
+                        // ownership per drag event from the CURRENT pointer
+                        // row handed the gesture to the chat mid-drag and
+                        // destroyed the tail selection.
+                        self.press_started_in_prompt = true;
                     }
                     return Ok(true);
                 }
@@ -586,6 +599,9 @@ impl App {
                     self.prompt_view.note_activity();
                     self.state.right_panel.panel_focus = None;
                     self.prompt_view.begin_selection(pos, true);
+                    // Same anchor-ownership contract as the left press: the
+                    // correction drag stays the prompt's for its whole life.
+                    self.press_started_in_prompt = true;
                     return Ok(true);
                 }
             }
@@ -671,9 +687,19 @@ impl App {
                     // Determine whether we are dragging inside the prompt area.
                     // We need prompt_area to be in scope below, so compute it first.
                     let prompt_area = self.compute_prompt_area();
+                    // Ownership first: a drag that ANCHORED inside the prompt
+                    // stays the prompt's for its whole life — even when the
+                    // pointer leaves the box (below it: the only direction
+                    // that extends a selection from the prompt's tail).
+                    // Re-deriving ownership per event from the CURRENT pointer
+                    // row handed the gesture to the chat mid-drag, which
+                    // destroyed every tail selection (the user could never
+                    // copy the end of the prompt without re-anchoring at the
+                    // head or mid-text).
                     let is_prompt_drag = matches!(self.mode(), AppMode::Session)
                         && self.prompt_view.sel_start.is_some()
-                        && prompt_area.is_some_and(|pa| y >= pa.y && y < pa.bottom());
+                        && (self.press_started_in_prompt
+                            || prompt_area.is_some_and(|pa| y >= pa.y && y < pa.bottom()));
 
                     if !is_prompt_drag {
                         // Update visual selection rectangle (session content).
@@ -692,9 +718,14 @@ impl App {
                     }
 
                     // If drag is within the prompt area, extend the text selection.
+                    // `drag_pos_at_mouse` clamps rows outside the visible
+                    // text window to the nearest text edge (standard editor
+                    // drag semantics): a tail-anchored drag keeps extending
+                    // to the end of the draft when the pointer drops below
+                    // the box instead of stalling on the anchor.
                     if is_prompt_drag
                         && let Some(pa) = prompt_area
-                        && let Some(pos) = self.prompt_view.char_pos_at_mouse(x, y, pa)
+                        && let Some(pos) = self.prompt_view.drag_pos_at_mouse(x, y, pa)
                     {
                         self.prompt_view.cursor_pos = pos;
                         self.prompt_view.sel_end = Some(pos);
@@ -709,12 +740,16 @@ impl App {
                 return Ok(true);
             }
             (MouseEventType::Drag, MouseButton::Right) => {
+                // Same anchor-ownership contract as the left drag: the
+                // correction drag extends while the pointer is over the
+                // prompt rows, and stays owned by the prompt (never leaks
+                // into other surfaces) after it leaves the box. The same
+                // edge clamp applies: dragging below the box grabs to the
+                // end of the draft (the easiest way to cover it all).
                 if matches!(self.mode(), AppMode::Session)
                     && self.prompt_view.correction_selection
                     && let Some(prompt_area) = self.compute_prompt_area()
-                    && y >= prompt_area.y
-                    && y < prompt_area.bottom()
-                    && let Some(pos) = self.prompt_view.char_pos_at_mouse(x, y, prompt_area)
+                    && let Some(pos) = self.prompt_view.drag_pos_at_mouse(x, y, prompt_area)
                 {
                     self.prompt_view.cursor_pos = pos;
                     self.prompt_view.sel_end = Some(pos);
@@ -722,6 +757,10 @@ impl App {
                 return Ok(true);
             }
             (MouseEventType::Up, MouseButton::Left) => {
+                // Capture and retire the gesture's anchor ownership: it is
+                // meaningful only between Down and Up.
+                let started_in_prompt = self.press_started_in_prompt;
+                self.press_started_in_prompt = false;
                 // Release of a scroll-to-bottom pill press: swallow it so the
                 // chat content underneath the pill's old row never sees the
                 // click (the pill is gone by now — the jump re-attached the
@@ -834,10 +873,21 @@ impl App {
                     }
 
                     // Auto-copy prompt selection on mouse release after drag.
-                    if self.prompt_view.has_selection() {
+                    if started_in_prompt || self.prompt_view.has_selection() {
+                        // A prompt-anchored drag is consumed HERE even when
+                        // the selection collapsed empty (the drag left the
+                        // box and never re-entered a text row): falling
+                        // through would hand the release to the chat's drag
+                        // extraction below.
                         let text = self.prompt_view.selected_text();
-                        selection::copy_selection(&text, &mut self.toast_state);
                         self.prompt_view.clear_selection();
+                        if !text.is_empty() {
+                            #[cfg(test)]
+                            {
+                                self.last_prompt_copy = Some(text.clone());
+                            }
+                            selection::copy_selection(&text, &mut self.toast_state);
+                        }
                         return Ok(true);
                     }
 
@@ -923,6 +973,10 @@ impl App {
                 // The model sees a correction request only after the entire
                 // prompt was selected. Partial right drags do not write to the
                 // clipboard, issue a request, or mutate the prompt.
+                // The right gesture also retires the prompt-press anchor flag
+                // (same invariant as the left Up arm: the flag is meaningful
+                // only between Down and Up).
+                self.press_started_in_prompt = false;
                 let is_complete = self.prompt_view.has_complete_correction_selection();
                 self.prompt_view.clear_selection();
                 if is_complete {

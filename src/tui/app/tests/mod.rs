@@ -49,8 +49,11 @@ fn isolate_home() {
     }
 }
 
+// NOTE: `agents_click_probe` was declared here but its file never existed in
+// the tree — the orphan declaration broke the bin test target entirely
+// (`E0583: file not found for module`), so it was removed. Re-add it together
+// with its file when the probe lands.
 mod agent_loop;
-mod agents_click_probe;
 mod history_panic_probe;
 mod commands;
 mod cost;
@@ -60,6 +63,7 @@ mod keys;
 mod model_persistence;
 mod paste_burst;
 mod prompt_correction;
+mod prompt_selection_mouse;
 mod prompt_undo;
 mod provider_login;
 mod providers;
