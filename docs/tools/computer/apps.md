@@ -47,4 +47,4 @@ variant follows the query:
 ## See also
 
 [`snapshot`](snapshot.md) for the tree below the focused element ·
-[runnable example](https://github.com/): `cargo run --example computer-apps`
+`cargo run --example computer-apps`

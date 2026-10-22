@@ -271,6 +271,105 @@ fn computer_wait_is_allowed_in_every_mode() {
 }
 
 #[test]
+fn computer_windows_listing_is_read_only_and_actions_need_approval() {
+    // Listing windows is pure observation: allowed in every mode,
+    // including Ask.
+    let list = serde_json::json!({ "name": "Safari" });
+    for mode in [Mode::Ask, Mode::Build, Mode::Yolo] {
+        let result = check_tool_permission("computer_windows", &list, mode, None);
+        assert!(
+            matches!(result, PermissionCheck::Allowed),
+            "listing windows must be allowed in {mode:?}, got {result:?}"
+        );
+    }
+
+    // An `action` call changes window state — Ask denies outright (no
+    // approval dialog exists there), Build asks, Yolo allows.
+    let close = serde_json::json!({
+        "name": "Safari",
+        "selector": "window[name='Settings']",
+        "action": "close"
+    });
+    let result = check_tool_permission("computer_windows", &close, Mode::Ask, None);
+    match result {
+        PermissionCheck::Denied(reason) => {
+            assert!(reason.contains("changes window state"), "{reason}");
+        }
+        other => panic!("window action must be denied in Ask, got {other:?}"),
+    }
+
+    let result = check_tool_permission("computer_windows", &close, Mode::Build, None);
+    match result {
+        PermissionCheck::NeedsApproval(req) => {
+            assert!(req.description.contains("close"), "{req:?}");
+            assert_eq!(req.args, "window[name='Settings']");
+        }
+        other => panic!("window action must ask in Build, got {other:?}"),
+    }
+
+    let result = check_tool_permission("computer_windows", &close, Mode::Yolo, None);
+    assert!(matches!(result, PermissionCheck::Allowed), "got {result:?}");
+}
+
+#[test]
+fn computer_screenshot_save_path_asks_outside_project_root() {
+    // Writing the PNG OUTSIDE the project root is a file write like any
+    // other — it goes through the path check even in Ask mode, where the
+    // inline capture itself is free.
+    let dir = tempfile::tempdir().unwrap();
+    let inside = dir.path().join("shot.png");
+    let inside_str = inside.to_str().unwrap();
+
+    let args = serde_json::json!({ "save_path": inside_str });
+    let result =
+        check_tool_permission("computer_screenshot", &args, Mode::Ask, Some(dir.path()));
+    assert!(
+        matches!(result, PermissionCheck::Allowed),
+        "save inside the project root is no approval matter, got {result:?}"
+    );
+
+    // An absolute path that is genuinely outside the root on EVERY
+    // platform (the temp dir is never inside a workspace root): the
+    // literal `C:/…` spelling of earlier drafts is only absolute on
+    // Windows, so a Linux run silently let it through.
+    let outside = std::env::temp_dir().join("cosh_outside_root_shot.png");
+    let args = serde_json::json!({ "save_path": outside.to_str().unwrap() });
+    let result =
+        check_tool_permission("computer_screenshot", &args, Mode::Ask, Some(dir.path()));
+    assert!(
+        matches!(result, PermissionCheck::NeedsApproval(_)),
+        "save outside the project root must ask, got {result:?}"
+    );
+
+    // SIBLING of the root sharing a literal prefix (`<root>_bar`): the
+    // not-yet-existing path falls back to textual containment, and a
+    // prefix blowback may never swallow a sibling directory.
+    let root_name = dir.path().file_name().unwrap().to_str().unwrap();
+    let sibling = dir
+        .path()
+        .with_file_name(format!("{root_name}_bar"))
+        .join("shot.png");
+    let args = serde_json::json!({ "save_path": sibling.to_str().unwrap() });
+    let result =
+        check_tool_permission("computer_screenshot", &args, Mode::Ask, Some(dir.path()));
+    assert!(
+        matches!(result, PermissionCheck::NeedsApproval(_)),
+        "a prefix-sibling of the root is still outside it, got {result:?}"
+    );
+
+    // No project root known AT ALL (e.g. a session without a workspace):
+    // the defensive default asks for even a plausible path.
+    let outside_any = std::env::temp_dir().join("cosh_any_tmp_shot.png");
+    let args = serde_json::json!({ "save_path": outside_any.to_str().unwrap() });
+    let result =
+        check_tool_permission("computer_screenshot", &args, Mode::Ask, None);
+    assert!(
+        matches!(result, PermissionCheck::NeedsApproval(_)),
+        "without a project root every absolute path asks, got {result:?}"
+    );
+}
+
+#[test]
 fn build_control_is_chain_aware_click_first_asks_keyboard_first_denied() {
     // The canonical click-first pipeline: a real click on the element
     // moves OS keyboard focus AFTER the user answers the dialog — exactly

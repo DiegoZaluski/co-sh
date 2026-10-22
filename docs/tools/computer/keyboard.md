@@ -8,10 +8,14 @@ module you can reason about (and test) with no desktop at all.
 ```
 keyboard::parse_key(name: &str, tool: &str) -> Result<Key, String>
 keyboard::parse_keys(names: &[String], tool: &str) -> Result<Vec<Key>, String>
+keyboard::parse_hold_keys(names: &[String], tool: &str) -> Result<Vec<Key>, String>
 keyboard::key_name(key: &Key) -> String
 keyboard::is_keyboard_step(key: Option<&str>, text: Option<&str>) -> bool
 keyboard::is_wait_step(wait_ms: Option<u64>) -> bool
 keyboard::run_keyboard_step(sim, step, tool) · keyboard::run_wait_step(ms)
+keyboard::parse_hold_keys(names, tool) ·
+keyboard::run_hold_step(sim, names, tool) ·
+keyboard::run_release_step(sim, names, tool)
 keyboard::MAX_WAIT_MS = 10_000                              // pipeline wait cap
 ```
 
@@ -63,12 +67,21 @@ validators and the dispatcher so the two can never disagree:
 
 - `key` counts after **trimming** — a whitespace-only key is not a step;
 - `text` counts **as-is** — a literal space IS text (a spacebar keystroke);
-- any `wait` value is a wait step (even `0`).
+- any `wait` value is a wait step (even `0`);
+- `hold`/`release` are keyboard steps of their OWN — same zero/target rule
+  (they touch nothing but the pressed-key state), and their key names run
+  through the same `parse_key` alias table as `key`. The pressed state
+  lives for the whole chain, so a `hold` in one step is still down when a
+  later step types its shifted characters.
 
 ## Edges
 
 - Chained `wait` steps cap at `MAX_WAIT_MS` (10 s) — for longer patience,
   use the [`wait`](wait.md) tool, which caps at 60 s.
+- A second `hold` of a down key just re-presses it, and `release` of a key
+  nothing held is HARMLESS (the platform layer treats a redundant
+  up-stroke as a no-op) — a `hold`/`release` pair needs no caller-side
+  tracking and cannot desync into an error.
 - `key_name` renders the human-facing names the tools' `sent` reports use —
   modifiers spell out, characters pass through.
 

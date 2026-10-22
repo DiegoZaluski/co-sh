@@ -195,6 +195,7 @@ pub fn tool_kind(tool: &str) -> ToolKind {
         | "computer_snapshot"
         | "computer_wait"
         | "computer_screenshot"
+        | "computer_windows"
         | "computer_act"
         | "computer_control" => ToolKind::Execute,
         "find_glob"

@@ -120,6 +120,7 @@ mod screenshot_annotate_tests {
             omitted: Vec::new(),
             truncated: 0,
             images: Vec::new(),
+            saved_to: None,
         }
     }
 
@@ -129,6 +130,64 @@ mod screenshot_annotate_tests {
         let text = msg.content.as_deref().unwrap_or_default();
         assert!(!text.contains("Annotated elements"));
         assert!(text.contains("screenshot 800x600"));
+        assert!(!text.contains("saved to"), "no save echo without save_path: {text}");
+    }
+
+    #[test]
+    fn saved_path_is_echoed_in_the_result_text() {
+        let saved = output(Vec::new());
+        let mut saved = saved;
+        saved.saved_to = Some("C:/tmp/shot.png".to_string());
+        let msg = screenshot_tool_result("t1", &saved);
+        let text = msg.content.as_deref().unwrap_or_default();
+        assert!(text.contains("saved to: C:/tmp/shot.png"), "{text}");
+    }
+
+    /// A blank `save_path` is a caller typo, not a "no file" intent —
+    /// rejected before any platform work.
+    #[tokio::test]
+    async fn blank_save_path_is_rejected() {
+        for blank in [Some("  ".into()), Some("\t\n".into()), Some("".into())] {
+            let input = ComputerScreenshot {
+                save_path: blank,
+                ..ComputerScreenshot::default()
+            };
+            let err = screenshot(&input).await.unwrap_err();
+            assert!(
+                err.contains("save_path") && err.contains("cannot be blank"),
+                "blank save_path must be rejected: {err}"
+            );
+        }
+    }
+
+    /// `save_png` creates missing parent directories, overwrites an
+    /// existing file, and echoes the CALLER-ISSUED path verbatim — only
+    /// the filesystem ops trim; the `saved_to` value must not.
+    #[test]
+    fn save_png_creates_parents_overwrites_and_echoes_raw() {
+        use crate::computer::screenshot::save_png;
+
+        let dir = std::env::temp_dir().join(format!(
+            "cosh-tools-savepng-test-{}",
+            std::process::id()
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+        let target = dir.join("even-deeper").join("shot.png");
+        let padded = format!("  {}  ", target.to_string_lossy());
+
+        let echoed = save_png(&padded, b"one").expect("first write must succeed");
+        assert_eq!(
+            echoed, padded,
+            "the echoed path is the caller's issue, untrimmed"
+        );
+        assert!(target.is_file(), "trim is applied to the filesystem target only");
+
+        save_png(&target.to_string_lossy(), b"two-bytes-longer")
+            .expect("overwrite of an existing file must succeed");
+        let bytes = std::fs::read(&target).expect("the overwritten file must exist");
+        assert_eq!(bytes, b"two-bytes-longer", "second write replaces first");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

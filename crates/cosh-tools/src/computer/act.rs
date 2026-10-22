@@ -84,7 +84,7 @@ pub(crate) fn validate_chain(step: &ComputerAct, remaining: usize) -> Result<(),
 /// a SEMANTIC step — the field groups are disjoint, and mixing them in one
 /// step is a mistake the model should hear about. The kind-specific rules
 /// live in the components.
-fn validate_step(step: &ComputerAct) -> Result<(), String> {
+pub(crate) fn validate_step(step: &ComputerAct) -> Result<(), String> {
     const TOOL: &str = "computer_act";
 
     // Wait step: STANDALONE — it carries no action, so any other field next
@@ -104,6 +104,8 @@ fn validate_step(step: &ComputerAct) -> Result<(), String> {
             (step.key.is_some(), "`key`"),
             (step.text.is_some(), "`text`"),
             (step.held.is_some(), "`held`"),
+            (step.hold.is_some(), "`hold`"),
+            (step.release.is_some(), "`release`"),
         ]
         .iter()
         .filter(|(present, _)| *present)
@@ -124,6 +126,52 @@ fn validate_step(step: &ComputerAct) -> Result<(), String> {
                  chain several wait steps for longer pauses"
             ));
         }
+        return Ok(());
+    }
+
+    // Hold/release step: STANDALONE key-state manipulation — every other
+    // field would silently misstate what the step does.
+    if step.hold.is_some() || step.release.is_some() {
+        let (names, taken, release_alongside) = if let Some(names) = &step.hold {
+            (&names[..], "`hold`", step.release.is_some())
+        } else {
+            (
+                step.release.as_deref().unwrap_or_default(),
+                "`release`",
+                false,
+            )
+        };
+        let extra: Vec<&str> = [
+            (step.name.is_some(), "`name`"),
+            (step.pid.is_some(), "`pid`"),
+            (step.surface.is_some(), "`surface`"),
+            (step.selector.is_some(), "`selector`"),
+            (step.nth.is_some(), "`nth`"),
+            (step.action.is_some(), "`action`"),
+            (step.value.is_some(), "`value`"),
+            (step.numeric_value.is_some(), "`numeric_value`"),
+            (step.range.is_some(), "`range`"),
+            (step.timeout_ms.is_some(), "`timeout_ms`"),
+            (step.key.is_some(), "`key`"),
+            (step.text.is_some(), "`text`"),
+            (step.held.is_some(), "`held`"),
+            (step.wait.is_some(), "`wait`"),
+            (release_alongside, "`release`"),
+        ]
+        .iter()
+        .filter(|(present, _)| *present)
+        .map(|(_, name)| *name)
+        .collect();
+        if !extra.is_empty() {
+            return Err(format!(
+                "{TOOL}: {taken} is a standalone step — it takes no {}",
+                extra.join(", ")
+            ));
+        }
+        if names.is_empty() {
+            return Err(format!("{TOOL}: {taken} needs at least one key name"));
+        }
+        keyboard::parse_hold_keys(names, TOOL)?;
         return Ok(());
     }
 
@@ -148,6 +196,8 @@ fn validate_step(step: &ComputerAct) -> Result<(), String> {
             (step.numeric_value.is_some(), "`numeric_value`"),
             (step.range.is_some(), "`range`"),
             (step.timeout_ms.is_some(), "`timeout_ms`"),
+            (step.hold.is_some(), "`hold`"),
+            (step.release.is_some(), "`release`"),
         ] {
             if present {
                 return Err(format!(
@@ -192,6 +242,8 @@ fn validate_step(step: &ComputerAct) -> Result<(), String> {
 /// early `false` on the wait itself.
 pub(crate) fn chain_needs_sim(step: &ComputerAct) -> bool {
     keyboard::is_keyboard_step(step.key.as_deref(), step.text.as_deref())
+        || step.hold.is_some()
+        || step.release.is_some()
         || step.then.as_deref().is_some_and(chain_needs_sim)
 }
 
@@ -234,6 +286,15 @@ fn run_step(sim: Option<&xa11y::InputSim>, step: &ComputerAct) -> Result<String,
     // Wait step: a plain pause (validated standalone).
     if let Some(ms) = step.wait {
         return Ok(keyboard::run_wait_step(ms));
+    }
+    // Hold/release steps (validated standalone): persistent keyboard state.
+    if let Some(names) = &step.hold {
+        let sim = sim.expect("chain_needs_sim: a hold step guarantees a simulator");
+        return keyboard::run_hold_step(sim, names, "computer_act");
+    }
+    if let Some(names) = &step.release {
+        let sim = sim.expect("chain_needs_sim: a release step guarantees a simulator");
+        return keyboard::run_release_step(sim, names, "computer_act");
     }
     // Classify EXACTLY like validate_step via the SHARED engine helpers.
     let key = step.key.as_deref();

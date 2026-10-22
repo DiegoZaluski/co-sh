@@ -119,6 +119,145 @@ pub struct FocusedOutput {
     pub focused_element: Option<FocusedElement>,
 }
 
+/// Action to perform on ONE window of the target application
+/// (`computer_windows` manage mode).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowAction {
+    /// Bring the window to the front (give it the system foreground and
+    /// keyboard focus).
+    #[default]
+    Activate,
+    /// Minimize the window (can no longer receive input).
+    Minimize,
+    /// Maximize the window to fill the work area (screen minus taskbar /
+    /// Dock).
+    Maximize,
+    /// Fill the whole screen (fullscreen-style; the platform's native
+    /// when supported — never aWM hand-rolled simulation).
+    EnterFullscreen,
+    /// Restore from minimized / maximized / fullscreen to the previous
+    /// geometry.
+    Restore,
+    /// Close the window. Unsaved-change prompts are the APP's own dialogs —
+    /// they open as new windows/tree nodes, re-list to see them.
+    Close,
+    /// Move the window's top-left corner to `x`/`y` (desktop pixels; may be
+    /// negative on multi-monitor layouts).
+    Move,
+    /// Resize the window to `width` × `height` (desktop pixels; excludes
+    /// nothing — it is the OUTER size).
+    Resize,
+}
+
+/// Bounds of one window, in desktop pixels (origin top-left of the primary
+/// display; same space `move`/`resize` take).
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct WindowBounds {
+    /// X of the window's top-left corner.
+    pub x: i32,
+    /// Y of the window's top-left corner.
+    pub y: i32,
+    /// Outer width.
+    pub width: u32,
+    /// Outer height.
+    pub height: u32,
+}
+
+/// One window (or native dialog) of the target application, as listed by
+/// `computer_windows`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct WindowInfo {
+    /// Element role — `window`, or `dialog` for native dialogs.
+    pub role: String,
+    /// Window title (a native dialog's caption), when it has one.
+    pub name: Option<String>,
+    /// Current geometry in desktop pixels (matches the space `move`/`resize`
+    /// take), when the platform reports bounds.
+    pub bounds: Option<WindowBounds>,
+    /// Whether this window is the ACTIVE one (the app's foreground window
+    /// that receives keyboard input). `null` = the platform does not say.
+    pub active: Option<bool>,
+    /// Whether the window is minimized. `null` = unknown to the platform.
+    pub minimized: Option<bool>,
+    /// Whether the window is maximized. `null` = unknown (Linux AT-SPI
+    /// never reports this flag, so it stays `null` there).
+    pub maximized: Option<bool>,
+    /// Whether the window is fullscreen. `null` = unknown.
+    pub fullscreen: Option<bool>,
+}
+
+/// Output of `computer_windows` list mode (no `action`).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct WindowsOutput {
+    /// Name of the application the listing came from.
+    pub app: String,
+    /// Process ID of the application, when the platform reports one.
+    pub pid: Option<u32>,
+    /// The application's windows (and native dialogs), enumeration order.
+    pub windows: Vec<WindowInfo>,
+    /// Convenience count of [`WindowsOutput::windows`].
+    pub count: usize,
+}
+
+/// Output of `computer_windows` manage mode (`action` set).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct WindowManageOutput {
+    /// The action that was performed (wire name, e.g. `"minimize"`).
+    pub action: String,
+    /// The target window's state AFTER the action (fresh re-read), when it
+    /// could be re-observed. `null` after `close` (the window is gone) or
+    /// when the platform no longer returns it.
+    pub window: Option<WindowInfo>,
+}
+
+/// Result of `computer_windows`, by mode.
+///
+/// Untagged: the model sees the plain `WindowsOutput` (list) or
+/// `WindowManageOutput` (manage) JSON shape, never the enum wrapper.
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum WindowsResult {
+    /// No `action` — the application's window listing.
+    List(WindowsOutput),
+    /// An `action` was performed on one window.
+    Manage(WindowManageOutput),
+}
+
+/// Input for `computer_windows` — list ONE application's windows, or
+/// perform an action on one of them.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct ComputerWindows {
+    /// Application name (exact match, e.g. `"Safari"`). Provide `name` or
+    /// `pid` — exactly one.
+    pub name: Option<String>,
+    /// Application process ID. Provide `name` or `pid` — exactly one.
+    pub pid: Option<u32>,
+    /// CSS-like selector for ONE window or dialog, e.g.
+    /// `"dialog[name='Erasing…']"` — which window an `action` operates on
+    /// (default: the app's first window). In list mode it narrows the
+    /// listing to the matched element.
+    pub selector: Option<String>,
+    /// 1-based match index when `selector` matches multiple elements
+    /// (default 1).
+    pub nth: Option<usize>,
+    /// Omitted (default): list every window. Set: perform the action on one
+    /// window — activate/minimize/maximize/enter_fullscreen/restore/close,
+    /// or move (needs `x`/`y`) / resize (needs `width`/`height`).
+    pub action: Option<WindowAction>,
+    /// New top-left X for `move` (desktop pixels).
+    pub x: Option<i32>,
+    /// New top-left Y for `move` (desktop pixels).
+    pub y: Option<i32>,
+    /// New outer width for `resize` (desktop pixels).
+    pub width: Option<u32>,
+    /// New outer height for `resize` (desktop pixels).
+    pub height: Option<u32>,
+    /// How long to wait for the application to surface in the accessibility
+    /// tree, in milliseconds. Default 3000.
+    pub timeout_ms: Option<u64>,
+}
+
 /// Input for `computer_screenshot`.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct ComputerScreenshot {
@@ -158,6 +297,11 @@ pub struct ComputerScreenshot {
     /// How long to wait for the app to appear (element capture only), in
     /// milliseconds. Default 3000.
     pub timeout_ms: Option<u64>,
+    /// ALSO write the PNG to this file path (any capture form) — relative
+    /// paths resolve against cosh's working directory; the file is
+    /// overwritten. The image still returns inline so you can see it.
+    /// Outside any project root the harness asks for approval.
+    pub save_path: Option<String>,
     /// Target an OS SHELL SURFACE instead of an application (mutually
     /// exclusive with `app`/`pid`; requires `selector`): shoot the pixels
     /// under the matched element of the menu bar, Dock/taskbar/panel, tray
@@ -200,6 +344,9 @@ pub struct ScreenshotOutput {
     /// annotation cap (100) was reached. `0` when the cap did not bite;
     /// narrow the `selector` when it does.
     pub truncated: usize,
+    /// Path the PNG was additionally written to, when `save_path` was given
+    /// (echoed as provided).
+    pub saved_to: Option<String>,
     /// Inline image payload (base64 PNG) for the multimodal channel.
     #[serde(skip)]
     pub images: Vec<cosh_sdk::connector::ImageBlock>,
@@ -501,6 +648,14 @@ pub struct ComputerAct {
     /// Milliseconds to WAIT as a STANDALONE step (no other fields): gives
     /// the app time to settle before the next step acts. Capped at 10 s.
     pub wait: Option<u64>,
+    /// Keys to press DOWN and KEEP held as a STANDALONE step (no other
+    /// fields): modifier names (`shift`, `ctrl`, `alt`, `meta`) or ordinary
+    /// key names (`a`, `enter`, `space`…). E.g. `hold ["shift"]`, then a
+    /// click step, then `release ["shift"]`. Keys stay down across steps
+    /// and calls until a later `release` — release what you hold.
+    pub hold: Option<Vec<String>>,
+    /// Keys to RELEASE (pressed by an earlier `hold`) — STANDALONE step.
+    pub release: Option<Vec<String>>,
     /// Optional NEXT step of the pipeline, executed only if this step
     /// succeeded. Same shape as this step, recursively.
     pub then: Option<Box<ComputerAct>>,
@@ -542,9 +697,13 @@ pub enum WaitState {
     Unfocused,
 }
 
-/// Input for `computer_wait` — block until a selector in a target app
-/// reaches a state, or time out with a diagnosis of the last observed
-/// state.
+/// Input for `computer_wait` — block until a condition in a target
+/// application is met, then time out with a diagnosis.
+///
+/// Three modes (mutually exclusive): an ELEMENT STATE (`selector` +
+/// `state`, default `visible`), a VALUE condition (`selector` +
+/// `value`/`value_contains`), or an app-scoped GRAPHICAL EVENT (`event`
+/// with exactly one of `name`/`pid` — no selector).
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct ComputerWait {
     /// Application name (exact match, e.g. `"Safari"`). Provide `name` or
@@ -553,16 +712,72 @@ pub struct ComputerWait {
     /// Application process ID. Provide `name` or `pid` — exactly one.
     pub pid: Option<u32>,
     /// CSS-like selector for the element to watch, e.g.
-    /// `progress_bar[name='Exporting…']`.
+    /// `progress_bar[name='Exporting…']`. Element-state and value modes.
     pub selector: Option<String>,
     /// 1-based match index when `selector` matches multiple elements
     /// (default 1).
     pub nth: Option<usize>,
-    /// The condition to wait for (default `visible`).
+    /// The element condition to wait for (default `visible`).
     pub state: Option<WaitState>,
+    /// Wait until the element's value EQUALS this string (e.g. `"100%"`).
+    /// Requires `selector`; mutually exclusive with `state`.
+    pub value: Option<String>,
+    /// Wait until the element's value CONTAINS this substring. Requires
+    /// `selector`; mutually exclusive with `state`.
+    pub value_contains: Option<String>,
+    /// Wait for a GRAPHICAL EVENT in the application INSTEAD of an element
+    /// condition — app-scoped: needs exactly one of `name`/`pid`, takes no
+    /// `selector`/`nth`/`state`/`value`. The platform's event stream
+    /// answers "wait until something happens" without a poll loop.
+    pub event: Option<WaitEvent>,
     /// How long to wait for the condition, in milliseconds. Default 10 000;
     /// capped at 60 000 so a stuck call cannot pin the session for minutes.
     pub timeout_ms: Option<u64>,
+}
+
+/// Graphical event `computer_wait` listens for (app-scoped). Mirrors
+/// xa11y's [`xa11y::EventKind`]; a variant's coverage notes carry over.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitEvent {
+    /// A new window of the app was created (the app-scoped answer to "wait
+    /// for the window to appear").
+    #[default]
+    WindowOpened,
+    /// One of the app's windows was closed (a dialog accepted/cancelled —
+    /// pair with the window's `close` action).
+    WindowClosed,
+    /// An app window gained the system foreground. Not emitted on Windows
+    /// (UIA has no first-class activation event).
+    WindowActivated,
+    /// An app window lost the system foreground. Not emitted on Windows.
+    WindowDeactivated,
+    /// Keyboard focus moved to a different element inside the app (target:
+    /// the element that GAINED focus).
+    FocusChanged,
+    /// An element's value changed (progress, slider, text contents…).
+    ValueChanged,
+    /// Text content changed in an editable element (distinct pulse from
+    /// `value_changed` on some toolkits).
+    TextChanged,
+    /// An element's name/label changed.
+    NameChanged,
+    /// An element gained or lost a boolean state flag (enabled, checked,
+    /// busy, minimized… — the target identifies the element; the flag and
+    /// its new value are not reported in the wire output).
+    StateChanged,
+    /// Elements were added/removed or the tree was invalidated (list
+    /// populated, pane opened).
+    StructureChanged,
+    /// The selected item(s) of a container changed.
+    SelectionChanged,
+    /// A menu became visible.
+    MenuOpened,
+    /// A menu was dismissed.
+    MenuClosed,
+    /// The app posted an accessibility announcement / alert (live region).
+    /// No text payload — re-query a nearby alert for contents.
+    Announcement,
 }
 
 /// Output of `computer_wait` when the condition was met in time.
@@ -591,6 +806,46 @@ pub struct WaitObservation {
     /// Whether the matched element held keyboard focus (absent when
     /// detached).
     pub focused: Option<bool>,
+}
+
+/// The event that arrived when an `event` wait resolved.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct WaitedEvent {
+    /// The event kind, in the same snake_case vocabulary the `event`
+    /// argument uses (an unknown future platform kind falls back to its
+    /// Rust variant name).
+    pub kind: String,
+    /// Name of the application that produced the event.
+    pub app: String,
+    /// Process ID of the application that produced the event.
+    pub pid: Option<u32>,
+    /// The element the event was about (the window that opened, the field
+    /// that changed, …), when the platform reported one.
+    pub element: Option<WaitedEventTarget>,
+}
+
+/// Snapshot of the element an event was about.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct WaitedEventTarget {
+    /// Element role, snake_case (same vocabulary as selectors).
+    pub role: String,
+    /// Accessible name, when the element has one.
+    pub name: Option<String>,
+    /// Current value, when the element has one.
+    pub value: Option<String>,
+}
+
+/// Output of `computer_wait` — one shape per mode.
+///
+/// Untagged: the model sees the plain `WaitOutput` (element condition) or
+/// `EventWaitOutput` (event) JSON, never the enum wrapper.
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum WaitResult {
+    /// Element-state / value condition met.
+    State(WaitOutput),
+    /// A subscribed graphical event arrived.
+    Event(WaitedEvent),
 }
 
 /// Which OS shell surface to target instead of an application — the parts
@@ -764,6 +1019,15 @@ pub struct ComputerControl {
     /// the next step acts — e.g. click the menu item that opens a rename
     /// box, then `{"wait": 600}`, then type into it. Capped at 10 s.
     pub wait: Option<u64>,
+    /// Keys to press DOWN and KEEP held as a STANDALONE step (no other
+    /// fields): modifier names (`shift`, `ctrl`, `alt`, `meta`) or ordinary
+    /// key names (`a`, `enter`, `space`…). E.g. `hold ["shift"]`, then a
+    /// click step, then `release ["shift"]` = shift + click across steps.
+    /// Keys stay down across steps and calls until a later `release` —
+    /// release what you hold.
+    pub hold: Option<Vec<String>>,
+    /// Keys to RELEASE (pressed by an earlier `hold`) — STANDALONE step.
+    pub release: Option<Vec<String>>,
     /// Optional NEXT step of the pipeline, executed only if this step
     /// succeeded (e.g. click `text_field` → then text `"olá"` → then key
     /// `enter`). Same shape as this step, recursively.

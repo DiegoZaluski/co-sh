@@ -79,6 +79,10 @@ fn internal_tools() -> &'static [(&'static str, &'static str)] {
             "Capture screen as an image; annotate=true for boxes + selector legend (Build-safe)",
         ),
         (
+            "computer_windows",
+            "List one app's open windows, or minimize/maximize/close/move/resize one (action = needs approval)",
+        ),
+        (
             "computer_act",
             "Act AND type as one pipeline: semantic action on an element, then keyboard/wait via `then`",
         ),

@@ -40,6 +40,9 @@ pub enum PermissionCheck {
 ///   for single-element compatibility (fs_read, fs_write, fs_edit,
 ///   fs_edit_lines, fs_ast_edit)
 /// - `{ "path": "..." }` / `{ "paths": [...] }` (find_glob, find_grep)
+/// - `{ "save_path": "..." }` (computer_screenshot) — the optional file
+///   write destination, which must go through the same outside-cwd
+///   approval as any other file write
 pub(crate) fn extract_paths_from_args(tool_name: &str, args: &Value) -> Vec<String> {
     match tool_name {
         "fs_read" | "fs_write" | "fs_edit" | "fs_edit_lines" | "fs_ast_edit" => {
@@ -73,6 +76,12 @@ pub(crate) fn extract_paths_from_args(tool_name: &str, args: &Value) -> Vec<Stri
             }
             out
         }
+        "computer_screenshot" => args
+            .get("save_path")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .into_iter()
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -102,6 +111,7 @@ fn is_scratch_log_path(path: &Path) -> bool {
 /// root (and is not under the harness scratch dir), the tool needs user
 /// approval.
 fn needs_path_approval(paths: &[String], project_root: Option<&Path>) -> Option<(String, String)> {
+    let root_canon = project_root.and_then(|root| root.canonicalize().ok());
     for p in paths {
         let path = Path::new(p);
         if path.is_absolute() {
@@ -109,13 +119,20 @@ fn needs_path_approval(paths: &[String], project_root: Option<&Path>) -> Option<
             if is_scratch_log_path(path) {
                 continue;
             }
-            let inside_root = project_root
-                .and_then(|root| root.canonicalize().ok())
-                .is_some_and(|root_canon| {
-                    path.canonicalize()
-                        .ok()
-                        .is_some_and(|p_canon| p_canon.starts_with(&root_canon))
-                });
+            let inside_root = match root_canon.as_deref() {
+                None => false,
+                Some(root) => match path.canonicalize() {
+                    Ok(p) => p.starts_with(root),
+                    // The target may NOT EXIST YET — a write destination
+                    // such as a `computer_screenshot` save_path — and
+                    // canonicalize fails on non-existent paths. A raw
+                    // spelling that sits textually under the canonical
+                    // root counts as inside: a not-created-yet file must
+                    // not cause a spurious approval (the tool itself will
+                    // fail loudly if the write is impossible).
+                    Err(_) => textually_inside(path, root),
+                },
+            };
 
             if !inside_root {
                 return Some((format!("access file: {p}"), format!("path: {p}")));
@@ -123,6 +140,39 @@ fn needs_path_approval(paths: &[String], project_root: Option<&Path>) -> Option<
         }
     }
     None
+}
+
+/// Textual containment of a RAW (possibly non-existent) path under a
+/// canonical root: normalizes separators and the Windows verbatim
+/// prefix (`\\?\…`), and compares case-insensitively on Windows where
+/// path spelling is case-preserving, not canonical. The separator after
+/// the root is checked explicitly so a SIBLING directory (`root\foo`
+/// vs `rootbar\file`) is never swallowed by prefix matching.
+fn textually_inside(path: &Path, root: &Path) -> bool {
+    #[cfg(windows)]
+    let normalize = |s: &Path| {
+        let s = s.to_string_lossy().replace('/', "\\");
+        let s = s.trim_end_matches('\\');
+        s.strip_prefix(r"\\?\").unwrap_or(s).to_ascii_lowercase()
+    };
+    #[cfg(not(windows))]
+    let normalize = |s: &Path| {
+        let s = s.to_string_lossy();
+        let s = s.trim_end_matches('/');
+        s.to_string()
+    };
+    let (file, root) = (normalize(path), normalize(root));
+    if !file.starts_with(&root) {
+        return false;
+    }
+    // Exact match (the target IS the root) or the character right after
+    // the root is a path separator — a component boundary, so a SIBLING
+    // directory (`root\foo` vs `rootbar\file`) never matches a prefix
+    // by accident.
+    if file.len() == root.len() {
+        return true;
+    }
+    file[root.len()..].starts_with(['\\', '/'])
 }
 
 /// Check whether a tool call needs user permission before dispatch.
@@ -146,6 +196,14 @@ fn needs_path_approval(paths: &[String], project_root: Option<&Path>) -> Option<
 /// pointer targets) is allowed — it resolves from the a11y tree at dispatch
 /// time, so no coordinate can go stale. Coordinate forms are fully available
 /// in Yolo/Command mode, where dispatches run without an interactive dialog.
+///
+/// `computer_windows` is gated PER CALL: listing windows (no `action`) is
+/// read-only and allowed in every mode, including Ask; an `action` call
+/// (minimize/maximize/close/move/resize) changes desktop state — it asks in
+/// Build mode and is denied in Ask mode, like the synthetic-input tools. A
+/// `computer_screenshot` call with `save_path` is a file write like any
+/// other: the path check below asks for approval when the destination is
+/// outside the project root.
 ///
 /// Tools that need approval when targeting paths outside the project root:
 /// - `fs_read` (read outside cwd)
@@ -181,6 +239,22 @@ pub fn check_tool_permission(
     // Ask mode should only expose read-only tools.
     if mode == Mode::Ask && is_restricted_in_ask_mode(tool_name) {
         return PermissionCheck::Denied(format!("`{tool_name}` is not available in Ask mode"));
+    }
+
+    // computer_windows (per call, not per tool): listing windows is pure
+    // read-only observation, but an `action` call changes window state
+    // (minimize/maximize/close/move/resize) — NOT read-only, so Ask mode
+    // denies it outright rather than routing it to the approval dialog
+    // Ask mode does not have.
+    if mode == Mode::Ask
+        && tool_name == "computer_windows"
+        && args.get("action").is_some()
+    {
+        return PermissionCheck::Denied(
+            "`computer_windows` with `action` is not available in Ask mode \
+             (it changes window state) — list the windows instead, or switch to Build mode"
+                .to_string(),
+        );
     }
 
     // Position-dependent tools are hidden from the model in Build mode
@@ -370,6 +444,33 @@ pub fn check_tool_permission(
                  legend of selectors), or switch to Yolo/Command mode"
                     .to_string(),
             );
+        }
+        // computer_windows (per call): listing is read-only and falls
+        // through; an `action` call changes window state — ask like any
+        // other synthetic desktop interaction. (A `save_path` capture, on
+        // the other hand, only writes a file: the path check below covers
+        // the outside-cwd case, no window policy involved.)
+        if tool_name == "computer_windows" && args.get("action").is_some() {
+            let app = args
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| {
+                    args.get("pid")
+                        .and_then(Value::as_u64)
+                        .map(|p| p.to_string())
+                })
+                .unwrap_or_else(|| "?".to_string());
+            let action = args.get("action").and_then(Value::as_str).unwrap_or("?");
+            return PermissionCheck::NeedsApproval(PermissionRequest {
+                tool: "computer_windows".to_string(),
+                description: format!("window `{action}` on a desktop application ({app})"),
+                args: args
+                    .get("selector")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?")
+                    .to_string(),
+            });
         }
     }
 

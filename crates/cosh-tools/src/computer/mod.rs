@@ -11,10 +11,14 @@
 //!   [`touch`] (semantic accessibility actions on elements).
 //! - Pipelines own one TOOL — chain walking (`then` with `&&` semantics),
 //!   step classification and the wire schema, composing the components:
-//!   [`control`] (pointer + keyboard at raw coordinates or elements) and
-//!   [`act`] (semantic + keyboard on accessibility-tree elements).
+//!   [`control`] (pointer + keyboard at raw coordinates or elements),
+//!   [`act`] (semantic + keyboard on accessibility-tree elements) and
+//!   [`windows`] (list or one window-manager verb on an app's windows).
 //! - Observation tools are standalone: [`apps`], [`snapshot`],
-//!   [`screenshot`].
+//!   [`screenshot`] (with optional disk save). [`wait`] is the blocking
+//!   observation twin of `computer_screenshot`: `state`, `value` or
+//!   `event` modes decide whether the deliverable is a live tree, an
+//!   element snapshot or a platform event.
 //!
 //! The two pipelines share the same schema skeleton on purpose (`then` →
 //! `then` → `wait`): the model learns the shape once and only the step
@@ -35,6 +39,7 @@ pub mod surface;
 pub mod touch;
 pub mod types;
 pub mod wait;
+pub mod windows;
 
 #[cfg(test)]
 mod test;
@@ -47,11 +52,14 @@ pub use screenshot::screenshot;
 pub use snapshot::snapshot;
 pub use types::{
     ActAction, ActOutput, AppInfo, AppsOutput, AppsTarget, ComputerAct, ComputerApps,
-    ComputerControl, ComputerScreenshot, ComputerSnapshot, ComputerWait, ControlOutput,
-    ElementStates, FocusedElement, FocusedOutput, PointerAction, PointerAnchor, ScreenshotOutput,
-    SnapshotFormat, SnapshotOutput, StateNode, ToggleState, WaitObservation, WaitOutput, WaitState,
+    ComputerControl, ComputerScreenshot, ComputerSnapshot, ComputerWait, ComputerWindows,
+    ControlOutput, ElementStates, FocusedElement, FocusedOutput, PointerAction, PointerAnchor,
+    ScreenshotOutput, SnapshotFormat, SnapshotOutput, StateNode, ToggleState, WaitEvent,
+    WaitObservation, WaitOutput, WaitResult, WaitState, WaitedEvent, WaitedEventTarget,
+    WindowAction, WindowBounds, WindowInfo, WindowManageOutput, WindowsOutput, WindowsResult,
 };
 pub use wait::wait;
+pub use windows::windows;
 
 use crate::ToolDescription;
 
@@ -88,6 +96,9 @@ pub struct Computer {
     /// MCP Tool description for `computer_control` (pointer + keyboard
     /// pipeline).
     pub description_control: ToolDescription,
+    /// MCP Tool description for `computer_windows` (window list +
+    /// management).
+    pub description_windows: ToolDescription,
 }
 
 impl Default for Computer {
@@ -217,8 +228,9 @@ impl Computer {
             description_wait: serde_json::json!({
                 "name": "computer_wait",
                 "description": concat!(
-                    "Block until an element of a desktop application reaches a state — ",
-                    "or time out with a diagnosis of the LAST OBSERVED state. Replaces ",
+                    "Block until an element of a desktop application reaches a state, ",
+                    "until its VALUE matches, or until the app RAISES AN EVENT — or ",
+                    "time out with a diagnosis of the LAST OBSERVED state. Replaces ",
                     "poll-loops (computer_snapshot → check → computer_snapshot …, each a ",
                     "full round trip): 'wait for the export to finish, then snapshot' is ",
                     "ONE call before the snapshot instead of N.",
@@ -228,6 +240,20 @@ impl Computer {
                     "spinner went away; tolerates the element never having existed), to ",
                     "ENABLE later (\"enabled\"), to CLOSE (\"hidden\"), or to gain/lose ",
                     "keyboard focus (\"focused\"/\"unfocused\").",
+                    "\n\nTwo element conditions need no state flag: `value`/`value_contains` ",
+                    "block until the element's value equals or contains a string — ",
+                    "value='100%' for a progress bar, value_contains='Done' for a status ",
+                    "label that may word differently across runs.",
+                    "\n\nWith `event` instead of `selector` the wait is app-scoped and ",
+                    "blocks until the platform accessibility stream raises the event: ",
+                    "window_opened/window_closed/window_activated/window_deactivated, ",
+                    "focus_changed, value_changed, text_changed, name_changed, ",
+                    "state_changed (any flag), structure_changed, selection_changed, ",
+                    "menu_opened, menu_closed, announcement (a live-region alert; no ",
+                    "text payload — re-query the nearby alert element). The output names the kind and ",
+                    "reports the event's target element (role, name, value) so you can ",
+                    "act on it immediately. Platform support varies — e.g. window ",
+                    "activate/deactivate events are NOT emitted on Windows.",
                     "\n\nRead-only: no input is sent and nothing moves, so this tool is ",
                     "allowed in every mode. On timeout the error names the condition and ",
                     "the last observed state — decide the next move from that instead of ",
@@ -248,7 +274,7 @@ impl Computer {
                         },
                         "selector": {
                             "type": "string",
-                            "description": "CSS-like selector for the element to watch, e.g. \"progress_bar[name='Exporting…']\"."
+                            "description": "CSS-like selector for the element to watch, e.g. \"progress_bar[name='Exporting…']\". Required unless `event` is used (event waits are app-scoped, no selector)."
                         },
                         "nth": {
                             "type": "integer",
@@ -258,7 +284,20 @@ impl Computer {
                         "state": {
                             "type": "string",
                             "enum": ["attached", "detached", "visible", "hidden", "enabled", "disabled", "focused", "unfocused"],
-                            "description": "The condition to wait for (default \"visible\"): \"attached\" = exists; \"detached\" = gone (or never existed); \"visible\" = exists and is visible; \"hidden\" = hidden or gone; \"enabled\"/\"disabled\"; \"focused\"/\"unfocused\"."
+                            "description": "The condition to wait for (default \"visible\"): \"attached\" = exists; \"detached\" = gone (or never existed); \"visible\" = exists and is visible; \"hidden\" = hidden or gone; \"enabled\"/\"disabled\"; \"focused\"/\"unfocused\". Mutually exclusive with `value`/`value_contains`."
+                        },
+                        "value": {
+                            "type": "string",
+                            "description": "Block until the element's value EQUALS this string (e.g. \"100%\"). Requires `selector`."
+                        },
+                        "value_contains": {
+                            "type": "string",
+                            "description": "Block until the element's value CONTAINS this substring (e.g. a status label that may word differently across runs). Requires `selector`."
+                        },
+                        "event": {
+                            "type": "string",
+                            "enum": ["window_opened", "window_closed", "window_activated", "window_deactivated", "focus_changed", "value_changed", "text_changed", "name_changed", "state_changed", "structure_changed", "selection_changed", "menu_opened", "menu_closed", "announcement"],
+                            "description": "App-scoped EVENT wait instead of an element wait: block until the app raises this event. Takes NO `selector`/`nth`/`state`/`value`/`value_contains`."
                         },
                         "timeout_ms": {
                             "type": "integer",
@@ -267,7 +306,6 @@ impl Computer {
                             "description": "How long to wait for the condition, in milliseconds (default 10000, max 60000). A timeout is an ERROR carrying the last observed state — not a quiet false."
                         }
                     },
-                    "required": ["selector"],
                     "anyOf": [
                         { "required": ["name"] },
                         { "required": ["pid"] }
@@ -276,6 +314,27 @@ impl Computer {
                         {
                             "if": { "required": ["name"] },
                             "then": { "not": { "required": ["pid"] } }
+                        },
+                        {
+                            "if": {
+                                "not": { "required": ["event"] }
+                            },
+                            "then": { "required": ["selector"] }
+                        },
+                        {
+                            "if": { "required": ["event"] },
+                            "then": { "not": { "anyOf": [{ "required": ["selector"] }, { "required": ["nth"] }, { "required": ["state"] }, { "required": ["value"] }, { "required": ["value_contains"] }] } }
+                        },
+                        {
+                            "if": { "anyOf": [{ "required": ["value"] }, { "required": ["value_contains"] }] },
+                            "then": { "allOf": [
+                                { "required": ["selector"] },
+                                { "not": { "required": ["state"] } }
+                            ] }
+                        },
+                        {
+                            "if": { "required": ["value"] },
+                            "then": { "not": { "required": ["value_contains"] } }
                         }
                     ]
                 }
@@ -307,7 +366,10 @@ impl Computer {
                     "must be application-scoped) and captures the full display; omissions ",
                     "and truncation (>100 matches) are reported — narrow the selector when ",
                     "truncated. Selectors must be single clauses: comma alternations ",
-                    "(`\"button, link\"`) are rejected — pass one selector per intent."
+                    "(`\"button, link\"`) are rejected — pass one selector per intent.",
+                    "\n\nWith `save_path` (absolute path) the PNG bytes are ALSO written ",
+                    "to disk — parent directories are created as needed and the output ",
+                    "echoes `saved_to` — while the image still travels inline as usual."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -355,6 +417,11 @@ impl Computer {
                             "type": "string",
                             "enum": ["menu_bar", "status_items", "taskbar", "panel", "dock", "desktop", "flyout", "unknown"],
                             "description": "Target an OS SHELL SURFACE instead of an application (element capture: requires `selector`; with `annotate: true` the legend covers the surface's elements the same way it covers an app's). Exactly one of `app`/`pid`/`surface`: menu_bar (macOS: File, Apple menu), status_items (tray/menu-bar extras), taskbar (Windows), panel (Linux), dock (macOS), desktop, flyout (open RIGHT NOW)."
+                        },
+                        "save_path": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": "File path to ALSO write the PNG bytes to (workpapers, a before/after diff, an artifact to hand a user). Relative paths resolve against cosh's working directory. Parent directories are created; the output echoes `saved_to`. The image still travels inline."
                         }
                     },
                     "allOf": [
@@ -365,12 +432,7 @@ impl Computer {
                             }
                         },
                         {
-                            "if": {
-                                "allOf": [
-                                    { "required": ["annotate"] },
-                                    { "const": true, "properties": { "annotate": true } }
-                                ]
-                            },
+                            "if": { "properties": { "annotate": { "const": true } }, "required": ["annotate"] },
                             "then": {
                                 "allOf": [
                                     { "anyOf": [{ "required": ["app"] }, { "required": ["pid"] }, { "required": ["surface"] }] },
@@ -384,12 +446,7 @@ impl Computer {
                             "then": {
                                 "anyOf": [
                                     { "required": ["selector"] },
-                                    {
-                                        "allOf": [
-                                            { "required": ["annotate"] },
-                                            { "const": true, "properties": { "annotate": true } }
-                                        ]
-                                    }
+                                    { "properties": { "annotate": { "const": true } }, "required": ["annotate"] }
                                 ]
                             }
                         },
@@ -433,7 +490,11 @@ impl Computer {
                     "`type_text`/`perform_action` need `value`, `set_numeric_value` ",
                     "needs `numeric_value`, `select_text` needs `range: [start, end]` ",
                     "(0-based). A `wait` step (standalone, millisecond cap 10 s) lets ",
-                    "the app settle between steps. A semantic `press` focuses the ",
+                    "the app settle between steps. A `hold` step presses keys down and ",
+                    "LEAVES them down (persistent key state across steps and calls), ",
+                    "and a `release` step puts them back up — for apps that behave ",
+                    "differently while a modifier or key is held. A semantic `press` ",
+                    "focuses the ",
                     "target on many toolkits but NOT reliably on every one — the one ",
                     "mechanism that always moves OS keyboard focus is a real click, ",
                     "which is computer_control's job: if chained typing keeps missing ",
@@ -522,6 +583,18 @@ impl Computer {
                                     "maximum": 10000,
                                     "description": "Milliseconds to WAIT as a STANDALONE step (no other fields): gives the app time to settle before the next step acts."
                                 },
+                                "hold": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "minItems": 1,
+                                    "description": "Keys to press DOWN and KEEP DOWN as a STANDALONE step (no other fields) — transient apps keyed on a modifier or a plain key (e.g. an overlay summoned while `space` is held). The keys stay down across steps AND calls until a later `release` step with the same names. Ordered: first listed is pressed first. Names: modifiers `shift`/`ctrl`/`alt`/`meta` or any key accepted by `key`."
+                                },
+                                "release": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "minItems": 1,
+                                    "description": "Keys to put back UP as a STANDALONE step (no other fields), undoing a previous `hold` (releasing a key that is not held is harmless). Same name vocabulary as `hold`; order does not matter."
+                                },
                                 "then": {
                                     "$ref": "#/$defs/step",
                                     "description": "Optional NEXT step of the pipeline, executed only if this step succeeded. Same shape as this step, recursively (max 8 steps)."
@@ -533,7 +606,9 @@ impl Computer {
                                         { "required": ["selector"] },
                                         { "required": ["key"] },
                                         { "required": ["text"] },
-                                        { "required": ["wait"] }
+                                        { "required": ["wait"] },
+                                        { "required": ["hold"] },
+                                        { "required": ["release"] }
                                     ]
                                 },
                                 {
@@ -556,7 +631,15 @@ impl Computer {
                                 },
                                 {
                                     "if": { "required": ["wait"] },
-                                    "then": { "not": { "anyOf": [{ "required": ["name"] }, { "required": ["pid"] }, { "required": ["surface"] }, { "required": ["selector"] }, { "required": ["nth"] }, { "required": ["action"] }, { "required": ["value"] }, { "required": ["numeric_value"] }, { "required": ["range"] }, { "required": ["timeout_ms"] }, { "required": ["key"] }, { "required": ["text"] }, { "required": ["held"] }] } }
+                                    "then": { "not": { "anyOf": [{ "required": ["name"] }, { "required": ["pid"] }, { "required": ["surface"] }, { "required": ["selector"] }, { "required": ["nth"] }, { "required": ["action"] }, { "required": ["value"] }, { "required": ["numeric_value"] }, { "required": ["range"] }, { "required": ["timeout_ms"] }, { "required": ["key"] }, { "required": ["text"] }, { "required": ["held"] }, { "required": ["hold"] }, { "required": ["release"] }] } }
+                                },
+                                {
+                                    "if": { "required": ["hold"] },
+                                    "then": { "not": { "anyOf": [{ "required": ["name"] }, { "required": ["pid"] }, { "required": ["surface"] }, { "required": ["selector"] }, { "required": ["nth"] }, { "required": ["action"] }, { "required": ["value"] }, { "required": ["numeric_value"] }, { "required": ["range"] }, { "required": ["timeout_ms"] }, { "required": ["key"] }, { "required": ["text"] }, { "required": ["held"] }, { "required": ["wait"] }, { "required": ["release"] }] } }
+                                },
+                                {
+                                    "if": { "required": ["release"] },
+                                    "then": { "not": { "anyOf": [{ "required": ["name"] }, { "required": ["pid"] }, { "required": ["surface"] }, { "required": ["selector"] }, { "required": ["nth"] }, { "required": ["action"] }, { "required": ["value"] }, { "required": ["numeric_value"] }, { "required": ["range"] }, { "required": ["timeout_ms"] }, { "required": ["key"] }, { "required": ["text"] }, { "required": ["held"] }, { "required": ["wait"] }, { "required": ["hold"] }] } }
                                 },
                                 {
                                     "if": { "anyOf": [{ "required": ["action"] }, { "required": ["value"] }, { "required": ["numeric_value"] }, { "required": ["range"] }, { "required": ["timeout_ms"] }] },
@@ -627,7 +710,10 @@ impl Computer {
                     "field it created. `action: drag` moves the pressed button from the ",
                     "start to the end point over `duration_ms` (default 150, min 50) — ",
                     "endpoints must share the form: x/y + x2/y2, or selector + ",
-                    "to_selector. `action: up` needs no target. If the target appears ",
+                    "to_selector. `action: up` needs no target. A `hold` step presses ",
+                    "keys down and LEAVES them down across steps (clicks land as ",
+                    "ctrl+click, typed text lands shifted); a `release` step puts them ",
+                    "back up — both standalone, like `wait`. If the target appears ",
                     "in computer_snapshot, prefer computer_act — it is semantic and ",
                     "auto-waits. In Build mode the element form asks for approval; the ",
                     "coordinate form is denied (coordinates go stale when the approval ",
@@ -733,6 +819,18 @@ impl Computer {
                                     "maximum": 10000,
                                     "description": "Milliseconds to WAIT as a STANDALONE step (no other fields): gives the app time to open a dialog or create an ephemeral field before the next step acts — e.g. click the menu item, then {\"wait\": 600}, then type into the rename box."
                                 },
+                                "hold": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "minItems": 1,
+                                    "description": "Keys to press DOWN and KEEP DOWN as a STANDALONE step (no other fields); a later `release` step with the same names puts them back up. Ordered: first listed is pressed first. Names: modifiers `shift`/`ctrl`/`alt`/`meta` or any key accepted by `key` (e.g. hold `space` for an app that only listens while it is down)."
+                                },
+                                "release": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "minItems": 1,
+                                    "description": "Keys to put back UP as a STANDALONE step (no other fields), undoing a previous `hold` (releasing a key that is not held is harmless). Same name vocabulary as `hold`; order does not matter."
+                                },
                                 "then": {
                                     "$ref": "#/$defs/step",
                                     "description": "Optional NEXT step of the pipeline, executed only if this step succeeded. Same shape as this step, recursively (max 8 steps)."
@@ -759,11 +857,19 @@ impl Computer {
                                 },
                                 {
                                     "if": { "not": { "properties": { "action": { "const": "up" } }, "required": ["action"] } },
-                                    "then": { "anyOf": [{ "allOf": [{ "required": ["key"] }, { "not": { "required": ["text"] } }] }, { "required": ["text"] }, { "allOf": [{ "required": ["x"] }, { "required": ["y"] }] }, { "required": ["selector"] }, { "required": ["wait"] }] }
+                                    "then": { "anyOf": [{ "allOf": [{ "required": ["key"] }, { "not": { "required": ["text"] } }] }, { "required": ["text"] }, { "allOf": [{ "required": ["x"] }, { "required": ["y"] }] }, { "required": ["selector"] }, { "required": ["wait"] }, { "required": ["hold"] }, { "required": ["release"] }] }
                                 },
                                 {
                                     "if": { "required": ["wait"] },
-                                    "then": { "not": { "anyOf": [{ "required": ["action"] }, { "required": ["x"] }, { "required": ["y"] }, { "required": ["app"] }, { "required": ["pid"] }, { "required": ["surface"] }, { "required": ["selector"] }, { "required": ["nth"] }, { "required": ["anchor"] }, { "required": ["count"] }, { "required": ["held"] }, { "required": ["x2"] }, { "required": ["y2"] }, { "required": ["to_selector"] }, { "required": ["duration_ms"] }, { "required": ["key"] }, { "required": ["text"] }, { "required": ["dx"] }, { "required": ["dy"] }, { "required": ["button"] }] } }
+                                    "then": { "not": { "anyOf": [{ "required": ["action"] }, { "required": ["x"] }, { "required": ["y"] }, { "required": ["app"] }, { "required": ["pid"] }, { "required": ["surface"] }, { "required": ["selector"] }, { "required": ["nth"] }, { "required": ["anchor"] }, { "required": ["count"] }, { "required": ["held"] }, { "required": ["x2"] }, { "required": ["y2"] }, { "required": ["to_selector"] }, { "required": ["duration_ms"] }, { "required": ["key"] }, { "required": ["text"] }, { "required": ["dx"] }, { "required": ["dy"] }, { "required": ["button"] }, { "required": ["hold"] }, { "required": ["release"] }] } }
+                                },
+                                {
+                                    "if": { "required": ["hold"] },
+                                    "then": { "not": { "anyOf": [{ "required": ["action"] }, { "required": ["x"] }, { "required": ["y"] }, { "required": ["button"] }, { "required": ["dx"] }, { "required": ["dy"] }, { "required": ["app"] }, { "required": ["pid"] }, { "required": ["surface"] }, { "required": ["selector"] }, { "required": ["nth"] }, { "required": ["anchor"] }, { "required": ["count"] }, { "required": ["held"] }, { "required": ["x2"] }, { "required": ["y2"] }, { "required": ["to_selector"] }, { "required": ["duration_ms"] }, { "required": ["key"] }, { "required": ["text"] }, { "required": ["wait"] }, { "required": ["release"] }] } }
+                                },
+                                {
+                                    "if": { "required": ["release"] },
+                                    "then": { "not": { "anyOf": [{ "required": ["action"] }, { "required": ["x"] }, { "required": ["y"] }, { "required": ["button"] }, { "required": ["dx"] }, { "required": ["dy"] }, { "required": ["app"] }, { "required": ["pid"] }, { "required": ["surface"] }, { "required": ["selector"] }, { "required": ["nth"] }, { "required": ["anchor"] }, { "required": ["count"] }, { "required": ["held"] }, { "required": ["x2"] }, { "required": ["y2"] }, { "required": ["to_selector"] }, { "required": ["duration_ms"] }, { "required": ["key"] }, { "required": ["text"] }, { "required": ["wait"] }, { "required": ["hold"] }] } }
                                 },
                                 {
                                     "if": { "anyOf": [{ "required": ["x"] }, { "required": ["y"] }] },
@@ -831,6 +937,121 @@ impl Computer {
                     "allOf": [ { "$ref": "#/$defs/step" } ]
                 }
             }),
+            description_windows: serde_json::json!({
+                "name": "computer_windows",
+                "description": concat!(
+                    "List the WINDOWS of one desktop application — role, title, bounds ",
+                    "(x, y, width, height), active/minimized/maximized/fullscreen — or ",
+                    "MANAGE one of them. computer_apps tells you WHICH apps exist; this ",
+                    "tells you which of their windows are open and where they sit. With ",
+                    "no `action` the output lists every window of the app (useful when ",
+                    "a dialog hides behind the main window, or before `close`, which ",
+                    "needs a specific target).",
+                    "\n\nWith `action` the target window changes state: minimize, ",
+                    "maximize, enter_fullscreen, restore, close, move (needs `x`+`y` — ",
+                    "the new top-left corner in desktop pixels) or resize (needs ",
+                    "`width`+`height`). The target is the window matched by ",
+                    "`selector` (e.g. \"window[name='Settings']\"); without `selector` ",
+                    "the FIRST listed window is acted on — pass `selector` when the ",
+                    "app has more than one window. The output shows the window's ",
+                    "geometry AFTER the move/resize.",
+                    "\n\nWindow management support varies by platform — e.g. Linux ",
+                    "AT-SPI cannot move or resize windows; the action then errors and ",
+                    "the fallback is driving the app's own window controls (maximize ",
+                    "button via computer_act, close via its close button or the ",
+                    "window's `close` action)."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": "Application name (exact match, e.g. 'Safari'). Provide `name` or `pid` — exactly one."
+                        },
+                        "pid": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "Application process ID. Provide `name` or `pid` — exactly one."
+                        },
+                        "selector": {
+                            "type": "string",
+                            "description": "CSS-like selector matching the window to act on or to filter by, e.g. \"window[name='Settings']\". With `action`: the window to act on (default: the app's first listed window). Without `action`: list only the matching window instead of all of them."
+                        },
+                        "nth": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "1-based match index when `selector` matches multiple windows (default 1)."
+                        },
+                        "action": {
+                            "type": "string",
+                            "enum": ["activate", "minimize", "maximize", "enter_fullscreen", "restore", "close", "move", "resize"],
+                            "description": "The window operation (omit to just LIST the windows): activate = bring to front; minimize/maximize/enter_fullscreen/restore = window state; close = destroy the window (its output has no post-state); move = reposition (needs `x`/`y`); resize (needs `width`/`height`)."
+                        },
+                        "x": {
+                            "type": "integer",
+                            "description": "New top-left corner X for `action: move` (desktop pixels)."
+                        },
+                        "y": {
+                            "type": "integer",
+                            "description": "New top-left corner Y for `action: move` (desktop pixels)."
+                        },
+                        "width": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": "New width for `action: resize` (desktop pixels)."
+                        },
+                        "height": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": "New height for `action: resize` (desktop pixels)."
+                        },
+                        "timeout_ms": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": "How long to wait for the app to appear, in milliseconds (default 3000). Applies only to the app lookup."
+                        }
+                    },
+                    "anyOf": [
+                        { "required": ["name"] },
+                        { "required": ["pid"] }
+                    ],
+                    "allOf": [
+                        {
+                            "if": { "required": ["name"] },
+                            "then": { "not": { "required": ["pid"] } }
+                        },
+                        {
+                            "if": { "required": ["nth"] },
+                            "then": { "required": ["selector"] }
+                        },
+                        {
+                            "if": { "required": ["x"] },
+                            "then": { "allOf": [{ "required": ["y"] }, { "properties": { "action": { "const": "move" } }, "required": ["action"] }] }
+                        },
+                        {
+                            "if": { "required": ["y"] },
+                            "then": { "allOf": [{ "required": ["x"] }, { "properties": { "action": { "const": "move" } }, "required": ["action"] }] }
+                        },
+                        {
+                            "if": { "required": ["width"] },
+                            "then": { "allOf": [{ "required": ["height"] }, { "properties": { "action": { "const": "resize" } }, "required": ["action"] }] }
+                        },
+                        {
+                            "if": { "required": ["height"] },
+                            "then": { "allOf": [{ "required": ["width"] }, { "properties": { "action": { "const": "resize" } }, "required": ["action"] }] }
+                        },
+                        {
+                            "if": { "properties": { "action": { "const": "move" } }, "required": ["action"] },
+                            "then": { "allOf": [{ "required": ["x"] }, { "not": { "anyOf": [{ "required": ["width"] }, { "required": ["height"] }] } }] }
+                        },
+                        {
+                            "if": { "properties": { "action": { "const": "resize" } }, "required": ["action"] },
+                            "then": { "allOf": [{ "required": ["width"] }, { "not": { "anyOf": [{ "required": ["x"] }, { "required": ["y"] }] } }] }
+                        }
+                    ]
+                }
+            }),
         }
     }
 
@@ -859,8 +1080,8 @@ impl Computer {
         snapshot::snapshot(input).await
     }
 
-    /// Block until an element reaches a state, or time out with a
-    /// diagnosis of the last observed state.
+    /// Block until an element reaches a state/value or the app raises an
+    /// event, or time out with a diagnosis of the last observed state.
     ///
     /// See [`wait`] for details.
     ///
@@ -869,8 +1090,22 @@ impl Computer {
     /// Returns `Err` for invalid input, an app that never surfaces, a
     /// selector that never matches, or a condition not met within the
     /// timeout (the error embeds xa11y's `Diagnosis`).
-    pub async fn wait(&self, input: &ComputerWait) -> Result<WaitOutput, String> {
+    pub async fn wait(&self, input: &ComputerWait) -> Result<WaitResult, String> {
         wait::wait(input).await
+    }
+
+    /// List an application's windows, or minimize/maximize/close/move/
+    /// resize one of them.
+    ///
+    /// See [`windows`] for details.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` for invalid input, an app that never surfaces, a
+    /// selector that never matches a window, or when the platform
+    /// accessibility API rejects the window operation.
+    pub async fn windows(&self, input: &ComputerWindows) -> Result<WindowsResult, String> {
+        windows::windows(input).await
     }
 
     /// Capture the screen (full display, a region, or one element) and get

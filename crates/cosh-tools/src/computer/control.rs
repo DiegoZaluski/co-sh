@@ -101,6 +101,8 @@ fn validate_step(step: &ComputerControl) -> Result<(), String> {
             (step.duration_ms.is_some(), "`duration_ms`"),
             (step.key.is_some(), "`key`"),
             (step.text.is_some(), "`text`"),
+            (step.hold.is_some(), "`hold`"),
+            (step.release.is_some(), "`release`"),
         ]
         .iter()
         .filter(|(present, _)| *present)
@@ -121,6 +123,91 @@ fn validate_step(step: &ComputerControl) -> Result<(), String> {
                  chain several wait steps for longer pauses"
             ));
         }
+        return Ok(());
+    }
+
+    // Hold/release step: STANDALONE key-state manipulation — every other
+    // field would silently misstate what the step does.
+    if step.hold.is_some() || step.release.is_some() {
+        if let Some(names) = &step.hold {
+            let extra: Vec<&str> = [
+                (step.action.is_some(), "`action`"),
+                (step.x.is_some(), "`x`"),
+                (step.y.is_some(), "`y`"),
+                (step.button.is_some(), "`button`"),
+                (step.dx.is_some(), "`dx`"),
+                (step.dy.is_some(), "`dy`"),
+                (step.app.is_some(), "`app`"),
+                (step.pid.is_some(), "`pid`"),
+                (step.surface.is_some(), "`surface`"),
+                (step.selector.is_some(), "`selector`"),
+                (step.nth.is_some(), "`nth`"),
+                (step.anchor.is_some(), "`anchor`"),
+                (step.count.is_some(), "`count`"),
+                (step.held.is_some(), "`held`"),
+                (step.x2.is_some(), "`x2`"),
+                (step.y2.is_some(), "`y2`"),
+                (step.to_selector.is_some(), "`to_selector`"),
+                (step.duration_ms.is_some(), "`duration_ms`"),
+                (step.key.is_some(), "`key`"),
+                (step.text.is_some(), "`text`"),
+                (step.wait.is_some(), "`wait`"),
+                (step.release.is_some(), "`release`"),
+            ]
+            .iter()
+            .filter(|(present, _)| *present)
+            .map(|(_, name)| *name)
+            .collect();
+            if !extra.is_empty() {
+                return Err(format!(
+                    "computer_control: `hold` is a standalone step — it takes no {}",
+                    extra.join(", ")
+                ));
+            }
+            if names.is_empty() {
+                return Err("computer_control: `hold` needs at least one key name".into());
+            }
+            keyboard::parse_hold_keys(names, "computer_control")?;
+            return Ok(());
+        }
+        let names = step.release.as_deref().unwrap_or_default();
+        let extra: Vec<&str> = [
+            (step.action.is_some(), "`action`"),
+            (step.x.is_some(), "`x`"),
+            (step.y.is_some(), "`y`"),
+            (step.button.is_some(), "`button`"),
+            (step.dx.is_some(), "`dx`"),
+            (step.dy.is_some(), "`dy`"),
+            (step.app.is_some(), "`app`"),
+            (step.pid.is_some(), "`pid`"),
+            (step.surface.is_some(), "`surface`"),
+            (step.selector.is_some(), "`selector`"),
+            (step.nth.is_some(), "`nth`"),
+            (step.anchor.is_some(), "`anchor`"),
+            (step.count.is_some(), "`count`"),
+            (step.held.is_some(), "`held`"),
+            (step.x2.is_some(), "`x2`"),
+            (step.y2.is_some(), "`y2`"),
+            (step.to_selector.is_some(), "`to_selector`"),
+            (step.duration_ms.is_some(), "`duration_ms`"),
+            (step.key.is_some(), "`key`"),
+            (step.text.is_some(), "`text`"),
+            (step.wait.is_some(), "`wait`"),
+        ]
+        .iter()
+        .filter(|(present, _)| *present)
+        .map(|(_, name)| *name)
+        .collect();
+        if !extra.is_empty() {
+            return Err(format!(
+                "computer_control: `release` is a standalone step — it takes no {}",
+                extra.join(", ")
+            ));
+        }
+        if names.is_empty() {
+            return Err("computer_control: `release` needs at least one key name".into());
+        }
+        keyboard::parse_hold_keys(names, "computer_control")?;
         return Ok(());
     }
 
@@ -152,6 +239,8 @@ fn validate_step(step: &ComputerControl) -> Result<(), String> {
             (step.surface.is_some(), "`surface`"),
             (step.selector.is_some(), "`selector`"),
             (step.nth.is_some(), "`nth`"),
+            (step.hold.is_some(), "`hold`"),
+            (step.release.is_some(), "`release`"),
         ] {
             if present {
                 return Err(format!(
@@ -216,6 +305,13 @@ fn run_step(sim: &xa11y::InputSim, step: &ComputerControl) -> Result<String, Str
     // to open a dialog or create an ephemeral field before the next step.
     if let Some(ms) = step.wait {
         return Ok(keyboard::run_wait_step(ms));
+    }
+    // Hold/release steps (validated standalone): persistent keyboard state.
+    if let Some(names) = &step.hold {
+        return keyboard::run_hold_step(sim, names, "computer_control");
+    }
+    if let Some(names) = &step.release {
+        return keyboard::run_release_step(sim, names, "computer_control");
     }
     // Classify EXACTLY like validate_step via the SHARED engine helpers, so
     // validation and execution can never disagree about the step's kind.
