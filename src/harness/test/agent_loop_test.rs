@@ -2421,6 +2421,109 @@ async fn natural_stop_gate_retries_a_bare_empty_response() {
     }
 }
 
+// ── Textual-output repetition detection ─────────────────────────────────────
+//
+// The crush-style loop detector only sees TOOL interactions — it is blind to
+// a model stuck repeating the same THOUGHT with no tool call (observed in the
+// field: a reasoning-only `stop` stream repeated the same paragraph for
+// dozens of iterations while the natural-stop gate kept continuing it). The
+// repetition detector tracks consecutive identical textual outputs (visible
+// answer, or the attempt's reasoning when the answer never came) and stops
+// the loop after REPETITION_MAX_IDENTICAL + 1 identical turns.
+
+#[tokio::test]
+async fn repetition_detection_stops_a_reasoning_only_loop() {
+    // Every stream repeats the SAME long reasoning and produces zero answer
+    // tokens — the field-observed stuck shape. The natural-stop gate would
+    // happily continue 10 times (the whole nudge budget); the repetition
+    // detector must stop the loop on the 3rd identical turn instead.
+    let reasoning = "The provider cut the stream before any answer could be \
+                     produced for this turn, so I must keep thinking.";
+    assert!(reasoning.len() >= 64, "the mock reasoning must be detectable");
+    let mut h = Harness::new_test()
+        .with_mock_reasonings(vec![vec![reasoning]; 6])
+        .with_mock_streams(vec![Ok(vec![]), Ok(vec![]), Ok(vec![]), Ok(vec![]), Ok(vec![]), Ok(vec![])])
+        .with_mock_finish_reason(Some("stop"));
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stop_signal = Arc::new(AtomicBool::new(false));
+
+    h.run_agent_loop("do the work", tx, answer_rx, perm_rx, stop_signal)
+        .await;
+    let events = pump_terminal_events(rx).await;
+
+    // The detector fires on the 3rd identical turn, so only 2 continuations
+    // were granted (2 promoted reasonings, NOT the whole nudge budget).
+    assert_eq!(
+        h.promoted_reasoning_log.len(),
+        2,
+        "the repetition detector must stop the loop before the gate's \
+         nudge budget is exhausted"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            HarnessEvent::Toast { message, .. } if message.contains("repeated the same output")
+        )),
+        "the repetition stop must surface a Toast explaining it, events={events:?}"
+    );
+    assert!(
+        matches!(events.last(), Some(HarnessEvent::Done { .. })),
+        "repetition detection must end with Done, got {:?}",
+        events.last()
+    );
+}
+
+#[tokio::test]
+async fn repetition_detection_does_not_fire_on_two_identical_texts() {
+    // Two identical long texts in a row is BELOW the threshold
+    // (REPETITION_MAX_IDENTICAL = 2, so the streak reaches 2 without firing);
+    // the third identical text trips the detector. The first two streams end
+    // with `length` (truncated) so the loop continues past the natural-stop
+    // path and the detector actually sees BOTH identical texts — a pair of
+    // clean `stop` answers would close the loop on the first turn and never
+    // exercise the streak=2 boundary this test pins.
+    let text = "The migration is complete: all forty-two call sites now use \
+                the new API and the test suite is green.";
+    assert!(text.len() >= 64, "the mock text must be detectable");
+    let mut h = Harness::new_test()
+        .with_mock_streams(vec![Ok(vec![text]), Ok(vec![text]), Ok(vec!["different ending now"])])
+        // One queued reason per stream; the drained queue defaults to
+        // `stop`, which is exactly what the third stream needs.
+        .with_mock_finish_reason(Some("length"))
+        .with_mock_finish_reason(Some("length"));
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_perm_tx, perm_rx) = tokio::sync::mpsc::unbounded_channel();
+    let stop_signal = Arc::new(AtomicBool::new(false));
+
+    h.run_agent_loop("do the work", tx, answer_rx, perm_rx, stop_signal)
+        .await;
+    let events = pump_terminal_events(rx).await;
+
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            HarnessEvent::Toast { message, .. } if message.contains("repeated the same output")
+        )),
+        "two identical texts are below the threshold — no repetition stop, events={events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(e, HarnessEvent::Done { .. })),
+        "the turn must still end with Done, events={events:?}"
+    );
+    let items: Vec<ContextItem> = h.context_manager.items_snapshot();
+    match items.last() {
+        Some(ContextItem::Closure { content, .. }) => {
+            assert_eq!(content, "different ending now");
+        }
+        other => panic!("expected the third turn's closure, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn a_stream_cut_mid_tool_call_is_never_a_finished_turn() {
     // Stream 1 mirrors a stream CUT mid-tool-call: the model opened the

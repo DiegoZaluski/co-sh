@@ -182,6 +182,15 @@ impl Harness {
         // stuck repetition.
         let mut loop_window: VecDeque<String> = VecDeque::with_capacity(LOOP_DETECTION_WINDOW_SIZE);
 
+        // Textual-output repetition detection: the tool-signature window
+        // above is blind to a model stuck repeating the same THOUGHT with no
+        // tool call (a reasoning-only `stop` the natural-stop gate keeps
+        // continuing, or a vetoed final answer). Track the current turn's
+        // text signature and the consecutive identical streak; the check
+        // runs right after the record site, once per iteration.
+        let mut last_output_signature: Option<u64> = None;
+        let mut identical_text_streak: usize = 0;
+
         // Throttle the periodic context snapshots so the TUI can persist the
         // context records incrementally without serializing the whole
         // context on every tool dispatch. The snapshot itself is emitted on
@@ -762,6 +771,43 @@ impl Harness {
                     )
                 };
                 self.correction_memory.push(&msg);
+            }
+
+            // Textual-output repetition detection: the crush-style window
+            // below only sees TOOL interactions, so a model stuck repeating
+            // the same THOUGHT with no tool call (a reasoning-only `stop`
+            // the natural-stop gate keeps continuing — observed in the
+            // field, where the same reasoning paragraph looped for dozens of
+            // iterations) would burn the whole nudge budget and then
+            // MAX_ITERATIONS, re-sending the growing context every time.
+            // Only tool-free turns feed this detector: a turn that
+            // dispatched tools is covered by the interaction-signature
+            // window instead. The visible answer is the tracked text when
+            // one was produced; otherwise the attempt's reasoning (still
+            // intact here — the record above skipped the `take` for an empty
+            // response, and the gate's one-shot promotion below can still
+            // consume it when this check does not fire).
+            if !had_tools {
+                let turn_text = if assistant_response.trim().is_empty() {
+                    self.attempt_reasoning.clone()
+                } else {
+                    assistant_response.clone()
+                };
+                if self.check_repetition_detection(
+                    &turn_text,
+                    &mut identical_text_streak,
+                    &mut last_output_signature,
+                    &tx,
+                ) {
+                    break;
+                }
+            } else {
+                // A turn that dispatched tools is progress — and it is
+                // covered by the interaction-signature window below. Clear
+                // the streak so an identical text sandwiching tool work
+                // never counts as a consecutive repeat.
+                identical_text_streak = 0;
+                last_output_signature = None;
             }
 
             // Honor stop only once pending tool calls have been dispatched —

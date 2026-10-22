@@ -35,6 +35,25 @@ pub(super) const LOOP_DETECTION_WINDOW_SIZE: usize = 10;
 /// same failing call long before it burns tokens up to `MAX_ITERATIONS`.
 pub(super) const LOOP_DETECTION_MAX_REPEATS: usize = 5;
 
+/// Repetition-detection threshold: consecutive iterations whose TEXTUAL
+/// output (visible answer or reasoning-only thinking) is identical stop the
+/// loop. The crush-style window above only sees TOOL interactions — it is
+/// blind to a model stuck repeating the same thought with no tool call at
+/// all (observed in the field: a reasoning-only loop repeated the same
+/// paragraph for dozens of iterations while the natural-stop gate kept
+/// continuing it, every continuation re-sending the ever-growing context).
+/// Reasoning text is usually byte-stable across repeats (the provider
+/// re-derives the same thought), so a tight bound of 2 identical turns is
+/// safe: legitimate work almost never repeats a full turn verbatim twice,
+/// and a model that DOES vary its wording still hits the tool-signature
+/// detector or `MAX_ITERATIONS`.
+pub(super) const REPETITION_MAX_IDENTICAL: usize = 2;
+
+/// Minimum length of normalized text eligible for repetition detection.
+/// Short texts are skipped: a tiny generic reply ("ok", "done.") carries too
+/// little signal to prove the model is stuck and is cheap to re-send anyway.
+pub(super) const REPETITION_MIN_TEXT_LEN: usize = 64;
+
 /// Tools disabled inside the internal sub-agent harness (the merged
 /// `subagent_call` internal path). The tools are removed from the
 /// sub-agent's schema AND extractor, so the model never even sees them:

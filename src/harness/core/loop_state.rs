@@ -3,7 +3,8 @@
 
 use std::collections::VecDeque;
 
-use super::{Harness, limits::{LOOP_DETECTION_MAX_REPEATS, LOOP_DETECTION_WINDOW_SIZE}};
+use super::{Harness, limits::{LOOP_DETECTION_MAX_REPEATS, LOOP_DETECTION_WINDOW_SIZE,
+    REPETITION_MAX_IDENTICAL, REPETITION_MIN_TEXT_LEN}};
 
 impl Harness {
     /// Hash one iteration's tool interactions (name, arguments, result — in
@@ -77,6 +78,84 @@ impl Harness {
             return true;
         }
         false
+    }
+
+    /// Textual-output repetition detection: the blind spot of the crush-style
+    /// window above. That detector only sees TOOL interactions, so a model
+    /// stuck repeating the same THOUGHT with no tool call (a reasoning-only
+    /// `stop` stream that the natural-stop gate keeps continuing, or a final
+    /// answer the checkup keeps vetoing) loops until `MAX_ITERATIONS`,
+    /// re-sending the ever-growing context on every iteration.
+    ///
+    /// Called once per iteration, right after the record site, with the
+    /// CURRENT iteration's textual output: the visible answer when one was
+    /// produced, otherwise the attempt's reasoning. Whitespace is collapsed
+    /// before comparison so tokenization differences between attempts cannot
+    /// mask an identical thought; texts shorter than
+    /// [`REPETITION_MIN_TEXT_LEN`] are skipped (too little signal, too cheap
+    /// to guard). After [`REPETITION_MAX_IDENTICAL`] consecutive identical
+    /// texts the loop stops (Toast + `Done`, returns `true`) with the same
+    /// guard-stop audit the tool detector performs.
+    ///
+    /// The reset happens on ANY differing text and on tool-calling turns
+    /// (the caller clears the streak when `had_tools` is set) — a turn that
+    /// dispatched tools is progress, and a single different text proves the
+    /// model is still moving, so only an unbroken streak of verbatim repeats
+    /// counts.
+    pub(super) fn check_repetition_detection(
+        &mut self,
+        text: &str,
+        identical_text_streak: &mut usize,
+        last_output_signature: &mut Option<u64>,
+        tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
+    ) -> bool {
+        let normalized: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if normalized.len() < REPETITION_MIN_TEXT_LEN {
+            *identical_text_streak = 0;
+            *last_output_signature = None;
+            return false;
+        }
+        let sig = Self::text_signature(&normalized);
+        if *last_output_signature == Some(sig) {
+            *identical_text_streak += 1;
+        } else {
+            *identical_text_streak = 1;
+            *last_output_signature = Some(sig);
+        }
+        if *identical_text_streak > REPETITION_MAX_IDENTICAL {
+            // Heuristic guard: the stop stands, but the decision model
+            // audits it so an improper stop is never silent.
+            let verdict = self.review_guard_stop("repetition-detection");
+            self.context_manager.close_loop();
+            let _ = tx.send(super::events::HarnessEvent::Toast {
+                message: concat!(
+                    "Agent stopped: the model repeated the same output ",
+                    "verbatim across consecutive turns (it appears stuck ",
+                    "in a repetition loop)."
+                )
+                .to_string(),
+                variant: super::events::ToastVariant::Info,
+            });
+            let _ = tx.send(self.lsp_snapshot_event());
+            let _ = tx.send(super::events::HarnessEvent::Done {
+                context: self.context_manager.save_state(),
+                checkup_verdict: verdict,
+            });
+            return true;
+        }
+        false
+    }
+
+    /// FNV-1a 64-bit over one normalized text — the same deterministic hash
+    /// used for tool-interaction signatures above, so two byte-identical
+    /// texts (post whitespace-collapsing) always compare equal.
+    fn text_signature(text: &str) -> u64 {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in text.as_bytes() {
+            hash ^= u64::from(*b);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        hash
     }
 
     /// Add a tool call + its result to the context manager (structural
