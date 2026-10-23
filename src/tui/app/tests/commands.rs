@@ -2463,6 +2463,7 @@ async fn a_rebooted_cosh_pane_replays_its_session_from_the_store() {
         agents_mode_open: false,
         agents_hidden: Vec::new(),
         ctx_ids: std::collections::HashMap::new(),
+        main_agent_worktree: None,
     });
 
     // The manager turn completes: the Done now carries the pane's session.
@@ -3509,10 +3510,16 @@ async fn manager_pane_slash_source_lists_worktree_exactly_once() {
         .filter(|e| e.name == "worktree")
         .count();
     assert_eq!(menu_count, 1, "the synced menu carries one /worktree row");
+    // `/worktree` is part of the BASE list (the main agent gets it too), so
+    // the manager's list is now byte-identical to the cosh set. The sync is
+    // therefore a no-op and the source stays `Cosh` — that is the intended
+    // idempotence (`slash_lists_equal` must not churn selection), not a
+    // routing change: the router keys on the command's SCOPE, never on this
+    // cosmetic label.
     assert_eq!(
-        app.slash_menu.source,
-        crate::ui::slash_menu::Source::Agent,
-        "the manager pane's list IS the menu source"
+        app.slash_menu.commands.len(),
+        crate::ui::slash_menu::SlashMenu::cosh_commands().len(),
+        "the manager's list IS the base cosh list"
     );
 }
 
@@ -3662,4 +3669,198 @@ async fn agents_worktree_tool_accepts_a_cosh_pane() {
     assert_eq!(parked.id, id);
     assert_eq!(parked.pane, "cosh");
     let _ = cosh::harness::panes::pop_worktree_op();
+}
+
+/// The MAIN agent's shape: a session and NO `/agents` split. `/worktree`
+/// must be reachable from normal chat, which is the whole point of the
+/// command being part of the base cosh list instead of a pane synthesis.
+fn main_agent_worktree_app(repo: &std::path::Path) -> App {
+    let mut app = App::new(repo.display().to_string());
+    let session_id = crate::session::store::generate_session_id();
+    app.state
+        .add_empty_session(session_id.clone(), "main agent worktree".into(), 0);
+    app.state.current_session_id = Some(session_id);
+    app
+}
+
+/// (a) With no split open the main agent's menu carries `/worktree`
+/// EXACTLY once — it is a base-list row now, so the pane fusion that used
+/// to append it must not double it.
+#[tokio::test]
+async fn main_agent_menu_lists_worktree_exactly_once() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let (_dir, repo) = worktree_test_repo();
+    let mut app = main_agent_worktree_app(&repo);
+
+    super::super::agents_dispatch::sync_slash_source(&mut app);
+    let count = app
+        .slash_menu
+        .commands
+        .iter()
+        .filter(|entry| entry.name == "worktree")
+        .count();
+    assert_eq!(
+        count, 1,
+        "the main agent's menu lists /worktree exactly once: {:?}",
+        app.slash_menu
+            .commands
+            .iter()
+            .map(|entry| &entry.name)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        app.agents_split.is_none(),
+        "precondition: no split — this is normal chat"
+    );
+}
+
+/// (b) `/worktree add <path> <branch>` on the MAIN agent creates the
+/// checkout, stamps the binding on the SESSION (`assigned_by: User`) and
+/// persists it, so a reopened session keeps the isolation.
+#[tokio::test]
+async fn slash_worktree_add_pins_the_main_agent_and_persists() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let (_dir, repo) = worktree_test_repo();
+    let mut app = main_agent_worktree_app(&repo);
+    let wt = repo.join("wt-main");
+    let session_id = app.state.current_session_id.clone().expect("session");
+
+    app.prompt_view.input = format!("/worktree add {} feat-main", wt.display());
+    app.run_slash_command(&slash_cmd("worktree"));
+
+    let pin = app
+        .state
+        .current_session()
+        .and_then(|session| session.main_agent_worktree.as_ref())
+        .expect("the main agent got pinned");
+    assert_eq!(pin.branch, "feat-main");
+    assert_eq!(pin.path, wt);
+    assert_eq!(pin.assigned_by, cosh::git::worktree::AssignedBy::User);
+
+    // The binding reached disk: a fresh load of the session file agrees.
+    let reloaded = app
+        .session_store
+        .load_session(&session_id)
+        .expect("the session persisted");
+    let persisted = reloaded
+        .main_agent_worktree
+        .expect("the binding survives a reload");
+    assert_eq!(persisted.branch, "feat-main");
+    assert_eq!(persisted.path, wt);
+    // A success is silent (same contract as the pane path).
+    assert!(
+        app.toast_state.current.is_none(),
+        "a successful add must not toast: {:?}",
+        app.toast_state.current.as_ref().map(|t| &t.message)
+    );
+    // No split was ever opened: the binding lives on the session, never a pane.
+    assert!(app.agents_split.is_none());
+}
+
+/// (c) `/worktree exit` drops the binding and the main agent resolves back
+/// to the ORIGINAL startup cwd — the directory the app was started in,
+/// which `AppState::working_directory` has held unmutated all along.
+#[tokio::test]
+async fn slash_worktree_exit_restores_the_original_cwd() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let (_dir, repo) = worktree_test_repo();
+    let mut app = main_agent_worktree_app(&repo);
+    let original = app.state.working_directory.clone();
+    let wt = repo.join("wt-exit-main");
+
+    app.prompt_view.input = format!("/worktree add {} feat-exit", wt.display());
+    app.run_slash_command(&slash_cmd("worktree"));
+    assert!(
+        super::super::agents_dispatch::main_agent_effective_cwd(&app) == wt,
+        "precondition: pinned"
+    );
+
+    app.prompt_view.input = "/worktree exit".to_string();
+    app.run_slash_command(&slash_cmd("worktree"));
+
+    assert!(
+        app.state
+            .current_session()
+            .is_some_and(|session| session.main_agent_worktree.is_none()),
+        "exit drops the binding"
+    );
+    assert_eq!(
+        super::super::agents_dispatch::main_agent_effective_cwd(&app),
+        std::path::PathBuf::from(&original),
+        "the main agent is back in the startup cwd"
+    );
+    // Nothing on disk was removed: the worktree stays registered.
+    let listed = std::process::Command::new("git")
+        .args(["worktree", "list"])
+        .current_dir(&repo)
+        .output()
+        .expect("git worktree list");
+    let has_wt = String::from_utf8_lossy(&listed.stdout).contains("wt-exit-main");
+    assert!(has_wt, "the worktree survives its binding being dropped");
+}
+
+/// (d) A malformed tail (`add` alone, an unknown subcommand, no arguments)
+/// is refused with the SAME usage toast the panes show — the grammar is
+/// shared, so the refusal must not drift.
+#[tokio::test]
+async fn slash_worktree_main_agent_bad_args_refuse_with_usage() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let (_dir, repo) = worktree_test_repo();
+
+    for tail in ["", "add", "nope", "add a b c", "exit now"] {
+        let mut app = main_agent_worktree_app(&repo);
+        app.prompt_view.input = format!("/worktree {tail}");
+        app.run_slash_command(&slash_cmd("worktree"));
+        assert!(
+            app.toast_state
+                .current
+                .as_ref()
+                .is_some_and(|toast| toast.message.contains("Usage:")),
+            "tail `{tail}` must refuse with the usage toast"
+        );
+        assert!(
+            app.state
+                .current_session()
+                .is_some_and(|session| session.main_agent_worktree.is_none()),
+            "a refused `{tail}` must never bind"
+        );
+    }
+}
+
+/// (e) The main agent's EFFECTIVE cwd is the worktree path once pinned —
+/// the single resolution the turn assembly, the shell root, the prompt
+/// corrector and the footer branch all read.
+#[tokio::test]
+async fn main_agent_effective_cwd_follows_the_binding() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let (_dir, repo) = worktree_test_repo();
+    let mut app = main_agent_worktree_app(&repo);
+    let original = std::path::PathBuf::from(app.state.working_directory.clone());
+
+    assert_eq!(
+        super::super::agents_dispatch::main_agent_effective_cwd(&app),
+        original,
+        "unpinned: the startup cwd"
+    );
+
+    let wt = repo.join("wt-effective");
+    app.prompt_view.input = format!("/worktree add {} feat-eff", wt.display());
+    app.run_slash_command(&slash_cmd("worktree"));
+
+    assert_eq!(
+        super::super::agents_dispatch::main_agent_effective_cwd(&app),
+        wt,
+        "pinned: the checkout"
+    );
+    // The startup cwd is never mutated — it stays the restore target.
+    assert_eq!(
+        app.state.working_directory,
+        original.to_string_lossy(),
+        "working_directory stays the original (it is the exit target)"
+    );
 }

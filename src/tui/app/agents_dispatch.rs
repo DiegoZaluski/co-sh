@@ -163,36 +163,46 @@ pub(super) fn route_agent_slash_command(
 /// persists through the session metadata write-back. A SUCCESS is silent:
 /// the pane's badge and the outcome text carry it, only refusals toast.
 pub(super) fn apply_worktree_command(app: &mut App, tail: Option<&str>) {
-    let Some(args) = tail else {
-        worktree_usage_toast(app);
-        return;
-    };
-    let parts: Vec<&str> = args.split_whitespace().collect();
-    if parts.is_empty() {
-        worktree_usage_toast(app);
-        return;
-    }
-    if parts[0] == "exit" {
-        if parts.len() != 1 {
-            worktree_usage_toast(app);
-            return;
+    match parse_worktree_command(tail) {
+        Some(WorktreeCommand::Add { path, branch }) => {
+            assign_focused_pane_worktree(app, path.as_deref(), &branch);
         }
-        clear_focused_pane_worktree(app);
-        return;
+        Some(WorktreeCommand::Exit) => clear_focused_pane_worktree(app),
+        // The grammar is shared with the MAIN agent's path (`parse_
+        // worktree_command`), so "malformed" means the same thing for both.
+        None => worktree_usage_toast(app),
     }
-    if parts[0] != "add" {
-        worktree_usage_toast(app);
-        return;
+}
+
+/// One parsed `/worktree` invocation. The pane path and the MAIN agent's
+/// path share this parse: the two must accept byte-identical arguments, so
+/// the grammar lives here once (`add [<path>] <branch>` / `exit`).
+enum WorktreeCommand {
+    /// `add [<path>] <branch>` — `path` is `None` for the managed temp root.
+    Add {
+        path: Option<String>,
+        branch: String,
+    },
+    /// `exit` — drop the binding; nothing on disk is touched.
+    Exit,
+}
+
+/// Parse the argument tail. `None` means malformed — the caller shows the
+/// usage toast (an empty tail is malformed: the command takes arguments).
+fn parse_worktree_command(tail: Option<&str>) -> Option<WorktreeCommand> {
+    let parts: Vec<&str> = tail?.split_whitespace().collect();
+    match parts.as_slice() {
+        ["exit"] => Some(WorktreeCommand::Exit),
+        ["add", branch] => Some(WorktreeCommand::Add {
+            path: None,
+            branch: (*branch).to_string(),
+        }),
+        ["add", path, branch] => Some(WorktreeCommand::Add {
+            path: Some((*path).to_string()),
+            branch: (*branch).to_string(),
+        }),
+        _ => None,
     }
-    let (path, branch) = match parts.len() {
-        2 => (None, parts[1]),
-        3 => (Some(parts[1]), parts[2]),
-        _ => {
-            worktree_usage_toast(app);
-            return;
-        }
-    };
-    assign_focused_pane_worktree(app, path, branch);
 }
 
 /// The `/worktree` usage toast — the command takes arguments, so an empty
@@ -238,6 +248,98 @@ fn assign_focused_pane_worktree(app: &mut App, path: Option<&str>, branch: &str)
             variant: ToastVariant::Error,
             duration_ms: 8000,
         }),
+    }
+}
+
+/// The MAIN agent's effective working directory: its `/worktree` binding
+/// when pinned, the session's startup cwd otherwise. `working_directory` is
+/// set once in `App::new` and never mutated, so it IS the original cwd —
+/// `/worktree exit` needs no saved copy, it just drops the binding.
+///
+/// This is deliberately a SEPARATE accessor from `pane_effective_cwd`: the
+/// main agent is not a pane (no registry id, no `AgentPane`), and the
+/// binding lives on the session because it must survive a reopen.
+pub(super) fn main_agent_effective_cwd(app: &App) -> PathBuf {
+    app.state
+        .current_session()
+        .and_then(|session| session.main_agent_worktree.as_ref())
+        .map(|worktree| worktree.path.clone())
+        .unwrap_or_else(|| PathBuf::from(&app.state.working_directory))
+}
+
+/// Pin the MAIN agent into a worktree (`/worktree add` with no `/agents`
+/// split open). Same engine, same `assigned_by: User` (a slash command IS
+/// the user acting) and same all-or-nothing refusal handling as the pane
+/// path — only the binding's home differs: the session, not a pane slot.
+fn assign_main_agent_worktree(app: &mut App, path: Option<&str>, branch: &str) {
+    // The repo is ALWAYS the startup cwd, never the current binding: a
+    // second `add` must branch off the real repository, not off the
+    // checkout the main agent is sitting in.
+    let repo = PathBuf::from(&app.state.working_directory);
+    let explicit = path.map(PathBuf::from);
+    match cosh::git::worktree::create(
+        &repo,
+        branch,
+        explicit.as_deref(),
+        cosh::git::worktree::AssignedBy::User,
+    ) {
+        Ok(worktree) => {
+            if let Some(session) = app.state.current_session_mut() {
+                session.main_agent_worktree = Some(worktree);
+            }
+            persist_main_agent_worktree(app);
+        }
+        // Only the REFUSAL speaks (same contract as the pane path): a
+        // success is evident from the footer badge.
+        Err(error) => app.toast_state.show(ToastOptions {
+            title: Some("Worktree".into()),
+            message: format!("{error}"),
+            variant: ToastVariant::Error,
+            duration_ms: 8000,
+        }),
+    }
+}
+
+/// Drop the MAIN agent's worktree binding (`/worktree exit`): its next turn
+/// runs in the original startup cwd again. Nothing on disk is removed.
+fn clear_main_agent_worktree(app: &mut App) {
+    let was_pinned = app
+        .state
+        .current_session()
+        .is_some_and(|session| session.main_agent_worktree.is_some());
+    if let Some(session) = app.state.current_session_mut() {
+        session.main_agent_worktree = None;
+    }
+    persist_main_agent_worktree(app);
+    if !was_pinned {
+        app.toast_state.show(ToastOptions {
+            title: Some("Worktree".into()),
+            message: "The main agent is not in a worktree.".into(),
+            variant: ToastVariant::Warning,
+            duration_ms: 6000,
+        });
+    }
+}
+
+/// Write the main agent's binding through to the session file. Reuses the
+/// metadata delta path, so a reopened session restores the isolation.
+fn persist_main_agent_worktree(app: &mut App) {
+    let Some(session) = app.state.current_session() else {
+        return;
+    };
+    let session = session.clone();
+    app.session_store.save_session(&session);
+}
+
+/// The App-side `/worktree` for the MAIN agent (normal mode, no split):
+/// the same parsed grammar as the panes, applied to the session's binding.
+pub(super) fn apply_main_agent_worktree_command(app: &mut App, tail: Option<&str>) {
+    match parse_worktree_command(tail) {
+        Some(WorktreeCommand::Add { path, branch }) => {
+            assign_main_agent_worktree(app, path.as_deref(), &branch);
+        }
+        Some(WorktreeCommand::Exit) => clear_main_agent_worktree(app),
+        None => worktree_usage_toast(app),
     }
 }
 
@@ -1442,6 +1544,7 @@ impl App {
             agents_mode_open: false,
             agents_hidden: Vec::new(),
             ctx_ids: std::collections::HashMap::new(),
+            main_agent_worktree: None,
         });
         if let Some(pane) = either_split_mut(&mut self.agents_split, &mut self.parked_agents_split)
             .and_then(|split| split.panes.get_mut(pane))
@@ -2194,6 +2297,7 @@ fn persist_manager_session(
             agents_mode_open: false,
             agents_hidden: Vec::new(),
             ctx_ids: std::collections::HashMap::new(),
+            main_agent_worktree: None,
         });
     session.messages = display
         .into_iter()

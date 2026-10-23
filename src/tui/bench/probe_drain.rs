@@ -81,6 +81,7 @@ async fn probe_drain_costs() {
             agents_mode_open: false,
             agents_hidden: Vec::new(),
             ctx_ids: Default::default(),
+            main_agent_worktree: None,
             messages,
         });
         app.state.current_session_id = Some("probe".into());

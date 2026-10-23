@@ -474,12 +474,14 @@ impl SessionStore {
         if current.session.agents_panes != requested.agents_panes
             || current.session.agents_mode_open != requested.agents_mode_open
             || current.session.agents_hidden != requested.agents_hidden
+            || current.session.main_agent_worktree != requested.main_agent_worktree
         {
             deltas.push(Delta::Metadata {
                 change: MetadataDelta::Agents {
                     panes: requested.agents_panes.clone(),
                     mode_open: requested.agents_mode_open,
                     hidden: requested.agents_hidden.clone(),
+                    main_worktree: requested.main_agent_worktree.clone(),
                 },
             });
         }
@@ -1917,6 +1919,7 @@ mod tests {
             agents_mode_open: false,
             agents_hidden: Vec::new(),
             ctx_ids: HashMap::new(),
+            main_agent_worktree: None,
         }
     }
 

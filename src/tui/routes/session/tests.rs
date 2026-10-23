@@ -50,6 +50,7 @@ fn test_state(msg: Message) -> AppState {
         agents_mode_open: false,
         agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
+        main_agent_worktree: None,
         messages: vec![msg],
     };
     state.add_session(session);
@@ -596,6 +597,7 @@ fn test_full_chat_history_performance() {
         agents_mode_open: false,
         agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
+        main_agent_worktree: None,
         messages,
     };
     state.add_session(session);
@@ -1668,6 +1670,7 @@ fn test_completed_bash_click_expands_while_new_content_streams() {
         agents_mode_open: false,
         agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
+        main_agent_worktree: None,
         messages: vec![bash_msg, stream_msg],
     };
     state.add_session(session);
@@ -1849,6 +1852,7 @@ fn test_completed_bash_click_expands_below_wrapped_message_with_matching_widths(
         agents_mode_open: false,
         agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
+        main_agent_worktree: None,
         messages: vec![
             Message {
                 id: "msg-lead".into(),
@@ -2588,6 +2592,7 @@ fn state_with_bash_block(session_id: &str, line: &str) -> AppState {
         agents_mode_open: false,
         agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
+        main_agent_worktree: None,
         messages: vec![Message {
             id: format!("{session_id}-0"),
             role: MessageRole::Assistant,
@@ -2702,6 +2707,7 @@ fn test_code_block_bottom_padding_not_overlapped() {
         agents_mode_open: false,
         agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
+        main_agent_worktree: None,
         messages: vec![code_msg, reply],
     };
     state.add_session(session);
@@ -2997,6 +3003,7 @@ fn seeding_the_call_seq_beyond_a_restored_session_prevents_cross_restart_collisi
         agents_mode_open: false,
         agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
+        main_agent_worktree: None,
         messages: vec![Message {
             id: "m1".into(),
             role: MessageRole::Assistant,
@@ -3056,6 +3063,7 @@ fn seeding_the_call_seq_beyond_a_restored_session_prevents_cross_restart_collisi
         agents_mode_open: false,
         agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
+        main_agent_worktree: None,
         messages: vec![Message {
             id: "m2".into(),
             role: MessageRole::Assistant,
@@ -3267,6 +3275,7 @@ fn bench_render_memory_growth_is_bounded() {
         agents_mode_open: false,
         agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
+        main_agent_worktree: None,
         messages: vec![bench_user_message(0)],
     };
     state.add_session(session);
@@ -3411,6 +3420,7 @@ fn bench_session_with_n_pairs(n: usize) -> Session {
         agents_mode_open: false,
         agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
+        main_agent_worktree: None,
         messages,
     }
 }
@@ -3514,6 +3524,7 @@ fn bench_streaming_frame_time_vs_session_size() {
         agents_mode_open: false,
         agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
+        main_agent_worktree: None,
         messages: vec![bench_user_message(0)],
     };
     state.add_session(session);
@@ -3697,6 +3708,7 @@ fn bench_render_memory_growth_short() {
         agents_mode_open: false,
         agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
+        main_agent_worktree: None,
         messages: vec![bench_user_message(0)],
     };
     state.add_session(session);
@@ -3794,6 +3806,7 @@ fn bench_render_heaptrack_minimal() {
         agents_mode_open: false,
         agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
+        main_agent_worktree: None,
         messages: vec![bench_user_message(0)],
     };
     state.add_session(session);
@@ -4219,6 +4232,7 @@ fn test_state_msgs(msgs: Vec<Message>) -> AppState {
         agents_mode_open: false,
         agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
+        main_agent_worktree: None,
         messages: msgs,
     };
     state.add_session(session);
@@ -7069,6 +7083,7 @@ fn bench_long_session(n_pairs: usize) -> Session {
         agents_mode_open: false,
         agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
+        main_agent_worktree: None,
         messages,
     }
 }
@@ -7357,6 +7372,7 @@ fn fully_visible_cache_fill_does_not_index_past_buffer_end() {
         agents_mode_open: false,
         agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
+        main_agent_worktree: None,
         messages: vec![
             // Tall: the real render far exceeds the 40-row buffer.
             build_streaming_message(400),

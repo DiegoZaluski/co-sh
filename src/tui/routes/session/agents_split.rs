@@ -1179,12 +1179,11 @@ impl AgentsSplitState {
     pub fn slash_source(&self) -> Option<(Vec<crate::ui::slash_menu::SlashCommand>, bool)> {
         let pane = self.focused_pane()?;
         if pane.agent == MANAGER_LABEL {
-            // The manager's own set (the caller used to fall back to it, and
-            // that fallback never carried the synthesized entry) plus the
-            // cosh-side `/worktree` row: identical discoverability to the
-            // ACP panes, whose commands come from their own ACP probe.
-            let mut entries = crate::ui::slash_menu::SlashMenu::cosh_commands();
-            entries.push(worktree_command_entry());
+            // The manager's own set — which already ends with the cosh-side
+            // `/worktree` row, because that row is part of the base list
+            // (the MAIN agent gets it too). Appending it here again would
+            // list the command twice.
+            let entries = crate::ui::slash_menu::SlashMenu::cosh_commands();
             return Some((entries, false));
         }
         let agent = pane.agent.as_str();

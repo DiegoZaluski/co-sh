@@ -36,7 +36,11 @@ impl App {
         let fallbacks = self.router_view.prompt_corrector_fallbacks.clone();
         let session_route = self.session_correction_route();
         let local_base_urls = self.configured_local_base_urls();
-        let cwd = self.state.working_directory.clone();
+        // The corrector runs as part of the main agent's turn, so it sees the
+        // same workspace the agent does (the worktree when pinned).
+        let cwd = super::agents_dispatch::main_agent_effective_cwd(self)
+            .to_string_lossy()
+            .into_owned();
         let event_tx = self.event_tx.clone();
         let cancelled = self.prompt_correction_cancel.clone();
 

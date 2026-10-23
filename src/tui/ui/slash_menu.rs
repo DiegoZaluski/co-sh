@@ -266,6 +266,12 @@ impl SlashMenu {
                 name: "undo".into(),
                 desc: "Undo last revert".into(),
             },
+            // The MAIN agent's worktree binding. It lives in the base list
+            // (not synthesized per pane) because the main agent — normal
+            // chat, no `/agents` split — is a legitimate target too: it is
+            // one more agent whose turns can run in a checkout. The pane
+            // sources do NOT append a second copy; see `slash_source`.
+            worktree_command_entry(),
         ]
     }
 
@@ -660,12 +666,10 @@ mod tests {
     /// would silently classify a future command by an old name).
     #[test]
     fn every_cosh_command_declares_its_scope() {
-        let mut menu_names = SlashMenu::cosh_command_names();
-        // `/worktree` is a cosh-owned command that lives OUTSIDE the base
-        // list: the pane sources synthesize it (`worktree_command_entry`)
-        // because only a pane can be isolated. It is still cosh's, so it
-        // declares a scope like any other.
-        menu_names.push(worktree_command_entry().name);
+        // `/worktree` is part of the base list: it belongs to the MAIN agent
+        // (whose menu IS this list) as much as to any pane, so the pane
+        // sources must not append a second copy.
+        let menu_names = SlashMenu::cosh_command_names();
         let inventory_names: Vec<&str> =
             COMMAND_INVENTORY.iter().map(|(name, _)| *name).collect();
         for name in &menu_names {

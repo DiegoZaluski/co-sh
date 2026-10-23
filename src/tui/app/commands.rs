@@ -1305,6 +1305,22 @@ impl App {
             self.prompt_view.clear_all();
             return;
         }
+        // `/worktree` for the MAIN agent (normal chat, no `/agents` split).
+        // A cosh-owned command (`CommandScope::Agent`), so it is handled
+        // HERE and never dispatched to an agent as prose. Reached only when
+        // the pane router above declined — i.e. no live split, or no pane
+        // focused — which is exactly the main agent's situation. The
+        // argument tail is read from the prompt before it is cleared.
+        if cmd.name == "worktree" {
+            let tail = crate::ui::slash_menu::SlashMenu::command_arg_tail(
+                &self.prompt_view.input,
+                "worktree",
+            );
+            super::agents_dispatch::apply_main_agent_worktree_command(self, tail.as_deref());
+            self.slash_menu.visible = false;
+            self.prompt_view.clear_all();
+            return;
+        }
         if cmd.name == "themes" {
             self.open_theme_dialog();
         } else if cmd.name == "models" {
@@ -1437,6 +1453,10 @@ impl App {
             return;
         };
         let store = self.session_store.clone();
+        // The export writes NEXT TO THE SESSION FILE the user thinks of as
+        // "this conversation", not next to the agent's checkout: it stays on
+        // the startup cwd even when the main agent is pinned to a worktree
+        // (a `/worktree` must never relocate the user's artifacts).
         let cwd = std::path::PathBuf::from(&self.state.working_directory);
         // The export is a snapshot of the PERSISTED records: a running loop's
         // in-flight turn has not landed on disk yet. Say so on the toast
@@ -1522,6 +1542,9 @@ impl App {
         let anthropic_ttl = self.setup.anthropic_cache_ttl_1h();
         let retention = self.setup.openai_cache_retention().map(String::from);
         let reasoning = self.llm_config.reasoning.clone();
+        // Compaction only SUMMARIZES the transcript; it reads no project
+        // file, so it keeps the startup cwd rather than following the
+        // worktree binding (a summarizer has no business in a checkout).
         let cwd = self.state.working_directory.clone();
         // Clear the shared stop flag BEFORE handing it to the compaction
         // task: the flag belongs to the PREVIOUS interaction (ESC/Interrupt),

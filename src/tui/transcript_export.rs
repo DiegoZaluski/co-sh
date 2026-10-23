@@ -126,6 +126,7 @@ mod tests {
             agents_mode_open: false,
             agents_hidden: Vec::new(),
             ctx_ids: HashMap::new(),
+            main_agent_worktree: None,
         }
     }
 

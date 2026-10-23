@@ -133,6 +133,16 @@ pub struct Session {
     /// never model-facing data.
     #[serde(default)]
     pub ctx_ids: std::collections::HashMap<String, Vec<u64>>,
+    /// The worktree binding of the MAIN agent (normal chat, no `/agents`
+    /// split), from `/worktree add`. `None` while the main agent works in
+    /// the session's startup cwd. The main agent is addressable by no pane
+    /// id, so `agents_worktree` can never target it — this binding is
+    /// reachable ONLY through the user's slash command. Persisted so a
+    /// reopened session keeps its isolation; `exit` clears it, returning
+    /// the main agent to `AppState::working_directory` (the process cwd,
+    /// stored once at startup and never mutated, so it IS the original).
+    #[serde(default)]
+    pub main_agent_worktree: Option<crate::git::worktree::PaneWorktree>,
 }
 
 impl Session {
@@ -480,6 +490,7 @@ mod tests {
             agents_mode_open: false,
             agents_hidden: Vec::new(),
             ctx_ids: Default::default(),
+            main_agent_worktree: None,
             messages: vec![
                 Message {
                     id: "msg-0".into(),

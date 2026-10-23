@@ -330,7 +330,13 @@ impl App {
             .collect();
         let stop_signal = self.stop_signal.clone();
         let input = msg;
-        let cwd = self.state.working_directory.clone();
+        // The main agent's EFFECTIVE cwd: its `/worktree` binding when
+        // pinned, the startup cwd otherwise. The harness assembly and the
+        // sandbox root both derive from this, so pinning the main agent
+        // really does move its turns into the checkout.
+        let cwd = super::agents_dispatch::main_agent_effective_cwd(self)
+            .to_string_lossy()
+            .into_owned();
         let mode = self.state.mode;
 
         // Session-level prompt-cache settings: the user's TTL/retention
@@ -591,7 +597,11 @@ impl App {
 
         let event_tx = self.event_tx.clone();
         let stop_signal = self.stop_signal.clone();
-        let cwd = self.state.working_directory.clone();
+        // Same rule as the turn's assembly: a shell the agent/consumer runs
+        // inside the main agent's session lands in its worktree when pinned.
+        let cwd = super::agents_dispatch::main_agent_effective_cwd(self)
+            .to_string_lossy()
+            .into_owned();
         let session_id = self.state.current_session_id.clone();
         let command = cmd;
         // Unique per-execution call_id: the hidden pairs must never collide

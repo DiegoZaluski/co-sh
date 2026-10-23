@@ -20,6 +20,7 @@ fn app_with_user_message() -> App {
         agents_mode_open: false,
         agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
+        main_agent_worktree: None,
         messages: vec![
             Message {
                 id: "u1".into(),
@@ -278,6 +279,7 @@ async fn message_actions_single_user_message_shows_all_options() {
         agents_mode_open: false,
         agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
+        main_agent_worktree: None,
         messages: vec![Message {
             id: "u1".into(),
             role: MessageRole::User,
@@ -543,6 +545,7 @@ fn app_with_cosh_pane() -> App {
         agents_mode_open: false,
         agents_hidden: Vec::new(),
         ctx_ids: Default::default(),
+        main_agent_worktree: None,
         messages: vec![
             make("m0", MessageRole::User, "first prompt", now),
             make("m1", MessageRole::Assistant, "first answer", now + 1),

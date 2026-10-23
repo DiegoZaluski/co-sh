@@ -178,6 +178,14 @@ pub(crate) enum MetadataDelta {
         /// model-facing data.
         #[serde(default)]
         hidden: Vec<crate::types::HiddenPane>,
+        /// The MAIN agent's worktree binding (`/worktree` with no split
+        /// open). Carried on the same delta as the pane set because it is
+        /// the same kind of fact — where an agent works — and it saves a
+        /// second delta shape. Older payloads default to `None` (the main
+        /// agent worked in the session's startup cwd), so old histories
+        /// replay unchanged. UI-only bookkeeping — never model-facing data.
+        #[serde(default)]
+        main_worktree: Option<crate::git::worktree::PaneWorktree>,
     },
 }
 
@@ -339,6 +347,7 @@ impl BranchProjection {
                 agents_mode_open: false,
                 agents_hidden: Vec::new(),
                 ctx_ids: HashMap::new(),
+                main_agent_worktree: None,
             },
             cwd: metadata.cwd,
             context: None,
@@ -947,10 +956,12 @@ fn apply_metadata(state: &mut BranchProjection, change: &MetadataDelta) {
             panes,
             mode_open,
             hidden,
+            main_worktree,
         } => {
             state.session.agents_panes = panes.clone();
             state.session.agents_mode_open = *mode_open;
             state.session.agents_hidden = hidden.clone();
+            state.session.main_agent_worktree = main_worktree.clone();
         }
     }
 }
@@ -1229,6 +1240,7 @@ pub(crate) fn parse_jsonl(session_id: &str, contents: &str) -> ParsedHistory {
             agents_mode_open: false,
             agents_hidden: Vec::new(),
             ctx_ids: HashMap::new(),
+            main_agent_worktree: None,
         };
         for stored in legacy_messages {
             if !stored.ctx_ids.is_empty() {
@@ -1842,6 +1854,7 @@ not-json"#;
                         panes: Some(vec![crate::types::AgentPaneRef::Name("kilo".into())]),
                         mode_open: true,
                         hidden: hidden.clone(),
+                        main_worktree: None,
                     },
                 },
             ),
@@ -1868,6 +1881,7 @@ not-json"#;
                     panes: Some(vec![crate::types::AgentPaneRef::Name("kilo".into())]),
                     mode_open: true,
                     hidden: vec![],
+                    main_worktree: None,
                 },
             },
         );

@@ -1133,7 +1133,11 @@ impl App {
 
             // Refresh the footer's git branch at its own rate-limited cadence
             // (the tracker internally throttles disk reads to twice a second).
-            self.state.git_branch = self.branch_tracker.current(&self.state.working_directory);
+            // The badge reports where the MAIN AGENT works, so it follows the
+            // `/worktree` binding (unlike the session store root below, which
+            // locates the session and must stay on the startup cwd).
+            let agent_cwd = agents_dispatch::main_agent_effective_cwd(self);
+            self.state.git_branch = self.branch_tracker.current(&agent_cwd.to_string_lossy());
 
             if self.needs_full_redraw {
                 // The external editor scribbled over the screen: force a

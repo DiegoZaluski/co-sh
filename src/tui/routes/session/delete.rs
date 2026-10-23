@@ -361,6 +361,7 @@ mod tests {
             agents_mode_open: false,
             agents_hidden: Vec::new(),
             ctx_ids: std::collections::HashMap::new(),
+            main_agent_worktree: None,
         };
         let pane = crate::types::Session {
             id: pane_id.to_string(),
@@ -378,6 +379,7 @@ mod tests {
                 agents_mode_open: false,
                 agents_hidden: Vec::new(),
                 ctx_ids: std::collections::HashMap::new(),
+                main_agent_worktree: None,
             }
         };
         parent.messages = Vec::new();
