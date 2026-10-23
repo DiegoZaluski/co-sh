@@ -1283,14 +1283,24 @@ impl App {
         }
     }
 
+    /// Execute one slash command from the menu, routed by the command's
+    /// DECLARED SCOPE (`slash_menu::COMMAND_INVENTORY`) and, for an
+    /// Agent-scoped one, by the focused `/agents` pane:
+    ///
+    /// - the split's router runs FIRST; it consumes the command when the
+    ///   focused pane owns it (an ACP pane's own command, its config box, or
+    ///   `/worktree` on any pane kind) and refuses Global-scoped ones
+    ///   outright, so a `/background` picked while a claude pane holds the
+    ///   focus still toggles THIS terminal's background — never the pane's;
+    /// - everything else is handled here, by the App, on the app-level state
+    ///   the main agent reads (which is exactly what the manager pane wants,
+    ///   since its agent IS this app's own loop).
+    ///
+    /// Scope, not the menu's incidental `source`, decides: the source only
+    /// says which list the user was LOOKING at, while the scope says who the
+    /// command belongs to.
     pub(super) fn run_slash_command(&mut self, cmd: &crate::ui::slash_menu::SlashCommand) {
-        // The menu's own SOURCE decides the routing — not a re-derived
-        // focus: a pick must never disagree with the list the user saw.
-        // The source is kept in lockstep with the split by
-        // `sync_slash_source` on every focus/teardown/open path.
-        if self.slash_menu.source == crate::ui::slash_menu::Source::Agent
-            && super::agents_dispatch::route_agent_slash_command(self, cmd)
-        {
+        if super::agents_dispatch::route_agent_slash_command(self, cmd) {
             self.slash_menu.visible = false;
             self.prompt_view.clear_all();
             return;

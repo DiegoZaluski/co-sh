@@ -47,7 +47,6 @@ pub mod skills;
 pub mod subagent;
 pub mod util;
 pub mod web;
-pub mod worktree;
 
 /// MCP Tool description: name, description, and inputSchema as a JSON value.
 /// Follows the [MCP Tool schema](https://modelcontextprotocol.io/specification/2025-11-25/server/tools)

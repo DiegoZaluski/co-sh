@@ -576,7 +576,7 @@ pub struct App {
     /// Fractional 30 Hz animation tick, independent of the draw cadence.
     animation_tick_remainder: f64,
     /// Rate-limited resolver for the git branch shown in the session footer.
-    branch_tracker: crate::util::git::BranchTracker,
+    branch_tracker: cosh::git::branch::BranchTracker,
     /// Per-frame counter — rate-limits the PERF debug logs in the render hot
     /// path (bg_fill etc.) to one sample per ~60 frames (~1/sec) instead of
     /// one write per frame.
@@ -934,7 +934,7 @@ impl App {
             live_requested: false,
             last_frame_time: std::time::Instant::now(),
             animation_tick_remainder: 0.0,
-            branch_tracker: crate::util::git::BranchTracker::default(),
+            branch_tracker: cosh::git::branch::BranchTracker::default(),
             perf_frame: 0,
             last_mouse_x: 0,
             last_mouse_y: 0,

@@ -1,6 +1,7 @@
 pub mod config;
 pub mod daemon;
 pub mod fallback;
+pub mod git;
 pub mod harness;
 pub mod mcp;
 pub mod notification;

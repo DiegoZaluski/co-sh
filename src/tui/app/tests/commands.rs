@@ -2992,6 +2992,43 @@ fn worktree_test_repo() -> (tempfile::TempDir, std::path::PathBuf) {
     (dir, path)
 }
 
+/// The SCOPE contract, end to end: a GLOBAL command picked while an external
+/// agent pane holds the focus still acts on the APP. `/background` toggles
+/// this terminal's background and is never dispatched to the pane as a
+/// prompt — before the scope inventory existed, the router trusted the
+/// menu's `source` alone, so every cosh command picked on a focused pane
+/// became the AGENT's (a per-pane background would mean one terminal with
+/// one background per pane: the overengineering the product rule forbids).
+#[tokio::test]
+async fn a_global_command_on_a_focused_agent_pane_acts_on_the_app() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let (_dir, repo) = worktree_test_repo();
+    let mut app = worktree_split_app(&repo);
+    super::super::agents_dispatch::sync_slash_source(&mut app);
+    assert_eq!(
+        app.slash_menu.source,
+        crate::ui::slash_menu::Source::Agent,
+        "precondition: the focused claude pane owns the menu source"
+    );
+    assert!(
+        app.agents_split.as_ref().unwrap().focused.is_some(),
+        "precondition: a pane holds the focus"
+    );
+
+    let before = app.transparent_background;
+    app.run_slash_command(&slash_cmd("background"));
+
+    assert_ne!(
+        app.transparent_background, before,
+        "`/background` is app state: it must toggle the terminal's background"
+    );
+    assert!(
+        !app.agents_split.as_ref().unwrap().panes[0].running,
+        "a Global command must never be dispatched to the pane as a turn"
+    );
+}
+
 /// One claude pane split with pane 0 focused — the worktree command's
 /// target shape.
 fn worktree_split_app(repo: &std::path::Path) -> App {
@@ -3028,7 +3065,7 @@ async fn slash_worktree_add_pins_the_pane_and_persists_the_binding() {
     let pin = pane.worktree.as_ref().expect("the pane got pinned");
     assert_eq!(pin.branch, "feat-x");
     assert_eq!(pin.path, wt);
-    assert_eq!(pin.assigned_by, cosh_tools::worktree::AssignedBy::User);
+    assert_eq!(pin.assigned_by, cosh::git::worktree::AssignedBy::User);
     assert!(wt.is_dir(), "the worktree directory exists");
     assert!(
         pane.worktree_handoff_pending,
@@ -3303,7 +3340,7 @@ async fn agents_worktree_assign_executes_on_the_app_drain() {
     assert_eq!(pin.branch, branch);
     assert_eq!(
         pin.assigned_by,
-        cosh_tools::worktree::AssignedBy::Agent,
+        cosh::git::worktree::AssignedBy::Agent,
         "the agent asked, not the user"
     );
     assert!(
@@ -3506,7 +3543,7 @@ async fn slash_worktree_add_pins_the_manager_pane() {
         .expect("the manager pane got pinned");
     assert_eq!(pin.branch, "feat-mgr");
     assert_eq!(pin.path, wt);
-    assert_eq!(pin.assigned_by, cosh_tools::worktree::AssignedBy::User);
+    assert_eq!(pin.assigned_by, cosh::git::worktree::AssignedBy::User);
     assert!(wt.is_dir(), "the worktree directory exists");
     assert!(
         pane.worktree_handoff_pending,
@@ -3589,42 +3626,40 @@ async fn slash_worktree_exit_clears_the_manager_pane_binding() {
     assert!(wt.is_dir(), "exit never deletes the worktree");
 }
 
-/// (e) The `agents_worktree` TOOL still refuses a cosh pane — with the new
-/// message that points the coordinator at the USER's `/worktree` (the
-/// rebinding is the user's call, never a peer agent's ask).
+/// (e) The `agents_worktree` TOOL addresses a cosh pane like any other: the
+/// manager pane gets no special refusal — it runs its own agent session with
+/// its own cwd, so isolating it is the same ask as isolating a `claude` pane.
+/// What still protects the user is unchanged: panes never receive this tool
+/// (`with_own_pane_id` strips it) and a User-assigned binding always opens
+/// the confirmation box.
 #[tokio::test]
-async fn agents_worktree_tool_still_refuses_a_cosh_pane() {
+async fn agents_worktree_tool_accepts_a_cosh_pane() {
     let _guard = HOME_LOCK.lock();
     isolate_home();
     let (_dir, repo) = worktree_test_repo();
     let mut app = manager_worktree_split_app(&repo);
     app.sync_agents_pane_registry();
 
-    // The tool's pane enum never offers the manager...
+    // The tool's pane enum offers the manager alongside every other pane...
     let tool = cosh::harness::panes::agents_worktree_tool();
     let enum_values = tool.input_schema["properties"]["pane"]["enum"]
         .as_array()
         .expect("pane enum present");
     assert!(
-        !enum_values.iter().any(|v| v == "cosh"),
-        "the manager pane is not an addressable target: {enum_values:?}"
+        enum_values.iter().any(|v| v == "cosh"),
+        "the cosh pane IS an addressable target: {enum_values:?}"
     );
 
-    // ...and a hand-crafted assign to it is refused with the new wording.
-    let err = cosh::harness::panes::enqueue_worktree_op(
+    // ...and an assign to it parks instead of being refused.
+    let id = cosh::harness::panes::enqueue_worktree_op(
         "cosh",
         cosh::harness::panes::WorktreeAction::Assign,
         Some("feat-cosh"),
         cosh::harness::panes::MAIN,
     )
-    .expect_err("the tool never binds a cosh pane");
-    assert!(err.contains("cosh"), "the error names the pane: {err}");
-    assert!(
-        err.contains("/worktree"),
-        "the refusal points the coordinator at the user's command: {err}"
-    );
-    assert!(
-        err.contains("USER"),
-        "the refusal names whose call it is: {err}"
-    );
+    .expect("the tool addresses a cosh pane");
+    let parked = cosh::harness::panes::peek_worktree_op().expect("the ask is parked");
+    assert_eq!(parked.id, id);
+    assert_eq!(parked.pane, "cosh");
+    let _ = cosh::harness::panes::pop_worktree_op();
 }

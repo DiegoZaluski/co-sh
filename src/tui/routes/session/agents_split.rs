@@ -50,18 +50,12 @@ use crate::util::text_region::{TextRegion, extract_text_in_region, text_from_cel
 /// own agent. No pane carries it unless the user marked `cosh`.
 pub const MANAGER_LABEL: &str = "cosh";
 
-/// The synthesized `/worktree` slash entry — a COSH-side command, present in
-/// every pane kind's menu (the worktree is a pane binding, never the agent's
-/// own command) and applied by `apply_worktree_command` on ANY focused pane,
-/// the manager included: a bound cosh pane runs its turns in the worktree cwd
-/// exactly like a bound ACP pane. Only the `agents_worktree` TOOL refuses to
-/// target a cosh pane (the user's call, never a peer agent's ask).
+/// The synthesized `/worktree` slash entry, re-exported from the slash menu
+/// where the command vocabulary now lives (`worktree_entry`). Kept as a thin
+/// alias so the pane code keeps its local spelling.
 #[must_use]
 pub fn worktree_command_entry() -> crate::ui::slash_menu::SlashCommand {
-    crate::ui::slash_menu::SlashCommand {
-        name: "worktree".into(),
-        desc: "Isolate this pane in a git worktree (add <branch>|<path> <branch>, exit)".into(),
-    }
+    crate::ui::slash_menu::worktree_command_entry()
 }
 
 /// Minimum luminance distance between a brand color and the pane background
@@ -205,7 +199,7 @@ pub struct AgentPane {
     /// `agents_worktree`): the pane's effective cwd resolves from its
     /// `path` instead of the session's working directory. In-memory twin
     /// of the persisted `AgentPaneRef::Bound` field.
-    pub worktree: Option<cosh_tools::worktree::PaneWorktree>,
+    pub worktree: Option<cosh::git::worktree::PaneWorktree>,
     /// The pane's cwd MOVED since its last turn (a `/worktree add`/`exit`
     /// changed the binding): the next dispatch prepends a handoff block
     /// summarized from the pane's local timeline, so the agent keeps its
@@ -4248,11 +4242,11 @@ mod tests {
     fn render_pane_paints_the_worktree_badge_on_the_reserved_footer_row() {
         let theme = test_theme();
         let mut state = AgentsSplitState::new(vec!["claude".into()]);
-        let wt = cosh_tools::worktree::PaneWorktree {
+        let wt = cosh::git::worktree::PaneWorktree {
             path: std::path::PathBuf::from("/tmp/cosh-worktrees/fix-1"),
             branch: "fix-1".into(),
             name: "fix-1".into(),
-            assigned_by: cosh_tools::worktree::AssignedBy::User,
+            assigned_by: cosh::git::worktree::AssignedBy::User,
         };
         state.panes[0].worktree = Some(wt);
 

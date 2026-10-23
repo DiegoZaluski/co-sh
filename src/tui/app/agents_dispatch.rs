@@ -69,29 +69,39 @@ fn slash_lists_equal(
             .all(|(x, y)| x.name == y.name && x.desc == y.desc)
 }
 
-/// Route a slash command picked while a LIVE split pane holds the focus:
-/// the command belongs to the AGENT, not to cosh. Returns `true` when
-/// consumed (the caller closes the menu and clears the draft).
+/// Route a slash command picked while a LIVE split pane holds the focus, by
+/// the command's DECLARED SCOPE (`slash_menu::command_scope`). Returns `true`
+/// when consumed (the caller closes the menu and clears the draft); `false`
+/// means "not this layer's" and the App handles it.
 ///
-/// - A mapped group with a config target (models / provider / mode) opens
-///   the standardized config box bound to the pane's own ACP
-///   config option — the agent's exact command name never leaves the menu,
-///   only what opens afterwards is cosh's.
-/// - Everything else (compact, review, custom harness commands …) is sent
-///   to the pane VERBATIM as its next prompt (`/name`) — the harness
-///   interprets its own command; no per-agent maintenance.
+/// The cases, in order — this order IS the contract:
 ///
-/// `/worktree` is intercepted HERE for every pane kind (its menu row is
-/// synthesized in each pane's list, the manager's included) and applied
-/// alike: the manager pane is a pane like any other, so a bound cosh pane
-/// runs its turns in the worktree cwd exactly like a bound ACP pane.
+/// 1. **Global** (`themes`, `background`, `bell`, `anim`, `spinner`,
+///    `settings`, `router`, `providers`, `new`, `rename`, `undo`, `agents`):
+///    app/TUI state, of which there is exactly one instance per process.
+///    Never handed to a pane, whoever is focused — a `/background` picked on
+///    a claude pane is still this one terminal's background.
+/// 2. **Agent**, and applied by cosh itself: `/worktree`, the pane's cwd
+///    binding. Consumed here for ANY pane kind — the MANAGER included, since
+///    a bound cosh pane runs its turns in the checkout exactly like a bound
+///    ACP pane.
+/// 3. **Agent**, on a MANAGER pane: the manager's agent IS the main loop, so
+///    its `/models`, `/compact`, … are the App's own handlers (they write the
+///    very `llm_config` that loop reads).
+/// 4. **Agent**, on an ACP pane: a mapped group with a config target
+///    (models / provider / mode) opens the standardized box bound to the
+///    pane's own ACP config option; everything else (compact, review, custom
+///    harness commands …) is sent to the pane VERBATIM as its next prompt
+///    (`/name`) and the harness interprets its own command.
 ///
-/// Unfocused, an unrecognized command on the manager pane, or no live
-/// split: `false` — the command falls through to the cosh command set.
+/// Unfocused, or no live split: `false` — the App handles the command, which
+/// for an Agent-scoped one means the main agent, the only agent that exists
+/// in that situation.
 pub(super) fn route_agent_slash_command(
     app: &mut App,
     cmd: &crate::ui::slash_menu::SlashCommand,
 ) -> bool {
+    use crate::ui::slash_menu::{CommandScope, command_scope};
     let Some(split) = app.agents_split.as_ref() else {
         return false;
     };
@@ -101,17 +111,23 @@ pub(super) fn route_agent_slash_command(
     let Some(pane) = split.panes.get(focused) else {
         return false;
     };
+    // 1. Global: one instance per process — always the App's.
+    if command_scope(&cmd.name) == CommandScope::Global {
+        return false;
+    }
     if cmd.name == "worktree" {
-        // cosh's own git-style command: intercepted BEFORE the manager guard
-        // and the passthrough (the worktree binding is cosh-side, never the
-        // agent's own) — its row is listed in EVERY pane's menu, so a pick
-        // here must always be consumed, refusals included. The typed
-        // argument tail rides the prompt — read it here, then apply.
+        // 2. cosh's own git-style command: intercepted BEFORE the manager
+        // guard and the passthrough (the worktree binding is cosh-side,
+        // never the agent's own) — its row is listed in EVERY pane's menu,
+        // so a pick here must always be consumed, refusals included. The
+        // typed argument tail rides the prompt — read it here, then apply.
         let tail =
             crate::ui::slash_menu::SlashMenu::command_arg_tail(&app.prompt_view.input, &cmd.name);
         apply_worktree_command(app, tail.as_deref());
         return true;
     }
+    // 3. The manager pane's agent is this app's own loop: the App's handlers
+    // ARE its handlers, so nothing is passed to it as prose.
     if pane.agent == MANAGER_LABEL {
         return false;
     }
@@ -201,11 +217,11 @@ fn assign_focused_pane_worktree(app: &mut App, path: Option<&str>, branch: &str)
     let Some((pane_index, split)) = focused_agent_pane_mut(app) else {
         return;
     };
-    match cosh_tools::worktree::create(
+    match cosh::git::worktree::create(
         &repo,
         branch,
         explicit.as_deref(),
-        cosh_tools::worktree::AssignedBy::User,
+        cosh::git::worktree::AssignedBy::User,
     ) {
         Ok(worktree) => {
             let pane = &mut split.panes[pane_index];
@@ -267,11 +283,11 @@ impl App {
         let Some((pane_index, split)) = focused_agent_pane_at_mut(self, pane_index) else {
             return Err("the target pane is not addressable anymore".to_string());
         };
-        let outcome = match cosh_tools::worktree::create(
+        let outcome = match cosh::git::worktree::create(
             &repo,
             branch,
             None,
-            cosh_tools::worktree::AssignedBy::Agent,
+            cosh::git::worktree::AssignedBy::Agent,
         ) {
             Ok(worktree) => {
                 let agent_label = split.panes[pane_index].agent.clone();
@@ -378,17 +394,17 @@ impl App {
 
 /// The split + pane index for an AGENT-driven worktree change, resolved
 /// from the LIVE split only (an agent cannot reach a parked pane — it has
-/// no focus). Out-of-range panes and the manager pane are refused: binding
-/// the coordinator is the USER's call only (`/worktree` works on a cosh
-/// pane — see `focused_agent_pane_mut` — while `agents_worktree` never
-/// targets one; `enqueue_worktree_op` refuses it at the tool layer, so this
-/// is the second net, not the contract).
+/// no focus). Every pane kind is addressable here, the MANAGER included: a
+/// cosh pane runs a real agent session whose assembly takes the same
+/// per-pane cwd an ACP pane's does (`pane_effective_cwd`), so isolating it
+/// is honored rather than cosmetic. What keeps the user in charge is
+/// elsewhere and unchanged: `with_own_pane_id` strips `agents_worktree`
+/// from every pane loop (a pane never rebinds itself or a peer), and a
+/// User-assigned binding always goes through the confirmation box. Only an
+/// out-of-range index is refused.
 fn focused_agent_pane_at_mut(app: &mut App, pane: usize) -> Option<(usize, &mut AgentsSplitState)> {
     let split = app.agents_split.as_mut()?;
-    let p = split.panes.get_mut(pane)?;
-    if p.agent == MANAGER_LABEL {
-        return None;
-    }
+    split.panes.get_mut(pane)?;
     Some((pane, split))
 }
 
@@ -1332,7 +1348,7 @@ impl App {
                 let needs_confirmation = split.panes[index]
                     .worktree
                     .as_ref()
-                    .is_some_and(|w| w.assigned_by == cosh_tools::worktree::AssignedBy::User);
+                    .is_some_and(|w| w.assigned_by == cosh::git::worktree::AssignedBy::User);
                 Some((index, needs_confirmation))
             });
         let Some((pane_index, needs_confirmation)) = resolved else {

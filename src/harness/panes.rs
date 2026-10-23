@@ -684,15 +684,23 @@ pub fn delivery_note(delivery: &PaneDelivery) -> String {
 /// the user's confirmation, and a tool result cannot sit across frames —
 /// the receipt is the tool's instant answer, the delivery is the truth).
 ///
+/// The TARGET rule is uniform: every pane in the set is addressable, the
+/// cosh (`is_manager`) ones included — a cosh pane runs a real agent session
+/// with its own cwd, so isolating one is a legitimate ask exactly like
+/// isolating a `claude` pane, and it is the supremacy check (a
+/// User-assigned binding always opens the user's confirmation box) plus the
+/// pane-stripping (`with_own_pane_id` removes this tool from every pane
+/// loop) that keep the user in charge. The old blanket refusal of cosh panes
+/// made `/worktree` the ONLY way to isolate them, which is exactly the
+/// asymmetry that read as "the command is missing for cosh panes".
+///
 /// # Errors
 ///
 /// An unknown pane id (the model guessed a name that is not bound — the
-/// error names the known ids so the model can correct itself), a MANAGER
-/// pane target (a cosh pane is the session's own coordinator: rebinding it
-/// stays the USER's call through `/worktree`, never an agent's ask), an
-/// `Assign` without a usable `name`, or a `name` the worktree engine would
-/// refuse at its git argument (leading dash, whitespace, control
-/// characters) — refused HERE so nothing parks.
+/// error names the known ids so the model can correct itself), an `Assign`
+/// without a usable `name`, or a `name` the worktree engine would refuse at
+/// its git argument (leading dash, whitespace, control characters) —
+/// refused HERE so nothing parks.
 pub fn enqueue_worktree_op(
     pane: &str,
     action: WorktreeAction,
@@ -701,18 +709,10 @@ pub fn enqueue_worktree_op(
 ) -> Result<String, String> {
     let mut state = registry().lock().unwrap_or_else(|p| p.into_inner());
     let known: Vec<String> = state.panes.iter().map(|p| p.id.clone()).collect();
-    let Some(target) = state.panes.iter().find(|p| p.id == pane) else {
+    if !state.panes.iter().any(|p| p.id == pane) {
         return Err(format!(
             "no pane '{pane}' in this session's /agents split; known panes: {known:?}"
         ));
-    };
-    if target.is_manager {
-        return Err(
-            "`agents_worktree` cannot bind a cosh pane: the manager IS this session's own \
-             coordinator, and rebinding it is the USER's call — ask them to run \
-             `/worktree add <branch>` (or `/worktree exit`) on that pane."
-                .to_string(),
-        );
     }
     let name = name.map(str::trim).filter(|n| !n.is_empty());
     if action == WorktreeAction::Assign {
@@ -951,20 +951,17 @@ pub fn agents_call_tool() -> super::core::HarnessTool {
 }
 
 /// The `agents_worktree` harness tool, built against the CURRENT pane set:
-/// the same addressable ids `agents_call` speaks, minus the manager pane
-/// (the TOOL never targets a cosh pane — rebinding it is the USER's call
-/// through `/worktree`, which does work on a cosh pane). Registered ONLY
-/// when panes exist and
-/// stripped from every pane loop by `with_own_pane_id` — the user's
-/// supremacy tooling. worktrees stay opt-in (the agent asks, the user can
-/// always veto a User-assigned pane's rebinding).
+/// the same addressable ids `agents_call` speaks, the cosh (`is_manager`)
+/// panes INCLUDED — a cosh pane runs a real agent session with its own cwd,
+/// so the agent may ask to isolate it exactly like any other pane, and the
+/// user keeps the final word through the confirmation box a User-assigned
+/// binding always opens. Registered ONLY when panes exist and
+/// stripped from every pane loop by `with_own_pane_id` — so a pane can
+/// never rebind itself or a peer. Worktrees stay opt-in (the agent asks, the
+/// user can always veto a User-assigned pane's rebinding).
 #[must_use]
 pub fn agents_worktree_tool() -> super::core::HarnessTool {
-    let ids: Vec<String> = list_panes()
-        .iter()
-        .filter(|p| !p.is_manager)
-        .map(|p| p.id.clone())
-        .collect();
+    let ids: Vec<String> = list_panes().iter().map(|p| p.id.clone()).collect();
     let pane_list = ids.join(", ");
     let enum_values: Vec<serde_json::Value> = ids
         .iter()
@@ -1207,7 +1204,7 @@ mod tests {
     }
 
     #[test]
-    fn worktree_op_validation_refuses_unknown_manager_and_bad_names() {
+    fn worktree_op_validation_refuses_unknown_and_bad_names() {
         let _g = lock();
         set_panes(vec![
             pane("cosh", "cosh", true),
@@ -1216,10 +1213,16 @@ mod tests {
         // Unknown pane: the error names the known ids.
         let err = enqueue_worktree_op("ghost", WorktreeAction::Clear, None, MAIN).unwrap_err();
         assert!(err.contains("ghost") && err.contains("claude"), "{err}");
-        // The manager pane is not an agent address: `agents_worktree` never
-        // targets a cosh pane (the user binds it via `/worktree` instead).
-        let err = enqueue_worktree_op("cosh", WorktreeAction::Assign, Some("x"), MAIN).unwrap_err();
-        assert!(err.contains("cosh"), "{err}");
+        // A cosh (manager) pane IS an address: the tool covers every pane kind
+        // now — isolating one is the same ask as isolating a `claude` pane,
+        // and the User-assigned confirmation box is what protects the user's
+        // own binding. The ask parks.
+        let id = enqueue_worktree_op("cosh", WorktreeAction::Assign, Some("cosh-iso"), MAIN)
+            .expect("a cosh pane is addressable");
+        assert_eq!(peek_worktree_op().expect("parked").id, id);
+        // Drain it so the later "refusals park nothing" assertion is about
+        // refusals only.
+        pop_worktree_op();
         // Assign without a name: refused, nothing parked.
         assert!(enqueue_worktree_op("claude", WorktreeAction::Assign, None, MAIN).is_err());
         assert!(peek_worktree_op().is_none());

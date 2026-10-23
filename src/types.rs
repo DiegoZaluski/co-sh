@@ -24,7 +24,7 @@ pub enum AgentPaneRef {
         /// `skip_serializing_if` keeps un-worktree'd panes byte-identical with
         /// pre-feature writes.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        worktree: Option<cosh_tools::worktree::PaneWorktree>,
+        worktree: Option<crate::git::worktree::PaneWorktree>,
     },
 }
 
@@ -51,7 +51,7 @@ impl AgentPaneRef {
     /// fresh pane and for a bound pane written before worktrees existed
     /// (the `#[serde(default)]` field loads as `None` there).
     #[must_use]
-    pub fn worktree(&self) -> Option<&cosh_tools::worktree::PaneWorktree> {
+    pub fn worktree(&self) -> Option<&crate::git::worktree::PaneWorktree> {
         match self {
             Self::Name(_) => None,
             Self::Bound { worktree, .. } => worktree.as_ref(),
@@ -687,11 +687,11 @@ mod tests {
         let pinned = AgentPaneRef::Bound {
             agent: "claude".to_string(),
             session_id: "sess-42".to_string(),
-            worktree: Some(cosh_tools::worktree::PaneWorktree {
+            worktree: Some(crate::git::worktree::PaneWorktree {
                 path: "/tmp/cosh-worktrees/fix-issue".into(),
                 branch: "fix-issue".to_string(),
                 name: "fix-issue".to_string(),
-                assigned_by: cosh_tools::worktree::AssignedBy::User,
+                assigned_by: crate::git::worktree::AssignedBy::User,
             }),
         };
         let json = serde_json::to_string(&pinned).expect("serialize");

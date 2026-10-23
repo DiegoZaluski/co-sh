@@ -46,6 +46,98 @@ pub struct SlashCommand {
     pub desc: String,
 }
 
+/// Which TARGET a slash command acts on. This is the routing contract: a
+/// [`CommandScope::Global`] command is executed by the App for the whole app
+/// and is never handed to a focused `/agents` pane; a
+/// [`CommandScope::Agent`] command belongs to the agent that would receive it
+/// — the focused pane when the split has one, the main loop otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandScope {
+    /// App/TUI state: appearance, preferences, the session list, dialogs.
+    /// There is exactly ONE of each in the process, so a per-pane version
+    /// would be overengineering — `/background` per pane would mean six
+    /// terminal backgrounds for one terminal.
+    Global,
+    /// The agent itself: its model, its toolset, its context, its
+    /// transcript, its working directory. These legitimately have a per-pane
+    /// meaning, because every pane runs an independent agent session.
+    Agent,
+}
+
+/// The command inventory: every cosh slash command, its [`CommandScope`] and
+/// what it actually mutates. This table IS the answer to "is this command
+/// global or per-agent?" — kept in ONE place so a new command must declare a
+/// side instead of inheriting a leaky default, and `run_slash_command` routes
+/// by it rather than by the menu's incidental source.
+///
+/// | command      | scope  | target                                          |
+/// |--------------|--------|-------------------------------------------------|
+/// | `models`     | Agent  | the agent's model / reasoning                   |
+/// | `compact`    | Agent  | the agent's context                             |
+/// | `toolcall`   | Agent  | the agent's tool-call delivery mode             |
+/// | `tools`      | Agent  | the agent's internal tool set                   |
+/// | `export`     | Agent  | the agent's transcript                          |
+/// | `worktree`   | Agent  | the pane's cwd binding (`AgentPane.worktree`)   |
+/// | `agents`     | Global | the split itself (one split per session)        |
+/// | `router`     | Global | `router_view` fallbacks                         |
+/// | `providers`  | Global | `setup` provider list                           |
+/// | `settings`   | Global | `setup` (app configuration)                     |
+/// | `themes`     | Global | `setup.appearance` theme                        |
+/// | `background` | Global | `setup.appearance` terminal background          |
+/// | `bell`       | Global | `setup.appearance.bell_enabled`                 |
+/// | `anim`       | Global | `setup.appearance.anim_enabled`                 |
+/// | `spinner`    | Global | `setup.appearance.spinner`                      |
+/// | `new`        | Global | the session list                                |
+/// | `rename`     | Global | the session's name                              |
+/// | `undo`       | Global | the last revert                                 |
+pub const COMMAND_INVENTORY: &[(&str, CommandScope)] = &[
+    ("models", CommandScope::Agent),
+    ("compact", CommandScope::Agent),
+    ("toolcall", CommandScope::Agent),
+    ("tools", CommandScope::Agent),
+    ("export", CommandScope::Agent),
+    ("worktree", CommandScope::Agent),
+    ("agents", CommandScope::Global),
+    ("router", CommandScope::Global),
+    ("providers", CommandScope::Global),
+    ("settings", CommandScope::Global),
+    ("themes", CommandScope::Global),
+    ("background", CommandScope::Global),
+    ("bell", CommandScope::Global),
+    ("anim", CommandScope::Global),
+    ("spinner", CommandScope::Global),
+    ("new", CommandScope::Global),
+    ("rename", CommandScope::Global),
+    ("undo", CommandScope::Global),
+];
+
+/// The [`CommandScope`] of `name`. A name absent from [`COMMAND_INVENTORY`]
+/// is an AGENT's own published command (that agent's harness interprets it),
+/// never a cosh-owned global action — so an unknown command can never steal
+/// app-wide state. The guard test
+/// `every_cosh_command_declares_its_scope` keeps both lists in lockstep.
+#[must_use]
+pub fn command_scope(name: &str) -> CommandScope {
+    COMMAND_INVENTORY
+        .iter()
+        .find(|(command, _)| *command == name)
+        .map(|(_, scope)| *scope)
+        .unwrap_or(CommandScope::Agent)
+}
+
+/// The synthesized `/worktree` slash entry — a COSH-side command (the
+/// worktree is a pane binding, never the agent's own command), listed in
+/// EVERY pane kind's menu including the manager's, and applied by
+/// `apply_worktree_command` on ANY focused pane: a bound cosh pane runs its
+/// turns in the worktree cwd exactly like a bound ACP pane.
+#[must_use]
+pub fn worktree_command_entry() -> SlashCommand {
+    SlashCommand {
+        name: "worktree".into(),
+        desc: "Isolate this pane in a git worktree (add <branch>|<path> <branch>, exit)".into(),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlashMenuMouseAction {
     None,
@@ -175,6 +267,20 @@ impl SlashMenu {
                 desc: "Undo last revert".into(),
             },
         ]
+    }
+
+    /// Every cosh-owned command name (the menu's own vocabulary, without the
+    /// synthesized per-pane entries). The scope inventory is checked against
+    /// this, and the router refuses a command missing from
+    /// [`COMMAND_INVENTORY`] as "not cosh's" — so this is the single list a
+    /// new command must be added to twice (here and in the inventory), which
+    /// the guard test enforces.
+    #[must_use]
+    pub fn cosh_command_names() -> Vec<String> {
+        Self::cosh_commands()
+            .into_iter()
+            .map(|command| command.name)
+            .collect()
     }
 
     /// Swap the command source to an agent's own list (the pane's cached
@@ -547,6 +653,83 @@ impl SlashMenu {
 mod tests {
     use super::*;
     use crate::theme::ThemeRegistry;
+
+    /// The scope inventory is the routing contract, so it must be COMPLETE:
+    /// every command the cosh menu offers declares a scope, and the
+    /// inventory declares no command the menu does not offer (a stale row
+    /// would silently classify a future command by an old name).
+    #[test]
+    fn every_cosh_command_declares_its_scope() {
+        let mut menu_names = SlashMenu::cosh_command_names();
+        // `/worktree` is a cosh-owned command that lives OUTSIDE the base
+        // list: the pane sources synthesize it (`worktree_command_entry`)
+        // because only a pane can be isolated. It is still cosh's, so it
+        // declares a scope like any other.
+        menu_names.push(worktree_command_entry().name);
+        let inventory_names: Vec<&str> =
+            COMMAND_INVENTORY.iter().map(|(name, _)| *name).collect();
+        for name in &menu_names {
+            assert!(
+                inventory_names.contains(&name.as_str()),
+                "`/{name}` is in the cosh menu but declares no scope in COMMAND_INVENTORY"
+            );
+        }
+        for name in &inventory_names {
+            assert!(
+                menu_names.iter().any(|menu| menu == name),
+                "COMMAND_INVENTORY declares `/{name}` which the cosh menu does not offer"
+            );
+        }
+        assert_eq!(
+            menu_names.len(),
+            inventory_names.len(),
+            "no duplicate scope rows: {inventory_names:?}"
+        );
+    }
+
+    /// The classification the product rules pin down: the TUI's own controls
+    /// are Global (a per-pane `/background` would mean one terminal with six
+    /// backgrounds — overengineering), while anything that customizes the
+    /// AGENT is Agent-scoped (each pane runs an independent agent session).
+    #[test]
+    fn the_scope_split_matches_the_product_rule() {
+        for global in [
+            "background",
+            "bell",
+            "anim",
+            "settings",
+            "themes",
+            "spinner",
+            "router",
+            "providers",
+            "agents",
+            "new",
+            "rename",
+            "undo",
+        ] {
+            assert_eq!(
+                command_scope(global),
+                CommandScope::Global,
+                "`/{global}` is app/TUI state — exactly one per process"
+            );
+        }
+        for agent in [
+            "models",
+            "compact",
+            "toolcall",
+            "tools",
+            "export",
+            "worktree",
+        ] {
+            assert_eq!(
+                command_scope(agent),
+                CommandScope::Agent,
+                "`/{agent}` customizes the agent, and every pane is its own agent"
+            );
+        }
+        // An agent's own published command is never a cosh global action.
+        assert_eq!(command_scope("some_harness_command"), CommandScope::Agent);
+    }
 
     fn mouse(event_type: MouseEventType, x: u16, y: u16) -> MouseEvent {
         MouseEvent::new(

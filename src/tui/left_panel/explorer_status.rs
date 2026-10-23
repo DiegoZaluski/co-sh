@@ -11,7 +11,7 @@
 //!   server, it only shows what servers have already published.
 //! * **Git status** — one `git status --porcelain=v1 -z` call per second in a
 //!   background thread. The project's git utilities read branch state
-//!   directly from `.git` (see [`crate::util::git`]), but porcelain status
+//!   directly from `.git` (see [`cosh::git::branch`]), but porcelain status
 //!   cannot be reproduced that way without reimplementing git; shelling out
 //!   is what VS Code and Zed do. Missing `git` binary / non-repo simply means
 //!   no git colors — never an error surface.
