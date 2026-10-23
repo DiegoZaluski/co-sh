@@ -688,10 +688,11 @@ pub fn delivery_note(delivery: &PaneDelivery) -> String {
 ///
 /// An unknown pane id (the model guessed a name that is not bound — the
 /// error names the known ids so the model can correct itself), a MANAGER
-/// pane target (a cosh pane never rebinds — the same rule the user's
-/// `/worktree` command applies), an `Assign` without a usable `name`, or
-/// a `name` the worktree engine would refuse at its git argument (leading
-/// dash, whitespace, control characters) — refused HERE so nothing parks.
+/// pane target (a cosh pane is the session's own coordinator: rebinding it
+/// stays the USER's call through `/worktree`, never an agent's ask), an
+/// `Assign` without a usable `name`, or a `name` the worktree engine would
+/// refuse at its git argument (leading dash, whitespace, control
+/// characters) — refused HERE so nothing parks.
 pub fn enqueue_worktree_op(
     pane: &str,
     action: WorktreeAction,
@@ -708,8 +709,8 @@ pub fn enqueue_worktree_op(
     if target.is_manager {
         return Err(
             "`agents_worktree` cannot bind a cosh pane: the manager IS this session's own \
-             coordinator and stays on the session's working directory (the same rule the \
-             user's /worktree command applies)."
+             coordinator, and rebinding it is the USER's call — ask them to run \
+             `/worktree add <branch>` (or `/worktree exit`) on that pane."
                 .to_string(),
         );
     }
@@ -951,7 +952,9 @@ pub fn agents_call_tool() -> super::core::HarnessTool {
 
 /// The `agents_worktree` harness tool, built against the CURRENT pane set:
 /// the same addressable ids `agents_call` speaks, minus the manager pane
-/// (a cosh pane never rebinds). Registered ONLY when panes exist and
+/// (the TOOL never targets a cosh pane — rebinding it is the USER's call
+/// through `/worktree`, which does work on a cosh pane). Registered ONLY
+/// when panes exist and
 /// stripped from every pane loop by `with_own_pane_id` — the user's
 /// supremacy tooling. worktrees stay opt-in (the agent asks, the user can
 /// always veto a User-assigned pane's rebinding).
@@ -1213,7 +1216,8 @@ mod tests {
         // Unknown pane: the error names the known ids.
         let err = enqueue_worktree_op("ghost", WorktreeAction::Clear, None, MAIN).unwrap_err();
         assert!(err.contains("ghost") && err.contains("claude"), "{err}");
-        // The manager pane never rebinds (the user's /worktree rule).
+        // The manager pane is not an agent address: `agents_worktree` never
+        // targets a cosh pane (the user binds it via `/worktree` instead).
         let err = enqueue_worktree_op("cosh", WorktreeAction::Assign, Some("x"), MAIN).unwrap_err();
         assert!(err.contains("cosh"), "{err}");
         // Assign without a name: refused, nothing parked.

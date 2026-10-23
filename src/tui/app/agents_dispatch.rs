@@ -23,7 +23,7 @@ use cosh::harness::events::HarnessEvent;
 use cosh_tools::subagent::events::{SubagentEvent, ToolCallStatus, ToolOutputBlock};
 
 use super::App;
-use crate::routes::session::agents_split::{AgentsSplitState, MANAGER_LABEL};
+use crate::routes::session::agents_split::{AgentPane, AgentsSplitState, MANAGER_LABEL};
 use crate::ui::toast::{ToastOptions, ToastVariant};
 use crossterm::event::KeyCode;
 
@@ -81,8 +81,13 @@ fn slash_lists_equal(
 ///   to the pane VERBATIM as its next prompt (`/name`) — the harness
 ///   interprets its own command; no per-agent maintenance.
 ///
-/// Unfocused, the manager pane focused, or no live split: `false` — the
-/// command falls through to the cosh command set.
+/// `/worktree` is intercepted HERE for every pane kind (its menu row is
+/// synthesized in each pane's list, the manager's included) and applied
+/// alike: the manager pane is a pane like any other, so a bound cosh pane
+/// runs its turns in the worktree cwd exactly like a bound ACP pane.
+///
+/// Unfocused, an unrecognized command on the manager pane, or no live
+/// split: `false` — the command falls through to the cosh command set.
 pub(super) fn route_agent_slash_command(
     app: &mut App,
     cmd: &crate::ui::slash_menu::SlashCommand,
@@ -96,6 +101,17 @@ pub(super) fn route_agent_slash_command(
     let Some(pane) = split.panes.get(focused) else {
         return false;
     };
+    if cmd.name == "worktree" {
+        // cosh's own git-style command: intercepted BEFORE the manager guard
+        // and the passthrough (the worktree binding is cosh-side, never the
+        // agent's own) — its row is listed in EVERY pane's menu, so a pick
+        // here must always be consumed, refusals included. The typed
+        // argument tail rides the prompt — read it here, then apply.
+        let tail =
+            crate::ui::slash_menu::SlashMenu::command_arg_tail(&app.prompt_view.input, &cmd.name);
+        apply_worktree_command(app, tail.as_deref());
+        return true;
+    }
     if pane.agent == MANAGER_LABEL {
         return false;
     }
@@ -103,15 +119,6 @@ pub(super) fn route_agent_slash_command(
         crate::routes::session::agent_command_map::resolve(&cmd.name).and_then(|group| group.target)
     {
         app.open_agent_config_dialog(target);
-        return true;
-    }
-    if cmd.name == "worktree" {
-        // cosh's own git-style command: intercepted BEFORE the passthrough
-        // (the worktree binding is cosh-side, never the agent's own). The
-        // typed argument tail rides the prompt — read it here, then apply.
-        let tail =
-            crate::ui::slash_menu::SlashMenu::command_arg_tail(&app.prompt_view.input, &cmd.name);
-        apply_worktree_command(app, tail.as_deref());
         return true;
     }
     // Direct passthrough: the command goes to the pane as its prompt.
@@ -132,9 +139,13 @@ pub(super) fn route_agent_slash_command(
 ///   only the pane's cwd binding is dropped).
 ///
 /// Anything else (no args, unknown subcommand) is refused with a usage
-/// toast. The applied binding re-syncs the registry (the worktree name
-/// reaches the main agent's pane listing) and persists through the
-/// session metadata write-back.
+/// toast. The MANAGER pane is a pane like any other here: cosh's own agent
+/// loop resolves its cwd from the SAME per-pane binding an ACP pane uses
+/// (`dispatch_to_pane` → `HarnessAssembly::cwd`), so binding it really does
+/// move the turns into the checkout. The applied binding re-syncs the
+/// registry (the worktree name reaches the main agent's pane listing) and
+/// persists through the session metadata write-back. A SUCCESS is silent:
+/// the pane's badge and the outcome text carry it, only refusals toast.
 pub(super) fn apply_worktree_command(app: &mut App, tail: Option<&str>) {
     let Some(args) = tail else {
         worktree_usage_toast(app);
@@ -190,46 +201,28 @@ fn assign_focused_pane_worktree(app: &mut App, path: Option<&str>, branch: &str)
     let Some((pane_index, split)) = focused_agent_pane_mut(app) else {
         return;
     };
-    let (ok, message, worktree) = match cosh_tools::worktree::create(
+    match cosh_tools::worktree::create(
         &repo,
         branch,
         explicit.as_deref(),
         cosh_tools::worktree::AssignedBy::User,
     ) {
         Ok(worktree) => {
-            let agent_label = split.panes[pane_index].agent.clone();
-            (
-                true,
-                format!(
-                    "Pane isolated: {} now works in {} (branch {}).",
-                    agent_label,
-                    worktree.path.display(),
-                    worktree.branch
-                ),
-                Some(worktree),
-            )
+            let pane = &mut split.panes[pane_index];
+            pane.worktree = Some(worktree);
+            pane.worktree_handoff_pending = true;
+            app.sync_agents_pane_registry();
+            persist_worktree_change(app);
         }
-        Err(error) => (false, format!("{error}"), None),
-    };
-    if let Some(worktree) = worktree {
-        let pane = &mut split.panes[pane_index];
-        pane.worktree = Some(worktree);
-        pane.worktree_handoff_pending = true;
+        // Only the REFUSAL speaks: a success is evident from the pane's
+        // badge and from the absence of an error toast.
+        Err(error) => app.toast_state.show(ToastOptions {
+            title: Some("Worktree".into()),
+            message: format!("{error}"),
+            variant: ToastVariant::Error,
+            duration_ms: 8000,
+        }),
     }
-    if ok {
-        app.sync_agents_pane_registry();
-        persist_worktree_change(app);
-    }
-    app.toast_state.show(ToastOptions {
-        title: Some("Worktree".into()),
-        message,
-        variant: if ok {
-            ToastVariant::Success
-        } else {
-            ToastVariant::Error
-        },
-        duration_ms: 8000,
-    });
 }
 
 /// Drop the focused pane's worktree binding (`/worktree exit`): the pane
@@ -246,16 +239,15 @@ fn clear_focused_pane_worktree(app: &mut App) {
     pane.worktree_handoff_pending = was_pinned;
     app.sync_agents_pane_registry();
     persist_worktree_change(app);
-    app.toast_state.show(ToastOptions {
-        title: Some("Worktree".into()),
-        message: if was_pinned {
-            "Pane exited the worktree — back in the session's working directory (the worktree and branch were kept).".into()
-        } else {
-            "This pane is not in a worktree.".into()
-        },
-        variant: ToastVariant::Info,
-        duration_ms: 6000,
-    });
+    if !was_pinned {
+        // The only thing worth saying: the command did nothing, and why.
+        app.toast_state.show(ToastOptions {
+            title: Some("Worktree".into()),
+            message: "This pane is not in a worktree.".into(),
+            variant: ToastVariant::Warning,
+            duration_ms: 6000,
+        });
+    }
 }
 
 impl App {
@@ -298,18 +290,16 @@ impl App {
         if outcome.is_ok() {
             self.sync_agents_pane_registry();
             persist_worktree_change(self);
+        } else if let Err(error) = &outcome {
+            // Only the REFUSAL speaks (same rule as the user's command): the
+            // outcome text itself is the delivery the asking loop receives.
+            self.toast_state.show(ToastOptions {
+                title: Some("Worktree".into()),
+                message: error.clone(),
+                variant: ToastVariant::Error,
+                duration_ms: 8000,
+            });
         }
-        // Mirror the user command's toast: every worktree event surfaces.
-        let (variant, message) = match &outcome {
-            Ok(message) => (ToastVariant::Success, message.clone()),
-            Err(error) => (ToastVariant::Error, error.clone()),
-        };
-        self.toast_state.show(ToastOptions {
-            title: Some("Worktree".into()),
-            message,
-            variant,
-            duration_ms: 8000,
-        });
         outcome
     }
 
@@ -327,16 +317,15 @@ impl App {
         pane.worktree_handoff_pending = was_pinned;
         self.sync_agents_pane_registry();
         persist_worktree_change(self);
-        self.toast_state.show(ToastOptions {
-            title: Some("Worktree".into()),
-            message: if was_pinned {
-                "Pane exited the worktree — back in the session's working directory (the worktree and branch were kept).".into()
-            } else {
-                "This pane is not in a worktree.".into()
-            },
-            variant: ToastVariant::Info,
-            duration_ms: 6000,
-        });
+        if !was_pinned {
+            // A no-op clear is the only case worth a toast.
+            self.toast_state.show(ToastOptions {
+                title: Some("Worktree".into()),
+                message: "This pane is not in a worktree.".into(),
+                variant: ToastVariant::Warning,
+                duration_ms: 6000,
+            });
+        }
         if was_pinned {
             Ok("binding cleared — the pane works in the session's working directory again; the worktree and its branch were kept on disk".to_string())
         } else {
@@ -389,8 +378,11 @@ impl App {
 
 /// The split + pane index for an AGENT-driven worktree change, resolved
 /// from the LIVE split only (an agent cannot reach a parked pane — it has
-/// no focus) and validated like `focused_agent_pane_mut`: out-of-range and
-/// the manager pane are refused (cosh itself has no worktree binding).
+/// no focus). Out-of-range panes and the manager pane are refused: binding
+/// the coordinator is the USER's call only (`/worktree` works on a cosh
+/// pane — see `focused_agent_pane_mut` — while `agents_worktree` never
+/// targets one; `enqueue_worktree_op` refuses it at the tool layer, so this
+/// is the second net, not the contract).
 fn focused_agent_pane_at_mut(app: &mut App, pane: usize) -> Option<(usize, &mut AgentsSplitState)> {
     let split = app.agents_split.as_mut()?;
     let p = split.panes.get_mut(pane)?;
@@ -424,15 +416,14 @@ fn persist_worktree_change(app: &mut App) {
 
 /// The LIVE split's focused pane for mutation — the worktree command is a
 /// LIVE-pane command (a parked split cannot take focus, so nothing else
-/// can reach it). `None` when no pane is focused or the focus is the
-/// manager pane (cosh itself has no worktree binding).
+/// can reach it). `None` when no pane is focused. The MANAGER pane is a
+/// valid target: its turns run cosh's own loop, whose assembly takes the
+/// SAME per-pane cwd an ACP pane's does (`dispatch_to_pane`), so a binding
+/// on it is honored rather than cosmetic.
 fn focused_agent_pane_mut(app: &mut App) -> Option<(usize, &mut AgentsSplitState)> {
     let split = app.agents_split.as_mut()?;
     let focused = split.focused?;
-    let pane = split.panes.get(focused)?;
-    if pane.agent == MANAGER_LABEL {
-        return None;
-    }
+    split.panes.get(focused)?;
     Some((focused, split))
 }
 
@@ -458,12 +449,8 @@ pub(super) fn ensure_pane_snapshot(app: &mut App, pane: usize) {
     }
     // The probe observes the pane's EFFECTIVE cwd (worktree when pinned):
     // commands/config options are per-connection, per-cwd state — the
-    // same resolution the turn dispatch applies.
-    let pane_probe_cwd = p
-        .worktree
-        .as_ref()
-        .map(|w| w.path.clone())
-        .unwrap_or_else(|| PathBuf::from(&app.state.working_directory));
+    // same resolution the turn dispatch applies (`pane_effective_cwd`).
+    let pane_probe_cwd = pane_effective_cwd(p, &app.state.working_directory);
     let agent = p.agent.clone();
     let session_id = p.session_id.clone();
     let pane_id = p.id;
@@ -827,12 +814,11 @@ impl App {
                         // the pane is pinned (`/worktree`), the session's
                         // working directory otherwise. Every layer of the
                         // isolation model rides THIS single resolution —
-                        // the ACP session cwd and the fs sandbox root both
+                        // the ACP session cwd, the MANAGER turn's
+                        // `HarnessAssembly::cwd` (harness root, CoshTools
+                        // root, LSP, hooks) and the fs sandbox root all
                         // derive from it inside the turn.
-                        p.worktree
-                            .as_ref()
-                            .map(|w| w.path.clone())
-                            .unwrap_or_else(|| PathBuf::from(&self.state.working_directory)),
+                        pane_effective_cwd(p, &self.state.working_directory),
                         // The handoff summary, built NOW from the pane's
                         // local timeline: when the pane's cwd moved since
                         // its last turn, the next prompt carries this block
@@ -951,10 +937,11 @@ impl App {
         let self_tool_call_mode = self.llm_config.tool_call_mode;
         let self_base_urls = local_base_urls.clone();
         // The pane's effective cwd (worktree path when pinned), resolved in
-        // the snapshot above — NOT the session's working directory: the
-        // manager pane keeps the session cwd (it has no worktree binding,
-        // `focused_agent_pane_mut` refuses it) while an isolated ACP pane
-        // works inside its own checkout.
+        // the snapshot above — NOT the session's working directory. The
+        // manager pane rides the SAME resolution as an ACP pane: its
+        // binding feeds the assembly's `cwd` below (harness root, `CoshTools`
+        // root, LSP, hooks), so `/worktree add` on a cosh pane really moves
+        // its turns into the checkout.
         let cwd_string = pane_cwd.to_string_lossy().into_owned();
         let anthropic_ttl_1h = self.setup.anthropic_cache_ttl_1h();
         let openai_cache_retention = self.setup.openai_cache_retention().map(String::from);
@@ -1027,7 +1014,22 @@ impl App {
                 return;
             };
             let context = self.session_store.load_context(&cosh_session);
-            let input = msg;
+            // The cwd may have MOVED under this pane (`/worktree add|exit`
+            // re-flags the handoff): the manager loop carries no prompt-side
+            // preamble layer — its sibling awareness rides the harness's
+            // panes context block — so the handoff block is the ONE thing
+            // prepended here. Without it the first post-move turn would
+            // start in a new checkout with no word about what it was doing.
+            let input = match handoff {
+                Some(summary) => {
+                    format!(
+                        "[workspace moved] Your working directory changed to {} — \
+                         work only inside it. What you were doing, carried over:\n\n{summary}\n\n",
+                        cwd_string
+                    )
+                }
+                None => msg,
+            };
             // The manager runs the user's real mode (the mapped ACP mode
             // above only concerns EXTERNAL agents; this pane needs no
             // mapping — it runs the actual harness). The permission channel
@@ -1546,7 +1548,7 @@ impl App {
         }
         let cwd = either_split(&self.agents_split, &self.parked_agents_split)
             .and_then(|split| split.panes.get(pane))
-            .and_then(|p| p.worktree.as_ref().map(|w| w.path.clone()))
+            .map(|p| pane_effective_cwd(p, &self.state.working_directory))
             .unwrap_or_else(|| PathBuf::from(&self.state.working_directory));
         let epoch = self.agents_pane_epoch;
         let event_tx = self.event_tx.clone();
@@ -1662,6 +1664,21 @@ fn pane_handoff_summary(timeline: &[SubagentTimelineEntry]) -> String {
         .rev()
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// A pane's EFFECTIVE working directory — the ONE resolution every
+/// consumer reads: the worktree path when the pane is pinned (`/worktree`),
+/// the session's working directory otherwise. The ACP turn's
+/// `acp::call(cwd)`, the MANAGER turn's `HarnessAssembly::cwd` (harness
+/// root, `CoshTools` root, LSP, hooks) and the focus-time snapshot probe
+/// all funnel through it, so a binding is either honored by every layer or
+/// by none — the manager pane included (a cosh pane is a pane like any
+/// other here; only the `agents_worktree` TOOL refuses to target one).
+pub(super) fn pane_effective_cwd(pane: &AgentPane, session_cwd: &str) -> PathBuf {
+    pane.worktree
+        .as_ref()
+        .map(|w| w.path.clone())
+        .unwrap_or_else(|| PathBuf::from(session_cwd))
 }
 
 /// Build the pane's turn input from its optional layers, in wire order:

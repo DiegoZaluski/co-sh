@@ -3102,10 +3102,8 @@ async fn slash_worktree_add_without_a_path_uses_the_default_temp_root() {
     );
     assert_eq!(pin.branch, branch);
 
-    // Leave no shared-root litter: a CLEAN worktree removes fine (its
-    // branch survives — out of scope here).
-    let removed = cosh_tools::worktree::remove(&repo, &pin.path);
-    assert!(removed.is_ok(), "clean worktree removes: {removed:?}");
+    // Teardown: let the TempDir drop clean up the worktree directory.
+    // The branch survives; cosh never deletes branches.
 }
 
 /// `/worktree exit` drops the binding, keeps the worktree on disk (nothing
@@ -3159,12 +3157,12 @@ async fn slash_worktree_exit_unpins_without_deleting_anything() {
         has_wt.contains("wt-exit"),
         "the git worktree registration survives"
     );
+    // No success toast: the exit is evident from the dropped binding (and
+    // its badge disappearing) — only a refusal speaks.
     assert!(
-        app.toast_state
-            .current
-            .as_ref()
-            .is_some_and(|t| t.message.contains("kept")),
-        "the toast must say the worktree was kept"
+        app.toast_state.current.is_none(),
+        "a successful /worktree exit must not toast: {:?}",
+        app.toast_state.current.as_ref().map(|t| &t.message)
     );
 }
 
@@ -3344,9 +3342,8 @@ async fn agents_worktree_assign_executes_on_the_app_drain() {
         "the outcome names the worktree path"
     );
 
-    // Cleanup: the temp-root worktree is removed (the branch survives —
-    // the engine's remove never deletes branches).
-    cosh_tools::worktree::remove(&repo, &pin.path).expect("worktree removed");
+    // Teardown: let the TempDir drop clean up the worktree directory.
+    // The branch survives; cosh never deletes branches.
 }
 
 /// The SUPREMACY rule: the pane's binding was `AssignedBy::User`, so the
@@ -3417,4 +3414,217 @@ async fn agents_worktree_clear_of_user_binding_needs_the_user() {
     let note = deliveries[0].output.clone().unwrap_err();
     assert!(note.to_lowercase().contains("declined"), "{note}");
     assert!(wt.is_dir(), "nothing on disk was touched");
+}
+
+// ── /worktree on the MANAGER (cosh) pane ────────────────────────────────
+//
+// A cosh pane is a pane like any other for the slash command: it LISTS
+// `/worktree`, APPLYING it pins the pane, and the manager turn's own
+// `HarnessAssembly::cwd` resolves through `pane_effective_cwd`, so a bound
+// cosh pane really runs its turns in the checkout. Only the
+// `agents_worktree` TOOL refuses a cosh pane (the user's call, never a
+// peer agent's ask).
+
+/// One `cosh` (manager) pane split with pane 0 focused — the manager-pane
+/// mirror of `worktree_split_app`.
+fn manager_worktree_split_app(repo: &std::path::Path) -> App {
+    let mut app = App::new(repo.display().to_string());
+    let session_id = crate::session::store::generate_session_id();
+    app.state
+        .add_empty_session(session_id.clone(), "manager worktree".into(), 0);
+    app.state.current_session_id = Some(session_id);
+    app.open_agents_split(vec![crate::ui::agents_picker::AgentPick {
+        name: crate::routes::session::agents_split::MANAGER_LABEL.into(),
+        instances: 1,
+    }]);
+    app
+}
+
+/// (a) The focused manager pane's slash SOURCE carries exactly ONE
+/// `worktree` entry — one row, not a duplicate (the cosh set never had it,
+/// and it is prepended exactly once for the manager branch).
+#[tokio::test]
+async fn manager_pane_slash_source_lists_worktree_exactly_once() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let (_dir, repo) = worktree_test_repo();
+    let app = manager_worktree_split_app(&repo);
+
+    // The split source (what the menu is seeded from).
+    let (entries, _) = app
+        .agents_split
+        .as_ref()
+        .expect("split open")
+        .slash_source()
+        .expect("a focused pane serves a list");
+    let count = entries.iter().filter(|e| e.name == "worktree").count();
+    assert_eq!(
+        count, 1,
+        "the manager pane lists /worktree exactly once: {:?}",
+        entries.iter().map(|e| &e.name).collect::<Vec<_>>()
+    );
+
+    // The menu the user actually sees (post-sync) agrees.
+    let menu_count = app
+        .slash_menu
+        .commands
+        .iter()
+        .filter(|e| e.name == "worktree")
+        .count();
+    assert_eq!(menu_count, 1, "the synced menu carries one /worktree row");
+    assert_eq!(
+        app.slash_menu.source,
+        crate::ui::slash_menu::Source::Agent,
+        "the manager pane's list IS the menu source"
+    );
+}
+
+/// (b) `/worktree add <branch>` on a MANAGER pane creates the worktree,
+/// stamps the binding (assigned_by: User) on that pane and flags the
+/// handoff — the SAME side effects as on an ACP pane.
+#[tokio::test]
+async fn slash_worktree_add_pins_the_manager_pane() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let (_dir, repo) = worktree_test_repo();
+    let app_repo = repo.clone();
+    let mut app = manager_worktree_split_app(&app_repo);
+    let wt = repo.join("wt-manager");
+
+    app.prompt_view.input = format!("/worktree add {} feat-mgr", wt.display());
+    app.run_slash_command(&slash_cmd("worktree"));
+
+    let pane = &app.agents_split.as_ref().unwrap().panes[0];
+    assert_eq!(
+        pane.agent,
+        crate::routes::session::agents_split::MANAGER_LABEL,
+        "precondition: pane 0 is the manager"
+    );
+    let pin = pane
+        .worktree
+        .as_ref()
+        .expect("the manager pane got pinned");
+    assert_eq!(pin.branch, "feat-mgr");
+    assert_eq!(pin.path, wt);
+    assert_eq!(pin.assigned_by, cosh_tools::worktree::AssignedBy::User);
+    assert!(wt.is_dir(), "the worktree directory exists");
+    assert!(
+        pane.worktree_handoff_pending,
+        "the cwd moved: the next turn carries the handoff"
+    );
+    assert!(
+        !app.toast_state.current.as_ref().is_some_and(|t| t.message
+            .contains("stays on the session's working directory")),
+        "the old manager-refusal toast must be gone"
+    );
+}
+
+/// (c) The manager pane's EFFECTIVE cwd equals the worktree path — the
+/// single resolution that feeds `dispatch_to_pane` (the ACP `acp::call`
+/// cwd AND the manager turn's `HarnessAssembly::cwd`), so a binding is
+/// honored by every layer rather than cosmetic. Asserted through
+/// `pane_effective_cwd` itself: it is the ONE seam both branches read,
+/// which makes it the cleanest probe of the contract (the turn's spawn is
+/// out of test reach, but its cwd comes from exactly this call).
+#[tokio::test]
+async fn manager_pane_effective_cwd_is_the_worktree_path() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let (_dir, repo) = worktree_test_repo();
+    let app_repo = repo.clone();
+    let mut app = manager_worktree_split_app(&app_repo);
+    let wt = repo.join("wt-manager-cwd");
+
+    let session_cwd = app.state.working_directory.clone();
+
+    // Unbound: the effective cwd is the session's working directory.
+    {
+        let pane = &app.agents_split.as_ref().unwrap().panes[0];
+        assert_eq!(
+            super::super::agents_dispatch::pane_effective_cwd(pane, &session_cwd),
+            std::path::PathBuf::from(&session_cwd),
+            "an unbound pane runs in the session cwd"
+        );
+    }
+
+    app.prompt_view.input = format!("/worktree add {} feat-mgr-cwd", wt.display());
+    app.run_slash_command(&slash_cmd("worktree"));
+
+    let pane = &app.agents_split.as_ref().unwrap().panes[0];
+    assert_eq!(
+        super::super::agents_dispatch::pane_effective_cwd(pane, &session_cwd),
+        wt,
+        "the bound manager pane's effective cwd IS the worktree path"
+    );
+}
+
+/// (d) `/worktree exit` clears the MANAGER pane's binding and flags the
+/// handoff back — nothing on disk is touched.
+#[tokio::test]
+async fn slash_worktree_exit_clears_the_manager_pane_binding() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let (_dir, repo) = worktree_test_repo();
+    let mut app = manager_worktree_split_app(&repo);
+    let wt = repo.join("wt-manager-exit");
+
+    app.prompt_view.input = format!("/worktree add {} feat-mgr-exit", wt.display());
+    app.run_slash_command(&slash_cmd("worktree"));
+    assert!(
+        app.agents_split.as_ref().unwrap().panes[0]
+            .worktree
+            .is_some(),
+        "precondition: the manager pane is pinned"
+    );
+
+    app.prompt_view.input = "/worktree exit".into();
+    app.run_slash_command(&slash_cmd("worktree"));
+
+    let pane = &app.agents_split.as_ref().unwrap().panes[0];
+    assert!(pane.worktree.is_none(), "the binding is dropped");
+    assert!(
+        pane.worktree_handoff_pending,
+        "the cwd moved back: the next turn carries the handoff"
+    );
+    assert!(wt.is_dir(), "exit never deletes the worktree");
+}
+
+/// (e) The `agents_worktree` TOOL still refuses a cosh pane — with the new
+/// message that points the coordinator at the USER's `/worktree` (the
+/// rebinding is the user's call, never a peer agent's ask).
+#[tokio::test]
+async fn agents_worktree_tool_still_refuses_a_cosh_pane() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let (_dir, repo) = worktree_test_repo();
+    let mut app = manager_worktree_split_app(&repo);
+    app.sync_agents_pane_registry();
+
+    // The tool's pane enum never offers the manager...
+    let tool = cosh::harness::panes::agents_worktree_tool();
+    let enum_values = tool.input_schema["properties"]["pane"]["enum"]
+        .as_array()
+        .expect("pane enum present");
+    assert!(
+        !enum_values.iter().any(|v| v == "cosh"),
+        "the manager pane is not an addressable target: {enum_values:?}"
+    );
+
+    // ...and a hand-crafted assign to it is refused with the new wording.
+    let err = cosh::harness::panes::enqueue_worktree_op(
+        "cosh",
+        cosh::harness::panes::WorktreeAction::Assign,
+        Some("feat-cosh"),
+        cosh::harness::panes::MAIN,
+    )
+    .expect_err("the tool never binds a cosh pane");
+    assert!(err.contains("cosh"), "the error names the pane: {err}");
+    assert!(
+        err.contains("/worktree"),
+        "the refusal points the coordinator at the user's command: {err}"
+    );
+    assert!(
+        err.contains("USER"),
+        "the refusal names whose call it is: {err}"
+    );
 }

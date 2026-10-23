@@ -50,6 +50,20 @@ use crate::util::text_region::{TextRegion, extract_text_in_region, text_from_cel
 /// own agent. No pane carries it unless the user marked `cosh`.
 pub const MANAGER_LABEL: &str = "cosh";
 
+/// The synthesized `/worktree` slash entry — a COSH-side command, present in
+/// every pane kind's menu (the worktree is a pane binding, never the agent's
+/// own command) and applied by `apply_worktree_command` on ANY focused pane,
+/// the manager included: a bound cosh pane runs its turns in the worktree cwd
+/// exactly like a bound ACP pane. Only the `agents_worktree` TOOL refuses to
+/// target a cosh pane (the user's call, never a peer agent's ask).
+#[must_use]
+pub fn worktree_command_entry() -> crate::ui::slash_menu::SlashCommand {
+    crate::ui::slash_menu::SlashCommand {
+        name: "worktree".into(),
+        desc: "Isolate this pane in a git worktree (add <branch>|<path> <branch>, exit)".into(),
+    }
+}
+
 /// Minimum luminance distance between a brand color and the pane background
 /// for the name to keep the pure brand color. Below it the color would
 /// dissolve into the surface (white Codex on a near-white theme, dark
@@ -1149,9 +1163,13 @@ impl AgentsSplitState {
     }
 
     /// The focused pane's slash-menu source: `None` when NO pane is
-    /// focused — OR the focused pane is the MANAGER (cosh itself: its
-    /// commands are the TUI's own set, which the caller serves directly;
-    /// an ACP probe would be meaningless). Otherwise the focused pane's
+    /// focused. The MANAGER pane (cosh itself: an ACP probe would be
+    /// meaningless) serves the TUI's OWN command set plus the synthesized
+    /// cosh-side `/worktree` entry every other pane kind carries — the
+    /// command must be DISCOVERABLE everywhere, and applying it on the
+    /// manager pane is honored like on any other (`apply_worktree_command`):
+    /// a bound cosh pane runs its turns in the worktree cwd.
+    /// Otherwise the focused pane's
     /// entries: the group commands SYNTHESIZED from the pane's own ACP
     /// config options first (model / provider / mode — the controls
     /// harnesses like opencode and kilo never publish as slash
@@ -1167,20 +1185,20 @@ impl AgentsSplitState {
     pub fn slash_source(&self) -> Option<(Vec<crate::ui::slash_menu::SlashCommand>, bool)> {
         let pane = self.focused_pane()?;
         if pane.agent == MANAGER_LABEL {
-            return None;
+            // The manager's own set (the caller used to fall back to it, and
+            // that fallback never carried the synthesized entry) plus the
+            // cosh-side `/worktree` row: identical discoverability to the
+            // ACP panes, whose commands come from their own ACP probe.
+            let mut entries = crate::ui::slash_menu::SlashMenu::cosh_commands();
+            entries.push(worktree_command_entry());
+            return Some((entries, false));
         }
         let agent = pane.agent.as_str();
-        let mut entries: Vec<crate::ui::slash_menu::SlashCommand> = vec![
-            // cosh's own git-style command, synthesized for EVERY pane kind
-            // (the worktree is a cosh-side binding, never the agent's own
-            // command): same mechanism as the model/mode group entries.
-            // Takes arguments (`/worktree add …`, `/worktree exit`).
-            crate::ui::slash_menu::SlashCommand {
-                name: "worktree".into(),
-                desc: "Isolate this pane in a git worktree (add <branch>|<path> <branch>, exit)"
-                    .into(),
-            },
-        ];
+        // cosh's own git-style command, synthesized for EVERY pane kind (the
+        // worktree is a cosh-side binding, never the agent's own command):
+        // same mechanism as the model/mode group entries. Takes arguments
+        // (`/worktree add …`, `/worktree exit`).
+        let mut entries: Vec<crate::ui::slash_menu::SlashCommand> = vec![worktree_command_entry()];
         entries.extend(
             pane.config_options
                 .as_ref()
@@ -2699,6 +2717,39 @@ mod tests {
         let pane = AgentPane::from_ref(&fresh);
         assert_eq!(pane.agent, "kilo");
         assert!(pane.session_id.is_none());
+    }
+
+    /// The `/worktree` entry is discoverable in EVERY pane kind: the ACP
+    /// panes (where it is synthesized) AND the manager pane, whose menu used
+    /// to fall back to the plain cosh set and silently lose it. Applying it
+    /// is honored on the manager pane too (see `apply_worktree_command`); the
+    /// `agents_worktree` TOOL is the only layer that refuses a cosh pane.
+    #[test]
+    fn the_worktree_command_is_listed_in_every_pane_menu_including_the_manager() {
+        let mut state = AgentsSplitState::new(vec![MANAGER_LABEL.into(), "claude".into()]);
+        // Manager focused (pane 0, the fresh-split default).
+        let (entries, loading) = state.slash_source().expect("the manager serves a list");
+        assert!(!loading);
+        assert!(
+            entries.iter().any(|e| e.name == "worktree"),
+            "the manager pane must list /worktree: {:?}",
+            entries.iter().map(|e| &e.name).collect::<Vec<_>>()
+        );
+        // The manager keeps the TUI's own commands alongside it.
+        assert!(entries.iter().any(|e| e.name == "models"));
+
+        // An ACP pane lists it too — same entry, same description.
+        state.focused = Some(1);
+        let (entries, _) = state.slash_source().expect("the agent pane serves a list");
+        let worktree = entries
+            .iter()
+            .find(|e| e.name == "worktree")
+            .expect("the agent pane lists /worktree");
+        assert_eq!(worktree.desc, worktree_command_entry().desc);
+
+        // No focus at all: no pane list (the cosh set, unfiltered).
+        state.focused = None;
+        assert!(state.slash_source().is_none());
     }
 
     /// Layout invariants for one (n, area) pair: exact pane count, containment,
