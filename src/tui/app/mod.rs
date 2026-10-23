@@ -1,6 +1,5 @@
 use std::io;
 use std::io::Write;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -1550,13 +1549,17 @@ impl App {
     }
 
     /// Ctrl+F: always open the left panel showing the file explorer rooted
-    /// at the working directory. Not a toggle — same one-key-shows-it
+    /// at where the MAIN AGENT works (its `/worktree` checkout when pinned,
+    /// the startup cwd otherwise). Not a toggle — same one-key-shows-it
     /// contract as Ctrl+U/Ctrl+S.
     fn show_file_explorer(&mut self) {
         self.left_panel = Mode::Explorer;
         self.sidebar.open = true;
         if self.file_explorer.is_none() {
-            let root = PathBuf::from(&self.state.working_directory);
+            // The explorer must browse the tree the agent edits: while
+            // `/worktree` is pinned, rooting it at the startup cwd would show
+            // a different checkout than the one turns read and write.
+            let root = self.state.main_agent_cwd();
             let root = if root.is_dir() {
                 root
             } else {

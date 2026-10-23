@@ -100,8 +100,17 @@ impl FooterView {
         });
 
         if state.current_session().is_some() {
-            let dir = &state.working_directory;
-            let dir_display = if dir.is_empty() { "~" } else { dir };
+            // The directory label reports where the MAIN AGENT works, not
+            // where cosh started: it sits beside the git branch badge, which
+            // already follows the `/worktree` binding. Reading the startup
+            // cwd here would pair one tree's path with another tree's branch.
+            let dir = state.main_agent_cwd();
+            let dir_text = dir.to_string_lossy();
+            let dir_display: &str = if dir_text.is_empty() {
+                "~"
+            } else {
+                dir_text.as_ref()
+            };
 
             // Display width, not byte length: right-anchored segments and
             // the draw limit must both count terminal cells (wide glyphs
@@ -280,5 +289,56 @@ mod tests {
             .collect();
         assert!(!line.contains("→"), "line: {line}");
         assert!(hitbox.is_none());
+    }
+
+    /// The directory label describes where the MAIN AGENT works, so it must
+    /// follow the `/worktree` binding — the branch badge beside it already
+    /// does, and a pair drawn from two different trees (the startup path next
+    /// to the checkout's branch) is actively misleading. The renderer only
+    /// holds `&AppState`, which is why the resolution lives on the state
+    /// (`AppState::main_agent_cwd`) rather than on `App`.
+    #[test]
+    fn directory_label_follows_the_main_agent_worktree() {
+        let mut state = AppState::new();
+        state.add_session(Session {
+            id: "test-session".into(),
+            title: "Test".into(),
+            created_at: 0,
+            title_generated: false,
+            provider: None,
+            model: None,
+            reasoning: None,
+            agents_panes: None,
+            agents_mode_open: false,
+            agents_hidden: Vec::new(),
+            ctx_ids: Default::default(),
+            main_agent_worktree: Some(cosh::git::worktree::PaneWorktree {
+                path: "/tmp/wt/feature-x".into(),
+                branch: "feature-x".into(),
+                name: "feature-x".into(),
+                assigned_by: cosh::git::worktree::AssignedBy::User,
+            }),
+            messages: vec![],
+        });
+        state.current_session_id = Some("test-session".into());
+        state.working_directory = "/home/user/startup-tree".into();
+
+        let theme = ThemeRegistry::new().default_theme().clone();
+        let area = Rect::new(0, 0, 100, 1);
+        let mut buf = Buffer::empty(area);
+
+        FooterView::render_with_mode(&mut buf, area, &state, &theme, false, None, false);
+
+        let line: String = (area.x..area.right())
+            .filter_map(|x| buf.cell((x, area.y)).map(|cell| cell.symbol()))
+            .collect();
+        assert!(
+            line.contains("feature-x"),
+            "the footer must name the checkout the agent works in: {line:?}"
+        );
+        assert!(
+            !line.contains("startup-tree"),
+            "the startup cwd is not where the agent works once pinned: {line:?}"
+        );
     }
 }

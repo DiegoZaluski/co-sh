@@ -253,18 +253,18 @@ fn assign_focused_pane_worktree(app: &mut App, path: Option<&str>, branch: &str)
 
 /// The MAIN agent's effective working directory: its `/worktree` binding
 /// when pinned, the session's startup cwd otherwise. `working_directory` is
-/// set once in `App::new` and never mutated, so it IS the original cwd —
-/// `/worktree exit` needs no saved copy, it just drops the binding.
+/// set once in `App::new` and never mutated by the running app, so it IS the
+/// original cwd — `/worktree exit` needs no saved copy, it just drops the
+/// binding.
 ///
-/// This is deliberately a SEPARATE accessor from `pane_effective_cwd`: the
-/// main agent is not a pane (no registry id, no `AgentPane`), and the
-/// binding lives on the session because it must survive a reopen.
+/// Deliberately SEPARATE from `pane_effective_cwd`: the main agent is not a
+/// pane (no registry id, no `AgentPane`), and the binding lives on the
+/// session because it must survive a reopen. Both this and the `&AppState`
+/// consumers the footer and file explorer hold resolve through
+/// [`AppState::main_agent_cwd`], so the crate has exactly ONE definition of
+/// "where the main agent works".
 pub(super) fn main_agent_effective_cwd(app: &App) -> PathBuf {
-    app.state
-        .current_session()
-        .and_then(|session| session.main_agent_worktree.as_ref())
-        .map(|worktree| worktree.path.clone())
-        .unwrap_or_else(|| PathBuf::from(&app.state.working_directory))
+    app.state.main_agent_cwd()
 }
 
 /// Pin the MAIN agent into a worktree (`/worktree add` with no `/agents`

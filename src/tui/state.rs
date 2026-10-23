@@ -62,6 +62,12 @@ pub struct AppState {
     pub status: SessionStatus,
     pub scroll_y: i32,
     pub content_height: i32,
+    /// Where cosh itself starts: the process cwd, captured once in
+    /// `App::new` and never mutated afterwards. Two things read it — the
+    /// session store root (it LOCATES the session, so it must not move) and
+    /// `/worktree exit` (it RESTORES this, so it must not move). Anything
+    /// describing where the MAIN AGENT works reads
+    /// [`Self::main_agent_cwd`] instead.
     pub working_directory: String,
     /// Current git branch (or short SHA on detached HEAD) for the session
     /// footer; `None` when the working directory is outside a repository.
@@ -239,6 +245,27 @@ impl AppState {
         self.current_session_id
             .as_ref()
             .and_then(|id| self.session_cache.peek(id.as_str()))
+    }
+
+    /// Where the MAIN AGENT works right now: the session's `/worktree`
+    /// binding when one is pinned, else [`Self::working_directory`].
+    ///
+    /// This is the ONE seam every display/resolution of the agent's cwd goes
+    /// through, so a new consumer cannot accidentally describe the startup
+    /// tree while the agent edits a checkout. Deliberately on `AppState`
+    /// rather than `App`: footer rendering and the file explorer only hold
+    /// `&AppState`, and they must report the same directory the agent's
+    /// turns use.
+    ///
+    /// Not for `working_directory`'s own two readers — the session store
+    /// root and `/worktree exit` both need the STARTUP cwd and must keep
+    /// reading the field directly.
+    #[must_use]
+    pub fn main_agent_cwd(&self) -> std::path::PathBuf {
+        self.current_session()
+            .and_then(|session| session.main_agent_worktree.as_ref())
+            .map(|worktree| worktree.path.clone())
+            .unwrap_or_else(|| std::path::PathBuf::from(&self.working_directory))
     }
 
     /// Returns a mutable reference to the current session if one is selected

@@ -125,16 +125,20 @@ pub fn command_scope(name: &str) -> CommandScope {
         .unwrap_or(CommandScope::Agent)
 }
 
-/// The synthesized `/worktree` slash entry — a COSH-side command (the
-/// worktree is a pane binding, never the agent's own command), listed in
-/// EVERY pane kind's menu including the manager's, and applied by
-/// `apply_worktree_command` on ANY focused pane: a bound cosh pane runs its
-/// turns in the worktree cwd exactly like a bound ACP pane.
+/// The `/worktree` slash entry — a COSH-side command (a worktree is a cosh
+/// binding, never the agent's own command).
+///
+/// It lives in the BASE command list because its target is whichever agent
+/// the user is talking to: the MAIN agent (no split open, applied by
+/// `apply_main_agent_worktree_command`) or the focused pane of any kind
+/// (`apply_worktree_command`). Both run their turns in the bound checkout,
+/// so the row means the same thing in every menu that lists it and the pane
+/// sources must not append a second copy.
 #[must_use]
 pub fn worktree_command_entry() -> SlashCommand {
     SlashCommand {
         name: "worktree".into(),
-        desc: "Isolate this pane in a git worktree (add <branch>|<path> <branch>, exit)".into(),
+        desc: "Isolate this agent in a git worktree (add <branch>|<path> <branch>, exit)".into(),
     }
 }
 
@@ -670,8 +674,7 @@ mod tests {
         // (whose menu IS this list) as much as to any pane, so the pane
         // sources must not append a second copy.
         let menu_names = SlashMenu::cosh_command_names();
-        let inventory_names: Vec<&str> =
-            COMMAND_INVENTORY.iter().map(|(name, _)| *name).collect();
+        let inventory_names: Vec<&str> = COMMAND_INVENTORY.iter().map(|(name, _)| *name).collect();
         for name in &menu_names {
             assert!(
                 inventory_names.contains(&name.as_str()),
@@ -718,12 +721,7 @@ mod tests {
             );
         }
         for agent in [
-            "models",
-            "compact",
-            "toolcall",
-            "tools",
-            "export",
-            "worktree",
+            "models", "compact", "toolcall", "tools", "export", "worktree",
         ] {
             assert_eq!(
                 command_scope(agent),
