@@ -1,5 +1,5 @@
 //! Split-view "panes" for the `/agents` route: one pane per agent the user
-//! picked (the `cosh` daemon pane only when explicitly marked), laid out
+//! picked (the `cosh` manager pane only when explicitly marked), laid out
 //! over the session area with a simple bin-packing heuristic.
 //!
 //! This module owns ONLY the pane model + layout + painting. The prompt is
@@ -8,27 +8,27 @@
 //! concern — it only tracks which pane (if any) the prompt targets.
 //!
 //! Layout heuristic (deliberately approximate — "fits nicely", not a perfect
-//! bin-packing): EVERY pane — the daemon included — is an equal participant
+//! bin-packing): EVERY pane — the manager included — is an equal participant
 //! in the area division: one row of equal columns while each column stays
 //! readable (>= 24 cols), otherwise two balanced rows (ceil/floor split, the
 //! top row slightly taller when the height is odd). Pane order is preserved,
-//! so marked agents keep the picker order; when the daemon is picked it
+//! so marked agents keep the picker order; when the manager pane is picked it
 //! keeps its grid position among them. The last row may end up
 //! narrower/taller than the others; what matters is that the panes tile the
 //! area with only 1-cell gaps and no holes.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
-use cosh_tui::core::lib::rgba::{ColorInput, RGBA};
-use cosh_tui::core::renderable::Renderable;
-use cosh_tui::core::renderables::markdown::MarkdownRenderable;
 use cosh_tools::subagent::events::{
     AgentCommand, AgentConfigOption, AgentPermissionOption, AgentSessionMode, PanePermissionAnswer,
     PlanEntryStatus, SubagentEvent, ToolCallStatus, ToolKind,
 };
 use cosh_tools::subagent::palette::{display_name, palette_for};
+use cosh_tui::core::lib::rgba::{ColorInput, RGBA};
+use cosh_tui::core::renderable::Renderable;
+use cosh_tui::core::renderables::markdown::MarkdownRenderable;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -39,16 +39,16 @@ use crate::component::scroll_pill::ScrollPill;
 use crate::component::spinner::SpinnerState;
 use crate::routes::session::right_panel::subagent_theme_key;
 use crate::routes::session::right_panel::types::{
+    INPUT_BOX_PAD_ROWS, SubagentActivity, SubagentActivityLine, SubagentBlockRenderer,
     SubagentDiffCells, SubagentTimelineEntry, activity_block_height, activity_lines,
-    subagent_diff_block, subagent_diff_content_key, subagent_diff_rows, SubagentActivity,
-    SubagentActivityLine, SubagentBlockRenderer, INPUT_BOX_PAD_ROWS,
+    subagent_diff_block, subagent_diff_content_key, subagent_diff_rows,
 };
 use crate::theme::{Theme, blend, contrast_fg, luminance, rgba_color};
 use crate::util::text_region::{TextRegion, extract_text_in_region, text_from_cell_row};
 
-/// Display label of the daemon pane when the picker marks it: the TUI's
+/// Display label of the manager pane when the picker marks it: the TUI's
 /// own agent. No pane carries it unless the user marked `cosh`.
-pub const DAEMON_LABEL: &str = "cosh";
+pub const MANAGER_LABEL: &str = "cosh";
 
 /// Minimum luminance distance between a brand color and the pane background
 /// for the name to keep the pure brand color. Below it the color would
@@ -126,7 +126,7 @@ pub struct PanePermissionRequest {
 /// One agent pane: identity, live activity stream and lifecycle state.
 #[derive(Debug, Clone, Default)]
 pub struct AgentPane {
-    /// Agent CLI name (`"claude"`, `"kilo"`, …). The daemon pane is `"cosh"`.
+    /// Agent CLI name (`"claude"`, `"kilo"`, …). The manager pane is `"cosh"`.
     pub agent: String,
     /// Stable identity of THIS pane object, stamped by [`AgentPane::new`]
     /// and carried unchanged by every pane-set rebuild that keeps the pane
@@ -134,7 +134,8 @@ pub struct AgentPane {
     /// with it at dispatch; the event handler routes by id and drops
     /// whatever no pane answers to — a stream can never land in a
     /// replacement pane that merely shares the index.
-    pub id: u64,    /// Structured live transcript, REUSED from the right panel's
+    pub id: u64,
+    /// Structured live transcript, REUSED from the right panel's
     /// `SubagentActivity` so Message/Thought chunks coalesce and tool-call
     /// patches apply exactly like the existing sub-agent box.
     pub activity: SubagentActivity,
@@ -186,6 +187,19 @@ pub struct AgentPane {
     /// `None` = never reported; `Some(vec![])` = the agent advertises no
     /// modes (bind nothing, like gemini).
     pub agent_modes: Option<Vec<AgentSessionMode>>,
+    /// The worktree the pane is pinned to, when isolated (`/worktree` or
+    /// `agents_worktree`): the pane's effective cwd resolves from its
+    /// `path` instead of the session's working directory. In-memory twin
+    /// of the persisted `AgentPaneRef::Bound` field.
+    pub worktree: Option<cosh_tools::worktree::PaneWorktree>,
+    /// The pane's cwd MOVED since its last turn (a `/worktree add`/`exit`
+    /// changed the binding): the next dispatch prepends a handoff block
+    /// summarized from the pane's local timeline, so the agent keeps its
+    /// working context across the move (resume-with-new-cwd is
+    /// best-effort — a harness that keys sessions by cwd falls back to a
+    /// fresh session and THIS is the safety net). Cleared by the dispatch
+    /// that consumes it.
+    pub worktree_handoff_pending: bool,
     /// The id of the mode the session currently runs in, from the same
     /// `Modes` report (or a later `CurrentModeUpdate`). Empty without modes.
     pub mode_current: String,
@@ -199,9 +213,7 @@ pub struct AgentPane {
     /// dispatch (non-Yolo modes). `Some` while the turn runs with
     /// interactive permissions; the answer send is `Ok` regardless of the
     /// receiver's state (the ACP handler has it until its turn ends).
-    pub permission_tx: Option<
-        tokio::sync::mpsc::UnboundedSender<PanePermissionAnswer>,
-    >,
+    pub permission_tx: Option<tokio::sync::mpsc::UnboundedSender<PanePermissionAnswer>>,
     /// True while an on-demand snapshot probe for this pane is in flight
     /// (focus arrived with no cache): the slash menu shows its spinner row
     /// until the probe returns.
@@ -263,6 +275,8 @@ impl AgentPane {
             config_options: None,
             picked_config_ids: Vec::new(),
             agent_modes: None,
+            worktree: None,
+            worktree_handoff_pending: false,
             mode_current: String::new(),
             pending_permission: None,
             permission_tx: None,
@@ -288,6 +302,7 @@ impl AgentPane {
     pub fn from_ref(pane_ref: &crate::types::AgentPaneRef) -> Self {
         let mut pane = Self::new(pane_ref.agent().to_string());
         pane.session_id = pane_ref.session_id().map(str::to_string);
+        pane.worktree = pane_ref.worktree().cloned();
         pane
     }
 
@@ -301,6 +316,7 @@ impl AgentPane {
             Some(session_id) => crate::types::AgentPaneRef::Bound {
                 agent: self.agent.clone(),
                 session_id: session_id.clone(),
+                worktree: self.worktree.clone(),
             },
             None => crate::types::AgentPaneRef::Name(self.agent.clone()),
         }
@@ -362,7 +378,7 @@ impl AgentPane {
 /// State of the whole `/agents` split view.
 #[derive(Debug, Default)]
 pub struct AgentsSplitState {
-    /// One pane per agent in picker order. The `cosh` daemon pane exists
+    /// One pane per agent in picker order. The `cosh` manager pane exists
     /// only when the picker marked it, and only as an ordinary pane.
     pub panes: Vec<AgentPane>,
     /// The pane under the cursor AND the content-row span of the input
@@ -431,7 +447,7 @@ pub struct AgentsSplitState {
 
 impl AgentsSplitState {
     /// Build the pane set from the user's split config, in the order they
-    /// setup. NO daemon insert: the `cosh` pane exists ONLY when the picker
+    /// setup. NO manager insert: the `cosh` pane exists ONLY when the picker
     /// marked it — the split is a plain reflection of the user's choice.
     /// Each entry carries its persisted binding (`AgentPaneRef::Bound`
     /// resumes its ACP session).
@@ -462,7 +478,7 @@ impl AgentsSplitState {
         }
     }
 
-    /// Number of panes (daemon included).
+    /// Number of panes (manager pane included).
     #[must_use]
     pub fn pane_count(&self) -> usize {
         self.panes.len()
@@ -768,7 +784,13 @@ impl AgentsSplitState {
     /// timeline entry's own text, un-sanitized — exactly what the sender
     /// typed/sent.
     pub fn input_text(&self, pane: usize, hit: &InputBoxHit) -> Option<String> {
-        match self.panes.get(pane)?.activity.timeline.get(hit.timeline_index) {
+        match self
+            .panes
+            .get(pane)?
+            .activity
+            .timeline
+            .get(hit.timeline_index)
+        {
             Some(SubagentTimelineEntry::UserMessage { text })
             | Some(SubagentTimelineEntry::AgentMessage { text }) => Some(text.clone()),
             _ => None,
@@ -818,7 +840,7 @@ impl AgentsSplitState {
     /// the pointer moves, the others stay put). `false` when no pane owns
     /// the position. The grid layout places panes side by side sharing the
     /// same row band, so the column must be part of the hit-test — a row-only
-    /// match lands every wheel on the FIRST pane of the row (the daemon).
+    /// match lands every wheel on the FIRST pane of the row (the manager pane).
     pub fn scroll_at(&mut self, x: u16, y: u16, rows: i32) -> bool {
         let Some(index) = self
             .pane_rects
@@ -1063,7 +1085,7 @@ impl AgentsSplitState {
     }
 
     /// Apply one sub-agent event to pane `pane`'s activity stream. Out-of
-    /// range panes are ignored: every pane incl. daemon is ordinary here.
+    /// range panes are ignored: every pane incl. the manager pane is ordinary here.
     pub fn apply_event(&mut self, pane: usize, event: &SubagentEvent) {
         if let Some(p) = self.panes.get_mut(pane) {
             p.activity.apply(event);
@@ -1127,7 +1149,7 @@ impl AgentsSplitState {
     }
 
     /// The focused pane's slash-menu source: `None` when NO pane is
-    /// focused — OR the focused pane is the DAEMON (cosh itself: its
+    /// focused — OR the focused pane is the MANAGER (cosh itself: its
     /// commands are the TUI's own set, which the caller serves directly;
     /// an ACP probe would be meaningless). Otherwise the focused pane's
     /// entries: the group commands SYNTHESIZED from the pane's own ACP
@@ -1142,19 +1164,29 @@ impl AgentsSplitState {
     /// `snapshot_loading` marks an in-flight probe: the menu shows its
     /// spinner row until the entries land.
     #[must_use]
-    pub fn slash_source(
-        &self,
-    ) -> Option<(Vec<crate::ui::slash_menu::SlashCommand>, bool)> {
+    pub fn slash_source(&self) -> Option<(Vec<crate::ui::slash_menu::SlashCommand>, bool)> {
         let pane = self.focused_pane()?;
-        if pane.agent == DAEMON_LABEL {
+        if pane.agent == MANAGER_LABEL {
             return None;
         }
         let agent = pane.agent.as_str();
-        let mut entries: Vec<crate::ui::slash_menu::SlashCommand> = pane
-            .config_options
-            .as_ref()
-            .map(|options| super::agent_command_map::synthesized_group_commands(options))
-            .unwrap_or_default();
+        let mut entries: Vec<crate::ui::slash_menu::SlashCommand> = vec![
+            // cosh's own git-style command, synthesized for EVERY pane kind
+            // (the worktree is a cosh-side binding, never the agent's own
+            // command): same mechanism as the model/mode group entries.
+            // Takes arguments (`/worktree add …`, `/worktree exit`).
+            crate::ui::slash_menu::SlashCommand {
+                name: "worktree".into(),
+                desc: "Isolate this pane in a git worktree (add <branch>|<path> <branch>, exit)"
+                    .into(),
+            },
+        ];
+        entries.extend(
+            pane.config_options
+                .as_ref()
+                .map(|options| super::agent_command_map::synthesized_group_commands(options))
+                .unwrap_or_default(),
+        );
         // The synthesized group spellings, normalized once — the dedup
         // filter below reads this SET, not `entries` itself (the mutable
         // extend borrow would otherwise conflict with the closure's read).
@@ -1163,21 +1195,26 @@ impl AgentsSplitState {
             .map(|entry| super::agent_command_map::normalize(&entry.name))
             .collect();
         let commands = pane.commands.clone().unwrap_or_default();
-        entries.extend(commands.iter().filter(|cmd| {
-            !super::agent_command_map::is_blocked(agent, &cmd.name)
+        entries.extend(
+            commands
+                .iter()
+                .filter(|cmd| {
+                    !super::agent_command_map::is_blocked(agent, &cmd.name)
                 // A published command that duplicates a synthesized group
                 // (claude's `/model`, a future fixed opencode) is covered
                 // by the synthesized entry: same box, standardized name.
                 && !group_names
                     .contains(&super::agent_command_map::normalize(&cmd.name))
-        }).map(|cmd| crate::ui::slash_menu::SlashCommand {
-            name: cmd.name.clone(),
-            // The agent's command NAME is verbatim; the description is
-            // unwrapped to ONE line (harnesses publish whole skill
-            // briefs — opencode's `customize-opencode`, claude's skill
-            // commands — which flood the row otherwise).
-            desc: super::agent_command_map::menu_description(&cmd.description),
-        }));
+                })
+                .map(|cmd| crate::ui::slash_menu::SlashCommand {
+                    name: cmd.name.clone(),
+                    // The agent's command NAME is verbatim; the description is
+                    // unwrapped to ONE line (harnesses publish whole skill
+                    // briefs — opencode's `customize-opencode`, claude's skill
+                    // commands — which flood the row otherwise).
+                    desc: super::agent_command_map::menu_description(&cmd.description),
+                }),
+        );
         Some((entries, pane.snapshot_loading))
     }
 
@@ -1253,6 +1290,15 @@ impl AgentsSplitState {
         }
     }
 
+    /// Clear (or set) the pane's pending worktree HANDOFF flag. The dispatch
+    /// that carried the handoff block consumes it — later turns ride the
+    /// prompt untouched until a new `/worktree` add/exit re-flags the pane.
+    pub fn set_worktree_handoff_pending(&mut self, pane: usize, pending: bool) {
+        if let Some(p) = self.panes.get_mut(pane) {
+            p.worktree_handoff_pending = pending;
+        }
+    }
+
     /// Attach (or drop) the pane's permission-answer channel at dispatch:
     /// `Some(tx)` makes this turn's `session/request_permission` requests
     /// surface on the TUI (the non-Yolo modes); `None` leaves the turn's
@@ -1278,7 +1324,9 @@ impl AgentsSplitState {
     /// The pane's pending permission request (the box's current data).
     #[must_use]
     pub fn pending_permission(&self, pane: usize) -> Option<&PanePermissionRequest> {
-        self.panes.get(pane).and_then(|p| p.pending_permission.as_ref())
+        self.panes
+            .get(pane)
+            .and_then(|p| p.pending_permission.as_ref())
     }
 
     /// Answer pane `pane`'s pending permission request: send through the
@@ -1313,8 +1361,8 @@ impl AgentsSplitState {
 /// Compute the pane rects for `pane_count` panes inside `area`.
 ///
 /// Heuristic (documented at module level; NOT a perfect bin-packing): EVERY
-/// pane — the cosh daemon included — is an equal participant in the tiling,
-/// so the daemon's block comes out of the same area division as the agents'
+/// pane — the cosh manager pane included — is an equal participant in the tiling,
+/// so the manager pane's block comes out of the same area division as the agents'
 /// instead of a fixed strip:
 /// - 1 pane: the whole area.
 /// - `n >= 2`: a single row of equal columns while every column stays >=
@@ -1380,7 +1428,7 @@ fn compute_layout_grid(pane_count: usize, area: Rect) -> Vec<Rect> {
     }
 
     // Every pane is an equal participant: the single-row test uses the FULL
-    // pane count (the daemon is not subtracted), so its block is one of the
+    // pane count (the manager pane is not subtracted), so its block is one of the
     // equal cells rather than a special-cased strip.
     let single_row = {
         let usable = area.width.saturating_sub((pane_count - 1) as u16 * GAP);
@@ -1517,8 +1565,10 @@ pub fn render(
     // `render_hover_highlight` recolor, pane scoped): the click-ability
     // cue. Painted after the panes so it lightens the final cells.
     if let Some((pane_index, hit)) = state.hovered_input.as_ref()
-        && let (Some(pane), Some(rect)) =
-            (state.panes.get(*pane_index), state.pane_rects.get(*pane_index).copied())
+        && let (Some(pane), Some(rect)) = (
+            state.panes.get(*pane_index),
+            state.pane_rects.get(*pane_index).copied(),
+        )
     {
         let body_top = i32::from(rect.y + 1);
         let body_end = i32::from(rect.bottom());
@@ -1690,6 +1740,31 @@ fn render_pane(
     if body_h == 0 || wrap_w == 0 {
         return;
     }
+    // ── Worktree badge (the reserved footer row) ──
+    // The pane keeps ONE reserved blank row above its bottom edge
+    // (`view_h = body_h - 1`): the badge paints there, left-aligned in the
+    // muted tone, so a pinned pane announces where it works WITHOUT
+    // touching the crowded header. Painted BEFORE the activity flow (and
+    // before the scroll pill): an empty pane keeps its badge on the
+    // reserved row too, and a visible scroll pill may cover it —
+    // navigation feedback wins over the static pin label.
+    if let Some(worktree) = &pane.worktree {
+        let badge = format!("⎇ {}", worktree.name);
+        let badge_style = Style::default().fg(rgba_color(theme.text_muted));
+        for (i, ch) in badge.chars().enumerate() {
+            let Ok(i) = u16::try_from(i) else { break };
+            let Some(cx) = rect.x.checked_add(1 + i) else {
+                break;
+            };
+            if cx >= rect.right() {
+                break;
+            }
+            if let Some(cell) = buf.cell_mut((cx, rect.bottom().saturating_sub(1))) {
+                cell.set_char(ch);
+                cell.set_style(badge_style);
+            }
+        }
+    }
     let lines = activity_lines(&pane.activity, wrap_w);
     if lines.is_empty() {
         // Empty pane: the background fill painted above is the whole body —
@@ -1812,8 +1887,7 @@ fn render_pane(
         }
         // Off-window lines overlapping the span emit regions only: no
         // screen position, no painted rows.
-        let visible =
-            line_end > scroll_y && content_row < scroll_y.saturating_add(view_h);
+        let visible = line_end > scroll_y && content_row < scroll_y.saturating_add(view_h);
         if input {
             // The box's full extent: pad row above, content rows, pad row
             // below — the clickable surface, hover target and drag anchor.
@@ -1859,12 +1933,7 @@ fn render_pane(
                 } else {
                     theme.secondary
                 };
-                let frame = Rect::new(
-                    rect.x,
-                    frame_y,
-                    wrap_w.saturating_add(2),
-                    frame_h,
-                );
+                let frame = Rect::new(rect.x, frame_y, wrap_w.saturating_add(2), frame_h);
                 prompt_message_box::render(buf, frame, rail, theme);
             }
         }
@@ -1988,7 +2057,10 @@ fn is_input_line(line: &SubagentActivityLine) -> bool {
 /// for the whole union, so one loop serves both without duplicating the
 /// per-row text formatting.
 fn paint_emit_window(skip: u16, paint: usize, emit: Option<(u16, u16)>, len: usize) -> (u16, u16) {
-    let (mut lo, mut hi) = (skip, skip.saturating_add(paint.min(u16::MAX as usize) as u16));
+    let (mut lo, mut hi) = (
+        skip,
+        skip.saturating_add(paint.min(u16::MAX as usize) as u16),
+    );
     if let Some((elo, ehi)) = emit {
         lo = lo.min(elo);
         hi = hi.max(ehi);
@@ -2068,7 +2140,14 @@ fn draw_activity_line(
                     if ri == 0 {
                         draw_text(buf, marker, x, line_y, wrap_w, marker_style);
                     }
-                    draw_text(buf, seg, x + 2, line_y, wrap_w.saturating_sub(2), text_style);
+                    draw_text(
+                        buf,
+                        seg,
+                        x + 2,
+                        line_y,
+                        wrap_w.saturating_sub(2),
+                        text_style,
+                    );
                 }
                 let region_text = if ri == 0 {
                     format!("{marker} {seg}")
@@ -2158,7 +2237,14 @@ fn draw_activity_line(
                 let Some(seg) = rows.get(ri) else { break };
                 let line_y = y + (ri as u16).saturating_sub(skip);
                 if painting(ri as u16) {
-                    draw_text(buf, seg, x + 2, line_y, wrap_w.saturating_sub(2), dimmed_style);
+                    draw_text(
+                        buf,
+                        seg,
+                        x + 2,
+                        line_y,
+                        wrap_w.saturating_sub(2),
+                        dimmed_style,
+                    );
                 }
                 regions.push(TextRegion::one_row(
                     i32::from(content_row.saturating_add(ri as u16)),
@@ -2228,7 +2314,11 @@ fn draw_activity_line(
             // blit would overwrite the band and the box would read as bare
             // text. Every other block keeps the pane's whisper tint.
             let is_input = is_user || is_agent_input;
-            let block_bg = if is_input { theme.background_panel } else { tint };
+            let block_bg = if is_input {
+                theme.background_panel
+            } else {
+                tint
+            };
             // The input's INTERNAL breathing (the chat's sent box keeps two
             // columns between each rail and the text): the markdown renders
             // into a NARROWER scratch and blits two columns in — the
@@ -2582,9 +2672,9 @@ fn highlight_selection(buf: &mut Buffer, state: &AgentsSplitState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::AgentPaneRef;
     use crate::routes::session::right_panel::types::SubagentTimelineEntry;
     use crate::theme::ThemeRegistry;
+    use crate::types::AgentPaneRef;
 
     fn test_theme() -> Theme {
         ThemeRegistry::new().default_theme().clone()
@@ -2598,6 +2688,7 @@ mod tests {
         let bound = AgentPaneRef::Bound {
             agent: "kilo".to_string(),
             session_id: "resume-me".to_string(),
+            worktree: None,
         };
         let pane = AgentPane::from_ref(&bound);
         assert_eq!(pane.agent, "kilo");
@@ -2611,7 +2702,7 @@ mod tests {
     }
 
     /// Layout invariants for one (n, area) pair: exact pane count, containment,
-    /// no overlap, daemon strip on top, and every cell covered at most once
+    /// no overlap, manager strip on top, and every cell covered at most once
     /// with only a small gap budget left uncovered.
     fn assert_layout_ok(pane_count: usize, area: Rect) {
         let rects = compute_layout(pane_count, area);
@@ -2634,12 +2725,15 @@ mod tests {
             }
         }
         if pane_count >= 2 {
-            let daemon = rects[0];
-            // Order preservation: the daemon keeps its grid slot (dispatch
+            let manager = rects[0];
+            // Order preservation: the manager pane keeps its grid slot (dispatch
             // routing and hotkeys depend on the stable index).
-            assert_eq!(daemon.y, area.y, "pane 0 first in the grid");
-            assert_eq!(daemon.x, area.x);
-            assert!(daemon.area() < area.area(), "daemon is not the whole area");
+            assert_eq!(manager.y, area.y, "pane 0 first in the grid");
+            assert_eq!(manager.x, area.x);
+            assert!(
+                manager.area() < area.area(),
+                "manager pane is not the whole area"
+            );
         }
 
         // Cell coverage: every cell in at most one pane; the uncovered cells
@@ -2732,18 +2826,18 @@ mod tests {
     }
 
     #[test]
-    fn new_keeps_picker_order_and_never_injects_the_daemon() {
+    fn new_keeps_picker_order_and_never_injects_the_manager_pane() {
         // Used to insert a forced `cosh` pane 0 — the Cosh Manager block
         // then existed in /agents without the user ever picking cosh. The
         // split must be a plain reflection of the picker's marks.
         let state = AgentsSplitState::new(vec!["kilo".into(), "claude".into()]);
-        assert_eq!(state.pane_count(), 2, "no daemon pane appears uninvited");
+        assert_eq!(state.pane_count(), 2, "no manager pane appears uninvited");
         assert_eq!(state.panes[0].agent, "kilo");
         assert_eq!(state.panes[1].agent, "claude");
 
         // An explicitly marked cosh keeps its marked position (first) and is
         // NOT duplicated.
-        let state = AgentsSplitState::new(vec![DAEMON_LABEL.into(), "claude".into()]);
+        let state = AgentsSplitState::new(vec![MANAGER_LABEL.into(), "claude".into()]);
         assert_eq!(state.pane_count(), 2);
         assert_eq!(state.panes[0].agent, "cosh");
         assert_eq!(state.panes[1].agent, "claude");
@@ -2755,8 +2849,11 @@ mod tests {
 
     #[test]
     fn cosh_panes_are_registry_addressable_with_occurrence_suffixes() {
-        let state =
-            AgentsSplitState::new(vec![DAEMON_LABEL.into(), "claude".into(), DAEMON_LABEL.into()]);
+        let state = AgentsSplitState::new(vec![
+            MANAGER_LABEL.into(),
+            "claude".into(),
+            MANAGER_LABEL.into(),
+        ]);
         assert_eq!(state.pane_registry_id(0).as_deref(), Some("cosh#1"));
         assert_eq!(state.pane_registry_id(1).as_deref(), Some("claude"));
         assert_eq!(state.pane_registry_id(2).as_deref(), Some("cosh#2"));
@@ -2773,7 +2870,10 @@ mod tests {
         assert_eq!(state.focused_pane().map(|p| p.agent.as_str()), Some("kilo"));
         assert_eq!(state.focus_hotkey('1'), Some(0));
         assert_eq!(state.focused, Some(0));
-        assert_eq!(state.focused_pane().map(|p| p.agent.as_str()), Some("claude"));
+        assert_eq!(
+            state.focused_pane().map(|p| p.agent.as_str()),
+            Some("claude")
+        );
         // '0' UNFOCUSES every pane: the shared prompt then targets the
         // MAIN agent (the normal-mode loop as manager).
         assert_eq!(state.focus_hotkey('0'), None);
@@ -2832,7 +2932,10 @@ mod tests {
         let SubagentTimelineEntry::Message { text } = &state.panes[0].activity.timeline[0] else {
             panic!("expected a Message entry");
         };
-        assert!(text.contains("hello") && text.contains("world"), "got {text:?}");
+        assert!(
+            text.contains("hello") && text.contains("world"),
+            "got {text:?}"
+        );
     }
 
     #[test]
@@ -2880,8 +2983,7 @@ mod tests {
         // The streamed entry was dropped (the report carries it) and the
         // report landed ONCE — the timeline never contains a doubled
         // answer.
-        let doubled = state
-            .panes[0]
+        let doubled = state.panes[0]
             .activity
             .timeline
             .iter()
@@ -2890,9 +2992,7 @@ mod tests {
                 _ => None,
             })
             .any(|text| {
-                let count = text
-                    .match_indices("Como")
-                    .count();
+                let count = text.match_indices("Como").count();
                 count > 1
             });
         assert!(
@@ -3268,7 +3368,8 @@ mod tests {
         }
         assert_eq!(user_rail, Some(expected_user), "the user echo wears brand");
         assert_eq!(
-            agent_rail, Some(expected_agent),
+            agent_rail,
+            Some(expected_agent),
             "the agents_call input wears secondary"
         );
     }
@@ -3465,10 +3566,7 @@ mod tests {
 
         fn changed_rows(sel: &Buffer, base: &Buffer, area: Rect) -> Vec<u16> {
             (area.y..area.bottom())
-                .filter(|y| {
-                    (area.x..area.right())
-                        .any(|x| sel.cell((x, *y)) != base.cell((x, *y)))
-                })
+                .filter(|y| (area.x..area.right()).any(|x| sel.cell((x, *y)) != base.cell((x, *y))))
                 .collect()
         }
         // Render with the selection, then without (same scroll): the only
@@ -3547,7 +3645,10 @@ mod tests {
         );
         // Nothing else was invented: no label, no status dot.
         assert!(!all.contains("restoring"), "no label: {all:?}");
-        assert!(!all.contains('●') && !all.contains('○'), "no status dots: {all:?}");
+        assert!(
+            !all.contains('●') && !all.contains('○'),
+            "no status dots: {all:?}"
+        );
 
         // Two further renders consume the spinner's half-rate tick
         // (`advance` moves the frame every other tick): the glyph changes.
@@ -3584,7 +3685,11 @@ mod tests {
 
         let row_text = |y: u16| {
             (0..80)
-                .map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()).unwrap_or_default())
+                .map(|x| {
+                    buf.cell((x, y))
+                        .map(|c| c.symbol().to_string())
+                        .unwrap_or_default()
+                })
                 .collect::<String>()
         };
         let all: String = (0..24).map(row_text).collect::<Vec<_>>().join("\n");
@@ -3600,7 +3705,7 @@ mod tests {
     /// The header name sits one breathing column past the pane edge, is
     /// bold, and carries the agent's OWN brand color: Claude focused paints
     /// the terracotta (lifted only when the theme would dissolve it), the
-    /// cosh daemon keeps the theme's text color (no invented brand), and an
+    /// cosh manager pane keeps the theme's text color (no invented brand), and an
     /// unfocused brand name dims toward the background.
     #[test]
     fn header_name_is_indented_bold_and_brand_colored() {
@@ -3923,12 +4028,7 @@ mod tests {
         // (or its contrast-lifted variant, the same formula the painter
         // applies; keep this assertion in sync with `draw_agent_name`).
         let palette = palette_for("devin").expect("devin palette");
-        let brand = RGBA::from_ints(
-            palette.primary.r,
-            palette.primary.g,
-            palette.primary.b,
-            255,
-        );
+        let brand = RGBA::from_ints(palette.primary.r, palette.primary.g, palette.primary.b, 255);
         let bg_lum = {
             let (r, g, b, _) = theme.background_element.to_ints();
             luminance(r, g, b)
@@ -4069,14 +4169,71 @@ mod tests {
         // The diff panel painted through the shared `DiffRenderable`: the
         // `+`/`-` code lines with the hunk header and the line-number
         // gutter (`2 +     new();` — gutter + sign + code).
-        assert!(all.contains("@@ -1,2 +1,3 @@"), "hunk header visible: {all:?}");
-        assert!(all.contains("2 +     new();"), "added line visible: {all:?}");
-        assert!(all.contains("2 -     old();"), "removed line visible: {all:?}");
+        assert!(
+            all.contains("@@ -1,2 +1,3 @@"),
+            "hunk header visible: {all:?}"
+        );
+        assert!(
+            all.contains("2 +     new();"),
+            "added line visible: {all:?}"
+        );
+        assert!(
+            all.contains("2 -     old();"),
+            "removed line visible: {all:?}"
+        );
         // The panel came from the shared cell cache (inserted this frame).
         assert!(
             state.diff_cells.contains_key("0:diff0"),
             "the EditDiff cell cache entry must exist: keys {:?}",
             state.diff_cells.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// The worktree badge paints on the pane's RESERVED footer row
+    /// (`view_h = body_h - 1`), left-aligned — a pinned pane announces
+    /// where it works without touching the crowded header; an unpinned
+    /// pane keeps the row blank.
+    #[test]
+    fn render_pane_paints_the_worktree_badge_on_the_reserved_footer_row() {
+        let theme = test_theme();
+        let mut state = AgentsSplitState::new(vec!["claude".into()]);
+        let wt = cosh_tools::worktree::PaneWorktree {
+            path: std::path::PathBuf::from("/tmp/cosh-worktrees/fix-1"),
+            branch: "fix-1".into(),
+            name: "fix-1".into(),
+            assigned_by: cosh_tools::worktree::AssignedBy::User,
+        };
+        state.panes[0].worktree = Some(wt);
+
+        let area = Rect::new(0, 0, 40, 12);
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut state, &theme, 0.0);
+        let last_row: String = (0..40)
+            .map(|x| {
+                buf.cell((x, 11))
+                    .map(|c| c.symbol().to_string())
+                    .unwrap_or_default()
+            })
+            .collect();
+        assert!(
+            last_row.trim_start().starts_with("⎇ fix-1"),
+            "the badge paints left-aligned on the reserved row: {last_row:?}"
+        );
+
+        // Unpinned: the reserved row stays blank.
+        state.panes[0].worktree = None;
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut state, &theme, 0.0);
+        let last_row: String = (0..40)
+            .map(|x| {
+                buf.cell((x, 11))
+                    .map(|c| c.symbol().to_string())
+                    .unwrap_or_default()
+            })
+            .collect();
+        assert!(
+            last_row.trim().is_empty(),
+            "no badge without a worktree: {last_row:?}"
         );
     }
 }
@@ -4101,13 +4258,19 @@ mod zoom_tests {
         assert_eq!(s.maximized, Some(1));
         // First Esc: `restore_maximized` consumes it and restores the grid —
         // the caller must NOT park on this press.
-        assert!(s.restore_maximized(), "the first Esc only restores the grid");
+        assert!(
+            s.restore_maximized(),
+            "the first Esc only restores the grid"
+        );
         assert_eq!(s.maximized, None, "grid restored");
         // Second Esc: the grid is up, nothing to restore — `false` hands the
         // key to the caller, whose next branch parks the split (leaves to
         // the chat). The toggle must never be what the Esc runs: with the
         // grid up a toggle would RE-EXPAND and the user could never leave.
-        assert!(!s.restore_maximized(), "grid up: the Esc falls through to park");
+        assert!(
+            !s.restore_maximized(),
+            "grid up: the Esc falls through to park"
+        );
         assert_eq!(s.maximized, None);
         assert_eq!(s.focused, Some(1), "focus survives the walk-back");
         // Ctrl+O is still a true toggle (expand again from the grid).
@@ -4218,6 +4381,7 @@ mod hide_tests {
         let bound = AgentPaneRef::Bound {
             agent: "claude".into(),
             session_id: "s-1".into(),
+            worktree: None,
         };
         assert_eq!(AgentPane::from_ref(&bound).to_ref(), bound);
 

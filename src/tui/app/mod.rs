@@ -47,12 +47,12 @@ use crate::ui::toast::ToastState;
 
 mod agent_loop;
 mod agents_dispatch;
-mod harness_assembly;
 mod commands;
 mod compaction;
 mod dialogs;
 pub(crate) mod events;
 mod gateway_recommendation;
+mod harness_assembly;
 mod keys;
 /// Right Panel feed for the MAIN agent in `/agents` mode: translates main-
 /// loop `HarnessEvent`s into the `SubagentEvent`s the subagent window
@@ -331,6 +331,17 @@ pub struct App {
     /// the synthesized tool-call ids of ONE main-agent turn with their
     /// results. Reset per turn by the mirror's input/done hooks.
     main_mirror_bridge: main_mirror::MirrorBridge,
+    /// The parked `agents_worktree` op awaiting the user's confirmation
+    /// (the pane's binding was `AssignedBy::User` and the ask would change
+    /// or clear it — the user's supremacy holds even in Yolo mode). Only
+    /// the OP is kept — its `pane` field IS the registry id, and the pane
+    /// INDEX is re-resolved from it when the user answers (a split that
+    /// changed while the dialog was open must never redirect the binding
+    /// to a different pane). `None` when no ask is pending. The Confirm
+    /// dialog that renders it is the SOVEREIGN modal: while this is
+    /// `Some`, the dialog owns the keyboard (the standard confirm-dialog
+    /// gate), so no other interaction can race the answer.
+    pending_worktree_confirmation: Option<cosh::harness::panes::WorktreeOp>,
     pub should_quit: bool,
     pub tokio_handle: Handle,
     pub event_tx: mpsc::UnboundedSender<HarnessEvent>,
@@ -807,6 +818,7 @@ impl App {
             session_view: SessionView::new(),
             sparkle: SparkleState::new(),
             main_mirror_bridge: main_mirror::MirrorBridge::default(),
+            pending_worktree_confirmation: None,
             #[cfg(feature = "home")]
             home_view: HomeView::new(),
             internal_tools_view: {
@@ -1115,6 +1127,7 @@ impl App {
             // is the only guaranteed heartbeat, so a request can never wait
             // on a pane event that never comes while every pane idles.
             if self.agents_split.is_some() || self.parked_agents_split.is_some() {
+                self.serve_agents_pane_worktree_ops();
                 self.serve_agents_pane_queues();
             }
 
@@ -1195,13 +1208,12 @@ impl App {
         } else {
             0
         };
-        let right_panel_w = if matches!(self.mode(), AppMode::Session)
-            && self.right_panel_visible(area.width)
-        {
-            RIGHT_PANEL_WIDTH
-        } else {
-            0
-        };
+        let right_panel_w =
+            if matches!(self.mode(), AppMode::Session) && self.right_panel_visible(area.width) {
+                RIGHT_PANEL_WIDTH
+            } else {
+                0
+            };
         SessionArea {
             main: Rect::new(
                 area.x + sidebar_w,
@@ -1649,20 +1661,17 @@ impl App {
                 .agents_split
                 .as_ref()
                 .is_some_and(crate::routes::session::agents_split::AgentsSplitState::any_running)
-            || self
-                .agents_split
-                .as_ref()
-                .is_some_and(crate::routes::session::agents_split::AgentsSplitState::any_rehydrating)
+            || self.agents_split.as_ref().is_some_and(
+                crate::routes::session::agents_split::AgentsSplitState::any_rehydrating,
+            )
             || (self.agents_split.is_none()
-                && self
-                    .parked_agents_split
-                    .as_ref()
-                    .is_some_and(crate::routes::session::agents_split::AgentsSplitState::any_running))
+                && self.parked_agents_split.as_ref().is_some_and(
+                    crate::routes::session::agents_split::AgentsSplitState::any_running,
+                ))
             || (self.agents_split.is_none()
-                && self
-                    .parked_agents_split
-                    .as_ref()
-                    .is_some_and(crate::routes::session::agents_split::AgentsSplitState::any_rehydrating)))
+                && self.parked_agents_split.as_ref().is_some_and(
+                    crate::routes::session::agents_split::AgentsSplitState::any_rehydrating,
+                )))
             && self.agent_spinner.is_some();
         let correction_spinner_active = self.prompt_correction_active && !agent_spinner_active;
         let spinner_h = u16::from(
@@ -1781,13 +1790,12 @@ impl App {
             0
         };
 
-        let right_panel_w = if matches!(self.mode(), AppMode::Session)
-            && self.right_panel_visible(area.width)
-        {
-            RIGHT_PANEL_WIDTH
-        } else {
-            0
-        };
+        let right_panel_w =
+            if matches!(self.mode(), AppMode::Session) && self.right_panel_visible(area.width) {
+                RIGHT_PANEL_WIDTH
+            } else {
+                0
+            };
 
         let main_area = Rect::new(
             area.x + sidebar_w,

@@ -1822,6 +1822,7 @@ not-json"#;
             pane: crate::types::AgentPaneRef::Bound {
                 agent: "claude".into(),
                 session_id: "sess-1".into(),
+                worktree: None,
             },
             index: 1,
         }];

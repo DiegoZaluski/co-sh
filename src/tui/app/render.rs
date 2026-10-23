@@ -16,7 +16,7 @@ use crate::left_panel::{MIN_WIDTH_FOR_LEFT_PANEL, Mode};
 use crate::logo::LOGO_CHAT;
 #[cfg(feature = "home")]
 use crate::routes::home::footer::HomeFooterView;
-use crate::routes::session::agents_split::{DAEMON_LABEL, brand_name_styles};
+use crate::routes::session::agents_split::{MANAGER_LABEL, brand_name_styles};
 use crate::routes::session::footer::FooterView;
 use crate::routes::session::right_panel::render_right_panel;
 use crate::state::PendingQueues;
@@ -986,7 +986,7 @@ impl App {
                         // Focused `/agents` pane badge: the prompt targets
                         // that pane, so the agent-label row leads with the
                         // pane's brand name + serving triple instead of the
-                        // gateway triple. The daemon pane IS the main agent
+                        // gateway triple. The manager pane IS the main agent
                         // itself: no badge at all — the row stays exactly
                         // the mode + gateway triple it always was. An ACP
                         // pane shows its reported triple (provider only
@@ -998,7 +998,7 @@ impl App {
                             .as_ref()
                             .and_then(|split| split.focused)
                             .and_then(|index| self.agents_split.as_ref()?.panes.get(index))
-                            .filter(|pane| pane.agent != DAEMON_LABEL);
+                            .filter(|pane| pane.agent != MANAGER_LABEL);
                         let mut name_styles = Vec::new();
                         let pane_badge: Option<PanePromptInfo<'_>> = pane.map(|pane| {
                             let name = display_name(&pane.agent);

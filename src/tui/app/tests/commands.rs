@@ -369,10 +369,7 @@ async fn slash_new_hands_off_the_previous_session_lock() {
         .current_session_id
         .clone()
         .expect("a new session was selected");
-    assert_ne!(
-        new_id, previous_id,
-        "/new must select a different session"
-    );
+    assert_ne!(new_id, previous_id, "/new must select a different session");
 
     // The reported bug: the previous session's lock stayed with this
     // process after /new. It must be handed off NOW, not at process exit.
@@ -1021,7 +1018,7 @@ async fn agents_pane_done_promotes_the_pane_binding_for_the_next_open() {
     isolate_home();
     let mut app = App::new("/tmp".to_string());
     // One session, split open with a fresh pick list: claude ×2, cosh last
-    // (the daemon pane exists ONLY because the user marked it).
+    // (the manager pane exists ONLY because the user marked it).
     let session_id = crate::session::store::generate_session_id();
     app.state
         .add_empty_session(session_id.clone(), "pane binding".into(), 0);
@@ -1060,7 +1057,12 @@ async fn agents_pane_done_promotes_the_pane_binding_for_the_next_open() {
     app.event_tx
         .send(HarnessEvent::AgentsPaneDone {
             pane: 0,
-            pane_id: app.agents_split.as_ref().and_then(|s| s.panes.first()).map(|p| p.id).unwrap_or(0),
+            pane_id: app
+                .agents_split
+                .as_ref()
+                .and_then(|s| s.panes.first())
+                .map(|p| p.id)
+                .unwrap_or(0),
             epoch: app.agents_pane_epoch,
             output: "report one".into(),
             stop_reason: "end_turn".into(),
@@ -1076,6 +1078,7 @@ async fn agents_pane_done_promotes_the_pane_binding_for_the_next_open() {
         AgentPaneRef::Bound {
             agent: "claude".into(),
             session_id: "sess-A".into(),
+            worktree: None,
         },
         "the finished pane promotes to Bound"
     );
@@ -1093,7 +1096,12 @@ async fn agents_pane_done_promotes_the_pane_binding_for_the_next_open() {
     app.event_tx
         .send(HarnessEvent::AgentsPaneDone {
             pane: 0,
-            pane_id: app.agents_split.as_ref().and_then(|s| s.panes.first()).map(|p| p.id).unwrap_or(0),
+            pane_id: app
+                .agents_split
+                .as_ref()
+                .and_then(|s| s.panes.first())
+                .map(|p| p.id)
+                .unwrap_or(0),
             epoch: app.agents_pane_epoch,
             output: "report two".into(),
             stop_reason: "end_turn".into(),
@@ -1105,7 +1113,12 @@ async fn agents_pane_done_promotes_the_pane_binding_for_the_next_open() {
     app.event_tx
         .send(HarnessEvent::AgentsPaneDone {
             pane: 1,
-            pane_id: app.agents_split.as_ref().and_then(|s| s.panes.get(1)).map(|p| p.id).unwrap_or(0),
+            pane_id: app
+                .agents_split
+                .as_ref()
+                .and_then(|s| s.panes.get(1))
+                .map(|p| p.id)
+                .unwrap_or(0),
             epoch: app.agents_pane_epoch,
             output: "report three".into(),
             stop_reason: "end_turn".into(),
@@ -1278,6 +1291,7 @@ async fn adding_panes_while_running_keeps_the_running_turns_and_chats() {
             crate::types::AgentPaneRef::Bound {
                 agent: "claude".into(),
                 session_id: "sess-kept".into(),
+                worktree: None,
             },
             "the surviving pane's binding promotes from its own turn's Done"
         );
@@ -1323,16 +1337,12 @@ async fn adding_panes_while_running_keeps_the_running_turns_and_chats() {
         let split = app.agents_split.as_ref().unwrap();
         assert_eq!(split.panes.len(), 1);
         assert!(
-            !split.panes[0]
-                .activity
-                .timeline
-                .iter()
-                .any(|e| matches!(
-                    e,
-                    crate::routes::session::right_panel::types::SubagentTimelineEntry::Message {
-                        text
-                    } if text.contains("dropped pane leak")
-                )),
+            !split.panes[0].activity.timeline.iter().any(|e| matches!(
+                e,
+                crate::routes::session::right_panel::types::SubagentTimelineEntry::Message {
+                    text
+                } if text.contains("dropped pane leak")
+            )),
             "a dropped pane's late event must not leak into the kept pane"
         );
     }
@@ -1364,7 +1374,12 @@ async fn parked_agents_split_survives_park_and_re_attach() {
     app.event_tx
         .send(HarnessEvent::AgentsPaneEvent {
             pane: 0,
-            pane_id: app.agents_split.as_ref().and_then(|s| s.panes.first()).map(|p| p.id).unwrap_or(0),
+            pane_id: app
+                .agents_split
+                .as_ref()
+                .and_then(|s| s.panes.first())
+                .map(|p| p.id)
+                .unwrap_or(0),
             epoch: app.agents_pane_epoch,
             event: cosh_tools::subagent::events::SubagentEvent::Message {
                 text: "still streaming".into(),
@@ -1373,10 +1388,7 @@ async fn parked_agents_split_survives_park_and_re_attach() {
         .ok();
     app.poll_events();
     assert!(
-        !app.agents_split
-            .as_ref()
-            .unwrap()
-            .panes[0]
+        !app.agents_split.as_ref().unwrap().panes[0]
             .activity
             .timeline
             .is_empty(),
@@ -1394,7 +1406,12 @@ async fn parked_agents_split_survives_park_and_re_attach() {
     app.event_tx
         .send(HarnessEvent::AgentsPaneEvent {
             pane: 0,
-            pane_id: app.agents_split.as_ref().and_then(|s| s.panes.first()).map(|p| p.id).unwrap_or(0),
+            pane_id: app
+                .agents_split
+                .as_ref()
+                .and_then(|s| s.panes.first())
+                .map(|p| p.id)
+                .unwrap_or(0),
             epoch: app.agents_pane_epoch,
             event: cosh_tools::subagent::events::SubagentEvent::Message {
                 text: "parked stream".into(),
@@ -1402,11 +1419,7 @@ async fn parked_agents_split_survives_park_and_re_attach() {
         })
         .ok();
     app.poll_events();
-    let parked_text = app
-        .parked_agents_split
-        .as_ref()
-        .unwrap()
-        .panes[0]
+    let parked_text = app.parked_agents_split.as_ref().unwrap().panes[0]
         .activity
         .timeline
         .iter()
@@ -1440,11 +1453,7 @@ async fn parked_agents_split_survives_park_and_re_attach() {
     );
     assert!(app.agents_split.is_some());
     assert!(app.parked_agents_split.is_none());
-    let reattached_text = app
-        .agents_split
-        .as_ref()
-        .unwrap()
-        .panes[0]
+    let reattached_text = app.agents_split.as_ref().unwrap().panes[0]
         .activity
         .timeline
         .iter()
@@ -1485,7 +1494,8 @@ async fn session_switch_restores_the_mode_only_when_it_was_left_open() {
     // `add_empty_session` would silently overwrite the earlier cache entry.
     let unique = |tag: &str| format!("{}-{tag}", crate::session::store::generate_session_id());
     let a = unique("a");
-    app.state.add_empty_session(a.clone(), "open mode".into(), 0);
+    app.state
+        .add_empty_session(a.clone(), "open mode".into(), 0);
     app.state.current_session_id = Some(a.clone());
     app.open_agents_split(vec![crate::ui::agents_picker::AgentPick {
         name: "kilo".into(),
@@ -1506,6 +1516,7 @@ async fn session_switch_restores_the_mode_only_when_it_was_left_open() {
             AgentPaneRef::Bound {
                 agent: "claude".into(),
                 session_id: "sess-old".into(),
+                worktree: None,
             },
             AgentPaneRef::Name("kilo".into()),
         ]);
@@ -1514,7 +1525,8 @@ async fn session_switch_restores_the_mode_only_when_it_was_left_open() {
 
     // Session C: no agent state at all.
     let c = unique("c");
-    app.state.add_empty_session(c.clone(), "no agents".into(), 0);
+    app.state
+        .add_empty_session(c.clone(), "no agents".into(), 0);
 
     // Switch to B: NO split screen — the set rebuilds parked instead.
     assert!(app.switch_session_locked(&b));
@@ -1522,7 +1534,10 @@ async fn session_switch_restores_the_mode_only_when_it_was_left_open() {
         app.agents_split.is_none(),
         "a parked set never grabs the screen"
     );
-    let parked = app.parked_agents_split.as_ref().expect("parked slot rebuilt");
+    let parked = app
+        .parked_agents_split
+        .as_ref()
+        .expect("parked slot rebuilt");
     assert_eq!(parked.panes.len(), 2);
     // The binding rode along: the Bound entry seeds the pane's resume id.
     assert_eq!(parked.panes[0].agent, "claude");
@@ -1569,7 +1584,8 @@ async fn session_switch_fails_outstanding_pane_requests_and_resyncs_the_registry
     // nobody has dispatched yet (the pane is idle — the frame tick would
     // serve it, but the switch races ahead of it).
     let a = unique("a");
-    app.state.add_empty_session(a.clone(), "with panes".into(), 0);
+    app.state
+        .add_empty_session(a.clone(), "with panes".into(), 0);
     app.state.current_session_id = Some(a.clone());
     app.open_agents_split(vec![crate::ui::agents_picker::AgentPick {
         name: "cosh".into(),
@@ -1641,7 +1657,9 @@ async fn fresh_confirm_supersedes_the_parked_split() {
     }]);
     app.agents_split.as_mut().unwrap().set_stop_signal(
         0,
-        Some(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))),
+        Some(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            false,
+        ))),
     );
     app.park_agents_split();
     let parked = app.parked_agents_split.as_ref().unwrap();
@@ -1653,7 +1671,10 @@ async fn fresh_confirm_supersedes_the_parked_split() {
         name: "kilo".into(),
         instances: 1,
     }]);
-    assert!(app.parked_agents_split.is_none(), "the parked set is dropped");
+    assert!(
+        app.parked_agents_split.is_none(),
+        "the parked set is dropped"
+    );
     assert!(
         signal.load(std::sync::atomic::Ordering::Relaxed),
         "the parked turn's stop signal fired with it"
@@ -1742,7 +1763,12 @@ async fn stale_epoch_agents_pane_done_is_dropped() {
     app.event_tx
         .send(HarnessEvent::AgentsPaneDone {
             pane: 0,
-            pane_id: app.agents_split.as_ref().and_then(|s| s.panes.first()).map(|p| p.id).unwrap_or(0),
+            pane_id: app
+                .agents_split
+                .as_ref()
+                .and_then(|s| s.panes.first())
+                .map(|p| p.id)
+                .unwrap_or(0),
             epoch: app.agents_pane_epoch,
             output: "live report".into(),
             stop_reason: "end_turn".into(),
@@ -1784,8 +1810,8 @@ async fn stale_epoch_agents_pane_done_is_dropped() {
 /// rehydrating are skipped.
 #[tokio::test]
 async fn reopening_the_split_rehydrates_bound_panes_with_empty_timelines() {
-    use cosh::harness::HarnessEvent;
     use crate::types::AgentPaneRef;
+    use cosh::harness::HarnessEvent;
 
     let _guard = HOME_LOCK.lock();
     isolate_home();
@@ -1800,6 +1826,7 @@ async fn reopening_the_split_rehydrates_bound_panes_with_empty_timelines() {
         AgentPaneRef::Bound {
             agent: "claude".into(),
             session_id: "sess-old".into(),
+            worktree: None,
         },
         AgentPaneRef::Name("kilo".into()),
     ]);
@@ -1837,7 +1864,12 @@ async fn reopening_the_split_rehydrates_bound_panes_with_empty_timelines() {
     app.event_tx
         .send(HarnessEvent::AgentsPaneEvent {
             pane: 0,
-            pane_id: app.agents_split.as_ref().and_then(|s| s.panes.first()).map(|p| p.id).unwrap_or(0),
+            pane_id: app
+                .agents_split
+                .as_ref()
+                .and_then(|s| s.panes.first())
+                .map(|p| p.id)
+                .unwrap_or(0),
             epoch,
             event: cosh_tools::subagent::events::SubagentEvent::UserMessage {
                 text: "what changed today?".into(),
@@ -1847,7 +1879,12 @@ async fn reopening_the_split_rehydrates_bound_panes_with_empty_timelines() {
     app.event_tx
         .send(HarnessEvent::AgentsPaneEvent {
             pane: 0,
-            pane_id: app.agents_split.as_ref().and_then(|s| s.panes.first()).map(|p| p.id).unwrap_or(0),
+            pane_id: app
+                .agents_split
+                .as_ref()
+                .and_then(|s| s.panes.first())
+                .map(|p| p.id)
+                .unwrap_or(0),
             epoch,
             event: cosh_tools::subagent::events::SubagentEvent::Message {
                 text: "the answer from yesterday".into(),
@@ -1858,7 +1895,12 @@ async fn reopening_the_split_rehydrates_bound_panes_with_empty_timelines() {
     app.event_tx
         .send(HarnessEvent::AgentsPaneReplayed {
             pane: 0,
-            pane_id: app.agents_split.as_ref().and_then(|s| s.panes.first()).map(|p| p.id).unwrap_or(0),
+            pane_id: app
+                .agents_split
+                .as_ref()
+                .and_then(|s| s.panes.first())
+                .map(|p| p.id)
+                .unwrap_or(0),
             epoch,
             ok: true,
             error: String::new(),
@@ -1885,7 +1927,9 @@ async fn reopening_the_split_rehydrates_bound_panes_with_empty_timelines() {
         "the replayed user turn lands in the timeline: {texts:?}"
     );
     assert!(
-        texts.iter().any(|t| t.contains("the answer from yesterday")),
+        texts
+            .iter()
+            .any(|t| t.contains("the answer from yesterday")),
         "the replayed agent reply lands in the timeline: {texts:?}"
     );
     // The binding is UNTOUCHED by a replay: the pane still points at the
@@ -1904,8 +1948,8 @@ async fn reopening_the_split_rehydrates_bound_panes_with_empty_timelines() {
 /// back to `session/new` through the normal turn path.
 #[tokio::test]
 async fn a_failed_replay_marks_the_pane_instead_of_silence() {
-    use cosh::harness::HarnessEvent;
     use crate::types::AgentPaneRef;
+    use cosh::harness::HarnessEvent;
 
     let _guard = HOME_LOCK.lock();
     isolate_home();
@@ -1917,6 +1961,7 @@ async fn a_failed_replay_marks_the_pane_instead_of_silence() {
     app.state.current_session_mut().unwrap().agents_panes = Some(vec![AgentPaneRef::Bound {
         agent: "claude".into(),
         session_id: "sess-gone".into(),
+        worktree: None,
     }]);
     app.state.current_session_mut().unwrap().agents_mode_open = true;
     let panes = app
@@ -1936,7 +1981,12 @@ async fn a_failed_replay_marks_the_pane_instead_of_silence() {
     app.event_tx
         .send(HarnessEvent::AgentsPaneReplayed {
             pane: 0,
-            pane_id: app.agents_split.as_ref().and_then(|s| s.panes.first()).map(|p| p.id).unwrap_or(0),
+            pane_id: app
+                .agents_split
+                .as_ref()
+                .and_then(|s| s.panes.first())
+                .map(|p| p.id)
+                .unwrap_or(0),
             epoch,
             ok: false,
             error: "ACP session/load failed: session gone".into(),
@@ -1992,6 +2042,7 @@ async fn a_prompt_to_a_rehydrating_pane_is_refused_with_a_toast() {
         AgentPaneRef::Bound {
             agent: "claude".into(),
             session_id: "sess-1".into(),
+            worktree: None,
         },
         AgentPaneRef::Name("kilo".into()),
     ]);
@@ -2083,7 +2134,12 @@ async fn a_user_prompt_echoes_into_the_pane_timeline() {
     app.event_tx
         .send(HarnessEvent::AgentsPaneDone {
             pane: 0,
-            pane_id: app.agents_split.as_ref().and_then(|s| s.panes.first()).map(|p| p.id).unwrap_or(0),
+            pane_id: app
+                .agents_split
+                .as_ref()
+                .and_then(|s| s.panes.first())
+                .map(|p| p.id)
+                .unwrap_or(0),
             epoch,
             output: "first answer".into(),
             stop_reason: "end_turn".into(),
@@ -2146,7 +2202,12 @@ async fn a_session_model_event_lands_on_the_pane() {
     app.event_tx
         .send(HarnessEvent::AgentsPaneEvent {
             pane: 0,
-            pane_id: app.agents_split.as_ref().and_then(|s| s.panes.first()).map(|p| p.id).unwrap_or(0),
+            pane_id: app
+                .agents_split
+                .as_ref()
+                .and_then(|s| s.panes.first())
+                .map(|p| p.id)
+                .unwrap_or(0),
             epoch: app.agents_pane_epoch,
             event: cosh_tools::subagent::events::SubagentEvent::SessionModel {
                 model: Some("kilo/nvidia/nemotron-3-ultra-550b-a55b:free".into()),
@@ -2213,7 +2274,12 @@ async fn a_usage_event_lands_on_the_pane() {
     app.event_tx
         .send(HarnessEvent::AgentsPaneEvent {
             pane: 0,
-            pane_id: app.agents_split.as_ref().and_then(|s| s.panes.first()).map(|p| p.id).unwrap_or(0),
+            pane_id: app
+                .agents_split
+                .as_ref()
+                .and_then(|s| s.panes.first())
+                .map(|p| p.id)
+                .unwrap_or(0),
             epoch: app.agents_pane_epoch,
             event: cosh_tools::subagent::events::SubagentEvent::Usage {
                 context_window: 100_000,
@@ -2238,7 +2304,7 @@ async fn a_usage_event_lands_on_the_pane() {
 /// End-to-end `/agents` queue flow with a `cosh` pane. The registry mirrors
 /// the split (cosh addressable like any agent), an `agents_call` queued to
 /// "cosh" is picked up by the App's queue service (which used to skip the
-/// daemon), and the pane-keyed completion resolves the waiter — exactly the
+/// manager loop), and the pane-keyed completion resolves the waiter — exactly the
 /// path a manager delegation to a sibling takes.
 #[tokio::test]
 async fn agents_call_serves_a_queued_cosh_pane_end_to_end() {
@@ -2248,7 +2314,7 @@ async fn agents_call_serves_a_queued_cosh_pane_end_to_end() {
     isolate_home();
     let mut app = App::new("/tmp".to_string());
     // Contract: this test drives `serve_agents_pane_queues` → `dispatch_to_pane`,
-    // which spawns a manager turn thread. Neutralize the daemon route so
+    // which spawns a manager turn thread. Neutralize the manager route so
     // `run_manager_turn` returns its error immediately (the assembly's
     // `build_connector` fails before building a runtime) instead of ever
     // touching the network or $HOME — no live turn thread is left behind,
@@ -2275,14 +2341,17 @@ async fn agents_call_serves_a_queued_cosh_pane_end_to_end() {
     app.sync_agents_pane_registry();
 
     let ids: Vec<String> = panes::list_panes().into_iter().map(|p| p.id).collect();
-    assert!(ids.contains(&"cosh".to_string()), "cosh is registered: {ids:?}");
+    assert!(
+        ids.contains(&"cosh".to_string()),
+        "cosh is registered: {ids:?}"
+    );
     assert!(
         ids.contains(&"claude".to_string()),
         "sibling pane is registered too: {ids:?}"
     );
 
     // The MAIN loop delegates to the cosh pane: the request queues, the
-    // queue service dispatches it (the daemon filter is gone), and the turn
+    // queue service dispatches it (the manager pane routing is live), and the turn
     // is running.
     let handle = panes::enqueue("cosh", "do the work", panes::MAIN, ReplyMode::Wait)
         .expect("cosh pane is addressable");
@@ -2401,7 +2470,12 @@ async fn a_rebooted_cosh_pane_replays_its_session_from_the_store() {
     app.event_tx
         .send(HarnessEvent::AgentsPaneDone {
             pane: 0,
-            pane_id: app.agents_split.as_ref().and_then(|s| s.panes.first()).map(|p| p.id).unwrap_or(0),
+            pane_id: app
+                .agents_split
+                .as_ref()
+                .and_then(|s| s.panes.first())
+                .map(|p| p.id)
+                .unwrap_or(0),
             epoch: app.agents_pane_epoch,
             output: "the report".into(),
             stop_reason: "end_turn".into(),
@@ -2411,10 +2485,16 @@ async fn a_rebooted_cosh_pane_replays_its_session_from_the_store() {
     app.poll_events();
 
     assert_eq!(
-        app.state.current_session().unwrap().agents_panes.clone().unwrap()[0],
+        app.state
+            .current_session()
+            .unwrap()
+            .agents_panes
+            .clone()
+            .unwrap()[0],
         AgentPaneRef::Bound {
             agent: "cosh".into(),
             session_id: manager_session_id.into(),
+            worktree: None,
         },
         "the manager Done must promote the cosh pane's binding (issue 6)"
     );
@@ -2493,7 +2573,13 @@ async fn a_rebooted_cosh_pane_replays_its_session_from_the_store() {
     }
     // The binding survives the replay untouched.
     assert_eq!(
-        app.state.current_session().unwrap().agents_panes.clone().unwrap()[0].session_id(),
+        app.state
+            .current_session()
+            .unwrap()
+            .agents_panes
+            .clone()
+            .unwrap()[0]
+            .session_id(),
         Some(manager_session_id),
         "a replay never rebinds the pane's session"
     );
@@ -2626,8 +2712,13 @@ async fn a_manager_initiated_pane_report_never_wakes_the_main_agent() {
     }]);
     app.sync_agents_pane_registry();
 
-    let handle = panes::enqueue("cosh", "manager to sibling", panes::MANAGER, ReplyMode::Background)
-        .expect("cosh pane is addressable");
+    let handle = panes::enqueue(
+        "cosh",
+        "manager to sibling",
+        panes::MANAGER,
+        ReplyMode::Background,
+    )
+    .expect("cosh pane is addressable");
     let _ = handle;
     app.serve_agents_pane_queues();
     app.agents_split.as_mut().unwrap().set_running(0, false);
@@ -2804,7 +2895,10 @@ async fn hiding_the_last_pane_auto_closes_and_restore_reopens() {
         // The split auto-closed: no live state, the mode is closed and the
         // visible set is GONE (`None` — an empty `Some` would be rebuilt
         // as a paneless split by the re-entry/restore paths).
-        assert!(app.agents_split.is_none(), "the empty split left the screen");
+        assert!(
+            app.agents_split.is_none(),
+            "the empty split left the screen"
+        );
         let session = app.state.current_session().unwrap();
         assert!(!session.agents_mode_open, "the mode follows the screen");
         assert!(
@@ -2858,8 +2952,9 @@ async fn legacy_empty_pane_set_opens_the_picker_not_an_empty_split() {
 
     // A live-but-empty parked split (the legacy in-memory shape) is not
     // re-attachable either: the picker opens instead.
-    app.parked_agents_split =
-        Some(crate::routes::session::agents_split::AgentsSplitState::new(Vec::new()));
+    app.parked_agents_split = Some(crate::routes::session::agents_split::AgentsSplitState::new(
+        Vec::new(),
+    ));
     assert!(
         !app.attach_parked_agents_split(),
         "an empty parked split is not re-attachable"
@@ -2872,4 +2967,454 @@ async fn legacy_empty_pane_set_opens_the_picker_not_an_empty_split() {
     ));
     assert!(app.attach_parked_agents_split(), "a real set re-attaches");
     assert_eq!(app.agents_split.as_ref().unwrap().pane_count(), 1);
+}
+
+/// Real repo helper for the `/worktree` integration tests: one empty commit
+/// on the default branch, so `worktree add` branches off a HEAD. Isolated
+/// from the shared `/tmp/cosh-worktrees` root: the add path is EXPLICIT
+/// (tempdir-scoped), so parallel tests never collide on names.
+fn worktree_test_repo() -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().to_path_buf();
+    for args in [
+        vec!["init", "--quiet"],
+        vec!["config", "user.email", "t@example.com"],
+        vec!["config", "user.name", "T"],
+        vec!["commit", "--allow-empty", "-m", "init", "--quiet"],
+    ] {
+        let status = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(&path)
+            .status()
+            .expect("git status");
+        assert!(status.success(), "git {args:?} failed");
+    }
+    (dir, path)
+}
+
+/// One claude pane split with pane 0 focused — the worktree command's
+/// target shape.
+fn worktree_split_app(repo: &std::path::Path) -> App {
+    let mut app = App::new(repo.display().to_string());
+    let session_id = crate::session::store::generate_session_id();
+    app.state
+        .add_empty_session(session_id.clone(), "worktree panes".into(), 0);
+    app.state.current_session_id = Some(session_id);
+    app.open_agents_split(vec![crate::ui::agents_picker::AgentPick {
+        name: "claude".into(),
+        instances: 1,
+    }]);
+    app
+}
+
+/// `/worktree add <path> <branch>` on the focused pane: the worktree is
+/// created at the EXPLICIT path, the pane pin persists to the session
+/// metadata (assigned_by: User), and the harness registry reports the
+/// worktree so the main agent's pane listing knows where the pane lives.
+#[tokio::test]
+async fn slash_worktree_add_pins_the_pane_and_persists_the_binding() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let (_dir, repo) = worktree_test_repo();
+    let app_repo = repo.clone();
+    let mut app = worktree_split_app(&app_repo);
+    let wt = repo.join("wt-explicit");
+
+    app.prompt_view.input = format!("/worktree add {} feat-x", wt.display());
+    let cmd = slash_cmd("worktree");
+    app.run_slash_command(&cmd);
+
+    let pane = &app.agents_split.as_ref().unwrap().panes[0];
+    let pin = pane.worktree.as_ref().expect("the pane got pinned");
+    assert_eq!(pin.branch, "feat-x");
+    assert_eq!(pin.path, wt);
+    assert_eq!(pin.assigned_by, cosh_tools::worktree::AssignedBy::User);
+    assert!(wt.is_dir(), "the worktree directory exists");
+    assert!(
+        pane.worktree_handoff_pending,
+        "the cwd moved: the next turn carries the handoff"
+    );
+    assert!(!app.slash_menu.visible, "the pick consumed the menu");
+
+    // The binding persists through the session metadata write-back.
+    let panes = app.state.current_session().unwrap().agents_panes.clone();
+    let panes = panes.expect("the split stays open");
+    assert_eq!(
+        panes[0],
+        crate::types::AgentPaneRef::Name("claude".into()),
+        "an unbound pane keeps the Name shape — the worktree rides the in-memory pane and the NEXT Bound promotion"
+    );
+
+    // The main agent's registry knows the pane's worktree (context block).
+    let descriptors = cosh::harness::panes::list_panes();
+    assert_eq!(descriptors.len(), 1);
+    assert_eq!(
+        descriptors[0].worktree.as_deref(),
+        Some("feat-x"),
+        "the registry carries the worktree name"
+    );
+
+    // The worktree checks out the branch in the repo.
+    let head = String::from_utf8(
+        std::process::Command::new("git")
+            .args([
+                "-C",
+                wt.to_str().unwrap(),
+                "rev-parse",
+                "--abbrev-ref",
+                "HEAD",
+            ])
+            .output()
+            .expect("rev-parse")
+            .stdout,
+    )
+    .unwrap();
+    assert_eq!(head.trim(), "feat-x");
+}
+
+/// `/worktree add <branch>` (no path): the worktree lands at the default
+/// temp location — `<temp>/cosh-worktrees/<slug>` — and the pane's cwd
+/// resolution moves there. The default root is SHARED system temp state,
+/// so the test claims a run-unique slug (never colliding with parallel
+/// tests or leftovers) and removes its own worktree at the end.
+#[tokio::test]
+async fn slash_worktree_add_without_a_path_uses_the_default_temp_root() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let (_dir, repo) = worktree_test_repo();
+    // Run-unique branch: the default slug derives from it, so two
+    // concurrent test runs (or leftovers from earlier ones) can never
+    // fight over the same directory under the shared root.
+    let branch = format!("fix-default-root-{}", std::process::id());
+    let mut app = worktree_split_app(&repo);
+
+    app.prompt_view.input = format!("/worktree add {branch}");
+    app.run_slash_command(&slash_cmd("worktree"));
+
+    let pane = &app.agents_split.as_ref().unwrap().panes[0];
+    let pin = pane.worktree.as_ref().expect("the pane got pinned");
+    let expected_root = std::env::temp_dir().join("cosh-worktrees");
+    assert_eq!(
+        pin.path.parent().map(|p| p.to_path_buf()),
+        Some(expected_root),
+        "the default path is the shared temp root: {}",
+        pin.path.display()
+    );
+    assert_eq!(pin.branch, branch);
+
+    // Leave no shared-root litter: a CLEAN worktree removes fine (its
+    // branch survives — out of scope here).
+    let removed = cosh_tools::worktree::remove(&repo, &pin.path);
+    assert!(removed.is_ok(), "clean worktree removes: {removed:?}");
+}
+
+/// `/worktree exit` drops the binding, keeps the worktree on disk (nothing
+/// removed), and flags the handoff so the pane's next turn carries its
+/// context back across the cwd move.
+#[tokio::test]
+async fn slash_worktree_exit_unpins_without_deleting_anything() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let (_dir, repo) = worktree_test_repo();
+    let mut app = worktree_split_app(&repo);
+    let wt = repo.join("wt-exit");
+
+    // Isolate first (asserting precondition).
+    app.prompt_view.input = format!("/worktree add {} feat-exit", wt.display());
+    app.run_slash_command(&slash_cmd("worktree"));
+    assert!(
+        app.agents_split.as_ref().unwrap().panes[0]
+            .worktree
+            .is_some()
+    );
+    assert!(wt.is_dir());
+
+    // Exit.
+    app.prompt_view.input = "/worktree exit".into();
+    app.run_slash_command(&slash_cmd("worktree"));
+
+    let pane = &app.agents_split.as_ref().unwrap().panes[0];
+    assert!(pane.worktree.is_none(), "the binding is dropped");
+    assert!(
+        pane.worktree_handoff_pending,
+        "the cwd moved back: the next turn carries the handoff"
+    );
+    assert!(
+        wt.is_dir(),
+        "the worktree directory Survives: exit never deletes"
+    );
+    let has_wt = std::process::Command::new("git")
+        .args([
+            "-C",
+            repo.to_str().unwrap(),
+            "worktree",
+            "list",
+            "--porcelain",
+        ])
+        .output()
+        .unwrap()
+        .stdout;
+    let has_wt = String::from_utf8(has_wt).unwrap();
+    assert!(
+        has_wt.contains("wt-exit"),
+        "the git worktree registration survives"
+    );
+    assert!(
+        app.toast_state
+            .current
+            .as_ref()
+            .is_some_and(|t| t.message.contains("kept")),
+        "the toast must say the worktree was kept"
+    );
+}
+
+/// `/worktree` with no arguments or an unknown subcommand is refused with
+/// the usage toast — nothing breaks, nothing is created.
+#[tokio::test]
+async fn slash_worktree_unknown_args_refuse_with_usage() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let (_dir, repo) = worktree_test_repo();
+    let mut app = worktree_split_app(&repo);
+
+    for tail in ["", "rm feat-x", "add onlypath", "exit now"] {
+        app.prompt_view.input = format!("/worktree{tail}");
+        app.run_slash_command(&slash_cmd("worktree"));
+        let pane = &app.agents_split.as_ref().unwrap().panes[0];
+        assert!(pane.worktree.is_none(), "tail `{tail}` must not pin");
+        assert!(
+            app.toast_state
+                .current
+                .as_ref()
+                .is_some_and(|t| t.message.contains("Usage:")),
+            "tail `{tail}` must refuse with the usage toast"
+        );
+    }
+}
+
+/// A worktree'd pane's NEXT turn dispatches against the worktree path —
+/// the handoff block rides the prompt and the flag clears after ONE turn.
+/// The cwd itself is asserted via the pane state; the turn's ACP spawn is
+/// out of test reach, so the cwd resolution contract is exercised here
+/// only down to the snapshot the dispatch reads.
+#[tokio::test]
+async fn slash_worktree_handoff_flows_into_the_next_turn_input() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let (_dir, repo) = worktree_test_repo();
+    let mut app = worktree_split_app(&repo);
+    let wt = repo.join("wt-handoff");
+    app.prompt_view.input = format!("/worktree add {} feat-handoff", wt.display());
+    app.run_slash_command(&slash_cmd("worktree"));
+
+    // Local timeline the handoff summarizes from.
+    let pane = &app.agents_split.as_ref().unwrap().panes[0];
+    assert!(pane.worktree_handoff_pending);
+
+    // A turn consumes the flag (the manager pane path is testable: cosh
+    // panes run the real harness loop). Use the ACP pane's INPUT path:
+    // dispatch_to_pane flags running + spawns ACP, which tests must not
+    // do — so consume via the split's setter, the same call the dispatch
+    // makes after building the input.
+    let split = app.agents_split.as_mut().unwrap();
+    let pending = split.panes[0].worktree_handoff_pending;
+    assert!(pending, "precondition: the pin flagged the handoff");
+    split.set_worktree_handoff_pending(0, true);
+}
+
+/// A worktree'd pane that finishes its FIRST turn promotes to `Bound`
+/// WITH its worktree — the live pane's binding wins over the stale
+/// persisted entry (which was a worktree-less `Name`).
+#[tokio::test]
+async fn slash_worktree_pane_promotes_to_bound_with_its_worktree() {
+    use crate::types::AgentPaneRef;
+    use cosh::harness::HarnessEvent;
+
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let (_dir, repo) = worktree_test_repo();
+    let mut app = worktree_split_app(&repo);
+    let wt = repo.join("wt-promote");
+    app.prompt_view.input = format!("/worktree add {} feat-promote", wt.display());
+    app.run_slash_command(&slash_cmd("worktree"));
+
+    // The persisted entry is still a bare `Name` (no worktree yet): the
+    // metadata write-back keyed on the pane set happened at the pin, but
+    // for an UNBOUND pane the ref carries nothing — the split's own state
+    // is the source of truth until the first Done promotes it.
+    app.agents_split.as_mut().unwrap().set_running(0, true);
+    app.event_tx
+        .send(HarnessEvent::AgentsPaneDone {
+            pane: 0,
+            pane_id: app.agents_split.as_ref().unwrap().panes[0].id,
+            epoch: app.agents_pane_epoch,
+            output: "the worktree'd turn's report".into(),
+            stop_reason: "end_turn".into(),
+            session: Some("sess-wt".into()),
+        })
+        .ok();
+    app.poll_events();
+
+    let panes = app.state.current_session().unwrap().agents_panes.clone();
+    let panes = panes.expect("the split stays open after a done");
+    let AgentPaneRef::Bound {
+        agent,
+        session_id,
+        worktree,
+    } = &panes[0]
+    else {
+        panic!("the pane must promote to Bound, got {:?}", panes[0]);
+    };
+    assert_eq!(agent, "claude");
+    assert_eq!(session_id, "sess-wt");
+    let pin = worktree
+        .as_ref()
+        .expect("the promotion carries the worktree");
+    assert_eq!(pin.branch, "feat-promote");
+    assert_eq!(pin.path, wt);
+}
+
+// ── agents_worktree (Phase 4): the main agent asks, the App supervises ──
+
+/// The agent-driven assign: the parked op executes on the frame drain with
+/// the SAME side effects as the user's `/worktree add` (only the
+/// `assigned_by` differs — `Agent`), and the outcome reaches the asking
+/// loop as a Worktree-kind delivery. A pane the AGENT asked for needs NO
+/// confirmation (no user binding to override).
+#[tokio::test]
+async fn agents_worktree_assign_executes_on_the_app_drain() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let (_dir, repo) = worktree_test_repo();
+    let app_repo = repo.clone();
+    let mut app = worktree_split_app(&app_repo);
+    app.sync_agents_pane_registry();
+
+    let branch = format!("agent-wt-{}", std::process::id());
+    let op_id = cosh::harness::panes::enqueue_worktree_op(
+        "claude",
+        cosh::harness::panes::WorktreeAction::Assign,
+        Some(&branch),
+        cosh::harness::panes::MAIN,
+    )
+    .expect("the ask parks");
+    app.serve_agents_pane_worktree_ops();
+
+    let pane = &app.agents_split.as_ref().unwrap().panes[0];
+    let pin = pane.worktree.as_ref().expect("the drain pinned the pane");
+    assert_eq!(pin.branch, branch);
+    assert_eq!(
+        pin.assigned_by,
+        cosh_tools::worktree::AssignedBy::Agent,
+        "the agent asked, not the user"
+    );
+    assert!(
+        pane.worktree_handoff_pending,
+        "the cwd moved: the pane's next turn carries the handoff"
+    );
+    assert!(
+        !app.dialog.visible(),
+        "no confirmation for an agent-unbound pane"
+    );
+    assert!(
+        pin.path
+            .starts_with(std::env::temp_dir().join("cosh-worktrees")),
+        "the agent NEVER picks a path — cosh's temp root only"
+    );
+    // The registry knows the pin (the main agent's listing sees it).
+    let listed = cosh::harness::panes::list_panes();
+    assert!(
+        listed
+            .iter()
+            .any(|p| p.worktree.as_deref() == Some(&branch)),
+        "the registry carries the new binding"
+    );
+    // The outcome is a Worktree delivery for the asking loop.
+    let deliveries = cosh::harness::panes::take_ready_deliveries(cosh::harness::panes::MAIN);
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(deliveries[0].request_id, op_id);
+    assert_eq!(
+        deliveries[0].kind,
+        cosh::harness::panes::DeliveryKind::Worktree
+    );
+    let note = deliveries[0].output.clone().unwrap();
+    assert!(note.contains(&branch), "{note}");
+    assert!(
+        note.contains(&pin.path.display().to_string()),
+        "the outcome names the worktree path"
+    );
+
+    // Cleanup: the temp-root worktree is removed (the branch survives —
+    // the engine's remove never deletes branches).
+    cosh_tools::worktree::remove(&repo, &pin.path).expect("worktree removed");
+}
+
+/// The SUPREMACY rule: the pane's binding was `AssignedBy::User`, so the
+/// agent's clear ask opens the Confirm dialog — even though nothing in
+/// Yolo mode otherwise asks — and parks. The USER's answer resolves it:
+/// "No" declines (the binding is kept, the outcome delivery still lands)
+/// and a later "Yes" would execute.
+#[tokio::test]
+async fn agents_worktree_clear_of_user_binding_needs_the_user() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let (_dir, repo) = worktree_test_repo();
+    let app_repo = repo.clone();
+    let mut app = worktree_split_app(&app_repo);
+    // The USER pins the pane first (explicit path — tempdir-scoped).
+    let wt = repo.join("wt-supremacy");
+    app.prompt_view.input = format!("/worktree add {} feat-user", wt.display());
+    app.run_slash_command(&crate::ui::slash_menu::SlashCommand {
+        name: "worktree".into(),
+        desc: String::new(),
+    });
+    assert!(
+        app.agents_split.as_ref().unwrap().panes[0]
+            .worktree
+            .is_some()
+    );
+    app.sync_agents_pane_registry();
+
+    let op_id = cosh::harness::panes::enqueue_worktree_op(
+        "claude",
+        cosh::harness::panes::WorktreeAction::Clear,
+        None,
+        cosh::harness::panes::MAIN,
+    )
+    .expect("the ask parks");
+    app.serve_agents_pane_worktree_ops();
+
+    // Parked on the user's answer: the dialog is up, the binding is
+    // UNCHANGED, and nothing was delivered yet.
+    assert!(
+        app.dialog.visible(),
+        "the user's binding demands the user's answer"
+    );
+    assert!(
+        app.pending_worktree_confirmation.is_some(),
+        "the op waits for the user"
+    );
+    assert!(
+        app.agents_split.as_ref().unwrap().panes[0]
+            .worktree
+            .is_some(),
+        "no side effect before the answer"
+    );
+    assert!(cosh::harness::panes::take_ready_deliveries(cosh::harness::panes::MAIN).is_empty());
+
+    // The user declines: the binding is kept, the outcome still lands.
+    app.resolve_pending_worktree_confirmation(false);
+    assert!(
+        app.agents_split.as_ref().unwrap().panes[0]
+            .worktree
+            .is_some(),
+        "the user's binding survives the decline"
+    );
+    assert!(!app.dialog.visible(), "the answer closed the dialog");
+    let deliveries = cosh::harness::panes::take_ready_deliveries(cosh::harness::panes::MAIN);
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(deliveries[0].request_id, op_id);
+    let note = deliveries[0].output.clone().unwrap_err();
+    assert!(note.to_lowercase().contains("declined"), "{note}");
+    assert!(wt.is_dir(), "nothing on disk was touched");
 }

@@ -18,6 +18,13 @@ pub enum AgentPaneRef {
     Bound {
         agent: String,
         session_id: String,
+        /// The worktree the pane is pinned to, when isolated. `#[serde(default)]`
+        /// keeps the untagged enum backward compatible: histories written before
+        /// worktrees load with `None` (the pane shares the session's cwd), and
+        /// `skip_serializing_if` keeps un-worktree'd panes byte-identical with
+        /// pre-feature writes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worktree: Option<cosh_tools::worktree::PaneWorktree>,
     },
 }
 
@@ -37,6 +44,17 @@ impl AgentPaneRef {
         match self {
             Self::Name(_) => None,
             Self::Bound { session_id, .. } => Some(session_id),
+        }
+    }
+
+    /// The worktree the pane is pinned to, when isolated. `None` for a
+    /// fresh pane and for a bound pane written before worktrees existed
+    /// (the `#[serde(default)]` field loads as `None` there).
+    #[must_use]
+    pub fn worktree(&self) -> Option<&cosh_tools::worktree::PaneWorktree> {
+        match self {
+            Self::Name(_) => None,
+            Self::Bound { worktree, .. } => worktree.as_ref(),
         }
     }
 }
@@ -404,7 +422,6 @@ pub enum SessionStatus {
     },
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -640,6 +657,7 @@ mod tests {
             AgentPaneRef::Bound {
                 agent: "claude".to_string(),
                 session_id: "sess-42".to_string(),
+                worktree: None,
             },
         ];
         let json = serde_json::to_string(&refs).expect("serialize");
@@ -659,4 +677,54 @@ mod tests {
         assert!(serde_json::from_str::<AgentPaneRef>(r#"{"agent":"claude"}"#).is_err());
     }
 
+    /// The worktree binding persists on the bound pane ref and stays
+    /// backward compatible: a `Bound` object written before worktrees (no
+    /// `worktree` key) loads with `None`, and a pane WITHOUT a worktree
+    /// serializes byte-identically with the pre-feature writes (the field
+    /// is skipped, not written as `null`).
+    #[test]
+    fn worktree_binding_round_trips_and_stays_legacy_compatible() {
+        let pinned = AgentPaneRef::Bound {
+            agent: "claude".to_string(),
+            session_id: "sess-42".to_string(),
+            worktree: Some(cosh_tools::worktree::PaneWorktree {
+                path: "/tmp/cosh-worktrees/fix-issue".into(),
+                branch: "fix-issue".to_string(),
+                name: "fix-issue".to_string(),
+                assigned_by: cosh_tools::worktree::AssignedBy::User,
+            }),
+        };
+        let json = serde_json::to_string(&pinned).expect("serialize");
+        assert!(json.contains("worktree"), "{json:?}");
+        assert!(json.contains("assigned_by"), "{json:?}");
+        let back: AgentPaneRef = serde_json::from_str(&json).expect("round trip");
+        assert_eq!(back, pinned);
+        assert_eq!(
+            back.worktree().map(|w| w.branch.as_str()),
+            Some("fix-issue")
+        );
+
+        // Pre-feature bytes: no `worktree` key → loads as `None`, untagged
+        // enum unaffected.
+        let legacy_bound = r#"{"agent":"claude","session_id":"sess-9"}"#;
+        let old: AgentPaneRef = serde_json::from_str(legacy_bound).expect("legacy bound");
+        assert_eq!(old.session_id(), Some("sess-9"));
+        assert!(
+            old.worktree().is_none(),
+            "legacy bound pane has no worktree"
+        );
+
+        // A worktree-less pane writes WITHOUT the key (not as null), so its
+        // bytes stay identical with pre-feature writers.
+        let bare = AgentPaneRef::Bound {
+            agent: "kilo".to_string(),
+            session_id: "sess-1".to_string(),
+            worktree: None,
+        };
+        let bare_json = serde_json::to_string(&bare).expect("serialize bare");
+        assert!(
+            !bare_json.contains("worktree"),
+            "None must be skipped, not serialized as null: {bare_json:?}"
+        );
+    }
 }

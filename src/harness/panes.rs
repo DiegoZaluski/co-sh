@@ -53,6 +53,11 @@ pub struct PaneDescriptor {
     /// Whether the pane already carries a bound agent session (`true`) or
     /// has never run (`false` — the first `agents_call` wakes it).
     pub bound: bool,
+    /// The worktree (git branch checkout) the pane is currently pinned to,
+    /// by name — `None` while the pane shares the session's cwd. The main
+    /// agent's pane listing renders it next to the id so it always knows
+    /// where each pane works.
+    pub worktree: Option<String>,
 }
 
 /// How a request's answer reaches the caller.
@@ -85,8 +90,21 @@ pub struct PaneRequest {
     pub mode: ReplyMode,
 }
 
+/// What a parked delivery carries — an `agents_call` pane report or a
+/// finished `agents_worktree` op. The drain and the requester tagging are
+/// shared; the note format differs per kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryKind {
+    /// A pane turn's final report (background `agents_call`).
+    CallReport,
+    /// A worktree op's outcome (executed, refused by the user, or failed).
+    Worktree,
+}
+
 /// A finished request whose answer is waiting for its requester's next
-/// loop drain (background mode only — wait mode resolves inline).
+/// loop drain, or a finished worktree op's closing note (background mode
+/// only — wait mode resolves inline; worktree ops NEVER wait: the tool
+/// returns a receipt and the outcome arrives here, same drain).
 #[derive(Debug)]
 pub struct PaneDelivery {
     /// The pane that produced the answer.
@@ -97,6 +115,66 @@ pub struct PaneDelivery {
     pub requester: &'static str,
     /// The pane's final report (or the failure reason).
     pub output: Result<String, String>,
+    /// Report or worktree outcome — selects the delivery note's shape.
+    pub kind: DeliveryKind,
+}
+
+/// What an `agents_worktree` ask does to its target pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorktreeAction {
+    /// Create a temp worktree from the pane's current HEAD and pin the
+    /// pane to it.
+    Assign,
+    /// Drop the pin — the pane returns to the session's cwd. Nothing on
+    /// disk is removed (the same semantics as the user's `/worktree exit`).
+    Clear,
+}
+
+impl WorktreeAction {
+    /// The wire name the tool's schema speaks (`action`).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Assign => "assign",
+            Self::Clear => "clear",
+        }
+    }
+}
+
+/// The SUPREMACY outcome a worktree op's user confirmation can take. The
+/// user's answer never travels as free prose: the App's confirmation box
+/// resolves into one of these, and the outcome message is built verbatim:
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorktreeApproval {
+    /// The user approved: the op executes now.
+    Approved,
+    /// The user refused: the op does nothing and the pane keeps its
+    /// current binding. NOT an error — the tool result reports the
+    /// choice so the agent can adapt instead of retrying.
+    Declined,
+}
+
+/// One parked `agents_worktree` call — the main agent asking to move a
+/// pane into (or out of) a worktree. The TOOL never touches git: it
+/// records the ask here, and the App's frame drain pops, supervises
+/// (the user's supremacy over a User-assigned worktree — even in Yolo)
+/// and executes it, owning every side effect.
+#[derive(Debug, Clone)]
+pub struct WorktreeOp {
+    /// Registry-unique op id (`wt-op-<n>`), echoed in the receipt and the
+    /// completion delivery so the requesting loop can pair them.
+    pub id: String,
+    /// Addressable pane id the op targets — the same ids `agents_call`
+    /// addresses (`agents_worktree_tool` carries them as its schema enum).
+    pub pane: String,
+    /// Assign or clear.
+    pub action: WorktreeAction,
+    /// The branch name for `Assign` (its slug names the temp directory).
+    /// `None` on `Clear`.
+    pub branch: Option<String>,
+    /// Which loop parked the op (`MAIN` or `MANAGER`) — routes the outcome
+    /// delivery home.
+    pub requester: &'static str,
 }
 
 /// The wait-mode half of a pending request: the tool's oneshot, resolved
@@ -108,6 +186,15 @@ struct PendingWait {
 #[derive(Default)]
 struct RegistryState {
     panes: Vec<PaneDescriptor>,
+    /// Monotonic generation counter, bumped by [`set_panes`] whenever the
+    /// pane set changes (ids, bindings or worktrees). Panes that ride their
+    /// awareness as a prompt preamble (the ACP panes — ACP has no system
+    /// prompt) compare their last-announced generation against it to know
+    /// when the announcement went stale and must be re-sent.
+    generation: u64,
+    /// Per-pane id, the generation whose pane set the pane was last told
+    /// about (see [`take_preamble`]). Only ACP panes use this.
+    announced: HashMap<String, u64>,
     /// One FIFO per pane: requests wait here while the pane is busy (or
     /// until the App's dispatcher picks them up). A pane works on at most
     /// one request at a time — the head of its queue.
@@ -125,6 +212,13 @@ struct RegistryState {
     next_id: u64,
     /// Finished background deliveries awaiting their requester's drain.
     deliveries: Vec<PaneDelivery>,
+    /// Parked `agents_worktree` calls (FIFO across all panes): the tool
+    /// parks its request; the App's frame drain pops, supervises (the
+    /// user's supremacy over a User-assigned worktree — even in Yolo) and
+    /// executes it, owning every side effect.
+    ops: VecDeque<WorktreeOp>,
+    /// Monotonic worktree-op id counter (`wt-op-<n>`).
+    next_op: u64,
 }
 
 fn registry() -> &'static Mutex<RegistryState> {
@@ -163,11 +257,49 @@ pub fn set_panes(panes: Vec<PaneDescriptor>) {
     // Finished background deliveries of removed panes are ORPHANED: their
     // requester may be long gone, and a stale delivery draining into a
     // LATER loop (a session reopened, a new manager turn) would inject a
-    // report from a dead conversation. They die with the pane.
+    // report from a dead conversation. They die with the pane. Worktree
+    // outcomes are the exception: their RECEIPT-holder (the requesting
+    // loop) is alive and waiting for the answer, so a worktree finding —
+    // including a failure committed after the pane closed — survives.
+    state.deliveries.retain(|delivery| {
+        delivery.kind == DeliveryKind::Worktree || panes.iter().any(|p| p.id == delivery.pane)
+    });
+    // Parked worktree ops of removed panes die immediately: the pane can
+    // never be rebound again. complete them as failures so the requesting
+    // loop's outcome delivery still lands (themselves Worktree-kind
+    // deliveries, so the retain above just kept the door open for them).
+    let op_targets: Vec<(String, &'static str)> = state
+        .ops
+        .iter()
+        .filter(|op| !panes.iter().any(|p| p.id == op.pane))
+        .map(|op| (op.id.clone(), op.requester))
+        .collect();
+    for (op_id, requester) in &op_targets {
+        let pane = state
+            .ops
+            .iter()
+            .find(|op| &op.id == op_id)
+            .map(|op| op.pane.clone())
+            .unwrap_or_default();
+        state.deliveries.push(PaneDelivery {
+            pane: pane.clone(),
+            request_id: op_id.clone(),
+            requester,
+            output: Err(format!(
+                "pane '{pane}' was removed — the binding cannot change"
+            )),
+            kind: DeliveryKind::Worktree,
+        });
+    }
+    state.ops.retain(|op| panes.iter().any(|p| p.id == op.pane));
+    // The announced-generation map only tracks panes that still exist; a
+    // re-added pane starts unannounced (generation 0 vs the live counter)
+    // so its next dispatch re-announces from scratch.
     state
-        .deliveries
-        .retain(|delivery| panes.iter().any(|p| p.id == delivery.pane));
+        .announced
+        .retain(|id, _| panes.iter().any(|p| p.id == *id));
     state.panes = panes;
+    state.generation += 1;
 }
 
 /// The current pane set (snapshot).
@@ -361,6 +493,7 @@ pub fn complete_request(pane: &str, output: Result<String, String>) -> Option<&'
                             request_id: request.id,
                             requester,
                             output: undelivered,
+                            kind: DeliveryKind::CallReport,
                         });
                     }
                 }
@@ -369,6 +502,7 @@ pub fn complete_request(pane: &str, output: Result<String, String>) -> Option<&'
                     request_id: request.id,
                     requester,
                     output,
+                    kind: DeliveryKind::CallReport,
                 }),
             }
         }
@@ -377,6 +511,7 @@ pub fn complete_request(pane: &str, output: Result<String, String>) -> Option<&'
             request_id: request.id,
             requester,
             output,
+            kind: DeliveryKind::CallReport,
         }),
     }
     Some(requester)
@@ -511,6 +646,7 @@ pub fn take_ready_deliveries(requester: &str) -> Vec<PaneDelivery> {
                 request_id: delivery.request_id.clone(),
                 requester: delivery.requester,
                 output: delivery.output.clone(),
+                kind: delivery.kind,
             });
             false
         } else {
@@ -520,18 +656,133 @@ pub fn take_ready_deliveries(requester: &str) -> Vec<PaneDelivery> {
     ready
 }
 
-/// Render one finished background delivery as the `[automated
-/// notification]` user turn both loop drain sites inject (the per-turn
-/// drain and the pre-Done busy-guard): same contract, same shape.
+/// Render one finished delivery as the `[automated notification]` user
+/// turn both loop drain sites inject (the per-turn drain and the pre-Done
+/// busy-guard): same contract, same shape — the body differs per kind (a
+/// pane report vs a worktree binding update).
 pub fn delivery_note(delivery: &PaneDelivery) -> String {
     let report = match &delivery.output {
         Ok(report) => super::background::sanitize(report),
         Err(error) => error.clone(),
     };
-    format!(
-        "[automated notification] Pane '{}' (agents_call {}) finished.\nReport:\n{}",
-        delivery.pane, delivery.request_id, report
-    )
+    match delivery.kind {
+        DeliveryKind::Worktree => format!(
+            "[automated notification] Worktree binding update for pane '{}' (agents_worktree {}):\n{report}",
+            delivery.pane, delivery.request_id
+        ),
+        DeliveryKind::CallReport => format!(
+            "[automated notification] Pane '{}' (agents_call {}) finished.\nReport:\n{}",
+            delivery.pane, delivery.request_id, report
+        ),
+    }
+}
+
+/// Park one `agents_worktree` ask — the mirror of [`enqueue`]'s contract,
+/// minus the wait-mode half. The op is FIFO-queued in the registry until
+/// the App's frame drain pops it; the outcome ALWAYS comes back as a
+/// Worktree-kind delivery in the requester's loop drain (an op may need
+/// the user's confirmation, and a tool result cannot sit across frames —
+/// the receipt is the tool's instant answer, the delivery is the truth).
+///
+/// # Errors
+///
+/// An unknown pane id (the model guessed a name that is not bound — the
+/// error names the known ids so the model can correct itself), a MANAGER
+/// pane target (a cosh pane never rebinds — the same rule the user's
+/// `/worktree` command applies), an `Assign` without a usable `name`, or
+/// a `name` the worktree engine would refuse at its git argument (leading
+/// dash, whitespace, control characters) — refused HERE so nothing parks.
+pub fn enqueue_worktree_op(
+    pane: &str,
+    action: WorktreeAction,
+    name: Option<&str>,
+    requester: &'static str,
+) -> Result<String, String> {
+    let mut state = registry().lock().unwrap_or_else(|p| p.into_inner());
+    let known: Vec<String> = state.panes.iter().map(|p| p.id.clone()).collect();
+    let Some(target) = state.panes.iter().find(|p| p.id == pane) else {
+        return Err(format!(
+            "no pane '{pane}' in this session's /agents split; known panes: {known:?}"
+        ));
+    };
+    if target.is_manager {
+        return Err(
+            "`agents_worktree` cannot bind a cosh pane: the manager IS this session's own \
+             coordinator and stays on the session's working directory (the same rule the \
+             user's /worktree command applies)."
+                .to_string(),
+        );
+    }
+    let name = name.map(str::trim).filter(|n| !n.is_empty());
+    if action == WorktreeAction::Assign {
+        let Some(name) = name else {
+            return Err(
+                "`agents_worktree` assign requires `name` — the branch the new worktree checks \
+                 out (its slug also names the worktree directory)."
+                    .to_string(),
+            );
+        };
+        // The engine's own pre-validation for anything reaching a git
+        // argument: refuse BEFORE parking so the tool result is the
+        // immediate refusal and the model can correct itself in place.
+        if name.starts_with('-') || name.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return Err(format!(
+                "invalid branch name '{name}': no leading dash, no whitespace or control \
+                 characters"
+            ));
+        }
+    }
+    state.next_op += 1;
+    let id = format!("wt-op-{}", state.next_op);
+    let op = WorktreeOp {
+        id: id.clone(),
+        pane: pane.to_string(),
+        action,
+        branch: name.map(str::to_string),
+        requester,
+    };
+    state.ops.push_back(op);
+    Ok(id)
+}
+
+/// Look at the OLDEST parked worktree op without consuming it — the App's
+/// drain needs the ask to DECIDE (supremacy check, modal availability)
+/// before popping. `None` when nothing is parked.
+#[must_use]
+pub fn peek_worktree_op() -> Option<WorktreeOp> {
+    registry()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .ops
+        .front()
+        .cloned()
+}
+
+/// Consume the OLDEST parked worktree op — after the App's decision is
+/// final (execute now, or the user's confirmation answered). The popped
+/// op pairs with [`complete_worktree_op`]'s outcome by its id. The App is
+/// the ONLY consumer; `None` when the registry head moved (nothing or
+/// someone else's drain).
+#[must_use]
+pub fn pop_worktree_op() -> Option<WorktreeOp> {
+    let mut state = registry().lock().unwrap_or_else(|p| p.into_inner());
+    state.ops.pop_front()
+}
+
+/// Deliver a worktree op's outcome to its requester's loop drain: the
+/// tool returned the receipt earlier, so this Worktree-kind delivery is
+/// the outcome's ONLY consumer path (same drain as a background
+/// `agents_call` report — [`delivery_note`] renders the automated
+/// notification).
+pub fn complete_worktree_op(op: &WorktreeOp, outcome: Result<String, String>) {
+    let mut state = registry().lock().unwrap_or_else(|p| p.into_inner());
+    state.deliveries.push(PaneDelivery {
+        pane: op.pane.clone(),
+        request_id: op.id.clone(),
+        requester: op.requester,
+        output: outcome,
+        kind: DeliveryKind::Worktree,
+    });
 }
 
 /// The context block appended at the END of the system header (an
@@ -557,9 +808,99 @@ pub fn context_block() -> Option<String> {
         } else {
             "no session yet (the first agents_call wakes it)"
         };
-        let _ = writeln!(block, "- {} — {} ({})", pane.id, pane.agent, session);
+        let worktree = pane
+            .worktree
+            .as_deref()
+            .map(|name| format!(", worktree {name}"))
+            .unwrap_or_default();
+        let _ = writeln!(
+            block,
+            "- {} — {} ({session}{worktree})",
+            pane.id, pane.agent
+        );
     }
     Some(block)
+}
+
+/// The awareness block a PANE sees: the pane set WITHOUT the coordination
+/// vocabulary. A pane must never learn the `agents_call` ids or its own
+/// addressability (the replication bug `with_own_pane_id` documents) — but
+/// it still benefits from knowing WHICH siblings share its workspace, so
+/// it can mention them ("claude is on the same branch") instead of assuming
+/// it is alone. Rendered for the manager pane's context tail (Phase 1) and
+/// as the preamble text for the ACP panes (Phase 3's prompt prefix).
+#[must_use]
+pub fn peer_block(own_id: &str) -> Option<String> {
+    use std::fmt::Write as _;
+    let panes = list_panes();
+    // Siblings only: the pane itself is not a peer.
+    let siblings: Vec<&PaneDescriptor> = panes.iter().filter(|p| p.id != own_id).collect();
+    if siblings.is_empty() {
+        return None;
+    }
+    let mut block = String::from(
+        "## Agents Panes\n\
+         Other /agents panes share this session's workspace alongside you:\n",
+    );
+    for pane in &siblings {
+        let worktree = pane
+            .worktree
+            .as_deref()
+            .map(|name| format!(", worktree {name}"))
+            .unwrap_or_default();
+        let _ = writeln!(block, "- {} — {}{}", pane.agent, pane.id, worktree);
+    }
+    block.push_str(
+        "You do NOT coordinate them (no `agents_call` for you): do your own \
+         delegated work and report back — the main agent owns the coordination.",
+    );
+    Some(block)
+}
+
+/// Take the awareness preamble for an ACP pane, when its announcement went
+/// stale. Returns the text to PREPEND to the pane's next prompt, and marks
+/// the pane as announced at the current generation; `None` when the pane is
+/// already up to date (nothing rides the prompt). ACP has no system prompt,
+/// so the pane's awareness can only arrive as prompt text — this keeps it
+/// once-per-change instead of once-per-turn.
+pub fn take_preamble(pane_id: &str) -> Option<String> {
+    let mut state = registry().lock().unwrap_or_else(|p| p.into_inner());
+    if !state.panes.iter().any(|p| p.id == pane_id) {
+        return None;
+    }
+    if state.announced.get(pane_id) == Some(&state.generation) {
+        return None;
+    }
+    // Announce exactly the peer view (same text the manager pane sees).
+    let block = {
+        let siblings: Vec<String> = state
+            .panes
+            .iter()
+            .filter(|p| p.id != pane_id)
+            .map(|p| {
+                let worktree = p
+                    .worktree
+                    .as_deref()
+                    .map(|name| format!(", worktree {name}"))
+                    .unwrap_or_default();
+                format!("- {} — {}{}", p.agent, p.id, worktree)
+            })
+            .collect();
+        if siblings.is_empty() {
+            None
+        } else {
+            Some(format!(
+                "## Agents Panes\n\
+                 Other /agents panes share this session's workspace alongside you:\n{}\n\
+                 You do NOT coordinate them: do your own delegated work and report back — \
+                 the main agent owns the coordination.",
+                siblings.join("\n")
+            ))
+        }
+    };
+    let generation = state.generation;
+    state.announced.insert(pane_id.to_string(), generation);
+    block
 }
 
 /// The `agents_call` harness tool, built against the CURRENT pane set:
@@ -608,6 +949,72 @@ pub fn agents_call_tool() -> super::core::HarnessTool {
     }
 }
 
+/// The `agents_worktree` harness tool, built against the CURRENT pane set:
+/// the same addressable ids `agents_call` speaks, minus the manager pane
+/// (a cosh pane never rebinds). Registered ONLY when panes exist and
+/// stripped from every pane loop by `with_own_pane_id` — the user's
+/// supremacy tooling. worktrees stay opt-in (the agent asks, the user can
+/// always veto a User-assigned pane's rebinding).
+#[must_use]
+pub fn agents_worktree_tool() -> super::core::HarnessTool {
+    let ids: Vec<String> = list_panes()
+        .iter()
+        .filter(|p| !p.is_manager)
+        .map(|p| p.id.clone())
+        .collect();
+    let pane_list = ids.join(", ");
+    let enum_values: Vec<serde_json::Value> = ids
+        .iter()
+        .map(|id| serde_json::Value::String(id.clone()))
+        .collect();
+    super::core::HarnessTool {
+        name: "agents_worktree".into(),
+        description: format!(
+            "Move one of this session's /agents panes into (or out of) a git worktree, so it \
+             works on its own branch without touching the session's working tree.\n\
+             `pane` is the addressable pane id ({pane_list}); `action` is `assign` (isolate the \
+             pane in a NEW temp worktree under the system temp dir, checking out branch \
+             `name` from the session repo's current HEAD) or `clear` (drop the binding — the \
+             pane returns to the session's working directory; the worktree and its branch are \
+             KEPT on disk, never removed here).\n\
+             ## Rules\n\
+             - `name` (required on `assign`): the branch to check out. Its slug also names the \
+             worktree directory. Collisions auto-suffix (`-2`, `-3`, …).\n\
+             - NO path parameter: the worktree location is cosh's temp root — the user picks \
+             explicit locations via their own `/worktree` command, never you.\n\
+             - The pane (and you) learn the new cwd automatically before the pane's next task: \
+             include this in your delegation message when you assign one.\n\
+             - The pane's UNCOMMITTED work is not carried along — assign a pane BEFORE it \
+             starts editing, or after it committed.\n\
+             - Rebinding a pane the USER assigned to a worktree opens a confirmation box the \
+             user must answer (their binding, their call — even in autonomous runs); the \
+             ask may therefore wait a while. The outcome always arrives as an \
+             [automated notification] to THIS loop: the receipt below only confirms the ask \
+             was parked."
+        ),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pane": {
+                    "type": "string",
+                    "description": "The pane to (re)bind. Must be one of the ids listed in the description.",
+                    "enum": enum_values,
+                },
+                "action": {
+                    "type": "string",
+                    "enum": ["assign", "clear"],
+                    "description": "assign = isolate the pane in a new temp worktree on branch `name`; clear = drop the binding (nothing is deleted on disk).",
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Required on `assign`: the branch name the new worktree checks out (also names the worktree directory). Ignored on clear.",
+                },
+            },
+            "required": ["pane", "action"],
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -638,9 +1045,10 @@ mod tests {
             id: id.to_string(),
             agent: agent.to_string(),
             // `cosh` is the app's manager label; the production sync sets the
-            // flag from `DAEMON_LABEL`, mirrored here for the tests.
+            // flag from the manager-pane label, mirrored here for the tests.
             is_manager: agent == "cosh",
             bound,
+            worktree: None,
         }
     }
 
@@ -710,14 +1118,16 @@ mod tests {
         // unblocks instead of hanging.
         assert_eq!(
             block_on(async move {
-                inflight.receiver.expect("wait").await.expect("sender alive")
+                inflight
+                    .receiver
+                    .expect("wait")
+                    .await
+                    .expect("sender alive")
             }),
             Err("the session switched away".to_string())
         );
         assert_eq!(
-            block_on(async move {
-                queued_rx.await.expect("sender alive")
-            }),
+            block_on(async move { queued_rx.await.expect("sender alive") }),
             Err("the session switched away".to_string())
         );
         // Nothing outstanding on either side, nothing drainable, no pane.
@@ -742,7 +1152,10 @@ mod tests {
         assert!(pop_next_request("claude").is_some(), "dispatched");
         // The completion is keyed by pane; the BACKGROUND mode parks the
         // delivery for the requester's drain.
-        assert_eq!(complete_request("claude", Ok("report".to_string())), Some(MANAGER));
+        assert_eq!(
+            complete_request("claude", Ok("report".to_string())),
+            Some(MANAGER)
+        );
         let deliveries = take_ready_deliveries(MANAGER);
         assert_eq!(deliveries.len(), 1);
         assert_eq!(deliveries[0].pane, "claude");
@@ -753,6 +1166,83 @@ mod tests {
         );
         // Drained once — a second drain is empty.
         assert!(take_ready_deliveries(MANAGER).is_empty());
+    }
+
+    #[test]
+    fn worktree_op_parks_fifo_and_delivers_to_its_requester() {
+        let _g = lock();
+        set_panes(vec![
+            pane("claude", "claude", false),
+            pane("kilo", "kilo", false),
+        ]);
+        let op1 = enqueue_worktree_op("claude", WorktreeAction::Assign, Some("fix-1"), MAIN)
+            .expect("parks");
+        let op2 = enqueue_worktree_op("kilo", WorktreeAction::Clear, None, MANAGER).expect("parks");
+        assert_ne!(op1, op2, "ids are unique");
+        // FIFO across panes: the FIRST parked ask pops first, whichever
+        // pane it targets.
+        assert_eq!(peek_worktree_op().unwrap().id, op1);
+        let popped = pop_worktree_op().expect("the head");
+        assert_eq!(popped.id, op1);
+        assert_eq!(popped.pane, "claude");
+        assert_eq!(popped.action, WorktreeAction::Assign);
+        assert_eq!(popped.branch.as_deref(), Some("fix-1"));
+        assert_eq!(popped.requester, MAIN);
+        // The outcome delivery routes to the op's OWN requester only.
+        complete_worktree_op(&popped, Ok("isolated".to_string()));
+        let drained = take_ready_deliveries(MAIN);
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].request_id, op1);
+        assert_eq!(drained[0].kind, DeliveryKind::Worktree);
+        assert_eq!(drained[0].output.clone().unwrap(), "isolated");
+        assert!(
+            take_ready_deliveries(MANAGER).is_empty(),
+            "wrong loop never drains"
+        );
+        // The second op is now the head.
+        assert_eq!(peek_worktree_op().unwrap().id, op2);
+    }
+
+    #[test]
+    fn worktree_op_validation_refuses_unknown_manager_and_bad_names() {
+        let _g = lock();
+        set_panes(vec![
+            pane("cosh", "cosh", true),
+            pane("claude", "claude", false),
+        ]);
+        // Unknown pane: the error names the known ids.
+        let err = enqueue_worktree_op("ghost", WorktreeAction::Clear, None, MAIN).unwrap_err();
+        assert!(err.contains("ghost") && err.contains("claude"), "{err}");
+        // The manager pane never rebinds (the user's /worktree rule).
+        let err = enqueue_worktree_op("cosh", WorktreeAction::Assign, Some("x"), MAIN).unwrap_err();
+        assert!(err.contains("cosh"), "{err}");
+        // Assign without a name: refused, nothing parked.
+        assert!(enqueue_worktree_op("claude", WorktreeAction::Assign, None, MAIN).is_err());
+        assert!(peek_worktree_op().is_none());
+        // A name that would never survive a git argument: refused here.
+        assert!(
+            enqueue_worktree_op("claude", WorktreeAction::Assign, Some("-evil"), MAIN).is_err()
+        );
+        assert!(enqueue_worktree_op("claude", WorktreeAction::Assign, Some("a b"), MAIN).is_err());
+        assert!(peek_worktree_op().is_none(), "refusals park nothing");
+    }
+
+    #[test]
+    fn worktree_ops_of_removed_panes_fail_without_losing_the_outcome() {
+        let _g = lock();
+        set_panes(vec![pane("claude", "claude", false)]);
+        let op = enqueue_worktree_op("claude", WorktreeAction::Assign, Some("fix"), MAIN)
+            .expect("parks");
+        // The pane dies with a parked ask: the ask is answered (a failure)
+        // so the asking loop's drain still completes its pairing.
+        set_panes(vec![pane("kilo", "kilo", false)]);
+        assert!(peek_worktree_op().is_none(), "the dead pane's op is gone");
+        let deliveries = take_ready_deliveries(MAIN);
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].request_id, op);
+        assert_eq!(deliveries[0].kind, DeliveryKind::Worktree);
+        assert!(deliveries[0].output.is_err());
+        assert!(deliveries[0].output.clone().unwrap_err().contains("claude"));
     }
 
     #[test]
@@ -925,7 +1415,10 @@ mod tests {
             has_outstanding_requests(MAIN),
             "the NEW request is outstanding (serving) until it completes"
         );
-        assert_eq!(complete_request("cosh#1", Ok("done".to_string())), Some(MAIN));
+        assert_eq!(
+            complete_request("cosh#1", Ok("done".to_string())),
+            Some(MAIN)
+        );
         let ok = block_on(async move { next_rx.await.expect("sender alive") });
         assert_eq!(ok, Ok("done".to_string()));
         assert!(!has_outstanding_requests(MAIN));
@@ -959,5 +1452,108 @@ mod tests {
         // A second failure is a no-op: the entry is gone.
         fail_serving("cosh#1", "again".into());
         assert!(!has_outstanding_requests(MAIN));
+    }
+
+    /// Phase 1: the worktree name rides the main agent's pane listing next
+    /// to the session state, so the agent always knows where each pane
+    /// works; a pane without one renders exactly as before (no suffix).
+    #[test]
+    fn context_block_renders_the_worktree_next_to_the_session() {
+        let _g = lock();
+        let mut pinned = pane("claude", "claude", true);
+        pinned.worktree = Some("wt-feat".to_string());
+        set_panes(vec![pinned, pane("kilo", "kilo", false)]);
+        let block = context_block().expect("block");
+        assert!(
+            block.contains("- claude — claude (agent session bound, worktree wt-feat)"),
+            "{block}"
+        );
+        assert!(
+            block.contains("- kilo — kilo (no session yet (the first agents_call wakes it))"),
+            "no-worktree pane renders unchanged: {block}"
+        );
+    }
+
+    /// Phase 1: the pane's awareness is the SIBLING view — it never sees
+    /// itself and never sees coordination vocabulary; a pane with no
+    /// siblings gets no block at all.
+    #[test]
+    fn peer_block_shows_only_siblings_without_coordination() {
+        let _g = lock();
+        set_panes(vec![pane("claude", "claude", false)]);
+        assert!(
+            peer_block("claude").is_none(),
+            "a lone pane has no peers to announce"
+        );
+        let mut pinned = pane("kilo", "kilo", true);
+        pinned.worktree = Some("wt-fix".to_string());
+        set_panes(vec![pane("claude", "claude", false), pinned]);
+        let block = peer_block("claude").expect("siblings exist");
+        assert!(block.starts_with("## Agents Panes"), "{block}");
+        assert!(block.contains("- kilo — kilo, worktree wt-fix"), "{block}");
+        assert!(
+            !block.contains("claude"),
+            "the pane never sees itself: {block}"
+        );
+        assert!(
+            block.contains("You do NOT coordinate them"),
+            "the no-coordination contract rides the block: {block}"
+        );
+        assert!(
+            !block.contains("address each"),
+            "no coordination vocabulary leaks into a pane's awareness: {block}"
+        );
+    }
+
+    /// Phase 1: the ACP preamble rides the prompt once per pane-set change,
+    /// not once per turn — a second take at the same generation is empty,
+    /// a `set_panes` (any change: binding, worktree, membership) re-arms
+    /// it, and a removed pane stops being announceable.
+    #[test]
+    fn take_preamble_announces_once_per_generation() {
+        let _g = lock();
+        set_panes(vec![
+            pane("claude", "claude", false),
+            pane("kilo", "kilo", false),
+        ]);
+        let first = take_preamble("claude").expect("first dispatch announces");
+        assert!(first.contains("- kilo — kilo"), "{first}");
+        assert!(
+            !first.contains("claude"),
+            "no self in the preamble: {first}"
+        );
+        assert!(
+            take_preamble("claude").is_none(),
+            "same generation → nothing rides the prompt again"
+        );
+        // Any set_panes bumps the generation — the next dispatch re-announces.
+        set_panes(vec![
+            pane("claude", "claude", true),
+            pane("kilo", "kilo", false),
+        ]);
+        let second = take_preamble("claude").expect("a changed pane set re-arms the preamble");
+        assert!(second.contains("- kilo — kilo"), "{second}");
+        // A pane gone from the split cannot be announced; re-adding it
+        // (generation bump, announce entry pruned) re-arms it from scratch.
+        set_panes(vec![pane("kilo", "kilo", false)]);
+        assert!(
+            take_preamble("claude").is_none(),
+            "a removed pane is not announceable"
+        );
+        set_panes(vec![
+            pane("claude", "claude", false),
+            pane("kilo", "kilo", false),
+        ]);
+        assert!(
+            take_preamble("claude").is_some(),
+            "a re-added pane announces from scratch"
+        );
+        // A lone pane still consumes its announcement (nothing to say, but
+        // the bookkeeping keeps it up to date for when a sibling appears).
+        set_panes(vec![pane("claude", "claude", false)]);
+        assert!(
+            take_preamble("claude").is_none(),
+            "no siblings → no preamble text"
+        );
     }
 }

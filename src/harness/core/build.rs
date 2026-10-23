@@ -117,6 +117,9 @@ impl Harness {
         // not exist.
         if super::panes::has_panes() {
             harness.harness_tools.push(super::panes::agents_call_tool());
+            harness
+                .harness_tools
+                .push(super::panes::agents_worktree_tool());
         }
         harness
     }
@@ -357,8 +360,12 @@ impl Harness {
     pub fn with_own_pane_id(mut self, id: Option<String>) -> Self {
         self.panes_own_id = id;
         if self.panes_own_id.is_some() {
+            self.harness_tools.retain(|tool| tool.name != "agents_call");
+            // The worktree ask is coordination tooling: a pane never
+            // rebinds itself or a peer (same supremacy invariant as the
+            // stripped `agents_call`).
             self.harness_tools
-                .retain(|tool| tool.name != "agents_call");
+                .retain(|tool| tool.name != "agents_worktree");
         }
         self
     }

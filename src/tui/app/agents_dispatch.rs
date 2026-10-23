@@ -15,16 +15,17 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
+use crate::routes::session::right_panel::types::SubagentTimelineEntry;
 use cosh::harness::events::HarnessEvent;
 use cosh_tools::subagent::events::{SubagentEvent, ToolCallStatus, ToolOutputBlock};
 
 use super::App;
-use crate::routes::session::agents_split::{AgentsSplitState, DAEMON_LABEL};
-use crossterm::event::KeyCode;
+use crate::routes::session::agents_split::{AgentsSplitState, MANAGER_LABEL};
 use crate::ui::toast::{ToastOptions, ToastVariant};
+use crossterm::event::KeyCode;
 
 /// Sync the slash menu's command source to the split's focus: a FOCUSED
 /// pane serves its own (blocklist-filtered) command list — or its spinner
@@ -80,7 +81,7 @@ fn slash_lists_equal(
 ///   to the pane VERBATIM as its next prompt (`/name`) — the harness
 ///   interprets its own command; no per-agent maintenance.
 ///
-/// Unfocused, the daemon pane focused, or no live split: `false` — the
+/// Unfocused, the manager pane focused, or no live split: `false` — the
 /// command falls through to the cosh command set.
 pub(super) fn route_agent_slash_command(
     app: &mut App,
@@ -95,13 +96,22 @@ pub(super) fn route_agent_slash_command(
     let Some(pane) = split.panes.get(focused) else {
         return false;
     };
-    if pane.agent == DAEMON_LABEL {
+    if pane.agent == MANAGER_LABEL {
         return false;
     }
-    if let Some(target) = crate::routes::session::agent_command_map::resolve(&cmd.name)
-        .and_then(|group| group.target)
+    if let Some(target) =
+        crate::routes::session::agent_command_map::resolve(&cmd.name).and_then(|group| group.target)
     {
         app.open_agent_config_dialog(target);
+        return true;
+    }
+    if cmd.name == "worktree" {
+        // cosh's own git-style command: intercepted BEFORE the passthrough
+        // (the worktree binding is cosh-side, never the agent's own). The
+        // typed argument tail rides the prompt — read it here, then apply.
+        let tail =
+            crate::ui::slash_menu::SlashMenu::command_arg_tail(&app.prompt_view.input, &cmd.name);
+        apply_worktree_command(app, tail.as_deref());
         return true;
     }
     // Direct passthrough: the command goes to the pane as its prompt.
@@ -109,10 +119,327 @@ pub(super) fn route_agent_slash_command(
     true
 }
 
+/// Parse and apply the `/worktree` arguments on the focused pane (git-style,
+/// no dialogs):
+///
+/// - `add <path> <branch>` — worktree at `<path>` on a new branch, based on
+///   the pane's current HEAD;
+/// - `add <branch>` — same, at the default temp path (the slug of the
+///   branch under `<OS temp>/cosh-worktrees/`);
+/// - `exit` — drop the pane's worktree binding and return it to the
+///   session's cwd. Nothing is removed: the worktree directory and its
+///   branch survive (the name deliberately does not suggest deletion —
+///   only the pane's cwd binding is dropped).
+///
+/// Anything else (no args, unknown subcommand) is refused with a usage
+/// toast. The applied binding re-syncs the registry (the worktree name
+/// reaches the main agent's pane listing) and persists through the
+/// session metadata write-back.
+pub(super) fn apply_worktree_command(app: &mut App, tail: Option<&str>) {
+    let Some(args) = tail else {
+        worktree_usage_toast(app);
+        return;
+    };
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    if parts.is_empty() {
+        worktree_usage_toast(app);
+        return;
+    }
+    if parts[0] == "exit" {
+        if parts.len() != 1 {
+            worktree_usage_toast(app);
+            return;
+        }
+        clear_focused_pane_worktree(app);
+        return;
+    }
+    if parts[0] != "add" {
+        worktree_usage_toast(app);
+        return;
+    }
+    let (path, branch) = match parts.len() {
+        2 => (None, parts[1]),
+        3 => (Some(parts[1]), parts[2]),
+        _ => {
+            worktree_usage_toast(app);
+            return;
+        }
+    };
+    assign_focused_pane_worktree(app, path, branch);
+}
+
+/// The `/worktree` usage toast — the command takes arguments, so an empty
+/// or malformed tail is a refusal, not a silent no-op.
+fn worktree_usage_toast(app: &mut App) {
+    app.toast_state.show(ToastOptions {
+        title: Some("Worktree".into()),
+        message: "Usage: /worktree add [<path>] <branch> — or /worktree exit".into(),
+        variant: ToastVariant::Warning,
+        duration_ms: 6000,
+    });
+}
+
+/// Assign the focused pane a worktree: create it (from the session repo's
+/// current HEAD), stamp the binding (`assigned_by: User` — a slash
+/// command IS the user acting), flag the handoff (the pane's next turn
+/// carries the context summary across the cwd move) and re-sync +
+/// persist. A git refusal or an unusable path surfaces as a toast.
+fn assign_focused_pane_worktree(app: &mut App, path: Option<&str>, branch: &str) {
+    let repo = std::path::PathBuf::from(&app.state.working_directory);
+    let explicit = path.map(std::path::PathBuf::from);
+    let Some((pane_index, split)) = focused_agent_pane_mut(app) else {
+        return;
+    };
+    let (ok, message, worktree) = match cosh_tools::worktree::create(
+        &repo,
+        branch,
+        explicit.as_deref(),
+        cosh_tools::worktree::AssignedBy::User,
+    ) {
+        Ok(worktree) => {
+            let agent_label = split.panes[pane_index].agent.clone();
+            (
+                true,
+                format!(
+                    "Pane isolated: {} now works in {} (branch {}).",
+                    agent_label,
+                    worktree.path.display(),
+                    worktree.branch
+                ),
+                Some(worktree),
+            )
+        }
+        Err(error) => (false, format!("{error}"), None),
+    };
+    if let Some(worktree) = worktree {
+        let pane = &mut split.panes[pane_index];
+        pane.worktree = Some(worktree);
+        pane.worktree_handoff_pending = true;
+    }
+    if ok {
+        app.sync_agents_pane_registry();
+        persist_worktree_change(app);
+    }
+    app.toast_state.show(ToastOptions {
+        title: Some("Worktree".into()),
+        message,
+        variant: if ok {
+            ToastVariant::Success
+        } else {
+            ToastVariant::Error
+        },
+        duration_ms: 8000,
+    });
+}
+
+/// Drop the focused pane's worktree binding (`/worktree exit`): the pane
+/// returns to the session's cwd on its next turn. Nothing on disk is
+/// touched — the worktree directory and its branch survive; only the
+/// binding is dropped (the name "exit" must not suggest deletion).
+fn clear_focused_pane_worktree(app: &mut App) {
+    let Some((pane_index, split)) = focused_agent_pane_mut(app) else {
+        return;
+    };
+    let was_pinned = split.panes[pane_index].worktree.is_some();
+    let pane = &mut split.panes[pane_index];
+    pane.worktree = None;
+    pane.worktree_handoff_pending = was_pinned;
+    app.sync_agents_pane_registry();
+    persist_worktree_change(app);
+    app.toast_state.show(ToastOptions {
+        title: Some("Worktree".into()),
+        message: if was_pinned {
+            "Pane exited the worktree — back in the session's working directory (the worktree and branch were kept).".into()
+        } else {
+            "This pane is not in a worktree.".into()
+        },
+        variant: ToastVariant::Info,
+        duration_ms: 6000,
+    });
+}
+
+impl App {
+    /// The App-side `agents_worktree` assign: create the worktree (temp
+    /// root — the agent NEVER picks a path), stamp the binding
+    /// `AssignedBy::Agent`, flag the handoff (the pane's next turn carries
+    /// the context summary across the cwd move) and re-sync + persist —
+    /// the SAME side effects as the user's `/worktree add`, difference
+    /// being only who is asking. The `Result` IS the op's outcome text for
+    /// the asking loop's delivery.
+    fn assign_pane_worktree_for_agent(
+        &mut self,
+        pane_index: usize,
+        branch: &str,
+    ) -> Result<String, String> {
+        let repo = std::path::PathBuf::from(&self.state.working_directory);
+        let Some((pane_index, split)) = focused_agent_pane_at_mut(self, pane_index) else {
+            return Err("the target pane is not addressable anymore".to_string());
+        };
+        let outcome = match cosh_tools::worktree::create(
+            &repo,
+            branch,
+            None,
+            cosh_tools::worktree::AssignedBy::Agent,
+        ) {
+            Ok(worktree) => {
+                let agent_label = split.panes[pane_index].agent.clone();
+                let message = format!(
+                    "Pane isolated: {agent_label} now works in {} (branch {}).",
+                    worktree.path.display(),
+                    worktree.branch
+                );
+                let pane = &mut split.panes[pane_index];
+                pane.worktree = Some(worktree);
+                pane.worktree_handoff_pending = true;
+                Ok(message)
+            }
+            Err(error) => Err(format!("{error}")),
+        };
+        if outcome.is_ok() {
+            self.sync_agents_pane_registry();
+            persist_worktree_change(self);
+        }
+        // Mirror the user command's toast: every worktree event surfaces.
+        let (variant, message) = match &outcome {
+            Ok(message) => (ToastVariant::Success, message.clone()),
+            Err(error) => (ToastVariant::Error, error.clone()),
+        };
+        self.toast_state.show(ToastOptions {
+            title: Some("Worktree".into()),
+            message,
+            variant,
+            duration_ms: 8000,
+        });
+        outcome
+    }
+
+    /// The App-side `agents_worktree` clear: drop the pane's binding (the
+    /// pane returns to the session's cwd on its next turn) — nothing on
+    /// disk is touched, the worktree directory and its branch survive.
+    /// Same side effects and outcome shape as the assign twin.
+    fn clear_pane_worktree_for_agent(&mut self, pane_index: usize) -> Result<String, String> {
+        let Some((pane_index, split)) = focused_agent_pane_at_mut(self, pane_index) else {
+            return Err("the target pane is not addressable anymore".to_string());
+        };
+        let was_pinned = split.panes[pane_index].worktree.is_some();
+        let pane = &mut split.panes[pane_index];
+        pane.worktree = None;
+        pane.worktree_handoff_pending = was_pinned;
+        self.sync_agents_pane_registry();
+        persist_worktree_change(self);
+        self.toast_state.show(ToastOptions {
+            title: Some("Worktree".into()),
+            message: if was_pinned {
+                "Pane exited the worktree — back in the session's working directory (the worktree and branch were kept).".into()
+            } else {
+                "This pane is not in a worktree.".into()
+            },
+            variant: ToastVariant::Info,
+            duration_ms: 6000,
+        });
+        if was_pinned {
+            Ok("binding cleared — the pane works in the session's working directory again; the worktree and its branch were kept on disk".to_string())
+        } else {
+            Err("the pane was not in a worktree — nothing to clear".to_string())
+        }
+    }
+
+    /// The user answered the `agents_worktree` confirmation box (Confirm
+    /// dialog's Yes path). `approved == false` is the DECLINE: the op dies
+    /// with a plain refusal outcome (the pane keeps ITS binding — the
+    /// user's supremacy is the whole point) and NO binding side effect.
+    /// Either way the dialog pops and the drain resumes on the next frame.
+    /// The pane INDEX is re-resolved from the op's registry id AT ANSWER
+    /// TIME: a split that changed while the dialog was open (pane closed,
+    /// panes reordered) must never redirect the binding to a different
+    /// pane — a vanished target fails the op cleanly instead.
+    pub(in crate::app) fn resolve_pending_worktree_confirmation(&mut self, approved: bool) {
+        let Some(op) = self.pending_worktree_confirmation.take() else {
+            return;
+        };
+        self.dialog.pop();
+        let pane_index =
+            either_split(&self.agents_split, &self.parked_agents_split).and_then(|split| {
+                (0..split.panes.len())
+                    .find(|&i| split.pane_registry_id(i).as_deref() == Some(op.pane.as_str()))
+            });
+        let outcome = match (approved, pane_index) {
+            (true, Some(pane_index)) => match op.action {
+                cosh::harness::panes::WorktreeAction::Assign => {
+                    let branch = op.branch.clone().unwrap_or_default();
+                    self.assign_pane_worktree_for_agent(pane_index, &branch)
+                }
+                cosh::harness::panes::WorktreeAction::Clear => {
+                    self.clear_pane_worktree_for_agent(pane_index)
+                }
+            },
+            (true, None) => Err(format!(
+                "pane '{}' no longer exists — the binding cannot change",
+                op.pane
+            )),
+            (false, _) => Err(format!(
+                "the user DECLINED this ask — pane '{}' keeps its current worktree binding; \
+                 do not retry the same ask",
+                op.pane
+            )),
+        };
+        cosh::harness::panes::complete_worktree_op(&op, outcome);
+    }
+}
+
+/// The split + pane index for an AGENT-driven worktree change, resolved
+/// from the LIVE split only (an agent cannot reach a parked pane — it has
+/// no focus) and validated like `focused_agent_pane_mut`: out-of-range and
+/// the manager pane are refused (cosh itself has no worktree binding).
+fn focused_agent_pane_at_mut(app: &mut App, pane: usize) -> Option<(usize, &mut AgentsSplitState)> {
+    let split = app.agents_split.as_mut()?;
+    let p = split.panes.get_mut(pane)?;
+    if p.agent == MANAGER_LABEL {
+        return None;
+    }
+    Some((pane, split))
+}
+
+/// Persist the session's pane metadata after a worktree binding change:
+/// the SAME write-back the picker/teardown paths use (`to_ref` carries the
+/// `PaneWorktree` through `AgentPaneRef::Bound`, so a cold restore
+/// re-attaches the pane already pinned). The hidden stack rides along
+/// unchanged — the delta is the pane set's worktree fields only.
+fn persist_worktree_change(app: &mut App) {
+    let mode_open = app.agents_split.is_some();
+    let panes = either_split(&app.agents_split, &app.parked_agents_split).map(|split| {
+        split
+            .panes
+            .iter()
+            .map(crate::routes::session::agents_split::AgentPane::to_ref)
+            .collect::<Vec<_>>()
+    });
+    let hidden = app
+        .state
+        .current_session()
+        .map(|s| s.agents_hidden.clone())
+        .unwrap_or_default();
+    app.save_agents_metadata(panes, mode_open, hidden);
+}
+
+/// The LIVE split's focused pane for mutation — the worktree command is a
+/// LIVE-pane command (a parked split cannot take focus, so nothing else
+/// can reach it). `None` when no pane is focused or the focus is the
+/// manager pane (cosh itself has no worktree binding).
+fn focused_agent_pane_mut(app: &mut App) -> Option<(usize, &mut AgentsSplitState)> {
+    let split = app.agents_split.as_mut()?;
+    let focused = split.focused?;
+    let pane = split.panes.get(focused)?;
+    if pane.agent == MANAGER_LABEL {
+        return None;
+    }
+    Some((focused, split))
+}
+
 /// Focus arrived on pane `pane` (hotkey or click): when the pane has never
 /// collected its agent's command/config snapshot, spawn the on-demand ACP
 /// probe (`session_snapshot` — resume + observe, never prompts) and flag
-/// the slash menu's spinner until the result lands. The daemon pane is
+/// the slash menu's spinner until the result lands. The manager pane is
 /// skipped: it is cosh itself, and the cosh command set already serves the
 /// menu (its slash commands are the TUI's own, not an ACP publication).
 /// The LIVE split only — a parked pane cannot take focus.
@@ -123,12 +450,20 @@ pub(super) fn ensure_pane_snapshot(app: &mut App, pane: usize) {
     let Some(p) = split.panes.get_mut(pane) else {
         return;
     };
-    if p.agent == DAEMON_LABEL
+    if p.agent == MANAGER_LABEL
         || (p.commands.is_some() && p.config_options.is_some())
         || p.snapshot_loading
     {
         return;
     }
+    // The probe observes the pane's EFFECTIVE cwd (worktree when pinned):
+    // commands/config options are per-connection, per-cwd state — the
+    // same resolution the turn dispatch applies.
+    let pane_probe_cwd = p
+        .worktree
+        .as_ref()
+        .map(|w| w.path.clone())
+        .unwrap_or_else(|| PathBuf::from(&app.state.working_directory));
     let agent = p.agent.clone();
     let session_id = p.session_id.clone();
     let pane_id = p.id;
@@ -137,12 +472,11 @@ pub(super) fn ensure_pane_snapshot(app: &mut App, pane: usize) {
         app.slash_menu.set_agent_commands(Vec::new());
         app.slash_menu.set_loading(true);
     }
-    let cwd = PathBuf::from(&app.state.working_directory);
+    let cwd = pane_probe_cwd;
     let event_tx = app.event_tx.clone();
     let epoch = app.agents_pane_epoch;
     app.tokio_handle.spawn(async move {
-        let result =
-            cosh_tools::subagent::acp::session_snapshot(&agent, session_id, cwd).await;
+        let result = cosh_tools::subagent::acp::session_snapshot(&agent, session_id, cwd).await;
         let (commands, options, modes, mode_current) = match result {
             Ok(snapshot) => (
                 snapshot.commands,
@@ -310,13 +644,14 @@ impl App {
     /// the caller consumes the key only then (sovereign over the prompt
     /// and every other handler, like the main dialog's gate).
     pub(super) fn pane_permission_key(&mut self, key: KeyCode) -> bool {
-        let Some(focused) = self.agents_split.as_ref().and_then(|split| split.focused)
-        else {
+        let Some(focused) = self.agents_split.as_ref().and_then(|split| split.focused) else {
             return false;
         };
-        let Some(request) = self.agents_split.as_ref().and_then(|split| {
-            split.pending_permission(focused)
-        }) else {
+        let Some(request) = self
+            .agents_split
+            .as_ref()
+            .and_then(|split| split.pending_permission(focused))
+        else {
             return false;
         };
         let count = request.options.len().max(1);
@@ -344,10 +679,7 @@ impl App {
                 true
             }
             KeyCode::Enter => {
-                let option_id = request
-                    .options
-                    .get(request.selected)
-                    .map(|o| o.id.clone());
+                let option_id = request.options.get(request.selected).map(|o| o.id.clone());
                 let Some(split) = self.agents_split.as_mut() else {
                     return true;
                 };
@@ -415,10 +747,7 @@ impl App {
             self.submit_prompt_message(msg);
             return;
         };
-        if split
-            .focused_pane()
-            .is_some_and(|pane| pane.running)
-        {
+        if split.focused_pane().is_some_and(|pane| pane.running) {
             // Same gate the `/new` command applies to a working loop: a
             // second dispatch while that pane's turn is live would
             // interleave two streams inside one pane. (Issue 3 made
@@ -432,10 +761,7 @@ impl App {
             });
             return;
         }
-        if split
-            .focused_pane()
-            .is_some_and(|pane| pane.rehydrating)
-        {
+        if split.focused_pane().is_some_and(|pane| pane.rehydrating) {
             // The pane's bound history is still arriving from the agent's
             // `session/load` replay: a prompt now would interleave with
             // the reconstruction stream (and resume the session from a
@@ -462,11 +788,11 @@ impl App {
     /// first chunk.
     fn dispatch_to_pane(&mut self, pane: usize, msg: String, from_agent: bool) {
         // Snapshot everything the spawned turn needs BEFORE any effect
-        // below: the agent name, resume id and the daemon's connector
-        // config (only when the focused pane IS the daemon — the connector
+        // below: the agent name, resume id and the manager pane's connector
+        // config (only when the focused pane IS the manager pane — the connector
         // resolution runs lazily so a split of ACP agents alone never
         // computes it).
-        let Some((agent, resume, picks)) =
+        let Some((agent, resume, picks, pane_cwd, handoff)) =
             either_split(&self.agents_split, &self.parked_agents_split)
                 .and_then(|split| split.panes.get(pane))
                 .map(|p| {
@@ -491,14 +817,30 @@ impl App {
                                 opts.iter()
                                     .filter(|o| {
                                         !o.current.is_empty()
-                                            && p.picked_config_ids
-                                                .iter()
-                                                .any(|id| id == &o.id)
+                                            && p.picked_config_ids.iter().any(|id| id == &o.id)
                                     })
                                     .map(|o| (o.id.clone(), o.current.clone()))
                                     .collect::<Vec<(String, String)>>()
                             })
                             .unwrap_or_default(),
+                        // The pane's EFFECTIVE cwd: the worktree path when
+                        // the pane is pinned (`/worktree`), the session's
+                        // working directory otherwise. Every layer of the
+                        // isolation model rides THIS single resolution —
+                        // the ACP session cwd and the fs sandbox root both
+                        // derive from it inside the turn.
+                        p.worktree
+                            .as_ref()
+                            .map(|w| w.path.clone())
+                            .unwrap_or_else(|| PathBuf::from(&self.state.working_directory)),
+                        // The handoff summary, built NOW from the pane's
+                        // local timeline: when the pane's cwd moved since
+                        // its last turn, the next prompt carries this block
+                        // so the agent keeps its working context across the
+                        // move (the fresh-session fallback of
+                        // resume-with-new-cwd is the failure mode it nets).
+                        p.worktree_handoff_pending
+                            .then(|| pane_handoff_summary(&p.activity.timeline)),
                     )
                 })
         else {
@@ -520,14 +862,18 @@ impl App {
             .and_then(|modes| {
                 crate::routes::session::agent_command_map::map_mode_to_agent(own_mode, modes)
             });
-        let is_daemon = agent == DAEMON_LABEL;
+        let is_manager_pane = agent == MANAGER_LABEL;
         // The registry id this pane answers to while THIS turn runs. For the
         // manager pane it is the id `agents_call` would use to reach it; the
         // manager harness carries it so it refuses to address itself (a
         // self-call would queue behind the very turn making it — deadlock).
-        let own_registry_id = if is_daemon {
-            either_split(&self.agents_split, &self.parked_agents_split)
-                .and_then(|split| split.pane_registry_id(pane))
+        // The ACP branch uses the same id for the awareness preamble
+        // (`panes::take_preamble` keys the announced-generation bookkeeping
+        // by it), so it is computed for EVERY pane, not just the manager.
+        let pane_registry_id = either_split(&self.agents_split, &self.parked_agents_split)
+            .and_then(|split| split.pane_registry_id(pane));
+        let own_registry_id = if is_manager_pane {
+            pane_registry_id.clone()
         } else {
             None
         };
@@ -535,7 +881,7 @@ impl App {
         // the manager pane's own cosh session can fail (I/O), and a refused
         // turn must leave the pane idle — never stranded `running` with a
         // spinner and a mirror spinning.
-        let manager_session: Option<String> = if is_daemon {
+        let manager_session: Option<String> = if is_manager_pane {
             let Some(id) = self.ensure_manager_pane_session(pane) else {
                 return;
             };
@@ -550,9 +896,16 @@ impl App {
         // agent's queued input with the distinct rail. After the guards
         // above — a refused turn must not write to the timeline either.
         // The echo goes wherever the pane lives (live or parked).
+        let handoff_consumed = handoff.is_some();
         if let Some(split) = either_split_mut(&mut self.agents_split, &mut self.parked_agents_split)
         {
             split.echo_turn_input(pane, &msg, !from_agent);
+            // The handoff block rode THIS turn's input — consume the flag
+            // so later turns go out without it (a new `/worktree` add/exit
+            // re-flags it).
+            if handoff_consumed {
+                split.set_worktree_handoff_pending(pane, false);
+            }
         }
         // The pane's assembly inputs come from the SAME user config the
         // main loop reads: the session route (provider + model, `auto`
@@ -560,9 +913,9 @@ impl App {
         // router's fallbacks. The old hand-cut subset forced Native and
         // froze the first fallback — the assembly honors the user's choices.
         // An EMPTY provider degrades to the router's first fallback (the
-        // deleted `daemon_connector`'s behavior): an unconfigured route
+        // deleted `daemon_connector`'s behavior): an unconfigured manager route
         // must not fail the pane when a working fallback exists.
-        let daemon_route = if is_daemon {
+        let manager_route = if is_manager_pane {
             let provider = self.llm_config.provider.trim().to_string();
             if provider.is_empty() {
                 self.router_view
@@ -597,7 +950,12 @@ impl App {
         let self_llm_reasoning = self.llm_config.reasoning.clone();
         let self_tool_call_mode = self.llm_config.tool_call_mode;
         let self_base_urls = local_base_urls.clone();
-        let cwd_string = self.state.working_directory.clone();
+        // The pane's effective cwd (worktree path when pinned), resolved in
+        // the snapshot above — NOT the session's working directory: the
+        // manager pane keeps the session cwd (it has no worktree binding,
+        // `focused_agent_pane_mut` refuses it) while an isolated ACP pane
+        // works inside its own checkout.
+        let cwd_string = pane_cwd.to_string_lossy().into_owned();
         let anthropic_ttl_1h = self.setup.anthropic_cache_ttl_1h();
         let openai_cache_retention = self.setup.openai_cache_retention().map(String::from);
         let mcp_config = self.setup.mcp.clone();
@@ -615,7 +973,7 @@ impl App {
         // The manager session's persistence rides a CLONE: the turn thread
         // outlives the &mut self borrow.
         let store = self.session_store.clone();
-        let cwd = PathBuf::from(&self.state.working_directory);
+        let cwd = pane_cwd;
         let tokio_handle = self.tokio_handle.clone();
 
         // Pane bookkeeping: the pane's own stop signal (Esc stops it through
@@ -624,7 +982,8 @@ impl App {
         // wherever the pane lives (a PARKED pane's turn must still be
         // stoppable when the user re-enters the mode).
         let signal = Arc::new(AtomicBool::new(false));
-        if let Some(split) = either_split_mut(&mut self.agents_split, &mut self.parked_agents_split) {
+        if let Some(split) = either_split_mut(&mut self.agents_split, &mut self.parked_agents_split)
+        {
             split.set_running(pane, true);
             split.set_stop_signal(pane, Some(signal.clone()));
         }
@@ -656,7 +1015,7 @@ impl App {
         // stale-epoch events instead of binding them into a replacement.
         let epoch = self.agents_pane_epoch;
         let event_tx = self.event_tx.clone();
-        if is_daemon {
+        if is_manager_pane {
             // The cosh pane: the MAIN agent itself, running delegated work
             // on its OWN cosh session — a real, persisted session (visible
             // in the history panel, openable like any other), not a
@@ -702,14 +1061,14 @@ impl App {
                 // distributed) and the pane's OWN session id as the
                 // cache-affinity key.
                 let assembly = super::harness_assembly::HarnessAssembly {
-                    provider: daemon_route
+                    provider: manager_route
                         .as_ref()
                         .map(|(p, _)| p.clone())
                         .unwrap_or_default(),
-                    model: daemon_route.as_ref().and_then(|(_, m)| m.clone()),
+                    model: manager_route.as_ref().and_then(|(_, m)| m.clone()),
                     reasoning: self_llm_reasoning.clone(),
                     tool_call_mode: self_tool_call_mode,
-                    base_url: daemon_route
+                    base_url: manager_route
                         .as_ref()
                         .and_then(|(p, _)| self_base_urls.get(p).cloned()),
                     local_base_urls: local_base_urls.clone(),
@@ -766,7 +1125,28 @@ impl App {
             // select! shape the prompt corrector drains with. The turn
             // resumes the pane's stored session so the agent keeps its
             // context across prompts.
-            let input = msg;
+            // ACP has no system prompt, so the pane's awareness of its
+            // siblings rides the prompt itself: `take_preamble` hands back
+            // the peer listing ONLY when the pane's announcement went
+            // stale (first turn, or the pane set/worktrees changed since
+            // the last one) — otherwise the input goes out untouched.
+            // A pending worktree HANDOFF rides BEFORE the preamble: the
+            // agent first learns where it now works and what it was
+            // doing, then who its siblings are.
+            let handoff_block = handoff.map(|summary| {
+                format!(
+                    "[workspace moved] Your working directory changed to {} — \
+                         work only inside it. What you were doing, carried over:\n\n{summary}\n\n",
+                    cwd.display()
+                )
+            });
+            let input = assemble_pane_input(
+                handoff_block,
+                pane_registry_id
+                    .as_deref()
+                    .and_then(cosh::harness::panes::take_preamble),
+                msg,
+            );
             // The permission channel rides the MODE (the split's Yolo
             // contract): a non-Yolo mode makes this turn's
             // `session/request_permission` requests surface on the pane's
@@ -911,6 +1291,101 @@ impl App {
         }
     }
 
+    /// The `agents_worktree` op drain — the App-side half of the tool: pops
+    /// parked asks from the pane registry, supervises them and executes
+    /// them with the SAME engine calls and side effects as the user's own
+    /// `/worktree` command, tagging the binding `AssignedBy::Agent`.
+    /// Supervision (design decision 3): an ask that would change or clear a
+    /// worktree the USER assigned opens the Confirm dialog — the user's
+    /// supremacy over their own binding holds even in Yolo mode — and the
+    /// drain parks until the dialog resolves it
+    /// (`pending_worktree_confirmation`). Any other ask executes
+    /// immediately. The outcome ALWAYS reaches the asking loop as a
+    /// Worktree-kind delivery (`complete_worktree_op`) — never a tool
+    /// result, which was only the receipt.
+    pub(super) fn serve_agents_pane_worktree_ops(&mut self) {
+        // A confirmation box for an earlier ask is on screen: it is the
+        // sovereign modal — the user's answer resolves it and the drain
+        // resumes on a later frame. Nothing else pops meanwhile.
+        if self.pending_worktree_confirmation.is_some() {
+            return;
+        }
+        // ANY visible dialog defers the pop: stacking this Confirm over a
+        // live one (quit, session delete, RAG delete) would let the
+        // resolve path steal the answer the user aimed at THEIR dialog.
+        if self.dialog.visible() {
+            return;
+        }
+        let Some(op) = cosh::harness::panes::peek_worktree_op() else {
+            return;
+        };
+        // Resolve the target pane by registry id (the tool speaks ids, the
+        // split speaks indexes). A pane that vanished since the ask was
+        // parked fails the op — the registry's `set_panes` cleanup usually
+        // gets there first; this is the same net result.
+        let resolved =
+            either_split(&self.agents_split, &self.parked_agents_split).and_then(|split| {
+                let index = (0..split.panes.len())
+                    .find(|&i| split.pane_registry_id(i).as_deref() == Some(op.pane.as_str()))?;
+                let needs_confirmation = split.panes[index]
+                    .worktree
+                    .as_ref()
+                    .is_some_and(|w| w.assigned_by == cosh_tools::worktree::AssignedBy::User);
+                Some((index, needs_confirmation))
+            });
+        let Some((pane_index, needs_confirmation)) = resolved else {
+            let op = cosh::harness::panes::pop_worktree_op();
+            if let Some(op) = op {
+                cosh::harness::panes::complete_worktree_op(
+                    &op,
+                    Err(format!("pane '{}' no longer exists", op.pane)),
+                );
+            }
+            return;
+        };
+        if needs_confirmation {
+            // The user's binding, the user's call: open the Confirm dialog
+            // (the sovereign modal — no other ask can stack on top while
+            // the user is deciding) and park the op until the answer.
+            let message = match op.action {
+                cosh::harness::panes::WorktreeAction::Assign => format!(
+                    "An agent asks to move pane '{}' into a NEW worktree on branch '{}'. \
+                     Allow?",
+                    op.pane,
+                    op.branch.as_deref().unwrap_or_default()
+                ),
+                cosh::harness::panes::WorktreeAction::Clear => format!(
+                    "An agent asks to move pane '{}' out of the worktree YOU assigned \
+                     (the binding is dropped; nothing on disk is deleted). Allow?",
+                    op.pane
+                ),
+            };
+            self.dialog
+                .show(crate::ui::dialogs::DialogType::Confirm { message });
+            let op = cosh::harness::panes::pop_worktree_op();
+            if let Some(op) = op {
+                // The index was only the resolution vehicle — the op's
+                // registry id is the durable handle (re-resolved at
+                // answer time, issue 1 of the review).
+                self.pending_worktree_confirmation = Some(op);
+            }
+            return;
+        }
+        let Some(op) = cosh::harness::panes::pop_worktree_op() else {
+            return;
+        };
+        let outcome = match op.action {
+            cosh::harness::panes::WorktreeAction::Assign => {
+                let branch = op.branch.clone().unwrap_or_default();
+                self.assign_pane_worktree_for_agent(pane_index, &branch)
+            }
+            cosh::harness::panes::WorktreeAction::Clear => {
+                self.clear_pane_worktree_for_agent(pane_index)
+            }
+        };
+        cosh::harness::panes::complete_worktree_op(&op, outcome);
+    }
+
     /// The manager pane's OWN cosh session id, minted on first use: the
     /// pane is not a throwaway nested harness — it is a real session in the
     /// store (the history panel lists it from birth, and reopening it
@@ -1000,7 +1475,7 @@ impl App {
         // into a fresh harness — replays as the pane's typed event stream
         // through the SAME pane-event channel, then the terminal replayed
         // event clears the in-flight flag.
-        if agent == DAEMON_LABEL {
+        if agent == MANAGER_LABEL {
             let epoch = self.agents_pane_epoch;
             let mut events = Vec::new();
             if let Some(context) = self.session_store.load_context(&session_id) {
@@ -1069,7 +1544,10 @@ impl App {
             });
             return;
         }
-        let cwd = PathBuf::from(&self.state.working_directory);
+        let cwd = either_split(&self.agents_split, &self.parked_agents_split)
+            .and_then(|split| split.panes.get(pane))
+            .and_then(|p| p.worktree.as_ref().map(|w| w.path.clone()))
+            .unwrap_or_else(|| PathBuf::from(&self.state.working_directory));
         let epoch = self.agents_pane_epoch;
         let event_tx = self.event_tx.clone();
         let tokio_handle = self.tokio_handle.clone();
@@ -1083,8 +1561,7 @@ impl App {
         // tests assert on.
         #[cfg(not(test))]
         tokio_handle.spawn(async move {
-            let (chunk_tx, mut chunk_rx) =
-                tokio::sync::mpsc::unbounded_channel::<SubagentEvent>();
+            let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel::<SubagentEvent>();
             let pass = cosh_tools::subagent::acp::replay(&agent, session_id, cwd, chunk_tx);
             tokio::pin!(pass);
             let mut chunks_open = true;
@@ -1121,11 +1598,91 @@ impl App {
             });
         });
         #[cfg(test)]
-        let _ = (agent, session_id, cwd, pane_id, epoch, event_tx, tokio_handle);
+        let _ = (
+            agent,
+            session_id,
+            cwd,
+            pane_id,
+            epoch,
+            event_tx,
+            tokio_handle,
+        );
     }
 }
 
-/// One daemon-pane turn: the pane's harness assembled through the ONE
+/// One worktree HANDOFF summary line from a pane timeline entry: the
+/// recent user messages and agent replies that describe what the pane was
+/// doing, so a cwd move never silently orphans its working context. Bounded
+/// (the block rides the NEXT prompt once — a transcript would defeat it);
+/// tool-call entries contribute their `detail` (the path/query/command the
+/// call targeted) rather than their output tails.
+fn pane_handoff_summary_line(entry: &SubagentTimelineEntry) -> Option<String> {
+    const MAX_LINE: usize = 200;
+    let mut line = match entry {
+        SubagentTimelineEntry::UserMessage { text } => {
+            format!("user: {}", text.trim())
+        }
+        SubagentTimelineEntry::AgentMessage { text } => {
+            format!("agent: {}", text.trim())
+        }
+        SubagentTimelineEntry::Message { text } => {
+            format!("reply: {}", text.trim())
+        }
+        SubagentTimelineEntry::Tool(call) => {
+            let detail = call.detail.as_deref().unwrap_or_default();
+            format!("tool {}: {}", call.title.trim(), detail.trim())
+        }
+        // Thoughts and plans are the agent's own scratchpad — the carried
+        // context is the WORK, not the narration.
+        _ => return None,
+    };
+    // Collapse whitespace: timeline text carries hard wraps and stream
+    // chunking; the handoff wants one readable line per entry.
+    line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.chars().count() > MAX_LINE {
+        let cut: String = line.chars().take(MAX_LINE).collect();
+        line = format!("{cut}…");
+    }
+    (!line.trim_end().ends_with(':')).then_some(line)
+}
+
+/// Build the worktree handoff block from a pane's local timeline: the LAST
+/// few meaningful entries (`pane_handoff_summary_line`), newest last — the
+/// same order the pane renders. An empty or all-noise timeline yields an
+/// empty string: the block still announces the move, just carries nothing.
+fn pane_handoff_summary(timeline: &[SubagentTimelineEntry]) -> String {
+    const MAX_ENTRIES: usize = 12;
+    timeline
+        .iter()
+        .rev()
+        .filter_map(pane_handoff_summary_line)
+        .take(MAX_ENTRIES)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Build the pane's turn input from its optional layers, in wire order:
+/// the worktree HANDOFF block first (the agent learns where it now works
+/// and what it was doing), the awareness PREAMBLE next (siblings), then
+/// the raw message. Pure — unit-tested against the exact composition the
+/// dispatch sends into `acp::call`.
+fn assemble_pane_input(
+    handoff_block: Option<String>,
+    preamble: Option<String>,
+    msg: String,
+) -> String {
+    match (handoff_block, preamble) {
+        (Some(block), Some(preamble)) => format!("{block}{preamble}\n\n{msg}"),
+        (Some(block), None) => format!("{block}{msg}"),
+        (None, Some(preamble)) => format!("{preamble}\n\n{msg}"),
+        (None, None) => msg,
+    }
+}
+
+/// One manager-pane turn: the pane's harness assembled through the ONE
 /// assembly (`harness_assembly::assemble`), whose plain event stream is bridged
 /// into the SAME typed `SubagentEvent` stream the external ACP panes emit —
 /// both pane flavors render identically. The final report (the loop's
@@ -1136,9 +1693,9 @@ fn run_manager_turn(
     pane_id: u64,
     epoch: u64,
     input: String,
-    permission_rx: Option<tokio::sync::mpsc::UnboundedReceiver<
-        cosh_tools::subagent::events::PanePermissionAnswer,
-    >>,
+    permission_rx: Option<
+        tokio::sync::mpsc::UnboundedReceiver<cosh_tools::subagent::events::PanePermissionAnswer>,
+    >,
     stop_signal: Arc<AtomicBool>,
     assembly: super::harness_assembly::HarnessAssembly,
     session_id: String,
@@ -1290,17 +1847,13 @@ fn run_manager_turn(
                                 std::sync::atomic::AtomicU64::new(1);
                             let call_id = format!(
                                 "manager-perm-{}",
-                                MANAGER_CALL.fetch_add(
-                                    1,
-                                    std::sync::atomic::Ordering::Relaxed,
-                                )
+                                MANAGER_CALL.fetch_add(1, std::sync::atomic::Ordering::Relaxed,)
                             );
                             vec![SubagentEvent::PermissionRequest {
                                 call_id,
                                 title: description,
                                 kind: cosh_tools::subagent::events::ToolKind::Execute,
-                                raw_input: serde_json::json!({ "tool": tool, "args": args })
-                                    .into(),
+                                raw_input: serde_json::json!({ "tool": tool, "args": args }).into(),
                                 options: vec![
                                     cosh_tools::subagent::events::AgentPermissionOption {
                                         id: "allow".to_string(),
@@ -1460,8 +2013,7 @@ fn manager_context_replay_events(
     // or absent) lands nowhere, exactly like the live bridge's FIFO
     // contract — and the TUI's apply locates the row to patch BY ID, so
     // the update never needs an index.
-    let mut announced: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
+    let mut announced: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for item in &context.items {
         match item {
             ContextItem::User { original, .. } => {
@@ -1472,16 +2024,16 @@ fn manager_context_replay_events(
                 }
             }
             ContextItem::Assistant {
-                original, reasoning, ..
+                original,
+                reasoning,
+                ..
             }
             | ContextItem::Closure {
                 content: original,
                 reasoning,
                 ..
             } => {
-                if let Some(reasoning) =
-                    reasoning.as_ref().filter(|r| !r.is_empty())
-                {
+                if let Some(reasoning) = reasoning.as_ref().filter(|r| !r.is_empty()) {
                     events.push(SubagentEvent::Thought {
                         text: reasoning.clone(),
                     });
@@ -1594,8 +2146,9 @@ fn persist_manager_session(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
-    let mut session = store.load_session(session_id).unwrap_or_else(|| {
-        crate::types::Session {
+    let mut session = store
+        .load_session(session_id)
+        .unwrap_or_else(|| crate::types::Session {
             id: session_id.to_string(),
             title: "agents manager".to_string(),
             created_at,
@@ -1608,8 +2161,7 @@ fn persist_manager_session(
             agents_mode_open: false,
             agents_hidden: Vec::new(),
             ctx_ids: std::collections::HashMap::new(),
-        }
-    });
+        });
     session.messages = display
         .into_iter()
         .enumerate()
@@ -1640,4 +2192,115 @@ fn persist_manager_session(
         })
         .collect();
     store.save_session_async_with_context(&mut session, context);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tl_user(text: &str) -> SubagentTimelineEntry {
+        SubagentTimelineEntry::UserMessage {
+            text: text.to_string(),
+        }
+    }
+
+    fn tl_message(text: &str) -> SubagentTimelineEntry {
+        SubagentTimelineEntry::Message {
+            text: text.to_string(),
+        }
+    }
+
+    fn tl_tool(title: &str, detail: Option<&str>) -> SubagentTimelineEntry {
+        SubagentTimelineEntry::Tool(
+            crate::routes::session::right_panel::types::SubagentToolCall {
+                id: "t1".into(),
+                title: title.to_string(),
+                kind: cosh_tools::subagent::events::ToolKind::Read,
+                tool: None,
+                status: cosh_tools::subagent::events::ToolCallStatus::Completed,
+                output_tail: None,
+                diff: None,
+                detail: detail.map(str::to_string),
+            },
+        )
+    }
+
+    fn tl_thought(text: &str) -> SubagentTimelineEntry {
+        SubagentTimelineEntry::Thought {
+            text: text.to_string(),
+        }
+    }
+
+    #[test]
+    fn handoff_summary_carries_the_recent_work_lines() {
+        let timeline = vec![
+            tl_user("find the failing test in the worktree"),
+            tl_message("Looking for failing tests in the worktree…"),
+            tl_tool("Search", Some("src/lib.rs")),
+            tl_thought("hmm"),
+            tl_user("fix it"),
+            tl_message("Fixed it."),
+        ];
+        let summary = pane_handoff_summary(&timeline);
+        let lines: Vec<&str> = summary.lines().collect();
+        // One collapsed line per carrying entry, chronological order,
+        // thoughts dropped.
+        assert_eq!(lines.len(), 5, "thoughts are dropped: {summary}");
+        assert!(summary.contains("user: find the failing test"));
+        assert!(summary.contains("tool Search: src/lib.rs"));
+        assert!(summary.ends_with("reply: Fixed it."));
+    }
+
+    #[test]
+    fn handoff_summary_is_bounded_and_whitespace_collapsed() {
+        let long = "x".repeat(600);
+        let wrapped = format!("{long}\n{long}");
+        let timeline = (0..40)
+            .map(|i| tl_message(&format!("chunk-{i} {wrapped}")))
+            .collect::<Vec<_>>();
+        let summary = pane_handoff_summary(&timeline);
+        // Only the LAST 12 entries survived, each capped at 200 chars.
+        assert!(
+            summary.lines().count() <= 12,
+            "bounded to 12: {len}",
+            len = summary.lines().count()
+        );
+        for line in summary.lines() {
+            assert!(line.chars().count() <= 201, "line capped: {line}");
+        }
+        assert!(summary.contains("chunk-39"), "the newest entry survived");
+        assert!(!summary.contains("chunk-27"), "older entries dropped");
+    }
+
+    #[test]
+    fn an_empty_timeline_yields_an_empty_handoff_but_the_block_still_announces() {
+        assert_eq!(pane_handoff_summary(&[]), "");
+        let input = assemble_pane_input(
+            Some("[workspace moved] …\n\n".into()),
+            None,
+            "do the thing".into(),
+        );
+        assert!(input.starts_with("[workspace moved]"));
+        assert!(input.ends_with("do the thing"));
+    }
+
+    #[test]
+    fn pane_input_composes_handoff_then_preamble_then_message() {
+        let input = assemble_pane_input(
+            Some("[moved]\n\n".into()),
+            Some("## Agents Panes\n- claude#1".into()),
+            "the message".into(),
+        );
+        assert_eq!(
+            input,
+            "[moved]\n\n## Agents Panes\n- claude#1\n\nthe message"
+        );
+        // Preamble without handoff — the Phase 1 shape.
+        assert_eq!(
+            assemble_pane_input(None, Some("## Agents Panes".into()), "msg".into()),
+            "## Agents Panes\n\nmsg"
+        );
+        // Neither layer — the input goes out verbatim.
+        assert_eq!(assemble_pane_input(None, None, "msg".into()), "msg");
+    }
 }

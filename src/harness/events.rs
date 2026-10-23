@@ -157,7 +157,7 @@ pub enum HarnessEvent {
     /// stopped turn's terminal delivery can never land in a replacement
     /// pane that merely shares the index.
     AgentsPaneEvent {
-        /// Index into `App::agents_split`'s panes (0 = the `cosh` daemon).
+        /// Index into `App::agents_split`'s panes (0 = the `cosh` manager pane).
         pane: usize,
         /// Stable identity of the pane object this turn was dispatched to
         /// (`AgentPane::id`). The event handler routes by THIS, not the
@@ -195,7 +195,7 @@ pub enum HarnessEvent {
         /// `end_turn`, `cancelled`, or a spawn-failure marker.
         stop_reason: String,
         /// The ACP session id to resume on the pane's next prompt (external
-        /// agents only; the nested cosh daemon has no resumable session).
+        /// agents only; the nested cosh manager pane has no resumable session).
         session: Option<String>,
     },
     /// A `/agents` pane's cold-restore REPLAY ended. The pane rehydrated

@@ -1716,8 +1716,8 @@ pub fn format_session_timestamp(ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Message, Part, ReasoningPart, TextPart, ToolPart, ToolStatus};
     use crate::harness::context::{ContextItem, SplitState};
+    use crate::types::{Message, Part, ReasoningPart, TextPart, ToolPart, ToolStatus};
 
     #[test]
     fn versioned_view_survives_display_only_mapping_loss_and_restores_hidden() {
@@ -3940,6 +3940,7 @@ mod tests {
             crate::types::AgentPaneRef::Bound {
                 agent: "cosh".into(),
                 session_id: "7000-pane".into(),
+                worktree: None,
             },
             crate::types::AgentPaneRef::Name("claude".into()),
         ]);
@@ -3980,6 +3981,7 @@ mod tests {
         fork.agents_panes = Some(vec![crate::types::AgentPaneRef::Bound {
             agent: "codex".into(),
             session_id: "7100-pane".into(),
+            worktree: None,
         }]);
         assert!(store.fork_session("7100", "msg-0", &fork));
         // The fork event's metadata carries no pane set, so the binding
@@ -4009,6 +4011,7 @@ mod tests {
             pane: crate::types::AgentPaneRef::Bound {
                 agent: "claude".into(),
                 session_id: "7200-pane".into(),
+                worktree: None,
             },
             index: 0,
         }];
@@ -4032,6 +4035,7 @@ mod tests {
             crate::types::AgentPaneRef::Bound {
                 agent: "claude".into(),
                 session_id: "7200-pane".into(),
+                worktree: None,
             },
             crate::types::AgentPaneRef::Name("kilo".into()),
         ]);

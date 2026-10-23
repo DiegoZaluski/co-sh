@@ -19,10 +19,17 @@
 //! truncation runs, so the user always sees everything.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use xxhash_rust::xxh64::xxh64;
 
 use crate::util::estimate_tokens;
+
+/// Per-process counter making temp-file names unique across concurrent
+/// truncations: several threads truncating the same middle (the tests do,
+/// and so can a busy session) must not share one temp path, or one winner's
+/// rename leaves the rest renaming a file that no longer exists.
+static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Token budget for the model-facing version of a single `bash_run` output.
 ///
@@ -214,7 +221,12 @@ fn write_middle_log(middle: &str) -> Option<PathBuf> {
     // (dedup by design). Write to a temp name and rename so a concurrent
     // reader never observes a half-written (or empty) file — `fs::write`
     // truncates first, so a racing reader could read an empty log.
-    let tmp = dir.join(format!("{:016x}.{}.tmp", xxh64(middle.as_bytes(), 0), std::process::id()));
+    let tmp = dir.join(format!(
+        "{:016x}.{}.{}.tmp",
+        xxh64(middle.as_bytes(), 0),
+        std::process::id(),
+        TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
     std::fs::write(&tmp, middle).ok()?;
     std::fs::rename(&tmp, &path).ok()?;
     Some(path)
@@ -223,6 +235,19 @@ fn write_middle_log(middle: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serialize the tests that truncate the SAME `big_output()` — they all
+    /// content-hash to one shared scratch log, and each deletes it at the
+    /// end: run in parallel, one test would delete the log another is
+    /// still about to read. One mutex, same pattern the panes registry
+    /// tests use for their global.
+    fn truncate_lock() -> std::sync::MutexGuard<'static, ()> {
+        static SERIAL: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        SERIAL
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+    }
 
     /// Deterministic multi-line output with UNIQUE lines (indexed), guaranteed
     /// to cost many tokens (≈ 10k+) while letting tests tell head/middle/tail
@@ -255,6 +280,7 @@ mod tests {
 
     #[test]
     fn huge_output_is_truncated_with_notice_and_log() {
+        let _lock = truncate_lock();
         let out = big_output();
         let result = truncate_tool_output(&out);
 
@@ -310,6 +336,7 @@ mod tests {
     /// 1/3 of the budget — the historical 2000/1000 split).
     #[test]
     fn budget_variant_matches_fixed_budget() {
+        let _lock = truncate_lock();
         let out = big_output();
         let a = truncate_tool_output(&out);
         let b = truncate_tool_output_with_budget(&out, MAX_TOOL_OUTPUT_TOKENS);
@@ -325,6 +352,7 @@ mod tests {
     /// even then a large head + tail survive around the notice.
     #[test]
     fn web_budget_passes_ordinary_content_and_truncates_dense() {
+        let _lock = truncate_lock();
         let small = "short article text with some content\n";
         let r = truncate_tool_output_with_budget(small, WEB_FETCH_MAX_TOKENS);
         assert!(!r.truncated);
@@ -351,6 +379,7 @@ mod tests {
 
     #[test]
     fn identical_output_deduplicates_to_same_log() {
+        let _lock = truncate_lock();
         let out = big_output();
         let a = truncate_tool_output(&out);
         let b = truncate_tool_output(&out);
@@ -365,6 +394,7 @@ mod tests {
 
     #[test]
     fn single_giant_line_is_still_truncated() {
+        let _lock = truncate_lock();
         // One line (no '\n') larger than the whole budget → the line-boundary
         // walk degenerates; the fallback must still produce head + notice + tail.
         let out = "abcd efgh ijkl mnop qrst uvwx yz12 3456 7890 ".repeat(700);

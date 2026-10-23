@@ -386,7 +386,7 @@ impl App {
         // loaded" / "no stored session"), which read as a bug instead of a
         // scope limit. Those clicks offer Copy only — the honest menu.
         let offers_session_actions = split.panes.get(pane).is_some_and(|p| {
-            p.agent == crate::routes::session::agents_split::DAEMON_LABEL && p.session_id.is_some()
+            p.agent == crate::routes::session::agents_split::MANAGER_LABEL && p.session_id.is_some()
         });
         let is_user = hit.user_ordinal.is_some() && offers_session_actions;
         // The dialog's preview: the raw timeline text (what was sent).

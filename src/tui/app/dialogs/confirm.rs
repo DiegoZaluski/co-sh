@@ -28,6 +28,13 @@ impl App {
                 true
             }
             KeyCode::Esc => {
+                // A pending agents_worktree confirmation Esc-dismisses as a
+                // DECLINE: the asking loop still gets its outcome delivery
+                // (the pane keeps its binding), the drain resumes later.
+                if self.pending_worktree_confirmation.is_some() {
+                    self.resolve_pending_worktree_confirmation(false);
+                    return true;
+                }
                 self.pending_delete = None;
                 self.clear_rag_pending_state();
                 self.dialog.pop();
@@ -45,6 +52,13 @@ impl App {
     fn resolve_confirm_dialog(&mut self) {
         let selected = self.dialog.current().map(|d| d.selected).unwrap_or(1);
         if selected == 0 {
+            // A pending agents_worktree confirmation RESOLVES FIRST —
+            // while it is parked, this dialog belongs to it (the ask is
+            // the agent's, the answer is the user's).
+            if self.pending_worktree_confirmation.is_some() {
+                self.resolve_pending_worktree_confirmation(true);
+                return;
+            }
             // A Confirm stacked over the provider-key picker means "forget
             // the API key" — it resolves (and pops) itself.
             if self.resolve_forget_key_confirmation() {
@@ -67,6 +81,13 @@ impl App {
                 self.should_quit = true;
             }
         } else {
+            // "No" on a worktree confirmation is a DECLINE answer, not a
+            // dismissal: the op resolves with a refusal outcome (the pane
+            // keeps its binding) so the asking loop is never left waiting.
+            if self.pending_worktree_confirmation.is_some() {
+                self.resolve_pending_worktree_confirmation(false);
+                return;
+            }
             self.pending_delete = None;
             self.clear_rag_pending_state();
             self.dialog.pop();

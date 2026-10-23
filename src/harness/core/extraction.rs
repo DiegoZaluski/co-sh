@@ -120,12 +120,21 @@ impl Harness {
             // The explicit arm also keeps the catch-all below from
             // swallowing the call with an empty result.
             "agents_call" => None,
+            // `agents_worktree` is async the same way: the tool result is
+            // only the parking receipt — the binding outcome arrives later
+            // as a Worktree-kind delivery, so the call must reach the
+            // dispatch arm, never resolve inline here.
+            "agents_worktree" => None,
             _ => Some(String::new()),
         }
     }
 
     /// Process extracted items into a text response, routing tool calls.
-    pub(super) fn process_extraction(&mut self, raw: &str, extractor: &mut ExtractAction) -> String {
+    pub(super) fn process_extraction(
+        &mut self,
+        raw: &str,
+        extractor: &mut ExtractAction,
+    ) -> String {
         let result = extractor.extract_batch(raw);
         let mut output = String::new();
         for item in result.items {

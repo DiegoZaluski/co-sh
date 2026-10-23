@@ -560,6 +560,7 @@ fn app_with_cosh_pane() -> App {
     let mut split = AgentsSplitState::new(vec![AgentPaneRef::Bound {
         agent: "cosh".into(),
         session_id: "pane-s".into(),
+        worktree: None,
     }]);
     split.panes[0].session_id = Some("pane-s".into());
     // Echo the timeline (user, agent, user, agent).
@@ -761,6 +762,7 @@ async fn pane_fork_works_on_a_legacy_prefeature_session() {
     let mut split = AgentsSplitState::new(vec![AgentPaneRef::Bound {
         agent: "cosh".into(),
         session_id: "legacy1".into(),
+        worktree: None,
     }]);
     split.panes[0].session_id = Some("legacy1".into());
     split.echo_turn_input(0, "primeira pergunta", true);

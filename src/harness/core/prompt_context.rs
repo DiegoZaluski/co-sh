@@ -24,13 +24,17 @@ impl Harness {
         // (rendered between the corrections and the TODO block). Rebuilt
         // per request: a pane bind/unbind changes only the tail, never the
         // system prompt — the exact-prefix cache of the whole conversation
-        // stays valid. A PANE loop mirrors nothing: coordination is the
-        // top-level agent's job (the replication bug `with_own_pane_id`
-        // documents) — the pane must not see the addressable pane set.
-        self.context_manager.set_panes_block(if self.panes_own_id.is_none() {
-            super::panes::context_block()
-        } else {
-            None
+        // stays valid. The MAIN loop mirrors the full listing (the
+        // addressable pane set — it owns coordination). A PANE loop mirrors
+        // the reduced peer view instead: WHICH siblings share its
+        // workspace, without the `agents_call` vocabulary (the replication
+        // bug `with_own_pane_id` documents) — a pane knows its peers but
+        // never coordinates them. ACP panes never run this harness: their
+        // awareness rides a prompt preamble (`panes::take_preamble`) at
+        // dispatch time instead.
+        self.context_manager.set_panes_block(match &self.panes_own_id {
+            None => super::panes::context_block(),
+            Some(own_id) => super::panes::peer_block(own_id),
         });
         self.header_context.clone()
     }

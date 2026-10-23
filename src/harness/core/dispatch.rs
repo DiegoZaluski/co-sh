@@ -161,9 +161,7 @@ impl Harness {
                 .unwrap_or("")
                 .to_string();
             if pane.is_empty() || input.trim().is_empty() {
-                return Err(
-                    "`agents_call` requires a non-empty `pane` and `input`.".to_string()
-                );
+                return Err("`agents_call` requires a non-empty `pane` and `input`.".to_string());
             }
             // Pane-call guard (defense in depth): `with_own_pane_id` strips
             // the tool from every pane loop, so this arm is unreachable from
@@ -229,6 +227,70 @@ impl Harness {
                 "Message sent to pane '{pane}' in the background (request {}). \
                  Its report arrives as an [automated notification] when the pane's turn ends.",
                 handle.request_id
+            ));
+        }
+
+        // The /agents worktree ask (`agents_worktree`): VALIDATE here (so
+        // the model can correct itself in place), then park the op in the
+        // pane registry and return a receipt immediately. The TOOL never
+        // touches git: the App's frame drain pops, supervises (the user's
+        // supremacy over a User-assigned pane — even in Yolo) and executes
+        // it; the outcome ALWAYS arrives as a Worktree-kind delivery in
+        // THIS loop's drain — never as this tool result (an ask may sit
+        // across frames waiting for the user's confirmation box, and a
+        // receipt cannot).
+        if tool_name == "agents_worktree" {
+            self.tool_issuer.pop_front();
+            let pane = args_map
+                .get("pane")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let action = match args_map
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+            {
+                "assign" => super::panes::WorktreeAction::Assign,
+                "clear" => super::panes::WorktreeAction::Clear,
+                other => {
+                    return Err(format!(
+                        "`agents_worktree` action must be \"assign\" or \"clear\" — got \
+                         \"{other}\"."
+                    ));
+                }
+            };
+            let name = args_map
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            // Pane-call guard (defense in depth): `with_own_pane_id` strips
+            // the tool from every pane loop; if a pane ever reaches it
+            // anyway, refuse BEFORE the registry is touched — a pane must
+            // never rebind the pane set. (Popped at the arm's top already.)
+            if self.panes_own_id.is_some() {
+                return Err(
+                    "`agents_worktree` is not available to a pane: pane agents execute their \
+                     delegated task and report back — the coordinating agent owns the panes."
+                        .to_string(),
+                );
+            }
+            let op_id = match super::panes::enqueue_worktree_op(
+                &pane,
+                action,
+                name.as_deref(),
+                self.panes_requester,
+            ) {
+                Ok(id) => id,
+                Err(error) => return Err(error),
+            };
+            return Ok(format!(
+                "Worktree ask parked (op {op_id}): pane '{pane}' {action} — the App now \
+                 supervises it (a User-assigned pane opens your confirmation box, even in \
+                 autonomous runs). The binding outcome arrives as an [automated notification] \
+                 in your next drain; do not treat this receipt as the move itself.",
+                action = action.as_str()
             ));
         }
 

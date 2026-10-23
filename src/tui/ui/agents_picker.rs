@@ -12,7 +12,7 @@ use crate::util::draw::draw_text_line_compact;
 use crate::util::list_selection::ListSelection;
 
 /// One row of the picker: a fixed listing entry plus the user's mark. The
-/// synthetic `cosh` daemon entry and every ACP harness share this shape so
+/// synthetic `cosh` manager entry and every ACP harness share this shape so
 /// keyboard, mouse and render can treat them uniformly.
 #[derive(Clone, Debug)]
 pub struct AgentEntry {
@@ -108,7 +108,7 @@ pub enum AgentsPickerAction {
 /// Central multi-select dialog for the `/agents` command: pick which agent
 /// CLIs may receive delegated work.
 ///
-/// The first entry is always the synthetic `cosh` daemon — the top-level
+/// The first entry is always the synthetic `cosh` manager — the top-level
 /// agent that delegates to the ACP harnesses below it. The remaining entries
 /// mirror [`cosh_tools::subagent::acp::ACP_AGENTS`] in registry order.
 ///
@@ -147,7 +147,7 @@ impl Default for AgentsPicker {
 
 impl AgentsPicker {
     /// Build the picker from the crate's agent registry: the synthetic `cosh`
-    /// daemon entry on top, then every registered ACP harness with its
+    /// manager entry on top, then every registered ACP harness with its
     /// installation status. Built-in availability comes from the cached
     /// [`cosh_tools::subagent::acp::detect_installed`] snapshot; user-
     /// registered harnesses are probed on demand, so an entry added in

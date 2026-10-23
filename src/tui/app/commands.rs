@@ -36,7 +36,7 @@ impl App {
     /// confirmed, in the order they were marked. Each pick carries its own
     /// instance count: the pane list receives `instances` copies of the
     /// agent so two Claude panes are two INDEPENDENT sessions (the
-    /// per-pane binding lands in task "binding"). The `cosh` daemon pane is
+    /// per-pane binding lands in task "binding"). The `cosh` manager pane is
     /// NOT inserted automatically: the Cosh Manager belongs to the user's
     /// own split choice: only an explicitly marked `cosh` entry creates
     /// its block. The MAIN agent needs no pane: `Ctrl+0` unfocuses every
@@ -70,12 +70,13 @@ impl App {
             let mut seen: std::collections::HashMap<String, usize> =
                 std::collections::HashMap::new();
             // Occurrence index per agent name in the PERSISTED list.
-            let mut persisted_occurrence: std::collections::HashMap<(String, usize), &crate::types::AgentPaneRef> =
-                std::collections::HashMap::new();
+            let mut persisted_occurrence: std::collections::HashMap<
+                (String, usize),
+                &crate::types::AgentPaneRef,
+            > = std::collections::HashMap::new();
             for entry in &persisted {
                 let k = seen.entry(entry.agent().to_string()).or_insert(0);
-                persisted_occurrence
-                    .insert((entry.agent().to_string(), *k), entry);
+                persisted_occurrence.insert((entry.agent().to_string(), *k), entry);
                 *k += 1;
             }
             seen.clear();
@@ -86,10 +87,14 @@ impl App {
                 let k = seen.entry(name.clone()).or_insert(0);
                 let bound = persisted_occurrence
                     .get(&(name.clone(), *k))
-                    .and_then(|entry| entry.session_id().map(str::to_string))
-                    .map(|session_id| crate::types::AgentPaneRef::Bound {
-                        agent: name.clone(),
-                        session_id,
+                    .and_then(|entry| {
+                        entry
+                            .session_id()
+                            .map(|session_id| crate::types::AgentPaneRef::Bound {
+                                agent: name.clone(),
+                                session_id: session_id.to_string(),
+                                worktree: entry.worktree().cloned(),
+                            })
                     });
                 *k += 1;
                 if let Some(bound) = bound {
@@ -157,7 +162,11 @@ impl App {
         // symptom this guards against. Drop it and let the caller open the
         // PICKER instead: the user sees the initial-state list, never an
         // empty mode.
-        if self.parked_agents_split.as_ref().is_some_and(|s| s.panes.is_empty()) {
+        if self
+            .parked_agents_split
+            .as_ref()
+            .is_some_and(|s| s.panes.is_empty())
+        {
             self.parked_agents_split = None;
         }
         if let Some(split) = self.parked_agents_split.take() {
@@ -222,24 +231,32 @@ impl App {
     /// closed). `set_panes` fails queued/orphaned requests of panes that
     /// left the set, so a removed pane never strands a waiter.
     pub(super) fn sync_agents_pane_registry(&mut self) {
-        let panes: Vec<cosh::harness::panes::PaneDescriptor> = either_split(&self.agents_split, &self.parked_agents_split)
-            .map(|split| {
-                split
-                    .panes
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, p)| {
-                        let id = split.pane_registry_id(i)?;
-                        Some(cosh::harness::panes::PaneDescriptor {
-                            id,
-                            agent: p.agent.clone(),
-                            is_manager: p.agent == crate::routes::session::agents_split::DAEMON_LABEL,
-                            bound: p.session_id.is_some(),
+        let panes: Vec<cosh::harness::panes::PaneDescriptor> =
+            either_split(&self.agents_split, &self.parked_agents_split)
+                .map(|split| {
+                    split
+                        .panes
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, p)| {
+                            let id = split.pane_registry_id(i)?;
+                            Some(cosh::harness::panes::PaneDescriptor {
+                                id,
+                                agent: p.agent.clone(),
+                                is_manager: p.agent
+                                    == crate::routes::session::agents_split::MANAGER_LABEL,
+                                bound: p.session_id.is_some(),
+                                // The worktree NAME (not the path) — the
+                                // context block renders it next to the pane
+                                // id, and `agents_call` requesters read the
+                                // same listing. `/worktree` keeps this in
+                                // sync right after each binding change.
+                                worktree: p.worktree.as_ref().map(|w| w.name.clone()),
+                            })
                         })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+                        .collect()
+                })
+                .unwrap_or_default();
         cosh::harness::panes::set_panes(panes);
     }
 
@@ -259,7 +276,25 @@ impl App {
             .right_panel
             .prune_agents_pane_beyond(split.panes.len());
         for (pane, p) in split.panes.iter().enumerate() {
-            self.state.right_panel.open_agents_pane_window(pane, &p.agent);
+            self.state
+                .right_panel
+                .open_agents_pane_window(pane, &p.agent);
+            // The mirror's list entry also announces the pane's worktree
+            // pin: the SAME badge the pane footer paints (`⎇ name`),
+            // composed into the description (rendered `<agent> <desc>`) so
+            // the right panel answers "where does this pane work" without
+            // opening it.
+            let mirror = split.pane_mirror_label(pane);
+            let label = p.worktree.as_ref().map(|w| {
+                format!(
+                    "{}⎇ {}",
+                    mirror
+                        .as_deref()
+                        .map(|m| format!("{m} "))
+                        .unwrap_or_default(),
+                    w.name
+                )
+            });
             self.state.right_panel.sync_agents_pane(
                 pane,
                 &p.activity,
@@ -267,7 +302,7 @@ impl App {
                 // signal that the bound history is coming back (the pane
                 // itself may be empty until the replay lands).
                 p.running || p.rehydrating,
-                split.pane_mirror_label(pane).as_deref(),
+                label.as_deref().or(mirror.as_deref()),
             );
         }
     }
@@ -286,7 +321,9 @@ impl App {
         // The pane closed its turn first (the report is the timeline's LAST
         // entry); the mirror only inherits that closed timeline and flips
         // its marker — never a separate report body (the read-order bug).
-        self.state.right_panel.finish_agents_pane(pane, &p.activity, failed);
+        self.state
+            .right_panel
+            .finish_agents_pane(pane, &p.activity, failed);
     }
 
     /// Fire cold-restore replay passes for every pane that needs one: a
@@ -306,9 +343,7 @@ impl App {
                     .iter()
                     .enumerate()
                     .filter(|(_, p)| {
-                        p.session_id.is_some()
-                            && p.activity.timeline.is_empty()
-                            && !p.rehydrating
+                        p.session_id.is_some() && p.activity.timeline.is_empty() && !p.rehydrating
                     })
                     .map(|(i, _)| i)
                     .collect::<Vec<usize>>()
@@ -419,10 +454,11 @@ impl App {
         if let Some(agents) = &panes
             && let Some(old) = self.agents_split.take()
         {
-            self.agents_split =
-                Some(crate::routes::session::agents_split::AgentsSplitState::reconciled_from(
+            self.agents_split = Some(
+                crate::routes::session::agents_split::AgentsSplitState::reconciled_from(
                     old, agents,
-                ));
+                ),
+            );
         } else if let Some(old) = &mut self.agents_split {
             // Teardown (`None`): every pane's turn stops with the split.
             // A discarded stop signal is one nobody will ever set again —
@@ -482,8 +518,7 @@ impl App {
         // Drop the split's spinner only when no NORMAL agent loop is still
         // running behind it (the double-scenario): a Working loop keeps its
         // indicator; an idle app must not inherit a stale spinner.
-        if self.agents_split.is_none()
-            && self.state.status != crate::types::SessionStatus::Working
+        if self.agents_split.is_none() && self.state.status != crate::types::SessionStatus::Working
         {
             self.agent_spinner = None;
         }
@@ -511,7 +546,7 @@ impl App {
     /// the quit path — a fire-and-forget save could never land, reopening
     /// the session with the wrong mode. The job is one tiny metadata delta,
     /// so blocking the frame is negligible. No session open (Home) → nothing.
-    fn save_agents_metadata(
+    pub(in crate::app) fn save_agents_metadata(
         &mut self,
         panes: Option<Vec<crate::types::AgentPaneRef>>,
         mode_open: bool,
@@ -628,8 +663,9 @@ impl App {
             if !ready {
                 return;
             }
-            self.agents_split =
-                Some(crate::routes::session::agents_split::AgentsSplitState::new(Vec::new()));
+            self.agents_split = Some(crate::routes::session::agents_split::AgentsSplitState::new(
+                Vec::new(),
+            ));
             if let Some(session) = self.state.current_session_mut() {
                 session.agents_mode_open = true;
                 session.agents_panes = Some(Vec::new());
@@ -699,10 +735,10 @@ impl App {
     /// `AgentsPickerAction::Confirmed` / `set_agents_split`; an out-of-range
     /// index is silently ignored.
     pub(crate) fn bind_agents_pane_session(&mut self, pane: usize, session_id: String) {
-        let agent_name = either_split(&self.agents_split, &self.parked_agents_split)
+        let pane_state = either_split(&self.agents_split, &self.parked_agents_split)
             .and_then(|split| split.panes.get(pane))
-            .map(|p| p.agent.clone());
-        let Some(agent_name) = agent_name else {
+            .map(|p| (p.agent.clone(), p.worktree.clone()));
+        let Some((agent_name, live_worktree)) = pane_state else {
             return;
         };
         let Some(session) = self.state.current_session_mut() else {
@@ -722,9 +758,14 @@ impl App {
         if entry.session_id() == Some(session_id.as_str()) {
             return;
         }
+        // The LIVE pane's worktree wins over the persisted entry's: a pane
+        // the user worktree'd BEFORE its first turn promotes from `Name`
+        // (which carries no worktree) to `Bound` here — reading the stale
+        // persisted field would silently drop the isolation.
         *entry = crate::types::AgentPaneRef::Bound {
             agent: agent_name,
             session_id,
+            worktree: live_worktree,
         };
         // Write through the cache and sync-save: the OLD dedup here compared
         // against the ALREADY-MUTATED field and silently skipped the save,
@@ -1046,9 +1087,7 @@ impl App {
         }) {
             Some((Some(panes), true, hidden)) => {
                 self.agents_split = Some(
-                    crate::routes::session::agents_split::AgentsSplitState::new(
-                        panes.clone(),
-                    ),
+                    crate::routes::session::agents_split::AgentsSplitState::new(panes.clone()),
                 );
                 self.save_agents_metadata(Some(panes), true, hidden);
                 // A session left with the mode open carries `Bound` panes
@@ -1084,8 +1123,7 @@ impl App {
         // The shared spinner follows the same rule `set_agents_split`
         // applies: drop it only when no split owns the screen and no NORMAL
         // agent loop is running behind the switch.
-        if self.agents_split.is_none()
-            && self.state.status != crate::types::SessionStatus::Working
+        if self.agents_split.is_none() && self.state.status != crate::types::SessionStatus::Working
         {
             self.agent_spinner = None;
         }
@@ -1222,8 +1260,7 @@ impl App {
         // Occurrence multiplicity per agent in the persisted set: how many
         // panes each agent name carries. A plain HashMap is enough — the
         // lookup below goes by name, no order to preserve.
-        let mut counts: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
+        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         for entry in &persisted {
             *counts.entry(entry.agent().to_string()).or_insert(0) += 1;
         }

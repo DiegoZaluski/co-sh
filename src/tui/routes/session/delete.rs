@@ -356,6 +356,7 @@ mod tests {
             agents_panes: Some(vec![crate::types::AgentPaneRef::Bound {
                 agent: "cosh".into(),
                 session_id: pane_id.to_string(),
+                worktree: None,
             }]),
             agents_mode_open: false,
             agents_hidden: Vec::new(),

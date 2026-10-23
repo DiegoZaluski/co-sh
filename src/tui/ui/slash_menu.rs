@@ -201,15 +201,52 @@ impl SlashMenu {
         self.loading = loading;
     }
 
+    /// Whether `name` takes a free-form argument tail (`/name <args…>`).
+    /// Only these keep the menu visible (and their tail routed) when the
+    /// prompt holds arguments; every other command keeps the legacy
+    /// no-arguments behavior — a space in the input hides the menu and
+    /// the raw input submits as a plain prompt, exactly as before.
+    #[must_use]
+    pub fn takes_args(name: &str) -> bool {
+        matches!(name, "worktree")
+    }
+
     pub fn check_state(input: &str) -> (bool, String) {
         if !input.starts_with('/') {
             return (false, String::new());
         }
         let after_slash = &input[1..];
-        if after_slash.contains(' ') {
-            return (false, String::new());
+        match after_slash.find(' ') {
+            // The legacy shape: a bare `/name` filters on the whole tail.
+            None => (true, after_slash.to_string()),
+            // `/name <args…>`: only an argument-taking command keeps the
+            // menu up (filtering on its name part); anything else hides
+            // it — today's behavior for a spaced input.
+            Some(idx) => {
+                let name = &after_slash[..idx];
+                if Self::takes_args(name) {
+                    (true, name.to_string())
+                } else {
+                    (false, String::new())
+                }
+            }
         }
-        (true, after_slash.to_string())
+    }
+
+    /// The typed argument tail for `cmd_name` in the prompt's current
+    /// input (`/worktree add feat` → `Some("add feat")`), when the
+    /// command takes arguments and the input actually carries a tail.
+    /// Read at pick time — the prompt still holds the typed text while
+    /// the menu routes the selected command.
+    #[must_use]
+    pub fn command_arg_tail(input: &str, cmd_name: &str) -> Option<String> {
+        if !Self::takes_args(cmd_name) {
+            return None;
+        }
+        let rest = input.strip_prefix('/')?;
+        let (_, tail) = rest.split_once(' ')?;
+        let tail = tail.trim();
+        (!tail.is_empty()).then(|| tail.to_string())
     }
 
     pub fn update(&mut self, input: &str) {
@@ -368,7 +405,13 @@ impl SlashMenu {
             let menu_width = prompt_area.width;
             let content_x = prompt_area.x + 1;
             let content_width = menu_width.saturating_sub(2);
-            draw_bg_line(buf, content_x, row_y, content_width, rgba_color(theme.background_element));
+            draw_bg_line(
+                buf,
+                content_x,
+                row_y,
+                content_width,
+                rgba_color(theme.background_element),
+            );
             if let Some(cell) = buf.cell_mut((prompt_area.x, row_y)) {
                 cell.set_char('│');
                 cell.set_style(
@@ -559,5 +602,62 @@ mod tests {
 
         assert_eq!(action, SlashMenuMouseAction::Execute);
         assert_eq!(menu.selected, 3);
+    }
+
+    #[test]
+    fn an_argument_taking_command_keeps_the_menu_visible_with_a_tail() {
+        // `/worktree add feat` used to hide the menu (any space did): the
+        // argument-taking command must keep it up and filter on the NAME
+        // part, so typing the tail never loses the entry.
+        let mut menu = SlashMenu::new();
+        // The /worktree entry is synthesized for AGENT panes (the cosh
+        // set does not carry it) — feed the agent source the same entry
+        // the pane's `slash_source` produces.
+        menu.set_agent_commands(vec![SlashCommand {
+            name: "worktree".into(),
+            desc: "Isolate this pane in a git worktree".into(),
+        }]);
+        let input = "/worktree add feat";
+        let visible = SlashMenu::check_state(input);
+        assert_eq!(visible, (true, "worktree".to_string()));
+        menu.update(input);
+        assert!(menu.visible, "the menu stays open for argument tails");
+        assert!(
+            menu.filtered_indices()
+                .iter()
+                .any(|&i| menu.commands[i].name == "worktree")
+        );
+
+        // The tail is read at pick time, not baked into the query.
+        let tail = SlashMenu::command_arg_tail(input, "worktree");
+        assert_eq!(tail, Some("add feat".to_string()));
+    }
+
+    #[test]
+    fn a_non_argument_command_still_hides_the_menu_on_a_spaced_input() {
+        // The legacy contract for every other command: a space in the
+        // input means the user submitted a plain prompt, never a pick.
+        assert_eq!(
+            SlashMenu::check_state("/sty add feat"),
+            (false, String::new())
+        );
+        assert_eq!(
+            SlashMenu::check_state("/comp act x"),
+            (false, String::new())
+        );
+        // The tail reader refuses argument-less commands too.
+        assert_eq!(SlashMenu::command_arg_tail("/sty add feat", "sty"), None);
+    }
+
+    #[test]
+    fn an_argument_taking_command_with_no_tail_yet_keeps_the_menu_up_without_a_tail() {
+        // `/worktree` followed by a space and NOTHING: no tail — the menu
+        // stays up while typing (the tail has not started yet), but the
+        // tail reader returns None (a pick would refuse with usage).
+        assert_eq!(
+            SlashMenu::check_state("/worktree "),
+            (true, "worktree".to_string())
+        );
+        assert_eq!(SlashMenu::command_arg_tail("/worktree ", "worktree"), None);
     }
 }
