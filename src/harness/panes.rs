@@ -1134,7 +1134,7 @@ mod tests {
         let queued = enqueue("claude", "waiting its turn", MAIN, ReplyMode::Wait).unwrap();
         let queued_rx = queued.receiver.expect("wait mode carries a receiver");
         assert!(pop_next_request("claude").is_some(), "dispatched");
-        let background = enqueue("claude", "fire and forget", MAIN, ReplyMode::Background).unwrap();
+        let _background = enqueue("claude", "fire and forget", MAIN, ReplyMode::Background).unwrap();
 
         fail_pane("claude", "the session switched away".to_string());
 
@@ -1246,7 +1246,7 @@ mod tests {
         assert_eq!(peek_worktree_op().expect("parked").id, id);
         // Drain it so the later "refusals park nothing" assertion is about
         // refusals only.
-        pop_worktree_op();
+        let _ = pop_worktree_op();
         // Assign without a name: refused, nothing parked.
         assert!(enqueue_worktree_op("claude", WorktreeAction::Assign, None, MAIN).is_err());
         assert!(peek_worktree_op().is_none());
