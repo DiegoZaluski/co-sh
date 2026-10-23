@@ -66,8 +66,9 @@ pub enum WorktreeError {
     Git(String),
     /// The branch/worktree name is unusable (empty, a git flag lookalike,
     /// whitespace or control characters). Rejected before git ever runs so
-    /// a crafted name cannot become an argument.
-    #[error("invalid worktree name `{0}`: use letters, digits, dashes, slashes and underscores")]
+    /// a crafted name cannot become an argument. The sentence is shared with
+    /// the tool's pre-flight check (see [`validate_name`]).
+    #[error("invalid worktree name `{0}`: no leading dash, no whitespace or control characters")]
     InvalidName(String),
     /// An explicitly requested worktree path already exists. Default paths
     /// never hit this — they get a `-2`-style collision suffix instead.
@@ -109,7 +110,12 @@ fn slugify(name: &str) -> String {
 /// non-empty, no leading dash (a git flag lookalike), no whitespace and no
 /// control characters. Everything else (ref-name rules, `..`, `.lock`
 /// endings) is git's own validation, whose errors surface verbatim.
-fn validate_name(name: &str) -> Result<(), WorktreeError> {
+///
+/// This is the ONE rule for a worktree/branch name: the registry's
+/// pre-flight check (`panes::enqueue_worktree_op`) calls it instead of
+/// restating it, so the tool and the engine accept exactly the same names
+/// and refuse with exactly the same sentence.
+pub fn validate_name(name: &str) -> Result<(), WorktreeError> {
     if name.is_empty()
         || name.starts_with('-')
         || name.chars().any(|c| c.is_whitespace() || c.is_control())
@@ -117,6 +123,37 @@ fn validate_name(name: &str) -> Result<(), WorktreeError> {
         return Err(WorktreeError::InvalidName(name.to_string()));
     }
     Ok(())
+}
+
+/// Resolve an explicitly typed worktree path against `repo`.
+///
+/// `git` runs with `current_dir(repo)`, so a RELATIVE path means "relative
+/// to the repo" — and the value this engine STORES must mean the same
+/// thing, because it later becomes a pane's session cwd, process cwd and
+/// sandbox root, all resolved against the cosh process's own cwd. Storing
+/// the raw text (`. /wt`) silently pinned the pane to a different tree.
+///
+/// `.`/`..` components are folded LEXICALLY: the directory does not exist
+/// yet, so there is nothing to canonicalise on disk (and `canonicalize`
+/// would fail on a path that does not exist, which is the normal case).
+#[must_use]
+fn absolute_against(repo: &Path, explicit: &Path) -> PathBuf {
+    let joined = if explicit.is_absolute() {
+        explicit.to_path_buf()
+    } else {
+        repo.join(explicit)
+    };
+    let mut out = PathBuf::new();
+    for component in joined.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// Run `git` inside `repo` and return its stdout. A non-zero exit surfaces
@@ -163,10 +200,18 @@ fn branch_exists(repo: &Path, name: &str) -> Result<bool, WorktreeError> {
 /// already checked out at …"), surfaced verbatim.
 ///
 /// `path`: the checkout directory. `None` (the agent-driven case) pins it
-/// under [`worktrees_root()`] at the name's slug, suffixing `-2`, `-3`, …
-/// on collision so a second assignment with the same slug never collides.
-/// An explicit path (the user-driven case) must not exist — nothing is
-/// created at or under a path the user did not type empty.
+/// under [`worktrees_root()`] at the name's slug. An explicit path (the
+/// user-driven case) is resolved against `repo` FIRST (a relative path is
+/// relative to the repo, exactly as git reads it) and must not exist —
+/// nothing is created at or under a path the user did not type empty.
+///
+/// The `-2`, `-3`, … suffix on the default path covers ONE case: two
+/// DIFFERENT branch names whose slugs are identical (`Fix.Issue` and
+/// `fix-issue`), where both branches are legal and only the directory
+/// collides. It cannot rescue a repeated SAME name — that fails earlier, on
+/// the branch ref (`-b` refuses an existing ref; an existing ref bound to
+/// another worktree keeps git's own refusal), which is the correct outcome:
+/// one branch, one worktree.
 ///
 /// `assigned_by` records the authority the caller acts with (the
 /// permission rule's input); the engine does not guess it.
@@ -186,10 +231,13 @@ pub fn create(
     let slug = slugify(name);
     let dir = match path {
         Some(explicit) => {
+            // Absolute BEFORE the existence check and before storing: see
+            // `absolute_against` (git resolves the argument against `repo`).
+            let explicit = absolute_against(repo, explicit);
             if explicit.exists() {
                 return Err(WorktreeError::PathExists(explicit.display().to_string()));
             }
-            explicit.to_path_buf()
+            explicit
         }
         None => {
             let root = worktrees_root();
@@ -220,8 +268,6 @@ pub fn create(
         assigned_by,
     })
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -293,6 +339,82 @@ mod tests {
         let head =
             std::fs::read_to_string(PathBuf::from(git_dir).join("HEAD")).expect("worktree HEAD");
         assert!(head.contains("refs/heads/feature/x"), "{head}");
+    }
+
+    /// A RELATIVE explicit path means "relative to the repo" — the same
+    /// thing git means when it runs with `current_dir(repo)` — and the value
+    /// stored for the pane must say exactly that, because it later becomes a
+    /// session/process cwd rooted at the cosh process, not at the repo.
+    #[test]
+    fn a_relative_explicit_path_is_stored_absolute_against_the_repo() {
+        let (_dir, repo) = repo();
+        let wt = create(&repo, "rel", Some(Path::new("./wt")), AssignedBy::User)
+            .expect("create at a relative path");
+        assert_eq!(
+            wt.path,
+            repo.join("wt"),
+            "resolved against the repo, not the process"
+        );
+        assert!(
+            wt.path.is_absolute(),
+            "the stored cwd is absolute: {}",
+            wt.path.display()
+        );
+        // The checkout really landed where the stored path points.
+        assert!(wt.path.join(".git").is_file());
+    }
+
+    /// `..` is folded lexically (the directory does not exist yet, so
+    /// there is nothing to canonicalise on disk).
+    #[test]
+    fn a_relative_path_folds_parent_components_without_touching_the_disk() {
+        let (_dir, repo) = repo();
+        let stored = absolute_against(&repo, Path::new("sub/../wt"));
+        assert_eq!(stored, repo.join("wt"));
+        // An absolute path is left alone.
+        let abs = Path::new("/tmp/somewhere/wt");
+        assert_eq!(absolute_against(&repo, abs), abs);
+    }
+
+    /// The `-2` suffix covers the DIFFERENT-names-same-slug case, which
+    /// is the only collision the branch rule leaves open.
+    #[test]
+    fn two_different_names_with_the_same_slug_get_distinct_directories() {
+        let (_dir, repo) = repo();
+        let first = create(&repo, "Slug.Collision", None, AssignedBy::Agent).expect("first");
+        let second = create(&repo, "slug-collision", None, AssignedBy::Agent).expect("second");
+        assert_eq!(first.branch, "Slug.Collision");
+        assert_eq!(second.branch, "slug-collision");
+        assert_ne!(first.path, second.path, "the slug collision was suffixed");
+        // Both live under the managed root, and the second one's directory is
+        // the slug plus a numeric suffix. The exact NUMBER is not asserted:
+        // the root is shared system temp state, so directories left by other
+        // panes/tests legitimately advance the counter.
+        assert_eq!(first.path.parent(), Some(worktrees_root().as_path()));
+        assert_eq!(second.path.parent(), Some(worktrees_root().as_path()));
+        let second_name = second
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("a directory name");
+        let suffix = second_name
+            .strip_prefix("slug-collision-")
+            .expect("the slug plus a suffix");
+        assert!(
+            !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()),
+            "expected `<slug>-<n>`, got `{second_name}`"
+        );
+        // Leave no litter in the SHARED temp root: this test owns these two
+        // checkouts, so it unregisters and deletes them itself (the engine
+        // never deletes worktrees — that is a product rule for USER
+        // worktrees, not for a test's own throwaway ones).
+        for wt in [&first, &second] {
+            let _ = git(
+                &repo,
+                &["worktree", "remove", &wt.path.display().to_string()],
+            );
+            let _ = std::fs::remove_dir_all(&wt.path);
+        }
     }
 
     #[test]

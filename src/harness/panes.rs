@@ -1,5 +1,20 @@
-//! Registry of `/agents` panes and the message bridge between the main
-//! agent's harness and those panes (`agents_call`).
+//! Registry of `/agents` panes and the two bridges between this app's agent
+//! loops and those panes.
+//!
+//! - [`enqueue`] / [`complete_request`] / [`take_ready_deliveries`] carry
+//!   `agents_call` traffic: a message to a pane, answered by the pane's turn
+//!   (wait mode resolves inline, background mode parks a [`PaneDelivery`]).
+//! - [`enqueue_worktree_op`] / [`peek_worktree_op`] / [`pop_worktree_op`] /
+//!   [`complete_worktree_op`] carry `agents_worktree` asks: the tool parks
+//!   an op, the App drains it (it owns the confirmation box and every git
+//!   side effect) and the outcome comes back as a [`DeliveryKind::Worktree`]
+//!   delivery.
+//!
+//! Both bridges share ONE contract, which is why they share this module and
+//! the same pane ids: a tool call NEVER waits on the App's frame loop. It
+//! parks its ask, returns a receipt, and the truth arrives later through the
+//! requester's loop drain ([`take_ready_deliveries`] →
+//! [`delivery_note`]). Nothing here is `agents_call`-specific.
 //!
 //! The registry is PROCESS-WIDE on purpose: the TUI builds a fresh
 //! [`Harness`](super::core::Harness) for every turn, while the pane set
@@ -141,19 +156,6 @@ impl WorktreeAction {
     }
 }
 
-/// The SUPREMACY outcome a worktree op's user confirmation can take. The
-/// user's answer never travels as free prose: the App's confirmation box
-/// resolves into one of these, and the outcome message is built verbatim:
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorktreeApproval {
-    /// The user approved: the op executes now.
-    Approved,
-    /// The user refused: the op does nothing and the pane keeps its
-    /// current binding. NOT an error — the tool result reports the
-    /// choice so the agent can adapt instead of retrying.
-    Declined,
-}
-
 /// One parked `agents_worktree` call — the main agent asking to move a
 /// pane into (or out of) a worktree. The TOOL never touches git: it
 /// records the ask here, and the App's frame drain pops, supervises
@@ -172,8 +174,14 @@ pub struct WorktreeOp {
     /// The branch name for `Assign` (its slug names the temp directory).
     /// `None` on `Clear`.
     pub branch: Option<String>,
-    /// Which loop parked the op (`MAIN` or `MANAGER`) — routes the outcome
-    /// delivery home.
+    /// Which loop parked the op — routes the outcome delivery home. Always
+    /// [`MAIN`] in practice: `agents_worktree` is stripped from every pane
+    /// loop (`with_own_pane_id`) and the dispatch arm refuses a
+    /// pane-originated call before the registry is touched, so the manager
+    /// loop can never park one. The tag is kept (rather than hardcoded at
+    /// the delivery site) because it is the requester routing every other
+    /// delivery already uses; if a pane ever gains this power it stays
+    /// correct instead of silently routing to `main`.
     pub requester: &'static str,
 }
 
@@ -604,10 +612,20 @@ pub fn cancel_wait(request_id: &str) {
 }
 
 /// Whether `requester` has any outstanding pane request — queued (waiting
-/// for a pane to free) or in-flight (a pane is working on it). The agent
-/// loop's busy-guard reads this at its natural-completion point: a turn
-/// that asked a pane for something does NOT end while the answer is still
-/// outstanding — ending it would orphan the wait and lose the report.
+/// for a pane to free) or in-flight (a pane is working on it) — or any
+/// PARKED worktree op of its own. The agent loop's busy-guard reads this at
+/// its natural-completion point: a turn that asked a pane for something
+/// does NOT end while the answer is still outstanding — ending it would
+/// orphan the wait and lose the report.
+///
+/// A parked `agents_worktree` op counts for the same reason. Its receipt
+/// already reached the model, but the OUTCOME (executed, refused by the
+/// user, failed in git) is still owed to this loop as a Worktree delivery:
+/// ending the turn here would leave the op to be drained by a later,
+/// unrelated turn — or never, if the session closes — and the model would
+/// have finished believing a binding change happened when nobody knows yet.
+/// Ops are cheap to wait for (the App drains them every frame) and a user
+/// confirmation answers promptly, so this cannot hang the loop.
 #[must_use]
 pub fn has_outstanding_requests(requester: &str) -> bool {
     let state = registry().lock().unwrap_or_else(|p| p.into_inner());
@@ -620,6 +638,7 @@ pub fn has_outstanding_requests(requester: &str) -> bool {
             .serving
             .values()
             .any(|request| request.requester == requester)
+        || state.ops.iter().any(|op| op.requester == requester)
 }
 
 /// Fail a wait-mode request (pane removed / registry reset). No-op when
@@ -723,14 +742,12 @@ pub fn enqueue_worktree_op(
                     .to_string(),
             );
         };
-        // The engine's own pre-validation for anything reaching a git
-        // argument: refuse BEFORE parking so the tool result is the
-        // immediate refusal and the model can correct itself in place.
-        if name.starts_with('-') || name.chars().any(|c| c.is_whitespace() || c.is_control()) {
-            return Err(format!(
-                "invalid branch name '{name}': no leading dash, no whitespace or control \
-                 characters"
-            ));
+        // The ENGINE's rule, called rather than restated: same acceptance
+        // set, same sentence, one place to change it. Refused BEFORE
+        // parking so the tool result is the immediate refusal and the
+        // model corrects itself in place.
+        if let Err(error) = crate::git::worktree::validate_name(name) {
+            return Err(error.to_string());
         }
     }
     state.next_op += 1;
@@ -801,7 +818,8 @@ pub fn context_block() -> Option<String> {
     let mut block = String::from(
         "## Agents Panes\n\
          The /agents panes currently bound to this session — address each \
-         by its pane id in `agents_call`:\n",
+         by its pane id (`agents_call` to message one, `agents_worktree` to \
+         move one into or out of a git worktree):\n",
     );
     for pane in &panes {
         let session = if pane.bound {
@@ -904,6 +922,22 @@ pub fn take_preamble(pane_id: &str) -> Option<String> {
     block
 }
 
+/// The two shapes both pane tools need from the CURRENT pane set: the ids
+/// joined for the description ("claude, kilo"), and the same ids as the
+/// JSON-schema `enum` for the `pane` property. Built once here because both
+/// tools address the SAME ids — a second copy is how the description and
+/// the enum drift apart.
+#[must_use]
+fn pane_schema_parts() -> (String, Vec<serde_json::Value>) {
+    let ids: Vec<String> = list_panes().iter().map(|p| p.id.clone()).collect();
+    let pane_list = ids.join(", ");
+    let pane_enum = ids
+        .into_iter()
+        .map(serde_json::Value::String)
+        .collect::<Vec<_>>();
+    (pane_list, pane_enum)
+}
+
 /// The `agents_call` harness tool, built against the CURRENT pane set:
 /// the description lists the addressable ids (the model never guesses)
 /// and the schema's `pane` enum carries the same ids. Called by the
@@ -911,12 +945,7 @@ pub fn take_preamble(pane_id: &str) -> Option<String> {
 /// registered and no context carries it.
 #[must_use]
 pub fn agents_call_tool() -> super::core::HarnessTool {
-    let ids: Vec<String> = list_panes().iter().map(|p| p.id.clone()).collect();
-    let pane_list = ids.join(", ");
-    let enum_values: Vec<serde_json::Value> = ids
-        .iter()
-        .map(|id| serde_json::Value::String(id.clone()))
-        .collect();
+    let (pane_list, pane_enum) = pane_schema_parts();
     super::core::HarnessTool {
         name: "agents_call".into(),
         description: format!(
@@ -934,7 +963,7 @@ pub fn agents_call_tool() -> super::core::HarnessTool {
                 "pane": {
                     "type": "string",
                     "description": "The pane to address. Must be one of the ids listed in the description.",
-                    "enum": enum_values,
+                    "enum": pane_enum,
                 },
                 "input": {
                     "type": "string",
@@ -961,12 +990,7 @@ pub fn agents_call_tool() -> super::core::HarnessTool {
 /// user can always veto a User-assigned pane's rebinding).
 #[must_use]
 pub fn agents_worktree_tool() -> super::core::HarnessTool {
-    let ids: Vec<String> = list_panes().iter().map(|p| p.id.clone()).collect();
-    let pane_list = ids.join(", ");
-    let enum_values: Vec<serde_json::Value> = ids
-        .iter()
-        .map(|id| serde_json::Value::String(id.clone()))
-        .collect();
+    let (pane_list, pane_enum) = pane_schema_parts();
     super::core::HarnessTool {
         name: "agents_worktree".into(),
         description: format!(
@@ -998,7 +1022,7 @@ pub fn agents_worktree_tool() -> super::core::HarnessTool {
                 "pane": {
                     "type": "string",
                     "description": "The pane to (re)bind. Must be one of the ids listed in the description.",
-                    "enum": enum_values,
+                    "enum": pane_enum,
                 },
                 "action": {
                     "type": "string",
@@ -1230,8 +1254,44 @@ mod tests {
         assert!(
             enqueue_worktree_op("claude", WorktreeAction::Assign, Some("-evil"), MAIN).is_err()
         );
-        assert!(enqueue_worktree_op("claude", WorktreeAction::Assign, Some("a b"), MAIN).is_err());
+        let spaced =
+            enqueue_worktree_op("claude", WorktreeAction::Assign, Some("a b"), MAIN).unwrap_err();
+        // The engine's own sentence, not a second wording of the same rule.
+        assert_eq!(
+            spaced,
+            crate::git::worktree::validate_name("a b")
+                .unwrap_err()
+                .to_string(),
+            "the registry defers to the engine's validation text"
+        );
         assert!(peek_worktree_op().is_none(), "refusals park nothing");
+    }
+
+    /// A PARKED worktree op is outstanding work for its requester — the
+    /// busy-guard must hold the turn open until the outcome delivery lands,
+    /// exactly as it does for a queued/in-flight `agents_call`.
+    #[test]
+    fn a_parked_worktree_op_is_outstanding_until_its_outcome_is_delivered() {
+        let _g = lock();
+        set_panes(vec![pane("claude", "claude", false)]);
+        assert!(!has_outstanding_requests(MAIN), "nothing to wait for yet");
+        enqueue_worktree_op("claude", WorktreeAction::Assign, Some("wt-f7"), MAIN).expect("parks");
+        assert!(
+            has_outstanding_requests(MAIN),
+            "the parked op's outcome is still owed to this loop"
+        );
+        assert!(
+            !has_outstanding_requests(MANAGER),
+            "another loop is not held by this op"
+        );
+        // The App executes it and delivers the outcome: no longer outstanding.
+        let op = pop_worktree_op().expect("the parked op");
+        complete_worktree_op(&op, Ok("isolated in /tmp/wt-f7".to_string()));
+        assert!(
+            !has_outstanding_requests(MAIN),
+            "a delivered outcome is finished work"
+        );
+        assert_eq!(take_ready_deliveries(MAIN).len(), 1, "the outcome drains");
     }
 
     #[test]
