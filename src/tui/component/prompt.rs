@@ -772,6 +772,65 @@ impl PromptView {
         }
     }
 
+    /// Locate the cursor's visual (wrapped) line and column, or `None` when it
+    /// cannot be placed (empty input). Shared by the head/tail extremity
+    /// checks the plain ArrowUp / ArrowDown handler relies on: history
+    /// navigation may take the arrow over ONLY at the matching edge of the
+    /// prompt, never while the cursor is inside the text.
+    fn visual_cursor_line(&self, text_w: usize) -> Option<(usize, usize)> {
+        if self.input.is_empty() {
+            return None;
+        }
+        let display_lines = Self::wrapped_lines(&self.input, text_w);
+        let input_start = self.input.as_ptr() as usize;
+
+        // When the cursor sits on a '\n', treat it as being at the end of
+        // the preceding display line (visually the newline is at line end).
+        let at_newline =
+            self.cursor_pos < self.input.len() && self.input.as_bytes()[self.cursor_pos] == b'\n';
+
+        for (i, line) in display_lines.iter().enumerate() {
+            let line_start = line.as_ptr() as usize - input_start;
+            let line_end = line_start + line.len();
+
+            if at_newline && self.cursor_pos == line_end {
+                return Some((i, line.chars().count()));
+            }
+            if self.cursor_pos >= line_start && self.cursor_pos < line_end {
+                return Some((i, self.input[line_start..self.cursor_pos].chars().count()));
+            }
+            if i + 1 == display_lines.len() && self.cursor_pos >= line_end {
+                // Cursor at the very end of input: it belongs to the last
+                // visual line, at its last column.
+                return Some((i, self.input[line_start..self.cursor_pos].chars().count()));
+            }
+        }
+        None
+    }
+
+    /// Whether the cursor sits at the prompt's head — the edge from which
+    /// plain ArrowUp hands over to history navigation (`None`-able visual
+    /// position aside: an empty prompt is always at the head, and a cursor
+    /// on byte 0 is at the head regardless of wrapping).
+    pub fn cursor_at_head(&self, text_w: usize) -> bool {
+        self.input.is_empty()
+            || self.cursor_pos == 0
+            || self
+                .visual_cursor_line(text_w)
+                .is_some_and(|(line, _)| line == 0)
+    }
+
+    /// Whether the cursor sits at the prompt's tail — the edge from which
+    /// plain ArrowDown hands over to history navigation (end-of-input byte
+    /// offsets short-circuit this, mirroring [`Self::cursor_at_head`]).
+    pub fn cursor_at_tail(&self, text_w: usize) -> bool {
+        self.input.is_empty()
+            || self.cursor_pos >= self.input.len()
+            || self
+                .visual_cursor_line(text_w)
+                .is_some_and(|(line, _)| line + 1 == Self::wrapped_lines(&self.input, text_w).len())
+    }
+
     pub fn cursor_up(&mut self, text_w: usize) {
         if self.input.is_empty() || text_w == 0 {
             return;

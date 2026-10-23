@@ -63,6 +63,7 @@ mod keys;
 mod model_persistence;
 mod paste_burst;
 mod prompt_correction;
+mod prompt_history_arrows;
 mod prompt_selection_mouse;
 mod prompt_undo;
 mod provider_login;

@@ -1892,8 +1892,15 @@ impl App {
                         match key.code {
                             KeyCode::Up => {
                                 if self.prompt_view.is_focused {
+                                    // History takes over ONLY at the head of
+                                    // the prompt (cursor on the first visual
+                                    // line): anywhere else the arrow moves the
+                                    // cursor within the text — a draft recalled
+                                    // via Ctrl+Up (which leaves `history_index`
+                                    // set) stays fully editable with Up/Down.
+                                    let text_w = self.prompt_view.input_text_width.get().max(1);
                                     if self.prompt_view.input.is_empty()
-                                        || self.prompt_view.history_index != -1
+                                        || self.prompt_view.cursor_at_head(text_w)
                                     {
                                         let user_msgs = self
                                             .state
@@ -1903,9 +1910,7 @@ impl App {
                                         self.prompt_view.history_up(&user_msgs);
                                     } else {
                                         self.prompt_view.note_activity();
-                                        self.prompt_view.cursor_up(
-                                            self.prompt_view.input_text_width.get().max(1),
-                                        );
+                                        self.prompt_view.cursor_up(text_w);
                                     }
                                 } else if self.is_in_right_panel(self.last_mouse_x) {
                                     self.state.right_panel.scroll_up_at(self.last_mouse_y, 3);
@@ -1923,8 +1928,14 @@ impl App {
                             }
                             KeyCode::Down => {
                                 if self.prompt_view.is_focused {
+                                    // Mirror of the ArrowUp rule: history
+                                    // continues ONLY from the tail of the
+                                    // prompt (cursor on the last visual
+                                    // line); inside the text the arrow
+                                    // keeps moving the cursor.
+                                    let text_w = self.prompt_view.input_text_width.get().max(1);
                                     if self.prompt_view.input.is_empty()
-                                        || self.prompt_view.history_index != -1
+                                        || self.prompt_view.cursor_at_tail(text_w)
                                     {
                                         let user_msgs = self
                                             .state
@@ -1934,9 +1945,7 @@ impl App {
                                         self.prompt_view.history_down(&user_msgs);
                                     } else {
                                         self.prompt_view.note_activity();
-                                        self.prompt_view.cursor_down(
-                                            self.prompt_view.input_text_width.get().max(1),
-                                        );
+                                        self.prompt_view.cursor_down(text_w);
                                     }
                                 } else if self.is_in_right_panel(self.last_mouse_x) {
                                     self.state.right_panel.scroll_down_at(self.last_mouse_y, 3);
