@@ -3497,7 +3497,8 @@ async fn manager_pane_slash_source_lists_worktree_exactly_once() {
         .expect("a focused pane serves a list");
     let count = entries.iter().filter(|e| e.name == "worktree").count();
     assert_eq!(
-        count, 1,
+        count,
+        1,
         "the manager pane lists /worktree exactly once: {:?}",
         entries.iter().map(|e| &e.name).collect::<Vec<_>>()
     );
@@ -3544,10 +3545,7 @@ async fn slash_worktree_add_pins_the_manager_pane() {
         crate::routes::session::agents_split::MANAGER_LABEL,
         "precondition: pane 0 is the manager"
     );
-    let pin = pane
-        .worktree
-        .as_ref()
-        .expect("the manager pane got pinned");
+    let pin = pane.worktree.as_ref().expect("the manager pane got pinned");
     assert_eq!(pin.branch, "feat-mgr");
     assert_eq!(pin.path, wt);
     assert_eq!(pin.assigned_by, cosh::git::worktree::AssignedBy::User);
@@ -3557,7 +3555,8 @@ async fn slash_worktree_add_pins_the_manager_pane() {
         "the cwd moved: the next turn carries the handoff"
     );
     assert!(
-        !app.toast_state.current.as_ref().is_some_and(|t| t.message
+        !app.toast_state.current.as_ref().is_some_and(|t| t
+            .message
             .contains("stays on the session's working directory")),
         "the old manager-refusal toast must be gone"
     );
@@ -3701,7 +3700,8 @@ async fn main_agent_menu_lists_worktree_exactly_once() {
         .filter(|entry| entry.name == "worktree")
         .count();
     assert_eq!(
-        count, 1,
+        count,
+        1,
         "the main agent's menu lists /worktree exactly once: {:?}",
         app.slash_menu
             .commands
@@ -3829,6 +3829,177 @@ async fn slash_worktree_main_agent_bad_args_refuse_with_usage() {
             "a refused `{tail}` must never bind"
         );
     }
+}
+
+/// Feature A (adoption): `/worktree add <path> <branch>` on a worktree that
+/// ALREADY exists re-enters it instead of failing, binds the main agent, and
+/// SAYS SO — the badge alone cannot tell a user whether cosh built a
+/// checkout or walked into one that was already there (typically after
+/// `/worktree exit`, which keeps the checkout on disk by product rule).
+#[tokio::test]
+async fn slash_worktree_add_adopts_an_existing_worktree_and_says_so() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let (_dir, repo) = worktree_test_repo();
+    let wt = repo.join("wt-adopt");
+    // The checkout exists FIRST — created outside the command, exactly the
+    // state `/worktree exit` leaves behind.
+    let existing = cosh::git::worktree::create(
+        &repo,
+        "feat-adopt",
+        Some(&wt),
+        cosh::git::worktree::AssignedBy::User,
+    )
+    .expect("the checkout exists before the command runs");
+
+    let mut app = main_agent_worktree_app(&repo);
+    app.prompt_view.input = format!("/worktree add {} feat-adopt", wt.display());
+    app.run_slash_command(&slash_cmd("worktree"));
+
+    let pin = app
+        .state
+        .current_session()
+        .and_then(|session| session.main_agent_worktree.as_ref())
+        .expect("the main agent is bound to the existing checkout");
+    assert_eq!(pin.path, existing.path, "the SAME checkout, not a new one");
+    assert_eq!(pin.branch, "feat-adopt");
+    assert_eq!(
+        pin.assigned_by,
+        cosh::git::worktree::AssignedBy::User,
+        "a slash command is the user acting"
+    );
+
+    // The toast distinguishes adoption from creation and names BOTH the
+    // path and the branch, so the user can tell which checkout they landed
+    // in without reading the footer.
+    let message = app
+        .toast_state
+        .current
+        .as_ref()
+        .map(|toast| toast.message.clone())
+        .expect("an adoption speaks: a silent adopt would make `add` a lie");
+    assert!(
+        message.contains("Attached to existing worktree"),
+        "the toast says it ADOPTED rather than created: {message}"
+    );
+    assert!(message.contains(&wt.display().to_string()), "{message}");
+    assert!(message.contains("feat-adopt"), "{message}");
+
+    // No second checkout appeared: adoption is a binding change, not a
+    // filesystem one.
+    let entries = cosh::git::worktree::list(&repo).expect("list");
+    assert_eq!(
+        entries.iter().filter(|entry| entry.path == wt).count(),
+        1,
+        "one registration for the adopted path"
+    );
+}
+
+/// Feature B: `/worktree list` renders ONE row per worktree and marks the
+/// bound one — the discovery half of adoption, so the user does not have to
+/// memorise paths.
+#[tokio::test]
+async fn slash_worktree_list_marks_the_bound_worktree() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let (_dir, repo) = worktree_test_repo();
+    let first = repo.join("wt-list-a");
+    let second = repo.join("wt-list-b");
+    for (path, branch) in [(&first, "feat-list-a"), (&second, "feat-list-b")] {
+        cosh::git::worktree::create(
+            &repo,
+            branch,
+            Some(path),
+            cosh::git::worktree::AssignedBy::User,
+        )
+        .expect("checkout");
+    }
+
+    let mut app = main_agent_worktree_app(&repo);
+    app.prompt_view.input = format!("/worktree add {} feat-list-a", first.display());
+    app.run_slash_command(&slash_cmd("worktree"));
+    assert!(
+        app.state
+            .current_session()
+            .and_then(|session| session.main_agent_worktree.as_ref())
+            .is_some_and(|worktree| worktree.path == first),
+        "precondition: bound to the first worktree"
+    );
+
+    app.prompt_view.input = "/worktree list".to_string();
+    app.run_slash_command(&slash_cmd("worktree"));
+
+    let message = app
+        .toast_state
+        .current
+        .as_ref()
+        .map(|toast| toast.message.clone())
+        .expect("the list speaks");
+    // One row per worktree, each naming its own path.
+    assert!(message.contains(&first.display().to_string()), "{message}");
+    assert!(message.contains(&second.display().to_string()), "{message}");
+    // Every row goes through the marker column, and ONLY the bound one is
+    // marked. Counted per line so an unmarked row cannot borrow the bound
+    // row's marker.
+    let marked: Vec<&str> = message
+        .lines()
+        .filter(|line| line.starts_with("\u{2192} "))
+        .collect();
+    assert_eq!(marked.len(), 1, "exactly one bound row: {message}");
+    assert!(
+        marked[0].contains(&first.display().to_string()),
+        "the marked row is the bound one: {message}"
+    );
+    assert!(
+        !marked[0].contains(&second.display().to_string()),
+        "the other worktree stays unmarked: {message}"
+    );
+    // And nothing was rebound by looking.
+    assert!(
+        app.state
+            .current_session()
+            .and_then(|session| session.main_agent_worktree.as_ref())
+            .is_some_and(|worktree| worktree.path == first),
+        "listing never changes the binding"
+    );
+}
+
+/// Feature B (grammar): `/worktree list` takes NO arguments — a trailing
+/// word is a refusal, not a silent no-op, and it changes no state.
+#[tokio::test]
+async fn slash_worktree_list_with_extra_args_refuses_with_usage() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let (_dir, repo) = worktree_test_repo();
+    let wt = repo.join("wt-list-args");
+    cosh::git::worktree::create(
+        &repo,
+        "feat-list-args",
+        Some(&wt),
+        cosh::git::worktree::AssignedBy::User,
+    )
+    .expect("checkout");
+
+    let mut app = main_agent_worktree_app(&repo);
+    app.prompt_view.input = format!("/worktree list {}", wt.display());
+    app.run_slash_command(&slash_cmd("worktree"));
+
+    assert!(
+        app.toast_state
+            .current
+            .as_ref()
+            .is_some_and(|toast| toast.message.contains("Usage:")),
+        "`/worktree list <extra>` refuses with the usage toast: {:?}",
+        app.toast_state.current.as_ref().map(|t| &t.message)
+    );
+    // Refused means untouched: no binding, and the list never ran (a real
+    // listing would carry the "worktree(s) of" preamble).
+    assert!(
+        app.state
+            .current_session()
+            .is_some_and(|session| session.main_agent_worktree.is_none()),
+        "a refused list must never bind"
+    );
 }
 
 /// (e) The main agent's EFFECTIVE cwd is the worktree path once pinned —

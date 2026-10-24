@@ -138,7 +138,8 @@ pub fn command_scope(name: &str) -> CommandScope {
 pub fn worktree_command_entry() -> SlashCommand {
     SlashCommand {
         name: "worktree".into(),
-        desc: "Isolate this agent in a git worktree (add <branch>|<path> <branch>, exit)".into(),
+        desc: "Isolate this agent in a git worktree (add <branch>|<path> <branch>, list, exit)"
+            .into(),
     }
 }
 

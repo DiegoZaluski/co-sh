@@ -168,6 +168,18 @@ pub(super) fn apply_worktree_command(app: &mut App, tail: Option<&str>) {
             assign_focused_pane_worktree(app, path.as_deref(), &branch);
         }
         Some(WorktreeCommand::Exit) => clear_focused_pane_worktree(app),
+        Some(WorktreeCommand::List) => {
+            // The FOCUSED pane is the binding a split user is looking at, so
+            // that is the row `/worktree list` marks here.
+            let bound = app
+                .agents_split
+                .as_ref()
+                .and_then(|split| split.focused)
+                .and_then(|index| app.agents_split.as_ref()?.panes.get(index))
+                .and_then(|pane| pane.worktree.as_ref())
+                .map(|worktree| worktree.path.clone());
+            show_worktree_list(app, bound.as_deref());
+        }
         // The grammar is shared with the MAIN agent's path (`parse_
         // worktree_command`), so "malformed" means the same thing for both.
         None => worktree_usage_toast(app),
@@ -176,7 +188,8 @@ pub(super) fn apply_worktree_command(app: &mut App, tail: Option<&str>) {
 
 /// One parsed `/worktree` invocation. The pane path and the MAIN agent's
 /// path share this parse: the two must accept byte-identical arguments, so
-/// the grammar lives here once (`add [<path>] <branch>` / `exit`).
+/// the grammar lives here once
+/// (`add [<path>] <branch>` / `exit` / `list`).
 enum WorktreeCommand {
     /// `add [<path>] <branch>` — `path` is `None` for the managed temp root.
     Add {
@@ -185,6 +198,8 @@ enum WorktreeCommand {
     },
     /// `exit` — drop the binding; nothing on disk is touched.
     Exit,
+    /// `list` — show the repository's worktrees, marking the bound one.
+    List,
 }
 
 /// Parse the argument tail. `None` means malformed — the caller shows the
@@ -193,6 +208,7 @@ fn parse_worktree_command(tail: Option<&str>) -> Option<WorktreeCommand> {
     let parts: Vec<&str> = tail?.split_whitespace().collect();
     match parts.as_slice() {
         ["exit"] => Some(WorktreeCommand::Exit),
+        ["list"] => Some(WorktreeCommand::List),
         ["add", branch] => Some(WorktreeCommand::Add {
             path: None,
             branch: (*branch).to_string(),
@@ -205,12 +221,101 @@ fn parse_worktree_command(tail: Option<&str>) -> Option<WorktreeCommand> {
     }
 }
 
+/// Render `/worktree list`: every worktree of the session repo, one row per
+/// entry, the bound one marked.
+///
+/// A copyable TOAST, not a dialog. Two reasons, both structural:
+///
+/// - Every `DialogType` variant is dismissed and driven by its OWN
+///   `handle_*_dialog_key` in `keys.rs`; there is no generic close. A new
+///   variant would be a box the user could not leave — worse than a
+///   transient one.
+/// - The row count is unbounded (~35 checkouts on a working machine), and
+///   the toast renderer already word-wraps over as many rows as the screen
+///   holds, keeps the message copyable through the ⧉ button, and expires on
+///   its own. A picker would add a selection state, a confirm handler and a
+///   key mapping for a READ-ONLY listing.
+///
+/// The list is rebuilt from `git worktree list --porcelain` (the same
+/// parser adoption uses), so it can never disagree with what `add` would
+/// accept.
+fn show_worktree_list(app: &mut App, bound: Option<&std::path::Path>) {
+    use crate::ui::toast::{ToastOptions, ToastVariant};
+    let repo = std::path::PathBuf::from(&app.state.working_directory);
+    let (message, rows) = match cosh::git::worktree::list(&repo) {
+        Ok(entries) if entries.is_empty() => (
+            format!("No worktrees reported for {}.", repo.display()),
+            None,
+        ),
+        Ok(entries) => {
+            let mut shown = String::new();
+            let mut plain = String::new();
+            for entry in &entries {
+                let branch = entry.branch.as_deref().unwrap_or("(detached HEAD)");
+                // Canonicalised on both sides: the binding stores the path
+                // the engine resolved, git reports its own resolved
+                // spelling, and a symlinked temp root (`/tmp` →
+                // `/private/tmp`) would otherwise hide the marker.
+                let is_bound = bound.is_some_and(|bound| {
+                    match (
+                        std::fs::canonicalize(bound),
+                        std::fs::canonicalize(&entry.path),
+                    ) {
+                        (Ok(bound), Ok(entry)) => bound == entry,
+                        _ => bound == entry.path,
+                    }
+                });
+                let marker = if is_bound { "→ " } else { "  " };
+                // The marker is part of the COPYABLE text too: the clipboard
+                // is how a user takes a path from here into `add`.
+                shown.push_str(&format!("{marker}{} — {branch}", entry.path.display()));
+                plain.push_str(&format!("{} — {branch}", entry.path.display()));
+                if entry.is_main {
+                    shown.push_str(" (main checkout)");
+                    plain.push_str(" (main checkout)");
+                }
+                shown.push('\n');
+                plain.push('\n');
+            }
+            // One leading line so the marker column is explained without a
+            // legend row per entry.
+            (
+                format!(
+                    "{} worktree(s) of {} (→ = current binding):\n{}",
+                    entries.len(),
+                    repo.display(),
+                    shown
+                ),
+                Some(plain),
+            )
+        }
+        Err(error) => (format!("{error}"), None),
+    };
+    let failed = rows.is_none();
+    let options = ToastOptions {
+        title: Some("Worktrees".into()),
+        message,
+        variant: if failed {
+            ToastVariant::Error
+        } else {
+            ToastVariant::Info
+        },
+        // Long enough to read and copy from, unlike the 6s refusal toasts.
+        duration_ms: 30_000,
+    };
+    match rows {
+        Some(plain) => app.toast_state.show_copyable(options, plain),
+        None => app.toast_state.show(options),
+    }
+}
+
 /// The `/worktree` usage toast — the command takes arguments, so an empty
 /// or malformed tail is a refusal, not a silent no-op.
 fn worktree_usage_toast(app: &mut App) {
     app.toast_state.show(ToastOptions {
         title: Some("Worktree".into()),
-        message: "Usage: /worktree add [<path>] <branch> — or /worktree exit".into(),
+        message: "Usage: /worktree add [<path>] <branch> — or /worktree exit, \"/worktree list\""
+            .into(),
         variant: ToastVariant::Warning,
         duration_ms: 6000,
     });
@@ -227,27 +332,59 @@ fn assign_focused_pane_worktree(app: &mut App, path: Option<&str>, branch: &str)
     let Some((pane_index, split)) = focused_agent_pane_mut(app) else {
         return;
     };
-    match cosh::git::worktree::create(
+    match cosh::git::worktree::create_or_adopt(
         &repo,
         branch,
         explicit.as_deref(),
         cosh::git::worktree::AssignedBy::User,
     ) {
-        Ok(worktree) => {
+        Ok((worktree, binding)) => {
+            let adopted = adoption_toast(&worktree, binding);
             let pane = &mut split.panes[pane_index];
             pane.worktree = Some(worktree);
             pane.worktree_handoff_pending = true;
             app.sync_agents_pane_registry();
             persist_worktree_change(app);
+            if let Some(message) = adopted {
+                app.toast_state.show(ToastOptions {
+                    title: Some("Worktree".into()),
+                    message,
+                    variant: ToastVariant::Info,
+                    duration_ms: 8000,
+                });
+            }
         }
-        // Only the REFUSAL speaks: a success is evident from the pane's
-        // badge and from the absence of an error toast.
+        // Only the REFUSAL speaks: a CREATION is evident from the pane's
+        // badge and from the absence of an error toast. An ADOPTION speaks
+        // too (see `adoption_toast`) — re-entering a checkout the user
+        // forgot about must not look like nothing happened.
         Err(error) => app.toast_state.show(ToastOptions {
             title: Some("Worktree".into()),
             message: format!("{error}"),
             variant: ToastVariant::Error,
             duration_ms: 8000,
         }),
+    }
+}
+
+/// The one sentence an ADOPTION says, and nothing for a creation.
+///
+/// `/worktree add` now does two different things behind one grammar, and the
+/// user cannot see which from the badge alone: a creation leaves a new
+/// checkout, an adoption re-enters one that already existed (typically after
+/// `/worktree exit`, which keeps the checkout on disk by product rule). A
+/// silent adoption would make the command a lie about what it built.
+fn adoption_toast(
+    worktree: &cosh::git::worktree::PaneWorktree,
+    binding: cosh::git::worktree::Binding,
+) -> Option<String> {
+    match binding {
+        cosh::git::worktree::Binding::Created => None,
+        cosh::git::worktree::Binding::Adopted => Some(format!(
+            "Attached to existing worktree {} ({})",
+            worktree.path.display(),
+            worktree.branch
+        )),
     }
 }
 
@@ -277,20 +414,30 @@ fn assign_main_agent_worktree(app: &mut App, path: Option<&str>, branch: &str) {
     // checkout the main agent is sitting in.
     let repo = PathBuf::from(&app.state.working_directory);
     let explicit = path.map(PathBuf::from);
-    match cosh::git::worktree::create(
+    match cosh::git::worktree::create_or_adopt(
         &repo,
         branch,
         explicit.as_deref(),
         cosh::git::worktree::AssignedBy::User,
     ) {
-        Ok(worktree) => {
+        Ok((worktree, binding)) => {
+            let adopted = adoption_toast(&worktree, binding);
             if let Some(session) = app.state.current_session_mut() {
                 session.main_agent_worktree = Some(worktree);
             }
             persist_main_agent_worktree(app);
+            if let Some(message) = adopted {
+                app.toast_state.show(ToastOptions {
+                    title: Some("Worktree".into()),
+                    message,
+                    variant: ToastVariant::Info,
+                    duration_ms: 8000,
+                });
+            }
         }
         // Only the REFUSAL speaks (same contract as the pane path): a
-        // success is evident from the footer badge.
+        // CREATION is evident from the footer badge; an adoption announces
+        // itself through the shared `adoption_toast` sentence.
         Err(error) => app.toast_state.show(ToastOptions {
             title: Some("Worktree".into()),
             message: format!("{error}"),
@@ -339,6 +486,15 @@ pub(super) fn apply_main_agent_worktree_command(app: &mut App, tail: Option<&str
             assign_main_agent_worktree(app, path.as_deref(), &branch);
         }
         Some(WorktreeCommand::Exit) => clear_main_agent_worktree(app),
+        Some(WorktreeCommand::List) => {
+            // No split here: the binding in question is the MAIN agent's.
+            let bound = app
+                .state
+                .current_session()
+                .and_then(|session| session.main_agent_worktree.as_ref())
+                .map(|worktree| worktree.path.clone());
+            show_worktree_list(app, bound.as_deref());
+        }
         None => worktree_usage_toast(app),
     }
 }
@@ -385,13 +541,18 @@ impl App {
         let Some((pane_index, split)) = focused_agent_pane_at_mut(self, pane_index) else {
             return Err("the target pane is not addressable anymore".to_string());
         };
-        let outcome = match cosh::git::worktree::create(
+        // The agent NEVER picks a path, so its ask always lands in the
+        // managed temp root and always CREATES: `create_or_adopt` is used
+        // for the one code path, and the `Binding` is asserted here rather
+        // than ignored — an agent ask that silently adopted somebody's
+        // checkout would be a bug, not a feature.
+        let outcome = match cosh::git::worktree::create_or_adopt(
             &repo,
             branch,
             None,
             cosh::git::worktree::AssignedBy::Agent,
         ) {
-            Ok(worktree) => {
+            Ok((worktree, cosh::git::worktree::Binding::Created)) => {
                 let agent_label = split.panes[pane_index].agent.clone();
                 let message = format!(
                     "Pane isolated: {agent_label} now works in {} (branch {}).",
@@ -403,6 +564,17 @@ impl App {
                 pane.worktree_handoff_pending = true;
                 Ok(message)
             }
+            // Unreachable by construction (the branch above passes no path,
+            // and adoption requires one), but handled EXPLICITLY rather than
+            // with a wildcard so the invariant is stated instead of assumed:
+            // if a future change ever lets an agent ask for a path, this
+            // arm fails loudly rather than quietly reporting an adoption as
+            // a creation.
+            Ok((worktree, cosh::git::worktree::Binding::Adopted)) => Err(format!(
+                "internal: an agent worktree ask must never adopt (it has no path); got {} ({})",
+                worktree.path.display(),
+                worktree.branch
+            )),
             Err(error) => Err(format!("{error}")),
         };
         if outcome.is_ok() {

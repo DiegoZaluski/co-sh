@@ -77,6 +77,196 @@ pub enum WorktreeError {
     /// The `git` binary could not be spawned at all (missing or unexcutable).
     #[error("could not run git: {0}")]
     Spawn(String),
+    /// The path exists but this repository has no worktree registered there.
+    /// Refused rather than adopted: pinning a pane to an arbitrary directory
+    /// would have the agent edit files that belong to no checkout of this
+    /// repo (typically a checkout of a DIFFERENT project), silently.
+    #[error(
+        "`{path}` exists but is not a git worktree of {repo} — give the path of an existing \
+         worktree of this repository, or a path that does not exist yet"
+    )]
+    NotAWorktree { path: String, repo: String },
+    /// The path is the repository's own main checkout. There is nothing to
+    /// isolate: the pane would run in the session's directory and its
+    /// branch would be whatever the user checks out there next.
+    #[error(
+        "`{path}` is the main checkout of this repository, not a linked worktree — there is \
+         nothing to isolate there; give a path that does not exist yet to create a worktree"
+    )]
+    MainCheckout { path: String },
+    /// The worktree has a detached HEAD: porcelain reports no branch for it,
+    /// so there is no branch name the argument could be checked against.
+    #[error(
+        "the worktree at `{path}` is on a detached HEAD, so it has no branch to match \
+         `{expected}` — check out a branch there, or give a path that does not exist yet"
+    )]
+    DetachedHead { path: String, expected: String },
+    /// The worktree is on a different branch than the one asked for. An
+    /// argument that silently had no effect is exactly the wrong-branch
+    /// failure this refusal exists to prevent.
+    #[error(
+        "the worktree at `{path}` is on `{actual}`, not `{expected}` — pass `{actual}` to \
+         attach to it, or a path that does not exist yet"
+    )]
+    BranchMismatch {
+        path: String,
+        expected: String,
+        actual: String,
+    },
+}
+
+/// One entry of `git worktree list --porcelain`: a registered checkout and,
+/// when it sits on a branch, that branch's name (a detached checkout has
+/// none).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeEntry {
+    /// The checkout directory, as git reports it (absolute, resolved).
+    pub path: PathBuf,
+    /// The branch checked out there; `None` for a detached HEAD or a bare
+    /// repository.
+    pub branch: Option<String>,
+    /// Whether this is the repository's MAIN checkout. `git worktree list`
+    /// always lists it first; it is a worktree for git but never a valid
+    /// pane binding (see [`WorktreeError::MainCheckout`]).
+    pub is_main: bool,
+}
+
+/// Which of the two things [`create_or_adopt`] did. The caller must say so:
+/// a silent adoption makes `/worktree add` claim it built something it
+/// found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Binding {
+    /// A new checkout was created at the path.
+    Created,
+    /// An existing worktree of this repository was re-entered.
+    Adopted,
+}
+
+/// Parse `git worktree list --porcelain` output into entries.
+///
+/// The format is one attribute per line, a blank line between entries:
+/// `worktree <path>`, `HEAD <sha>`, `branch refs/heads/<name>`, `detached`,
+/// `bare`, `prunable <reason>`. Only the path and the branch matter here;
+/// the FIRST entry is always the main checkout. Lines are split with
+/// [`str::lines`], so CRLF output parses too, and the remainder of the line
+/// is taken verbatim — paths with spaces survive.
+#[must_use]
+fn parse_worktree_list(out: &str) -> Vec<WorktreeEntry> {
+    let mut entries: Vec<WorktreeEntry> = Vec::new();
+    for line in out.lines() {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            entries.push(WorktreeEntry {
+                path: PathBuf::from(path),
+                branch: None,
+                is_main: entries.is_empty(),
+            });
+        } else if let Some(ref_name) = line.strip_prefix("branch ")
+            && let Some(entry) = entries.last_mut()
+        {
+            entry.branch = ref_name.strip_prefix("refs/heads/").map(String::from);
+        }
+    }
+    entries
+}
+
+/// The worktrees of `repo`, main checkout included and flagged
+/// ([`WorktreeEntry::is_main`]).
+///
+/// # Errors
+///
+/// Any git refusal, verbatim (no repository, git missing, …).
+pub fn list(repo: &Path) -> Result<Vec<WorktreeEntry>, WorktreeError> {
+    Ok(parse_worktree_list(&git(
+        repo,
+        &["worktree", "list", "--porcelain"],
+    )?))
+}
+
+/// Whether two paths name the same checkout. Canonicalised on both sides,
+/// because `/tmp/x`, `/tmp/./x` and a symlinked `/tmp` are one directory and
+/// git reports the resolved spelling. Falls back to the textual comparison
+/// when canonicalisation fails (a broken symlink, a path that vanished).
+#[must_use]
+fn same_path(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+/// Re-enter an EXISTING worktree of `repo` at `path`, checking it out on
+/// `expected`. Validate and adopt, never "the directory exists, so adopt":
+/// see the error variants for what each rejection protects.
+fn adopt(
+    repo: &Path,
+    path: &Path,
+    expected: &str,
+    assigned_by: AssignedBy,
+) -> Result<PaneWorktree, WorktreeError> {
+    let shown = path.display().to_string();
+    let entries = list(repo)?;
+    let Some(entry) = entries.iter().find(|entry| same_path(&entry.path, path)) else {
+        return Err(WorktreeError::NotAWorktree {
+            path: shown,
+            repo: repo.display().to_string(),
+        });
+    };
+    if same_path(&entry.path, repo) {
+        return Err(WorktreeError::MainCheckout { path: shown });
+    }
+    let Some(branch) = entry.branch.as_deref() else {
+        return Err(WorktreeError::DetachedHead {
+            path: shown,
+            expected: expected.to_string(),
+        });
+    };
+    if branch != expected {
+        return Err(WorktreeError::BranchMismatch {
+            path: shown,
+            expected: expected.to_string(),
+            actual: branch.to_string(),
+        });
+    }
+    Ok(PaneWorktree {
+        path: entry.path.clone(),
+        branch: branch.to_string(),
+        name: branch.to_string(),
+        assigned_by,
+    })
+}
+
+/// [`create`], except that an EXPLICIT path which already exists is
+/// validated and ADOPTED when it is a worktree of `repo` on `expected`
+/// branch (see [`Binding`]). The managed-root form (`path: None`) never
+/// adopts — it always creates, exactly as before.
+///
+/// This is why worktrees can stay permanent: `/worktree exit` only drops the
+/// binding, so without adoption an existing checkout would be unreachable
+/// forever (deleting it by hand violates the product rule).
+///
+/// # Errors
+///
+/// Everything [`create`] refuses, plus the adoption refusals
+/// ([`WorktreeError::NotAWorktree`], [`WorktreeError::MainCheckout`],
+/// [`WorktreeError::DetachedHead`], [`WorktreeError::BranchMismatch`]).
+pub fn create_or_adopt(
+    repo: &Path,
+    name: &str,
+    path: Option<&Path>,
+    assigned_by: AssignedBy,
+) -> Result<(PaneWorktree, Binding), WorktreeError> {
+    validate_name(name)?;
+    let Some(explicit) = path else {
+        return Ok((create(repo, name, None, assigned_by)?, Binding::Created));
+    };
+    let explicit = absolute_against(repo, explicit);
+    if explicit.exists() {
+        return Ok((adopt(repo, &explicit, name, assigned_by)?, Binding::Adopted));
+    }
+    Ok((
+        create(repo, name, Some(&explicit), assigned_by)?,
+        Binding::Created,
+    ))
 }
 
 /// Slugify a name into a directory-safe component: lowercased ASCII, every
@@ -415,6 +605,209 @@ mod tests {
             );
             let _ = std::fs::remove_dir_all(&wt.path);
         }
+    }
+
+    /// Feature A/1: a second `add` at the SAME path with the SAME branch
+    /// adopts — no second checkout appears in `git worktree list`.
+    #[test]
+    fn a_second_add_at_the_same_path_and_branch_adopts_without_a_new_checkout() {
+        let (_dir, repo) = repo();
+        let path = _dir.path().join("adopt-me");
+        let first = create(&repo, "feat/adopt", Some(&path), AssignedBy::User).expect("created");
+        let before = list(&repo).expect("list").len();
+
+        let (adopted, binding) =
+            create_or_adopt(&repo, "feat/adopt", Some(&path), AssignedBy::Agent).expect("adopts");
+        assert_eq!(binding, Binding::Adopted, "an existing worktree is adopted");
+        assert_eq!(adopted.path, first.path, "same checkout");
+        assert_eq!(adopted.branch, "feat/adopt");
+        assert_eq!(
+            adopted.name, "feat/adopt",
+            "the name is the branch, as on create"
+        );
+        assert_eq!(
+            adopted.assigned_by,
+            AssignedBy::Agent,
+            "the CALLER's authority, not the original one"
+        );
+        assert_eq!(
+            list(&repo).expect("list").len(),
+            before,
+            "adoption never creates a second checkout"
+        );
+    }
+
+    /// Feature A/1 (managed form): `path: None` ALWAYS creates — the managed
+    /// root form never adopts, it suffixes.
+    #[test]
+    fn the_managed_root_form_never_adopts() {
+        let (_dir, repo) = repo();
+        let branch = unique_slug("managed");
+        let (first, first_binding) =
+            create_or_adopt(&repo, &branch, None, AssignedBy::User).expect("creates");
+        assert_eq!(first_binding, Binding::Created);
+        // A second ask under a DIFFERENT name creates a second checkout.
+        let other = unique_slug("managed");
+        let (second, second_binding) =
+            create_or_adopt(&repo, &other, None, AssignedBy::Agent).expect("creates");
+        assert_eq!(second_binding, Binding::Created);
+        assert_ne!(first.path, second.path);
+        for wt in [&first, &second] {
+            let _ = git(
+                &repo,
+                &["worktree", "remove", &wt.path.display().to_string()],
+            );
+            let _ = std::fs::remove_dir_all(&wt.path);
+        }
+    }
+
+    /// Feature A/4: same path, different branch → refused, naming BOTH.
+    #[test]
+    fn adopting_a_worktree_on_another_branch_is_refused_naming_both() {
+        let (_dir, repo) = repo();
+        let path = _dir.path().join("other-branch");
+        create(&repo, "feat/actual", Some(&path), AssignedBy::User).expect("created");
+        let error = create_or_adopt(&repo, "feat/asked", Some(&path), AssignedBy::User)
+            .expect_err("mismatch");
+        match &error {
+            WorktreeError::BranchMismatch {
+                expected, actual, ..
+            } => {
+                assert_eq!(expected, "feat/asked");
+                assert_eq!(actual, "feat/actual");
+            }
+            other => panic!("expected BranchMismatch, got {other}"),
+        }
+        let message = error.to_string();
+        assert!(message.contains("feat/actual"), "{message}");
+        assert!(message.contains("feat/asked"), "{message}");
+    }
+
+    /// Feature A/3: an existing directory that is NOT a worktree of this
+    /// repo is refused with the dedicated variant (never adopted).
+    #[test]
+    fn a_directory_that_is_not_a_worktree_of_this_repo_is_refused() {
+        // Build the FOREIGN repo FIRST: the destructuring below shadows the
+        // `repo()` fixture fn with the local `repo` path.
+        let (_other_dir, other_repo) = repo();
+        let (_dir, repo) = repo();
+        // (a) a plain directory
+        let plain = _dir.path().join("plain");
+        std::fs::create_dir_all(&plain).expect("dir");
+        match create_or_adopt(&repo, "feat", Some(&plain), AssignedBy::User) {
+            Err(WorktreeError::NotAWorktree { path, repo: named }) => {
+                assert!(path.contains("plain"), "{path}");
+                assert!(named.contains(&repo.display().to_string()), "{named}");
+            }
+            other => panic!("expected NotAWorktree, got {other:?}"),
+        }
+        // (b) a worktree of a DIFFERENT repository — the likely mistake.
+        let foreign = _other_dir.path().join("foreign-wt");
+        create(
+            &other_repo,
+            "foreign-branch",
+            Some(&foreign),
+            AssignedBy::User,
+        )
+        .expect("foreign");
+        assert!(
+            matches!(
+                create_or_adopt(&repo, "foreign-branch", Some(&foreign), AssignedBy::User),
+                Err(WorktreeError::NotAWorktree { .. })
+            ),
+            "another repository's checkout is not adoptable"
+        );
+    }
+
+    /// Feature A/6: a detached-HEAD worktree has no branch to match.
+    #[test]
+    fn a_detached_head_worktree_is_refused() {
+        let (_dir, repo) = repo();
+        let path = _dir.path().join("detached");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                &path.display().to_string(),
+                "--quiet",
+            ],
+        )
+        .expect("detached worktree");
+        // The parser must agree: no branch line exists for it.
+        let entries = list(&repo).expect("list");
+        let entry = entries
+            .iter()
+            .find(|entry| entry.path == path)
+            .expect("listed");
+        assert_eq!(entry.branch, None, "a detached worktree carries no branch");
+        let error =
+            create_or_adopt(&repo, "feat", Some(&path), AssignedBy::User).expect_err("detached");
+        match &error {
+            WorktreeError::DetachedHead { path, expected } => {
+                assert!(path.contains("detached"), "{path}");
+                assert_eq!(expected, "feat");
+            }
+            other => panic!("expected DetachedHead, got {other}"),
+        }
+        assert!(error.to_string().contains("detached HEAD"), "{error}");
+    }
+
+    /// Feature A/main-tree decision: the repository's own checkout is NOT
+    /// adoptable as a pane binding.
+    #[test]
+    fn the_repositorys_main_checkout_is_not_adoptable() {
+        let (_dir, repo) = repo();
+        let branch = git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .expect("branch")
+            .trim()
+            .to_string();
+        assert!(
+            matches!(
+                create_or_adopt(&repo, &branch, Some(&repo), AssignedBy::User),
+                Err(WorktreeError::MainCheckout { .. })
+            ),
+            "the main checkout is refused deliberately"
+        );
+    }
+
+    /// Feature A/6 (parser): sample porcelain output, including a detached
+    /// entry and a path with spaces.
+    #[test]
+    fn the_porcelain_parser_reads_branches_and_tolerates_detached_and_spaces() {
+        let sample = "worktree /repo/main\n\
+                      HEAD 1111111111111111111111111111111111111111\n\
+                      branch refs/heads/main\n\
+                      \n\
+                      worktree /tmp/with space/wt\n\
+                      HEAD 2222222222222222222222222222222222222222\n\
+                      branch refs/heads/feat/x\n\
+                      \n\
+                      worktree /tmp/detached\n\
+                      HEAD 3333333333333333333333333333333333333333\n\
+                      detached\n\
+                      \n\
+                      worktree /tmp/bare\n\
+                      HEAD 4444444444444444444444444444444444444444\n\
+                      bare\n\
+                      ";
+        let entries = parse_worktree_list(sample);
+        assert_eq!(entries.len(), 4, "one entry per `worktree ` line");
+        assert_eq!(entries[0].path, PathBuf::from("/repo/main"));
+        assert_eq!(entries[0].branch.as_deref(), Some("main"));
+        assert!(entries[0].is_main, "the first entry is the main checkout");
+        assert!(!entries[1].is_main);
+        assert_eq!(entries[1].path, PathBuf::from("/tmp/with space/wt"));
+        assert_eq!(entries[1].branch.as_deref(), Some("feat/x"));
+        assert_eq!(entries[2].branch, None, "detached: no branch line");
+        assert_eq!(entries[3].branch, None, "bare: no branch line");
+        // CRLF output parses too (`str::lines` strips the \r).
+        let crlf = parse_worktree_list(
+            "worktree /a\r\nHEAD 1111111111111111111111111111111111111111\r\nbranch refs/heads/b\r\n",
+        );
+        assert_eq!(crlf[0].path, PathBuf::from("/a"));
+        assert_eq!(crlf[0].branch.as_deref(), Some("b"));
     }
 
     #[test]
