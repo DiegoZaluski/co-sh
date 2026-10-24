@@ -186,12 +186,38 @@ pub fn list(repo: &Path) -> Result<Vec<WorktreeEntry>, WorktreeError> {
 /// because `/tmp/x`, `/tmp/./x` and a symlinked `/tmp` are one directory and
 /// git reports the resolved spelling. Falls back to the textual comparison
 /// when canonicalisation fails (a broken symlink, a path that vanished).
+///
+/// Public because the callers that decide whether a checkout is ALREADY
+/// bound must answer the same question — "is this the same directory?" —
+/// that the engine asks when it looks a path up. Two spellings of one
+/// checkout must never be treated as two checkouts there either.
 #[must_use]
-fn same_path(a: &Path, b: &Path) -> bool {
+pub fn same_path(a: &Path, b: &Path) -> bool {
     match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
         (Ok(a), Ok(b)) => a == b,
-        _ => a == b,
+        // Canonicalisation is a best effort: when one side cannot be
+        // resolved, fall back to comparing the raw spellings rather than
+        // claiming "different" or "equal" outright.
+        _ => lexical_normalize(a) == lexical_normalize(b),
     }
+}
+
+/// Fold `.` and `..` components without touching the disk, so a path typed
+/// as `/repo/./x` or `/repo/sub/../x` still matches its plain spelling when
+/// canonicalisation is unavailable.
+#[must_use]
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// Re-enter an EXISTING worktree of `repo` at `path`, checking it out on
@@ -333,17 +359,7 @@ fn absolute_against(repo: &Path, explicit: &Path) -> PathBuf {
     } else {
         repo.join(explicit)
     };
-    let mut out = PathBuf::new();
-    for component in joined.components() {
-        match component {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                out.pop();
-            }
-            other => out.push(other),
-        }
-    }
-    out
+    lexical_normalize(&joined)
 }
 
 /// Run `git` inside `repo` and return its stdout. A non-zero exit surfaces

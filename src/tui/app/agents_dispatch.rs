@@ -202,20 +202,75 @@ enum WorktreeCommand {
     List,
 }
 
+/// Split the argument tail into tokens, honouring double quotes.
+///
+/// `split_whitespace` is not enough here: a worktree path may contain a
+/// space, and `/worktree list` deliberately prints copyable paths. Without
+/// quoting, a copied `/tmp/my tree` could not be pasted back into `add` —
+/// it would parse as two tokens and refuse with a branch/path error that
+/// says nothing about the real problem. `"<path with spaces>"` round-trips.
+///
+/// Inside quotes, `\` escapes the next character (so a path can contain a
+/// quote). An unterminated quote is malformed (`None`), never a guess about
+/// where the path ends.
+fn split_args(tail: &str) -> Option<Vec<String>> {
+    let mut out: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    // A token exists even when it is empty (`""`), so this tracks "started"
+    // separately from the buffer's contents.
+    let mut has_token = false;
+    let mut chars = tail.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' => {
+                in_quotes = !in_quotes;
+                has_token = true;
+            }
+            '\\' if in_quotes => {
+                if let Some(escaped) = chars.next() {
+                    current.push(escaped);
+                    has_token = true;
+                }
+            }
+            ch if ch.is_whitespace() && !in_quotes => {
+                if has_token {
+                    out.push(std::mem::take(&mut current));
+                    has_token = false;
+                }
+            }
+            ch => {
+                current.push(ch);
+                has_token = true;
+            }
+        }
+    }
+    if in_quotes {
+        return None;
+    }
+    if has_token {
+        out.push(current);
+    }
+    Some(out)
+}
+
 /// Parse the argument tail. `None` means malformed — the caller shows the
 /// usage toast (an empty tail is malformed: the command takes arguments).
+///
+/// A path containing spaces is written quoted: `/worktree add "/tmp/my
+/// tree" feat`.
 fn parse_worktree_command(tail: Option<&str>) -> Option<WorktreeCommand> {
-    let parts: Vec<&str> = tail?.split_whitespace().collect();
+    let parts = split_args(tail?)?;
     match parts.as_slice() {
-        ["exit"] => Some(WorktreeCommand::Exit),
-        ["list"] => Some(WorktreeCommand::List),
-        ["add", branch] => Some(WorktreeCommand::Add {
+        [sub] if sub.as_str() == "exit" => Some(WorktreeCommand::Exit),
+        [sub] if sub.as_str() == "list" => Some(WorktreeCommand::List),
+        [add, branch] if add.as_str() == "add" => Some(WorktreeCommand::Add {
             path: None,
-            branch: (*branch).to_string(),
+            branch: branch.clone(),
         }),
-        ["add", path, branch] => Some(WorktreeCommand::Add {
-            path: Some((*path).to_string()),
-            branch: (*branch).to_string(),
+        [add, path, branch] if add.as_str() == "add" => Some(WorktreeCommand::Add {
+            path: Some(path.clone()),
+            branch: branch.clone(),
         }),
         _ => None,
     }
@@ -242,10 +297,15 @@ fn parse_worktree_command(tail: Option<&str>) -> Option<WorktreeCommand> {
 fn show_worktree_list(app: &mut App, bound: Option<&std::path::Path>) {
     use crate::ui::toast::{ToastOptions, ToastVariant};
     let repo = std::path::PathBuf::from(&app.state.working_directory);
-    let (message, rows) = match cosh::git::worktree::list(&repo) {
+    // `empty` and `failed` are tracked separately: an empty list is a fine
+    // answer that deserves an Info toast, while only a git refusal is an
+    // Error. Folding them together (both produced `rows: None`) rendered
+    // "no worktrees reported" in the error style.
+    let (message, rows, empty) = match cosh::git::worktree::list(&repo) {
         Ok(entries) if entries.is_empty() => (
             format!("No worktrees reported for {}.", repo.display()),
             None,
+            true,
         ),
         Ok(entries) => {
             let mut shown = String::new();
@@ -287,11 +347,13 @@ fn show_worktree_list(app: &mut App, bound: Option<&std::path::Path>) {
                     shown
                 ),
                 Some(plain),
+                false,
             )
         }
-        Err(error) => (format!("{error}"), None),
+        Err(error) => (format!("{error}"), None, false),
     };
-    let failed = rows.is_none();
+    // Only a git REFUSAL is an error; an empty list is a fine answer.
+    let failed = !empty && rows.is_none();
     let options = ToastOptions {
         title: Some("Worktrees".into()),
         message,
@@ -329,9 +391,18 @@ fn worktree_usage_toast(app: &mut App) {
 fn assign_focused_pane_worktree(app: &mut App, path: Option<&str>, branch: &str) {
     let repo = std::path::PathBuf::from(&app.state.working_directory);
     let explicit = path.map(std::path::PathBuf::from);
-    let Some((pane_index, split)) = focused_agent_pane_mut(app) else {
+    // The focused INDEX only: the duplicate-binding check below has to read
+    // every OTHER pane's binding, so the split cannot be held mutably yet.
+    let Some(pane_index) = app.agents_split.as_ref().and_then(|split| split.focused) else {
         return;
     };
+    if app
+        .agents_split
+        .as_ref()
+        .is_none_or(|split| pane_index >= split.panes.len())
+    {
+        return;
+    }
     match cosh::git::worktree::create_or_adopt(
         &repo,
         branch,
@@ -339,8 +410,31 @@ fn assign_focused_pane_worktree(app: &mut App, path: Option<&str>, branch: &str)
         cosh::git::worktree::AssignedBy::User,
     ) {
         Ok((worktree, binding)) => {
+            // Refuse a checkout ANOTHER agent already works in. Two loops in
+            // one tree edit each other's files — the failure pane isolation
+            // exists to prevent — and this became reachable once adoption
+            // replaced the `PathExists` refusal that used to block a second
+            // bind at the same path.
+            if let Some(holder) = worktree_holder(app, &worktree.path, Some(pane_index), false) {
+                app.toast_state.show(ToastOptions {
+                    title: Some("Worktree".into()),
+                    message: format!(
+                        "{holder} already works in {} — two agents in one checkout edit each \
+                         other's files; pick another path",
+                        worktree.path.display()
+                    ),
+                    variant: ToastVariant::Error,
+                    duration_ms: 8000,
+                });
+                return;
+            }
             let adopted = adoption_toast(&worktree, binding);
-            let pane = &mut split.panes[pane_index];
+            let Some(split) = app.agents_split.as_mut() else {
+                return;
+            };
+            let Some(pane) = split.panes.get_mut(pane_index) else {
+                return;
+            };
             pane.worktree = Some(worktree);
             pane.worktree_handoff_pending = true;
             app.sync_agents_pane_registry();
@@ -388,6 +482,64 @@ fn adoption_toast(
     }
 }
 
+/// Which agent ALREADY works in `path`, if any: the MAIN agent's session
+/// binding, or another pane's. `except_pane` skips the pane being re-bound,
+/// so a second `add` on the SAME pane stays allowed (it is how a pane moves
+/// between checkouts).
+///
+/// Two loops in one checkout edit each other's files — the exact failure
+/// pane isolation exists to prevent. `PathExists` used to make this
+/// unreachable by ACCIDENT: a second bind at the same path simply failed,
+/// with a message about the directory, not about the other agent. Adoption
+/// deliberately removed that refusal, so the guard has to be explicit and
+/// has to name the holder: "pick another path" is useless without saying
+/// who is already there.
+///
+/// The PARKED split counts. Its panes still hold their bindings, and
+/// re-opening it must not put one back into a tree a live agent took over.
+fn worktree_holder(
+    app: &App,
+    path: &std::path::Path,
+    except_pane: Option<usize>,
+    except_main: bool,
+) -> Option<String> {
+    use cosh::git::worktree::same_path;
+    // `except_main` when the caller IS the main agent: re-pinning itself at
+    // the same checkout is a no-op, not a conflict with itself.
+    let main_bound = !except_main
+        && app
+            .state
+            .current_session()
+            .and_then(|session| session.main_agent_worktree.as_ref())
+            .is_some_and(|worktree| same_path(&worktree.path, path));
+    if main_bound {
+        return Some("The main agent".to_string());
+    }
+    // LIVE first (its indices are the ones `except_pane` refers to), then the
+    // parked set, which has no focused pane and therefore no exception.
+    for (slot, split) in [app.agents_split.as_ref(), app.parked_agents_split.as_ref()]
+        .into_iter()
+        .enumerate()
+    {
+        let Some(split) = split else {
+            continue;
+        };
+        for (index, pane) in split.panes.iter().enumerate() {
+            if slot == 0 && except_pane == Some(index) {
+                continue;
+            }
+            let bound = pane
+                .worktree
+                .as_ref()
+                .is_some_and(|worktree| same_path(&worktree.path, path));
+            if bound {
+                return Some(format!("Pane {} ({})", index + 1, pane.agent));
+            }
+        }
+    }
+    None
+}
+
 /// The MAIN agent's effective working directory: its `/worktree` binding
 /// when pinned, the session's startup cwd otherwise. `working_directory` is
 /// set once in `App::new` and never mutated by the running app, so it IS the
@@ -421,6 +573,23 @@ fn assign_main_agent_worktree(app: &mut App, path: Option<&str>, branch: &str) {
         cosh::git::worktree::AssignedBy::User,
     ) {
         Ok((worktree, binding)) => {
+            // Same guard as the pane path: a checkout another agent already
+            // works in is refused. `except_main` is true because re-pinning
+            // the main agent at ITS OWN checkout is a no-op, not a
+            // self-conflict.
+            if let Some(holder) = worktree_holder(app, &worktree.path, None, true) {
+                app.toast_state.show(ToastOptions {
+                    title: Some("Worktree".into()),
+                    message: format!(
+                        "{holder} already works in {} — two agents in one checkout edit each \
+                         other's files; pick another path",
+                        worktree.path.display()
+                    ),
+                    variant: ToastVariant::Error,
+                    duration_ms: 8000,
+                });
+                return;
+            }
             let adopted = adoption_toast(&worktree, binding);
             if let Some(session) = app.state.current_session_mut() {
                 session.main_agent_worktree = Some(worktree);
