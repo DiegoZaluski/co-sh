@@ -1269,10 +1269,7 @@ async fn ctrl_x_force_closes_a_stuck_focused_pane_turn() {
         split.panes[0].stop_signal.is_none(),
         "the pane accepts a new dispatch (signal cleared)"
     );
-    assert!(
-        !split.panes[1].running,
-        "the sibling pane is untouched"
-    );
+    assert!(!split.panes[1].running, "the sibling pane is untouched");
     assert!(
         split.panes[0].activity.timeline.iter().any(|e| matches!(
             e,
@@ -1307,10 +1304,7 @@ async fn ctrl_x_is_inert_without_a_running_focused_pane() {
         .unwrap();
     assert!(!app.agents_split.as_ref().unwrap().panes[0].running);
     assert!(
-        app.agents_split
-            .as_ref()
-            .unwrap()
-            .panes[0]
+        app.agents_split.as_ref().unwrap().panes[0]
             .activity
             .timeline
             .iter()
@@ -1452,4 +1446,186 @@ async fn backspace_and_ctrl_z_edit_the_prompt_when_it_is_focused() {
             .len(),
         2
     );
+}
+
+/// The slash menu stays VISIBLE while the arguments of an argument-taking
+/// command are typed (`takes_args`), which used to mean its key handler
+/// swallowed every key it did not match. These helpers pin the prompt's
+/// editing keys against that state.
+fn menu_visible_app_with(input: &str) -> App {
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    app.prompt_view.input = input.to_string();
+    app.prompt_view.cursor_pos = input.len();
+    // The menu open ON the arguments, exactly what `check_state` produces
+    // for `/worktree add feat` (it filters on the name part and stays up).
+    app.slash_menu.visible = true;
+    app
+}
+
+/// Left moves the prompt cursor back one char boundary while the menu is
+/// visible. Before the ownership inversion the handler consumed it.
+#[tokio::test]
+async fn slash_menu_visible_left_moves_the_prompt_cursor() {
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = menu_visible_app_with("/worktree add feat");
+    let before = app.prompt_view.cursor_pos;
+
+    app.process_key_event(mod_key(KeyCode::Left, KeyModifiers::NONE))
+        .unwrap();
+
+    assert!(app.slash_menu.visible, "the menu stays open on arguments");
+    assert_eq!(
+        app.prompt_view.cursor_pos,
+        before - 1,
+        "Left is the prompt's, not the menu's"
+    );
+}
+
+/// Right moves it forward again.
+#[tokio::test]
+async fn slash_menu_visible_right_moves_the_prompt_cursor() {
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = menu_visible_app_with("/worktree add feat");
+    app.prompt_view.cursor_pos = 5;
+    let before = app.prompt_view.cursor_pos;
+
+    app.process_key_event(mod_key(KeyCode::Right, KeyModifiers::NONE))
+        .unwrap();
+
+    assert!(app.slash_menu.visible, "the menu stays open on arguments");
+    assert_eq!(app.prompt_view.cursor_pos, before + 1);
+}
+
+/// Home and End reach the prompt (front / back of the input).
+#[tokio::test]
+async fn slash_menu_visible_home_and_end_move_the_prompt_cursor() {
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = menu_visible_app_with("/worktree add feat");
+    let len = app.prompt_view.input.len();
+
+    app.process_key_event(mod_key(KeyCode::Home, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.prompt_view.cursor_pos, 0, "Home reaches the prompt");
+
+    app.process_key_event(mod_key(KeyCode::End, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(app.prompt_view.cursor_pos, len, "End reaches the prompt");
+}
+
+/// Delete forward-deletes at the cursor instead of being discarded.
+#[tokio::test]
+async fn slash_menu_visible_delete_removes_the_char_at_the_cursor() {
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = menu_visible_app_with("/worktree add feat");
+    // Cursor on the 'a' of "add" (index 10): deleting it yields "dd".
+    app.prompt_view.cursor_pos = 10;
+    assert_eq!(&app.prompt_view.input[9..12], " ad");
+
+    app.process_key_event(mod_key(KeyCode::Delete, KeyModifiers::NONE))
+        .unwrap();
+
+    assert_eq!(
+        app.prompt_view.input, "/worktree dd feat",
+        "Delete removed the character AT the cursor, not the one before it"
+    );
+    assert_eq!(app.prompt_view.cursor_pos, 10, "the cursor did not move");
+}
+
+/// Ctrl+Left is word movement — the `cursor_word_left` binding.
+#[tokio::test]
+async fn slash_menu_visible_ctrl_left_moves_to_the_previous_word() {
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = menu_visible_app_with("/worktree add feat");
+    assert_eq!(app.prompt_view.cursor_pos, 18, "precondition: end of input");
+
+    app.process_key_event(mod_key(KeyCode::Left, KeyModifiers::CONTROL))
+        .unwrap();
+
+    assert_eq!(
+        app.prompt_view.cursor_pos, 14,
+        "cursor sits on the start of the last word (`feat`)"
+    );
+}
+
+/// The OTHER direction: the keys the menu really implements stay its own.
+/// Up/Down move the MENU selection and never the prompt cursor; Esc closes
+/// the menu. (Enter's command execution is covered by the existing
+/// `esc_while_working_closes_slash_menu_first_stop_on_second_esc` and the
+/// ctrl-digit tests, so it is not duplicated here.)
+#[tokio::test]
+async fn slash_menu_visible_keeps_its_own_navigation_keys() {
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = menu_visible_app_with("/");
+    app.slash_menu_refresh();
+    let cursor = app.prompt_view.cursor_pos;
+    let first = app.slash_menu.selected;
+
+    app.process_key_event(mod_key(KeyCode::Down, KeyModifiers::NONE))
+        .unwrap();
+    assert_ne!(
+        app.slash_menu.selected, first,
+        "Down still moves the MENU selection"
+    );
+    assert_eq!(
+        app.prompt_view.cursor_pos, cursor,
+        "Down must never move the prompt cursor"
+    );
+
+    let after_down = app.slash_menu.selected;
+    app.process_key_event(mod_key(KeyCode::Up, KeyModifiers::NONE))
+        .unwrap();
+    assert_ne!(
+        app.slash_menu.selected, after_down,
+        "Up still moves the MENU selection"
+    );
+
+    app.process_key_event(mod_key(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+    assert!(!app.slash_menu.visible, "Esc still closes the menu");
+}
+
+/// The general mechanism, not just today's keys: a Ctrl+<letter> the menu
+/// does not implement must behave EXACTLY as it does with the menu hidden.
+/// Ctrl+B has no binding, so the prompt's Char arm types the letter — the
+/// assertion that matters is the EQUIVALENCE: the menu no longer changes
+/// the outcome of a key it does not own. Before the inversion the menu
+/// swallowed it and the two runs diverged (nothing typed).
+#[tokio::test]
+async fn slash_menu_declines_a_ctrl_letter_it_does_not_implement() {
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+
+    // Baseline: menu HIDDEN.
+    let mut hidden = menu_visible_app_with("/worktree add feat");
+    hidden.slash_menu.visible = false;
+    hidden
+        .process_key_event(mod_key(KeyCode::Char('b'), KeyModifiers::CONTROL))
+        .unwrap();
+
+    // Same key, menu VISIBLE.
+    let mut shown = menu_visible_app_with("/worktree add feat");
+    shown
+        .process_key_event(mod_key(KeyCode::Char('b'), KeyModifiers::CONTROL))
+        .unwrap();
+
+    assert_eq!(
+        shown.prompt_view.input, hidden.prompt_view.input,
+        "an unimplemented Ctrl+letter must not behave differently because the menu is open"
+    );
+    assert_eq!(
+        shown.prompt_view.cursor_pos, hidden.prompt_view.cursor_pos,
+        "same key, same cursor"
+    );
+
+    // Guard the equivalence is not vacuous: the menu genuinely handled the
+    // key by declining it — it stayed open for the remaining arguments.
+    assert!(shown.slash_menu.visible, "the menu was left open");
 }

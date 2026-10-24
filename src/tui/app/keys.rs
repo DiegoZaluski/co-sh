@@ -632,9 +632,7 @@ impl App {
             // key while a box is pending is consumed by it (Up/Down
             // navigate, Enter picks, Esc cancels per the ACP spec); text
             // keys are swallowed, never typed into the prompt behind it.
-            if self.agents_split.is_some()
-                && self.pane_permission_key(key.code)
-            {
+            if self.agents_split.is_some() && self.pane_permission_key(key.code) {
                 return Ok(false);
             }
 
@@ -906,9 +904,7 @@ impl App {
                         .change_summarizer(&mut self.setup, operation)
                     {
                         self.setup.save();
-                    } else if operation == "remove"
-                        && self.remove_selected_settings_entry()
-                    {
+                    } else if operation == "remove" && self.remove_selected_settings_entry() {
                         // Removal (keyring purge / registry re-publish)
                         // happened inside the shared helper; nothing else
                         // to do here.
@@ -1273,9 +1269,14 @@ impl App {
                 }
             }
 
-            // If slash menu is visible, arrow keys should move selection there
-            if self.slash_menu.visible {
-                return self.handle_slash_menu_key(key);
+            // If the slash menu is visible, let it CLAIM its own keys and
+            // decline the rest: the menu stays open while the arguments of
+            // an argument-taking command are typed, so anything it did not
+            // claim must still reach the normal prompt handling below.
+            if self.slash_menu.visible
+                && let Some(quit) = self.handle_slash_menu_key(key)?
+            {
+                return Ok(quit);
             }
 
             // When the usage dashboard is open, Tab / Shift+Tab cycle the
@@ -1336,13 +1337,8 @@ impl App {
                     // The MAIN agent holds the focus (`Ctrl+0`) or no
                     // split is open: nothing to zoom — the key then does
                     // nothing rather than expanding an unfocused target.
-                    if matches!(self.mode(), AppMode::Session)
-                        && self.agents_split.is_some()
-                    {
-                        let focused = self
-                            .agents_split
-                            .as_ref()
-                            .and_then(|split| split.focused);
+                    if matches!(self.mode(), AppMode::Session) && self.agents_split.is_some() {
+                        let focused = self.agents_split.as_ref().and_then(|split| split.focused);
                         if focused.is_some() {
                             let zoomed = self
                                 .agents_split
@@ -1417,7 +1413,8 @@ impl App {
                         // page step (the pane IS the viewport here).
                         let vh = split
                             .focused_pane()
-                            .map_or(1, |p| p.body_height.max(1) as u32) as i32;
+                            .map_or(1, |p| p.body_height.max(1) as u32)
+                            as i32;
                         split.scroll_focused_by(-vh / 2);
                     } else {
                         let vh = self.session_view.visible_height.max(1);
@@ -1442,7 +1439,8 @@ impl App {
                         // page step (the pane IS the viewport here).
                         let vh = split
                             .focused_pane()
-                            .map_or(1, |p| p.body_height.max(1) as u32) as i32;
+                            .map_or(1, |p| p.body_height.max(1) as u32)
+                            as i32;
                         split.scroll_focused_by(vh / 2);
                     } else {
                         let vh = self.session_view.visible_height.max(1);
@@ -1884,8 +1882,13 @@ impl App {
                     self.hovered_queue_row = None;
                 }
                 None => {
-                    if self.slash_menu.visible {
-                        return self.handle_slash_menu_key(key);
+                    // Same ownership contract as the call site above: the
+                    // menu claims its keys and declines the rest, which then
+                    // fall through to the normal prompt handling.
+                    if self.slash_menu.visible
+                        && let Some(quit) = self.handle_slash_menu_key(key)?
+                    {
+                        return Ok(quit);
                     }
 
                     if matches!(self.mode(), AppMode::Session) {
@@ -2418,19 +2421,48 @@ impl App {
 
     /// Key handling while the slash menu is visible: menu navigation,
     /// editing of the filtered command, and handoff back to the prompt.
-    /// Runs BEFORE the mode-specific Char handler, so Ctrl-combos
-    /// (Ctrl+Z undo, Ctrl+Y redo, Ctrl+J newline, Ctrl+W delete-word) are
-    /// intercepted here and never type their letter into the filter.
-    /// Consumes the key either way — the menu owns the keyboard while open.
-    fn handle_slash_menu_key(&mut self, key: KeyEvent) -> io::Result<bool> {
+    ///
+    /// OWNERSHIP: this handler CLAIMS only the keys that are its own — the
+    /// navigation/edit set the menu implements — and DECLINES everything
+    /// else so the caller falls through to the normal prompt path:
+    ///
+    /// - owned: `Up`, `Down`, `Enter`, `Esc`, `Backspace` (plain and Ctrl),
+    ///   plain `Char` (typing into the filter), and the four Ctrl combos the
+    ///   menu genuinely implements (Ctrl+Z undo, Ctrl+Y redo, Ctrl+J
+    ///   newline, Ctrl+W delete-word);
+    /// - declined: every other key — cursor movement (`Left`/`Right`,
+    ///   `Home`/`End`, Ctrl+Left/Right word movement), `Delete`,
+    ///   `PageUp`/`PageDown`, `Tab`, and any Ctrl+`<letter>` the menu does
+    ///   not implement.
+    ///
+    /// The distinction matters because the menu STAYS VISIBLE while the
+    /// user types the arguments of an argument-taking command (`/worktree
+    /// add feat` keeps it open, filtering on the name part). When this
+    /// handler consumed every key it did not match, the prompt editor lost
+    /// that whole key set for as long as the menu was up. Declining is the
+    /// structural fix: the next prompt key somebody adds is reachable
+    /// without touching this match.
+    ///
+    /// Runs BEFORE the mode-specific Char handler. Returns `Ok(None)` when
+    /// the key is not the menu's (the caller continues), `Ok(Some(quit))`
+    /// when it is — `quit` carries the same meaning as
+    /// [`Self::process_key_event`]'s return value.
+    fn handle_slash_menu_key(&mut self, key: KeyEvent) -> io::Result<Option<bool>> {
         match key.code {
-            KeyCode::Up => self.slash_menu.select_prev(),
-            KeyCode::Down => self.slash_menu.select_next(),
+            KeyCode::Up => {
+                self.slash_menu.select_prev();
+                Ok(Some(false))
+            }
+            KeyCode::Down => {
+                self.slash_menu.select_next();
+                Ok(Some(false))
+            }
             KeyCode::Enter => {
                 self.prompt_view.note_activity();
                 if let Some(cmd) = self.slash_menu.get_selected_command().cloned() {
                     self.run_slash_command(&cmd);
                 }
+                Ok(Some(false))
             }
             KeyCode::Esc => {
                 self.prompt_view.note_activity();
@@ -2438,6 +2470,7 @@ impl App {
                 // with it (nothing to undo back to).
                 self.prompt_view.clear_draft();
                 self.slash_menu.visible = false;
+                Ok(Some(false))
             }
             KeyCode::Backspace => {
                 if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -2453,17 +2486,22 @@ impl App {
                         self.slash_menu_refresh();
                     }
                 }
+                Ok(Some(false))
             }
             KeyCode::Char(ch) => {
                 if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    // Only the combos the menu implements are claimed. The
+                    // rest (Ctrl+B, Ctrl+A, Ctrl+P, …) belong to the prompt
+                    // or the app: claiming them here silently ate them —
+                    // the same ownership trap as the movement keys.
                     match ch {
                         'z' => self.prompt_undo(),
                         'y' => self.prompt_redo(),
                         'j' => self.prompt_view.insert_newline(),
                         'w' => self.prompt_view.delete_word_before_cursor(),
-                        _ => {}
+                        _ => return Ok(None),
                     }
-                    return Ok(false);
+                    return Ok(Some(false));
                 }
                 // Typing hands keyboard control back
                 // from the right panel to the prompt.
@@ -2479,9 +2517,10 @@ impl App {
                 {
                     self.prompt_view.strip_leading_slash();
                 }
+                Ok(Some(false))
             }
-            _ => {}
+            // Not the menu's key: let the caller's normal handling have it.
+            _ => Ok(None),
         }
-        Ok(false)
     }
 }
