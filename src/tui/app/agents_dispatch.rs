@@ -1115,7 +1115,11 @@ impl App {
         // channel (the spec's contract for a cancelled turn's pending
         // permission), so the agent-side request resolves cleanly.
         split.clear_permission(pane);
-        split.finish_turn(pane, reason, "cancelled");
+        // Ctrl+X IS the user's stop: `cancelled` here is the one place the
+        // word is literal (see `PaneTurnEnd`). The forced close must not
+        // pretend the pane failed on its own — that is exactly the
+        // conflation this vocabulary removes.
+        split.finish_turn(pane, reason, cosh::harness::panes::PaneTurnEnd::Cancelled);
         if let Some(id) = registry_id {
             cosh::harness::panes::fail_serving(&id, reason.to_string());
         }
@@ -2222,6 +2226,110 @@ fn assemble_pane_input(
     }
 }
 
+/// Which terminal event the manager loop emitted.
+///
+/// The three shapes are NOT interchangeable, and the distinction is exactly
+/// what the pane used to lose: `Done` is the loop's own natural close,
+/// `Stopped` means the stop flag was observed (`self.stop` or the shared
+/// `stop_signal` — and for a pane `self.stop` cannot come from the model,
+/// because `stop_agent_loop` is in `MANAGER_BLOCKED_TOOLS`), and `Error` is
+/// an infrastructure failure. Without this the close had to guess, and it
+/// guessed "cancelled" for all of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalKind {
+    /// The loop closed by itself (`HarnessEvent::Done`).
+    Done,
+    /// The loop observed a stop request (`HarnessEvent::Stopped`).
+    Stopped,
+    /// The loop closed on an error (`HarnessEvent::Error`).
+    Error,
+}
+
+/// The loop's terminal event, captured by the bridge so the pane's close can
+/// report what actually happened.
+#[derive(Debug, Clone)]
+struct TerminalCause {
+    kind: TerminalKind,
+    /// The error text (`Error`) or the guard-stop audit (`Done` with a
+    /// `checkup_verdict`); `None` for a clean natural completion and for
+    /// `Stopped`.
+    detail: Option<String>,
+}
+
+/// Decide the pane turn's report and how it ended — the ONE place a pane
+/// turn is classified, pure so it can be tested without a harness.
+///
+/// The rule, in order:
+///
+/// 1. **A closure** → `end_turn`. The loop promoted its own final text.
+/// 2. **`HarnessEvent::Error`** → `error`, carrying the real message. The
+///    report IS the failure text (a requester must see it).
+/// 3. **`HarnessEvent::Stopped`** → `cancelled`. For a pane this is the
+///    USER's stop and nothing else: `stop_agent_loop` is blocked for panes
+///    (`MANAGER_BLOCKED_TOOLS`), so the loop cannot stop itself. This is the
+///    single legitimate `cancelled`.
+/// 4. **`Done` without a closure, but the model wrote something** →
+///    `partial`: the turn's real last text, marked as not necessarily
+///    final. This is the case the old code answered with "ended without a
+///    report (stopped or errored)" while the model HAD written text one
+///    item earlier.
+/// 5. **`Done` with nothing written at all** → `incomplete`, naming the
+///    guard verdict when there is one ("why did it stop?" stays
+///    answerable).
+/// 6. **No terminal event at all** → `error`. The loop vanished without
+///    saying why; that is a harness defect, not a result.
+///
+/// Note what is NOT here: any branch that produces a generic message while
+/// real text exists, or that reports `cancelled` for a turn nobody stopped.
+fn close_pane_turn(
+    cause: Option<&TerminalCause>,
+    final_answer: Option<String>,
+    fallback: Option<String>,
+) -> (String, cosh::harness::panes::PaneTurnEnd) {
+    use cosh::harness::panes::PaneTurnEnd;
+    if let Some(report) = final_answer {
+        return (report, PaneTurnEnd::EndTurn);
+    }
+    // No closure. From here the terminal cause decides, and the fallback
+    // text (when the model wrote anything) becomes the report.
+    let fallback = fallback.filter(|text| !text.trim().is_empty());
+    match cause.map(|c| c.kind) {
+        None => (
+            "The pane turn ended without any terminal event from the harness. \
+             That is a bug, not a result: no report was produced."
+                .to_string(),
+            PaneTurnEnd::Error,
+        ),
+        Some(TerminalKind::Error) => (
+            cause
+                .and_then(|c| c.detail.clone())
+                .unwrap_or_else(|| "the pane turn failed".to_string()),
+            PaneTurnEnd::Error,
+        ),
+        Some(TerminalKind::Stopped) => (
+            "The user stopped this pane turn.".to_string(),
+            PaneTurnEnd::Cancelled,
+        ),
+        Some(TerminalKind::Done) => match fallback {
+            // The model wrote something: deliver it as the report, marked.
+            Some(text) => (text, PaneTurnEnd::Partial),
+            None => {
+                let verdict = cause
+                    .and_then(|c| c.detail.as_deref())
+                    .map(|v| format!(" (guard stop: {v})"))
+                    .unwrap_or_default();
+                (
+                    format!(
+                        "The pane turn ended without producing any text{verdict}. \
+                         The model wrote no report at all."
+                    ),
+                    PaneTurnEnd::Incomplete,
+                )
+            }
+        },
+    }
+}
+
 /// One manager-pane turn: the pane's harness assembled through the ONE
 /// assembly (`harness_assembly::assemble`), whose plain event stream is bridged
 /// into the SAME typed `SubagentEvent` stream the external ACP panes emit —
@@ -2337,11 +2445,49 @@ fn run_manager_turn(
             // Bridge: manager-loop events → typed SubagentEvents → the pane
             // channel. Same mapping the harness's internal sub-agent uses,
             // routed by pane index instead of call_ref.
+            //
+            // The bridge is ALSO the only place the loop's TERMINAL event is
+            // visible (`Done` / `Stopped` / `Error`), so it records it here.
+            // It used to fall into `_ => Vec::new()` alongside every
+            // display-only event, which threw the information away and left
+            // the turn's close unable to say anything but "stopped or
+            // errored" — the reason a cancelled-looking message appeared for
+            // turns nobody cancelled. `Arc<Mutex<_>>` because the future
+            // below is `move`d into the bridge task while the close reads it
+            // after the join.
+            let terminal_cause: Arc<std::sync::Mutex<Option<TerminalCause>>> =
+                Arc::new(std::sync::Mutex::new(None));
+            let cause_sink = terminal_cause.clone();
             let bridge_tx = event_tx.clone();
             let bridge = tokio::spawn(async move {
                 use cosh_tools::subagent::internal::InternalEventBridge;
                 let mut internal = InternalEventBridge::new();
                 while let Some(event) = loop_rx.recv().await {
+                    // The terminal event: record WHY the loop ended, then let
+                    // the display mapping below decide whether it also has a
+                    // visual representation (none of the three does — the
+                    // pane renders its own close).
+                    match &event {
+                        HarnessEvent::Done { checkup_verdict, .. } => {
+                            *cause_sink.lock().unwrap() = Some(TerminalCause {
+                                kind: TerminalKind::Done,
+                                detail: checkup_verdict.clone(),
+                            });
+                        }
+                        HarnessEvent::Stopped { .. } => {
+                            *cause_sink.lock().unwrap() = Some(TerminalCause {
+                                kind: TerminalKind::Stopped,
+                                detail: None,
+                            });
+                        }
+                        HarnessEvent::Error { message, .. } => {
+                            *cause_sink.lock().unwrap() = Some(TerminalCause {
+                                kind: TerminalKind::Error,
+                                detail: Some(message.clone()),
+                            });
+                        }
+                        _ => {}
+                    }
                     let events: Vec<SubagentEvent> = match event {
                         HarnessEvent::Token { text } => {
                             vec![InternalEventBridge::message(text)]
@@ -2442,9 +2588,20 @@ fn run_manager_turn(
             .await;
 
             // The report is the loop's closure (its last post-tool-call
-            // message); a stopped turn closes without one.
+            // message). A loop that closed without one still OWES a report
+            // (see `PaneTurnEnd`), so the last assistant text is used as the
+            // fallback — the same policy the ACP panes' `TurnClosure`
+            // already applies (its `previous` segment).
+            //
+            // `last_assistant_text` (not `final_answer`) is what makes the
+            // fallback possible: `close_loop` promotes only a TRAILING
+            // assistant item, so a turn that ended on a tool result has its
+            // text one item earlier, invisible to `final_answer`. Scanning
+            // past tool calls/results recovers exactly the text the model
+            // really wrote.
             manager.context_manager.close_loop();
             let final_answer = manager.context_manager.final_answer();
+            let fallback = manager.context_manager.last_assistant_text();
             // Persist the manager session BEFORE dropping the harness: the
             // context snapshot must be taken while the manager still owns
             // it. The pane is a REAL cosh session — the history panel lists
@@ -2455,19 +2612,17 @@ fn run_manager_turn(
             let _ = bridge.await;
             persist_manager_session(&store, &session_id, display, context_state);
 
-            let (output, stop_reason) = match final_answer {
-                Some(report) => (report, "end_turn".to_string()),
-                None => (
-                    "The manager turn ended without a report (stopped or errored).".to_string(),
-                    "cancelled".to_string(),
-                ),
-            };
+            // WHY the loop ended, as captured by the bridge. `None` means the
+            // loop never emitted a terminal event at all (a panic path the
+            // catch_unwind below handles separately, or a receiver drop).
+            let cause = terminal_cause.lock().unwrap().take();
+            let (output, end) = close_pane_turn(cause.as_ref(), final_answer, fallback);
             let _ = event_tx.send(HarnessEvent::AgentsPaneDone {
                 pane,
                 pane_id,
                 epoch,
                 output,
-                stop_reason,
+                stop_reason: end.as_str().to_string(),
                 // The cosh pane's session id IS the bound session: carried
                 // here so the Done handler seeds `pane.session_id` AND
                 // promotes the persisted pane ref to `Bound { agent: cosh,
@@ -2910,4 +3065,79 @@ mod tests {
         // An empty tail stays malformed (the command takes arguments).
         assert!(parse_worktree_command(Some("   ")).is_none());
     }
+
+    /// The classification table behind every pane turn's close. This is the
+    /// test that pins the ACTUAL bug: a turn that ended on its own without a
+    /// closure must never be reported as `cancelled`, and a turn whose model
+    /// DID write text must never report "no report".
+    #[test]
+    fn a_pane_turn_is_classified_from_its_real_terminal_cause() {
+        use cosh::harness::panes::PaneTurnEnd;
+
+        let done = TerminalCause {
+            kind: TerminalKind::Done,
+            detail: None,
+        };
+        let stopped = TerminalCause {
+            kind: TerminalKind::Stopped,
+            detail: None,
+        };
+        let errored = TerminalCause {
+            kind: TerminalKind::Error,
+            detail: Some("connector exploded".to_string()),
+        };
+        let guard = TerminalCause {
+            kind: TerminalKind::Done,
+            detail: Some("termination checkup @ max-iterations".to_string()),
+        };
+
+        // 1. A closure is the natural end.
+        let (text, end) = close_pane_turn(
+            Some(&done),
+            Some("the final answer".to_string()),
+            None,
+        );
+        assert_eq!((text.as_str(), end), ("the final answer", PaneTurnEnd::EndTurn));
+
+        // 2. THE REGRESSION: no closure, but the model wrote text one item
+        // earlier (the turn ended on a tool result). It must be delivered as
+        // a `partial` report — never as "ended without a report", and never
+        // as `cancelled`.
+        let (text, end) = close_pane_turn(
+            Some(&done),
+            None,
+            Some("now I'll edit core.rs".to_string()),
+        );
+        assert_eq!(text, "now I'll edit core.rs");
+        assert_eq!(end, PaneTurnEnd::Partial);
+        assert!(!end.is_failure(), "a partial report is real content");
+
+        // 3. Nothing written at all and a guard fired: `incomplete`, naming
+        // the guard so "why did it stop?" stays answerable.
+        let (text, end) = close_pane_turn(Some(&guard), None, None);
+        assert_eq!(end, PaneTurnEnd::Incomplete);
+        assert!(text.contains("max-iterations"), "{text}");
+
+        // A whitespace-only "answer" is NOT a report (the same trim contract
+        // the gate applies).
+        let (_, end) = close_pane_turn(Some(&done), None, Some("   ".to_string()));
+        assert_eq!(end, PaneTurnEnd::Incomplete);
+
+        // 4. `Stopped` is the USER's stop and the ONLY legitimate
+        // `cancelled` — for a pane the model cannot stop its own loop
+        // (`stop_agent_loop` is blocked).
+        let (_, end) = close_pane_turn(Some(&stopped), None, Some("half done".to_string()));
+        assert_eq!(end, PaneTurnEnd::Cancelled);
+
+        // 5. An error carries its real message as the report.
+        let (text, end) = close_pane_turn(Some(&errored), None, Some("partial".to_string()));
+        assert_eq!(text, "connector exploded");
+        assert_eq!(end, PaneTurnEnd::Error);
+
+        // 6. No terminal event at all is a harness defect, surfaced as such.
+        let (text, end) = close_pane_turn(None, None, Some("orphan text".to_string()));
+        assert_eq!(end, PaneTurnEnd::Error);
+        assert!(text.contains("bug, not a result"), "{text}");
+    }
+
 }

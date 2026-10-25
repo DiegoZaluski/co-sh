@@ -502,9 +502,15 @@ impl App {
                     // the persistence below both want it, and the match-arm
                     // binding owns the value (no Copy).
                     let binding = session;
-                    // The mirror's finish classification, captured before
-                    // `output` moves into the marker below.
-                    let failed = stop_reason == "error" || stop_reason == "cancelled";
+                    // How the turn ended, parsed ONCE from the wire spelling
+                    // and shared by every consumer below (the pane timeline,
+                    // the registry delivery, the mirror). Parsing here — not
+                    // at each use — is what keeps `cancelled` meaning "the
+                    // user stopped it" everywhere: the pane produces the
+                    // reason from its own terminal event now, so a guard stop
+                    // or a cut stream arrives as `incomplete`/`partial` and
+                    // can never be mistaken for a deliberate interrupt.
+                    let end = cosh::harness::panes::PaneTurnEnd::parse(&stop_reason);
                     let target =
                         either_split_mut(&mut self.agents_split, &mut self.parked_agents_split);
                     if let Some(split) = target {
@@ -525,7 +531,7 @@ impl App {
                         // timeline, and appending the report raw would let
                         // the coalescer merge it into that same entry —
                         // the "answer twice" bug.
-                        split.finish_turn(pane, &output, &stop_reason);
+                        split.finish_turn(pane, &output, end);
                     }
                     // The bridge's completion half: a pane turn the
                     // `agents_call` registry was tracking resolves HERE,
@@ -539,12 +545,18 @@ impl App {
                     let registry_id = either_split(&self.agents_split, &self.parked_agents_split)
                         .and_then(|split| split.pane_registry_id(pane));
                     if let Some(id) = registry_id {
-                        let report = if failed {
+                        // A failure's text IS the reason; a successful turn's
+                        // text is the report. `end` rides along so the
+                        // requester can qualify it (see `report_block`).
+                        let report = if end.is_failure() {
                             Err(output.clone())
                         } else {
                             Ok(output.clone())
                         };
-                        let requester = cosh::harness::panes::complete_request(&id, report);
+                        let requester = cosh::harness::panes::complete_request(
+                            &id,
+                            cosh::harness::panes::PaneReport::new(report, end),
+                        );
                         // The pane just freed: the queue service may
                         // dispatch its NEXT queued agent message in this
                         // same frame.
@@ -563,7 +575,7 @@ impl App {
                     // entry stops spinning. Runs even when the split is gone
                     // (no pane to read from — the sync would no-op; the
                     // binding below still persists).
-                    self.finish_agents_pane_mirror(pane, failed);
+                    self.finish_agents_pane_mirror(pane, end.is_failure());
                     // Persist the binding for the NEXT open: a `Name` pane
                     // promotes to `Bound { agent, session_id }` in the
                     // session metadata, so a mode switch or app restart

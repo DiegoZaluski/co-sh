@@ -213,17 +213,35 @@ impl Harness {
                 // error (the request is cancelled for THIS requester — a
                 // pane already working on it finishes its turn normally,
                 // the report simply is not delivered to a dead caller).
-                return tokio::select! {
+                // The result goes through `report_block` — the SAME builder
+                // the background drain uses — because this is the path where
+                // a non-final report is most dangerous: the requester blocked
+                // on the call, gets the text as its tool result, and has no
+                // other signal telling it the pane may not have finished. The
+                // old code returned the raw report here, so a blocked caller
+                // never saw the qualification a background caller did.
+                let answer = tokio::select! {
                     answer = rx => {
-                        answer.unwrap_or_else(
-                            |_| Err("the pane request was cancelled".to_string()),
-                        )
+                        answer.unwrap_or_else(|_| {
+                            super::panes::PaneReport::new(
+                                Err("the pane request was cancelled".to_string()),
+                                super::panes::PaneTurnEnd::Error,
+                            )
+                        })
                     }
                     () = wait_for_stop_signal(self.stop_signal.clone()) => {
                         super::panes::cancel_wait(&handle.request_id);
-                        Err("the agents_call wait was interrupted (stop requested)".to_string())
+                        return Err(
+                            "the agents_call wait was interrupted (stop requested)".to_string()
+                        );
                     }
                 };
+                return Ok(super::panes::report_block(
+                    &pane,
+                    &handle.request_id,
+                    answer.output.as_deref().map_err(String::as_str),
+                    answer.end,
+                ));
             }
             return Ok(format!(
                 "Message sent to pane '{pane}' in the background (request {}). \

@@ -1241,11 +1241,23 @@ impl AgentsSplitState {
     /// right after a tool call and fell back to a previous segment, a
     /// truncated report) keeps the entry: degrades to keeping, never to
     /// losing content.
-    pub fn finish_turn(&mut self, pane: usize, output: &str, stop_reason: &str) {
+    ///
+    /// `end` ([`cosh::harness::panes::PaneTurnEnd`]) decides both details —
+    /// whether the transcript seals failed and whether the marker is
+    /// prefixed. A `partial` report deliberately seals like a COMPLETED turn
+    /// (it carries the pane's real last text, which already streamed into
+    /// the timeline, so it must dedupe) while still being marked, so the
+    /// reader can tell "finished" from "cut off, here is what it managed".
+    pub fn finish_turn(
+        &mut self,
+        pane: usize,
+        output: &str,
+        end: cosh::harness::panes::PaneTurnEnd,
+    ) {
         let Some(p) = self.panes.get_mut(pane) else {
             return;
         };
-        p.activity.close_turn(output, stop_reason);
+        p.activity.close_turn(output, end);
     }
 
     /// The list label of pane `pane` in the right panel's mirror entry:
@@ -3022,7 +3034,11 @@ mod tests {
         assert_eq!(state.panes[0].activity.timeline.len(), 1);
 
         // The turn ends: the report IS that same text.
-        state.finish_turn(0, "Tudo bem! Como\nposso ajudar hoje?", "end_turn");
+        state.finish_turn(
+            0,
+            "Tudo bem! Como\nposso ajudar hoje?",
+            cosh::harness::panes::PaneTurnEnd::EndTurn,
+        );
 
         // The streamed entry was dropped (the report carries it) and the
         // report landed ONCE — the timeline never contains a doubled
@@ -3063,7 +3079,11 @@ mod tests {
                 text: "partial answer".to_string(),
             },
         );
-        failed.finish_turn(0, "spawn failed", "error");
+        failed.finish_turn(
+            0,
+            "spawn failed",
+            cosh::harness::panes::PaneTurnEnd::Error,
+        );
         let texts: Vec<String> = failed.panes[0]
             .activity
             .timeline
@@ -3106,7 +3126,11 @@ mod tests {
                 text: "como posso ajudar?".to_string(),
             },
         );
-        state.finish_turn(0, "tudo bem! como posso ajudar?", "end_turn");
+        state.finish_turn(
+            0,
+            "tudo bem! como posso ajudar?",
+            cosh::harness::panes::PaneTurnEnd::EndTurn,
+        );
         // Turn 2 (no tool call in between — the old merge crossed here).
         state.echo_turn_input(0, "qual seu nome?", true);
         state.apply_event(
@@ -3115,7 +3139,11 @@ mod tests {
                 text: "sou o Kilo.".to_string(),
             },
         );
-        state.finish_turn(0, "sou o Kilo.", "end_turn");
+        state.finish_turn(
+            0,
+            "sou o Kilo.",
+            cosh::harness::panes::PaneTurnEnd::EndTurn,
+        );
 
         let rows: Vec<(bool, String)> = state.panes[0]
             .activity

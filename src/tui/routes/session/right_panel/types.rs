@@ -23,6 +23,8 @@ use ratatui::buffer::{Buffer, Cell};
 use ratatui::layout::Rect;
 
 use crate::theme::Theme;
+use cosh::harness::panes::PaneTurnEnd;
+
 use crate::types::{Part, Session, ToolStatus};
 use crate::util::text_region::{TextRegion, extract_text_in_region};
 
@@ -1635,11 +1637,16 @@ impl SubagentActivity {
     /// The appended entry is bounded like every timeline text entry (a
     /// single chunk may itself exceed the cap — see
     /// [`bounded_tail`]/`SUBAGENT_TEXT_ENTRY_BYTES`).
-    pub(crate) fn close_turn(&mut self, output: &str, stop_reason: &str) {
-        let failed = stop_reason == "error" || stop_reason == "cancelled";
+    pub(crate) fn close_turn(&mut self, output: &str, end: PaneTurnEnd) {
+        let failed = end.is_failure();
         self.seal(!failed, Some(output));
-        let marker = if failed {
-            format!("\n\n[turn {stop_reason}] {output}")
+        // A `partial` report is NOT a failure (its text already streamed and
+        // must dedupe above) but it IS marked: the reader has to be able to
+        // tell "the pane finished" from "the pane was cut off and this is
+        // what it had". `end_turn` stays bare — the normal case carries no
+        // noise.
+        let marker = if end.is_marked() {
+            format!("\n\n[turn {}] {output}", end.as_str())
         } else {
             output.to_string()
         };
@@ -8283,7 +8290,7 @@ mod tests {
         closed.apply(&SubagentEvent::Message {
             text: "working final report".into(),
         });
-        closed.close_turn("working final report", "end_turn");
+        closed.close_turn("working final report", PaneTurnEnd::EndTurn);
         state.finish_agents_pane(1, &closed, false);
         let mirror = state
             .pty_sessions
@@ -8361,7 +8368,7 @@ mod tests {
         activity.apply(&SubagentEvent::Message {
             text: "primeira resposta.".into(),
         });
-        activity.close_turn("primeira resposta.", "end_turn");
+        activity.close_turn("primeira resposta.", PaneTurnEnd::EndTurn);
         state.sync_agents_pane(0, &activity, true, None);
 
         // Turn 2: the pane echoes the NEW input (fresh entry), streams its
@@ -8371,7 +8378,7 @@ mod tests {
         activity.apply(&SubagentEvent::Message {
             text: "segunda resposta.".into(),
         });
-        activity.close_turn("segunda resposta.", "end_turn");
+        activity.close_turn("segunda resposta.", PaneTurnEnd::EndTurn);
         state.finish_agents_pane(0, &activity, false);
 
         let mirror = state

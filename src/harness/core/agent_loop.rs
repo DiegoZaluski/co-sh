@@ -1733,6 +1733,35 @@ impl Harness {
                                 .to_string();
                         continue;
                     }
+                } else if assistant_response.trim().is_empty() {
+                    // The nudge budget is EXHAUSTED and the model still
+                    // produced nothing. This is the silent exit the budget's
+                    // own docs warn about (`STOP_NUDGE_BUDGET`: "the loop then
+                    // accepts the bare `stop` silently ... no trace"), and it
+                    // is the shape behind most "ended without a report"
+                    // reports.
+                    //
+                    // It cannot continue: the bound exists so a model that
+                    // keeps returning empty completions terminates instead of
+                    // looping to MAX_ITERATIONS. So the stop STANDS, but it
+                    // stops being silent here and is classified honestly
+                    // downstream — no Closure is recorded, so a pane turn
+                    // reports `incomplete` (never `cancelled`) and the failure
+                    // is attributable in the log and on screen.
+                    //
+                    // Deliberately no `current_input`: there is no next
+                    // request to steer.
+                    log::warn!(
+                        target: "laya",
+                        "natural-stop gate: EMPTY response with the nudge budget exhausted \
+                         (finish reason {reason}) — the turn ends with no output"
+                    );
+                    let _ = tx.send(HarnessEvent::Toast {
+                        message: "The model returned an empty response repeatedly; this \
+                                  turn ends without an answer."
+                            .to_string(),
+                        variant: ToastVariant::Warning,
+                    });
                 }
 
                 // No tools, no extraction failures, deliberate completion —

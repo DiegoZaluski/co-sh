@@ -1612,7 +1612,7 @@ async fn session_switch_fails_outstanding_pane_requests_and_resyncs_the_registry
     // `agents_call` tool at all.
     let answer = rx.await.expect("sender alive");
     assert!(
-        answer.is_err(),
+        answer.output.is_err(),
         "the queued request must fail on a session switch, not hang: {answer:?}"
     );
     assert!(
@@ -2368,7 +2368,13 @@ async fn agents_call_serves_a_queued_cosh_pane_end_to_end() {
 
     // The turn's end (keyed by pane) resolves the waiter with its report.
     assert_eq!(
-        panes::complete_request("cosh", Ok("report".to_string())),
+        panes::complete_request(
+            "cosh",
+            panes::PaneReport::new(
+                Ok("report".to_string()),
+                panes::PaneTurnEnd::EndTurn
+            )
+        ),
         Some(panes::MAIN),
         "a MAIN-requested pane turn resolves the wake promise's tag"
     );
@@ -2378,7 +2384,7 @@ async fn agents_call_serves_a_queued_cosh_pane_end_to_end() {
     drop(_guard);
     let rx = handle.receiver.expect("wait mode carries a receiver");
     let answer = rx.await.expect("sender alive");
-    assert_eq!(answer, Ok("report".to_string()));
+    assert_eq!(answer.output, Ok("report".to_string()));
 
     // No split: the same service does not panic with no pane set to serve.
     app.close_agents_split();
@@ -2630,7 +2636,13 @@ async fn a_main_initiated_pane_report_wakes_the_idle_main_agent() {
     // The pane's turn completes: the completion reports the MAIN
     // requester and the wake promise fires — the idle main agent starts
     // a FRESH turn carrying the report.
-    let requester = panes::complete_request("cosh", Ok("the pane's report".to_string()));
+    let requester = panes::complete_request(
+        "cosh",
+        panes::PaneReport::new(
+            Ok("the pane's report".to_string()),
+            panes::PaneTurnEnd::EndTurn,
+        ),
+    );
     assert_eq!(requester, Some(panes::MAIN));
     app.agents_split.as_mut().unwrap().set_running(0, false);
     app.wake_main_agent_if_promised(requester);
@@ -2678,7 +2690,13 @@ async fn a_user_initiated_pane_turn_never_wakes_the_main_agent() {
         !panes::has_queued_request("cosh"),
         "a user turn tracks no agents_call request"
     );
-    let requester = panes::complete_request("cosh", Ok("a user-driven report".to_string()));
+    let requester = panes::complete_request(
+        "cosh",
+        panes::PaneReport::new(
+            Ok("a user-driven report".to_string()),
+            panes::PaneTurnEnd::EndTurn,
+        ),
+    );
     assert_eq!(
         requester, None,
         "a user-initiated pane turn promises no output to any agent"
@@ -2723,7 +2741,13 @@ async fn a_manager_initiated_pane_report_never_wakes_the_main_agent() {
     let _ = handle;
     app.serve_agents_pane_queues();
     app.agents_split.as_mut().unwrap().set_running(0, false);
-    let requester = panes::complete_request("cosh", Ok("manager's report".to_string()));
+    let requester = panes::complete_request(
+        "cosh",
+        panes::PaneReport::new(
+            Ok("manager's report".to_string()),
+            panes::PaneTurnEnd::EndTurn,
+        ),
+    );
     assert_eq!(requester, Some(panes::MANAGER));
     app.wake_main_agent_if_promised(requester);
 
