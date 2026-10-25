@@ -428,6 +428,14 @@ pub struct App {
     /// late reset reach another session's messages. `pub(crate)`: cleared
     /// by `routes::session::delete` when it stops a deleted session's loop.
     pub(crate) stream_msg_id: Option<(String, String)>,
+    /// Message KEPT alive after a mid-stream reset (`ClearAssistant`): the
+    /// retried attempt re-streams from zero and its first delta REPLACES the
+    /// staged content in place, so the bubble never vanishes between the two
+    /// streams (removing the message made the chat text blink: the block
+    /// disappeared and reappeared on every retry). If no delta ever arrives,
+    /// the terminal handlers (`Done`/`Stopped`/`Error`) prune the stale
+    /// partial, restoring the old discard semantics at turn end.
+    pub(crate) cleared_stream_msg: Option<(String, String)>,
     terminal_focused: bool,
     pub(crate) agent_spinner: Option<AgentSpinner>,
     /// What the running agent loop is doing right now (drives the spinner
@@ -888,6 +896,7 @@ impl App {
             manual_compaction_active: false,
             paste_burst: paste_burst::PasteBurstState::default(),
             stream_msg_id: None,
+            cleared_stream_msg: None,
             #[cfg(feature = "embed")]
             pending_delete_db_name: None,
             #[cfg(feature = "embed")]

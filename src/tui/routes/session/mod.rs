@@ -36,7 +36,7 @@ mod text_regions;
 use msg_tokens::{
     RENDER_CACHE_BUDGET, RENDER_CACHE_GUARD_ROWS, RENDER_CACHE_LOW_WATER, msg_change_token,
     msg_content_token, msg_has_running_compaction, msg_has_running_install, mutable_msg_indices,
-    status_to_u8,
+    part_content_stamp, status_to_u8,
 };
 use part_lines::{
     SUMMARIZING_COLLAPSED_LINES, SUMMARIZING_PAD_V, compaction_color, compaction_line, install_line,

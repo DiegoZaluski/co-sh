@@ -469,6 +469,12 @@ pub(crate) struct StreamingMessageCache {
     pub(crate) tool_state_version: u64,
     /// Per-part heights (mirrors `part_heights_cache[idx]`).
     pub(crate) part_hs: Vec<u16>,
+    /// Per-part change stamps (`part_content_stamp`) captured at the last
+    /// build/update. The incremental path only patches the Text part, so a
+    /// changed stamp on ANY other part (a folding Reasoning block, a
+    /// completing tool box) must invalidate the identity and force a fresh
+    /// full rebuild — the part count alone cannot see an in-place fold.
+    pub(crate) part_stamps: Vec<u64>,
     /// Full-width (w × h) cells of the message (border + margins + parts).
     pub(crate) cells: Vec<ratatui::buffer::Cell>,
     /// Total message height.

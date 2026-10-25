@@ -260,6 +260,33 @@ impl App {
         Ok(false)
     }
 
+    /// Take the staged mid-stream-reset message as the CURRENT attempt's
+    /// re-stream target (see `ClearAssistant`). Returns the message id only
+    /// when the staged entry belongs to the given session; anything staged
+    /// for another session stays staged (its own turn may still resume).
+    fn take_cleared_stream_target(&mut self, sid: Option<&str>) -> Option<String> {
+        let (staged_sid, mid) = self.cleared_stream_msg.take()?;
+        if sid != Some(staged_sid.as_str()) {
+            self.cleared_stream_msg = Some((staged_sid, mid));
+            return None;
+        }
+        Some(mid)
+    }
+
+    /// Prune a staged mid-stream-reset message that was never re-streamed:
+    /// the turn ended (Done/Stopped/Error) without the retry delivering a
+    /// delta, so the failed attempt's partial content is removed — the same
+    /// discard semantics the old remove-on-reset behavior applied, just
+    /// deferred to the turn's end.
+    fn prune_unreused_cleared_stream(&mut self) {
+        let Some((sid, mid)) = self.cleared_stream_msg.take() else {
+            return;
+        };
+        if let Some(session) = self.state.session_cache.get_mut(&sid) {
+            session.messages.retain(|m| m.id != mid);
+        }
+    }
+
     pub(super) fn poll_events(&mut self) {
         use crate::types::{
             Message, MessageRole, Part, ReasoningPart, SessionStatus, TextPart, ToolPart,
@@ -671,19 +698,28 @@ impl App {
                     self.stream_msg_id = None;
                 }
                 HarnessEvent::ClearAssistant => {
-                    // The SDK retried a mid-stream failure: drop the partial
-                    // assistant message rendered from the failed attempt (it
-                    // would otherwise concatenate with the retried response).
-                    // Scoped to the message the attempt opened (BeginAssistant)
-                    // AND to the session the attempt belongs to — a session
-                    // switch during a background loop must never let a late
-                    // reset reach another session's transcript.
+                    // The SDK retried a mid-stream failure: the retried
+                    // response would otherwise concatenate with the partial
+                    // one. Instead of REMOVING the partial message (which
+                    // made the whole chat block vanish and reappear on every
+                    // retry — the "blinking chat" symptom during long
+                    // reasoning phases, where mid-stream resets are most
+                    // likely), KEEP it staged: the retried stream's first
+                    // delta clears the partial in place and re-streams into
+                    // the same bubble (same id, same position, no reflow
+                    // jump). Scoped to the message the attempt opened
+                    // (BeginAssistant) AND to the session the attempt
+                    // belongs to — a session switch during a background loop
+                    // must never let a late reset reach another session's
+                    // transcript. If no delta ever arrives, the terminal
+                    // handlers prune the stale partial.
+                    let cur_session = self.state.current_session_id.clone();
                     if let Some((sid, mid)) = self.stream_msg_id.take()
-                        && self.state.current_session_id.as_deref() == Some(&sid)
+                        && cur_session.as_deref() == Some(sid.as_str())
                         && let Some(session) = self.state.current_session_mut()
-                        && let Some(pos) = session.messages.iter().position(|m| m.id == mid)
+                        && session.messages.iter().any(|m| m.id == mid)
                     {
-                        session.messages.remove(pos);
+                        self.cleared_stream_msg = Some((sid, mid));
                     }
                 }
                 HarnessEvent::Token { text } => {
@@ -705,6 +741,19 @@ impl App {
                         continue;
                     }
                     let cur_session = self.state.current_session_id.clone();
+                    // A mid-stream reset staged this attempt's message for
+                    // reuse (see `ClearAssistant`). Read-only decision here:
+                    // the actual take/clear happens on the FIRST REAL delta
+                    // below — a leading noise chunk must neither open a
+                    // bubble nor wipe the staged partial.
+                    let staged_mid = if self.stream_msg_id.is_none() {
+                        self.cleared_stream_msg
+                            .as_ref()
+                            .filter(|(sid, _)| cur_session.as_deref() == Some(sid.as_str()))
+                            .map(|(_, mid)| mid.clone())
+                    } else {
+                        None
+                    };
                     let Some(session) = self.state.current_session_mut() else {
                         continue;
                     };
@@ -712,11 +761,11 @@ impl App {
                     // attempt never bleeds into the previous iteration's
                     // message (its tool parts would be at risk on a reset).
                     let taken_id = self.stream_msg_id.take();
-                    let target = taken_id
+                    let mut target_id = taken_id
                         .as_ref()
                         .filter(|(sid, _)| cur_session.as_deref() == Some(sid.as_str()))
-                        .and_then(|(_, mid)| session.messages.iter_mut().find(|m| m.id == *mid));
-                    if whitespace_only && target.is_none() {
+                        .map(|(_, mid)| mid.clone());
+                    if whitespace_only && target_id.is_none() {
                         // Leading whitespace before any text must never open
                         // a blank bubble — and the stream id goes back
                         // untouched: a break chunk must not disturb the
@@ -725,6 +774,30 @@ impl App {
                         self.stream_msg_id = taken_id;
                         continue;
                     }
+                    if target_id.is_none()
+                        && let Some(mid) = staged_mid
+                    {
+                        match session.messages.iter_mut().find(|m| m.id == mid) {
+                            Some(msg) => {
+                                // The retried stream's first real delta
+                                // replaces the failed partial in place: the
+                                // bubble never vanishes, it re-streams.
+                                msg.parts.clear();
+                                self.stream_msg_id =
+                                    cur_session.clone().map(|sid| (sid, mid.clone()));
+                                self.cleared_stream_msg = None;
+                                target_id = Some(mid);
+                            }
+                            None => {
+                                // The staged message is gone (deleted /
+                                // replaced): the stale flag must not linger.
+                                self.cleared_stream_msg = None;
+                            }
+                        }
+                    }
+                    let target = target_id
+                        .as_ref()
+                        .and_then(|mid| session.messages.iter_mut().find(|m| m.id == *mid));
                     match target {
                         Some(msg) => {
                             self.stream_msg_id = cur_session.map(|sid| (sid, msg.id.clone()));
@@ -1306,11 +1379,26 @@ impl App {
                     // A reasoning block is streaming: the model is thinking.
                     self.set_agent_activity(crate::types::AgentActivity::Pondering);
                     let cur_session = self.state.current_session_id.clone();
+                    // Same attempt-scoping as the Token handler: reasoning
+                    // belongs to the CURRENT attempt's message.
+                    // A mid-stream reset staged this attempt's message for
+                    // reuse: the retried stream's FIRST delta clears the
+                    // failed partial in place and re-streams into the same
+                    // bubble (see `ClearAssistant`).
+                    let staged_reuse = if self.stream_msg_id.is_none() {
+                        self.take_cleared_stream_target(cur_session.as_deref())
+                    } else {
+                        None
+                    };
                     let Some(session) = self.state.current_session_mut() else {
                         continue;
                     };
-                    // Same attempt-scoping as the Token handler: reasoning
-                    // belongs to the CURRENT attempt's message.
+                    if let Some(mid) = staged_reuse
+                        && let Some(msg) = session.messages.iter_mut().find(|m| m.id == mid)
+                    {
+                        msg.parts.clear();
+                        self.stream_msg_id = cur_session.clone().map(|sid| (sid, mid));
+                    }
                     let target = self
                         .stream_msg_id
                         .take()
@@ -1550,6 +1638,7 @@ impl App {
                     self.state.status = SessionStatus::Idle;
                     self.agent_spinner = None;
                     self.stream_msg_id = None;
+                    self.prune_unreused_cleared_stream();
                     // opencode model: the LSP engine is session-scoped (the
                     // process-wide singleton keeps servers alive between
                     // turns), so the footer keeps showing the last snapshot.
@@ -1746,6 +1835,7 @@ impl App {
                     self.state.status = SessionStatus::Idle;
                     self.agent_spinner = None;
                     self.stream_msg_id = None;
+                    self.prune_unreused_cleared_stream();
                     // Session-scoped servers (see the Done handler): keep the
                     // last LSP snapshot; the next turn refreshes it.
                     self.finalize_stale_compaction_lines();
@@ -1959,6 +2049,7 @@ impl App {
                     };
                     self.agent_spinner = None;
                     self.stream_msg_id = None;
+                    self.prune_unreused_cleared_stream();
 
                     if let Some(session) = self.state.current_session_mut() {
                         if self.telemetry.enabled() {

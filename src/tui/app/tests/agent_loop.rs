@@ -881,3 +881,190 @@ async fn agents_mode_right_panel_shows_the_main_agent_not_a_list() {
         "without the mirror the pane mirrors' list returns — normal behavior"
     );
 }
+
+/// A mid-stream reset during a Thought (long reasoning phases are where
+/// mid-stream retries are most likely) must not make the chat text blink:
+/// the failed attempt's partial message STAYS in place and the retried
+/// stream's first delta REPLACES its content in the same bubble (same id,
+/// same position, no reflow). The old remove-and-recreate behavior made the
+/// whole block vanish and reappear on every retry — the "blinking chat"
+/// incident. A partial that never gets re-streamed is pruned at turn end,
+/// restoring the old discard semantics.
+#[tokio::test]
+async fn mid_stream_reset_keeps_the_thought_bubble_instead_of_blinking() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    use cosh::harness::HarnessEvent;
+
+    let mut app = App::new("/tmp".to_string());
+    let id = crate::session::store::generate_session_id();
+    app.state.add_empty_session(
+        id.clone(),
+        "reset blink test".into(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64,
+    );
+    app.state.current_session_id = Some(id);
+    // A user prompt, like a real session.
+    {
+        let session = app.state.current_session_mut().unwrap();
+        session.messages.push(crate::types::Message {
+            id: "msg-0".into(),
+            role: crate::types::MessageRole::User,
+            parts: vec![crate::types::Part::Text(crate::types::TextPart {
+                text: "do the task".into(),
+                synthetic: false,
+            })],
+            created_at: 0,
+            agent: None,
+            model: None,
+        });
+    }
+
+    // Attempt 1: the Thought streams.
+    app.event_tx.send(HarnessEvent::BeginAssistant).ok();
+    for chunk in ["thinking hard", " about the task"] {
+        app.event_tx
+            .send(HarnessEvent::Reasoning {
+                text: chunk.to_string(),
+            })
+            .ok();
+    }
+    app.poll_events();
+    let staged_id = {
+        let session = app.state.current_session().unwrap();
+        assert_eq!(
+            session.messages.len(),
+            2,
+            "the Thought bubble is on screen"
+        );
+        session.messages[1].id.clone()
+    };
+
+    // The SDK retries mid-thought: the bubble must NOT vanish.
+    app.event_tx.send(HarnessEvent::ClearAssistant).ok();
+    app.poll_events();
+    {
+        let session = app.state.current_session().unwrap();
+        assert_eq!(
+            session.messages.len(),
+            2,
+            "a mid-stream reset must not remove the in-progress Thought bubble"
+        );
+        assert_eq!(
+            session.messages[1].id, staged_id,
+            "the bubble keeps its identity and position across the retry"
+        );
+    }
+
+    // A leading noise chunk of the retried stream must neither open a
+    // bubble nor wipe the staged partial (the replace happens on the first
+    // REAL delta only).
+    app.event_tx
+        .send(HarnessEvent::Token {
+            text: " ".into(),
+        })
+        .ok();
+    app.poll_events();
+    {
+        let session = app.state.current_session().unwrap();
+        assert_eq!(session.messages.len(), 2, "noise must not open a bubble");
+        let crate::types::Part::Reasoning(r) = &session.messages[1].parts[0] else {
+            panic!("expected a reasoning part");
+        };
+        assert!(
+            r.text.contains("thinking hard"),
+            "a noise chunk must not wipe the staged partial; got {:?}",
+            r.text
+        );
+    }
+
+    // The retry re-streams from zero: its FIRST delta replaces the failed
+    // partial in place (no duplicate block, no concatenation).
+    app.event_tx.send(HarnessEvent::BeginAssistant).ok();
+    app.event_tx
+        .send(HarnessEvent::Reasoning {
+            text: "retried thought".into(),
+        })
+        .ok();
+    app.poll_events();
+    {
+        let session = app.state.current_session().unwrap();
+        assert_eq!(
+            session.messages.len(),
+            2,
+            "the retried attempt re-streams into the SAME bubble"
+        );
+        assert_eq!(session.messages[1].id, staged_id);
+        let crate::types::Part::Reasoning(r) = &session.messages[1].parts[0] else {
+            panic!("expected a reasoning part, got {:?}", session.messages[1].parts);
+        };
+        assert_eq!(
+            r.text, "retried thought",
+            "the failed partial was replaced, not concatenated"
+        );
+    }
+
+    // The retried stream continues normally into the same message.
+    app.event_tx
+        .send(HarnessEvent::Token {
+            text: "the answer".into(),
+        })
+        .ok();
+    app.poll_events();
+    {
+        let session = app.state.current_session().unwrap();
+        assert_eq!(session.messages.len(), 2);
+        assert!(
+            session.messages[1]
+                .parts
+                .iter()
+                .any(|p| matches!(p, crate::types::Part::Text(t) if t.text == "the answer")),
+            "the retried answer streams into the reused bubble"
+        );
+    }
+
+    // A partial that never gets re-streamed is pruned at turn end (Error
+    // terminal here — the cheapest terminal event to drive). A NEW attempt
+    // opens a NEW bubble (BeginAssistant dissociates the old one); its reset
+    // stages THAT message for reuse.
+    app.event_tx.send(HarnessEvent::BeginAssistant).ok();
+    app.event_tx
+        .send(HarnessEvent::Token {
+            text: "second attempt partial".into(),
+        })
+        .ok();
+    app.poll_events();
+    let stale_id = {
+        let session = app.state.current_session().unwrap();
+        assert_eq!(session.messages.len(), 3, "a new attempt opens a new bubble");
+        session.messages[2].id.clone()
+    };
+    app.event_tx.send(HarnessEvent::ClearAssistant).ok();
+    app.poll_events();
+    assert_eq!(
+        app.state.current_session().unwrap().messages.len(),
+        3,
+        "the stale partial stays staged (kept, not removed) until the turn ends"
+    );
+    app.event_tx
+        .send(HarnessEvent::Error {
+            message: "stream failed for good".into(),
+            context: None,
+            checkup_verdict: None,
+        })
+        .ok();
+    app.poll_events();
+    let session = app.state.current_session().unwrap();
+    assert!(
+        !session.messages.iter().any(|m| m.id == stale_id),
+        "the never-re-streamed partial is pruned at turn end; messages={:?}",
+        session.messages.iter().map(|m| (m.id.clone(), m.parts.len())).collect::<Vec<_>>()
+    );
+    assert!(
+        session.messages.iter().any(|m| m.id == staged_id),
+        "the earlier reused bubble (with the retried content) survives"
+    );
+}

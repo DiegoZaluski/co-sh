@@ -127,6 +127,7 @@ impl App {
             // `Streaming`/`Question` events keyed by the old id must not
             // append to whatever session is viewed next.
             self.stream_msg_id = None;
+            self.cleared_stream_msg = None;
             self.agent_spinner = None;
             if self
                 .edit_requeue_hint

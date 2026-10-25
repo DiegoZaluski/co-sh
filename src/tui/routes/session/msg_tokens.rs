@@ -96,3 +96,43 @@ pub(super) fn msg_content_token(
     h = h.wrapping_mul(31).wrapping_add(max_w as u64);
     h
 }
+
+/// Cheap per-part change stamp for the streaming render cache's identity
+/// check. The streaming cache patches only the LAST `Text` part
+/// incrementally; every OTHER part must force a fresh rebuild when its
+/// render-relevant content changes — the part COUNT alone cannot see an
+/// in-place change, and `push_reasoning` deliberately keeps the count fixed
+/// (interleaved thinking folds each delta into the Reasoning part that
+/// precedes the answer). Lengths are enough because the mutable parts only
+/// ever grow in place; statuses and flags ride along as small integers.
+pub(super) fn part_content_stamp(part: &Part) -> u64 {
+    match part {
+        Part::Text(t) => t.text.len() as u64,
+        Part::Reasoning(r) => r.text.len() as u64,
+        Part::Tool(t) => {
+            let mut h = u64::from(status_to_u8(&t.status));
+            h = h
+                .wrapping_mul(31)
+                .wrapping_add(t.output.as_ref().map_or(0, |o| o.len()) as u64);
+            h = h.wrapping_mul(31).wrapping_add(u64::from(t.is_start));
+            h = h.wrapping_mul(31).wrapping_add(u64::from(t.is_streaming));
+            h = h
+                .wrapping_mul(31)
+                .wrapping_add(t.cached_line_count.unwrap_or(0) as u64);
+            h.wrapping_mul(31).wrapping_add(
+                t.lsp_notes
+                    .as_ref()
+                    .map_or(0, |n| n.errors.len() + n.warnings.len()) as u64,
+            )
+        }
+        Part::Compaction(c) => c.text.len() as u64 * 2 + u64::from(c.is_running()),
+        Part::Install(p) => {
+            let mut h = p.bytes_done;
+            h = h.wrapping_mul(31).wrapping_add(p.bytes_total);
+            h.wrapping_mul(31).wrapping_add(
+                u64::from(p.elapsed_ms.is_some()) * 2 + u64::from(p.failed.is_some()),
+            )
+        }
+        Part::File(_) => 0,
+    }
+}

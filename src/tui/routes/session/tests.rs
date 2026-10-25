@@ -24,6 +24,7 @@ use crate::types::{
 };
 
 use super::SessionView;
+use super::tool_render::ToolRenderState;
 
 /// Build a minimal Theme for testing.
 fn test_theme() -> Theme {
@@ -9495,4 +9496,242 @@ fn regression_hover_must_not_mutate_layout_during_streaming() {
         }
     }
     assert!(checked > 0, "probe streamed at least one frame");
+}
+
+// ── Interleaved Thought growth after the answer text opened ────────────────
+//
+// Reproduction of the "tail cut off, unscrollable until a resize" incident:
+// reasoning deltas that keep arriving AFTER the answer's Text part exists
+// fold into the existing Reasoning part (`push_reasoning`), so neither the
+// message count nor the part count changes. The streaming render cache's
+// identity check only compares the part COUNT, so its painted cells and the
+// heights it feeds the height cache froze at the build-frame values while
+// the thought kept growing — the true tail was neither painted nor
+// reachable, and only a width-changing resize (full rebuild) healed it.
+
+/// Re-estimate the message's part heights from its CURRENT content (the
+/// ground truth the caches must track).
+fn fresh_part_heights(
+    msg: &Message,
+    max_w: u16,
+    config: &TuiConfig,
+    tool_state: &ToolRenderState,
+) -> Vec<u16> {
+    msg.parts
+        .iter()
+        .map(|p| SessionView::estimate_part_height(p, max_w, config, &msg.role, tool_state))
+        .collect()
+}
+
+#[test]
+fn interleaved_thought_growth_keeps_heights_and_tail_fresh() {
+    let theme = test_theme();
+    let config = test_config();
+    let area = Rect::new(0, 0, 80, 24);
+    let max_w = area.width.saturating_sub(6);
+
+    let mut state = test_state(Message {
+        id: "msg-stream".into(),
+        role: MessageRole::Assistant,
+        parts: vec![
+            Part::Reasoning(ReasoningPart {
+                text: "first thought segment MARKER-0".into(),
+                collapsed: true,
+            }),
+            Part::Text(TextPart {
+                text: "answer opening".into(),
+                synthetic: false,
+            }),
+        ],
+        created_at: 0,
+        agent: None,
+        model: None,
+    });
+
+    let mut view = SessionView::new();
+
+    // Build frame: the streaming cache is created here (last part = Text).
+    let mut buf = Buffer::empty(area);
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+    // Interleaved thinking: each delta folds into the EXISTING reasoning part
+    // (exactly what `push_reasoning` does once a Text part is present).
+    for k in 1..=6 {
+        if let Some(session) = state.current_session_mut() {
+            session.messages[0]
+                .push_reasoning(&format!("\n\nthought segment {k} MARKER-{k}"));
+        }
+        let mut buf = Buffer::empty(area);
+        view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+        let msg = &state.current_session().unwrap().messages[0];
+        let expected = fresh_part_heights(msg, max_w, &config, &view.tool_state);
+        assert_eq!(
+            view.part_heights_cache[0], expected,
+            "frame {k}: the streaming cache must re-measure the growing thought"
+        );
+        let expected_msg_h = SessionView::render_message_height(
+            msg,
+            max_w,
+            &config,
+            Some(&expected),
+            &view.tool_state,
+        );
+        assert_eq!(
+            view.msg_height_cache[0], expected_msg_h,
+            "frame {k}: the cached message height must track the growing thought"
+        );
+    }
+
+    // The final delta must be reachable at the bottom (sticky) and painted.
+    view.scroll_to_bottom();
+    let mut buf = Buffer::empty(area);
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+    let text = buffer_text(&buf);
+    assert!(
+        text.contains("MARKER-6"),
+        "the thought's final delta must be painted at the reachable bottom; \
+         got:\n{text}"
+    );
+    assert!(
+        text.contains("MARKER-5"),
+        "the second-to-last thought delta must be painted too; got:\n{text}"
+    );
+}
+
+#[test]
+fn thought_streaming_through_text_opening_keeps_the_tail_reachable() {
+    // The full incident shape: a reasoning-ONLY message streams first
+    // (healthy path), the answer's Text part then opens (fresh cache build),
+    // and reasoning deltas KEEP folding afterwards (the freeze window).
+    let theme = test_theme();
+    let config = test_config();
+    let area = Rect::new(0, 0, 80, 24);
+    let max_w = area.width.saturating_sub(6);
+
+    let mut state = test_state(Message {
+        id: "msg-stream".into(),
+        role: MessageRole::Assistant,
+        parts: vec![Part::Reasoning(ReasoningPart {
+            text: "thinking phase MARKER-0".into(),
+            collapsed: true,
+        })],
+        created_at: 0,
+        agent: None,
+        model: None,
+    });
+
+    let mut view = SessionView::new();
+
+    // Phase A: reasoning-only streaming (several deltas, one frame each).
+    for k in 1..=3 {
+        if let Some(session) = state.current_session_mut() {
+            session.messages[0].push_reasoning(&format!("\n\nmore thinking {k}"));
+        }
+        let mut buf = Buffer::empty(area);
+        view.render(&mut buf, area, &state, &theme, &config, 0.016);
+    }
+
+    // Phase B: the answer text opens (a new part is appended).
+    if let Some(session) = state.current_session_mut() {
+        session.messages[0].parts.push(Part::Text(TextPart {
+            text: "answer begins".into(),
+            synthetic: false,
+        }));
+    }
+    let mut buf = Buffer::empty(area);
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+    // Phase C: interleaved reasoning deltas keep folding into the existing
+    // Reasoning part while the answer text also keeps streaming.
+    for k in 4..=8 {
+        if let Some(session) = state.current_session_mut() {
+            session.messages[0]
+                .push_reasoning(&format!("\n\nlate thought {k} TAIL-{k}"));
+            if let Some(Part::Text(t)) = session.messages[0].parts.last_mut() {
+                t.text.push_str(&format!(" and more answer {k}"));
+            }
+        }
+        let mut buf = Buffer::empty(area);
+        view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+        let msg = &state.current_session().unwrap().messages[0];
+        let expected = fresh_part_heights(msg, max_w, &config, &view.tool_state);
+        assert_eq!(
+            view.part_heights_cache[0], expected,
+            "phase-C frame {k}: the folded thought growth must be re-measured"
+        );
+    }
+
+    // The last folded thought delta must be reachable and painted.
+    view.scroll_to_bottom();
+    let mut buf = Buffer::empty(area);
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+    let text = buffer_text(&buf);
+    assert!(
+        text.contains("TAIL-8"),
+        "the thought tail folded after the answer opened must be reachable \
+         and painted; got:\n{text}"
+    );
+}
+
+#[test]
+fn tool_completion_inside_the_streaming_message_is_remeasured() {
+    use crate::types::{ToolPart, ToolStatus};
+
+    // A tool box that completes (Running → Completed, output arrives) inside
+    // the still-streaming last message must re-measure too: the box's height
+    // estimate changes with its status/output, and the frozen streaming
+    // cache would clip the message the same way the folded thought does.
+    let theme = test_theme();
+    let config = test_config();
+    let area = Rect::new(0, 0, 80, 24);
+    let max_w = area.width.saturating_sub(6);
+
+    let tool = ToolPart {
+        tool: "bash_run".into(),
+        input: serde_json::json!({ "command": "echo hi" }),
+        output: None,
+        status: ToolStatus::Running,
+        tool_call_id: Some("bash-1".into()),
+        is_start: true,
+        is_streaming: false,
+        cached_line_count: None,
+        lsp_notes: None,
+    };
+    let mut state = test_state(Message {
+        id: "msg-stream".into(),
+        role: MessageRole::Assistant,
+        parts: vec![
+            Part::Tool(tool),
+            Part::Text(TextPart {
+                text: "running the command".into(),
+                synthetic: false,
+            }),
+        ],
+        created_at: 0,
+        agent: None,
+        model: None,
+    });
+
+    let mut view = SessionView::new();
+    let mut buf = Buffer::empty(area);
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+    // The tool completes in place while the message keeps streaming.
+    if let Some(session) = state.current_session_mut() {
+        if let Some(Part::Tool(t)) = session.messages[0].parts.first_mut() {
+            t.status = ToolStatus::Completed;
+            t.output = Some((0..15).map(|i| format!("output line {i}\n")).collect());
+        }
+    }
+    let mut buf = Buffer::empty(area);
+    view.render(&mut buf, area, &state, &theme, &config, 0.016);
+
+    let msg = &state.current_session().unwrap().messages[0];
+    let expected = fresh_part_heights(msg, max_w, &config, &view.tool_state);
+    assert_eq!(
+        view.part_heights_cache[0], expected,
+        "the completed tool's new height must be re-measured, not frozen"
+    );
 }

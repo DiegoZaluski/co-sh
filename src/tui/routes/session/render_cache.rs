@@ -232,6 +232,11 @@ impl SessionView {
         let config_tok = config_token(config);
         let width = inner_area.width;
         let text_pi = msg.parts.len() - 1;
+        // Per-part change stamps: the incremental path only patches the Text
+        // part, so any in-place change of another part (a Reasoning block the
+        // deltas keep folding into, a tool box completing mid-stream) must
+        // force a fresh full rebuild — the part COUNT cannot see those.
+        let part_stamps: Vec<u64> = msg.parts.iter().map(part_content_stamp).collect();
         // Track which message the streaming cache is rendering: while deltas
         // keep arriving to it AFTER a queued message was injected below it
         // (it is no longer `last`), the height cache must keep re-estimating
@@ -245,6 +250,12 @@ impl SessionView {
                 && sc.config_token == config_tok
                 && sc.tool_state_version == self.tool_state.version
                 && sc.part_hs.len() == msg.parts.len()
+                // Only the NON-text parts gate the identity: the streaming
+                // Text part grows on every delta by design (its own
+                // incremental cache patches it), so its stamp must not
+                // invalidate the cache — comparing it would force a fresh
+                // full rebuild per frame and destroy the O(delta) path.
+                && sc.part_stamps[..text_pi] == part_stamps[..text_pi]
                 && sc.text.as_ref().is_some_and(|t| t.part_index == text_pi)
         });
 
@@ -309,6 +320,7 @@ impl SessionView {
                 config_token: config_tok,
                 tool_state_version: self.tool_state.version,
                 part_hs,
+                part_stamps,
                 cells,
                 height: msg_h,
                 text: Some(text_cache),
