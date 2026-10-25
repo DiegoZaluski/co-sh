@@ -638,31 +638,68 @@ impl App {
 
             // Check permission dialog for keyboard navigation
             if self.permission_dialog.visible {
-                match key.code {
-                    KeyCode::Up => {
-                        self.permission_dialog.selected = (self.permission_dialog.selected + 2) % 3;
-                        return Ok(false);
+                // A pending `agents_worktree` ask RESOLVES FIRST: while it
+                // is parked, this box belongs to it (the ask is the
+                // agent's, the answer is the user's, resolved App-side —
+                // never sent into the main loop's `perm_tx`).
+                if self.pending_worktree_confirmation.is_some() {
+                    match key.code {
+                        KeyCode::Up => {
+                            self.permission_dialog.selected =
+                                (self.permission_dialog.selected + 2) % 3;
+                            return Ok(false);
+                        }
+                        KeyCode::Down => {
+                            self.permission_dialog.selected =
+                                (self.permission_dialog.selected + 1) % 3;
+                            return Ok(false);
+                        }
+                        KeyCode::Enter => {
+                            let action = match self.permission_dialog.selected {
+                                0 => crate::routes::session::permission::PermissionAction::Allow,
+                                1 => {
+                                    crate::routes::session::permission::PermissionAction::AllowOnce
+                                }
+                                _ => crate::routes::session::permission::PermissionAction::Deny,
+                            };
+                            self.resolve_pending_worktree_permission(action);
+                            return Ok(false);
+                        }
+                        KeyCode::Esc => {
+                            self.resolve_pending_worktree_permission(
+                                crate::routes::session::permission::PermissionAction::Deny,
+                            );
+                            return Ok(false);
+                        }
+                        _ => {}
                     }
-                    KeyCode::Down => {
-                        self.permission_dialog.selected = (self.permission_dialog.selected + 1) % 3;
-                        return Ok(false);
+                } else {
+                    match key.code {
+                        KeyCode::Up => {
+                            self.permission_dialog.selected = (self.permission_dialog.selected + 2) % 3;
+                            return Ok(false);
+                        }
+                        KeyCode::Down => {
+                            self.permission_dialog.selected = (self.permission_dialog.selected + 1) % 3;
+                            return Ok(false);
+                        }
+                        KeyCode::Enter => {
+                            let action = match self.permission_dialog.selected {
+                                0 => cosh::harness::PermissionAction::Allow,
+                                1 => cosh::harness::PermissionAction::AllowOnce,
+                                _ => cosh::harness::PermissionAction::Deny,
+                            };
+                            self.permission_dialog.visible = false;
+                            let _ = self.perm_tx.send(action);
+                            return Ok(false);
+                        }
+                        KeyCode::Esc => {
+                            self.permission_dialog.visible = false;
+                            let _ = self.perm_tx.send(cosh::harness::PermissionAction::Deny);
+                            return Ok(false);
+                        }
+                        _ => {}
                     }
-                    KeyCode::Enter => {
-                        let action = match self.permission_dialog.selected {
-                            0 => cosh::harness::PermissionAction::Allow,
-                            1 => cosh::harness::PermissionAction::AllowOnce,
-                            _ => cosh::harness::PermissionAction::Deny,
-                        };
-                        self.permission_dialog.visible = false;
-                        let _ = self.perm_tx.send(action);
-                        return Ok(false);
-                    }
-                    KeyCode::Esc => {
-                        self.permission_dialog.visible = false;
-                        let _ = self.perm_tx.send(cosh::harness::PermissionAction::Deny);
-                        return Ok(false);
-                    }
-                    _ => {}
                 }
             }
 

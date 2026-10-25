@@ -6,12 +6,17 @@
 //!   (wait mode resolves inline, background mode parks a [`PaneDelivery`]).
 //! - [`enqueue_worktree_op`] / [`peek_worktree_op`] / [`pop_worktree_op`] /
 //!   [`complete_worktree_op`] carry `agents_worktree` asks: the tool parks
-//!   an op, the App drains it (it owns the confirmation box and every git
-//!   side effect) and the outcome comes back as a [`DeliveryKind::Worktree`]
-//!   delivery.
+//!   an op, the App drains it (it owns the permission box and every git
+//!   side effect) and the outcome normally flows back INTO the paused tool
+//!   call as its result ([`take_ready_worktree_delivery`]); only a
+//!   stop-interrupted ask falls back to a [`DeliveryKind::Worktree`]
+//!   delivery on a later turn.
 //!
 //! Both bridges share ONE contract, which is why they share this module and
-//! the same pane ids: a tool call NEVER waits on the App's frame loop. It
+//! the same pane ids: a tool call never blocks ON GIT or on anything the
+//! registry cannot answer — the MAIN loop's `agents_worktree` tool is the
+//! ONE exception, and it pauses cleanly inside `dispatch_next` while the
+//! App owns the permission box and the git side effects. Everything else
 //! parks its ask, returns a receipt, and the truth arrives later through the
 //! requester's loop drain ([`take_ready_deliveries`] →
 //! [`delivery_note`]). Nothing here is `agents_call`-specific.
@@ -118,8 +123,11 @@ pub enum DeliveryKind {
 
 /// A finished request whose answer is waiting for its requester's next
 /// loop drain, or a finished worktree op's closing note (background mode
-/// only — wait mode resolves inline; worktree ops NEVER wait: the tool
-/// returns a receipt and the outcome arrives here, same drain).
+/// only — wait mode resolves inline; worktree ops normally do not linger:
+/// the tool call pauses inside `dispatch_next` and consumes the outcome
+/// itself, so a [`DeliveryKind::Worktree`] delivery here is the
+/// EXCEPTION path — an ask that was stop-interrupted or otherwise left
+/// parked reaches its loop on a later turn through this same drain).
 #[derive(Debug)]
 pub struct PaneDelivery {
     /// The pane that produced the answer.
@@ -163,8 +171,8 @@ impl WorktreeAction {
 /// and executes it, owning every side effect.
 #[derive(Debug, Clone)]
 pub struct WorktreeOp {
-    /// Registry-unique op id (`wt-op-<n>`), echoed in the receipt and the
-    /// completion delivery so the requesting loop can pair them.
+    /// Registry-unique op id (`wt-op-<n>`), echoed in the tool result and in
+    /// any later Worktree delivery so the requesting loop can pair them.
     pub id: String,
     /// Addressable pane id the op targets — the same ids `agents_call`
     /// addresses (`agents_worktree_tool` carries them as its schema enum).
@@ -618,14 +626,16 @@ pub fn cancel_wait(request_id: &str) {
 /// does NOT end while the answer is still outstanding — ending it would
 /// orphan the wait and lose the report.
 ///
-/// A parked `agents_worktree` op counts for the same reason. Its receipt
-/// already reached the model, but the OUTCOME (executed, refused by the
-/// user, failed in git) is still owed to this loop as a Worktree delivery:
-/// ending the turn here would leave the op to be drained by a later,
-/// unrelated turn — or never, if the session closes — and the model would
-/// have finished believing a binding change happened when nobody knows yet.
-/// Ops are cheap to wait for (the App drains them every frame) and a user
-/// confirmation answers promptly, so this cannot hang the loop.
+/// A parked `agents_worktree` op counts for the same reason — but only on
+/// the EXCEPTION path. Normally the asking tool call pauses inside
+/// `dispatch_next` until the App resolves the ask, so by the time the turn
+/// can end the outcome is already in the model's hands. What still parks
+/// here is a stop-interrupted ask: the OUTCOME (executed, refused by the
+/// user, failed in git) is then still owed to this loop as a Worktree
+/// delivery, and ending the turn would leave it to a later, unrelated turn
+/// — or never, if the session closes. Ops are cheap to wait for (the App
+/// drains them every frame) and a user permission box answers promptly, so
+/// this cannot hang the loop.
 #[must_use]
 pub fn has_outstanding_requests(requester: &str) -> bool {
     let state = registry().lock().unwrap_or_else(|p| p.into_inner());
@@ -675,6 +685,23 @@ pub fn take_ready_deliveries(requester: &str) -> Vec<PaneDelivery> {
     ready
 }
 
+/// Take the ONE Worktree-kind delivery addressed to `requester` with the
+/// given op id, without touching any other parked delivery. The paused
+/// `agents_worktree` dispatch polls this — `take_ready_deliveries` would
+/// also sweep up unrelated `agents_call` reports sitting in the same
+/// queue and drop them (the loop would never see those reports).
+/// `None` while the ask is still pending.
+#[must_use]
+pub fn take_ready_worktree_delivery(requester: &str, request_id: &str) -> Option<PaneDelivery> {
+    let mut state = registry().lock().unwrap_or_else(|p| p.into_inner());
+    let index = state.deliveries.iter().position(|delivery| {
+        delivery.requester == requester
+            && delivery.request_id == request_id
+            && delivery.kind == DeliveryKind::Worktree
+    })?;
+    Some(state.deliveries.remove(index))
+}
+
 /// Render one finished delivery as the `[automated notification]` user
 /// turn both loop drain sites inject (the per-turn drain and the pre-Done
 /// busy-guard): same contract, same shape — the body differs per kind (a
@@ -698,16 +725,17 @@ pub fn delivery_note(delivery: &PaneDelivery) -> String {
 
 /// Park one `agents_worktree` ask — the mirror of [`enqueue`]'s contract,
 /// minus the wait-mode half. The op is FIFO-queued in the registry until
-/// the App's frame drain pops it; the outcome ALWAYS comes back as a
-/// Worktree-kind delivery in the requester's loop drain (an op may need
-/// the user's confirmation, and a tool result cannot sit across frames —
-/// the receipt is the tool's instant answer, the delivery is the truth).
+/// the App's frame drain pops it; the asking tool call then pauses inside
+/// `dispatch_next` and consumes the outcome itself
+/// ([`take_ready_worktree_delivery`]), so the tool result IS the truth.
+/// Only a stop-interrupted ask falls back to a Worktree-kind delivery in
+/// the requester's loop drain on a later turn.
 ///
 /// The TARGET rule is uniform: every pane in the set is addressable, the
 /// cosh (`is_manager`) ones included — a cosh pane runs a real agent session
 /// with its own cwd, so isolating one is a legitimate ask exactly like
 /// isolating a `claude` pane, and it is the supremacy check (a
-/// User-assigned binding always opens the user's confirmation box) plus the
+/// User-assigned binding always opens the user's permission box) plus the
 /// pane-stripping (`with_own_pane_id` removes this tool from every pane
 /// loop) that keep the user in charge. The old blanket refusal of cosh panes
 /// made `/worktree` the ONLY way to isolate them, which is exactly the
@@ -788,10 +816,12 @@ pub fn pop_worktree_op() -> Option<WorktreeOp> {
 }
 
 /// Deliver a worktree op's outcome to its requester's loop drain: the
-/// tool returned the receipt earlier, so this Worktree-kind delivery is
-/// the outcome's ONLY consumer path (same drain as a background
-/// `agents_call` report — [`delivery_note`] renders the automated
-/// notification).
+/// tool parked the ask and is PAUSED on it (its dispatch polls for this
+/// delivery as its own tool result), so this is the outcome's FIRST
+/// consumer path. If the requester's wait was interrupted by a stop, the
+/// delivery stays parked instead and reaches the loop through its drain
+/// (same path as a background `agents_call` report — [`delivery_note`]
+/// renders the automated notification).
 pub fn complete_worktree_op(op: &WorktreeOp, outcome: Result<String, String>) {
     let mut state = registry().lock().unwrap_or_else(|p| p.into_inner());
     state.deliveries.push(PaneDelivery {
@@ -983,8 +1013,9 @@ pub fn agents_call_tool() -> super::core::HarnessTool {
 /// the same addressable ids `agents_call` speaks, the cosh (`is_manager`)
 /// panes INCLUDED — a cosh pane runs a real agent session with its own cwd,
 /// so the agent may ask to isolate it exactly like any other pane, and the
-/// user keeps the final word through the confirmation box a User-assigned
-/// binding always opens. Registered ONLY when panes exist and
+/// user keeps the final word through the session permission box (Allow /
+/// Allow Once / Deny) a User-assigned binding always opens. Registered ONLY
+/// when panes exist and
 /// stripped from every pane loop by `with_own_pane_id` — so a pane can
 /// never rebind itself or a peer. Worktrees stay opt-in (the agent asks, the
 /// user can always veto a User-assigned pane's rebinding).
@@ -1010,11 +1041,12 @@ pub fn agents_worktree_tool() -> super::core::HarnessTool {
              include this in your delegation message when you assign one.\n\
              - The pane's UNCOMMITTED work is not carried along — assign a pane BEFORE it \
              starts editing, or after it committed.\n\
-             - Rebinding a pane the USER assigned to a worktree opens a confirmation box the \
-             user must answer (their binding, their call — even in autonomous runs); the \
-             ask may therefore wait a while. The outcome always arrives as an \
-             [automated notification] to THIS loop: the receipt below only confirms the ask \
-             was parked."
+             - Rebinding a pane the USER assigned to a worktree opens the session permission \
+             box (Allow / Allow Once / Deny) the user must answer — their binding, their call \
+             (even in autonomous runs) — and THIS tool call pauses until they do. The call's \
+             result IS the outcome: success text on Allow, a refusal explanation on Deny. If \
+             the turn is stopped while the box is open, the ask stays parked and its outcome \
+             arrives later as an [automated notification]."
         ),
         input_schema: serde_json::json!({
             "type": "object",

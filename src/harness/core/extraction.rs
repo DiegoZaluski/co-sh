@@ -120,10 +120,12 @@ impl Harness {
             // The explicit arm also keeps the catch-all below from
             // swallowing the call with an empty result.
             "agents_call" => None,
-            // `agents_worktree` is async the same way: the tool result is
-            // only the parking receipt — the binding outcome arrives later
-            // as a Worktree-kind delivery, so the call must reach the
-            // dispatch arm, never resolve inline here.
+            // `agents_worktree` is async the same way: the call must reach
+            // the dispatch arm, never resolve inline here. There the tool
+            // pauses until the App resolves the ask (usually the session
+            // permission box) and the outcome becomes the tool result; only
+            // a stop-interrupted ask is left parked for a later-turn
+            // Worktree delivery.
             "agents_worktree" => None,
             _ => Some(String::new()),
         }

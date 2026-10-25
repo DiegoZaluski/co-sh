@@ -3419,11 +3419,12 @@ async fn agents_worktree_clear_of_user_binding_needs_the_user() {
     .expect("the ask parks");
     app.serve_agents_pane_worktree_ops();
 
-    // Parked on the user's answer: the dialog is up, the binding is
-    // UNCHANGED, and nothing was delivered yet.
+    // Parked on the user's answer: the SESSION permission box is up (the
+    // same inline box the main loop's permission requests use), the
+    // binding is UNCHANGED, and nothing was delivered yet.
     assert!(
-        app.dialog.visible(),
-        "the user's binding demands the user's answer"
+        app.permission_dialog.visible,
+        "the user's binding demands the user's answer (session permission box)"
     );
     assert!(
         app.pending_worktree_confirmation.is_some(),
@@ -3438,20 +3439,288 @@ async fn agents_worktree_clear_of_user_binding_needs_the_user() {
     assert!(cosh::harness::panes::take_ready_deliveries(cosh::harness::panes::MAIN).is_empty());
 
     // The user declines: the binding is kept, the outcome still lands.
-    app.resolve_pending_worktree_confirmation(false);
+    app.resolve_pending_worktree_permission(
+        crate::routes::session::permission::PermissionAction::Deny,
+    );
     assert!(
         app.agents_split.as_ref().unwrap().panes[0]
             .worktree
             .is_some(),
         "the user's binding survives the decline"
     );
-    assert!(!app.dialog.visible(), "the answer closed the dialog");
+    assert!(
+        !app.permission_dialog.visible,
+        "the answer closed the permission box"
+    );
     let deliveries = cosh::harness::panes::take_ready_deliveries(cosh::harness::panes::MAIN);
     assert_eq!(deliveries.len(), 1);
     assert_eq!(deliveries[0].request_id, op_id);
     let note = deliveries[0].output.clone().unwrap_err();
     assert!(note.to_lowercase().contains("declined"), "{note}");
     assert!(wt.is_dir(), "nothing on disk was touched");
+}
+
+/// THE reported bug, end to end: a user-pinned pane whose split is PARKED
+/// (the /agents mode closed while the user talks to the main agent). The
+/// ask opens the session permission box, the user ALLOWS ONCE, and the
+/// confirmed clear must actually drop the binding — the executor used to
+/// resolve only the LIVE split and fail with "the target pane is not
+/// addressable anymore", leaving the pane pinned forever.
+#[tokio::test]
+async fn agents_worktree_ask_on_a_parked_split_executes_after_allow_once() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let (_dir, repo) = worktree_test_repo();
+    let app_repo = repo.clone();
+    let mut app = worktree_split_app(&app_repo);
+    // The USER pins the pane first (live split — the command needs focus).
+    let wt = repo.join("wt-parked");
+    app.prompt_view.input = format!("/worktree add {} feat-parked", wt.display());
+    app.run_slash_command(&crate::ui::slash_menu::SlashCommand {
+        name: "worktree".into(),
+        desc: String::new(),
+    });
+    assert!(app.agents_split.as_ref().unwrap().panes[0]
+        .worktree
+        .is_some());
+    // The user leaves the mode (park — the common shape of the report:
+    // the main agent is asked from the NORMAL view).
+    app.park_agents_split();
+    assert!(app.agents_split.is_none());
+    assert!(app.parked_agents_split.is_some());
+    app.sync_agents_pane_registry();
+
+    let op_id = cosh::harness::panes::enqueue_worktree_op(
+        "claude",
+        cosh::harness::panes::WorktreeAction::Clear,
+        None,
+        cosh::harness::panes::MAIN,
+    )
+    .expect("the ask parks");
+    app.serve_agents_pane_worktree_ops();
+
+    // The SESSION permission box is up for the user's binding.
+    assert!(app.permission_dialog.visible, "the ask renders in the session box");
+    assert!(app.pending_worktree_confirmation.is_some());
+
+    // Allow Once: the confirmed clear REALLY clears (the fix).
+    app.resolve_pending_worktree_permission(
+        crate::routes::session::permission::PermissionAction::AllowOnce,
+    );
+    let pane = &app.parked_agents_split.as_ref().unwrap().panes[0];
+    assert!(
+        pane.worktree.is_none(),
+        "the confirmed move must not strand the pane in its old worktree"
+    );
+    assert!(pane.worktree_handoff_pending, "the cwd moved back");
+    assert!(!app.permission_dialog.visible, "the box closed");
+    assert!(
+        !app.worktree_agent_grant(),
+        "AllowOnce does not latch the session grant"
+    );
+    let deliveries = cosh::harness::panes::take_ready_deliveries(cosh::harness::panes::MAIN);
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(deliveries[0].request_id, op_id);
+    assert!(deliveries[0].output.clone().unwrap().contains("cleared"));
+}
+
+/// An agent-unbound pane in a PARKED split needs NO box at all: the drain
+/// executes the assign directly against the parked pane (the same
+/// `either_split_mut` view the user-pinned path now uses).
+#[tokio::test]
+async fn agents_worktree_assign_executes_on_a_parked_split_without_a_box() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let (_dir, repo) = worktree_test_repo();
+    let app_repo = repo.clone();
+    let mut app = worktree_split_app(&app_repo);
+    app.park_agents_split();
+    app.sync_agents_pane_registry();
+
+    let branch = format!("agent-parked-{}", std::process::id());
+    let op_id = cosh::harness::panes::enqueue_worktree_op(
+        "claude",
+        cosh::harness::panes::WorktreeAction::Assign,
+        Some(&branch),
+        cosh::harness::panes::MAIN,
+    )
+    .expect("the ask parks");
+    app.serve_agents_pane_worktree_ops();
+
+    assert!(!app.permission_dialog.visible, "no box for an agent binding");
+    let pane = &app.parked_agents_split.as_ref().unwrap().panes[0];
+    let pin = pane.worktree.as_ref().expect("the parked pane got pinned");
+    assert_eq!(pin.branch, branch);
+    assert_eq!(pin.assigned_by, cosh::git::worktree::AssignedBy::Agent);
+    let deliveries = cosh::harness::panes::take_ready_deliveries(cosh::harness::panes::MAIN);
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(deliveries[0].request_id, op_id);
+    assert!(deliveries[0].output.is_ok());
+}
+
+/// "Allow" latches the SESSION-WIDE grant: a second ask on the same
+/// User-assigned binding executes on the drain WITHOUT reopening the box
+/// (and the grant survives — this app run only). "Allow Once" does not.
+#[tokio::test]
+async fn agents_worktree_allow_latches_the_session_grant() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let (_dir, repo) = worktree_test_repo();
+    let app_repo = repo.clone();
+    let mut app = worktree_split_app(&app_repo);
+    let wt = repo.join("wt-grant");
+    app.prompt_view.input = format!("/worktree add {} feat-grant", wt.display());
+    app.run_slash_command(&crate::ui::slash_menu::SlashCommand {
+        name: "worktree".into(),
+        desc: String::new(),
+    });
+    app.sync_agents_pane_registry();
+
+    // First ask: the box opens, the user answers "Allow".
+    cosh::harness::panes::enqueue_worktree_op(
+        "claude",
+        cosh::harness::panes::WorktreeAction::Clear,
+        None,
+        cosh::harness::panes::MAIN,
+    )
+    .expect("the ask parks");
+    app.serve_agents_pane_worktree_ops();
+    assert!(app.permission_dialog.visible);
+    app.resolve_pending_worktree_permission(
+        crate::routes::session::permission::PermissionAction::Allow,
+    );
+    assert!(
+        app.worktree_agent_grant(),
+        "Allow latches the session grant"
+    );
+    assert!(
+        app.parked_agents_split.is_none() && app.agents_split.is_some(),
+        "the binding actually changed (live split)"
+    );
+    assert!(app.agents_split.as_ref().unwrap().panes[0]
+        .worktree
+        .is_none());
+    // Drain the first ask's outcome: the registry deliveries are GLOBAL
+    // state — a leftover here would leak into the next test that reads
+    // MAIN's deliveries.
+    assert_eq!(
+        cosh::harness::panes::take_ready_deliveries(cosh::harness::panes::MAIN).len(),
+        1
+    );
+
+    // The user re-pins (another User binding), a new ask comes: NO box.
+    let wt2 = repo.join("wt-grant-2");
+    app.prompt_view.input = format!("/worktree add {} feat-grant-2", wt2.display());
+    app.run_slash_command(&crate::ui::slash_menu::SlashCommand {
+        name: "worktree".into(),
+        desc: String::new(),
+    });
+    assert!(app.agents_split.as_ref().unwrap().panes[0]
+        .worktree
+        .is_some());
+    app.sync_agents_pane_registry();
+
+    let op_id = cosh::harness::panes::enqueue_worktree_op(
+        "claude",
+        cosh::harness::panes::WorktreeAction::Clear,
+        None,
+        cosh::harness::panes::MAIN,
+    )
+    .expect("the second ask parks");
+    app.serve_agents_pane_worktree_ops();
+    assert!(
+        !app.permission_dialog.visible,
+        "the session grant skips the box"
+    );
+    assert!(app.pending_worktree_confirmation.is_none());
+    assert!(app.agents_split.as_ref().unwrap().panes[0]
+        .worktree
+        .is_none());
+    let deliveries = cosh::harness::panes::take_ready_deliveries(cosh::harness::panes::MAIN);
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(deliveries[0].request_id, op_id);
+}
+
+/// A harness `PermissionRequest` that arrives while an `agents_worktree`
+/// ask holds the session box is PARKED (never overwriting the ask) and is
+/// RE-SHOWN the moment the ask resolves — the main loop's own permission
+/// gate is then answered through the box into `perm_tx` (simulated here
+/// by capturing what the resolver leaves in the box).
+#[tokio::test]
+async fn agents_worktree_ask_holds_the_box_and_re_shows_a_parked_permission_request() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let (_dir, repo) = worktree_test_repo();
+    let app_repo = repo.clone();
+    let mut app = worktree_split_app(&app_repo);
+    let wt = repo.join("wt-hold");
+    app.prompt_view.input = format!("/worktree add {} feat-hold", wt.display());
+    app.run_slash_command(&crate::ui::slash_menu::SlashCommand {
+        name: "worktree".into(),
+        desc: String::new(),
+    });
+    app.sync_agents_pane_registry();
+
+    // The worktree ask opens the box first.
+    cosh::harness::panes::enqueue_worktree_op(
+        "claude",
+        cosh::harness::panes::WorktreeAction::Clear,
+        None,
+        cosh::harness::panes::MAIN,
+    )
+    .expect("the ask parks");
+    app.serve_agents_pane_worktree_ops();
+    assert!(app.permission_dialog.visible);
+    let ask_args = app
+        .permission_dialog
+        .request
+        .as_ref()
+        .unwrap()
+        .args
+        .clone();
+    assert!(ask_args.contains("claude"), "{ask_args}");
+
+    // A harness permission request arrives while the ask holds the box:
+    // it must NOT overwrite the ask's content (it parks instead).
+    app.event_tx
+        .send(cosh::harness::HarnessEvent::PermissionRequest {
+            tool: "bash_run".into(),
+            description: "Run ls".into(),
+            args: "path: /tmp".into(),
+        })
+        .ok();
+    app.poll_events();
+    assert!(
+        app.permission_dialog.request.as_ref().unwrap().tool == "agents_worktree",
+        "the parked ask still owns the box"
+    );
+    assert!(
+        app.pending_permission_request().is_some(),
+        "the harness request was parked, not dropped"
+    );
+
+    // The ask resolves: the harness request takes the box over, and the
+    // worktree outcome is delivered.
+    app.resolve_pending_worktree_permission(
+        crate::routes::session::permission::PermissionAction::AllowOnce,
+    );
+    assert!(app.permission_dialog.visible, "the parked request re-shows");
+    let held = app.permission_dialog.request.as_ref().unwrap();
+    assert_eq!(held.tool, "bash_run");
+    assert_eq!(held.args, "path: /tmp");
+    assert!(app.pending_permission_request().is_none(), "nothing leaks");
+    assert!(
+        app.agents_split.as_ref().unwrap().panes[0]
+            .worktree
+            .is_none(),
+        "the allowed ask executed"
+    );
+    // Drain the ask's outcome: registry deliveries are GLOBAL state — a
+    // leftover here would leak into the next test reading MAIN's box.
+    assert_eq!(
+        cosh::harness::panes::take_ready_deliveries(cosh::harness::panes::MAIN).len(),
+        1
+    );
 }
 
 // ── /worktree on the MANAGER (cosh) pane ────────────────────────────────

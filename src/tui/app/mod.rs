@@ -330,17 +330,29 @@ pub struct App {
     /// the synthesized tool-call ids of ONE main-agent turn with their
     /// results. Reset per turn by the mirror's input/done hooks.
     main_mirror_bridge: main_mirror::MirrorBridge,
-    /// The parked `agents_worktree` op awaiting the user's confirmation
+    /// The parked `agents_worktree` op awaiting the user's permission
     /// (the pane's binding was `AssignedBy::User` and the ask would change
     /// or clear it — the user's supremacy holds even in Yolo mode). Only
     /// the OP is kept — its `pane` field IS the registry id, and the pane
     /// INDEX is re-resolved from it when the user answers (a split that
     /// changed while the dialog was open must never redirect the binding
-    /// to a different pane). `None` when no ask is pending. The Confirm
-    /// dialog that renders it is the SOVEREIGN modal: while this is
-    /// `Some`, the dialog owns the keyboard (the standard confirm-dialog
-    /// gate), so no other interaction can race the answer.
+    /// to a different pane). `None` when no ask is pending. The ask renders
+    /// in the SESSION permission box (`routes::session::permission`), whose
+    /// Up/Down/Enter/Esc and click resolution routes here instead of the
+    /// harness `perm_tx` while this is `Some` — the ask is resolved
+    /// App-side, never by the running loop.
     pending_worktree_confirmation: Option<cosh::harness::panes::WorktreeOp>,
+    /// Session-wide grant recorded when the user answers an
+    /// `agents_worktree` permission box with "Allow": later agent asks may
+    /// rebind User-assigned panes for the rest of this app run without
+    /// reopening the box. In-memory only — a restart asks again.
+    worktree_agent_grant: bool,
+    /// A harness `PermissionRequest` that arrived while an `agents_worktree`
+    /// ask held the session permission box: parked here and re-shown the
+    /// moment the worktree ask resolves, so the main loop's own permission
+    /// gate is answered through the box it is waiting on (never dropped).
+    pending_permission_request:
+        Option<crate::routes::session::permission::PermissionRequest>,
     pub should_quit: bool,
     pub tokio_handle: Handle,
     pub event_tx: mpsc::UnboundedSender<HarnessEvent>,
@@ -826,6 +838,8 @@ impl App {
             sparkle: SparkleState::new(),
             main_mirror_bridge: main_mirror::MirrorBridge::default(),
             pending_worktree_confirmation: None,
+            worktree_agent_grant: false,
+            pending_permission_request: None,
             #[cfg(feature = "home")]
             home_view: HomeView::new(),
             internal_tools_view: {

@@ -1802,11 +1802,17 @@ impl App {
         // 5. Permission dialog
         if self.permission_dialog.visible {
             let area = self.terminal_size();
-            if self
+            if let Some(action) = self
                 .permission_dialog
                 .handle_mouse(&mouse, area, &self.theme)
-                .is_some()
             {
+                // A pending `agents_worktree` ask RESOLVES FIRST: while it
+                // is parked, this box belongs to it (the ask is the
+                // agent's, the answer is the user's, resolved App-side —
+                // never sent into the main loop's `perm_tx`).
+                if self.pending_worktree_confirmation.is_some() {
+                    self.resolve_pending_worktree_permission(action);
+                }
                 return Ok(true);
             }
         }

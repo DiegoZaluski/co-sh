@@ -17,7 +17,6 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-
 use crate::routes::session::right_panel::types::SubagentTimelineEntry;
 use cosh::harness::events::HarnessEvent;
 use cosh_tools::subagent::events::{SubagentEvent, ToolCallStatus, ToolOutputBlock};
@@ -793,35 +792,57 @@ impl App {
         }
     }
 
-    /// The user answered the `agents_worktree` confirmation box (Confirm
-    /// dialog's Yes path). `approved == false` is the DECLINE: the op dies
-    /// with a plain refusal outcome (the pane keeps ITS binding — the
-    /// user's supremacy is the whole point) and NO binding side effect.
-    /// Either way the dialog pops and the drain resumes on the next frame.
-    /// The pane INDEX is re-resolved from the op's registry id AT ANSWER
-    /// TIME: a split that changed while the dialog was open (pane closed,
-    /// panes reordered) must never redirect the binding to a different
-    /// pane — a vanished target fails the op cleanly instead.
-    pub(in crate::app) fn resolve_pending_worktree_confirmation(&mut self, approved: bool) {
+    /// The user answered the `agents_worktree` ask in the SESSION
+    /// permission box. `Allow`/`AllowOnce` approve (`Allow` also records a
+    /// session-wide grant so later asks skip the box); `Deny` is the
+    /// DECLINE: the op dies with a plain refusal outcome (the pane keeps
+    /// ITS binding — the user's supremacy is the whole point) and NO
+    /// binding side effect. Either way the inline box closes and the drain
+    /// resumes on the next frame. The pane INDEX is re-resolved from the
+    /// op's registry id AT ANSWER TIME: a split that changed while the box
+    /// was open (pane closed, panes reordered) must never redirect the
+    /// binding to a different pane — a vanished target fails the op
+    /// cleanly instead.
+    pub(in crate::app) fn resolve_pending_worktree_permission(
+        &mut self,
+        action: crate::routes::session::permission::PermissionAction,
+    ) {
+        use crate::routes::session::permission::PermissionAction as PermAction;
         let Some(op) = self.pending_worktree_confirmation.take() else {
             return;
         };
-        self.dialog.pop();
+        self.permission_dialog.visible = false;
+        self.permission_dialog.request = None;
+        // Re-show a harness permission request that was parked while this
+        // ask held the box: the main loop's own permission gate is next.
+        if let Some(held) = self.pending_permission_request.take() {
+            self.permission_dialog.request = Some(held);
+            self.permission_dialog.visible = true;
+            self.permission_dialog.selected = 1;
+        }
+        let approved = matches!(action, PermAction::Allow | PermAction::AllowOnce);
         let pane_index =
             either_split(&self.agents_split, &self.parked_agents_split).and_then(|split| {
                 (0..split.panes.len())
                     .find(|&i| split.pane_registry_id(i).as_deref() == Some(op.pane.as_str()))
             });
         let outcome = match (approved, pane_index) {
-            (true, Some(pane_index)) => match op.action {
-                cosh::harness::panes::WorktreeAction::Assign => {
-                    let branch = op.branch.clone().unwrap_or_default();
-                    self.assign_pane_worktree_for_agent(pane_index, &branch)
+            (true, Some(pane_index)) => {
+                // The session-wide grant latches ONLY on a real approval of
+                // an executable ask: a target that vanished grants nothing.
+                if action == PermAction::Allow {
+                    self.worktree_agent_grant = true;
                 }
-                cosh::harness::panes::WorktreeAction::Clear => {
-                    self.clear_pane_worktree_for_agent(pane_index)
+                match op.action {
+                    cosh::harness::panes::WorktreeAction::Assign => {
+                        let branch = op.branch.clone().unwrap_or_default();
+                        self.assign_pane_worktree_for_agent(pane_index, &branch)
+                    }
+                    cosh::harness::panes::WorktreeAction::Clear => {
+                        self.clear_pane_worktree_for_agent(pane_index)
+                    }
                 }
-            },
+            }
             (true, None) => Err(format!(
                 "pane '{}' no longer exists — the binding cannot change",
                 op.pane
@@ -834,20 +855,37 @@ impl App {
         };
         cosh::harness::panes::complete_worktree_op(&op, outcome);
     }
+
+    /// Test/inspection accessor for the session-wide worktree grant.
+    #[cfg(test)]
+    pub(in crate::app) fn worktree_agent_grant(&self) -> bool {
+        self.worktree_agent_grant
+    }
+
+    /// Test/inspection accessor for the parked harness permission request.
+    #[cfg(test)]
+    pub(in crate::app) fn pending_permission_request(
+        &self,
+    ) -> Option<&crate::routes::session::permission::PermissionRequest> {
+        self.pending_permission_request.as_ref()
+    }
 }
 
 /// The split + pane index for an AGENT-driven worktree change, resolved
-/// from the LIVE split only (an agent cannot reach a parked pane — it has
-/// no focus). Every pane kind is addressable here, the MANAGER included: a
+/// from whichever slot owns the panes (live OR parked — the parked split
+/// keeps serving `agents_call`, so an agent ask can legitimately target a
+/// pane while the mode is closed, and the confirmation resolver resolves
+/// its index through the same `either_split` view). Every pane kind is
+/// addressable here, the MANAGER included: a
 /// cosh pane runs a real agent session whose assembly takes the same
 /// per-pane cwd an ACP pane's does (`pane_effective_cwd`), so isolating it
 /// is honored rather than cosmetic. What keeps the user in charge is
 /// elsewhere and unchanged: `with_own_pane_id` strips `agents_worktree`
 /// from every pane loop (a pane never rebinds itself or a peer), and a
-/// User-assigned binding always goes through the confirmation box. Only an
+/// User-assigned binding always goes through the permission box. Only an
 /// out-of-range index is refused.
 fn focused_agent_pane_at_mut(app: &mut App, pane: usize) -> Option<(usize, &mut AgentsSplitState)> {
-    let split = app.agents_split.as_mut()?;
+    let split = either_split_mut(&mut app.agents_split, &mut app.parked_agents_split)?;
     split.panes.get_mut(pane)?;
     Some((pane, split))
 }
@@ -1758,24 +1796,25 @@ impl App {
     /// them with the SAME engine calls and side effects as the user's own
     /// `/worktree` command, tagging the binding `AssignedBy::Agent`.
     /// Supervision (design decision 3): an ask that would change or clear a
-    /// worktree the USER assigned opens the Confirm dialog — the user's
-    /// supremacy over their own binding holds even in Yolo mode — and the
-    /// drain parks until the dialog resolves it
-    /// (`pending_worktree_confirmation`). Any other ask executes
-    /// immediately. The outcome ALWAYS reaches the asking loop as a
-    /// Worktree-kind delivery (`complete_worktree_op`) — never a tool
-    /// result, which was only the receipt.
+    /// worktree the USER assigned opens the session permission box (Allow /
+    /// Allow Once / Deny) — the user's supremacy over their own binding
+    /// holds even in Yolo mode — and the drain parks until the box resolves
+    /// it (`pending_worktree_confirmation`). Any other ask executes
+    /// immediately. The paused tool call consumes the outcome itself
+    /// (`take_ready_worktree_delivery`), so it becomes the tool result; a
+    /// Worktree-kind delivery (`complete_worktree_op`) is only the fallback
+    /// for an ask interrupted by a stop request.
     pub(super) fn serve_agents_pane_worktree_ops(&mut self) {
-        // A confirmation box for an earlier ask is on screen: it is the
-        // sovereign modal — the user's answer resolves it and the drain
+        // A permission box for an earlier ask is on screen: it is the
+        // sovereign ask — the user's answer resolves it and the drain
         // resumes on a later frame. Nothing else pops meanwhile.
         if self.pending_worktree_confirmation.is_some() {
             return;
         }
-        // ANY visible dialog defers the pop: stacking this Confirm over a
-        // live one (quit, session delete, RAG delete) would let the
+        // ANY visible dialog defers the pop: stacking this permission box
+        // over a live one (quit, session delete, RAG delete) would let the
         // resolve path steal the answer the user aimed at THEIR dialog.
-        if self.dialog.visible() {
+        if self.dialog.visible() || self.permission_dialog.visible {
             return;
         }
         let Some(op) = cosh::harness::panes::peek_worktree_op() else {
@@ -1789,10 +1828,17 @@ impl App {
             either_split(&self.agents_split, &self.parked_agents_split).and_then(|split| {
                 let index = (0..split.panes.len())
                     .find(|&i| split.pane_registry_id(i).as_deref() == Some(op.pane.as_str()))?;
-                let needs_confirmation = split.panes[index]
+                let mut needs_confirmation = split.panes[index]
                     .worktree
                     .as_ref()
                     .is_some_and(|w| w.assigned_by == cosh::git::worktree::AssignedBy::User);
+                // The user granted session-wide worktree permission
+                // ("Allow" on an earlier ask): the agent may rebind even
+                // User-assigned panes without asking again for the rest
+                // of this app run.
+                if self.worktree_agent_grant {
+                    needs_confirmation = false;
+                }
                 Some((index, needs_confirmation))
             });
         let Some((pane_index, needs_confirmation)) = resolved else {
@@ -1806,24 +1852,40 @@ impl App {
             return;
         };
         if needs_confirmation {
-            // The user's binding, the user's call: open the Confirm dialog
-            // (the sovereign modal — no other ask can stack on top while
-            // the user is deciding) and park the op until the answer.
-            let message = match op.action {
+            // The user's binding, the user's call: open the SESSION
+            // permission box (the same inline `PermissionDialog` the main
+            // loop's permission requests use) so the user can allow for
+            // the whole session, allow once, or deny — and park the op
+            // until the answer. The `tool` field marks the ask as a
+            // worktree change, so the key/mouse resolution routes the
+            // answer here instead of into the main loop's `perm_tx`
+            // (this ask is resolved App-side, never by the harness).
+            let description = match op.action {
                 cosh::harness::panes::WorktreeAction::Assign => format!(
                     "An agent asks to move pane '{}' into a NEW worktree on branch '{}'. \
-                     Allow?",
+                     Allow for this whole session (the agent may then change any pane's \
+                     worktree binding), only this once, or deny?",
                     op.pane,
                     op.branch.as_deref().unwrap_or_default()
                 ),
                 cosh::harness::panes::WorktreeAction::Clear => format!(
                     "An agent asks to move pane '{}' out of the worktree YOU assigned \
-                     (the binding is dropped; nothing on disk is deleted). Allow?",
+                     (the binding is dropped; nothing on disk is deleted). Allow for this \
+                     whole session (the agent may then change any pane's worktree binding), \
+                     only this once, or deny?",
                     op.pane
                 ),
             };
-            self.dialog
-                .show(crate::ui::dialogs::DialogType::Confirm { message });
+            self.permission_dialog.request =
+                Some(crate::routes::session::permission::PermissionRequest {
+                    tool: "agents_worktree".to_string(),
+                    description,
+                    args: format!("pane: {}", op.pane),
+                });
+            self.permission_dialog.visible = true;
+            // Default to "Allow Once" (index 1), same default as the
+            // harness permission requests.
+            self.permission_dialog.selected = 1;
             let op = cosh::harness::panes::pop_worktree_op();
             if let Some(op) = op {
                 // The index was only the resolution vehicle — the op's

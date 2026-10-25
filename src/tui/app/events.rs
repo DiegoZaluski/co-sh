@@ -2185,8 +2185,36 @@ impl App {
                 } => {
                     // Send a desktop notification if the terminal
                     // window is not focused (user switched away): the
-                    // dialog blocks the loop until answered.
+                    // dialog blocks the loop until answered. Even when a
+                    // worktree ask currently holds the box (the request
+                    // parks below), the loop IS blocked on it — notify.
                     notification::notify_permission(self.terminal_focused, &tool, &description);
+                    // An `agents_worktree` ask renders in this box ONLY
+                    // through the App drain (`serve_agents_pane_worktree_
+                    // ops`), which resolves it App-side — never by the
+                    // running loop. A harness PermissionRequest arriving
+                    // while such an ask is parked would otherwise
+                    // OVERWRITE its box content (and its answer would go
+                    // into the main loop's `perm_tx`); hold the incoming
+                    // request and answer it AFTER the worktree ask is
+                    // resolved (the loop stays blocked meanwhile — the
+                    // permission gate is its own wait). Only ONE request
+                    // can be held: the producer blocks on its own gate
+                    // until the current one is answered.
+                    if self.pending_worktree_confirmation.is_some() {
+                        debug_assert!(
+                            self.pending_permission_request.is_none(),
+                            "a second permission request arrived while one was already held"
+                        );
+                        self.pending_permission_request = Some(
+                            crate::routes::session::permission::PermissionRequest {
+                                tool,
+                                description,
+                                args,
+                            },
+                        );
+                        continue;
+                    }
                     // Show the permission dialog with details from the harness
                     self.permission_dialog.request =
                         Some(crate::routes::session::permission::PermissionRequest {

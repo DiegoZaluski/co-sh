@@ -1,6 +1,8 @@
 //! Tool dispatch: dequeue the next pending call and run it through the
 //! three-tier dispatch (cosh tools → MCP servers).
 
+use std::time::Duration;
+
 use cosh_tools::subagent::types::SubAgentCallInput;
 
 use super::{Harness, Mode, background, wait_for_stop_signal};
@@ -231,14 +233,17 @@ impl Harness {
         }
 
         // The /agents worktree ask (`agents_worktree`): VALIDATE here (so
-        // the model can correct itself in place), then park the op in the
-        // pane registry and return a receipt immediately. The TOOL never
-        // touches git: the App's frame drain pops, supervises (the user's
-        // supremacy over a User-assigned pane — even in Yolo) and executes
-        // it; the outcome ALWAYS arrives as a Worktree-kind delivery in
-        // THIS loop's drain — never as this tool result (an ask may sit
-        // across frames waiting for the user's confirmation box, and a
-        // receipt cannot).
+        // the model can correct itself in place), park the op in the pane
+        // registry, then PAUSE this dispatch until the outcome exists. The
+        // TOOL never touches git: the App's frame drain pops, supervises
+        // (the user's supremacy over a User-assigned pane — even in Yolo)
+        // and executes it. The loop does NOT proceed on a bare receipt —
+        // the model must not keep working while its ask (and possibly the
+        // cwd it depends on) is still undecided; the tool result IS the
+        // outcome (executed / refused by the user / failed in git), so the
+        // next request sees exactly what happened. Esc interrupts the wait
+        // like every other blocking tool; the op stays parked and its
+        // outcome still reaches this loop's drain on a later turn.
         if tool_name == "agents_worktree" {
             self.tool_issuer.pop_front();
             let pane = args_map
@@ -285,13 +290,35 @@ impl Harness {
                 Ok(id) => id,
                 Err(error) => return Err(error),
             };
-            return Ok(format!(
-                "Worktree ask parked (op {op_id}): pane '{pane}' {action} — the App now \
-                 supervises it (a User-assigned pane opens your confirmation box, even in \
-                 autonomous runs). The binding outcome arrives as an [automated notification] \
-                 in your next drain; do not treat this receipt as the move itself.",
-                action = action.as_str()
-            ));
+            // PAUSE here until the App drain resolves the ask (the user's
+            // permission box, or an immediate execution): poll the
+            // registry's deliveries for this op's Worktree outcome. Esc
+            // wins the race — the op stays parked and its outcome still
+            // reaches this loop's drain on a later turn, like a
+            // background `agents_call` report.
+            loop {
+                tokio::select! {
+                    () = wait_for_stop_signal(self.stop_signal.clone()) => {
+                        return Err(
+                            "the worktree ask was interrupted (stop requested) — the ask \
+                             stays parked with the App; its outcome arrives as an \
+                             [automated notification] on a later turn"
+                                .to_string(),
+                        );
+                    }
+                    () = tokio::time::sleep(Duration::from_millis(100)) => {
+                        if let Some(delivery) = super::panes::take_ready_worktree_delivery(
+                            self.panes_requester,
+                            &op_id,
+                        ) {
+                            return match delivery.output {
+                                Ok(note) => Ok(note),
+                                Err(error) => Err(error),
+                            };
+                        }
+                    }
+                }
+            }
         }
 
         // Test-only tools have no real dispatch implementation; return a
