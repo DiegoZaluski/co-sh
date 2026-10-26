@@ -2725,6 +2725,78 @@ mod tests {
         assert_eq!(deliveries[0].pane_id, 301);
     }
 
+    /// The motivating case for the two-phase detach, fully loaded: a label
+    /// SWAP (`claude#1`↔`claude#2`) with traffic on BOTH panes — an
+    /// in-flight (serving) request AND a queued request each. A one-phase
+    /// re-key would let the second leg read what the first leg wrote (or
+    /// worse, with the old label-diff, cross the two panes' traffic); with
+    /// the identity diff every piece of traffic follows ITS pane: each new
+    /// label pops the queue and resolves the serving entry of the pane
+    /// object that now carries it — and nothing else.
+    #[test]
+    fn a_label_swap_with_queues_on_both_panes_follows_identity() {
+        let _g = lock();
+        set_panes(vec![
+            with_identity("claude#1", "claude", 301),
+            with_identity("claude#2", "claude", 302),
+        ]);
+        // Pane 301: one IN-FLIGHT request (dispatched → serving) and one
+        // QUEUED behind it. Pane 302: the same pair. Wait receivers are
+        // dropped up front — this test asserts routing, not replies (the
+        // dead-waiter path parks completions as deliveries instead).
+        let inflight_301 = enqueue("claude#1", "301 running", MAIN, ReplyMode::Wait).unwrap();
+        drop(inflight_301.receiver);
+        let queued_301 = enqueue("claude#1", "301 queued", MAIN, ReplyMode::Wait).unwrap();
+        drop(queued_301.receiver);
+        let inflight_302 = enqueue("claude#2", "302 running", MAIN, ReplyMode::Wait).unwrap();
+        drop(inflight_302.receiver);
+        let queued_302 = enqueue("claude#2", "302 queued", MAIN, ReplyMode::Wait).unwrap();
+        drop(queued_302.receiver);
+        assert!(pop_next_request("claude#1").is_some(), "301's first dispatched");
+        assert!(pop_next_request("claude#2").is_some(), "302's first dispatched");
+        assert!(has_queued_request("claude#1") && has_queued_request("claude#2"));
+
+        // THE SWAP: 302 takes `claude#1`, 301 takes `claude#2`. Both legs
+        // detach first, then re-key — the swap must survive its own
+        // sequential legs AND the HashMap's random iteration order.
+        set_panes(vec![
+            with_identity("claude#1", "claude", 302),
+            with_identity("claude#2", "claude", 301),
+        ]);
+
+        // Each in-flight completion resolves under the pane's NEW label —
+        // and carries the pane's OWN identity, never its sibling's.
+        let requester = complete_request(
+            "claude#2",
+            PaneReport::new(Ok("301 done".to_string()), PaneTurnEnd::EndTurn),
+        );
+        assert_eq!(requester, Some(MAIN), "301's serving entry migrated");
+        let deliveries = take_ready_deliveries(MAIN);
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].pane_id, 301, "the report is 301's own");
+        assert_eq!(deliveries[0].output.clone().unwrap(), "301 done".to_string());
+
+        let requester = complete_request(
+            "claude#1",
+            PaneReport::new(Ok("302 done".to_string()), PaneTurnEnd::EndTurn),
+        );
+        assert_eq!(requester, Some(MAIN), "302's serving entry migrated");
+        let deliveries = take_ready_deliveries(MAIN);
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].pane_id, 302, "the report is 302's own");
+        assert_eq!(deliveries[0].output.clone().unwrap(), "302 done".to_string());
+
+        // The queued half follows too: each new label's queue holds ITS
+        // pane's request, in order, un-crossed.
+        let served = pop_next_request("claude#1").expect("302's queued request");
+        assert_eq!(served.text, "302 queued");
+        assert_eq!(served.pane_id, 302);
+        let served = pop_next_request("claude#2").expect("301's queued request");
+        assert_eq!(served.text, "301 queued");
+        assert_eq!(served.pane_id, 301);
+        assert!(!has_queued_request("claude#1") && !has_queued_request("claude#2"));
+    }
+
     /// The anti-false-positive: a sync that touches NOTHING but binding /
     /// worktree metadata (the promotion and `/worktree` syncs run this every
     /// turn) must leave every queued request untouched — the no-op arm of
