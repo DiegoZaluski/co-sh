@@ -262,6 +262,7 @@ impl Harness {
                 };
                 return Ok(super::panes::report_block(
                     &pane,
+                    handle.pane_id,
                     &handle.request_id,
                     answer.output.as_deref().map_err(String::as_str),
                     answer.end,
