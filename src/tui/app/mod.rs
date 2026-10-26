@@ -496,6 +496,13 @@ pub struct App {
     /// Structured user preferences (theme, tools, routing) persisted in
     /// `~/.config/cosh/setup.json`.
     setup: cosh::setup::Setup,
+    /// The persisted per-agent model picks (the CLI-parity "remember my last
+    /// model"): agent name → model id, written ONLY on a real user pick in a
+    /// config box and read at turn dispatch to seed pane-less agents. The
+    /// directory resolves from the data-dir override; the store itself lives
+    /// in the sub-agent domain (cosh-tools), which takes the directory as an
+    /// argument and owns nothing about cosh's paths.
+    agents_model_picks: cosh_tools::subagent::model_picks::ModelPicks,
     /// Telemetry facade: consent-resolved state (setup.json flag + env
     /// override + CI hard-off) plus the local event queue.
     telemetry: cosh::telemetry::Telemetry,
@@ -899,6 +906,15 @@ impl App {
             model_dialog_original: None,
             reasoning_dialog_original: None,
             model_cache: crate::util::cache::StaleCache::new("cache", "model.json"),
+            agents_model_picks: {
+                // CLI parity for the panes' model picks: one global surface,
+                // separate from setup.json (domain state, not cosh config).
+                // The data-dir override resolves the root (test isolation and
+                // portability stay one knob); the store itself lives in the
+                // sub-agent domain and takes the directory as an argument.
+                let dir = cosh::setup::data_dir_override().join("agents");
+                cosh_tools::subagent::model_picks::ModelPicks::new(&dir)
+            },
             setup,
             telemetry,
             session_telemetry: cosh::telemetry::session::SessionTelemetry::new(),

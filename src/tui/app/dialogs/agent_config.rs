@@ -253,6 +253,20 @@ impl App {
         // EVERY turn (`run_session`'s `apply_session_picks`). Record it
         // now — even before the pane has any session — and move the badge
         // with it, so the pane shows the pick from its next prompt on.
+        // The model option's id, resolved through the SAME two-pass
+        // `match_option` the box opening used: cline categorizes BOTH its
+        // `provider` and its `model` options as `model`, so a flat id-or-
+        // category test on the confirmed option would treat a provider
+        // pick as a model pick and poison the persisted store with a
+        // provider value. Only the option the model surface itself
+        // resolves to writes the store.
+        let model_option_id = self
+            .agents_split
+            .as_ref()
+            .and_then(|split| split.panes.get(pane))
+            .and_then(|p| p.config_options.as_ref())
+            .and_then(|opts| super::super::agents_dispatch::model_option_id(opts))
+            .map(str::to_string);
         let mut model_pick = false;
         if let Some(p) = self
             .agents_split
@@ -269,10 +283,23 @@ impl App {
             if !p.picked_config_ids.iter().any(|id| id == &config_id) {
                 p.picked_config_ids.push(config_id.clone());
             }
-            if option.id == "model" || option.category.as_deref() == Some("model") {
+            if Some(&config_id) == model_option_id.as_ref() {
                 let info = p.session_info.get_or_insert_with(Default::default);
                 info.model = Some(selection.clone());
                 model_pick = true;
+                // CLI parity: the pane's pick is per-connection state, but the
+                // user's choice itself is global — the agent's own CLI
+                // remembers its last picked model for every NEW session, and
+                // the headless ACP harness never runs the layer that would.
+                // This store is the client-side record: written ONLY here (a
+                // real user pick), read at dispatch to seed future panes.
+                // Defaults (harness, registry) never touch it.
+                if let Err(error) =
+                    self.agents_model_picks
+                        .set(&open_agent, &selection)
+                {
+                    log::warn!("agent model pick persist failed: {error}");
+                }
             }
             if option.id == "reasoning" || option.category.as_deref() == Some("thought_level") {
                 // The badge shows the pick from its next repaint (the label
