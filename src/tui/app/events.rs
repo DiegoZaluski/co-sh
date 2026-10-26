@@ -1648,6 +1648,13 @@ impl App {
                         });
                     }
                     self.state.status = SessionStatus::Idle;
+                    // The loop is gone, so the "only waiting for reports"
+                    // state is gone with it. The harness emits `false` when
+                    // its wait ends, but a loop that ends WITHOUT entering
+                    // that wait in this pass — or that dies mid-wait — never
+                    // gets to; a stale flag would make the submit gate treat
+                    // a genuinely idle agent as still awaiting reports.
+                    self.awaiting_pane_reports = false;
                     self.agent_spinner = None;
                     self.stream_msg_id = None;
                     self.prune_unreused_cleared_stream();
@@ -1845,6 +1852,11 @@ impl App {
                     self.mirror_main_message("The agent loop was stopped.");
                     self.mirror_main_done(true);
                     self.state.status = SessionStatus::Idle;
+                    // The loop is gone: the "only waiting for reports" state
+                    // cannot outlive it. (The harness also emits `false` when
+                    // the wait ends, but a loop that dies mid-wait — a stop,
+                    // an error — never gets to.)
+                    self.awaiting_pane_reports = false;
                     self.agent_spinner = None;
                     self.stream_msg_id = None;
                     self.prune_unreused_cleared_stream();
@@ -1889,6 +1901,15 @@ impl App {
                         notification::notify_stopped(self.terminal_focused);
                     }
                 }
+                HarnessEvent::AwaitingPaneReports { awaiting } => {
+                    // The main loop is only waiting for pane reports: it
+                    // finished its own work and is idle as far as the user is
+                    // concerned. Recorded so the submit path can send a
+                    // prompt straight through instead of asking which queue
+                    // it should join — the wait wakes on the message.
+                    self.awaiting_pane_reports = awaiting;
+                }
+
                 HarnessEvent::ContextInfo { info } => {
                     self.context_info = Some(info);
                 }
@@ -2062,6 +2083,12 @@ impl App {
                     self.agent_spinner = None;
                     self.stream_msg_id = None;
                     self.prune_unreused_cleared_stream();
+                    // The loop died mid-flight, so any pending "only waiting
+                    // for reports" state is gone with it. (Status becomes
+                    // `Retry`, not `Idle`, so the submit gate could not fire
+                    // on a stale flag anyway — but the flag must never
+                    // describe a wait that no longer exists.)
+                    self.awaiting_pane_reports = false;
 
                     if let Some(session) = self.state.current_session_mut() {
                         if self.telemetry.enabled() {

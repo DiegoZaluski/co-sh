@@ -74,6 +74,24 @@ impl QueuedInput {
         self.inner.lock().expect("queued input poisoned").held
     }
 
+    /// True when at least one message is pending AND the queue is not held.
+    ///
+    /// This is the "the user is trying to talk to you" signal the pre-Done
+    /// busy-guards poll: a loop that has finished its work but is waiting for
+    /// `/agents` pane reports or background sub-agents must not keep sleeping
+    /// while a real message sits here — it has to take the message now, which
+    /// is what the user sees as "the agent is idle, so send it".
+    ///
+    /// Honours the hold for the same reason [`Self::drain`] does: while the
+    /// Queue Actions box is open (or the grace window runs) the user is
+    /// deleting or editing that message, and waking the loop for it would
+    /// race the edit.
+    #[must_use]
+    pub fn has_pending(&self) -> bool {
+        let inner = self.inner.lock().expect("queued input poisoned");
+        !inner.held && !inner.queue.is_empty()
+    }
+
     /// Remove the FIRST message whose text equals `text` (used by the TUI to
     /// retract a message it deleted from its own pending queue — the deque
     /// mirrors that queue, so the same text may appear more than once and the
@@ -155,6 +173,22 @@ mod tests {
         // Hold released (box closed, edit submitted): the drain resumes.
         q.set_hold(false);
         assert_eq!(q.drain(), vec!["pending".to_string()]);
+    }
+
+    #[test]
+    fn has_pending_reports_what_a_drain_would_deliver() {
+        let q = QueuedInput::default();
+        assert!(!q.has_pending(), "an empty queue wakes nothing");
+        q.push("hello".into());
+        assert!(q.has_pending());
+        // While held, a drain returns nothing — so has_pending must agree,
+        // or a busy-guard would wake for a message it then cannot take.
+        q.set_hold(true);
+        assert!(!q.has_pending(), "a held message must not wake the loop");
+        q.set_hold(false);
+        assert!(q.has_pending());
+        assert_eq!(q.drain(), vec!["hello".to_string()]);
+        assert!(!q.has_pending(), "a drained queue wakes nothing");
     }
 
     #[test]

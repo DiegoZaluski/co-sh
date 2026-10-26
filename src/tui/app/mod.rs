@@ -370,6 +370,13 @@ pub struct App {
     /// cleared by the session route's deletion lifecycle
     /// (`routes::session::delete`) when it stops a deleted session's loop.
     pub(crate) queued_input: cosh::harness::queued_input::QueuedInput,
+    /// True while the running main loop is parked in its pre-Done wait for
+    /// `/agents` pane reports (`HarnessEvent::AwaitingPaneReports`).
+    ///
+    /// The status stays `Working`, but the agent is idle: a submitted prompt
+    /// must go straight to it, not into a queue. The harness's wait wakes on
+    /// a pending queued message, so "send now" is honoured within one poll.
+    pub(crate) awaiting_pane_reports: bool,
     /// Session id that owns the currently running agent loop — guards the
     /// queue auto-start against mid-run session switches. `pub(crate)`: read
     /// by `routes::session::delete` to decide whether a deleted session
@@ -924,6 +931,7 @@ impl App {
             answer_tx,
             perm_tx,
             queued_input: cosh::harness::queued_input::QueuedInput::default(),
+            awaiting_pane_reports: false,
             active_loop_session_id: None,
             hovered_queue_row: None,
             queue_actions_grace_until: None,

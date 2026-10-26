@@ -258,6 +258,19 @@ pub enum HarnessEvent {
         description: String,
         args: String,
     },
+    /// The main loop has entered (or left) its pre-Done busy-guard wait for
+    /// `/agents` pane reports.
+    ///
+    /// The loop is `Working` throughout — it is not Idle — but it is IDLE in
+    /// the only sense the user cares about: it finished its own work and is
+    /// merely waiting for a report to come back. The TUI needs that
+    /// distinction to decide what a submitted prompt means: in this state the
+    /// message goes straight to the agent (the harness's wait wakes on it)
+    /// rather than into a queue the user would be right to call unnecessary.
+    ///
+    /// `false` is emitted as soon as the wait ends, whatever ended it, so the
+    /// flag can never outlive the condition it describes.
+    AwaitingPaneReports { awaiting: bool },
     /// Context manager budget info for the TUI header bar.
     /// Sent after each [`ContextManager::run`] cycle during the agent loop.
     ContextInfo {

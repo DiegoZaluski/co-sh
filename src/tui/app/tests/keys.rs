@@ -1191,6 +1191,83 @@ async fn enter_with_main_target_while_working_still_queues() {
     );
 }
 
+/// The reported bug: the main loop finished its own work and is only
+/// WAITING for `/agents` pane reports. The agent is idle from the user's
+/// point of view, so a submitted message must reach it — not open the
+/// queue-choice dialog. It enters the "next request" queue, which the
+/// ordinary pump hands to the shared `queued_input`, and the harness's
+/// wait wakes on it instead of sleeping out the reports.
+#[tokio::test]
+async fn enter_while_only_awaiting_pane_reports_sends_instead_of_queuing() {
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    // Still `Working` — the loop exists — but parked waiting for reports.
+    app.state.status = crate::types::SessionStatus::Working;
+    app.awaiting_pane_reports = true;
+    app.prompt_view.input = "are you there?".into();
+
+    app.process_key_event(mod_key(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+
+    assert!(
+        !app.queue_choice_dialog.visible,
+        "an idle-awaiting agent must not ask which queue the message joins"
+    );
+    assert!(
+        app.prompt_view.input.is_empty(),
+        "the message left the prompt: it was sent, not parked for a choice"
+    );
+    let queued = app
+        .state
+        .current_session_id
+        .as_ref()
+        .and_then(|id| app.state.pending_queues.get(id))
+        .map(|q| q.next_request.clone())
+        .unwrap_or_default();
+    assert_eq!(
+        queued.iter().cloned().collect::<Vec<_>>(),
+        vec!["are you there?".to_string()],
+        "the message enters the next-request queue the live loop drains"
+    );
+    assert_eq!(
+        app.state.status,
+        crate::types::SessionStatus::Working,
+        "no second loop was started"
+    );
+}
+
+/// The flag must not outlive the condition it describes: once the reports
+/// land the loop is a normally-working loop again, and Enter opens the
+/// dialog as before.
+#[tokio::test]
+async fn the_awaiting_flag_restores_the_queue_choice_once_reports_land() {
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    app.state.status = crate::types::SessionStatus::Working;
+    app.awaiting_pane_reports = true;
+    app.prompt_view.input = "first".into();
+    app.process_key_event(mod_key(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert!(!app.queue_choice_dialog.visible);
+    assert!(app.prompt_view.input.is_empty());
+
+    // The harness emits `false` when the wait ends and the loop resumes.
+    app.awaiting_pane_reports = false;
+    app.prompt_view.input = "second".into();
+    app.process_key_event(mod_key(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert!(
+        app.queue_choice_dialog.visible,
+        "a genuinely working loop keeps its queue-choice behavior"
+    );
+}
+
 /// Issue 3 — the `/agents` command opens the split (or re-attaches the
 /// parked one) EVEN WHILE the main loop streams: the old Working refusal
 /// is gone. A parked set re-attaches verbatim; a fresh entry opens the

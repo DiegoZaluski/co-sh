@@ -13,6 +13,7 @@ use crate::left_panel::{MIN_WIDTH_FOR_LEFT_PANEL, Mode};
 use crate::routes::home::HomeAction;
 use crate::routes::router::FocusTarget;
 use crate::routes::session::agents_split::AgentsSplitState;
+use crate::routes::session::queue_choice::QueueTarget;
 use crate::ui::dialogs::DialogType;
 use crate::util::edit_history::{RedoOutcome, UndoOutcome};
 use crate::util::selection;
@@ -1604,6 +1605,29 @@ impl App {
                             return Ok(false);
                         }
                         self.dispatch_to_agents_split(msg);
+                        return Ok(false);
+                    }
+                    // The loop is still `Working`, but only because it is
+                    // parked in its pre-Done wait for `/agents` pane reports:
+                    // it finished its own work and is idle as far as the
+                    // user is concerned. A message sent now is meant for the
+                    // agent, so it skips the queue dialog.
+                    //
+                    // It enters the "next request" queue rather than starting
+                    // a loop: a loop IS running, and `start_agent_loop` would
+                    // begin a second one. From there the ordinary pump hands
+                    // it to the shared `queued_input`, and the harness's wait
+                    // wakes on it instead of sleeping out the reports — the
+                    // message reaches the agent within one poll, which is
+                    // what "the agent is idle, send it now" has to mean.
+                    if self.state.status == crate::types::SessionStatus::Working
+                        && self.awaiting_pane_reports
+                    {
+                        let msg = self.prompt_view.send_message();
+                        if msg.trim().is_empty() {
+                            return Ok(false);
+                        }
+                        self.enqueue_pending_message(QueueTarget::NextRequest, msg);
                         return Ok(false);
                     }
                     if self.state.status == crate::types::SessionStatus::Working {

@@ -22,10 +22,10 @@ Output exactly the Markdown structure shown inside <template> and keep the secti
 - [constraints/preferences, decisions and why, important facts/assumptions, exact context needed to continue, or \"(none)\"]
 
 ### Constraints
-- [explicit user requirements and prohibitions, with source item IDs when available]
+- [explicit user requirements and prohibitions, quoting the user's actual wording when available]
 
 ### Decisions and Evidence
-- [current decision, rationale, source item IDs, and verification status]
+- [current decision, rationale, the quoted instruction or wording that motivated it, and verification status]
 
 ### Invalidated State
 - [superseded decisions, changed files, outdated observations, and the evidence that replaced them; or \"(none)\"]
@@ -54,7 +54,7 @@ Output exactly the Markdown structure shown inside <template> and keep the secti
 Rules:
 - Keep every section, even when empty.
 - Treat this as a handoff to a fresh agent: include the current objective, exact constraints, verified work, open work, blockers, and the next concrete action.
-- Cite source context item IDs when supplied. Never invent provenance or infer completion from an intention.
+- Never cite item numbers (e.g. `item #3`): the referenced items may no longer exist in the agent's view, so the number means nothing to a later reader. Identify the source by quoting (or paraphrasing exactly) its actual text instead. Never invent provenance or infer completion from an intention.
 - A later supported invalidation supersedes an older checkpoint. Keep changed-file references, but mark stale contents and require a fresh read before editing.
 - Preserve conflicts explicitly when the evidence does not establish the current state.
 - Use terse bullets, not prose paragraphs — except code, which is ALWAYS copied verbatim inside Markdown code fences.

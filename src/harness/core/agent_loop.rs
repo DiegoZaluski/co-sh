@@ -18,6 +18,20 @@ use super::{
     LOOP_DETECTION_WINDOW_SIZE, PrefixCacheProbe, RunOutcome, StreamEvent, background,
 };
 
+/// What ended a pre-Done busy-guard wait (see `Harness::wait_for_outstanding`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WaitExit {
+    /// Nothing is outstanding any more: the reports/tasks landed, so the
+    /// caller injects their notes and continues.
+    Resolved,
+    /// A user message is waiting in the shared queue. The caller must
+    /// continue WITHOUT injecting notes (there are none to inject yet) so
+    /// the next iteration's drain hands the message to the model.
+    MessagePending,
+    /// Stop was requested: fall through to the normal Done/Stopped path.
+    Stopped,
+}
+
 impl Harness {
     /// Run the full agent loop: stream LLM response, dispatch tool calls,
     /// feed results back to the LLM, and repeat — until the model finishes
@@ -102,10 +116,39 @@ impl Harness {
     /// messages are injected into the model context (see the docs of the
     /// public wrappers). The drain pops each entry right before injecting it,
     /// so a TUI-side delete/edit of a still-pending message is always honored.
-    /// Sleep-poll until `outstanding()` clears or stop is requested: the
-    /// shared pre-Done wait for pane reports and background tasks alike.
-    async fn wait_for_outstanding(stop_signal: &AtomicBool, outstanding: impl Fn() -> bool) {
-        while outstanding() && !stop_signal.load(Ordering::Relaxed) {
+    /// Sleep-poll until `outstanding()` clears, a user message arrives, or
+    /// stop is requested: the shared pre-Done wait for pane reports and
+    /// background tasks alike.
+    ///
+    /// The `MessagePending` exit is why this takes `queued_input`. These
+    /// guards fire after the loop has finished its own work — at that moment
+    /// the agent is IDLE from the user's point of view, merely waiting for a
+    /// report to come back. Without this arm the wait polled only
+    /// `outstanding()`, so a message typed then sat in the queue (the TUI
+    /// still reported `Working`, so it never reached the shared drain either)
+    /// until the last pane answered — the user saw a message go unanswered
+    /// while the agent was plainly not doing anything. Waking on the message
+    /// is the fix: the loop takes it immediately, as it would in any other
+    /// inter-iteration gap.
+    async fn wait_for_outstanding(
+        stop_signal: &AtomicBool,
+        queued_input: &super::queued_input::QueuedInput,
+        outstanding: impl Fn() -> bool,
+    ) -> WaitExit {
+        loop {
+            if stop_signal.load(Ordering::Relaxed) {
+                return WaitExit::Stopped;
+            }
+            // The message check precedes `outstanding()`: when both are true
+            // the reports are still on their way, and taking the user's
+            // message first is the same priority the loop gives a queued
+            // message at the top of any iteration.
+            if queued_input.has_pending() {
+                return WaitExit::MessagePending;
+            }
+            if !outstanding() {
+                return WaitExit::Resolved;
+            }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
@@ -1859,11 +1902,18 @@ impl Harness {
                 // interrupts the wait and ends the turn normally.
                 if !self.nested && super::panes::has_outstanding_requests(self.panes_requester) {
                     log::debug!("run_agent_loop WAITING for /agents pane reports before Done");
-                    Self::wait_for_outstanding(&stop_signal, || {
+                    // Tell the TUI the loop is only waiting: a prompt
+                    // submitted now is meant for IMMEDIATE delivery, and the
+                    // wait below wakes for it. The `false` on the way out is
+                    // emitted for every exit — the flag must never outlive
+                    // the condition it describes.
+                    let _ = tx.send(HarnessEvent::AwaitingPaneReports { awaiting: true });
+                    let exit = Self::wait_for_outstanding(&stop_signal, &queued_input, || {
                         super::panes::has_outstanding_requests(self.panes_requester)
                     })
                     .await;
-                    if !stop_signal.load(Ordering::Relaxed) {
+                    let _ = tx.send(HarnessEvent::AwaitingPaneReports { awaiting: false });
+                    if exit != WaitExit::Stopped {
                         let notes: Vec<(String, String, Option<String>)> =
                             super::panes::take_ready_deliveries(self.panes_requester)
                                 .iter()
@@ -1878,7 +1928,10 @@ impl Harness {
                         self.inject_completion_notes(&tx, notes);
                         // New input (or just the resolved waits): the stale
                         // steering text must not shadow it. The loop
-                        // continues so the model responds to it.
+                        // continues so the model responds to it — and on a
+                        // `MessagePending` exit this is what hands the
+                        // waiting user message to the next iteration's drain
+                        // instead of parking it behind the reports.
                         current_input.clear();
                         continue;
                     }
@@ -1895,13 +1948,20 @@ impl Harness {
                     log::debug!(
                         "run_agent_loop WAITING for background sub-agent tasks before Done"
                     );
-                    Self::wait_for_outstanding(&stop_signal, background::has_running_tasks).await;
+                    let exit =
+                        Self::wait_for_outstanding(&stop_signal, &queued_input, background::has_running_tasks)
+                            .await;
                     // Esc during the wait ends the turn normally: no
                     // injection, fall through to the standard Done path
                     // below (never break without emitting Done — the TUI
                     // would stay in a "running" state).
-                    let notes: Vec<(String, String, Option<String>)> = if stop_signal
-                        .load(Ordering::Relaxed)
+                    //
+                    // A waiting user message means the same thing here as in
+                    // the pane guard above: take it now rather than sleeping
+                    // out the background tasks — `inject_completion_notes`
+                    // finds nothing to inject, so the loop re-enters and the
+                    // next iteration drains the message.
+                    let notes: Vec<(String, String, Option<String>)> = if exit != WaitExit::Resolved
                     {
                         Vec::new()
                     } else {
@@ -1910,9 +1970,19 @@ impl Harness {
                             .map(|(note, call_ref)| ("subagent_status".to_string(), note, call_ref))
                             .collect()
                     };
-                    if self.inject_completion_notes(&tx, notes) {
-                        // The injected completions are the new input; the
-                        // stale steering text must not shadow them.
+                    // `MessagePending` also continues, even though there is
+                    // nothing to inject: the point is to reach the next
+                    // iteration's drain, which is where the waiting message
+                    // is actually handed to the model. `Resolved` continues
+                    // only when it really produced notes (a task can finish
+                    // with nothing to report).
+                    if exit == WaitExit::MessagePending
+                        || (exit == WaitExit::Resolved
+                            && self.inject_completion_notes(&tx, notes))
+                    {
+                        // The injected completions (or the waiting message)
+                        // are the new input; the stale steering text must not
+                        // shadow them.
                         current_input.clear();
                         continue;
                     }
@@ -2019,5 +2089,109 @@ impl Harness {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod wait_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    use super::{Harness, WaitExit};
+    use crate::harness::queued_input::QueuedInput;
+
+    fn stop() -> Arc<AtomicBool> {
+        Arc::new(AtomicBool::new(false))
+    }
+
+    /// The reported bug: a loop parked in the pre-Done wait for pane reports
+    /// must take a message the user sends now, instead of sleeping until the
+    /// last report lands. Without the `MessagePending` arm this test hangs
+    /// until its own timeout — which is exactly what the user experienced.
+    #[test]
+    fn a_queued_message_wakes_the_pane_report_wait() {
+        let signal = stop();
+        let queue = QueuedInput::default();
+        let outcome = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(async {
+                // Reports still outstanding: left alone, the wait never ends.
+                // `QueuedInput` is a cheap `Arc` handle: the waiter owns a
+                // clone, the test keeps one to push the message.
+                let waiter_queue = queue.clone();
+                let never = || true;
+                let woken = tokio::spawn(async move {
+                    Harness::wait_for_outstanding(&signal, &waiter_queue, never).await
+                });
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                // The user's message arrives.
+                queue.push("are you there?".to_string());
+                tokio::time::timeout(Duration::from_secs(5), woken)
+                    .await
+                    .expect("the wait must wake for the message, not hang")
+                    .expect("waiter task")
+            });
+        assert_eq!(outcome, WaitExit::MessagePending);
+        // The message is still OURS to deliver: the wait only noticed it, the
+        // loop's drain pops it (pop-on-inject keeps TUI edit/delete working).
+        assert_eq!(queue.drain(), vec!["are you there?".to_string()]);
+    }
+
+    /// A held message must NOT wake the loop: while the Queue Actions box is
+    /// open the user is editing or deleting it, and delivering it then would
+    /// race the edit — the same contract `drain` already honours.
+    #[test]
+    fn a_held_message_does_not_wake_the_wait() {
+        let signal = stop();
+        let queue = QueuedInput::default();
+        queue.push("still editing".to_string());
+        queue.set_hold(true);
+        let blocked = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(async {
+                tokio::time::timeout(
+                    Duration::from_millis(300),
+                    Harness::wait_for_outstanding(&signal, &queue, || true),
+                )
+                .await
+            });
+        assert!(blocked.is_err(), "a held message must not end the wait");
+        assert_eq!(queue.len(), 1, "the held message was not consumed");
+    }
+
+    /// A stop request ends the wait immediately, so the loop falls through to
+    /// its Done/Stopped path instead of sleeping out the reports.
+    #[test]
+    fn a_stop_request_ends_the_wait() {
+        let signal = stop();
+        let queue = QueuedInput::default();
+        let outcome = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(async {
+                signal.store(true, Ordering::Relaxed);
+                Harness::wait_for_outstanding(&signal, &queue, || true).await
+            });
+        assert_eq!(outcome, WaitExit::Stopped);
+    }
+
+    /// Nothing outstanding and nothing queued: the reports landed, so the
+    /// caller injects their notes and continues — the pre-existing behaviour.
+    #[test]
+    fn resolved_reports_end_the_wait() {
+        let signal = stop();
+        let queue = QueuedInput::default();
+        let outcome = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(async { Harness::wait_for_outstanding(&signal, &queue, || false).await });
+        assert_eq!(outcome, WaitExit::Resolved);
     }
 }
