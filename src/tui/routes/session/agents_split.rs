@@ -37,6 +37,7 @@ use crate::component::budget::{budget_bar_style, budget_block, budget_pct_style}
 use crate::component::prompt_message_box;
 use crate::component::scroll_pill::ScrollPill;
 use crate::component::spinner::SpinnerState;
+use crate::component::spinner_highlight::HighlightSpinner;
 use crate::routes::session::right_panel::subagent_theme_key;
 use crate::routes::session::right_panel::types::{
     INPUT_BOX_PAD_ROWS, SubagentActivity, SubagentActivityLine, SubagentBlockRenderer,
@@ -433,6 +434,15 @@ pub struct AgentsSplitState {
     /// Lives on the split state (not the pane) so the pane model stays
     /// plain data.
     pub diff_cells: HashMap<String, SubagentDiffCells>,
+    /// Luminous-sweep spinners for the RUNNING tool-call lines of the
+    /// panes' activity streams, keyed `{pane_index}:{call_id}` — the same
+    /// highlight the main chat's tool boxes and the right panel's live
+    /// windows paint on InProgress rows. Pruned to InProgress entries after
+    /// each split render so finished calls never keep animating state alive.
+    /// Lives on the split state (not the pane) so the pane model stays
+    /// plain data.
+    pub tool_spinners:
+        HashMap<String, crate::component::spinner_highlight::HighlightSpinner>,
     /// Copy-by-selection state (the chat's drag contract, one selection for
     /// the whole split): the pane it started in, the screen-space anchor/
     /// focus, and the content rows they map to.
@@ -475,6 +485,7 @@ impl AgentsSplitState {
             pane_rects: Vec::new(),
             block_cache: HashMap::new(),
             diff_cells: HashMap::new(),
+            tool_spinners: HashMap::new(),
             selection_pane: None,
             drag_selection: None,
             selection_anchor_content_y: 0,
@@ -648,6 +659,7 @@ impl AgentsSplitState {
             pane_rects: Vec::new(),
             block_cache: old.block_cache,
             diff_cells: old.diff_cells,
+            tool_spinners: old.tool_spinners,
             selection_pane: None,
             drag_selection: None,
             selection_anchor_content_y: 0,
@@ -1548,6 +1560,7 @@ pub fn render(
         panes,
         block_cache,
         diff_cells,
+        tool_spinners,
         pane_regions,
         ..
     } = state;
@@ -1557,6 +1570,10 @@ pub fn render(
     // tail, or the pane vanished) and its renderer+scratch are dropped
     // instead of pinning hundreds of KB per pane for the session's life.
     let mut live_keys: HashSet<String> = HashSet::new();
+    // Spinner keys that are InProgress THIS frame — the map is pruned to
+    // them after the loop (the right panel's identical pattern), so a
+    // finished call never keeps animating state alive.
+    let mut live_spinner_keys: Vec<String> = Vec::new();
     for (i, rect) in rects.into_iter().enumerate() {
         let Some(pane) = panes.get_mut(i) else {
             break;
@@ -1573,6 +1590,8 @@ pub fn render(
             theme,
             block_cache,
             diff_cells,
+            tool_spinners,
+            &mut live_spinner_keys,
             &mut live_keys,
             &mut pane_regions[i],
             select_span,
@@ -1584,6 +1603,13 @@ pub fn render(
     // itself `{pane_index}:diff{index}` into it), so its pruning is one
     // pass too — the right panel's window prunes identically.
     diff_cells.retain(|key, _| live_keys.contains(key));
+    // Prune spinner entries that left the InProgress state this frame (the
+    // call finished or the pane vanished): finished calls must not keep
+    // animating state alive across turns. The right panel prunes its
+    // subagent spinners identically.
+    let live_spinners: std::collections::HashSet<&str> =
+        live_spinner_keys.iter().map(String::as_str).collect();
+    tool_spinners.retain(|key, _| live_spinners.contains(key.as_str()));
     // Hover highlight over a pane's input box (the chat's
     // `render_hover_highlight` recolor, pane scoped): the click-ability
     // cue. Painted after the panes so it lightens the final cells.
@@ -1636,6 +1662,8 @@ fn render_pane(
     theme: &Theme,
     block_cache: &mut HashMap<String, SubagentBlockRenderer>,
     diff_cells: &mut HashMap<String, SubagentDiffCells>,
+    spinners: &mut HashMap<String, HighlightSpinner>,
+    spinner_keys: &mut Vec<String>,
     live_keys: &mut HashSet<String>,
     out_regions: &mut Vec<TextRegion>,
     select_span: Option<(i32, i32)>,
@@ -1993,6 +2021,8 @@ fn render_pane(
                 tint,
                 block_cache,
                 diff_cells,
+                spinners,
+                spinner_keys,
                 live_keys,
                 &mut regions,
                 block_content_row,
@@ -2111,7 +2141,7 @@ fn draw_activity_line(
     line: &SubagentActivityLine,
     index: usize,
     pane_index: usize,
-    _agent: &str,
+    agent: &str,
     x: u16,
     y: u16,
     wrap_w: u16,
@@ -2123,6 +2153,8 @@ fn draw_activity_line(
     tint: RGBA,
     block_cache: &mut HashMap<String, SubagentBlockRenderer>,
     diff_cells: &mut HashMap<String, SubagentDiffCells>,
+    spinners: &mut HashMap<String, HighlightSpinner>,
+    spinner_keys: &mut Vec<String>,
     live_keys: &mut HashSet<String>,
     regions: &mut Vec<TextRegion>,
     content_row: u16,
@@ -2142,7 +2174,15 @@ fn draw_activity_line(
     let marker_style_err = Style::default().fg(rgba_color(theme.error));
 
     match line {
-        SubagentActivityLine::Tool { rows, status, .. } => {
+        SubagentActivityLine::Tool { id, rows, status } => {
+            // Liveness is tracked BEFORE the clip check: an off-screen
+            // running call keeps its animation entry, so scrolling it back
+            // in does not restart the sweep from phase 0 (the right
+            // panel's identical contract). The pane index disambiguates
+            // the call id: two panes can run the same harness session.
+            if *status == ToolCallStatus::InProgress {
+                spinner_keys.push(format!("{pane_index}:{id}"));
+            }
             let marker = match status {
                 ToolCallStatus::Completed => "✓",
                 ToolCallStatus::Failed => "✗",
@@ -2154,6 +2194,30 @@ fn draw_activity_line(
                 ToolCallStatus::Failed => marker_style_err,
                 _ => dimmed_style,
             };
+            // The running tool-call label highlights with the pane agent's
+            // OWN brand color — the same agent-identity accent the header
+            // name paints, and the same luminous-sweep treatment the main
+            // chat's tool boxes and the right panel's live windows use for
+            // InProgress rows. The accent is NOT focus-dimmed (the right
+            // panel's accents never dim either) — a dimmed brand over a
+            // dimmed base washes the sweep out. Finished calls keep the
+            // static muted text.
+            // A non-catalog agent (the `cosh` manager pane included) has no
+            // brand palette: `brand_rgba` would return the very tone the
+            // base uses (theme.text focused), and a sweep lerping between
+            // two identical colors is mathematically invisible. Those fall
+            // back to the right panel's no-verdict pairing: text accent
+            // over a muted base — always contrasting.
+            let accent = if palette_for(agent).is_some() {
+                brand_rgba(agent, 0.0, theme, true)
+            } else {
+                theme.text
+            };
+            // The spinner's base colour is the muted tone (the right
+            // panel's exact pairing), so rows far from the beam read as
+            // quiet continuation text and the beam stands out on every
+            // agent.
+            let base = theme.text_muted;
             let (rlo, rhi) = paint_emit_window(skip, draw_rows, emit_rows, rows.len());
             for ri in rlo..rhi {
                 let ri = ri as usize;
@@ -2163,14 +2227,63 @@ fn draw_activity_line(
                     if ri == 0 {
                         draw_text(buf, marker, x, line_y, wrap_w, marker_style);
                     }
-                    draw_text(
-                        buf,
-                        seg,
-                        x + 2,
-                        line_y,
-                        wrap_w.saturating_sub(2),
-                        text_style,
-                    );
+                    if *status == ToolCallStatus::InProgress {
+                        // ONE spinner per running call, keyed by pane + call
+                        // id, holding the FULL concatenated label. The beam
+                        // is normalised over that whole string, so the sweep
+                        // flows ACROSS the wrapped rows — a broken path like
+                        // `src/tui/routes/…` is swept to its end instead of
+                        // dying at the first wrap. render_row paints this
+                        // row's slice at the row's cumulative character
+                        // offset; the spinner's base colour IS the row's
+                        // text style, so rows far from the beam still read
+                        // as normal continuation text.
+                        let key = format!("{pane_index}:{id}");
+                        // The spinner filters control characters out of
+                        // its text (`HighlightSpinner::new`), so the
+                        // concatenated label and the per-row offsets must
+                        // be built from the SAME filtered rows — raw
+                        // offsets would desync the row slices (and, with
+                        // a mismatched text, `set_text` would reset the
+                        // beam every frame).
+                        let clean: Vec<String> = rows
+                            .iter()
+                            .map(|s| s.chars().filter(|c| !c.is_control()).collect::<String>())
+                            .collect();
+                        let joined: String = clean.concat();
+                        let start_char: usize =
+                            clean.iter().take(ri).map(|s| s.chars().count()).sum();
+                        let spinner = spinners
+                            .entry(key)
+                            .or_insert_with(|| HighlightSpinner::new(&joined, accent, base));
+                        if spinner.text() != joined {
+                            spinner.set_text(&joined);
+                        }
+                        spinner.set_colors(accent, base);
+                        // The row's own width is the paint limit: a shared
+                        // `wrap_w` would let a SHORT row (wrap_chars
+                        // produces variable-length rows) also paint the
+                        // first chars of the NEXT row's slice — the
+                        // duplicated-text corruption the right panel's
+                        // review already fixed once.
+                        let row_chars = seg.chars().count() as u16;
+                        spinner.render_row(
+                            buf,
+                            x + 2,
+                            line_y,
+                            row_chars.min(wrap_w.saturating_sub(2)),
+                            start_char,
+                        );
+                    } else {
+                        draw_text(
+                            buf,
+                            seg,
+                            x + 2,
+                            line_y,
+                            wrap_w.saturating_sub(2),
+                            text_style,
+                        );
+                    }
                 }
                 let region_text = if ri == 0 {
                     format!("{marker} {seg}")
@@ -4259,6 +4372,126 @@ mod tests {
             "the EditDiff cell cache entry must exist: keys {:?}",
             state.diff_cells.keys().collect::<Vec<_>>()
         );
+    }
+
+    /// The running tool-call row highlights through the luminous-sweep
+    /// spinner (the chat's and the right panel's activity highlight): the
+    /// render creates ONE spinner entry per InProgress call, keyed
+    /// `{pane_index}:{call_id}`, and a completed call leaves the map —
+    /// pruned after the frame — so nothing keeps animating state alive.
+    #[test]
+    fn running_tool_call_highlights_and_completing_prunes_the_spinner() {
+        let theme = test_theme();
+        let mut state = AgentsSplitState::new(vec!["claude".into()]);
+        state.set_running(0, true);
+        state.apply_event(
+            0,
+            &SubagentEvent::ToolCall {
+                id: "c1".to_string(),
+                title: "find_grep src".to_string(),
+                kind: cosh_tools::subagent::events::ToolKind::Search,
+                status: ToolCallStatus::InProgress,
+                raw_input: None,
+                tool: Some("find_grep".to_string()),
+            },
+        );
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut state, &theme, 0.0);
+
+        // The spinner entry exists for THIS call and holds the full label.
+        assert!(
+            state.tool_spinners.contains_key("0:c1"),
+            "the running call must own a spinner entry: {:?}",
+            state.tool_spinners.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            state.tool_spinners["0:c1"].text(),
+            "find_grep find_grep src",
+            "the spinner holds the FULL label (tool name + detail), like the right panel"
+        );
+
+        // The completion update retires the call: the next render prunes
+        // the map (the right panel's identical hygiene).
+        state.apply_event(
+            0,
+            &SubagentEvent::ToolCallUpdate {
+                id: "c1".to_string(),
+                status: Some(ToolCallStatus::Completed),
+                title: None,
+                raw_output: None,
+                content: cosh_tools::subagent::events::ToolOutputBlock {
+                    text: "ok".to_string(),
+                    skipped: 0,
+                    diff: None,
+                },
+            },
+        );
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut state, &theme, 0.0);
+        assert!(
+            !state.tool_spinners.contains_key("0:c1"),
+            "a completed call must not keep its spinner: {:?}",
+            state.tool_spinners.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// The sweep must be VISIBLE: the pane tool spinner's accent never
+    /// equals its base. The first cut fed `brand_rgba(agent, …, focused)`
+    /// (the UNFOCUSED brand is blended 45% into the background) as accent
+    /// over the muted base, and the manager pane's `cosh` has no palette at
+    /// all (`brand_rgba` returns `theme.text`) — both pairings made the
+    /// beam's lerp mathematically colorless, so the highlight painted
+    /// exactly like plain text (the user-visible "nothing changed").
+    /// Regression pins the pairing: brand accent (undimmed) over muted
+    /// base for catalog agents, text-over-muted for the rest.
+    #[test]
+    fn running_tool_call_sweep_is_actually_visible() {
+        let theme = test_theme();
+        // A catalog agent (claude → terracotta) AND the manager pane (cosh,
+        // no palette) must both paint a beam that departs from the base.
+        for agent in ["claude", MANAGER_LABEL] {
+            let mut state =
+                AgentsSplitState::new(vec![cosh::types::AgentPaneRef::Name(agent.to_string())]);
+            state.set_running(0, true);
+            state.apply_event(
+                0,
+                &SubagentEvent::ToolCall {
+                    id: "c1".to_string(),
+                    title: "find_grep src".to_string(),
+                    kind: cosh_tools::subagent::events::ToolKind::Search,
+                    status: ToolCallStatus::InProgress,
+                    raw_input: None,
+                    tool: Some("find_grep".to_string()),
+                },
+            );
+            let area = Rect::new(0, 0, 80, 24);
+            let mut distinct = false;
+            let base = rgba_color(theme.text_muted);
+            // Mirror the app's tick (advance BEFORE the frame draws) and
+            // step the beam across the whole label: at some point the beam
+            // sits over the visible row and lights it.
+            for _ in 0..250 {
+                for spinner in state.tool_spinners.values_mut() {
+                    spinner.advance(1.0 / 30.0);
+                }
+                let mut buf = Buffer::empty(area);
+                render(&mut buf, area, &mut state, &theme, 1.0 / 30.0);
+                for x in 0..40u16 {
+                    if let Some(cell) = buf.cell((x, 1)) {
+                        if cell.symbol().chars().next().is_some_and(|c| !c.is_whitespace())
+                            && cell.style().fg != Some(base)
+                        {
+                            distinct = true;
+                        }
+                    }
+                }
+            }
+            assert!(
+                distinct,
+                "the beam must visibly light the tool row for {agent}: every cell stayed at the base tone"
+            );
+        }
     }
 
     /// The worktree badge paints on the pane's RESERVED footer row
