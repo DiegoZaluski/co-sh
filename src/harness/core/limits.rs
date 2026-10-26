@@ -10,6 +10,16 @@ pub(super) const MAX_TOOL_RETRIES: usize = 10;
 /// searching) — the loop force-stopped mid-task with a misleading `Done`.
 pub(crate) const MAX_ITERATIONS: u64 = 100;
 
+/// How many times the MAX_ITERATIONS guard may RENEW the iteration budget.
+/// The hard limit exists to kill a RUNAWAY loop — and the loop detectors
+/// (tool-signature window, textual repetition) already cover runaway: a loop
+/// whose recent window shows no stuck repetition is making real progress, and
+/// long multi-step work is legitimate. When the guard fires while the window
+/// is clean, the budget renews (bounded) instead of cutting a healthy turn
+/// with tool calls still queued; a stuck or renewal-exhausted loop stops
+/// visibly (warn + toast) as before.
+pub(crate) const ITERATION_RENEWALS: u32 = 2;
+
 /// Natural-stop gate budget: how many continuations the deterministic veto
 /// layer (reasoning-only retry, empty-response retry) may grant per agent
 /// loop. An agent loop runs for hours and each veto is a REAL provider cut

@@ -213,6 +213,14 @@ impl Harness {
                 // error (the request is cancelled for THIS requester — a
                 // pane already working on it finishes its turn normally,
                 // the report simply is not delivered to a dead caller).
+                // A QUEUED USER MESSAGE wakes the wait too: the user's
+                // input outranks the block, and the wait is INSIDE a tool
+                // call — the loop cannot drain the queue until this tool
+                // returns. The wait degrades to background WITHOUT
+                // `cancel_wait`: dropping the oneshot receiver parks the
+                // report for this requester's drain (the dead-waiter branch
+                // in `complete_request`), so the pane's work is not lost —
+                // it just stops blocking the loop.
                 // The result goes through `report_block` — the SAME builder
                 // the background drain uses — because this is the path where
                 // a non-final report is most dangerous: the requester blocked
@@ -220,6 +228,7 @@ impl Harness {
                 // other signal telling it the pane may not have finished. The
                 // old code returned the raw report here, so a blocked caller
                 // never saw the qualification a background caller did.
+                let queued_wake = self.loop_queued_input.clone();
                 let answer = tokio::select! {
                     answer = rx => {
                         answer.unwrap_or_else(|_| {
@@ -233,6 +242,21 @@ impl Harness {
                         super::panes::cancel_wait(&handle.request_id);
                         return Err(
                             "the agents_call wait was interrupted (stop requested)".to_string()
+                        );
+                    }
+                    () = async {
+                        loop {
+                            if queued_wake.as_ref().is_some_and(|q| q.has_pending()) {
+                                break;
+                            }
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                        }
+                    } => {
+                        return Err(
+                            "the agents_call wait was interrupted: a user message arrived \
+                             while waiting — the pane keeps working and its report arrives \
+                             as an automated notification."
+                                .to_string(),
                         );
                     }
                 };

@@ -32,6 +32,7 @@ impl Harness {
             stop: false,
             tool_issuer: VecDeque::new(),
             active_call_ref: None,
+            loop_queued_input: None,
             nested: false,
             panes_requester: super::panes::MAIN,
             panes_own_id: None,

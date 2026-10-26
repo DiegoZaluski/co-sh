@@ -437,6 +437,30 @@ pub(crate) fn acp_error(message: impl Into<String>) -> AcpError {
     error
 }
 
+/// Wall-clock bound for ONE ACP handshake step (initialize, session open,
+/// config picks, mode bind). A harness that never answers its handshake
+/// would otherwise block the requesting agent loop forever with no event and
+/// no error — the docs of [`call`] keep the TURN unbounded by design (work
+/// can legitimately be long), but the handshake is setup, not work: past
+/// this bound it is a hung launch, and the tool must FAIL so the requesting
+/// loop continues.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Run one handshake step under [`HANDSHAKE_TIMEOUT`].
+async fn handshake_step<T>(
+    what: &str,
+    fut: impl std::future::Future<Output = Result<T, AcpError>>,
+) -> Result<T, AcpError> {
+    match tokio::time::timeout(HANDSHAKE_TIMEOUT, fut).await {
+        Ok(result) => result,
+        Err(_) => Err(acp_error(format!(
+            "ACP {what} timed out after {}s — the harness never answered the handshake; \
+             the launch is hung",
+            HANDSHAKE_TIMEOUT.as_secs()
+        ))),
+    }
+}
+
 /// Wrap a wire error into a context-carrying `AcpError` WITHOUT discarding
 /// its protocol code. The lazy-auth retry points match on
 /// `ErrorCode::AuthRequired`; a plain `acp_error` rewrite (internal_error)
@@ -2134,35 +2158,40 @@ where
             // authentication attempt precedes the retry. A harness that
             // manages auth itself advertises no methods, and the retry
             // path then simply re-surfaces its own error message.
-            let opened =
-                match open_or_resume_session(
+            let opened = match handshake_step(
+                "session open",
+                open_or_resume_session(
                     &connection,
                     resume.clone(),
                     &cwd,
                     session_resume_support(&init.agent_capabilities),
-                )
-                .await
+                ),
+            )
+            .await
+            {
+                Ok(open) => open,
+                Err(auth_error)
+                    if auth_error.code == ErrorCode::AuthRequired =>
                 {
-                    Ok(open) => open,
-                    Err(auth_error)
-                        if auth_error.code == ErrorCode::AuthRequired =>
-                    {
-                        authenticate_on_auth_required(
-                            &connection,
-                            &init.auth_methods,
-                            &auth_error,
-                        )
-                        .await?;
+                    authenticate_on_auth_required(
+                        &connection,
+                        &init.auth_methods,
+                        &auth_error,
+                    )
+                    .await?;
+                    handshake_step(
+                        "session open",
                         open_or_resume_session(
                             &connection,
                             resume,
                             &cwd,
                             session_resume_support(&init.agent_capabilities),
-                        )
-                        .await?
-                    }
-                    Err(auth_error) => return Err(auth_error),
-                };
+                        ),
+                    )
+                    .await?
+                }
+                Err(auth_error) => return Err(auth_error),
+            };
             let session_id = opened.session_id;
 
 // Re-apply the pane's config picks inside THIS turn's own
@@ -2175,11 +2204,14 @@ where
             // so the picks apply to them too. An `auth_required`
             // rejection triggers one lazy-authentication attempt (see
             // [`authenticate_on_auth_required`]) before the retry.
-            let picks_applied = apply_session_picks(
-                &connection,
-                &session_id,
-                opened.config_options.as_deref(),
-                picks,
+            let picks_applied = handshake_step(
+                "config picks",
+                apply_session_picks(
+                    &connection,
+                    &session_id,
+                    opened.config_options.as_deref(),
+                    picks,
+                ),
             )
             .await;
             match picks_applied {
@@ -2191,11 +2223,14 @@ where
                         &auth_error,
                     )
                     .await?;
-                    apply_session_picks(
-                        &connection,
-                        &session_id,
-                        opened.config_options.as_deref(),
-                        picks,
+                    handshake_step(
+                        "config picks",
+                        apply_session_picks(
+                            &connection,
+                            &session_id,
+                            opened.config_options.as_deref(),
+                            picks,
+                        ),
                     )
                     .await?;
                 }
@@ -2230,7 +2265,11 @@ where
                     .as_ref()
                     .is_some_and(|(_, modes)| modes.iter().any(|m| m.id == mode_id))
             {
-                let mode_applied = apply_session_mode(&connection, &session_id, Some(mode_id)).await;
+                let mode_applied = handshake_step(
+                    "mode bind",
+                    apply_session_mode(&connection, &session_id, Some(mode_id)),
+                )
+                .await;
                 match mode_applied {
                     Ok(()) => {}
                     Err(auth_error) if auth_error.code == ErrorCode::AuthRequired => {
@@ -2240,7 +2279,11 @@ where
                             &auth_error,
                         )
                         .await?;
-                        apply_session_mode(&connection, &session_id, Some(mode_id)).await?;
+                        handshake_step(
+                            "mode bind",
+                            apply_session_mode(&connection, &session_id, Some(mode_id)),
+                        )
+                        .await?;
                     }
                     Err(auth_error) => return Err(auth_error),
                 }

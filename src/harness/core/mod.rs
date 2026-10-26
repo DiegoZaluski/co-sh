@@ -79,7 +79,7 @@ use prefix_cache::PrefixCacheProbe;
 pub use tool_catalog::HarnessTool;
 use tool_catalog::{build_lsp, default_harness_tools, PromptSystem};
 
-pub(crate) use limits::{CONTEXT_WINDOW_MARKER, INTERRUPTED_MARKER, MAX_ITERATIONS, SUBAGENT_BLOCKED_TOOLS};
+pub(crate) use limits::{CONTEXT_WINDOW_MARKER, INTERRUPTED_MARKER, MAX_ITERATIONS, ITERATION_RENEWALS, SUBAGENT_BLOCKED_TOOLS};
 use limits::{LOOP_DETECTION_WINDOW_SIZE, MAX_TOOL_RETRIES, SUBAGENT_INTERNAL_NOTE};
 pub use prompts::{
     INSTRUCTIONS_ASK, INSTRUCTIONS_BUILD, INSTRUCTIONS_BUILD_BASE, INSTRUCTIONS_BUILD_SELF_REVIEW,
@@ -143,6 +143,12 @@ pub struct Harness {
     /// ref, so the TUI can pair a window's input echo with ITS OWN stream
     /// and report — the last-Running-window guess could cross-pair them.
     active_call_ref: Option<String>,
+    /// The CURRENT loop's queued-input handle (`None` outside a running
+    /// loop). Set at every `run_agent_loop*` entry so a blocking dispatch
+    /// arm (the `agents_call` wait) can wake when the user queues a message
+    /// — the queue belongs to the LOOP, not the harness, and a harness
+    /// reused across loops must never read a previous loop's queue.
+    loop_queued_input: Option<queued_input::QueuedInput>,
     /// True when this harness is an INTERNAL SUB-AGENT (a nested harness
     /// built by [`Self::run_internal_subagent`]). Gates the two behaviors a
     /// nested loop must not have (Claude Code non-interactive nesting rules):

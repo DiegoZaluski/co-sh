@@ -14,9 +14,11 @@ use super::discovered_context_window;
 #[cfg(not(test))]
 use super::context::ContextManager;
 use super::{
-    CONTEXT_WINDOW_MARKER, INTERRUPTED_MARKER, MAX_ITERATIONS, MAX_TOOL_RETRIES, Harness,
-    LOOP_DETECTION_WINDOW_SIZE, PrefixCacheProbe, RunOutcome, StreamEvent, background,
+    CONTEXT_WINDOW_MARKER, INTERRUPTED_MARKER, MAX_ITERATIONS, ITERATION_RENEWALS,
+    MAX_TOOL_RETRIES, Harness, LOOP_DETECTION_WINDOW_SIZE, PrefixCacheProbe, RunOutcome,
+    StreamEvent, background,
 };
+use super::limits::LOOP_DETECTION_MAX_REPEATS;
 
 /// What ended a pre-Done busy-guard wait (see `Harness::wait_for_outstanding`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,6 +192,11 @@ impl Harness {
         queued_input: super::queued_input::QueuedInput,
     ) {
         use super::events::{HarnessEvent, ToastVariant};
+        // The queue belongs to THIS loop: publish the handle so a blocking
+        // dispatch arm (the `agents_call` wait) can wake when the user queues
+        // a message mid-wait. Overwritten at every loop entry — a harness
+        // reused across loops must never read a previous loop's queue.
+        self.loop_queued_input = Some(queued_input.clone());
         self.context_manager.set_binding_sender(tx.clone());
         use super::guardrails::{PermissionCheck, check_tool_permission};
         use cosh_tools::question::types::{QuestionInput, QuestionOutput};
@@ -199,6 +206,10 @@ impl Harness {
         // iteration so the user prompt is not sent twice).
         let mut current_input = String::new();
         let mut iteration = 0u64;
+        // Bounded renewals of the iteration budget: a loop the detectors
+        // cannot call stuck is progressing, so the MAX_ITERATIONS guard
+        // renews instead of cutting healthy work (see [`ITERATION_RENEWALS`]).
+        let mut iteration_renewals_left: u32 = ITERATION_RENEWALS;
         // Fresh nudge budget per agent loop: a harness reused across loops
         // must not inherit the previous turn's exhausted budget.
         self.stop_nudges_left = super::limits::STOP_NUDGE_BUDGET;
@@ -878,18 +889,66 @@ impl Harness {
                 // when the model fails to recognise that its request is
                 // complete.
                 if iteration >= MAX_ITERATIONS {
-                    // log::debug!("run_agent_loop MAX_ITERATIONS={MAX_ITERATIONS} reached");
-                    // Heuristic guard: the stop stands, but the decision
-                    // model audits it so an improper stop is never silent.
-                    let verdict = self.review_guard_stop("max-iterations");
-                    self.context_manager.close_loop();
-                    let _ = tx.send(self.lsp_snapshot_event());
-                    let _ = tx.send(HarnessEvent::Done {
-                        context: self.context_manager.save_state(),
-                        checkup_verdict: verdict,
+                    // Progress check BEFORE stopping: the hard limit exists to
+                    // kill a RUNAWAY loop, and the loop detectors (tool
+                    // signatures, textual repetition) already cover runaway —
+                    // a loop whose recent window shows no stuck repetition is
+                    // making real progress, and long multi-step work is
+                    // legitimate. Renew the budget (bounded) instead of
+                    // cutting the turn with tool calls still queued.
+                    let recent_sig = loop_window.back().cloned();
+                    let stuck = recent_sig.is_some_and(|sig| {
+                        loop_window.len() == LOOP_DETECTION_WINDOW_SIZE
+                            && loop_window.iter().filter(|w| **w == sig).count()
+                                > LOOP_DETECTION_MAX_REPEATS
                     });
-                    terminal_sent = true;
-                    break;
+                    if !stuck && iteration_renewals_left > 0 {
+                        iteration_renewals_left -= 1;
+                        iteration -= MAX_ITERATIONS / 2;
+                        let message = format!(
+                            "The {MAX_ITERATIONS}-iteration safety limit was reached while the \
+                             work was still progressing; the limit was renewed \
+                             ({iteration_renewals_left} renewal(s) left)."
+                        );
+                        log::warn!(target: "cosh::harness", "guard: {message}");
+                        let _ = tx.send(HarnessEvent::Toast {
+                            message,
+                            variant: ToastVariant::Warning,
+                        });
+                        // Fall through: the pending calls dispatch normally.
+                    } else {
+                        // The stop stands. Make it VISIBLE: with no checkup
+                        // attached, `review_guard_stop` returns None before
+                        // logging anything, so this arm used to end the turn
+                        // with zero trace — no log line, no toast — while
+                        // dropping every still-queued tool call.
+                        let dropped = self.tool_issuer.len();
+                        log::warn!(
+                            target: "cosh::harness",
+                            "guard stop: MAX_ITERATIONS={MAX_ITERATIONS} reached (stuck={stuck}) — dropping {dropped} queued tool call(s)"
+                        );
+                        let verdict = self.review_guard_stop("max-iterations");
+                        let _ = tx.send(HarnessEvent::Toast {
+                            message: format!(
+                                "Agent stopped: the {MAX_ITERATIONS}-iteration safety limit \
+                                 was reached{}.",
+                                if dropped > 0 {
+                                    format!(" with {dropped} queued tool call(s) undispached")
+                                } else {
+                                    String::new()
+                                }
+                            ),
+                            variant: ToastVariant::Warning,
+                        });
+                        self.context_manager.close_loop();
+                        let _ = tx.send(self.lsp_snapshot_event());
+                        let _ = tx.send(HarnessEvent::Done {
+                            context: self.context_manager.save_state(),
+                            checkup_verdict: verdict,
+                        });
+                        terminal_sent = true;
+                        break;
+                    }
                 }
 
                 // A model-requested stop (`self.stop` via stop_agent_loop) must
@@ -1049,6 +1108,22 @@ impl Harness {
                     // Normal dispatch for all other tools
                     // log::debug!("run_agent_loop dispatch_next start");
 
+                    // TRACE the intent BEFORE anything can block: the call
+                    // item is recorded now, and every later outcome (result,
+                    // denial, error, interruption) lands on this exact item
+                    // via `record_tool_result`. A dispatch that never returns
+                    // (a hung tool await) leaves a visible
+                    // call-without-result in the timeline instead of
+                    // vanishing without a trace.
+                    let traced_id = info.as_ref().map(|(_, name, args)| {
+                        self.record_tool_call(
+                            dispatch_call_ref.as_deref().unwrap_or(""),
+                            name,
+                            args,
+                            info_sig.as_deref().unwrap_or_default(),
+                        )
+                    });
+
                     // PreToolUse hooks: run user-defined shell commands
                     // before the permission check. Deny/halt results block
                     // the tool call without reaching the permission dialog;
@@ -1103,12 +1178,9 @@ impl Harness {
                         // call that never gets a visible answer gets re-issued,
                         // burning MAX_TOOL_RETRIES lives on the same mistake.
                         if let Some((_, ref name, ref args)) = info {
-                            let tool_id = dispatch_call_ref.clone().unwrap_or_default();
-                            self.push_tool_history(
-                                &tool_id,
+                            self.record_tool_result(
+                                traced_id.as_deref().unwrap_or(""),
                                 name,
-                                args,
-                                info_sig.as_deref().unwrap_or_default(),
                                 &reason,
                             );
                             tool_interactions.push(format!("{name}\u{0}{args}\u{0}{reason}"));
@@ -1184,12 +1256,9 @@ impl Harness {
                             self.tool_issuer.pop_front();
                             self.tool_failure_count += 1;
                             if let Some((_, ref name, ref args)) = info {
-                                let tool_id = dispatch_call_ref.clone().unwrap_or_default();
-                                self.push_tool_history(
-                                    &tool_id,
+                                self.record_tool_result(
+                                    traced_id.as_deref().unwrap_or(""),
                                     name,
-                                    args,
-                                    info_sig.as_deref().unwrap_or_default(),
                                     &reason,
                                 );
                                 // Loop-detection signature part: identical
@@ -1371,15 +1440,10 @@ impl Harness {
                                                 // Record the denial in history so the model
                                                 // sees its own tool call + the "denied" result
                                                 // as a proper conversation turn.
-                                                if let Some((_, ref name, ref args)) = info {
-                                                    let tool_id = dispatch_call_ref
-                                                        .clone()
-                                                        .unwrap_or_default();
-                                                    self.push_tool_history(
-                                                        &tool_id,
+                                                if let Some((_, ref name, _)) = info {
+                                                    self.record_tool_result(
+                                                        traced_id.as_deref().unwrap_or(""),
                                                         name,
-                                                        args,
-                                                        info_sig.as_deref().unwrap_or_default(),
                                                         &msg,
                                                     );
                                                 }
@@ -1396,6 +1460,16 @@ impl Harness {
                                         // Channel closed or stop requested
                                         // log::debug!("run_agent_loop PERM_CHANNEL_CLOSED");
                                         self.tool_issuer.pop_front();
+                                        // The call was pre-recorded: close its chain with the
+                                        // failure, or the next request carries an orphaned
+                                        // tool_call the providers reject.
+                                        if let Some((_, ref name, _)) = info {
+                                            self.record_tool_result(
+                                                traced_id.as_deref().unwrap_or(""),
+                                                name,
+                                                "Internal error: permission channel closed",
+                                            );
+                                        }
                                         let _ = tx.send(HarnessEvent::ToolError {
                                             error: "Internal error: permission channel closed"
                                                 .to_string(),
@@ -1506,6 +1580,18 @@ impl Harness {
                                     log::debug!(
                                         "run_agent_loop POST_HOOK_HALT tool={tool_name_str}"
                                     );
+                                    // The call was pre-recorded: close its chain even on a
+                                    // halt — the tool ran, its output just is not delivered
+                                    // as a ToolResult event. An open tool_call here would
+                                    // make the next request carry an orphan the providers
+                                    // reject.
+                                    if let Some((_, ref name, _)) = info {
+                                        self.record_tool_result(
+                                            traced_id.as_deref().unwrap_or(""),
+                                            name,
+                                            &output,
+                                        );
+                                    }
                                     // Explicit user intent via hook config —
                                     // never reviewed by the model.
                                     self.emit_terminal_error(&tx, reason, None);
@@ -1539,14 +1625,11 @@ impl Harness {
 
                             self.tool_failure_count = 0;
                             log::debug!("run_agent_loop dispatch_next OK len={}", output.len());
-                            // Record the tool call + result in native history
+                            // Record the tool result on the pre-recorded call
                             if let Some((_, ref name, ref args)) = info {
-                                let tool_id = dispatch_call_ref.clone().unwrap_or_default();
-                                self.push_tool_history(
-                                    &tool_id,
+                                self.record_tool_result(
+                                    traced_id.as_deref().unwrap_or(""),
                                     name,
-                                    args,
-                                    info_sig.as_deref().unwrap_or_default(),
                                     &output,
                                 );
                                 // Loop-detection signature part.
@@ -1561,12 +1644,9 @@ impl Harness {
                             // Record the error in history so the model sees
                             // its tool call + the error as a proper turn.
                             if let Some((_, ref name, ref args)) = info {
-                                let tool_id = dispatch_call_ref.clone().unwrap_or_default();
-                                self.push_tool_history(
-                                    &tool_id,
+                                self.record_tool_result(
+                                    traced_id.as_deref().unwrap_or(""),
                                     name,
-                                    args,
-                                    info_sig.as_deref().unwrap_or_default(),
                                     &e,
                                 );
                                 // Loop-detection signature part.
@@ -1606,6 +1686,16 @@ impl Harness {
                         DispatchOut::Stopped => {
                             // log::debug!("run_agent_loop dispatch_next STOPPED by user");
                             self.stop = true;
+                            // The call was pre-recorded: close its chain with the
+                            // interruption, or the next request carries an orphaned
+                            // tool_call the providers reject.
+                            if let Some((_, ref name, _)) = info {
+                                self.record_tool_result(
+                                    traced_id.as_deref().unwrap_or(""),
+                                    name,
+                                    "The tool call was interrupted by the user before it produced a result.",
+                                );
+                            }
                             self.context_manager.close_loop();
                             let _ = tx.send(HarnessEvent::Stopped {
                                 context: self.context_manager.save_state(),
@@ -1646,6 +1736,19 @@ impl Harness {
                         // Safety net — emit a terminal event so the TUI does
                         // not stay in a "running" state. Heuristic guard:
                         // the stop stands, but the decision model audits it.
+                        // VISIBILITY: with no checkup attached the audit is
+                        // None and logs nothing — surface the stop.
+                        log::warn!(
+                            target: "cosh::harness",
+                            "guard stop: MAX_ITERATIONS={MAX_ITERATIONS} reached while every tool call failed validation"
+                        );
+                        let _ = tx.send(HarnessEvent::Toast {
+                            message: format!(
+                                "Agent stopped: the {MAX_ITERATIONS}-iteration safety limit \
+                                 was reached."
+                            ),
+                            variant: ToastVariant::Warning,
+                        });
                         let verdict = self.review_guard_stop("max-iterations");
                         self.context_manager.close_loop();
                         let _ = tx.send(self.lsp_snapshot_event());
@@ -1688,6 +1791,19 @@ impl Harness {
                         // Safety net — emit a terminal event so the TUI does
                         // not stay in a "running" state. Heuristic guard:
                         // the stop stands, but the decision model audits it.
+                        // VISIBILITY: with no checkup attached the audit is
+                        // None and logs nothing — surface the stop.
+                        log::warn!(
+                            target: "cosh::harness",
+                            "guard stop: MAX_ITERATIONS={MAX_ITERATIONS} reached while the turn never reached a completion"
+                        );
+                        let _ = tx.send(HarnessEvent::Toast {
+                            message: format!(
+                                "Agent stopped: the {MAX_ITERATIONS}-iteration safety limit \
+                                 was reached."
+                            ),
+                            variant: ToastVariant::Warning,
+                        });
                         let verdict = self.review_guard_stop("max-iterations");
                         self.context_manager.close_loop();
                         let _ = tx.send(self.lsp_snapshot_event());

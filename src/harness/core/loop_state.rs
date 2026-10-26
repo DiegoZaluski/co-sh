@@ -170,6 +170,27 @@ impl Harness {
         signature: &str,
         result: &str,
     ) {
+        let tool_id = self.record_tool_call(id, name, args, signature);
+        self.record_tool_result(&tool_id, name, result);
+    }
+
+    /// Record ONLY the call half of a tool turn: the `assistant` message
+    /// with `tool_calls`, BEFORE the tool runs. The dispatch loop pre-records
+    /// the intent so a dispatch that never returns (a hung tool await) leaves
+    /// a visible call-without-result in the timeline instead of vanishing
+    /// without a trace — and every later outcome (result, denial, error,
+    /// interruption) lands on this exact item via [`Self::record_tool_result`].
+    ///
+    /// Returns the id the call was recorded under: the provider id when one
+    /// arrived, a synthesized `call_<n>` otherwise (inline JSON calls) — the
+    /// result site MUST reuse it, or the `tool_call → tool` chain breaks.
+    pub(super) fn record_tool_call(
+        &mut self,
+        id: &str,
+        name: &str,
+        args: &serde_json::Value,
+        signature: &str,
+    ) -> String {
         let args_str = serde_json::to_string(args).unwrap_or_default();
         // Providers require a non-empty tool_call_id; synthesize one when the
         // extractor did not attach an id (inline JSON calls).
@@ -200,13 +221,20 @@ impl Harness {
             signature,
             thinking_blocks,
         );
+        tool_id
+    }
+
+    /// Record ONLY the result half of a tool turn: the `tool` message bound
+    /// to the id [`Self::record_tool_call`] returned. Consumes the staged
+    /// multimodal images of THIS dispatch (see the drain contract below).
+    pub(super) fn record_tool_result(&mut self, tool_id: &str, name: &str, result: &str) {
         // Multimodal channel: the Tier-1 dispatch (`dispatch_next`) drained
         // this dispatch's staged PNG payload into `self.pending_images`
         // right after the call returned. Consume it here so the images ride
         // on THIS result's `ChatMessage`; a payload drained by any other
         // path (hook halt, stop, MCP fallback) is dropped there instead.
         self.context_manager.add_tool_result_with_images(
-            &tool_id,
+            tool_id,
             result,
             result_is_useless(name, result),
             std::mem::take(&mut self.pending_images),
