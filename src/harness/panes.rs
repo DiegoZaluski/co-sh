@@ -700,17 +700,32 @@ pub fn complete_request(
     Some(requester)
 }
 
-/// Fail a pane's IN-FLIGHT request, if any: the pane's turn was force-
-/// closed (the Ctrl+X interrupt) or reset without completing — a leftover
-/// serving entry would keep [`has_outstanding_requests`] true forever and
-/// hang the requester's busy-guard at its natural-completion point.
-/// Queued (not yet served) requests are kept: the freed pane can still
-/// serve them.
+/// Fail a pane's IN-FLIGHT request, if any: the pane's turn was reset
+/// without completing (a pane-set teardown) — a leftover serving entry
+/// would keep [`has_outstanding_requests`] true forever and hang the
+/// requester's busy-guard at its natural-completion point. Queued (not yet
+/// served) requests are kept: the freed pane can still serve them. This is
+/// an infrastructure failure (`Error`); the USER stopping the turn
+/// (Ctrl+X) goes through [`cancel_serving`] instead, so the requester is
+/// told the turn was cancelled rather than told to retry.
 pub fn fail_serving(pane: &str, error: String) {
     let mut state = registry().lock().unwrap_or_else(|p| p.into_inner());
     if let Some(request) = state.serving.remove(pane) {
         fail_wait(&mut state, &request.id, error);
     }
+}
+
+/// A user-stop interrupt (Ctrl+X) fails the pane's IN-FLIGHT request as a
+/// CANCELLED turn — the one path where `cancelled` is literal. Every other
+/// teardown ([`fail_serving`], [`fail_pane`], [`set_panes`]) stays `Error`.
+/// Routing through [`complete_request`] resolves BOTH reply modes exactly
+/// like a real terminal Done: a wait-mode caller unblocks inline with
+/// `end = Cancelled`, a background-mode caller (or a dead waiter) parks the
+/// cancellation as a delivery instead of losing it. Returns the requester
+/// tag so the caller can honor the wake promise.
+#[must_use]
+pub fn cancel_serving(pane: &str, reason: String) -> Option<&'static str> {
+    complete_request(pane, PaneReport::new(Err(reason), PaneTurnEnd::Cancelled))
 }
 
 /// Fail ALL of a pane's outstanding requests — in-flight AND queued — and
@@ -1892,6 +1907,71 @@ mod tests {
         );
         // A second failure is a no-op: the entry is gone.
         fail_serving("cosh#1", "again".into());
+        assert!(!has_outstanding_requests(MAIN));
+    }
+
+    /// Ctrl+X regression: a user stop of a pane serving a wait-mode
+    /// `agents_call` must resolve the requester with `Cancelled` (never
+    /// `Error`), so `report_block` renders the "do not re-send" guidance —
+    /// the anti-ping-pong contract — instead of the "retry later" one.
+    #[test]
+    fn cancel_serving_reports_cancelled_not_error() {
+        let _g = lock();
+        set_panes(vec![pane("claude", "claude", false)]);
+        let handle = enqueue("claude", "task", MAIN, ReplyMode::Wait).unwrap();
+        let rx = handle.receiver.expect("wait mode carries a receiver");
+        assert!(pop_next_request("claude").is_some(), "dispatched");
+        assert_eq!(
+            cancel_serving("claude", "interrupted by the user (Ctrl+X)".into()),
+            Some(MAIN),
+            "the cancellation reports its requester"
+        );
+        let answer = block_on(async move { rx.await.expect("sender alive") });
+        assert_eq!(answer.end, PaneTurnEnd::Cancelled);
+        assert_eq!(
+            answer.output,
+            Err("interrupted by the user (Ctrl+X)".to_string())
+        );
+        let note = report_block(
+            "claude",
+            &handle.request_id,
+            answer.output.as_deref().map_err(String::as_str),
+            answer.end,
+        );
+        assert!(note.contains("[failed: cancelled]"), "{note}");
+        assert!(
+            note.contains("Do not re-send the task automatically"),
+            "{note}"
+        );
+        assert!(!note.contains("retry later"), "{note}");
+    }
+
+    /// Ctrl+X regression: a background `agents_call` whose pane is force-
+    /// closed must NOT lose its report — the cancellation parks as a
+    /// delivery for the requester's next drain instead of vanishing.
+    #[test]
+    fn cancel_serving_parks_a_background_delivery() {
+        let _g = lock();
+        set_panes(vec![pane("claude", "claude", false)]);
+        enqueue("claude", "task", MAIN, ReplyMode::Background).unwrap();
+        assert!(pop_next_request("claude").is_some(), "dispatched");
+        assert_eq!(
+            cancel_serving("claude", "interrupted by the user (Ctrl+X)".into()),
+            Some(MAIN),
+            "the cancellation reports its requester"
+        );
+        let deliveries = take_ready_deliveries(MAIN);
+        assert_eq!(deliveries.len(), 1, "the cancellation is not lost");
+        assert_eq!(deliveries[0].end, PaneTurnEnd::Cancelled);
+        assert_eq!(
+            deliveries[0].output,
+            Err("interrupted by the user (Ctrl+X)".to_string())
+        );
+        let note = delivery_note(&deliveries[0]);
+        assert!(
+            note.contains("Do not re-send the task automatically"),
+            "{note}"
+        );
         assert!(!has_outstanding_requests(MAIN));
     }
 

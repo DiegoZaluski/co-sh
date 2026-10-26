@@ -1121,7 +1121,17 @@ impl App {
         // conflation this vocabulary removes.
         split.finish_turn(pane, reason, cosh::harness::panes::PaneTurnEnd::Cancelled);
         if let Some(id) = registry_id {
-            cosh::harness::panes::fail_serving(&id, reason.to_string());
+            // Ctrl+X is the user's stop: report it as `cancelled`, never as
+            // an infrastructure error — `report_block`'s `Cancelled`
+            // guidance is what stops the requester from re-running the pane
+            // the user just halted. The requester tag honors the wake
+            // promise (a MAIN-requested background call parks a delivery
+            // and must wake the idle main agent), and the freed pane's next
+            // queued message dispatches in this same frame — the same
+            // follow-through as the normal `AgentsPaneDone` handler.
+            let requester = cosh::harness::panes::cancel_serving(&id, reason.to_string());
+            self.serve_agents_pane_queues();
+            self.wake_main_agent_if_promised(requester);
         }
         self.finish_agents_pane_mirror(pane, true);
     }
