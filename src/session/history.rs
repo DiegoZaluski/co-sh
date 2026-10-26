@@ -1837,6 +1837,7 @@ not-json"#;
                 worktree: None,
             },
             index: 1,
+            pane_id: 0,
         }];
         let events = vec![
             HistoryEvent::new(

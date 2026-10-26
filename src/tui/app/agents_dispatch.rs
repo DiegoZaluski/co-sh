@@ -1120,6 +1120,13 @@ impl App {
         // pretend the pane failed on its own — that is exactly the
         // conflation this vocabulary removes.
         split.finish_turn(pane, reason, cosh::harness::panes::PaneTurnEnd::Cancelled);
+        // The force-close DROPS the winding-down turn's terminal Done (the
+        // pane-idle gate in the event handler), which used to drop its
+        // session binding with it — the stale-binding bug (issue 1,
+        // variant C). The turn's gate-free fact is absorbed HERE so the
+        // pane (and its persisted ref) carries the session the turn
+        // actually drove.
+        self.absorb_pane_session_bindings();
         if let Some(id) = registry_id {
             // Ctrl+X is the user's stop: report it as `cancelled`, never as
             // an infrastructure error — `report_block`'s `Cancelled`
@@ -1725,6 +1732,20 @@ impl App {
                     Ok((output, stop_reason, session)) => (output, stop_reason, session),
                     Err(error) => (error, "error".to_string(), None),
                 };
+                // The binding FACT first, gate-free: the id this turn
+                // actually drove (resumed, or the fresh `session/new`
+                // fallback) is a property of the turn, not of the Done's
+                // routing. The Done handler's gates (unknown pane id, stale
+                // epoch, already-idle pane) may legitimately DROP the event
+                // — a pane force-closed by Ctrl+X or hidden mid-turn — and
+                // with it the binding; the App's absorb pass still finds the
+                // fact here and promotes the pane (live, parked OR hidden).
+                // Preserves the deliberate no-propagate-on-error contract of
+                // `acp::call`: an `Err` carries `session = None` and records
+                // nothing.
+                if let Some(id) = &session {
+                    cosh::harness::panes::record_session_binding(pane_id, id.clone());
+                }
                 let _ = event_tx.send(HarnessEvent::AgentsPaneDone {
                     pane: index,
                     pane_id,
@@ -1768,6 +1789,94 @@ impl App {
         }
         let report = notes.join("\n\n");
         self.start_agent_loop(report);
+    }
+
+    /// Absorb the session-binding FACTS the pane turns recorded gate-free
+    /// (see `cosh::harness::panes::record_session_binding`): promote the
+    /// matching pane object — LIVE, PARKED or HIDDEN — to the session the
+    /// turn actually drove.
+    ///
+    /// This is the reconciliation half that decouples binding capture from
+    /// the `AgentsPaneDone` routing: the Done handler's gates (unknown pane
+    /// id, stale epoch, already-idle pane) stay untouched — they protect
+    /// the event stream (no double closure, no cross-pane injection) — but
+    /// they may drop the event that used to be the binding's only vehicle.
+    /// A fact is a property of the turn, not a routing decision, so it
+    /// lands here instead:
+    /// - a pane id that answers to a LIVE or PARKED pane binds it (the same
+    ///   `bind_agents_pane_session` promotion the happy-path Done handler
+    ///   runs — idempotent, so a Done that DID land just no-ops here);
+    /// - a pane id that answers to a HIDDEN-stack entry (the pane was
+    ///   hidden while its first turn was still running) promotes the
+    ///   persisted `Name` ref to `Bound` in place — the restore path then
+    ///   rebuilds the pane already bound and its replay rehydrates the
+    ///   timeline;
+    /// - a pane id that answers to NOTHING (a pane a rebuild dropped, or a
+    ///   pre-`pane_id` legacy hidden entry) drops the fact — the same
+    ///   anti-contamination verdict the event gates reach, reached
+    ///   structurally.
+    pub(super) fn absorb_pane_session_bindings(&mut self) {
+        let facts = cosh::harness::panes::drain_session_bindings();
+        if facts.is_empty() {
+            return;
+        }
+        let mut hidden_dirty = false;
+        for (pane_id, session_id) in facts {
+            // `0` = never stamped (tests, pre-field legacy entries): no
+            // identity to route by — drop the fact.
+            if pane_id == 0 {
+                continue;
+            }
+            // LIVE or PARKED pane object first: the same object either slot
+            // carries, resolved by its stable id wherever it lives.
+            let index = either_split(&self.agents_split, &self.parked_agents_split)
+                .and_then(|split| split.pane_index_by_id(pane_id));
+            if let Some(index) = index {
+                let already = either_split(&self.agents_split, &self.parked_agents_split)
+                    .and_then(|split| split.panes.get(index))
+                    .is_some_and(|p| p.session_id.as_deref() == Some(session_id.as_str()));
+                if already {
+                    continue;
+                }
+                if let Some(split) =
+                    either_split_mut(&mut self.agents_split, &mut self.parked_agents_split)
+                    && let Some(p) = split.panes.get_mut(index)
+                {
+                    p.session_id = Some(session_id.clone());
+                }
+                // The same promotion + persistence the Done handler runs
+                // (dedup + agent-match guards inside) — reused verbatim.
+                self.bind_agents_pane_session(index, session_id);
+                continue;
+            }
+            // Hidden stack: the pane object is gone (the hide dropped it);
+            // its persisted identity rides the `HiddenPane::pane_id` bridge.
+            let Some(session) = self.state.current_session_mut() else {
+                continue;
+            };
+            let Some(entry) = session
+                .agents_hidden
+                .iter_mut()
+                .find(|hidden| hidden.pane_id == pane_id)
+            else {
+                continue;
+            };
+            if entry.pane.session_id() == Some(session_id.as_str()) {
+                continue;
+            }
+            entry.pane = crate::types::AgentPaneRef::Bound {
+                agent: entry.pane.agent().to_string(),
+                session_id,
+                worktree: entry.pane.worktree().cloned(),
+            };
+            hidden_dirty = true;
+        }
+        // ONE save for the whole pass (the hidden-stack path has no per-entry
+        // writer of its own — unlike the live path, whose
+        // `bind_agents_pane_session` already persists).
+        if hidden_dirty {
+            self.save_current_agents_metadata();
+        }
     }
 
     /// Dispatch every queued `agents_call` request whose target pane is
@@ -2398,6 +2507,10 @@ fn run_manager_turn(
             let mut manager = match super::harness_assembly::assemble(assembly, &event_tx).await {
                 Ok(manager) => manager,
                 Err(error) => {
+                    // Gate-free fact capture (see the external turn's record):
+                    // the Done may be dropped by the handler's gates, the
+                    // binding fact may not be lost with it.
+                    cosh::harness::panes::record_session_binding(pane_id, session_id.clone());
                     let _ = event_tx.send(HarnessEvent::AgentsPaneDone {
                         pane,
                         pane_id,
@@ -2629,6 +2742,9 @@ fn run_manager_turn(
             // catch_unwind below handles separately, or a receiver drop).
             let cause = terminal_cause.lock().unwrap().take();
             let (output, end) = close_pane_turn(cause.as_ref(), final_answer, fallback);
+            // Gate-free fact capture (see the external turn's record): the
+            // cosh pane's binding survives a Done the handler drops.
+            cosh::harness::panes::record_session_binding(pane_id, session_id.clone());
             let _ = event_tx.send(HarnessEvent::AgentsPaneDone {
                 pane,
                 pane_id,
@@ -2647,6 +2763,10 @@ fn run_manager_turn(
         });
     }));
     if outcome.is_err() {
+        // The panic path binds too (issue 6's contract): capture the fact
+        // gate-free so the binding lands even when the handler drops the
+        // synthetic Done.
+        cosh::harness::panes::record_session_binding(pane_id, panic_session.clone());
         // A panicking turn must never leave the pane Running forever (the
         // spinner would spin with nothing behind it and Esc would have
         // nothing to stop).

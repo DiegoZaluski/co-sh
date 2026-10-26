@@ -1160,6 +1160,11 @@ impl App {
                 self.serve_agents_pane_worktree_ops();
                 self.serve_agents_pane_queues();
             }
+            // The gate-free session-binding facts drain here too (unconditionally:
+            // a fact may belong to a HIDDEN pane — no split owns it, the frame
+            // tick is still the only guaranteed heartbeat). A no-op pass is
+            // one empty-map lock; facts only exist while a pane turn is landing.
+            self.absorb_pane_session_bindings();
 
             // Refresh the footer's git branch at its own rate-limited cadence
             // (the tracker internally throttles disk reads to twice a second).

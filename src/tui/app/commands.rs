@@ -334,6 +334,12 @@ impl App {
     /// content already (live turn, prior replay) and unbound `Name` panes
     /// are skipped.
     pub(super) fn trigger_agents_pane_replays(&mut self) {
+        // Absorb the gate-free binding facts FIRST: a fresh confirm that
+        // re-picks a pane whose first turn just ended (the Done dropped by
+        // the handler's gates) must promote the pane to `Bound` BEFORE the
+        // empty-timeline scan below decides it needs a replay — the
+        // freshly absorbed session is exactly what the replay rehydrates.
+        self.absorb_pane_session_bindings();
         let needs = self
             .agents_split
             .as_ref()
@@ -607,9 +613,16 @@ impl App {
         if index < panes.len() {
             panes.remove(index);
         }
+        // The LIVE pane object id rides the hidden entry: a turn still
+        // running at hide time finishes later, and its gate-free binding
+        // fact (`record_session_binding`, absorbed by
+        // `absorb_pane_session_bindings`) is routed to this entry BY this
+        // id. Without it the fact would answer to nothing and the first
+        // turn's session would never be bound (issue 1, variant A).
         session.agents_hidden.push(crate::types::HiddenPane {
             pane: pane_ref,
             index,
+            pane_id: pane.id,
         });
         if emptied {
             // The metadata follows the screen: the mode is CLOSED and the
@@ -716,7 +729,7 @@ impl App {
     /// mode flag already mutated in place) through the store's normal diff
     /// pipeline. Used by the hide/restore paths, which change the metadata
     /// directly rather than through the open/close helpers.
-    fn save_current_agents_metadata(&mut self) {
+    pub(super) fn save_current_agents_metadata(&mut self) {
         let Some(session) = self.state.current_session() else {
             return;
         };

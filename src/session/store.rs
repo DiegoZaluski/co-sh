@@ -4017,6 +4017,7 @@ mod tests {
                 worktree: None,
             },
             index: 0,
+            pane_id: 0,
         }];
         store.save_session(&session);
 

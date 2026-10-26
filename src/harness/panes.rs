@@ -388,6 +388,17 @@ struct RegistryState {
     /// produces a real closure: the conversation concluded, so a LATER
     /// delegation to the same pane starts with a full budget again.
     redirects: HashMap<String, u32>,
+    /// Session-binding FACTS from finished pane turns, keyed by the App's
+    /// stable pane object id (`AgentPane::id`, the u64 every pane event is
+    /// stamped with — NOT the registry's string pane id, which is
+    /// label-based and re-resolvable across set rebuilds). Written by the
+    /// turn task itself the moment its turn resolves the agent's ACP
+    /// session, OUTSIDE every event-routing gate, and drained by the App's
+    /// absorb pass. Deliberately NOT pruned by [`set_panes`]: a fact may
+    /// land AFTER its pane left the visible set (hidden mid-turn — the
+    /// pane lives on in the session's hidden stack) and must stay
+    /// absorbable there.
+    session_bindings: HashMap<u64, String>,
 }
 
 fn registry() -> &'static Mutex<RegistryState> {
@@ -885,6 +896,49 @@ pub fn take_ready_worktree_delivery(requester: &str, request_id: &str) -> Option
             && delivery.kind == DeliveryKind::Worktree
     })?;
     Some(state.deliveries.remove(index))
+}
+
+/// Record a session-binding FACT: the ACP session id the turn for the
+/// pane object `pane_id` actually ended up driving (the id it resumed, or
+/// the fresh `session/new` id a failed resume silently fell back to).
+///
+/// This is the fact-capture half of the session-binding contract — written
+/// by the turn task itself the moment the turn resolves its session,
+/// WITHOUT routing through the `AgentsPaneDone` event. The Done's handler
+/// gates (unknown pane id, stale epoch, already-idle pane) exist to keep
+/// the event stream honest (no double closure, no cross-pane injection);
+/// they may legitimately DROP the event, and with it the turn's only other
+/// binding vehicle. This registry is the gate-free channel: a fact is a
+/// property of the turn, not a routing decision.
+///
+/// Overwrite semantics: a pane object runs at most one turn at a time, so
+/// a later record for the same `pane_id` is the turn's own authoritative
+/// latest answer (e.g. the manager pane re-binding after a session mint).
+/// `drain_session_bindings` is the consumer half — all-or-nothing per
+/// pass, so an absorbed id can never resurface after the App deliberately
+/// dropped it.
+pub fn record_session_binding(pane_id: u64, session_id: String) {
+    registry()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .session_bindings
+        .insert(pane_id, session_id);
+}
+
+/// Drain ALL recorded session-binding facts, sorted by pane id for a
+/// deterministic pass. The App's absorb pass consumes these and rebinding
+/// is idempotent (already-bound panes short-circuit), so consuming every
+/// fact at once is safe — and it is what guarantees a dropped fact never
+/// comes back to haunt a later absorb pass.
+#[must_use]
+pub fn drain_session_bindings() -> Vec<(u64, String)> {
+    let mut state = registry().lock().unwrap_or_else(|p| p.into_inner());
+    let mut facts: Vec<(u64, String)> = state
+        .session_bindings
+        .drain()
+        .collect();
+    facts.sort_by_key(|(pane_id, _)| *pane_id);
+    facts
 }
 
 /// Render one finished delivery as the `[automated notification]` user
@@ -2265,5 +2319,50 @@ mod tests {
         );
         assert!(!block.contains("<system-reminder>"), "{block}");
         assert!(block.contains("`system-reminder`"), "{block}");
+    }
+
+    // ---- Session-binding fact registry (issue 1) ----
+
+    /// The fact survives a registry pane-set change (`set_panes` does NOT
+    /// prune it): a turn that finished after its pane left the visible set
+    /// (hidden mid-turn) must stay absorbable for the hidden stack.
+    #[test]
+    fn session_binding_fact_survives_a_pane_set_change() {
+        let _g = lock();
+        record_session_binding(7, "s-7".into());
+        set_panes(vec![pane("claude", "claude", false)]);
+        assert_eq!(
+            drain_session_bindings(),
+            vec![(7, "s-7".to_string())],
+            "a fact is a property of the turn, not of the visible pane set"
+        );
+    }
+
+    /// Latest record wins: the pane object runs one turn at a time, so a
+    /// second record for the same pane object id is the turn's own
+    /// authoritative answer (overwriting any earlier stale value).
+    #[test]
+    fn session_binding_record_overwrites_by_pane_object_id() {
+        let _g = lock();
+        record_session_binding(7, "old".into());
+        record_session_binding(7, "new".into());
+        record_session_binding(8, "other".into());
+        assert_eq!(
+            drain_session_bindings(),
+            vec![(7, "new".to_string()), (8, "other".to_string())]
+        );
+    }
+
+    /// The drain is all-or-nothing: an absorbed fact can never resurface
+    /// and re-bind in a later pass the App already decided to drop.
+    #[test]
+    fn session_binding_drain_consumes_every_fact() {
+        let _g = lock();
+        record_session_binding(3, "s-3".into());
+        assert_eq!(drain_session_bindings(), vec![(3, "s-3".to_string())]);
+        assert!(
+            drain_session_bindings().is_empty(),
+            "a consumed fact must not resurface"
+        );
     }
 }
