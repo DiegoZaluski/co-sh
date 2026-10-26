@@ -242,6 +242,11 @@ impl App {
                             let id = split.pane_registry_id(i)?;
                             Some(cosh::harness::panes::PaneDescriptor {
                                 id,
+                                // The pane's IDENTITY rides the descriptor:
+                                // the registry reconciles by it, so a label
+                                // recycled by a sibling's removal can never
+                                // vouch for a dead pane's traffic (Issue 3).
+                                pane_id: p.id,
                                 agent: p.agent.clone(),
                                 is_manager: p.agent
                                     == crate::routes::session::agents_split::MANAGER_LABEL,

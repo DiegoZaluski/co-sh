@@ -821,11 +821,12 @@ impl App {
             self.permission_dialog.selected = 1;
         }
         let approved = matches!(action, PermAction::Allow | PermAction::AllowOnce);
-        let pane_index =
-            either_split(&self.agents_split, &self.parked_agents_split).and_then(|split| {
-                (0..split.panes.len())
-                    .find(|&i| split.pane_registry_id(i).as_deref() == Some(op.pane.as_str()))
-            });
+        // Re-resolve by the op's stamped IDENTITY, not by the registry
+        // label: a label can be recycled onto a DIFFERENT pane by a
+        // sibling's removal while the box sat open, and the answer must
+        // never redirect onto that pane (Issue 3).
+        let pane_index = either_split(&self.agents_split, &self.parked_agents_split)
+            .and_then(|split| split.pane_index_by_id(op.pane_id));
         let outcome = match (approved, pane_index) {
             (true, Some(pane_index)) => {
                 // The session-wide grant latches ONLY on a real approval of
@@ -1298,13 +1299,18 @@ impl App {
         // config (only when the focused pane IS the manager pane — the connector
         // resolution runs lazily so a split of ACP agents alone never
         // computes it).
-        let Some((agent, resume, picks, pane_cwd, handoff)) =
+        let Some((agent, resume, picks, pane_cwd, handoff, pane_identity)) =
             either_split(&self.agents_split, &self.parked_agents_split)
                 .and_then(|split| split.panes.get(pane))
                 .map(|p| {
                     (
                         p.agent.clone(),
                         p.session_id.clone(),
+                        // The pane's IDENTITY (`AgentPane::id`): the
+                        // awareness preamble keys its once-per-generation
+                        // bookkeeping on it — a label recycled by a
+                        // sibling's removal must announce from scratch
+                        // (Issue 3).
                         // The user's picks from the /agents config boxes,
                         // mirrored into the pane's config cache (the box
                         // confirm writes the pick onto the cached option's
@@ -1346,6 +1352,7 @@ impl App {
                         // resume-with-new-cwd is the failure mode it nets).
                         p.worktree_handoff_pending
                             .then(|| pane_handoff_summary(&p.activity.timeline)),
+                        p.id,
                     )
                 })
         else {
@@ -1665,9 +1672,7 @@ impl App {
             });
             let input = assemble_pane_input(
                 handoff_block,
-                pane_registry_id
-                    .as_deref()
-                    .and_then(cosh::harness::panes::take_preamble),
+                cosh::harness::panes::take_preamble(pane_identity),
                 msg,
             );
             // The permission channel rides the MODE (the split's Yolo
@@ -1949,10 +1954,12 @@ impl App {
         // split speaks indexes). A pane that vanished since the ask was
         // parked fails the op — the registry's `set_panes` cleanup usually
         // gets there first; this is the same net result.
+        // Resolve the target by the op's stamped IDENTITY (`pane_index_by_id`):
+        // a label recycled onto another pane by a sibling's removal must not
+        // receive the ask (Issue 3).
         let resolved =
             either_split(&self.agents_split, &self.parked_agents_split).and_then(|split| {
-                let index = (0..split.panes.len())
-                    .find(|&i| split.pane_registry_id(i).as_deref() == Some(op.pane.as_str()))?;
+                let index = split.pane_index_by_id(op.pane_id)?;
                 let mut needs_confirmation = split.panes[index]
                     .worktree
                     .as_ref()
