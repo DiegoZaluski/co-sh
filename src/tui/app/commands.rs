@@ -755,10 +755,27 @@ impl App {
     pub(crate) fn bind_agents_pane_session(&mut self, pane: usize, session_id: String) {
         let pane_state = either_split(&self.agents_split, &self.parked_agents_split)
             .and_then(|split| split.panes.get(pane))
-            .map(|p| (p.agent.clone(), p.worktree.clone()));
-        let Some((agent_name, live_worktree)) = pane_state else {
+            .map(|p| (p.agent.clone(), p.worktree.clone(), p.session_id.clone()));
+        let Some((agent_name, live_worktree, live_session)) = pane_state else {
             return;
         };
+        // Seed the LIVE pane's next resume id — the single write site for
+        // the pane object's session binding. The Done handler seeds early
+        // as well ONLY because its queue service may dispatch a queued
+        // message in the same frame (before this helper runs); every other
+        // promotion — the gate-free absorb pass included — lands HERE, so
+        // there is exactly one live-pane write outside that pre-dispatch
+        // necessity. Deduped: a pane already carrying the id is untouched.
+        if live_session.as_deref() != Some(session_id.as_str())
+            && let Some(split) =
+                super::agents_dispatch::either_split_mut(
+                    &mut self.agents_split,
+                    &mut self.parked_agents_split,
+                )
+            && let Some(p) = split.panes.get_mut(pane)
+        {
+            p.session_id = Some(session_id.clone());
+        }
         let Some(session) = self.state.current_session_mut() else {
             return;
         };

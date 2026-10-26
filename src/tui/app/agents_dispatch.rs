@@ -1139,6 +1139,17 @@ impl App {
             // follow-through as the normal `AgentsPaneDone` handler.
             let requester = cosh::harness::panes::cancel_serving(&id, reason.to_string());
             self.serve_agents_pane_queues();
+            // Absorb ONCE MORE after the dispatch: the first absorb above
+            // ran before any queued message was served, but the winding-
+            // down turn's fact may land in between — and `dispatch_to_pane`
+            // snapshots `p.session_id` as its resume id. Without this
+            // second pass, a queued request served in that window could
+            // resume the STALE session (issue 1's stale-resume window
+            // narrowed to zero width best-effort: facts that arrived by
+            // now bind before the next frame can dispatch anything else;
+            // a fact that lands even later is caught by the frame tick's
+            // absorb pass before any further dispatch).
+            self.absorb_pane_session_bindings();
             self.wake_main_agent_if_promised(requester);
         }
         self.finish_agents_pane_mirror(pane, true);
@@ -1808,9 +1819,10 @@ impl App {
     /// they may drop the event that used to be the binding's only vehicle.
     /// A fact is a property of the turn, not a routing decision, so it
     /// lands here instead:
-    /// - a pane id that answers to a LIVE or PARKED pane binds it (the same
-    ///   `bind_agents_pane_session` promotion the happy-path Done handler
-    ///   runs — idempotent, so a Done that DID land just no-ops here);
+    /// - a pane id that answers to a LIVE or PARKED pane binds it (the
+    ///   same single `bind_agents_pane_session` promotion the happy-path
+    ///   Done handler runs — dedup inside, so a Done that DID land just
+    ///   no-ops here);
     /// - a pane id that answers to a HIDDEN-stack entry (the pane was
     ///   hidden while its first turn was still running) promotes the
     ///   persisted `Name` ref to `Bound` in place — the restore path then
@@ -1837,20 +1849,10 @@ impl App {
             let index = either_split(&self.agents_split, &self.parked_agents_split)
                 .and_then(|split| split.pane_index_by_id(pane_id));
             if let Some(index) = index {
-                let already = either_split(&self.agents_split, &self.parked_agents_split)
-                    .and_then(|split| split.panes.get(index))
-                    .is_some_and(|p| p.session_id.as_deref() == Some(session_id.as_str()));
-                if already {
-                    continue;
-                }
-                if let Some(split) =
-                    either_split_mut(&mut self.agents_split, &mut self.parked_agents_split)
-                    && let Some(p) = split.panes.get_mut(index)
-                {
-                    p.session_id = Some(session_id.clone());
-                }
-                // The same promotion + persistence the Done handler runs
-                // (dedup + agent-match guards inside) — reused verbatim.
+                // The same promotion the Done handler runs — reused
+                // verbatim. ONE write path: `bind_agents_pane_session` both
+                // seeds the live pane's resume id (deduped) and promotes
+                // the persisted entry; the absorb adds no parallel write.
                 self.bind_agents_pane_session(index, session_id);
                 continue;
             }
