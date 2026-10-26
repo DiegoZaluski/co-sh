@@ -434,17 +434,23 @@ fn registry() -> &'static Mutex<RegistryState> {
     REGISTRY.get_or_init(|| Mutex::new(RegistryState::default()))
 }
 
-/// The actionable failure a requester receives when its target pane left
-/// the set (removed by a hide, a fresh confirm, or a teardown): the pane's
-/// label AND the CURRENT addressable set, so the agent can re-address
-/// `agents_call` immediately instead of guessing (Issue 3). Mirrors the
-/// unknown-id error `enqueue` renders. `known` is the INCOMING set — the
-/// labels the pane set resolves to after this reconciliation.
+/// The actionable failure a requester receives when the pane it addressed
+/// left the set (removed by a hide, a fresh confirm, or a teardown).
+///
+/// The wording addresses the pane the requester MEANT — "the pane you
+/// addressed as '<label>'" — never the label as an identity, because a
+/// positional label is recyclable: `cosh#2` may still exist in the CURRENT
+/// set as a DIFFERENT pane object, and a bare "the pane you addressed as 'cosh#2' is gone"
+/// would leave the requester arguing with itself about whether its
+/// address is still valid (Issue 3 review note). The CURRENT addressable
+/// set rides along so the agent can re-address `agents_call` immediately
+/// instead of guessing. `known` is the INCOMING set — the labels the pane
+/// set resolves to after this reconciliation.
 fn removal_error(removed_label: &str, known: &[String]) -> String {
     let known: Vec<&str> = known.iter().map(String::as_str).collect();
     format!(
-        "pane '{removed_label}' was removed from the /agents split; \
-         re-address agents_call to one of: {known:?}"
+        "the pane you addressed as '{removed_label}' is gone from the \
+         /agents split; re-address agents_call to one of: {known:?}"
     )
 }
 
@@ -537,11 +543,17 @@ pub fn set_panes(panes: Vec<PaneDescriptor>) {
         }
     }
     for (old_label, new_label) in relabeled.iter() {
-        if let Some((_, queue)) = detached_queues.iter().find(|(l, _)| l == old_label) {
-            state.queues.insert(new_label.clone(), queue.clone());
+        // MOVE, not clone: the detached queue/request IS the live traffic —
+        // swap_remove splices it out (order across relabels is irrelevant;
+        // each leg looks its entry up by the old label) and the value is
+        // handed straight to its new key with no copy.
+        if let Some(at) = detached_queues.iter().position(|(l, _)| l == old_label) {
+            let (_, queue) = detached_queues.swap_remove(at);
+            state.queues.insert(new_label.clone(), queue);
         }
-        if let Some((_, request)) = detached_serving.iter().find(|(l, _)| l == old_label) {
-            state.serving.insert(new_label.clone(), request.clone());
+        if let Some(at) = detached_serving.iter().position(|(l, _)| l == old_label) {
+            let (_, request) = detached_serving.swap_remove(at);
+            state.serving.insert(new_label.clone(), request);
         }
     }
 
@@ -1937,7 +1949,7 @@ mod tests {
         assert_eq!(
             answer.output,
             Err(
-                "pane 'claude' was removed from the /agents split; re-address agents_call to one of: [\"kilo\"]"
+                "the pane you addressed as 'claude' is gone from the /agents split; re-address agents_call to one of: [\"kilo\"]"
                     .to_string()
             )
         );
@@ -2631,7 +2643,10 @@ mod tests {
         // with the CURRENT set — never delivered to pane 103.
         let answer = block_on(async move { rx_102.await.expect("sender alive") });
         let error = answer.output.expect_err("the dead pane's wait fails");
-        assert!(error.contains("pane 'cosh#2' was removed"), "{error}");
+        assert!(
+            error.contains("the pane you addressed as 'cosh#2' is gone"),
+            "{error}"
+        );
         assert!(error.contains("re-address agents_call"), "{error}");
         assert!(error.contains("cosh#1"), "{error}");
 
@@ -2666,7 +2681,7 @@ mod tests {
 
         let answer = block_on(async move { rx.await.expect("sender alive") });
         let error = answer.output.expect_err("the replaced pane's wait fails");
-        assert!(error.contains("pane 'claude' was removed"), "{error}");
+        assert!(error.contains("the pane you addressed as 'claude' is gone"), "{error}");
         assert!(error.contains("re-address agents_call to one of: [\"claude\"]"), "{error}");
         // The fresh pane starts CLEAN: no queue to serve, no inherited
         // state. (The fresh pane's first request would be a NEW enqueue.)
