@@ -23,6 +23,44 @@ pub(crate) const MAX_ITERATIONS: u64 = 100;
 /// resurfaces, raise this — never remove the bound.
 pub(crate) const STOP_NUDGE_BUDGET: u32 = 10;
 
+/// Resume budget for a `/agents` PANE turn — how many times the harness
+/// re-sends the context after a stop NOBODY asked for (the natural-stop
+/// gate's [`STOP_NUDGE_BUDGET`] exhausted on an empty completion, or the
+/// textual repetition detector firing).
+///
+/// Why a pane needs this and a chat turn does not: a chat turn's stop is
+/// final (the user reads the answer, or asks again), while a pane turn owes a
+/// DELIVERABLE — the report its `agents_call` requester is blocked on — and
+/// `stop_agent_loop` is blocked for panes ([`SUBAGENT_BLOCKED_TOOLS`] here,
+/// the TUI's `MANAGER_BLOCKED_TOOLS` for the cosh pane), so the loop cannot
+/// end early on purpose. The only legitimate early end is the USER's stop,
+/// which is exactly observable (`self.stop` / the shared `stop_signal` — the
+/// same flags `check_stop!` reads). Any other stop is an IMPROPER stop: the
+/// pane hands its requester `incomplete` while the model may have been cut one
+/// turn before writing the report.
+///
+/// SCOPE — this budget covers the two shapes that produced the field reports
+/// (an exhausted empty stop, and the repetition detector). It deliberately
+/// does NOT cover every terminal shape: `MAX_ITERATIONS`, `MAX_TOOL_RETRIES`
+/// and the tool-interaction loop detector still stop a pane (and report
+/// `incomplete` with their guard verdict). Those are cost/safety nets whose
+/// stop is a bound on RESOURCE EXHAUSTION, not a verdict on the work — the
+/// model has provably failed the task those bounds exist to catch, so
+/// granting more context re-sends would buy nothing. Widening this to them
+/// would turn a runaway model into a longer runaway.
+///
+/// Continuing is safe because it is the SAME mechanism every other
+/// continuation in the loop uses — full history plus one steering turn, the
+/// provider-standard re-send — not a new wire shape and not a fabricated user
+/// turn. What was missing was only the BOUND: the loop's nudges renew per
+/// ENTRY (`run_agent_loop_inner` resets `stop_nudges_left`), so without a
+/// per-loop budget a resuming pane could renew forever. Two is enough to
+/// recover a cut turn (the observed defect stops after ONE) and short enough
+/// that a chronically empty model still terminates visibly, reported as
+/// `incomplete` with its guard verdict. Never remove this bound; raise it
+/// only against a measured streak.
+pub(crate) const PANE_RESUME_BUDGET: u32 = 2;
+
 /// Loop-detection window: the number of recent tool-call iterations watched
 /// for a repeated identical interaction, mirroring crush's
 /// `loopDetectionWindowSize`. Detection only fires once the window is full

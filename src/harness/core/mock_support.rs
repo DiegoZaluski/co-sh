@@ -44,6 +44,8 @@ impl Harness {
             last_finish_reason: None,
             last_stream_unfinished: false,
             stop_nudges_left: super::limits::STOP_NUDGE_BUDGET,
+            pane_resumes_left: super::limits::PANE_RESUME_BUDGET,
+            stop_nudge_budget_override: None,
             prefix_cache_probe: PrefixCacheProbe::default(),
             #[cfg(test)]
             promoted_reasoning_log: Vec::new(),
@@ -107,6 +109,37 @@ impl Harness {
             example_args: None,
         });
         self
+    }
+
+    /// Remaining improper-stop resumes for this loop (test accessor — the
+    /// field is private to `core`).
+    #[cfg(test)]
+    pub(crate) fn pane_resumes_left(&self) -> u32 {
+        self.pane_resumes_left
+    }
+
+    /// Force the natural-stop nudge budget the loop ENTERS with (test-only):
+    /// lets a test reach the "budget EXHAUSTED and the model still produced
+    /// nothing" branch on the FIRST empty stream instead of scripting ten.
+    /// It seeds the entry override rather than `stop_nudges_left`, because
+    /// `run_agent_loop_inner` resets that counter on every entry.
+    #[cfg(test)]
+    pub(crate) fn set_stop_nudges_left_for_test(&mut self, left: u32) {
+        self.stop_nudge_budget_override = Some(left);
+    }
+
+    /// The per-loop resume budget the pane tests assert against (test-only:
+    /// `limits` is private to `core`, so the constant needs a door).
+    #[cfg(test)]
+    pub(crate) const fn pane_resume_budget() -> u32 {
+        super::limits::PANE_RESUME_BUDGET
+    }
+
+    /// Seed the CURRENT attempt's reasoning (test-only): lets a test pin the
+    /// promotion `resume_pane_turn` performs without driving a whole stream.
+    #[cfg(test)]
+    pub(crate) fn set_attempt_reasoning_for_test(&mut self, reasoning: &str) {
+        self.attempt_reasoning = reasoning.to_string();
     }
 
     /// Set a mock response for `chat()`. `Ok(text)` simulates a successful reply;

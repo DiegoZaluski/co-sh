@@ -3,6 +3,11 @@ use super::{background, guardrails, hooks, panes, queued_input};
 use super::context;
 #[allow(unused_imports)]
 pub(crate) use loop_state::result_is_useless;
+// Test-only re-export: the `harness::test` modules are siblings of `core`,
+// so they cannot reach the private `guards` module to name a `ResumeCause`.
+// Production code refers to it as `super::guards::ResumeCause` directly.
+#[cfg(test)]
+pub(crate) use guards::ResumeCause;
 #[allow(unused_imports)]
 use super::context::error_catalog_window;
 use super::context::{ContextManager, MAX_CONTEXT_TOKENS, MapRequest, RunOutcome};
@@ -220,6 +225,21 @@ pub struct Harness {
     /// stay scarce so a model that keeps insisting on stopping with open
     /// work still terminates visibly instead of looping to 100.
     stop_nudges_left: u32,
+
+    /// Test-only override for the natural-stop nudge budget `run_agent_loop_inner`
+    /// starts each ENTRY with. The budget is reset on every entry, so a test
+    /// that wants to reach the "budget exhausted" branch cannot simply set
+    /// `stop_nudges_left` — it seeds this instead.
+    #[cfg(test)]
+    stop_nudge_budget_override: Option<u32>,
+
+    /// Remaining IMPROPER-STOP resumes granted to THIS loop when the loop
+    /// owes a REPORT (a `/agents` cosh pane, or the internal sub-agent). See
+    /// [`super::limits::PANE_RESUME_BUDGET`] for why such a loop continues
+    /// where a chat turn does not, and why the bound is what makes the
+    /// continuation safe. Consumed only by [`Self::resume_pane_turn`]; a loop
+    /// that owes no report never reaches it (the helper refuses).
+    pane_resumes_left: u32,
 
     /// Exact-prefix cache probe: the previous request's fingerprint and the
     /// running counters. See [`PrefixCacheProbe`].
