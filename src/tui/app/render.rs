@@ -84,6 +84,14 @@ impl App {
             .tool_spinners
             .iter()
             .any(|(_, s)| !s.is_idle());
+        // The /agents panes' tool-call spinners keep live mode too (the
+        // right panel's `subagent_tool_spinners` feed the same predicate
+        // through the working-session checks): without this a running
+        // pane's sweep would freeze mid-label until the next event.
+        let has_active_pane_spinner = self
+            .agents_split
+            .as_ref()
+            .is_some_and(|split| split.tool_spinners.values().any(|s| !s.is_idle()));
         let mut live = self.session_view.is_auto_scrolling
             || self.state.right_panel.is_auto_scrolling
             || (self.state.status == crate::types::SessionStatus::Working
@@ -109,6 +117,7 @@ impl App {
         live = live || (self.prompt_correction_active && !agent_spinner_live);
         live = live || self.rag_spinner_active();
         live = live || has_active_spinner;
+        live = live || has_active_pane_spinner;
         // Free-gateway recommendation: its fake-streaming text advances per
         // rendered frame (wall-clock-compensated, so no chars are lost, but a
         // 200 ms idle gap made it visibly chunky).
@@ -835,6 +844,14 @@ impl App {
                     // state and share the same per-frame tick.
                     for spinner in self.state.right_panel.subagent_tool_spinners.values_mut() {
                         spinner.advance(delta_time);
+                    }
+                    // The /agents panes' tool-call spinners follow the same
+                    // contract: advanced right before the split renders, so
+                    // InProgress rows sweep in lockstep with the panel's.
+                    if let Some(split) = &mut self.agents_split {
+                        for spinner in split.tool_spinners.values_mut() {
+                            spinner.advance(delta_time);
+                        }
                     }
 
                     // The correction spinner occupies this row only while the
