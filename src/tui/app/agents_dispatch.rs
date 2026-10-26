@@ -1597,14 +1597,16 @@ impl App {
                     // (`subagent_call` is foreground-only here and a pane
                     // must not nest reviews over its delegator's head).
                     // Build/Yolo/Command map to the Build BASE (the full
-                    // Build prompt minus `INSTRUCTIONS_BUILD_SELF_REVIEW`);
-                    // Ask never had a review section, so it stays whole.
+                    // Build prompt minus `INSTRUCTIONS_BUILD_SELF_REVIEW`),
+                    // with Yolo interpolated by the cwd-containment block
+                    // (`INSTRUCTIONS_YOLO_BASE`) — tool freedom is intended,
+                    // directory drift is not; Ask never had a review
+                    // section, so it stays whole.
                     instructions: Some(match own_mode {
-                        cosh::harness::Mode::Build
-                        | cosh::harness::Mode::Yolo
-                        | cosh::harness::Mode::Command => {
+                        cosh::harness::Mode::Build | cosh::harness::Mode::Command => {
                             cosh::harness::core::INSTRUCTIONS_BUILD_BASE
                         }
+                        cosh::harness::Mode::Yolo => cosh::harness::core::INSTRUCTIONS_YOLO_BASE,
                         cosh::harness::Mode::Ask => cosh::harness::core::INSTRUCTIONS_ASK,
                     }),
                     anthropic_ttl_1h,

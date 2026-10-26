@@ -88,7 +88,7 @@ pub(crate) use limits::{CONTEXT_WINDOW_MARKER, INTERRUPTED_MARKER, MAX_ITERATION
 use limits::{LOOP_DETECTION_WINDOW_SIZE, MAX_TOOL_RETRIES, SUBAGENT_INTERNAL_NOTE};
 pub use prompts::{
     INSTRUCTIONS_ASK, INSTRUCTIONS_BUILD, INSTRUCTIONS_BUILD_BASE, INSTRUCTIONS_BUILD_SELF_REVIEW,
-    INSTRUCTIONS_SUBAGENT,
+    INSTRUCTIONS_SUBAGENT, INSTRUCTIONS_YOLO, INSTRUCTIONS_YOLO_BASE, INSTRUCTIONS_YOLO_CWD,
 };
 
 
@@ -383,7 +383,13 @@ impl Harness {
         let instructions = match self.instructions {
             Some(ins) => ins,
             None => match self.mode {
-                Mode::Build | Mode::Yolo | Mode::Command => INSTRUCTIONS_BUILD,
+                // Build/Command keep the unmodified Build prompt; Yolo is
+                // the same text interpolated with the cwd-containment
+                // block — tool freedom is intended, directory drift is
+                // not (worktree-pinned loops tended to wander back to
+                // the main repository without it).
+                Mode::Build | Mode::Command => INSTRUCTIONS_BUILD,
+                Mode::Yolo => INSTRUCTIONS_YOLO,
                 Mode::Ask => INSTRUCTIONS_ASK,
             },
         };

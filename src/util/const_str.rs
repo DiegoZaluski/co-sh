@@ -8,8 +8,14 @@
 //! from the concatenation of all parts — the literals are written exactly
 //! once and can never drift apart between the part and the whole.
 
-/// Defines one or more `pub const &str` parts from literal lists, plus a
-/// final constant equal to their byte-exact concatenation, in order.
+/// Defines one or more `pub const &str` parts, plus a final constant equal
+/// to their byte-exact concatenation, in order.
+///
+/// Each part's body is a comma-separated token list that `concat!`
+/// accepts: plain string literals (the classic form) or zero-argument
+/// macro invocations that each expand to a single `concat!(...)` — the
+/// latter lets shared literal groups feed several composites while being
+/// written exactly once.
 ///
 /// ```ignore
 /// cosh::const_str_joined! {
@@ -28,6 +34,12 @@
 /// }
 /// ```
 ///
+/// A part may alternatively be a zero-argument macro invocation whose
+/// body is a single `concat!(...)` (`PART = shared_text!()`), letting one
+/// literal group feed several composites. The invoked macro must be in
+/// scope at the expansion site (textual scoping — define it before use in
+/// the same module or import it at the crate root).
+///
 /// Every output is `const`-evaluated (no runtime cost, stays `&'static
 /// str`); `FULL` is byte-identical to `PART_A` immediately followed by
 /// `PART_B`.
@@ -38,9 +50,7 @@ macro_rules! const_str_joined {
         $full:ident : joined [
             $(
                 $(#[$part_doc:meta])*
-                $part:ident = [
-                    $($lit:literal),* $(,)?
-                ]
+                $part:ident = [ $($lit:tt),* $(,)? ]
             )+
         ] $(,)?
     ) => {
@@ -50,6 +60,28 @@ macro_rules! const_str_joined {
         )+
         $(#[$full_doc])*
         pub const $full: &str = concat!( $( $($lit),* , )+ );
+    };
+    // Alternative part form: a zero-argument macro invocation whose body
+    // is itself a `concat!(...)`. This lets one shared literal group feed
+    // several composites (the part constant, composites containing it,
+    // and composites that extend it) while the literals are written
+    // exactly once — `concat!` itself accepts such an invocation as an
+    // argument, so the full constant concatenates the same expansions.
+    (
+        $(#[$full_doc:meta])*
+        $full:ident : joined [
+            $(
+                $(#[$part_doc:meta])*
+                $part:ident = $mac:ident ! ( )
+            ),+ $(,)?
+        ] $(,)?
+    ) => {
+        $(
+            $(#[$part_doc])*
+            pub const $part: &str = $mac ! ();
+        )+
+        $(#[$full_doc])*
+        pub const $full: &str = concat!( $( $mac ! () , )+ );
     };
 }
 
