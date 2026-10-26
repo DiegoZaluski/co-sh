@@ -211,8 +211,22 @@ impl Harness {
         // renews instead of cutting healthy work (see [`ITERATION_RENEWALS`]).
         let mut iteration_renewals_left: u32 = ITERATION_RENEWALS;
         // Fresh nudge budget per agent loop: a harness reused across loops
-        // must not inherit the previous turn's exhausted budget.
-        self.stop_nudges_left = super::limits::STOP_NUDGE_BUDGET;
+        // must not inherit the previous turn's exhausted budget. Tests can
+        // seed the entry budget (`stop_nudge_budget_override`) to reach the
+        // exhausted branch on the first stream.
+        #[cfg(test)]
+        let entry_nudge_budget = self
+            .stop_nudge_budget_override
+            .unwrap_or(super::limits::STOP_NUDGE_BUDGET);
+        #[cfg(not(test))]
+        let entry_nudge_budget = super::limits::STOP_NUDGE_BUDGET;
+        self.stop_nudges_left = entry_nudge_budget;
+        // Same contract for the improper-stop resumes: the budget is per
+        // LOOP, not per Harness lifetime (see `PANE_RESUME_BUDGET`). A pane
+        // turn builds a fresh harness today, so this only matters for a
+        // reused one — which must not start with an already-spent budget and
+        // close `incomplete` for a cut it never got the chance to recover.
+        self.pane_resumes_left = super::limits::PANE_RESUME_BUDGET;
 
         // Whether ANY tool ran this turn. A turn with zero tool dispatches
         // is a pure text exchange — the request was answerable directly, so
@@ -847,13 +861,22 @@ impl Harness {
                 } else {
                     assistant_response.clone()
                 };
-                if self.check_repetition_detection(
+                match self.check_repetition_detection(
                     &turn_text,
                     &mut identical_text_streak,
                     &mut last_output_signature,
+                    &stop_signal,
                     &tx,
                 ) {
-                    break;
+                    super::loop_state::RepetitionVerdict::Clear => {}
+                    super::loop_state::RepetitionVerdict::Stopped => break,
+                    // The turn owes a report and nobody asked it to stop:
+                    // continue with the steering message instead of closing
+                    // `incomplete` (see `resume_pane_turn`).
+                    super::loop_state::RepetitionVerdict::Resume(steering) => {
+                        current_input = steering;
+                        continue;
+                    }
                 }
             } else {
                 // A turn that dispatched tools is progress — and it is
@@ -1845,7 +1868,14 @@ impl Harness {
                 // each grants a continuation that consumes one scarce nudge
                 // (bounded per loop, independent of MAX_ITERATIONS) so a model
                 // that keeps insisting on stopping still terminates visibly.
-                let reason = self.last_finish_reason.as_deref().unwrap_or("none");
+                // Owned, not borrowed: the resume below mutates `self`
+                // (`resume_pane_turn` consumes a nudge and takes the
+                // reasoning), so a `&str` into `self.last_finish_reason`
+                // would hold an immutable borrow across that call.
+                let reason = self
+                    .last_finish_reason
+                    .clone()
+                    .unwrap_or_else(|| "none".to_string());
                 if self.stop_nudges_left > 0 {
                     // (1) Reasoning ended, the answer never came: the attempt
                     // produced thinking deltas but zero answer text (the
@@ -1900,13 +1930,31 @@ impl Harness {
                     // is the shape behind most "ended without a report"
                     // reports.
                     //
-                    // It cannot continue: the bound exists so a model that
-                    // keeps returning empty completions terminates instead of
-                    // looping to MAX_ITERATIONS. So the stop STANDS, but it
-                    // stops being silent here and is classified honestly
-                    // downstream — no Closure is recorded, so a pane turn
-                    // reports `incomplete` (never `cancelled`) and the failure
-                    // is attributable in the log and on screen.
+                    // A turn that OWES A REPORT is not allowed to end here.
+                    // The bound exists so a model that keeps returning empty
+                    // completions terminates instead of looping to
+                    // MAX_ITERATIONS — but that argument is about an
+                    // UNBOUNDED continuation, not about this one: a `/agents`
+                    // cosh pane (or the internal sub-agent) has a requester
+                    // blocked on its report and `stop_agent_loop` is blocked
+                    // for it, so a stop nobody asked for is by definition
+                    // improper. `resume_pane_turn` re-sends the context with
+                    // one steering turn (the SAME mechanism every other
+                    // continuation uses) under its own per-loop budget
+                    // (`PANE_RESUME_BUDGET`), and refuses when the USER
+                    // stopped the turn — the one legitimate early end.
+                    if let Some(steering) =
+                        self.resume_pane_turn(&stop_signal, super::guards::ResumeCause::EmptyStop)
+                    {
+                        current_input = steering;
+                        continue;
+                    }
+                    // Otherwise the stop STANDS (a chat turn, a user stop, or
+                    // the resume budget spent), but it stops being silent
+                    // here and is classified honestly downstream — no Closure
+                    // is recorded, so a pane turn reports `incomplete` (never
+                    // `cancelled`) and the failure is attributable in the log
+                    // and on screen.
                     //
                     // Deliberately no `current_input`: there is no next
                     // request to steer.

@@ -13,7 +13,7 @@ use crate::harness::tools::CoshTools;
 use super::{
     ContextManager, CorrectionMemory, Harness, MAX_CONTEXT_TOKENS, Mode, PrefixCacheProbe,
     PromptSystem, SUBAGENT_INTERNAL_NOTE, build_lsp, default_harness_tools,
-    limits::STOP_NUDGE_BUDGET,
+    limits::{PANE_RESUME_BUDGET, STOP_NUDGE_BUDGET},
 };
 
 impl Harness {
@@ -57,6 +57,9 @@ impl Harness {
             last_finish_reason: None,
             last_stream_unfinished: false,
             stop_nudges_left: STOP_NUDGE_BUDGET,
+            pane_resumes_left: PANE_RESUME_BUDGET,
+            #[cfg(test)]
+            stop_nudge_budget_override: None,
             prefix_cache_probe: PrefixCacheProbe::default(),
             #[cfg(test)]
             promoted_reasoning_log: Vec::new(),
@@ -367,6 +370,18 @@ impl Harness {
             // stripped `agents_call`).
             self.harness_tools
                 .retain(|tool| tool.name != "agents_worktree");
+            // `stop_agent_loop` goes too, and NOT only as tidiness: the
+            // pane's whole report contract rests on "the loop cannot stop
+            // itself", which is what makes a stop it did take the USER's
+            // stop (see `Harness::resume_pane_turn`). The TUI's
+            // `MANAGER_BLOCKED_TOOLS` enforced that by disabling the tool
+            // per pane, but a pane harness built anywhere else would inherit
+            // the model's ability to end its own turn with no report — and
+            // the resume logic would then read that self-stop as a user stop
+            // and correctly refuse, closing the turn with nothing. Stripping
+            // it HERE binds the invariant to the pane ROLE, where it belongs.
+            self.harness_tools
+                .retain(|tool| tool.name != "stop_agent_loop");
         }
         self
     }

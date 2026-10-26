@@ -6,6 +6,26 @@ use std::collections::VecDeque;
 use super::{Harness, limits::{LOOP_DETECTION_MAX_REPEATS, LOOP_DETECTION_WINDOW_SIZE,
     REPETITION_MAX_IDENTICAL, REPETITION_MIN_TEXT_LEN}};
 
+/// What the textual-output repetition detector decided for this iteration.
+///
+/// Three outcomes, not two: besides "nothing to do" and "stop the loop", a
+/// turn that OWES A REPORT gets a RESUME — the detector noticed the model
+/// stuck, but nobody asked the turn to stop (a pane cannot: `stop_agent_loop`
+/// is blocked for it), so handing its requester `incomplete` would discard
+/// work one attempt short of the report. A two-valued `bool` could not carry
+/// the steering message the resume needs, which is why this is a type.
+pub(super) enum RepetitionVerdict {
+    /// Below the threshold, below the minimum length, or the streak reset:
+    /// the iteration proceeds normally.
+    Clear,
+    /// The detector fired on a report-owing turn and the resume was granted.
+    /// Carries the steering message for the next request.
+    Resume(String),
+    /// The detector fired and the stop STANDS (a chat turn, a user stop, or
+    /// the resume budget spent). The terminal `Done` was already emitted.
+    Stopped,
+}
+
 impl Harness {
     /// Hash one iteration's tool interactions (name, arguments, result — in
     /// dispatch order) into a stable signature for loop detection, mirroring
@@ -94,8 +114,10 @@ impl Harness {
     /// mask an identical thought; texts shorter than
     /// [`REPETITION_MIN_TEXT_LEN`] are skipped (too little signal, too cheap
     /// to guard). After [`REPETITION_MAX_IDENTICAL`] consecutive identical
-    /// texts the loop stops (Toast + `Done`, returns `true`) with the same
-    /// guard-stop audit the tool detector performs.
+    /// texts the loop stops (Toast + `Done`) with the same guard-stop audit
+    /// the tool detector performs — UNLESS the turn owes a report, in which
+    /// case [`Self::resume_pane_turn`] may continue it instead (see
+    /// [`RepetitionVerdict`]).
     ///
     /// The reset happens on ANY differing text and on tool-calling turns
     /// (the caller clears the streak when `had_tools` is set) — a turn that
@@ -107,13 +129,14 @@ impl Harness {
         text: &str,
         identical_text_streak: &mut usize,
         last_output_signature: &mut Option<u64>,
+        stop_signal: &std::sync::atomic::AtomicBool,
         tx: &tokio::sync::mpsc::UnboundedSender<super::events::HarnessEvent>,
-    ) -> bool {
+    ) -> RepetitionVerdict {
         let normalized: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
         if normalized.len() < REPETITION_MIN_TEXT_LEN {
             *identical_text_streak = 0;
             *last_output_signature = None;
-            return false;
+            return RepetitionVerdict::Clear;
         }
         let sig = Self::text_signature(&normalized);
         if *last_output_signature == Some(sig) {
@@ -123,6 +146,31 @@ impl Harness {
             *last_output_signature = Some(sig);
         }
         if *identical_text_streak > REPETITION_MAX_IDENTICAL {
+            // A turn that OWES A REPORT is not allowed to end on a detector
+            // firing: nobody asked it to stop (a pane cannot — see
+            // `resume_pane_turn`), so the requester would be handed
+            // `incomplete` for work that was still moving. `resume_pane_turn`
+            // returns the steering message for another attempt under its own
+            // per-loop budget, and refuses when the USER stopped the turn —
+            // in which case the detector's stop stands below, exactly as it
+            // always did. The streak is reset so the resumed turn is judged on
+            // its own output instead of tripping on the pre-resume history.
+            if let Some(steering) =
+                self.resume_pane_turn(stop_signal, super::guards::ResumeCause::Repetition)
+            {
+                // The streak is deliberately NOT reset: the resume grants
+                // another turn, but the model's output is still the suspect.
+                // Clearing it here would let a permanently repeating pane run
+                // the threshold again from scratch on every resume (three
+                // identical texts times one resume each) instead of stopping
+                // as soon as the budget is gone — and it would diverge from
+                // the tool-interaction detector, whose window is never reset
+                // either. The verdict still lets this iteration proceed, so a
+                // model that produces DIFFERENT text on the resumed turn is
+                // never penalised: any differing text resets the streak on
+                // its own.
+                return RepetitionVerdict::Resume(steering);
+            }
             // Heuristic guard: the stop stands, but the decision model
             // audits it so an improper stop is never silent.
             let verdict = self.review_guard_stop("repetition-detection");
@@ -141,9 +189,9 @@ impl Harness {
                 context: self.context_manager.save_state(),
                 checkup_verdict: verdict,
             });
-            return true;
+            return RepetitionVerdict::Stopped;
         }
-        false
+        RepetitionVerdict::Clear
     }
 
     /// FNV-1a 64-bit over one normalized text — the same deterministic hash
