@@ -1388,6 +1388,20 @@ pub fn complete_worktree_op(op: &WorktreeOp, outcome: Result<String, String>) {
     });
 }
 
+/// The silence suffix Claude Code pins onto every ambient-context block:
+/// the listing is re-attached on every request (tail render — see
+/// `set_panes_block`), so without it a model reads each fresh copy as a NEW
+/// message and acknowledges it turn after turn. Wording follows Claude
+/// Code's own suffix ("This is ambient context — do not narrate it to the
+/// user unless they ask or it is directly relevant to their request.").
+#[must_use]
+pub fn ambient_context_suffix() -> &'static str {
+    "This is ambient context — it is re-attached on every request for \
+     reference and is not a new message: do not narrate it or respond to \
+     it unless the user asks about it or it is directly relevant to their \
+     request."
+}
+
 /// The context block appended at the END of the system header (an
 /// appendix — never a prefix insertion, so the providers' exact-prefix
 /// caches stay valid). `None` when no panes exist: the header stays
@@ -1423,6 +1437,8 @@ pub fn context_block() -> Option<String> {
             pane.id, pane.agent
         );
     }
+    block.push_str("\n");
+    block.push_str(ambient_context_suffix());
     Some(block)
 }
 
@@ -1458,6 +1474,8 @@ pub fn peer_block(own_id: &str) -> Option<String> {
         "You do NOT coordinate them (no `agents_call` for you): do your own \
          delegated work and report back — the main agent owns the coordination.",
     );
+    block.push_str("\n\n");
+    block.push_str(ambient_context_suffix());
     Some(block)
 }
 
@@ -2033,6 +2051,34 @@ mod tests {
             "{block}"
         );
         assert!(block.contains("- kilo — kilo (no session yet"), "{block}");
+    }
+
+    /// Both context blocks carry the ambient-context suffix: the listing is
+    /// re-attached on every request, so the suffix is what keeps a model from
+    /// acknowledging each fresh copy as a new message (the repeated-ack
+    /// defect this wording pins).
+    #[test]
+    fn both_context_blocks_carry_the_ambient_context_suffix() {
+        let _g = lock();
+        set_panes(vec![
+            pane("claude", "claude", true),
+            pane("kilo", "kilo", false),
+        ]);
+        let suffix = ambient_context_suffix();
+        assert!(suffix.starts_with("This is ambient context"), "{suffix}");
+        for block in [
+            context_block().expect("manager block"),
+            peer_block("claude").expect("peer block"),
+        ] {
+            assert!(
+                block.contains(suffix),
+                "the silence suffix must ride every context block: {block}"
+            );
+            assert!(
+                block.ends_with(suffix),
+                "the suffix sits at the tail, after every listing line: {block}"
+            );
+        }
     }
 
     /// A manager `Wait` call to another cosh pane is refused (mutual-deadlock
