@@ -242,6 +242,11 @@ impl App {
                             let id = split.pane_registry_id(i)?;
                             Some(cosh::harness::panes::PaneDescriptor {
                                 id,
+                                // The pane's IDENTITY rides the descriptor:
+                                // the registry reconciles by it, so a label
+                                // recycled by a sibling's removal can never
+                                // vouch for a dead pane's traffic (Issue 3).
+                                pane_id: p.id,
                                 agent: p.agent.clone(),
                                 is_manager: p.agent
                                     == crate::routes::session::agents_split::MANAGER_LABEL,
@@ -334,6 +339,12 @@ impl App {
     /// content already (live turn, prior replay) and unbound `Name` panes
     /// are skipped.
     pub(super) fn trigger_agents_pane_replays(&mut self) {
+        // Absorb the gate-free binding facts FIRST: a fresh confirm that
+        // re-picks a pane whose first turn just ended (the Done dropped by
+        // the handler's gates) must promote the pane to `Bound` BEFORE the
+        // empty-timeline scan below decides it needs a replay — the
+        // freshly absorbed session is exactly what the replay rehydrates.
+        self.absorb_pane_session_bindings();
         let needs = self
             .agents_split
             .as_ref()
@@ -607,9 +618,16 @@ impl App {
         if index < panes.len() {
             panes.remove(index);
         }
+        // The LIVE pane object id rides the hidden entry: a turn still
+        // running at hide time finishes later, and its gate-free binding
+        // fact (`record_session_binding`, absorbed by
+        // `absorb_pane_session_bindings`) is routed to this entry BY this
+        // id. Without it the fact would answer to nothing and the first
+        // turn's session would never be bound (issue 1, variant A).
         session.agents_hidden.push(crate::types::HiddenPane {
             pane: pane_ref,
             index,
+            pane_id: pane.id,
         });
         if emptied {
             // The metadata follows the screen: the mode is CLOSED and the
@@ -716,7 +734,7 @@ impl App {
     /// mode flag already mutated in place) through the store's normal diff
     /// pipeline. Used by the hide/restore paths, which change the metadata
     /// directly rather than through the open/close helpers.
-    fn save_current_agents_metadata(&mut self) {
+    pub(super) fn save_current_agents_metadata(&mut self) {
         let Some(session) = self.state.current_session() else {
             return;
         };
@@ -737,10 +755,27 @@ impl App {
     pub(crate) fn bind_agents_pane_session(&mut self, pane: usize, session_id: String) {
         let pane_state = either_split(&self.agents_split, &self.parked_agents_split)
             .and_then(|split| split.panes.get(pane))
-            .map(|p| (p.agent.clone(), p.worktree.clone()));
-        let Some((agent_name, live_worktree)) = pane_state else {
+            .map(|p| (p.agent.clone(), p.worktree.clone(), p.session_id.clone()));
+        let Some((agent_name, live_worktree, live_session)) = pane_state else {
             return;
         };
+        // Seed the LIVE pane's next resume id — the single write site for
+        // the pane object's session binding. The Done handler seeds early
+        // as well ONLY because its queue service may dispatch a queued
+        // message in the same frame (before this helper runs); every other
+        // promotion — the gate-free absorb pass included — lands HERE, so
+        // there is exactly one live-pane write outside that pre-dispatch
+        // necessity. Deduped: a pane already carrying the id is untouched.
+        if live_session.as_deref() != Some(session_id.as_str())
+            && let Some(split) =
+                super::agents_dispatch::either_split_mut(
+                    &mut self.agents_split,
+                    &mut self.parked_agents_split,
+                )
+            && let Some(p) = split.panes.get_mut(pane)
+        {
+            p.session_id = Some(session_id.clone());
+        }
         let Some(session) = self.state.current_session_mut() else {
             return;
         };

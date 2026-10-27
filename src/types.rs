@@ -82,6 +82,16 @@ pub struct HiddenPane {
     /// to re-insert it at (or as close as possible to) its old slot.
     #[serde(default)]
     pub index: usize,
+    /// The hidden pane's LIVE object identity (`AgentPane::id`) at hide
+    /// time — the same u64 every pane event is stamped with. A turn that
+    /// was still running when the pane was hidden finishes LATER, and its
+    /// terminal binding arrives against an id that answers to no visible
+    /// pane: this is the bridge that lets the App's absorb pass promote the
+    /// hidden entry to `Bound { session_id }` instead of dropping the
+    /// fact. `0` = unknown (sessions persisted before the field: the
+    /// binding fact is discarded, exactly the pre-fix behavior).
+    #[serde(default)]
+    pub pane_id: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
