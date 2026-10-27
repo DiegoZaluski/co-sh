@@ -1112,3 +1112,27 @@ async fn agents_call_is_refused_from_a_pane_loop() {
         "a pane loop must never coordinate: {err}"
     );
 }
+
+/// A pane loop NEVER compacts a sibling: `with_own_pane_id` strips the
+/// `agents_compact` tool at build time, and the dispatch arm refuses
+/// pane-originated calls as defense in depth (the same shape the
+/// `agents_call` refusal test pins). The refusal fires BEFORE the registry
+/// is touched — nothing parks for a pane the coordinator never asked.
+#[tokio::test]
+async fn agents_compact_is_refused_from_a_pane_loop() {
+    let mut h = Harness::new_test()
+        .as_manager()
+        .with_own_pane_id(Some("cosh".into()));
+
+    h.push_tool_call(ToolCallData {
+        id: String::new(),
+        name: "agents_compact".into(),
+        arguments: json!({"pane": "claude"}),
+        thought_signature: String::new(),
+    });
+    let err = h.dispatch_next().await.unwrap_err();
+    assert!(
+        err.contains("`agents_compact` is not available to a pane"),
+        "a pane loop must never compact a sibling: {err}"
+    );
+}

@@ -1265,6 +1265,24 @@ impl App {
             self.submit_prompt_message(msg);
             return;
         };
+        // A compaction in flight has the SAME exclusivity as a running
+        // turn — worse: its persist would race the turn's persist over the
+        // same session record. The user's prompt is refused with the same
+        // toast shape the busy gate uses (finding 1).
+        if let Some(pane) = split.focused_pane()
+            && cosh::harness::panes::pane_is_compacting(pane.id)
+        {
+            self.toast_state.show(ToastOptions {
+                title: Some("Agents".into()),
+                message: format!(
+                    "'{}' is being compacted — try again when it finishes.",
+                    pane.id
+                ),
+                variant: ToastVariant::Warning,
+                duration_ms: 4000,
+            });
+            return;
+        }
         if split.focused_pane().is_some_and(|pane| pane.running) {
             // Same gate the `/new` command applies to a working loop: a
             // second dispatch while that pane's turn is live would
@@ -1908,7 +1926,9 @@ impl App {
                 // itself is rejected at the tool layer (see
                 // `Harness::with_own_pane_id`), so a queued request always
                 // belongs to a pane that CAN free itself.
-                .filter(|(_, p)| !p.running && !p.rehydrating)
+                .filter(|(_, p)| {
+                    !p.running && !p.rehydrating && !cosh::harness::panes::pane_is_compacting(p.id)
+                })
                 .filter_map(|(i, _)| {
                     let id = split.pane_registry_id(i)?;
                     cosh::harness::panes::has_queued_request(&id).then_some((i, id))
@@ -2042,6 +2062,186 @@ impl App {
             }
         };
         cosh::harness::panes::complete_worktree_op(&op, outcome);
+    }
+
+    /// The App-side `agents_compact` drain: pop parked compaction asks and
+    /// execute them — running the TARGET pane's own session through
+    /// `build_manual_compaction_harness` + `compact_on_demand`, the EXACT
+    /// mechanism the user's `/compact` slash command drives on a session.
+    /// Nothing here is compact-specific: the harness is built once, the
+    /// pane's persisted context is restored into it, the shared funnel
+    /// runs, and the compacted snapshot is persisted back to the pane's
+    /// session record.
+    ///
+    /// Guards, in order — a refused ask completes with its reason instead
+    /// of parking forever:
+    ///
+    /// - a pane busy with a live turn (compaction would race the loop's
+    ///   context manager — the same "between messages" rule `/compact`
+    ///   applies to the main session);
+    /// - a pane whose bound session has no context records yet (nothing to
+    ///   compact).
+    ///
+    /// The paused `agents_compact` tool call consumes the outcome itself
+    /// (`take_ready_compact_delivery`), so it becomes the tool result; a
+    /// Compact-kind delivery (`complete_compact_op`) is only the fallback
+    /// for an ask interrupted by a stop request. The pane's own timeline
+    /// is not rewritten here: its next turn restores the compacted context
+    /// records from its session, so the summary arrives as its new
+    /// baseline without colliding with any live stream.
+    pub(super) fn serve_agents_pane_compact_ops(&mut self) {
+        let Some(op) = cosh::harness::panes::peek_compact_op() else {
+            return;
+        };
+        // Resolve the target pane by the op's stamped IDENTITY
+        // (`pane_index_by_id`): a label recycled onto another pane by a
+        // sibling's removal must not receive the ask (Issue 3, same rule
+        // the worktree drain applies).
+        let resolved = either_split(&self.agents_split, &self.parked_agents_split)
+            .and_then(|split| split.pane_index_by_id(op.pane_id))
+            .and_then(|pane_index| {
+                either_split(&self.agents_split, &self.parked_agents_split)
+                    .and_then(|split| split.panes.get(pane_index))
+                    .map(|pane| (pane_index, pane.running, pane.session_id.clone()))
+            });
+        let Some((pane_index, running, session_id)) = resolved else {
+            let op = cosh::harness::panes::pop_compact_op();
+            if let Some(op) = op {
+                cosh::harness::panes::complete_compact_op(
+                    &op,
+                    Err(format!("pane '{}' no longer exists", op.pane)),
+                );
+            }
+            return;
+        };
+        if running {
+            // Do NOT pop: the ask stays parked and this drain retries on a
+            // later frame — the pane frees and the compaction runs then,
+            // instead of failing an ask the model correctly made.
+            return;
+        }
+        let Some(session_id) = session_id else {
+            let op = cosh::harness::panes::pop_compact_op();
+            if let Some(op) = op {
+                cosh::harness::panes::complete_compact_op(
+                    &op,
+                    Err(format!(
+                        "pane '{}' has no bound session yet — nothing to compact",
+                        op.pane
+                    )),
+                );
+            }
+            return;
+        };
+        let Some(op) = cosh::harness::panes::pop_compact_op() else {
+            return;
+        };
+        let Some(ctx_state) = self.session_store.load_context(&session_id) else {
+            cosh::harness::panes::complete_compact_op(
+                &op,
+                Err("nothing to compact yet — the pane's session has no context records".into()),
+            );
+            return;
+        };
+        // The SAME inputs the user's `/compact` passes: the pane's session
+        // is a real cosh session, so it compacts through the identical
+        // connector resolution and cache affinity (keyed to the PANE's own
+        // session id — never the main session's).
+        let provider = self.llm_config.provider.clone();
+        let model = self.llm_config.model.clone();
+        let base_url = self.base_url_for(&provider);
+        let summarization_models = self.manual_summarization_models();
+        let local_base_urls = self.configured_local_base_urls();
+        let anthropic_ttl = self.setup.anthropic_cache_ttl_1h();
+        let retention = self.setup.openai_cache_retention().map(String::from);
+        let reasoning = self.llm_config.reasoning.clone();
+        let cwd = self.state.working_directory.clone();
+        let store = self.session_store.clone();
+        let stop_signal = Arc::new(AtomicBool::new(false));
+        let pane = op.pane.clone();
+        self.tokio_handle.spawn(async move {
+            // A DEDICATED event channel, deliberately NOT the app's: the
+            // compaction's lifecycle events (ContextInfo, ContextSnapshot,
+            // the streamed summary tokens) belong to the PANE's session —
+            // forwarded to the app channel they would land in the MAIN
+            // session's handlers (its footer, and `persist_incrementally`
+            // would save the pane's compacted context into the main
+            // session record — the exact cross-session leak this feature
+            // must never commit). The main `/compact` forwards them
+            // because the session it compacts IS the main one; here they
+            // are drained and dropped after the run, the tool result
+            // carries the only truth the model needs.
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut builder_error: Option<String> = None;
+            let outcome = match super::commands::build_manual_compaction_harness(
+                &provider,
+                model.as_deref(),
+                base_url,
+                summarization_models,
+                local_base_urls,
+                anthropic_ttl,
+                retention,
+                reasoning,
+                &session_id,
+                &cwd,
+            ) {
+                Ok(mut harness) => {
+                    harness.context_manager.restore_state(&ctx_state);
+                    let ok = harness.compact_on_demand(&tx, stop_signal).await;
+                    if ok == cosh::harness::ManualCompactionOutcome::Compacted {
+                        // Persist the compacted context back to the PANE's
+                        // session record (the same path the manager loop
+                        // saves with) — the pane's next turn restores from
+                        // here. Read from the harness BEFORE dropping it.
+                        let context = harness.context_manager.save_state();
+                        drop(harness);
+                        drop(tx);
+                        // The run is over: drain whatever the harness
+                        // queued (all senders are gone, so this
+                        // terminates) and discard it.
+                        while rx.recv().await.is_some() {}
+                        let display = manager_context_display(&context);
+                        persist_manager_session(&store, &session_id, display, context);
+                    } else {
+                        drop(harness);
+                        drop(tx);
+                        while rx.recv().await.is_some() {}
+                    }
+                    ok
+                }
+                Err(reason) => {
+                    // Finding 5: carry the builder's reason (a connector
+                    // misconfiguration) into the tool result, like the
+                    // `/compact` path forwards its `HarnessEvent::Error`.
+                    builder_error = Some(reason);
+                    cosh::harness::ManualCompactionOutcome::Failed
+                }
+            };
+            let note = match outcome {
+                cosh::harness::ManualCompactionOutcome::Compacted => Ok(format!(
+                    "Pane '{pane}' compacted: its context was summarized with the same \
+                     mechanism as /compact and persisted to its session. Its next turn \
+                     starts from the handoff summary."
+                )),
+                cosh::harness::ManualCompactionOutcome::NothingToCompact => {
+                    Err(format!("Pane '{pane}' has nothing to compact yet."))
+                }
+                cosh::harness::ManualCompactionOutcome::Failed => Err(match builder_error {
+                    Some(reason) => format!(
+                        "The compaction of pane '{pane}' failed before it could run: \
+                         {reason} Nothing changed."
+                    ),
+                    None => format!(
+                        "The compaction of pane '{pane}' failed — the summarization \
+                         call did not complete. Nothing changed."
+                    ),
+                }),
+            };
+            cosh::harness::panes::complete_compact_op(&op, note);
+        });
+        // `pane_index` is only the resolution vehicle (same as the
+        // worktree drain): the registry pairs the outcome by op id.
+        let _ = pane_index;
     }
 
     /// The manager pane's OWN cosh session id, minted on first use: the

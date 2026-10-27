@@ -1158,6 +1158,7 @@ impl App {
             // on a pane event that never comes while every pane idles.
             if self.agents_split.is_some() || self.parked_agents_split.is_some() {
                 self.serve_agents_pane_worktree_ops();
+                self.serve_agents_pane_compact_ops();
                 self.serve_agents_pane_queues();
             }
             // The gate-free session-binding facts drain here too (unconditionally:

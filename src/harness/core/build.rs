@@ -124,6 +124,11 @@ impl Harness {
             harness
                 .harness_tools
                 .push(super::panes::agents_worktree_tool());
+            // The compaction ask is coordination tooling like the two above:
+            // registered with them, stripped with them (`with_own_pane_id`).
+            harness
+                .harness_tools
+                .push(super::panes::agents_compact_tool());
         }
         harness
     }
@@ -370,6 +375,12 @@ impl Harness {
             // stripped `agents_call`).
             self.harness_tools
                 .retain(|tool| tool.name != "agents_worktree");
+            // Compaction belongs to the TOP-LEVEL coordinator alone: a pane
+            // must never compact a sibling's context (the same
+            // anti-replication invariant that strips the two tools above —
+            // one delegation would fan the compact out to every pane).
+            self.harness_tools
+                .retain(|tool| tool.name != "agents_compact");
             // `stop_agent_loop` goes too, and NOT only as tidiness: the
             // pane's whole report contract rests on "the loop cannot stop
             // itself", which is what makes a stop it did take the USER's

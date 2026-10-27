@@ -4617,3 +4617,110 @@ async fn main_agent_effective_cwd_follows_the_binding() {
                 .is_none()
         );
     }
+
+    // ── agents_compact: the App drain runs the PANE's own compaction ──
+
+    /// The drain's refusal path on an UNBOUND pane: the ask is popped (not
+    /// left parked), completed with the reason, and the in-flight guard is
+    /// cleared — so the pane is not blocked forever by a refusal, and the
+    /// asking loop's paused tool call gets a real answer instead of
+    /// hanging.
+    #[tokio::test]
+    async fn agents_compact_of_an_unbound_pane_is_refused_and_frees_the_guard() {
+        let _guard = HOME_LOCK.lock();
+        isolate_home();
+        let (_dir, repo) = worktree_test_repo();
+        let app_repo = repo.clone();
+        let mut app = manager_worktree_split_app(&app_repo);
+        app.sync_agents_pane_registry();
+        let pane_id = app.agents_split.as_ref().unwrap().panes[0].id;
+
+        let op_id = cosh::harness::panes::enqueue_compact_op(
+            crate::routes::session::agents_split::MANAGER_LABEL,
+            cosh::harness::panes::MAIN,
+        )
+        .expect("the ask parks");
+        app.serve_agents_pane_compact_ops();
+
+        assert!(
+            cosh::harness::panes::peek_compact_op().is_none(),
+            "the ask is popped, never left parked on a refusal"
+        );
+        assert!(
+            !cosh::harness::panes::pane_is_compacting(pane_id),
+            "a refusal clears the guard: the pane is usable again"
+        );
+        let deliveries = cosh::harness::panes::take_ready_deliveries(cosh::harness::panes::MAIN);
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].request_id, op_id);
+        assert_eq!(
+            deliveries[0].kind,
+            cosh::harness::panes::DeliveryKind::Compact
+        );
+        let error = deliveries[0].output.clone().unwrap_err();
+        assert!(
+            error.contains("no bound session"),
+            "the refusal names the reason: {error}"
+        );
+        // The compaction never touched the main session's timeline: no
+        // "Summarizing" box was opened in it (the pane path is silent by
+        // design — its events go to a dedicated, discarded channel).
+        assert!(
+            app.state
+                .current_session()
+                .map(|s| s.messages.iter().all(|m| !m
+                    .parts
+                    .iter()
+                    .any(|p| matches!(p, crate::types::Part::Compaction(_)))))
+                .unwrap_or(true),
+            "the pane compaction must never paint into the main session"
+        );
+    }
+
+    /// A BUSY pane does NOT pop its ask: the drain retries on a later
+    /// frame, so a correctly-made ask waits for the pane's turn to finish
+    /// instead of failing.
+    #[tokio::test]
+    async fn agents_compact_waits_for_a_running_pane_instead_of_failing() {
+        let _guard = HOME_LOCK.lock();
+        isolate_home();
+        let (_dir, repo) = worktree_test_repo();
+        let app_repo = repo.clone();
+        let mut app = manager_worktree_split_app(&app_repo);
+        app.sync_agents_pane_registry();
+        let pane_label = crate::routes::session::agents_split::MANAGER_LABEL;
+        let op_id = cosh::harness::panes::enqueue_compact_op(
+            pane_label,
+            cosh::harness::panes::MAIN,
+        )
+        .expect("the ask parks");
+
+        // The pane is mid-turn: the drain must leave the ask parked.
+        app.agents_split
+            .as_mut()
+            .unwrap()
+            .set_running(0, true);
+        app.serve_agents_pane_compact_ops();
+        let still = cosh::harness::panes::peek_compact_op().expect("the ask stays parked");
+        assert_eq!(still.id, op_id, "not popped while the pane is busy");
+        assert!(
+            !cosh::harness::panes::pane_is_compacting(still.pane_id),
+            "a parked ask reserves nothing yet"
+        );
+        assert!(
+            cosh::harness::panes::take_ready_deliveries(cosh::harness::panes::MAIN).is_empty(),
+            "no outcome while the ask is still parked"
+        );
+
+        // The turn ends: the next frame's drain resolves it (here: refused
+        // for the missing session, which is the point — it MOVED).
+        app.agents_split
+            .as_mut()
+            .unwrap()
+            .set_running(0, false);
+        app.serve_agents_pane_compact_ops();
+        assert!(cosh::harness::panes::peek_compact_op().is_none());
+        let deliveries = cosh::harness::panes::take_ready_deliveries(cosh::harness::panes::MAIN);
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].request_id, op_id);
+    }

@@ -364,6 +364,66 @@ impl Harness {
             }
         }
 
+        // The /agents compaction ask (`agents_compact`): park the op in the
+        // pane registry, then PAUSE this dispatch until the App drain
+        // resolves it — the App runs the actual compaction (the SAME
+        // mechanism its `/compact` slash command uses on the pane's own
+        // session), so the tool result IS the outcome and the model never
+        // proceeds while the ask is undecided. Esc interrupts the wait like
+        // every other blocking tool; the op stays parked and its outcome
+        // still reaches this loop's drain on a later turn. Validation is
+        // pane-membership only; everything else (session existence, busy
+        // state, the compaction itself) belongs to the App, which owns the
+        // sessions and the permission-free compaction path.
+        if tool_name == "agents_compact" {
+            self.tool_issuer.pop_front();
+            let pane = args_map
+                .get("pane")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            // Pane-call guard (defense in depth): `with_own_pane_id` strips
+            // the tool from every pane loop; if a pane ever reaches it
+            // anyway, refuse BEFORE the registry is touched — compaction is
+            // coordination, and a pane must never fold a sibling's context
+            // into a summary only IT can then steer.
+            if self.panes_own_id.is_some() {
+                return Err(
+                    "`agents_compact` is not available to a pane: pane agents execute their \
+                     delegated task and report back — the coordinating agent owns the panes."
+                        .to_string(),
+                );
+            }
+            let op_id = match super::panes::enqueue_compact_op(&pane, self.panes_requester) {
+                Ok(id) => id,
+                Err(error) => return Err(error),
+            };
+            loop {
+                tokio::select! {
+                    () = wait_for_stop_signal(self.stop_signal.clone()) => {
+                        return Err(
+                            "the compaction ask was interrupted (stop requested) — the ask \
+                             stays parked with the App; its outcome arrives as an \
+                             [automated notification] on a later turn"
+                                .to_string(),
+                        );
+                    }
+                    () = tokio::time::sleep(Duration::from_millis(100)) => {
+                        if let Some(delivery) = super::panes::take_ready_compact_delivery(
+                            self.panes_requester,
+                            &op_id,
+                        ) {
+                            return match delivery.output {
+                                Ok(note) => Ok(note),
+                                Err(error) => Err(error),
+                            };
+                        }
+                    }
+                }
+            }
+        }
+
         // Test-only tools have no real dispatch implementation; return a
         // canned, deterministic success so tests (e.g. loop detection) can
         // drive repeated identical (tool, args, result) interactions.

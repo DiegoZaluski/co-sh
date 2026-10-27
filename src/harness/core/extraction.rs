@@ -127,6 +127,13 @@ impl Harness {
             // a stop-interrupted ask is left parked for a later-turn
             // Worktree delivery.
             "agents_worktree" => None,
+            // `agents_compact` is async the same way: the ask must reach the
+            // dispatch arm, never resolve inline. There the tool pauses
+            // until the App drain runs (or refuses) the pane session's
+            // compaction and the outcome becomes the tool result; only a
+            // stop-interrupted ask is left parked for a later-turn Compact
+            // delivery.
+            "agents_compact" => None,
             _ => Some(String::new()),
         }
     }
