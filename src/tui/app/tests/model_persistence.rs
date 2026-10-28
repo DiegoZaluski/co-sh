@@ -516,3 +516,206 @@ async fn persisted_auto_selection_survives_the_credential_gate() {
         "auto's persisted reasoning must survive the restore gate too"
     );
 }
+
+// ── Per-pane model selection (the /agents split's cosh panes) ───────────
+
+use crate::routes::session::agents_split::AgentsSplitState;
+
+/// Build an app with a live split of `count` cosh (manager) panes, pane 0
+/// focused. The split is the plain reflection of the picker the real flow
+/// produces (`AgentPaneRef::Name` panes, no bound sessions yet).
+fn app_with_cosh_panes(count: usize) -> App {
+    let mut app = App::new("/tmp".into());
+    // A main session exists (the split lives inside one; `/new` would tear
+    // the split down, so it is created BEFORE the split attaches).
+    app.run_slash_command(&new_cmd());
+    let panes = (0..count)
+        .map(|_| crate::types::AgentPaneRef::Name("cosh".into()))
+        .collect();
+    app.agents_split = Some(AgentsSplitState::new(panes));
+    app
+}
+
+/// A `/models` pick on a focused cosh pane must scope to THAT pane: the
+/// pane's own selection is committed while pane B, the global config, the
+/// persisted global slot and the main session all stay untouched.
+#[tokio::test]
+async fn pane_model_pick_scopes_to_the_pane() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = app_with_cosh_panes(2);
+    app.llm_config.provider = "global-provider".into();
+    app.llm_config.model = Some("global-model".into());
+    app.llm_config.reasoning = Some("high".into());
+
+    // The picker opens pane-scoped: it edits the pane, not the config.
+    app.open_pane_model_dialog(0);
+    assert_eq!(app.pane_model_edit, Some(0));
+    assert!(app.is_model_dialog_visible());
+    assert_eq!(app.llm_config.provider, "global-provider");
+    assert_eq!(app.llm_config.model.as_deref(), Some("global-model"));
+
+    // Commit through the SAME entry the global picker uses ("pane-a-model"
+    // supports no reasoning, so this is the direct commit path).
+    app.confirm_model_entry("pane-a-model", "pane-a-provider");
+    assert!(!app.is_model_dialog_visible());
+    assert_eq!(app.pane_model_edit, None);
+
+    // Pane A runs its own selection, with the reasoning level it inherited
+    // (the same "keep the previous level" rule the main path applies).
+    let pane_a = &app.agents_split.as_ref().unwrap().panes[0];
+    let selection = pane_a.model_selection.as_ref().expect("pane A picked");
+    assert_eq!(selection.provider, "pane-a-provider");
+    assert_eq!(selection.model, "pane-a-model");
+    assert_eq!(selection.reasoning.as_deref(), Some("high"));
+
+    // ...pane B never picked, and the main agent keeps the global config.
+    assert!(
+        app.agents_split.as_ref().unwrap().panes[1]
+            .model_selection
+            .is_none(),
+        "pane B must not inherit pane A's pick"
+    );
+    assert_eq!(app.llm_config.provider, "global-provider");
+    assert_eq!(app.llm_config.model.as_deref(), Some("global-model"));
+    assert_eq!(app.llm_config.reasoning.as_deref(), Some("high"));
+    assert_eq!(
+        app.setup.persisted_model(),
+        None,
+        "the global slot is untouched by a pane pick"
+    );
+    let main_session = app.state.current_session().unwrap();
+    assert_eq!(main_session.model, None, "the main session is untouched");
+}
+
+/// Switching the MAIN model must not alter an existing pane: the pane keeps
+/// its own committed selection (and its own reasoning), and the dispatch
+/// route resolution still resolves the pane to ITS model.
+#[tokio::test]
+async fn main_model_change_leaves_existing_panes_alone() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = app_with_cosh_panes(2);
+    app.llm_config.provider = "global-provider".into();
+    app.llm_config.model = Some("global-model".into());
+    app.llm_config.reasoning = Some("high".into());
+    app.open_pane_model_dialog(0);
+    app.confirm_model_entry("pane-a-model", "pane-a-provider");
+
+    // The main agent picks a new model (the global commit path).
+    app.commit_model_selection("main-new-model", "main-new-provider", Some("medium"));
+    assert_eq!(app.llm_config.model.as_deref(), Some("main-new-model"));
+    assert_eq!(app.llm_config.provider, "main-new-provider");
+
+    // The pane's selection survives verbatim — model AND reasoning (the
+    // global pick's `medium` effort must not leak into the pane).
+    let pane_a = &app.agents_split.as_ref().unwrap().panes[0];
+    let selection = pane_a.model_selection.as_ref().unwrap();
+    assert_eq!(selection.model, "pane-a-model");
+    assert_eq!(selection.provider, "pane-a-provider");
+    assert_eq!(selection.reasoning.as_deref(), Some("high"));
+
+    // And the route the pane's next turn dispatches with is still its own.
+    let route = app.manager_pane_model_selection(pane_a).unwrap();
+    assert_eq!(route.model, "pane-a-model");
+    assert_eq!(route.reasoning.as_deref(), Some("high"));
+}
+
+/// A pane's model pick persists in the SAME session-file markers the main
+/// session uses, and the markers take precedence on a restarted pane (no
+/// in-memory selection): the pane resolves back to its own model, not the
+/// global config.
+#[tokio::test]
+async fn pane_model_persists_in_the_session_markers() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = app_with_cosh_panes(1);
+    app.llm_config.provider = "global-provider".into();
+    app.llm_config.model = Some("global-model".into());
+
+    // Bind the pane to a real cosh session (the shell a first turn mints).
+    let session_id = crate::session::store::generate_session_id();
+    app.session_store.save_session(&crate::types::Session {
+        id: session_id.clone(),
+        title: "agents manager".to_string(),
+        messages: Vec::new(),
+        created_at: 0,
+        title_generated: false,
+        provider: None,
+        model: None,
+        reasoning: None,
+        agents_panes: None,
+        agents_mode_open: false,
+        agents_hidden: Vec::new(),
+        ctx_ids: std::collections::HashMap::new(),
+        main_agent_worktree: None,
+    });
+    app.agents_split.as_mut().unwrap().panes[0].session_id = Some(session_id.clone());
+
+    app.open_pane_model_dialog(0);
+    app.confirm_model_entry("pane-model", "pane-provider");
+    // Auto selection keeps its own shape too: model without a provider.
+    // `auto` pushes the reasoning sub-dialog (the standard effort set) —
+    // pick the default level and Enter, which routes the commit to the
+    // pane through the same shared path.
+    app.open_pane_model_dialog(0);
+    app.confirm_model_entry("auto", "");
+    app.dialog.current_mut().unwrap().selected = 0;
+    app.handle_reasoning_dialog_key(KeyCode::Enter);
+
+    let persisted = app.session_store.load_session(&session_id).unwrap();
+    assert_eq!(persisted.model.as_deref(), Some("auto"));
+    assert_eq!(persisted.provider, None, "auto records no provider");
+    assert_eq!(persisted.reasoning, None);
+
+    // A restarted pane carries no in-memory selection: the session markers
+    // take precedence over the global config, exactly like the main
+    // session's markers do.
+    let mut restarted = crate::routes::session::agents_split::AgentPane::new("cosh".into());
+    restarted.session_id = Some(session_id);
+    let route = app.manager_pane_model_selection(&restarted).unwrap();
+    assert_eq!(route.model, "auto");
+    assert!(route.provider.is_empty(), "auto must not pin a provider");
+    // ...while a pane that never recorded anything resolves to None (the
+    // global config at spawn time).
+    restarted.session_id = None;
+    assert!(app.manager_pane_model_selection(&restarted).is_none());
+}
+
+/// The routing contract: `/models` on a focused cosh pane opens the
+/// PANE-scoped picker; the same command with no pane focused stays global.
+#[tokio::test]
+async fn slash_models_on_a_focused_cosh_pane_opens_the_pane_picker() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = app_with_cosh_panes(1);
+    let models_cmd = crate::ui::slash_menu::SlashCommand {
+        name: "models".into(),
+        desc: String::new(),
+    };
+
+    // No focused pane: the main agent's global picker. `AgentsSplitState::
+    // new` focuses pane 0 by default — the split's Ctrl+0 state is what
+    // routes to the main agent.
+    app.agents_split.as_mut().unwrap().focused = None;
+    assert!(
+        !crate::app::agents_dispatch::route_agent_slash_command(&mut app, &models_cmd),
+        "no focused pane: the pane router declines"
+    );
+    // ...and the caller (run_slash_command) opens the GLOBAL picker.
+    app.run_slash_command(&models_cmd);
+    assert_eq!(app.pane_model_edit, None);
+    assert!(app.is_model_dialog_visible());
+    app.restore_model_dialog();
+
+    // Focused cosh pane: the pane's own picker.
+    app.agents_split.as_mut().unwrap().focused = Some(0);
+    crate::app::agents_dispatch::route_agent_slash_command(&mut app, &models_cmd);
+    assert_eq!(app.pane_model_edit, Some(0));
+    assert!(app.is_model_dialog_visible());
+    // And cancel (Esc) leaves nothing behind.
+    app.handle_model_dialog_key(KeyCode::Esc);
+    assert_eq!(app.pane_model_edit, None);
+    assert!(!app.is_model_dialog_visible());
+    assert_eq!(app.llm_config.model, crate::config::LlmConfig::from_env().model);
+}

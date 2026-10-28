@@ -263,6 +263,11 @@ pub struct App {
     pub settings_view: SettingsView,
     /// None: agent picker; Some(None): add summarizer; Some(Some(i)): edit.
     pub summarization_model_edit: Option<Option<usize>>,
+    /// The focused pane whose per-pane model dialog is open: `Some(pane)`
+    /// while the model picker serves a focused cosh pane (the commit lands
+    /// on THAT pane only), `None` for the global picker. Same redirect
+    /// pattern as `summarization_model_edit`.
+    pub pane_model_edit: Option<usize>,
     pub show_settings: bool,
     /// Draft of the MCP registration box that survives an accidental
     /// close: `open_mcp_form` prefills from it, every edit keeps it in
@@ -859,6 +864,7 @@ impl App {
             show_add_provider: false,
             settings_view: SettingsView::new(),
             summarization_model_edit: None,
+            pane_model_edit: None,
             show_settings: false,
             mcp_form_draft: None,
             router_view: {

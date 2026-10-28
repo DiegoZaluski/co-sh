@@ -22,14 +22,77 @@ impl App {
 
     pub(in crate::app) fn open_model_dialog(&mut self) {
         self.summarization_model_edit = None;
-        use cosh::ModelEntry;
-        use cosh_sdk::connector::Connector;
-
+        self.pane_model_edit = None;
         let current = self.llm_config.model.clone().unwrap_or_default();
 
         // Store the current model (and reasoning) so we can restore on cancel
         self.model_dialog_original = Some(current.clone());
         self.reasoning_dialog_original = self.llm_config.reasoning.clone();
+        self.open_model_dialog_with_current(current);
+    }
+
+    /// The pane-scoped variant: the picker serves ONE focused cosh pane.
+    /// The machinery below (provider checks, cache, background
+    /// revalidation) is shared with the global picker, but the commit lands
+    /// on the pane's own selection and its session's model markers instead
+    /// of the global config — and cancel restores nothing, because nothing
+    /// global was ever mutated (the originals stay `None`).
+    pub(in crate::app) fn open_pane_model_dialog(&mut self, pane: usize) {
+        self.summarization_model_edit = None;
+        self.pane_model_edit = Some(pane);
+        self.model_dialog_original = None;
+        self.reasoning_dialog_original = None;
+        // The pane's own selection is what the picker edits; a pane that
+        // never picked preselects the global model it inherits.
+        let current = self
+            .pane_model_selection(pane)
+            .map(|selection| selection.model)
+            .or_else(|| self.llm_config.model.clone())
+            .unwrap_or_default();
+        self.open_model_dialog_with_current(current);
+    }
+
+    /// The focused pane's OWN selection, from whichever split the pane
+    /// lives in. `None` = the pane never picked.
+    pub(in crate::app) fn pane_model_selection(
+        &self,
+        pane: usize,
+    ) -> Option<crate::routes::session::agents_split::PaneModelSelection> {
+        self.agents_split
+            .as_ref()
+            .or(self.parked_agents_split.as_ref())
+            .and_then(|split| split.panes.get(pane))
+            .and_then(|p| p.model_selection.clone())
+    }
+
+    /// The pane's bound cosh session id, same split resolution.
+    fn pane_session_id(&self, pane: usize) -> Option<String> {
+        self.agents_split
+            .as_ref()
+            .or(self.parked_agents_split.as_ref())
+            .and_then(|split| split.panes.get(pane))
+            .and_then(|p| p.session_id.clone())
+    }
+
+    /// The reasoning level the picker preselects in the reasoning
+    /// sub-dialog: a pane-scoped picker starts from the PANE's level (its
+    /// own selection, or the global one it inherits when it never picked);
+    /// the global picker starts from the global config.
+    fn dialog_reasoning_current(&self) -> String {
+        if let Some(pane) = self.pane_model_edit
+            && let Some(selection) = self.pane_model_selection(pane)
+        {
+            return selection.reasoning.unwrap_or_default();
+        }
+        self.llm_config.reasoning.clone().unwrap_or_default()
+    }
+
+    /// Shared picker body: provider credential checks, cache fill and the
+    /// background revalidation. `current` is whatever model this picker
+    /// edits — the global config's, or the focused pane's own.
+    fn open_model_dialog_with_current(&mut self, current: String) {
+        use cosh::ModelEntry;
+        use cosh_sdk::connector::Connector;
 
         // Collect providers and check if their API key is still configured.
         // If a provider has no key (env var or keyring), invalidate its cache
@@ -332,7 +395,7 @@ impl App {
             // standard effort set; the choice is re-mapped onto the closest
             // level each fallback model actually accepts (both here and on
             // every harness fallback switch via `resolve_reasoning_effort`).
-            let current = self.llm_config.reasoning.clone().unwrap_or_default();
+            let current = self.dialog_reasoning_current();
             let levels = crate::config::auto_reasoning_levels();
             let start = levels.iter().position(|l| l == &current).unwrap_or(0);
             self.dialog.show(DialogType::ReasoningList {
@@ -348,7 +411,7 @@ impl App {
         }
 
         if crate::config::model_supports_reasoning(model) {
-            let current = self.llm_config.reasoning.clone().unwrap_or_default();
+            let current = self.dialog_reasoning_current();
             let levels = crate::config::model_reasoning_levels(model);
             let start = levels.iter().position(|l| l == &current).unwrap_or(0);
             // Push the sub-dialog FIRST, then set its initial selection —
@@ -366,7 +429,10 @@ impl App {
         } else {
             // Keep the previous reasoning level — the new model either
             // ignores it or uses it; user can change it from the dialog.
-            let reasoning = self.llm_config.reasoning.clone();
+            // The pane-scoped picker keeps the PANE's previous level (its
+            // own selection, or the global one it inherits).
+            let previous = self.dialog_reasoning_current();
+            let reasoning = (!previous.is_empty()).then_some(previous);
             self.commit_model_selection(model, provider, reasoning.as_deref());
             self.model_dialog_original = None;
             self.reasoning_dialog_original = None;
@@ -377,6 +443,7 @@ impl App {
     /// Restore the model + reasoning that were active when the dialog opened.
     pub(in crate::app) fn restore_model_dialog(&mut self) {
         self.summarization_model_edit = None;
+        self.pane_model_edit = None;
         if let Some(ref orig) = self.model_dialog_original {
             self.llm_config.model = if orig.is_empty() {
                 None
@@ -406,6 +473,13 @@ impl App {
         provider: &str,
         reasoning: Option<&str>,
     ) {
+        // A pane-scoped picker commits to THAT pane only: the pane's own
+        // selection plus its session's model markers — the global config,
+        // the persisted global slot and the main session stay untouched.
+        if let Some(pane) = self.pane_model_edit {
+            self.commit_pane_model_selection(pane, model, provider, reasoning);
+            return;
+        }
         self.set_llm_model(
             model.to_owned(),
             provider.to_owned(),
@@ -438,14 +512,55 @@ impl App {
     /// persisted in the session's JSONL history on the next save.
     pub(in crate::app) fn record_model_on_current_session(&mut self) {
         if let Some(session) = self.state.current_session_mut() {
-            session.provider = if self.llm_config.provider.is_empty() {
-                None
-            } else {
-                Some(self.llm_config.provider.clone())
-            };
-            session.model = self.llm_config.model.clone();
-            session.reasoning = self.llm_config.reasoning.clone();
+            record_session_model_fields(
+                session,
+                &self.llm_config.provider,
+                self.llm_config.model.as_deref().unwrap_or(""),
+                self.llm_config.reasoning.as_deref(),
+            );
         }
+    }
+
+    /// Commit a pane-scoped model pick: the selection lands on THAT pane
+    /// only — the pane's live state (which the dispatch route reads for
+    /// every later turn) and the SAME provider/model/reasoning markers the
+    /// main session records, written onto the pane's own cosh session so
+    /// the pick survives restarts with the existing marker precedence. The
+    /// global config, the persisted global slot and the main session are
+    /// never touched. A pane that has not run its first turn yet has no
+    /// session to stamp — the in-memory selection rides along until
+    /// `ensure_manager_pane_session` mints the session shell.
+    pub(in crate::app) fn commit_pane_model_selection(
+        &mut self,
+        pane: usize,
+        model: &str,
+        provider: &str,
+        reasoning: Option<&str>,
+    ) {
+        if let Some(session_id) = self.pane_session_id(pane)
+            && let Some(mut session) = self.session_store.load_session(&session_id)
+        {
+            record_session_model_fields(&mut session, provider, model, reasoning);
+            // Synchronous like the manager shell save: one tiny metadata
+            // write per dialog confirm, and the markers land before any
+            // later save could race them.
+            self.session_store.save_session(&session);
+        }
+        if let Some(pane_state) = self
+            .agents_split
+            .as_mut()
+            .or(self.parked_agents_split.as_mut())
+            .and_then(|split| split.panes.get_mut(pane))
+        {
+            pane_state.model_selection = Some(
+                crate::routes::session::agents_split::PaneModelSelection::new(
+                    provider.to_string(),
+                    model.to_string(),
+                    reasoning.map(String::from),
+                ),
+            );
+        }
+        self.pane_model_edit = None;
     }
 
     /// Restore the globally persisted model (the last one the user selected)
@@ -663,4 +778,27 @@ impl App {
         }
         grouped.values().flatten().copied().collect()
     }
+}
+
+/// Write a model selection onto a session record — the field mapping BOTH
+/// the main session and the per-pane commits share: an empty provider is
+/// the persisted `auto` selection (no provider to pin), an empty model
+/// clears the record entirely.
+pub(in crate::app) fn record_session_model_fields(
+    session: &mut crate::types::Session,
+    provider: &str,
+    model: &str,
+    reasoning: Option<&str>,
+) {
+    session.provider = if provider.is_empty() {
+        None
+    } else {
+        Some(provider.to_string())
+    };
+    session.model = if model.is_empty() {
+        None
+    } else {
+        Some(model.to_string())
+    };
+    session.reasoning = reasoning.map(String::from);
 }

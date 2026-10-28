@@ -187,6 +187,14 @@ pub struct AgentPane {
     /// free model where the harness's default is a paid-tier login wall)
     /// still apply.
     pub picked_config_ids: Vec<String>,
+    /// The pane's OWN model selection (the per-pane `/models` pick on a
+    /// focused cosh pane): the (provider, model, reasoning) triple the
+    /// pane's turns run with. `None` = never picked — the pane inherits
+    /// the GLOBAL config at spawn time. A committed selection is ALSO
+    /// recorded on the pane's cosh session (the same provider/model/
+    /// reasoning markers the main session carries), so it survives
+    /// restarts through the session file the store already persists.
+    pub model_selection: Option<PaneModelSelection>,
     /// The agent's advertised session modes, from the turn's `Modes`
     /// report (`session/new`/`resume`/`load` payload): the full list plus
     /// the id the session starts in. The client maps its own harness mode
@@ -269,6 +277,29 @@ pub struct AgentSessionInfo {
     pub reasoning: Option<String>,
 }
 
+/// One pane's OWN model selection: what the per-pane model picker committed
+/// for THIS pane's agent session. `provider` is empty for an `auto` pick
+/// (the fallback chain stays the source of truth, exactly like the main
+/// session's recorded `auto`), `reasoning` `None` for the model's default.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PaneModelSelection {
+    pub provider: String,
+    pub model: String,
+    pub reasoning: Option<String>,
+}
+
+impl PaneModelSelection {
+    /// Build from the dialog's commit triple (owned values — the caller
+    /// has already copied them out of the app state).
+    pub fn new(provider: String, model: String, reasoning: Option<String>) -> Self {
+        Self {
+            provider,
+            model,
+            reasoning,
+        }
+    }
+}
+
 impl AgentPane {
     #[must_use]
     pub fn new(agent: String) -> Self {
@@ -280,6 +311,7 @@ impl AgentPane {
             stop_signal: None,
             session_id: None,
             session_info: None,
+            model_selection: None,
             commands: None,
             config_options: None,
             picked_config_ids: Vec::new(),

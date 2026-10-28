@@ -22,7 +22,9 @@ use cosh::harness::events::HarnessEvent;
 use cosh_tools::subagent::events::{SubagentEvent, ToolCallStatus, ToolOutputBlock};
 
 use super::App;
-use crate::routes::session::agents_split::{AgentPane, AgentsSplitState, MANAGER_LABEL};
+use crate::routes::session::agents_split::{
+    AgentPane, AgentsSplitState, MANAGER_LABEL, PaneModelSelection,
+};
 use crate::ui::toast::{ToastOptions, ToastVariant};
 use crossterm::event::KeyCode;
 
@@ -123,6 +125,18 @@ pub(super) fn route_agent_slash_command(
         let tail =
             crate::ui::slash_menu::SlashMenu::command_arg_tail(&app.prompt_view.input, &cmd.name);
         apply_worktree_command(app, tail.as_deref());
+        return true;
+    }
+    // 2b. The manager pane's /models: the pane's OWN model picker. The
+    // manager's agent is this app's own loop, so the fall-through below
+    // would open the GLOBAL picker and move every agent's model with it —
+    // but the split's contract is per-pane agents: a pick here lands on
+    // THIS pane's session only (the pane's own selection plus its session
+    // markers, never the global config). External agents keep their own
+    // config-dialog path (the `resolve` branch below) — the picker here is
+    // the cosh pane's, which has no ACP config options to offer.
+    if cmd.name == "models" && pane.agent == MANAGER_LABEL {
+        app.open_pane_model_dialog(focused);
         return true;
     }
     // 3. The manager pane's agent is this app's own loop: the App's handlers
@@ -1456,15 +1470,35 @@ impl App {
         // An EMPTY provider degrades to the router's first fallback (the
         // deleted `daemon_connector`'s behavior): an unconfigured manager route
         // must not fail the pane when a working fallback exists.
+        // The pane's OWN model selection (the per-pane /models pick) wins
+        // over the global config; a pane that never picked falls back to it
+        // — the global model at spawn time, the pre-feature behavior.
+        // `auto` (empty provider) degrades to the fallback chain below,
+        // exactly like the global config's auto.
+        let pane_selection = if is_manager_pane {
+            either_split(&self.agents_split, &self.parked_agents_split)
+                .and_then(|split| split.panes.get(pane))
+                .and_then(|p| self.manager_pane_model_selection(p))
+        } else {
+            None
+        };
         let manager_route = if is_manager_pane {
-            let provider = self.llm_config.provider.trim().to_string();
+            let (provider, model) = match pane_selection.as_ref() {
+                Some(selection) => {
+                    (selection.provider.trim().to_string(), Some(selection.model.clone()))
+                }
+                None => (
+                    self.llm_config.provider.trim().to_string(),
+                    self.llm_config.model.clone(),
+                ),
+            };
             if provider.is_empty() {
                 self.router_view
                     .fallbacks
                     .first()
                     .map(|fb| (fb.provider.clone(), Some(fb.model.clone())))
             } else {
-                Some((provider, self.llm_config.model.clone()))
+                Some((provider, model))
             }
         } else {
             None
@@ -1488,7 +1522,20 @@ impl App {
         // contract): reasoning effort, tool-call delivery mode, cache
         // settings, MCP servers, the effective-context budget and RAG —
         // cloned before the turn thread moves in.
-        let self_llm_reasoning = self.llm_config.reasoning.clone();
+        // A pane with its own model selection runs ITS reasoning level too:
+        // the selection is the (provider, model, reasoning) triple, and a
+        // recorded `None` is a deliberate default that must NOT be replaced
+        // by whatever effort the global config carries (switching the main
+        // model's reasoning must not touch a pane that picked its own).
+        // Panes without a selection keep the global config.
+        let self_llm_reasoning = if is_manager_pane {
+            match pane_selection.as_ref() {
+                Some(selection) => selection.reasoning.clone(),
+                None => self.llm_config.reasoning.clone(),
+            }
+        } else {
+            self.llm_config.reasoning.clone()
+        };
         let self_tool_call_mode = self.llm_config.tool_call_mode;
         let self_base_urls = local_base_urls.clone();
         // The pane's effective cwd (worktree path when pinned), resolved in
@@ -2256,6 +2303,26 @@ impl App {
         {
             return Some(session_id);
         }
+        // A pane with its own model selection stamps it on the fresh shell:
+        // the session's model markers exist from birth (the SAME fields the
+        // main session records), so a restart resumes the pane on ITS model
+        // via the marker precedence below — the shell save after this block
+        // carries them.
+        let pane_selection = either_split(&self.agents_split, &self.parked_agents_split)
+            .and_then(|split| split.panes.get(pane))
+            .and_then(|p| p.model_selection.as_ref());
+        let (pane_provider, pane_model, pane_reasoning) = match pane_selection {
+            Some(selection) => (
+                if selection.provider.is_empty() {
+                    None
+                } else {
+                    Some(selection.provider.clone())
+                },
+                Some(selection.model.clone()),
+                selection.reasoning.clone(),
+            ),
+            None => (None, None, None),
+        };
         let Some((session_id, now_ms)) = self.session_store.claim_fresh_session_id() else {
             // Every candidate failed to lock (I/O trouble): refuse the turn
             // rather than run an unpersisted manager session.
@@ -2275,9 +2342,9 @@ impl App {
             messages: Vec::new(),
             created_at: now_ms,
             title_generated: false,
-            provider: None,
-            model: None,
-            reasoning: None,
+            provider: pane_provider,
+            model: pane_model,
+            reasoning: pane_reasoning,
             agents_panes: None,
             agents_mode_open: false,
             agents_hidden: Vec::new(),
@@ -2291,6 +2358,41 @@ impl App {
         }
         self.state.session_summaries = self.session_store.list_sessions();
         Some(session_id)
+    }
+
+    /// The manager pane's OWN model selection, with the session markers'
+    /// precedence: the pane's committed per-pane pick wins; absent one, the
+    /// pane's cosh session carries the same provider/model/reasoning markers
+    /// the main session does (a pick made in a previous run comes back —
+    /// the SAME precedence `restore_current_session_model` honors when the
+    /// main view re-enters a session); `None` = the pane has no selection
+    /// and inherits the global config at spawn time.
+    pub(in crate::app) fn manager_pane_model_selection(
+        &self,
+        pane: &AgentPane,
+    ) -> Option<PaneModelSelection> {
+        if let Some(selection) = &pane.model_selection {
+            return Some(selection.clone());
+        }
+        let session = self.session_store.load_session(pane.session_id.as_ref()?)?;
+        match (session.provider, session.model) {
+            // A recorded explicit selection fully replaces the route — the
+            // reasoning could legitimately be `None` (the model's default),
+            // which must clear a leftover effort from the global config.
+            (Some(provider), Some(model)) => {
+                Some(PaneModelSelection::new(provider, model, session.reasoning))
+            }
+            // A recorded `auto` selection has no provider to pin — the
+            // fallback chain stays the source of truth.
+            (None, Some(model)) if model == "auto" => Some(PaneModelSelection::new(
+                String::new(),
+                model,
+                session.reasoning,
+            )),
+            // No usable recorded selection: the pane inherits the global
+            // config (the pre-feature behavior).
+            _ => None,
+        }
     }
 
     /// Cold-restore ONE pane's bound session: drive an ACP `session/load`
