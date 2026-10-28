@@ -719,3 +719,91 @@ async fn slash_models_on_a_focused_cosh_pane_opens_the_pane_picker() {
     assert!(!app.is_model_dialog_visible());
     assert_eq!(app.llm_config.model, crate::config::LlmConfig::from_env().model);
 }
+
+// ── The prompt badge must reflect the pane's OWN model ──────────────────
+//
+// REGRESSION (the badge half of the per-pane model feature): the commit
+// landed on the pane's selection and its session markers, but the badge
+// kept reading the GLOBAL config triple — a pick changed the pane's turns
+// while the row kept painting the main agent's model. The badge now reads
+// the pane's own serving pair (`effective_pane_prompt_info`), which the
+// commit overwrites in `session_info` and the split rebuilds hydrate from
+// the session markers.
+
+/// A committed pane pick paints the prompt badge with the PANE's model the
+/// moment it is committed — not the main agent's global triple.
+#[tokio::test]
+async fn pane_model_pick_shows_on_the_prompt_badge() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = app_with_cosh_panes(2);
+    app.llm_config.provider = "global-provider".into();
+    app.llm_config.model = Some("global-model".into());
+
+    app.open_pane_model_dialog(0);
+    app.confirm_model_entry("pane-a-model", "pane-a-provider");
+
+    // The pane's serving pair carries the pick (the badge reads it).
+    let info = app
+        .effective_pane_prompt_info(0)
+        .expect("the pane's own badge triple");
+    assert_eq!(info.model.as_deref(), Some("pane-a-model"));
+    assert_eq!(info.provider.as_deref(), Some("pane-a-provider"));
+
+    // Pane B never picked: a manager pane with no pick of its own shows NO
+    // badge triple (the row falls through to the gateway triple it always
+    // painted) — the global config stays untouched beneath it.
+    let info_b = app.effective_pane_prompt_info(1);
+    assert!(
+        info_b.is_none(),
+        "a manager pane with no pick shows no badge triple"
+    );
+}
+
+/// A hydrated manager pane (a pick recorded on its bound session in a
+/// previous run) shows its own model on the badge the moment the split
+/// rebuilds — before any new turn runs.
+#[tokio::test]
+async fn hydrated_manager_pane_shows_the_session_model_on_the_badge() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = app_with_cosh_panes(1);
+    app.llm_config.provider = "global-provider".into();
+    app.llm_config.model = Some("global-model".into());
+
+    // A bound pane whose session carries the recorded pick (the same
+    // markers a first-turn shell is stamped with).
+    let session_id = crate::session::store::generate_session_id();
+    app.session_store.save_session(&crate::types::Session {
+        id: session_id.clone(),
+        title: "agents manager".to_string(),
+        messages: Vec::new(),
+        created_at: 0,
+        title_generated: false,
+        provider: Some("pane-provider".into()),
+        model: Some("pane-model".into()),
+        reasoning: Some("high".into()),
+        agents_panes: None,
+        agents_mode_open: false,
+        agents_hidden: Vec::new(),
+        ctx_ids: std::collections::HashMap::new(),
+        main_agent_worktree: None,
+    });
+    app.agents_split.as_mut().unwrap().panes[0].session_id = Some(session_id);
+
+    // The rebuild hydration resolves the markers into the pane's live
+    // selection and its badge chrome.
+    app.hydrate_manager_pane_model_selections();
+    let info = app
+        .effective_pane_prompt_info(0)
+        .expect("the hydrated pane's badge triple");
+    assert_eq!(info.model.as_deref(), Some("pane-model"));
+    assert_eq!(info.provider.as_deref(), Some("pane-provider"));
+    assert_eq!(info.reasoning.as_deref(), Some("high"));
+    // The in-memory selection is in place too (the dispatch route reads it).
+    let selection = app.agents_split.as_ref().unwrap().panes[0]
+        .model_selection
+        .as_ref()
+        .expect("hydrated");
+    assert_eq!(selection.model, "pane-model");
+}

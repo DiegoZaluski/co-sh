@@ -559,6 +559,18 @@ impl App {
                     reasoning.map(String::from),
                 ),
             );
+            // The prompt badge reads the pane's chrome, not the selection:
+            // overwrite its serving pair too, so the pick shows the moment
+            // it is committed (the manager pane's bridge emits no
+            // `SessionModel` event to repaint it later).
+            pane_state.session_info = Some(
+                crate::routes::session::agents_split::PaneModelSelection::new(
+                    provider.to_string(),
+                    model.to_string(),
+                    reasoning.map(String::from),
+                )
+                .to_session_info(),
+            );
         }
         self.pane_model_edit = None;
     }

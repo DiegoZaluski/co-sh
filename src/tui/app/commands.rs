@@ -190,6 +190,11 @@ impl App {
             // The mirrors are already in place (the parked slot kept them
             // alive); one sync re-affirms their state for the re-open.
             self.sync_agents_pane_mirrors();
+            // The manager panes' own model selections hydrate from their
+            // bound sessions' markers (one disk read per cosh pane): a pick
+            // made in a previous run shows on the pane's prompt badge the
+            // moment the mode re-attaches, not only on its next turn.
+            self.hydrate_manager_pane_model_selections();
             // The re-attached pane set carries its focus (pane 0 on a
             // rebuilt one): the slash menu's source follows it — agent
             // list when the pane was already probed, spinner/cosh
@@ -525,6 +530,11 @@ impl App {
             // app rehydrate their transcript from the agent's own replay
             // here.
             self.trigger_agents_pane_replays();
+            // The manager panes' own model selections hydrate from their
+            // bound sessions' markers (one disk read per cosh pane): a pick
+            // made in a previous run shows on the pane's prompt badge the
+            // moment the split takes the screen, not only on its next turn.
+            self.hydrate_manager_pane_model_selections();
         }
         // Drop the split's spinner only when no NORMAL agent loop is still
         // running behind it (the double-scenario): a Working loop keeps its
@@ -726,6 +736,10 @@ impl App {
         // A bound pane returns with no live timeline — rehydrate it; the
         // focus already sits on it, so the slash menu's source follows.
         self.trigger_agents_pane_replays();
+        // The restored pane's own model selection hydrates from its bound
+        // session's markers (a hidden manager pane shows its pick on the
+        // prompt badge immediately, like every other rebuild path).
+        self.hydrate_manager_pane_model_selections();
         super::agents_dispatch::ensure_pane_snapshot(self, index);
         super::agents_dispatch::sync_slash_source(self);
     }
@@ -1128,6 +1142,12 @@ impl App {
                 // A session left with the mode open carries `Bound` panes
                 // whose timelines died with the process — rehydrate them.
                 self.trigger_agents_pane_replays();
+                // The manager panes' own model selections hydrate from
+                // their bound sessions' markers (one disk read per cosh
+                // pane): a pick made in a previous run shows on the pane's
+                // prompt badge the moment the session takes the screen,
+                // not only on its next turn.
+                self.hydrate_manager_pane_model_selections();
             }
             Some((Some(panes), false, _)) => {
                 // An EMPTY persisted set is the legacy emptied-split shape

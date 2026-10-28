@@ -298,6 +298,23 @@ impl PaneModelSelection {
             reasoning,
         }
     }
+
+    /// Project the selection onto the pane's badge chrome (`AgentSessionInfo`)
+    /// — the ONE mapping every writer shares (the picker's commit, the
+    /// rebuild hydration): the model is the picked id, the provider rides
+    /// the row only when pinned (an `auto` pick leaves it empty, like an ACP
+    /// pane that advertises no provider), no harness labels exist for a
+    /// cosh pane's own pick, the reasoning level passes through. Changing
+    /// the badge's provider-display rule happens HERE, not at each writer.
+    pub fn to_session_info(&self) -> AgentSessionInfo {
+        AgentSessionInfo {
+            model: Some(self.model.clone()),
+            model_label: None,
+            provider: (!self.provider.is_empty()).then(|| self.provider.clone()),
+            provider_label: None,
+            reasoning: self.reasoning.clone(),
+        }
+    }
 }
 
 impl AgentPane {

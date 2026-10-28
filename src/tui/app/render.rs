@@ -1004,32 +1004,59 @@ impl App {
                         // that pane, so the agent-label row leads with the
                         // pane's brand name + serving triple instead of the
                         // gateway triple. The manager pane IS the main agent
-                        // itself: no badge at all — the row stays exactly
-                        // the mode + gateway triple it always was. An ACP
-                        // pane shows its reported triple (provider only
-                        // when advertised) — empty until the first report,
-                        // replaced on change. Unfocused (`None`) is the
-                        // main agent: unchanged.
-                        let pane = self
+                        // itself, but its bridge never emits a `SessionModel`
+                        // report — its triple resolves from the pane's own
+                        // selection source (`effective_pane_prompt_info`):
+                        // a committed per-pane pick shows the moment it is
+                        // picked, not only on the pane's next turn, and a
+                        // manager pane with no pick of its own keeps the
+                        // row exactly the mode + gateway triple it always
+                        // was (no badge). An ACP pane keeps its reported
+                        // triple (provider only when advertised) — empty
+                        // until the first report, replaced on change.
+                        // Unfocused (`None`) is the main agent: unchanged.
+                        let focused_index = self
                             .agents_split
                             .as_ref()
-                            .and_then(|split| split.focused)
-                            .and_then(|index| self.agents_split.as_ref()?.panes.get(index))
-                            .filter(|pane| pane.agent != MANAGER_LABEL);
+                            .and_then(|split| split.focused);
                         let mut name_styles = Vec::new();
-                        let pane_badge: Option<PanePromptInfo<'_>> = pane.map(|pane| {
+                        // The badge's inputs, resolved BEFORE the prompt's
+                        // mutable borrow: the ACP harness's own report, or —
+                        // for the manager (cosh) pane, whose bridge never
+                        // reports one — the pane's own selection source (the
+                        // per-pane pick, the session markers). A manager pane
+                        // with no pick of its own drops the badge entirely:
+                        // the row keeps the mode + gateway triple it always
+                        // painted (the pre-feature behavior). The info copy
+                        // is OWNED so the `&self` read ends here — the
+                        // `prompt_view.render` below borrows the prompt
+                        // mutably.
+                        let mut badge_name: Option<&str> = None;
+                        let mut badge_info: Option<
+                            crate::routes::session::agents_split::AgentSessionInfo,
+                        > = None;
+                        if let Some(index) = focused_index
+                            && let Some(pane) =
+                                self.agents_split.as_ref().and_then(|s| s.panes.get(index))
+                        {
                             let name = display_name(&pane.agent);
-                            // The header's own per-glyph sweep, resolved
-                            // once: the badge logo IS the pane logo.
-                            name_styles = brand_name_styles(name, &self.theme, true);
-                            let info = pane.session_info.as_ref();
-                            let provider = info.and_then(|i| i.provider.as_deref());
+                            let info = self.effective_pane_prompt_info(index);
+                            if info.is_some() || pane.agent != MANAGER_LABEL {
+                                badge_name = Some(name);
+                                badge_info = Some(info.unwrap_or_default());
+                                // The header's own per-glyph sweep, resolved
+                                // once: the badge logo IS the pane logo.
+                                name_styles = brand_name_styles(name, &self.theme, true);
+                            }
+                        }
+                        let pane_badge: Option<PanePromptInfo<'_>> = badge_name.map(|name| {
+                            let info = badge_info.as_ref();
                             PanePromptInfo {
                                 name,
                                 name_styles: &name_styles,
                                 model: info.and_then(|i| i.model.as_deref()).unwrap_or(""),
                                 model_label: info.and_then(|i| i.model_label.as_deref()),
-                                provider: provider.unwrap_or(""),
+                                provider: info.and_then(|i| i.provider.as_deref()).unwrap_or(""),
                                 provider_label: info.and_then(|i| i.provider_label.as_deref()),
                                 reasoning: info.and_then(|i| i.reasoning.as_deref()),
                             }

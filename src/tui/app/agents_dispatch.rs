@@ -2395,6 +2395,78 @@ impl App {
         }
     }
 
+    /// The focused pane's PROMPT-BADGE triple (provider, model, reasoning),
+    /// resolved for EVERY pane kind — strictly from IN-MEMORY pane state
+    /// (render calls this every frame; a session-file read here would parse
+    /// the pane's JSONL per repaint). External ACP panes read the pane's
+    /// `session_info` — the harness's own `SessionModel` report — and yield
+    /// `None` when nothing was reported yet (the badge shows only the
+    /// brand name). The manager (cosh) pane is the main agent itself: its
+    /// bridge never emits a `SessionModel` event, so its badge resolves
+    /// from the pane's OWN selection (`model_selection` — committed by the
+    /// per-pane picker, hydrated from the session markers on every split
+    /// rebuild by `hydrate_manager_pane_model_selections`). Without this a
+    /// committed per-pane pick changed the pane's TURNS while the badge
+    /// kept showing the main agent's global model — the pick looked broken.
+    pub(in crate::app) fn effective_pane_prompt_info(
+        &self,
+        pane: usize,
+    ) -> Option<crate::routes::session::agents_split::AgentSessionInfo> {
+        let split = either_split(&self.agents_split, &self.parked_agents_split)?;
+        let pane_state = split.panes.get(pane)?;
+        if pane_state.agent != MANAGER_LABEL {
+            return pane_state.session_info.clone();
+        }
+        let selection = pane_state.model_selection.as_ref()?;
+        Some(selection.to_session_info())
+    }
+
+    /// Hydrate every manager (cosh) pane's OWN model selection from its
+    /// bound session's markers, ONE disk read per pane per call — never per
+    /// frame (the render badge reads the in-memory `model_selection` the
+    /// hydration lands in). A pane that already carries a selection (the
+    /// picker's commit, or a previous hydration) is left untouched. Called
+    /// on every split (re)build — session switch, fresh confirm, park
+    /// re-attach — so a pick made in a previous run (or in another session
+    /// view) shows on the pane's badge the moment the split takes the
+    /// screen, exactly like the dispatch route resolves it.
+    pub(in crate::app) fn hydrate_manager_pane_model_selections(&mut self) {
+        // Phase 1 (shared borrow): the manager panes still missing a
+        // selection, keyed by index — with the selections resolved from
+        // their sessions. The store reads happen here, BEFORE the mutable
+        // phase: `load_session` borrows `self` immutably and cannot run
+        // under the split's `&mut` below.
+        let mut hydrated: Vec<(usize, crate::routes::session::agents_split::PaneModelSelection)> =
+            Vec::new();
+        if let Some(split) = either_split(&self.agents_split, &self.parked_agents_split) {
+            for (index, pane) in split.panes.iter().enumerate() {
+                if pane.agent == MANAGER_LABEL
+                    && pane.model_selection.is_none()
+                    && let Some(selection) = self.manager_pane_model_selection(pane)
+                {
+                    hydrated.push((index, selection));
+                }
+            }
+        }
+        // Phase 2 (exclusive borrow): the selection AND the badge chrome
+        // land together — the pane's serving pair exists from the hydration
+        // on, so the pick shows without waiting for a turn report.
+        if let Some(split) = either_split_mut(&mut self.agents_split, &mut self.parked_agents_split)
+        {
+            for (index, selection) in hydrated {
+                let Some(pane) = split.panes.get_mut(index) else {
+                    continue;
+                };
+                // The selection AND the badge chrome land together (the one
+                // shared mapping): the pane's serving pair exists from the
+                // hydration on, so the pick shows without waiting for a
+                // turn report.
+                pane.session_info = Some(selection.to_session_info());
+                pane.model_selection = Some(selection);
+            }
+        }
+    }
+
     /// Cold-restore ONE pane's bound session: drive an ACP `session/load`
     /// replay pass against a fresh harness connection and stream the
     /// replayed history into the pane's timeline through the SAME
