@@ -1286,7 +1286,7 @@ impl AgentsSplitState {
     /// truncated report) keeps the entry: degrades to keeping, never to
     /// losing content.
     ///
-    /// `end` ([`cosh::harness::panes::PaneTurnEnd`]) decides both details —
+    /// `end` ([`cosh::harness::agent_coworkers::AgentCoworkerTurnEnd`]) decides both details —
     /// whether the transcript seals failed and whether the marker is
     /// prefixed. A `partial` report deliberately seals like a COMPLETED turn
     /// (it carries the pane's real last text, which already streamed into
@@ -1296,7 +1296,7 @@ impl AgentsSplitState {
         &mut self,
         pane: usize,
         output: &str,
-        end: cosh::harness::panes::PaneTurnEnd,
+        end: cosh::harness::agent_coworkers::AgentCoworkerTurnEnd,
     ) {
         let Some(p) = self.panes.get_mut(pane) else {
             return;
@@ -3182,7 +3182,7 @@ mod tests {
         state.finish_turn(
             0,
             "Tudo bem! Como\nposso ajudar hoje?",
-            cosh::harness::panes::PaneTurnEnd::EndTurn,
+            cosh::harness::agent_coworkers::AgentCoworkerTurnEnd::EndTurn,
         );
 
         // The streamed entry was dropped (the report carries it) and the
@@ -3227,7 +3227,7 @@ mod tests {
         failed.finish_turn(
             0,
             "spawn failed",
-            cosh::harness::panes::PaneTurnEnd::Error,
+            cosh::harness::agent_coworkers::AgentCoworkerTurnEnd::Error,
         );
         let texts: Vec<String> = failed.panes[0]
             .activity
@@ -3274,7 +3274,7 @@ mod tests {
         state.finish_turn(
             0,
             "tudo bem! como posso ajudar?",
-            cosh::harness::panes::PaneTurnEnd::EndTurn,
+            cosh::harness::agent_coworkers::AgentCoworkerTurnEnd::EndTurn,
         );
         // Turn 2 (no tool call in between — the old merge crossed here).
         state.echo_turn_input(0, "qual seu nome?", true);
@@ -3287,7 +3287,7 @@ mod tests {
         state.finish_turn(
             0,
             "sou o Kilo.",
-            cosh::harness::panes::PaneTurnEnd::EndTurn,
+            cosh::harness::agent_coworkers::AgentCoworkerTurnEnd::EndTurn,
         );
 
         let rows: Vec<(bool, String)> = state.panes[0]

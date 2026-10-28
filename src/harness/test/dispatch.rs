@@ -1089,7 +1089,7 @@ fn handoff_notice_lists_each_stale_tool_once() {
 }
 
 /// A pane loop (any harness with its own pane id bound) NEVER coordinates:
-/// `with_own_pane_id` strips the `agents_call` tool at build time, and the
+/// `with_own_coworker_id` strips the `agents_call` tool at build time, and the
 /// dispatch arm refuses pane-originated calls as defense in depth. This
 /// test drives the dispatch arm directly with a pushed call (simulating a
 /// stale/re-added tool) and asserts the pane-call refusal fires BEFORE the
@@ -1098,7 +1098,7 @@ fn handoff_notice_lists_each_stale_tool_once() {
 async fn agents_call_is_refused_from_a_pane_loop() {
     let mut h = Harness::new_test()
         .as_manager()
-        .with_own_pane_id(Some("cosh".into()));
+        .with_own_coworker_id(Some("cosh".into()));
 
     h.push_tool_call(ToolCallData {
         id: String::new(),
@@ -1113,7 +1113,7 @@ async fn agents_call_is_refused_from_a_pane_loop() {
     );
 }
 
-/// A pane loop NEVER compacts a sibling: `with_own_pane_id` strips the
+/// A pane loop NEVER compacts a sibling: `with_own_coworker_id` strips the
 /// `agents_compact` tool at build time, and the dispatch arm refuses
 /// pane-originated calls as defense in depth (the same shape the
 /// `agents_call` refusal test pins). The refusal fires BEFORE the registry
@@ -1122,7 +1122,7 @@ async fn agents_call_is_refused_from_a_pane_loop() {
 async fn agents_compact_is_refused_from_a_pane_loop() {
     let mut h = Harness::new_test()
         .as_manager()
-        .with_own_pane_id(Some("cosh".into()));
+        .with_own_coworker_id(Some("cosh".into()));
 
     h.push_tool_call(ToolCallData {
         id: String::new(),

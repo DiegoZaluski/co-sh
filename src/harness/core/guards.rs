@@ -56,7 +56,7 @@ impl Harness {
     /// - the internal sub-agent (`as_nested`): its ONLY deliverable is the
     ///   final report text (`stop_agent_loop` is blocked for it, see
     ///   [`super::limits::SUBAGENT_BLOCKED_TOOLS`]);
-    /// - the `/agents` cosh pane (`with_own_pane_id`): a requester is
+    /// - the `/agents` cosh coworker (`with_own_coworker_id`): a requester is
     ///   BLOCKED on its report, and `stop_agent_loop` is blocked there too
     ///   (the TUI's `MANAGER_BLOCKED_TOOLS`).
     ///
@@ -65,14 +65,14 @@ impl Harness {
     /// this helper is gated on the loop's ROLE rather than on the stop shape
     /// alone.
     pub(crate) fn owes_report(&self) -> bool {
-        self.nested || self.panes_own_id.is_some()
+        self.nested || self.own_coworker_id.is_some()
     }
 
     /// Continue a REPORT-OWING turn whose loop stopped without anybody
     /// asking it to — returning the steering message for the next iteration,
     /// or `None` when the stop must stand.
     ///
-    /// This is the missing seam behind the field defect: a `/agents` pane
+    /// This is the missing seam behind the field defect: a `/agents` coworker
     /// whose loop ended right after a reasoning (or on an exhausted
     /// natural-stop budget) closed the turn `incomplete`, handing its
     /// requester "the pane produced no report" for work that was one
@@ -87,10 +87,10 @@ impl Harness {
     /// 1. The loop owes no report ([`Self::owes_report`]) — a chat turn's
     ///    stop is the user's to read.
     /// 2. The USER stopped it: `self.stop` / the shared `stop_signal`, the
-    ///    SAME flags `check_stop!` reads. For a pane `self.stop` cannot come
+    ///    SAME flags `check_stop!` reads. For a coworker `self.stop` cannot come
     ///    from the model (`stop_agent_loop` is blocked), so this is the
     ///    user's stop and nothing else — the single legitimate early end.
-    /// 3. The resume budget is spent ([`super::limits::PANE_RESUME_BUDGET`]).
+    /// 3. The resume budget is spent ([`super::limits::COWORKER_RESUME_BUDGET`]).
     ///    Kept per LOOP, because the inner nudges renew per ENTRY and would
     ///    otherwise make the resume unbounded.
     ///
@@ -115,10 +115,10 @@ impl Harness {
             );
             return None;
         }
-        if self.pane_resumes_left == 0 {
+        if self.coworker_resumes_left == 0 {
             return None;
         }
-        self.pane_resumes_left -= 1;
+        self.coworker_resumes_left -= 1;
 
         // The note must describe what ACTUALLY happened, or it steers the
         // model wrong: an empty-stop resume follows a stream that produced
@@ -151,9 +151,9 @@ impl Harness {
         log::warn!(
             target: "laya",
             "pane resume ({reason}): this turn owes a report and NOBODY asked it to \
-             stop (no user stop, no `stop_agent_loop` for a pane) — re-sending the \
+             stop (no user stop, no `stop_agent_loop` for a coworker) — re-sending the \
              context instead of closing `incomplete` ({} resumes left)",
-            self.pane_resumes_left
+            self.coworker_resumes_left
         );
         Some(steering)
     }

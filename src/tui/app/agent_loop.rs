@@ -373,7 +373,7 @@ impl App {
         // not the `/agents` split is open — the manager/pane prompts and
         // the coordinator blocklist are gone. Coordination stays available
         // through `agents_call`, and the anti-replication invariants live
-        // in the harness itself (`with_own_pane_id` + the dispatch guards),
+        // in the harness itself (`with_own_coworker_id` + the dispatch guards),
         // never in the main loop's assembly.
 
         // Registered MCP servers (Settings screen → setup.json). Cloned
@@ -475,7 +475,7 @@ impl App {
                         // The MAIN loop: MAIN requester tag, owns no pane
                         // (keeps `agents_call`).
                         as_manager: false,
-                        own_pane_id: None,
+                        own_coworker_id: None,
                     };
 
                     let mut harness = match assemble(assembly, &event_tx).await {

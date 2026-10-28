@@ -1,4 +1,4 @@
-//! System-context assembly: the correction block, the /agents panes block
+//! System-context assembly: the correction block, the /agents coworkers block
 //! and their tail-rendered placement in the conversation.
 
 use super::Harness;
@@ -20,21 +20,21 @@ impl Harness {
     pub(super) fn build_chat_context(&mut self) -> String {
         self.context_manager
             .set_correction_block(self.correction_memory.format());
-        // Mirror the /agents panes listing into the context manager's TAIL
+        // Mirror the /agents coworkers listing into the context manager's TAIL
         // (rendered between the corrections and the TODO block). Rebuilt
-        // per request: a pane bind/unbind changes only the tail, never the
+        // per request: a coworker bind/unbind changes only the tail, never the
         // system prompt — the exact-prefix cache of the whole conversation
         // stays valid. The MAIN loop mirrors the full listing (the
-        // addressable pane set — it owns coordination). A PANE loop mirrors
+        // addressable coworker set — it owns coordination). A PANE loop mirrors
         // the reduced peer view instead: WHICH siblings share its
         // workspace, without the `agents_call` vocabulary (the replication
-        // bug `with_own_pane_id` documents) — a pane knows its peers but
-        // never coordinates them. ACP panes never run this harness: their
-        // awareness rides a prompt preamble (`panes::take_preamble`) at
+        // bug `with_own_coworker_id` documents) — a coworker knows its peers but
+        // never coordinates them. ACP coworkers never run this harness: their
+        // awareness rides a prompt preamble (`agent_coworkers::take_preamble`) at
         // dispatch time instead.
-        self.context_manager.set_panes_block(match &self.panes_own_id {
-            None => super::panes::context_block(),
-            Some(own_id) => super::panes::peer_block(own_id),
+        self.context_manager.set_coworkers_block(match &self.own_coworker_id {
+            None => super::agent_coworkers::context_block(),
+            Some(own_id) => super::agent_coworkers::peer_block(own_id),
         });
         self.header_context.clone()
     }

@@ -105,7 +105,7 @@ pub enum ContextItem {
         ///
         /// STRICTLY DISPLAY-ONLY and WRITE-ONCE: set at the item's birth
         /// (never mutated in place afterwards), read only by display
-        /// projections (the agents manager pane). It NEVER enters
+        /// projections (the agents manager coworker). It NEVER enters
         /// `build_messages` — the model must not see its own thinking as
         /// assistant prose — and `tokens()` must never count it (the
         /// compaction budget must not inflate with text the model will
@@ -457,21 +457,21 @@ pub struct ContextManager {
     /// Memoized token estimate of [`Self::correction_block`], kept in sync by
     /// [`Self::set_correction_block`] so `total_tokens` stays O(1).
     correction_block_tokens: usize,
-    /// The /agents panes listing, mirrored by the harness right after
+    /// The /agents coworkers listing, mirrored by the harness right after
     /// `format_header_context` (the same per-request mirror contract as
     /// [`Self::correction_block`]). Rendered in [`Self::build_messages`]'s
     /// tail BETWEEN the corrections and the TODO block. Why the tail and
     /// not the system prompt: the system prompt is prefix position 0 — a
-    /// pane binding/unbinding re-renders this block mid-session, and any
+    /// coworker binding/unbinding re-renders this block mid-session, and any
     /// byte change at position 0 invalidates the provider's exact-prefix
     /// cache for the WHOLE conversation (system → history). At the tail a
     /// change only costs the tail itself, the same contract the TODO and
     /// corrections blocks already follow. Like them, it is not an item:
     /// re-mirrored per request, never compacted, never persisted.
-    panes_block: Option<String>,
-    /// Memoized token estimate of [`Self::panes_block`], kept in sync by
-    /// [`Self::set_panes_block`] so `total_tokens` stays O(1).
-    panes_block_tokens: usize,
+    coworkers_block: Option<String>,
+    /// Memoized token estimate of [`Self::coworkers_block`], kept in sync by
+    /// [`Self::set_coworkers_block`] so `total_tokens` stays O(1).
+    coworkers_block_tokens: usize,
     /// Transient rehydration signal, never authoritative or persisted state.
     todo_restore_pending: bool,
     /// Handoff/tool-set consistency check: applied to every summary at
@@ -601,8 +601,8 @@ impl ContextManager {
             todo: TodoContext::new(),
             correction_block: None,
             correction_block_tokens: 0,
-            panes_block: None,
-            panes_block_tokens: 0,
+            coworkers_block: None,
+            coworkers_block_tokens: 0,
             todo_restore_pending: false,
             summary_annotator: None,
             cached_items_tokens: 0,
@@ -1903,17 +1903,17 @@ impl ContextManager {
                 tail_block = Some(corrections.to_string());
             }
         }
-        // The /agents panes listing sits BETWEEN the corrections and the
-        // TODO block: pane set/bind changes churn per pane lifecycle, so
+        // The /agents coworkers listing sits BETWEEN the corrections and the
+        // TODO block: coworker set/bind changes churn per coworker lifecycle, so
         // they must never touch the system prompt (prefix position 0 — the
         // exact-prefix cache of the WHOLE conversation dies with any byte
         // change there). At the tail a change only costs the tail itself.
-        if let Some(panes) = self.panes_block.as_deref() {
+        if let Some(coworkers) = self.coworkers_block.as_deref() {
             if let Some(existing) = tail_block.as_mut() {
                 existing.push_str("\n\n");
-                existing.push_str(panes);
+                existing.push_str(coworkers);
             } else {
-                tail_block = Some(panes.to_string());
+                tail_block = Some(coworkers.to_string());
             }
         }
         if let Some(block) = self.todo.text() {
@@ -2068,14 +2068,14 @@ impl ContextManager {
             .map_or(0, |block| self.encoding.estimate(block));
     }
 
-    /// Mirror the /agents panes listing block for the next request (tail
+    /// Mirror the /agents coworkers listing block for the next request (tail
     /// rendering — see the field docs). `None`/empty clears the block: a
-    /// session without panes renders nothing (byte-identical tail with
+    /// session without coworkers renders nothing (byte-identical tail with
     /// the pre-feature one).
-    pub fn set_panes_block(&mut self, text: Option<String>) {
-        self.panes_block = text.filter(|t| !t.trim().is_empty());
-        self.panes_block_tokens = self
-            .panes_block
+    pub fn set_coworkers_block(&mut self, text: Option<String>) {
+        self.coworkers_block = text.filter(|t| !t.trim().is_empty());
+        self.coworkers_block_tokens = self
+            .coworkers_block
             .as_deref()
             .map_or(0, |block| self.encoding.estimate(block));
     }
@@ -2273,7 +2273,7 @@ impl ContextManager {
         self.cached_items_tokens
             .saturating_add(self.todo.tokens(self.encoding))
             .saturating_add(self.correction_block_tokens)
-            .saturating_add(self.panes_block_tokens)
+            .saturating_add(self.coworkers_block_tokens)
     }
 
     /// Whether the model must not see this raw item: it is behind a legacy

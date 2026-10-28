@@ -328,9 +328,9 @@ fn slugify(name: &str) -> String {
 /// endings) is git's own validation, whose errors surface verbatim.
 ///
 /// This is the ONE rule for a worktree/branch name: the registry's
-/// pre-flight check (`panes::enqueue_worktree_op`) calls it instead of
-/// restating it, so the tool and the engine accept exactly the same names
-/// and refuse with exactly the same sentence.
+/// pre-flight check (`agent_coworkers::enqueue_worktree_op`) calls it
+/// instead of restating it, so the tool and the engine accept exactly
+/// the same names and refuse with exactly the same sentence.
 pub fn validate_name(name: &str) -> Result<(), WorktreeError> {
     if name.is_empty()
         || name.starts_with('-')

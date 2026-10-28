@@ -1573,7 +1573,7 @@ async fn session_switch_restores_the_mode_only_when_it_was_left_open() {
 /// (same agent name) would even be served by the NEW session's pane.
 #[tokio::test]
 async fn session_switch_fails_outstanding_pane_requests_and_resyncs_the_registry() {
-    use cosh::harness::panes::{self, ReplyMode};
+    use cosh::harness::agent_coworkers::{self, ReplyMode};
 
     let _guard = HOME_LOCK.lock();
     isolate_home();
@@ -1592,11 +1592,11 @@ async fn session_switch_fails_outstanding_pane_requests_and_resyncs_the_registry
         instances: 1,
     }]);
     app.sync_agents_pane_registry();
-    let handle = panes::enqueue("cosh", "delegated work", panes::MAIN, ReplyMode::Wait)
+    let handle = agent_coworkers::enqueue("cosh", "delegated work", agent_coworkers::MAIN, ReplyMode::Wait)
         .expect("cosh pane is addressable");
     let rx = handle.receiver.expect("wait mode carries a receiver");
-    assert!(panes::has_queued_request("cosh"), "request queued");
-    assert!(panes::has_outstanding_requests(panes::MAIN));
+    assert!(agent_coworkers::has_queued_request("cosh"), "request queued");
+    assert!(agent_coworkers::has_outstanding_requests(agent_coworkers::MAIN));
 
     // Session B: NO pane set — the plainest hang reproduction: after the
     // switch nothing can ever dispatch the old request.
@@ -1608,7 +1608,7 @@ async fn session_switch_fails_outstanding_pane_requests_and_resyncs_the_registry
 
     // THE FIX: the queued request failed (the waiter unblocked with the
     // failure instead of hanging forever) and the registry is EMPTY —
-    // `has_panes` false means the next harness build registers no
+    // `has_coworkers` false means the next harness build registers no
     // `agents_call` tool at all.
     let answer = rx.await.expect("sender alive");
     assert!(
@@ -1616,11 +1616,11 @@ async fn session_switch_fails_outstanding_pane_requests_and_resyncs_the_registry
         "the queued request must fail on a session switch, not hang: {answer:?}"
     );
     assert!(
-        !panes::has_outstanding_requests(panes::MAIN),
+        !agent_coworkers::has_outstanding_requests(agent_coworkers::MAIN),
         "no outstanding request may survive a session switch (the busy-guard would spin forever)"
     );
     assert!(
-        !panes::has_panes(),
+        !agent_coworkers::has_coworkers(),
         "the outgoing pane set must leave the registry — no session, no panes"
     );
 
@@ -1628,12 +1628,12 @@ async fn session_switch_fails_outstanding_pane_requests_and_resyncs_the_registry
     // registry serves, never the old session's leftovers.
     app.state.current_session_id = Some(a.clone());
     assert!(app.switch_session_locked(&a));
-    let ids: Vec<String> = panes::list_panes().into_iter().map(|p| p.id).collect();
+    let ids: Vec<String> = agent_coworkers::list_coworkers().into_iter().map(|p| p.id).collect();
     assert!(
         ids.contains(&"cosh".to_string()),
         "pane re-registered: {ids:?}"
     );
-    assert!(panes::has_panes());
+    assert!(agent_coworkers::has_coworkers());
 }
 
 /// A FRESH picker confirm supersedes a parked split of the same session:
@@ -2308,7 +2308,7 @@ async fn a_usage_event_lands_on_the_pane() {
 /// path a manager delegation to a sibling takes.
 #[tokio::test]
 async fn agents_call_serves_a_queued_cosh_pane_end_to_end() {
-    use cosh::harness::panes::{self, ReplyMode};
+    use cosh::harness::agent_coworkers::{self, ReplyMode};
 
     let _guard = HOME_LOCK.lock();
     isolate_home();
@@ -2340,7 +2340,7 @@ async fn agents_call_serves_a_queued_cosh_pane_end_to_end() {
     // fails at the registry assertion, not at the serve step).
     app.sync_agents_pane_registry();
 
-    let ids: Vec<String> = panes::list_panes().into_iter().map(|p| p.id).collect();
+    let ids: Vec<String> = agent_coworkers::list_coworkers().into_iter().map(|p| p.id).collect();
     assert!(
         ids.contains(&"cosh".to_string()),
         "cosh is registered: {ids:?}"
@@ -2353,12 +2353,12 @@ async fn agents_call_serves_a_queued_cosh_pane_end_to_end() {
     // The MAIN loop delegates to the cosh pane: the request queues, the
     // queue service dispatches it (the manager pane routing is live), and the turn
     // is running.
-    let handle = panes::enqueue("cosh", "do the work", panes::MAIN, ReplyMode::Wait)
+    let handle = agent_coworkers::enqueue("cosh", "do the work", agent_coworkers::MAIN, ReplyMode::Wait)
         .expect("cosh pane is addressable");
-    assert!(panes::has_queued_request("cosh"), "request queued");
+    assert!(agent_coworkers::has_queued_request("cosh"), "request queued");
     app.serve_agents_pane_queues();
     assert!(
-        !panes::has_queued_request("cosh"),
+        !agent_coworkers::has_queued_request("cosh"),
         "the cosh request left the queue: it was served"
     );
     assert!(
@@ -2368,14 +2368,14 @@ async fn agents_call_serves_a_queued_cosh_pane_end_to_end() {
 
     // The turn's end (keyed by pane) resolves the waiter with its report.
     assert_eq!(
-        panes::complete_request(
+        agent_coworkers::complete_request(
             "cosh",
-            panes::PaneReport::new(
+            agent_coworkers::AgentCoworkerReport::new(
                 Ok("report".to_string()),
-                panes::PaneTurnEnd::EndTurn
+                agent_coworkers::AgentCoworkerTurnEnd::EndTurn
             )
         ),
-        Some(panes::MAIN),
+        Some(agent_coworkers::MAIN),
         "a MAIN-requested pane turn resolves the wake promise's tag"
     );
     // Everything HOME-sensitive above has already run: release the lock
@@ -2391,7 +2391,7 @@ async fn agents_call_serves_a_queued_cosh_pane_end_to_end() {
     app.sync_agents_pane_registry();
     app.serve_agents_pane_queues();
     assert!(
-        !panes::has_queued_request("cosh"),
+        !agent_coworkers::has_queued_request("cosh"),
         "an absent cosh pane has no queue to serve"
     );
 }
@@ -2601,7 +2601,7 @@ async fn a_rebooted_cosh_pane_replays_its_session_from_the_store() {
 /// runs its real path in the test (no dialog, no parked message).
 #[tokio::test]
 async fn a_main_initiated_pane_report_wakes_the_idle_main_agent() {
-    use cosh::harness::panes::{self, ReplyMode};
+    use cosh::harness::agent_coworkers::{self, ReplyMode};
 
     let _guard = HOME_LOCK.lock();
     isolate_home();
@@ -2622,7 +2622,7 @@ async fn a_main_initiated_pane_report_wakes_the_idle_main_agent() {
     // the pane kept working): the request is WAIT mode — an inline wait —
     // so simulate the ended waiter by completing the request AFTER the
     // handle is dropped into a dead receiver.
-    let handle = panes::enqueue("cosh", "delegate the work", panes::MAIN, ReplyMode::Wait)
+    let handle = agent_coworkers::enqueue("cosh", "delegate the work", agent_coworkers::MAIN, ReplyMode::Wait)
         .expect("cosh pane is addressable");
     app.serve_agents_pane_queues();
     // The pane is running the delegated turn; the app is IDLE (no main
@@ -2636,14 +2636,14 @@ async fn a_main_initiated_pane_report_wakes_the_idle_main_agent() {
     // The pane's turn completes: the completion reports the MAIN
     // requester and the wake promise fires — the idle main agent starts
     // a FRESH turn carrying the report.
-    let requester = panes::complete_request(
+    let requester = agent_coworkers::complete_request(
         "cosh",
-        panes::PaneReport::new(
+        agent_coworkers::AgentCoworkerReport::new(
             Ok("the pane's report".to_string()),
-            panes::PaneTurnEnd::EndTurn,
+            agent_coworkers::AgentCoworkerTurnEnd::EndTurn,
         ),
     );
-    assert_eq!(requester, Some(panes::MAIN));
+    assert_eq!(requester, Some(agent_coworkers::MAIN));
     app.agents_split.as_mut().unwrap().set_running(0, false);
     app.wake_main_agent_if_promised(requester);
 
@@ -2669,7 +2669,7 @@ async fn a_main_initiated_pane_report_wakes_the_idle_main_agent() {
 /// wake an idle main agent. The pane works in harmony with the main agent.
 #[tokio::test]
 async fn a_user_initiated_pane_turn_never_wakes_the_main_agent() {
-    use cosh::harness::panes;
+    use cosh::harness::agent_coworkers;
 
     let _guard = HOME_LOCK.lock();
     isolate_home();
@@ -2687,14 +2687,14 @@ async fn a_user_initiated_pane_turn_never_wakes_the_main_agent() {
     // A USER turn ran in the pane and completed: the registry tracked no
     // request, so the completion resolves None and no wake can arm.
     assert!(
-        !panes::has_queued_request("cosh"),
+        !agent_coworkers::has_queued_request("cosh"),
         "a user turn tracks no agents_call request"
     );
-    let requester = panes::complete_request(
+    let requester = agent_coworkers::complete_request(
         "cosh",
-        panes::PaneReport::new(
+        agent_coworkers::AgentCoworkerReport::new(
             Ok("a user-driven report".to_string()),
-            panes::PaneTurnEnd::EndTurn,
+            agent_coworkers::AgentCoworkerTurnEnd::EndTurn,
         ),
     );
     assert_eq!(
@@ -2716,7 +2716,7 @@ async fn a_user_initiated_pane_turn_never_wakes_the_main_agent() {
 /// not wake the MAIN agent: the delivery belongs to the manager's drain.
 #[tokio::test]
 async fn a_manager_initiated_pane_report_never_wakes_the_main_agent() {
-    use cosh::harness::panes::{self, ReplyMode};
+    use cosh::harness::agent_coworkers::{self, ReplyMode};
 
     let _guard = HOME_LOCK.lock();
     isolate_home();
@@ -2731,24 +2731,24 @@ async fn a_manager_initiated_pane_report_never_wakes_the_main_agent() {
     }]);
     app.sync_agents_pane_registry();
 
-    let handle = panes::enqueue(
+    let handle = agent_coworkers::enqueue(
         "cosh",
         "manager to sibling",
-        panes::MANAGER,
+        agent_coworkers::MANAGER,
         ReplyMode::Background,
     )
     .expect("cosh pane is addressable");
     let _ = handle;
     app.serve_agents_pane_queues();
     app.agents_split.as_mut().unwrap().set_running(0, false);
-    let requester = panes::complete_request(
+    let requester = agent_coworkers::complete_request(
         "cosh",
-        panes::PaneReport::new(
+        agent_coworkers::AgentCoworkerReport::new(
             Ok("manager's report".to_string()),
-            panes::PaneTurnEnd::EndTurn,
+            agent_coworkers::AgentCoworkerTurnEnd::EndTurn,
         ),
     );
-    assert_eq!(requester, Some(panes::MANAGER));
+    assert_eq!(requester, Some(agent_coworkers::MANAGER));
     app.wake_main_agent_if_promised(requester);
 
     assert_eq!(
@@ -2757,7 +2757,7 @@ async fn a_manager_initiated_pane_report_never_wakes_the_main_agent() {
         "a manager-tagged delivery never wakes the MAIN agent"
     );
     assert!(
-        panes::take_ready_deliveries(panes::MANAGER).len() == 1,
+        agent_coworkers::take_ready_deliveries(agent_coworkers::MANAGER).len() == 1,
         "the delivery stays parked for the manager loop's own drain"
     );
 }
@@ -3108,7 +3108,7 @@ async fn slash_worktree_add_pins_the_pane_and_persists_the_binding() {
     );
 
     // The main agent's registry knows the pane's worktree (context block).
-    let descriptors = cosh::harness::panes::list_panes();
+    let descriptors = cosh::harness::agent_coworkers::list_coworkers();
     assert_eq!(descriptors.len(), 1);
     assert_eq!(
         descriptors[0].worktree.as_deref(),
@@ -3351,11 +3351,11 @@ async fn agents_worktree_assign_executes_on_the_app_drain() {
     app.sync_agents_pane_registry();
 
     let branch = format!("agent-wt-{}", std::process::id());
-    let op_id = cosh::harness::panes::enqueue_worktree_op(
+    let op_id = cosh::harness::agent_coworkers::enqueue_worktree_op(
         "claude",
-        cosh::harness::panes::WorktreeAction::Assign,
+        cosh::harness::agent_coworkers::WorktreeAction::Assign,
         Some(&branch),
-        cosh::harness::panes::MAIN,
+        cosh::harness::agent_coworkers::MAIN,
     )
     .expect("the ask parks");
     app.serve_agents_pane_worktree_ops();
@@ -3382,7 +3382,7 @@ async fn agents_worktree_assign_executes_on_the_app_drain() {
         "the agent NEVER picks a path — cosh's temp root only"
     );
     // The registry knows the pin (the main agent's listing sees it).
-    let listed = cosh::harness::panes::list_panes();
+    let listed = cosh::harness::agent_coworkers::list_coworkers();
     assert!(
         listed
             .iter()
@@ -3390,12 +3390,12 @@ async fn agents_worktree_assign_executes_on_the_app_drain() {
         "the registry carries the new binding"
     );
     // The outcome is a Worktree delivery for the asking loop.
-    let deliveries = cosh::harness::panes::take_ready_deliveries(cosh::harness::panes::MAIN);
+    let deliveries = cosh::harness::agent_coworkers::take_ready_deliveries(cosh::harness::agent_coworkers::MAIN);
     assert_eq!(deliveries.len(), 1);
     assert_eq!(deliveries[0].request_id, op_id);
     assert_eq!(
         deliveries[0].kind,
-        cosh::harness::panes::DeliveryKind::Worktree
+        cosh::harness::agent_coworkers::DeliveryKind::Worktree
     );
     let note = deliveries[0].output.clone().unwrap();
     assert!(note.contains(&branch), "{note}");
@@ -3434,11 +3434,11 @@ async fn agents_worktree_clear_of_user_binding_needs_the_user() {
     );
     app.sync_agents_pane_registry();
 
-    let op_id = cosh::harness::panes::enqueue_worktree_op(
+    let op_id = cosh::harness::agent_coworkers::enqueue_worktree_op(
         "claude",
-        cosh::harness::panes::WorktreeAction::Clear,
+        cosh::harness::agent_coworkers::WorktreeAction::Clear,
         None,
-        cosh::harness::panes::MAIN,
+        cosh::harness::agent_coworkers::MAIN,
     )
     .expect("the ask parks");
     app.serve_agents_pane_worktree_ops();
@@ -3460,7 +3460,7 @@ async fn agents_worktree_clear_of_user_binding_needs_the_user() {
             .is_some(),
         "no side effect before the answer"
     );
-    assert!(cosh::harness::panes::take_ready_deliveries(cosh::harness::panes::MAIN).is_empty());
+    assert!(cosh::harness::agent_coworkers::take_ready_deliveries(cosh::harness::agent_coworkers::MAIN).is_empty());
 
     // The user declines: the binding is kept, the outcome still lands.
     app.resolve_pending_worktree_permission(
@@ -3476,7 +3476,7 @@ async fn agents_worktree_clear_of_user_binding_needs_the_user() {
         !app.permission_dialog.visible,
         "the answer closed the permission box"
     );
-    let deliveries = cosh::harness::panes::take_ready_deliveries(cosh::harness::panes::MAIN);
+    let deliveries = cosh::harness::agent_coworkers::take_ready_deliveries(cosh::harness::agent_coworkers::MAIN);
     assert_eq!(deliveries.len(), 1);
     assert_eq!(deliveries[0].request_id, op_id);
     let note = deliveries[0].output.clone().unwrap_err();
@@ -3514,11 +3514,11 @@ async fn agents_worktree_ask_on_a_parked_split_executes_after_allow_once() {
     assert!(app.parked_agents_split.is_some());
     app.sync_agents_pane_registry();
 
-    let op_id = cosh::harness::panes::enqueue_worktree_op(
+    let op_id = cosh::harness::agent_coworkers::enqueue_worktree_op(
         "claude",
-        cosh::harness::panes::WorktreeAction::Clear,
+        cosh::harness::agent_coworkers::WorktreeAction::Clear,
         None,
-        cosh::harness::panes::MAIN,
+        cosh::harness::agent_coworkers::MAIN,
     )
     .expect("the ask parks");
     app.serve_agents_pane_worktree_ops();
@@ -3542,7 +3542,7 @@ async fn agents_worktree_ask_on_a_parked_split_executes_after_allow_once() {
         !app.worktree_agent_grant(),
         "AllowOnce does not latch the session grant"
     );
-    let deliveries = cosh::harness::panes::take_ready_deliveries(cosh::harness::panes::MAIN);
+    let deliveries = cosh::harness::agent_coworkers::take_ready_deliveries(cosh::harness::agent_coworkers::MAIN);
     assert_eq!(deliveries.len(), 1);
     assert_eq!(deliveries[0].request_id, op_id);
     assert!(deliveries[0].output.clone().unwrap().contains("cleared"));
@@ -3562,11 +3562,11 @@ async fn agents_worktree_assign_executes_on_a_parked_split_without_a_box() {
     app.sync_agents_pane_registry();
 
     let branch = format!("agent-parked-{}", std::process::id());
-    let op_id = cosh::harness::panes::enqueue_worktree_op(
+    let op_id = cosh::harness::agent_coworkers::enqueue_worktree_op(
         "claude",
-        cosh::harness::panes::WorktreeAction::Assign,
+        cosh::harness::agent_coworkers::WorktreeAction::Assign,
         Some(&branch),
-        cosh::harness::panes::MAIN,
+        cosh::harness::agent_coworkers::MAIN,
     )
     .expect("the ask parks");
     app.serve_agents_pane_worktree_ops();
@@ -3576,7 +3576,7 @@ async fn agents_worktree_assign_executes_on_a_parked_split_without_a_box() {
     let pin = pane.worktree.as_ref().expect("the parked pane got pinned");
     assert_eq!(pin.branch, branch);
     assert_eq!(pin.assigned_by, cosh::git::worktree::AssignedBy::Agent);
-    let deliveries = cosh::harness::panes::take_ready_deliveries(cosh::harness::panes::MAIN);
+    let deliveries = cosh::harness::agent_coworkers::take_ready_deliveries(cosh::harness::agent_coworkers::MAIN);
     assert_eq!(deliveries.len(), 1);
     assert_eq!(deliveries[0].request_id, op_id);
     assert!(deliveries[0].output.is_ok());
@@ -3601,11 +3601,11 @@ async fn agents_worktree_allow_latches_the_session_grant() {
     app.sync_agents_pane_registry();
 
     // First ask: the box opens, the user answers "Allow".
-    cosh::harness::panes::enqueue_worktree_op(
+    cosh::harness::agent_coworkers::enqueue_worktree_op(
         "claude",
-        cosh::harness::panes::WorktreeAction::Clear,
+        cosh::harness::agent_coworkers::WorktreeAction::Clear,
         None,
-        cosh::harness::panes::MAIN,
+        cosh::harness::agent_coworkers::MAIN,
     )
     .expect("the ask parks");
     app.serve_agents_pane_worktree_ops();
@@ -3628,7 +3628,7 @@ async fn agents_worktree_allow_latches_the_session_grant() {
     // state — a leftover here would leak into the next test that reads
     // MAIN's deliveries.
     assert_eq!(
-        cosh::harness::panes::take_ready_deliveries(cosh::harness::panes::MAIN).len(),
+        cosh::harness::agent_coworkers::take_ready_deliveries(cosh::harness::agent_coworkers::MAIN).len(),
         1
     );
 
@@ -3644,11 +3644,11 @@ async fn agents_worktree_allow_latches_the_session_grant() {
         .is_some());
     app.sync_agents_pane_registry();
 
-    let op_id = cosh::harness::panes::enqueue_worktree_op(
+    let op_id = cosh::harness::agent_coworkers::enqueue_worktree_op(
         "claude",
-        cosh::harness::panes::WorktreeAction::Clear,
+        cosh::harness::agent_coworkers::WorktreeAction::Clear,
         None,
-        cosh::harness::panes::MAIN,
+        cosh::harness::agent_coworkers::MAIN,
     )
     .expect("the second ask parks");
     app.serve_agents_pane_worktree_ops();
@@ -3660,7 +3660,7 @@ async fn agents_worktree_allow_latches_the_session_grant() {
     assert!(app.agents_split.as_ref().unwrap().panes[0]
         .worktree
         .is_none());
-    let deliveries = cosh::harness::panes::take_ready_deliveries(cosh::harness::panes::MAIN);
+    let deliveries = cosh::harness::agent_coworkers::take_ready_deliveries(cosh::harness::agent_coworkers::MAIN);
     assert_eq!(deliveries.len(), 1);
     assert_eq!(deliveries[0].request_id, op_id);
 }
@@ -3686,11 +3686,11 @@ async fn agents_worktree_ask_holds_the_box_and_re_shows_a_parked_permission_requ
     app.sync_agents_pane_registry();
 
     // The worktree ask opens the box first.
-    cosh::harness::panes::enqueue_worktree_op(
+    cosh::harness::agent_coworkers::enqueue_worktree_op(
         "claude",
-        cosh::harness::panes::WorktreeAction::Clear,
+        cosh::harness::agent_coworkers::WorktreeAction::Clear,
         None,
-        cosh::harness::panes::MAIN,
+        cosh::harness::agent_coworkers::MAIN,
     )
     .expect("the ask parks");
     app.serve_agents_pane_worktree_ops();
@@ -3742,7 +3742,7 @@ async fn agents_worktree_ask_holds_the_box_and_re_shows_a_parked_permission_requ
     // Drain the ask's outcome: registry deliveries are GLOBAL state — a
     // leftover here would leak into the next test reading MAIN's box.
     assert_eq!(
-        cosh::harness::panes::take_ready_deliveries(cosh::harness::panes::MAIN).len(),
+        cosh::harness::agent_coworkers::take_ready_deliveries(cosh::harness::agent_coworkers::MAIN).len(),
         1
     );
 }
@@ -3929,7 +3929,7 @@ async fn slash_worktree_exit_clears_the_manager_pane_binding() {
 /// manager pane gets no special refusal — it runs its own agent session with
 /// its own cwd, so isolating it is the same ask as isolating a `claude` pane.
 /// What still protects the user is unchanged: panes never receive this tool
-/// (`with_own_pane_id` strips it) and a User-assigned binding always opens
+/// (`with_own_coworker_id` strips it) and a User-assigned binding always opens
 /// the confirmation box.
 #[tokio::test]
 async fn agents_worktree_tool_accepts_a_cosh_pane() {
@@ -3940,7 +3940,7 @@ async fn agents_worktree_tool_accepts_a_cosh_pane() {
     app.sync_agents_pane_registry();
 
     // The tool's pane enum offers the manager alongside every other pane...
-    let tool = cosh::harness::panes::agents_worktree_tool();
+    let tool = cosh::harness::agent_coworkers::agents_worktree_tool();
     let enum_values = tool.input_schema["properties"]["pane"]["enum"]
         .as_array()
         .expect("pane enum present");
@@ -3950,17 +3950,17 @@ async fn agents_worktree_tool_accepts_a_cosh_pane() {
     );
 
     // ...and an assign to it parks instead of being refused.
-    let id = cosh::harness::panes::enqueue_worktree_op(
+    let id = cosh::harness::agent_coworkers::enqueue_worktree_op(
         "cosh",
-        cosh::harness::panes::WorktreeAction::Assign,
+        cosh::harness::agent_coworkers::WorktreeAction::Assign,
         Some("feat-cosh"),
-        cosh::harness::panes::MAIN,
+        cosh::harness::agent_coworkers::MAIN,
     )
     .expect("the tool addresses a cosh pane");
-    let parked = cosh::harness::panes::peek_worktree_op().expect("the ask is parked");
+    let parked = cosh::harness::agent_coworkers::peek_worktree_op().expect("the ask is parked");
     assert_eq!(parked.id, id);
-    assert_eq!(parked.pane, "cosh");
-    let _ = cosh::harness::panes::pop_worktree_op();
+    assert_eq!(parked.coworker, "cosh");
+    let _ = cosh::harness::agent_coworkers::pop_worktree_op();
 }
 
 /// The MAIN agent's shape: a session and NO `/agents` split. `/worktree`
@@ -4343,7 +4343,7 @@ async fn main_agent_effective_cwd_follows_the_binding() {
         isolate_home();
         // Start from a clean fact registry: this suite shares the process
         // with every other test, and a fact is consumed exactly once.
-        let _ = cosh::harness::panes::drain_session_bindings();
+        let _ = cosh::harness::agent_coworkers::drain_session_bindings();
         let mut app = App::new("/tmp".to_string());
         let session_id = crate::session::store::generate_session_id();
         app.state
@@ -4361,7 +4361,7 @@ async fn main_agent_effective_cwd_follows_the_binding() {
         // The turn runs; its resume of "s-1" failed and the harness fell
         // back to a FRESH session "s-2" (the fact the Done used to carry).
         app.agents_split.as_mut().unwrap().set_running(0, true);
-        cosh::harness::panes::record_session_binding(pane_id, "s-2".into());
+        cosh::harness::agent_coworkers::record_session_binding(pane_id, "s-2".into());
 
         // Ctrl+X: the pane goes idle NOW; the turn's terminal Done arrives
         // later against an idle pane and is dropped by the gate. The
@@ -4423,7 +4423,7 @@ async fn main_agent_effective_cwd_follows_the_binding() {
     async fn variant_a_a_hidden_panes_first_turn_binding_lands_in_the_hidden_stack() {
         let _guard = HOME_LOCK.lock();
         isolate_home();
-        let _ = cosh::harness::panes::drain_session_bindings();
+        let _ = cosh::harness::agent_coworkers::drain_session_bindings();
         let mut app = App::new("/tmp".to_string());
         let session_id = crate::session::store::generate_session_id();
         app.state
@@ -4465,7 +4465,7 @@ async fn main_agent_effective_cwd_follows_the_binding() {
 
         // The turn finishes AFTER the hide: `acp::call` resolved a fresh
         // session "s-A" and the turn task recorded the gate-free fact.
-        cosh::harness::panes::record_session_binding(pane_id, "s-A".into());
+        cosh::harness::agent_coworkers::record_session_binding(pane_id, "s-A".into());
         app.absorb_pane_session_bindings();
 
         {
@@ -4491,7 +4491,7 @@ async fn main_agent_effective_cwd_follows_the_binding() {
     async fn variant_a_a_restored_hidden_pane_comes_back_bound() {
         let _guard = HOME_LOCK.lock();
         isolate_home();
-        let _ = cosh::harness::panes::drain_session_bindings();
+        let _ = cosh::harness::agent_coworkers::drain_session_bindings();
         let mut app = App::new("/tmp".to_string());
         let session_id = crate::session::store::generate_session_id();
         app.state
@@ -4513,7 +4513,7 @@ async fn main_agent_effective_cwd_follows_the_binding() {
         let pane_id = app.agents_split.as_ref().unwrap().panes[0].id;
         app.agents_split.as_mut().unwrap().set_running(0, true);
         app.hide_focused_agents_pane();
-        cosh::harness::panes::record_session_binding(pane_id, "s-A".into());
+        cosh::harness::agent_coworkers::record_session_binding(pane_id, "s-A".into());
         app.absorb_pane_session_bindings();
 
         // Ctrl+Z: the pane returns — bound, so its empty timeline is
@@ -4541,7 +4541,7 @@ async fn main_agent_effective_cwd_follows_the_binding() {
     async fn an_absorbed_binding_fact_without_an_owner_is_dropped() {
         let _guard = HOME_LOCK.lock();
         isolate_home();
-        let _ = cosh::harness::panes::drain_session_bindings();
+        let _ = cosh::harness::agent_coworkers::drain_session_bindings();
         let mut app = App::new("/tmp".to_string());
         let session_id = crate::session::store::generate_session_id();
         app.state
@@ -4553,8 +4553,8 @@ async fn main_agent_effective_cwd_follows_the_binding() {
         }]);
 
         // An id that answers to no pane object, and the legacy `0`.
-        cosh::harness::panes::record_session_binding(99_999, "s-x".into());
-        cosh::harness::panes::record_session_binding(0, "s-y".into());
+        cosh::harness::agent_coworkers::record_session_binding(99_999, "s-x".into());
+        cosh::harness::agent_coworkers::record_session_binding(0, "s-y".into());
         app.absorb_pane_session_bindings();
 
         assert_eq!(
@@ -4569,7 +4569,7 @@ async fn main_agent_effective_cwd_follows_the_binding() {
             "the persisted set stays unbound"
         );
         assert!(
-            cosh::harness::panes::drain_session_bindings().is_empty(),
+            cosh::harness::agent_coworkers::drain_session_bindings().is_empty(),
             "the pass consumed every fact: nothing resurfaces later"
         );
     }
@@ -4582,7 +4582,7 @@ async fn main_agent_effective_cwd_follows_the_binding() {
     async fn a_done_for_an_unknown_pane_id_still_delivers_nothing() {
         let _guard = HOME_LOCK.lock();
         isolate_home();
-        let _ = cosh::harness::panes::drain_session_bindings();
+        let _ = cosh::harness::agent_coworkers::drain_session_bindings();
         let mut app = App::new("/tmp".to_string());
         let session_id = crate::session::store::generate_session_id();
         app.state
@@ -4635,27 +4635,27 @@ async fn main_agent_effective_cwd_follows_the_binding() {
         app.sync_agents_pane_registry();
         let pane_id = app.agents_split.as_ref().unwrap().panes[0].id;
 
-        let op_id = cosh::harness::panes::enqueue_compact_op(
+        let op_id = cosh::harness::agent_coworkers::enqueue_compact_op(
             crate::routes::session::agents_split::MANAGER_LABEL,
-            cosh::harness::panes::MAIN,
+            cosh::harness::agent_coworkers::MAIN,
         )
         .expect("the ask parks");
         app.serve_agents_pane_compact_ops();
 
         assert!(
-            cosh::harness::panes::peek_compact_op().is_none(),
+            cosh::harness::agent_coworkers::peek_compact_op().is_none(),
             "the ask is popped, never left parked on a refusal"
         );
         assert!(
-            !cosh::harness::panes::pane_is_compacting(pane_id),
+            !cosh::harness::agent_coworkers::coworker_is_compacting(pane_id),
             "a refusal clears the guard: the pane is usable again"
         );
-        let deliveries = cosh::harness::panes::take_ready_deliveries(cosh::harness::panes::MAIN);
+        let deliveries = cosh::harness::agent_coworkers::take_ready_deliveries(cosh::harness::agent_coworkers::MAIN);
         assert_eq!(deliveries.len(), 1);
         assert_eq!(deliveries[0].request_id, op_id);
         assert_eq!(
             deliveries[0].kind,
-            cosh::harness::panes::DeliveryKind::Compact
+            cosh::harness::agent_coworkers::DeliveryKind::Compact
         );
         let error = deliveries[0].output.clone().unwrap_err();
         assert!(
@@ -4689,9 +4689,9 @@ async fn main_agent_effective_cwd_follows_the_binding() {
         let mut app = manager_worktree_split_app(&app_repo);
         app.sync_agents_pane_registry();
         let pane_label = crate::routes::session::agents_split::MANAGER_LABEL;
-        let op_id = cosh::harness::panes::enqueue_compact_op(
+        let op_id = cosh::harness::agent_coworkers::enqueue_compact_op(
             pane_label,
-            cosh::harness::panes::MAIN,
+            cosh::harness::agent_coworkers::MAIN,
         )
         .expect("the ask parks");
 
@@ -4701,14 +4701,14 @@ async fn main_agent_effective_cwd_follows_the_binding() {
             .unwrap()
             .set_running(0, true);
         app.serve_agents_pane_compact_ops();
-        let still = cosh::harness::panes::peek_compact_op().expect("the ask stays parked");
+        let still = cosh::harness::agent_coworkers::peek_compact_op().expect("the ask stays parked");
         assert_eq!(still.id, op_id, "not popped while the pane is busy");
         assert!(
-            !cosh::harness::panes::pane_is_compacting(still.pane_id),
+            !cosh::harness::agent_coworkers::coworker_is_compacting(still.coworker_id),
             "a parked ask reserves nothing yet"
         );
         assert!(
-            cosh::harness::panes::take_ready_deliveries(cosh::harness::panes::MAIN).is_empty(),
+            cosh::harness::agent_coworkers::take_ready_deliveries(cosh::harness::agent_coworkers::MAIN).is_empty(),
             "no outcome while the ask is still parked"
         );
 
@@ -4719,8 +4719,8 @@ async fn main_agent_effective_cwd_follows_the_binding() {
             .unwrap()
             .set_running(0, false);
         app.serve_agents_pane_compact_ops();
-        assert!(cosh::harness::panes::peek_compact_op().is_none());
-        let deliveries = cosh::harness::panes::take_ready_deliveries(cosh::harness::panes::MAIN);
+        assert!(cosh::harness::agent_coworkers::peek_compact_op().is_none());
+        let deliveries = cosh::harness::agent_coworkers::take_ready_deliveries(cosh::harness::agent_coworkers::MAIN);
         assert_eq!(deliveries.len(), 1);
         assert_eq!(deliveries[0].request_id, op_id);
     }

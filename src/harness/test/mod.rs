@@ -1,5 +1,5 @@
 pub(crate) mod agent_loop_test;
-pub(crate) mod pane_resume;
+pub(crate) mod coworker_resume;
 pub(crate) mod bash_dispatch;
 pub(crate) mod bug_hunt;
 pub(crate) mod chat_tests;
