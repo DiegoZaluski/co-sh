@@ -65,7 +65,7 @@ impl Harness {
                 .get("run_in_background")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            if run_in_background && (self.nested || self.panes_requester != super::panes::MAIN) {
+            if run_in_background && (self.nested || self.coworkers_requester != super::agent_coworkers::MAIN) {
                 self.tool_issuer.pop_front();
                 return Err(
                     "run_in_background is not available in this loop: background \
@@ -140,18 +140,18 @@ impl Harness {
             }
         }
 
-        // The /agents pane tool (`agents_call`): enqueue the message in the
-        // pane registry and either await the pane's report (wait mode,
+        // The /agents coworker tool (`agents_call`): enqueue the message in the
+        // coworker registry and either await the coworker's report (wait mode,
         // raced against the stop signal so Esc unblocks the tool) or
         // return the receipt immediately (background mode — the report
         // arrives later as an automated notification in THIS loop's drain;
         // the other loop never sees it). The queue itself IS the race
-        // handling: a pane busy with the user's turn (or an earlier
+        // handling: a coworker busy with the user's turn (or an earlier
         // request) receives the message after its current work — the
-        // registry holds it, the App dispatches it when the pane frees.
+        // registry holds it, the App dispatches it when the coworker frees.
         if tool_name == "agents_call" {
             self.tool_issuer.pop_front();
-            let pane = args_map
+            let coworker = args_map
                 .get("pane")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
@@ -162,17 +162,17 @@ impl Harness {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            if pane.is_empty() || input.trim().is_empty() {
+            if coworker.is_empty() || input.trim().is_empty() {
                 return Err("`agents_call` requires a non-empty `pane` and `input`.".to_string());
             }
-            // Pane-call guard (defense in depth): `with_own_pane_id` strips
-            // the tool from every pane loop, so this arm is unreachable from
-            // a pane — but if a pane ever reaches it anyway (a re-added
+            // Coworker-call guard (defense in depth): `with_own_coworker_id` strips
+            // the tool from every coworker loop, so this arm is unreachable from
+            // a coworker — but if a coworker ever reaches it anyway (a re-added
             // tool, a stale harness), refuse BEFORE the registry is
-            // touched: a pane must never queue work into the pane set.
+            // touched: a coworker must never queue work into the coworker set.
             // NO pop here — the arm already popped this call at its top,
             // and every error path after that point pops nothing.
-            if self.panes_own_id.is_some() {
+            if self.own_coworker_id.is_some() {
                 return Err(
                     "`agents_call` is not available to a pane: pane agents execute their \
                      delegated task and report back — the coordinating agent owns the panes."
@@ -180,18 +180,18 @@ impl Harness {
                 );
             }
             // Self-call guard (deadlock): a MANAGER loop runs INSIDE its own
-            // pane, so asking that same pane to run a turn would queue behind
+            // coworker, so asking that same coworker to run a turn would queue behind
             // the turn making the call — the `wait` could never resolve and
             // the background busy-guard would spin forever. This refuses
-            // BOTH modes for the pane's OWN id; the cross-pane `Wait` case
-            // (a manager targeting ANOTHER cosh pane) is refused inside
-            // `panes::enqueue` with a pointer to background mode. Sibling
-            // cosh panes reached in background stay addressable.
-            if self.panes_requester == super::panes::MANAGER
-                && self.panes_own_id.as_deref() == Some(pane.as_str())
+            // BOTH modes for the coworker's OWN id; the cross-coworker `Wait` case
+            // (a manager targeting ANOTHER cosh coworker) is refused inside
+            // `agent_coworkers::enqueue` with a pointer to background mode. Sibling
+            // cosh coworkers reached in background stay addressable.
+            if self.coworkers_requester == super::agent_coworkers::MANAGER
+                && self.own_coworker_id.as_deref() == Some(coworker.as_str())
             {
                 return Err(format!(
-                    "`agents_call` cannot target this pane's own session ('{pane}'): the manager is already running in it, so the request could never be served. Address a different pane."
+                    "`agents_call` cannot target this coworker's own session ('{coworker}'): the manager is already running in it, so the request could never be served. Address a different coworker."
                 ));
             }
             let background = args_map
@@ -199,11 +199,11 @@ impl Harness {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             let mode = if background {
-                super::panes::ReplyMode::Background
+                super::agent_coworkers::ReplyMode::Background
             } else {
-                super::panes::ReplyMode::Wait
+                super::agent_coworkers::ReplyMode::Wait
             };
-            let handle = match super::panes::enqueue(&pane, &input, self.panes_requester, mode) {
+            let handle = match super::agent_coworkers::enqueue(&coworker, &input, self.coworkers_requester, mode) {
                 Ok(handle) => handle,
                 Err(error) => return Err(error),
             };
@@ -211,7 +211,7 @@ impl Harness {
                 // Wait mode: the report IS the tool result. Esc unblocks:
                 // the stop wait wins the race and the tool returns the stop
                 // error (the request is cancelled for THIS requester — a
-                // pane already working on it finishes its turn normally,
+                // coworker already working on it finishes its turn normally,
                 // the report simply is not delivered to a dead caller).
                 // A QUEUED USER MESSAGE wakes the wait too: the user's
                 // input outranks the block, and the wait is INSIDE a tool
@@ -219,27 +219,27 @@ impl Harness {
                 // returns. The wait degrades to background WITHOUT
                 // `cancel_wait`: dropping the oneshot receiver parks the
                 // report for this requester's drain (the dead-waiter branch
-                // in `complete_request`), so the pane's work is not lost —
+                // in `complete_request`), so the coworker's work is not lost —
                 // it just stops blocking the loop.
                 // The result goes through `report_block` — the SAME builder
                 // the background drain uses — because this is the path where
                 // a non-final report is most dangerous: the requester blocked
                 // on the call, gets the text as its tool result, and has no
-                // other signal telling it the pane may not have finished. The
+                // other signal telling it the coworker may not have finished. The
                 // old code returned the raw report here, so a blocked caller
                 // never saw the qualification a background caller did.
                 let queued_wake = self.loop_queued_input.clone();
                 let answer = tokio::select! {
                     answer = rx => {
                         answer.unwrap_or_else(|_| {
-                            super::panes::PaneReport::new(
+                            super::agent_coworkers::AgentCoworkerReport::new(
                                 Err("the pane request was cancelled".to_string()),
-                                super::panes::PaneTurnEnd::Error,
+                                super::agent_coworkers::AgentCoworkerTurnEnd::Error,
                             )
                         })
                     }
                     () = wait_for_stop_signal(self.stop_signal.clone()) => {
-                        super::panes::cancel_wait(&handle.request_id);
+                        super::agent_coworkers::cancel_wait(&handle.request_id);
                         return Err(
                             "the agents_call wait was interrupted (stop requested)".to_string()
                         );
@@ -254,32 +254,32 @@ impl Harness {
                     } => {
                         return Err(
                             "the agents_call wait was interrupted: a user message arrived \
-                             while waiting — the pane keeps working and its report arrives \
+                             while waiting — the coworker keeps working and its report arrives \
                              as an automated notification."
                                 .to_string(),
                         );
                     }
                 };
-                return Ok(super::panes::report_block(
-                    &pane,
-                    handle.pane_id,
+                return Ok(super::agent_coworkers::report_block(
+                    &coworker,
+                    handle.coworker_id,
                     &handle.request_id,
                     answer.output.as_deref().map_err(String::as_str),
                     answer.end,
                 ));
             }
             return Ok(format!(
-                "Message sent to pane '{pane}' in the background (request {}). \
-                 Its report arrives as an [automated notification] when the pane's turn ends.",
+                "Message sent to coworker '{coworker}' in the background (request {}). \
+                 Its report arrives as an [automated notification] when the coworker's turn ends.",
                 handle.request_id
             ));
         }
 
         // The /agents worktree ask (`agents_worktree`): VALIDATE here (so
-        // the model can correct itself in place), park the op in the pane
+        // the model can correct itself in place), park the op in the coworker
         // registry, then PAUSE this dispatch until the outcome exists. The
         // TOOL never touches git: the App's frame drain pops, supervises
-        // (the user's supremacy over a User-assigned pane — even in Yolo)
+        // (the user's supremacy over a User-assigned coworker — even in Yolo)
         // and executes it. The loop does NOT proceed on a bare receipt —
         // the model must not keep working while its ask (and possibly the
         // cwd it depends on) is still undecided; the tool result IS the
@@ -289,7 +289,7 @@ impl Harness {
         // outcome still reaches this loop's drain on a later turn.
         if tool_name == "agents_worktree" {
             self.tool_issuer.pop_front();
-            let pane = args_map
+            let coworker = args_map
                 .get("pane")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
@@ -300,8 +300,8 @@ impl Harness {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
             {
-                "assign" => super::panes::WorktreeAction::Assign,
-                "clear" => super::panes::WorktreeAction::Clear,
+                "assign" => super::agent_coworkers::WorktreeAction::Assign,
+                "clear" => super::agent_coworkers::WorktreeAction::Clear,
                 other => {
                     return Err(format!(
                         "`agents_worktree` action must be \"assign\" or \"clear\" — got \
@@ -313,22 +313,22 @@ impl Harness {
                 .get("name")
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
-            // Pane-call guard (defense in depth): `with_own_pane_id` strips
-            // the tool from every pane loop; if a pane ever reaches it
-            // anyway, refuse BEFORE the registry is touched — a pane must
-            // never rebind the pane set. (Popped at the arm's top already.)
-            if self.panes_own_id.is_some() {
+            // Coworker-call guard (defense in depth): `with_own_coworker_id` strips
+            // the tool from every coworker loop; if a coworker ever reaches it
+            // anyway, refuse BEFORE the registry is touched — a coworker must
+            // never rebind the coworker set. (Popped at the arm's top already.)
+            if self.own_coworker_id.is_some() {
                 return Err(
                     "`agents_worktree` is not available to a pane: pane agents execute their \
                      delegated task and report back — the coordinating agent owns the panes."
                         .to_string(),
                 );
             }
-            let op_id = match super::panes::enqueue_worktree_op(
-                &pane,
+            let op_id = match super::agent_coworkers::enqueue_worktree_op(
+                &coworker,
                 action,
                 name.as_deref(),
-                self.panes_requester,
+                self.coworkers_requester,
             ) {
                 Ok(id) => id,
                 Err(error) => return Err(error),
@@ -350,8 +350,8 @@ impl Harness {
                         );
                     }
                     () = tokio::time::sleep(Duration::from_millis(100)) => {
-                        if let Some(delivery) = super::panes::take_ready_worktree_delivery(
-                            self.panes_requester,
+                        if let Some(delivery) = super::agent_coworkers::take_ready_worktree_delivery(
+                            self.coworkers_requester,
                             &op_id,
                         ) {
                             return match delivery.output {
@@ -365,37 +365,37 @@ impl Harness {
         }
 
         // The /agents compaction ask (`agents_compact`): park the op in the
-        // pane registry, then PAUSE this dispatch until the App drain
+        // coworker registry, then PAUSE this dispatch until the App drain
         // resolves it — the App runs the actual compaction (the SAME
-        // mechanism its `/compact` slash command uses on the pane's own
+        // mechanism its `/compact` slash command uses on the coworker's own
         // session), so the tool result IS the outcome and the model never
         // proceeds while the ask is undecided. Esc interrupts the wait like
         // every other blocking tool; the op stays parked and its outcome
         // still reaches this loop's drain on a later turn. Validation is
-        // pane-membership only; everything else (session existence, busy
+        // coworker-membership only; everything else (session existence, busy
         // state, the compaction itself) belongs to the App, which owns the
         // sessions and the permission-free compaction path.
         if tool_name == "agents_compact" {
             self.tool_issuer.pop_front();
-            let pane = args_map
+            let coworker = args_map
                 .get("pane")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .trim()
                 .to_string();
-            // Pane-call guard (defense in depth): `with_own_pane_id` strips
-            // the tool from every pane loop; if a pane ever reaches it
+            // Coworker-call guard (defense in depth): `with_own_coworker_id` strips
+            // the tool from every coworker loop; if a coworker ever reaches it
             // anyway, refuse BEFORE the registry is touched — compaction is
-            // coordination, and a pane must never fold a sibling's context
+            // coordination, and a coworker must never fold a sibling's context
             // into a summary only IT can then steer.
-            if self.panes_own_id.is_some() {
+            if self.own_coworker_id.is_some() {
                 return Err(
                     "`agents_compact` is not available to a pane: pane agents execute their \
                      delegated task and report back — the coordinating agent owns the panes."
                         .to_string(),
                 );
             }
-            let op_id = match super::panes::enqueue_compact_op(&pane, self.panes_requester) {
+            let op_id = match super::agent_coworkers::enqueue_compact_op(&coworker, self.coworkers_requester) {
                 Ok(id) => id,
                 Err(error) => return Err(error),
             };
@@ -410,8 +410,8 @@ impl Harness {
                         );
                     }
                     () = tokio::time::sleep(Duration::from_millis(100)) => {
-                        if let Some(delivery) = super::panes::take_ready_compact_delivery(
-                            self.panes_requester,
+                        if let Some(delivery) = super::agent_coworkers::take_ready_compact_delivery(
+                            self.coworkers_requester,
                             &op_id,
                         ) {
                             return match delivery.output {

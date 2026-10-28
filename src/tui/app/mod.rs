@@ -341,7 +341,7 @@ pub struct App {
     /// Up/Down/Enter/Esc and click resolution routes here instead of the
     /// harness `perm_tx` while this is `Some` — the ask is resolved
     /// App-side, never by the running loop.
-    pending_worktree_confirmation: Option<cosh::harness::panes::WorktreeOp>,
+    pending_worktree_confirmation: Option<cosh::harness::agent_coworkers::WorktreeOp>,
     /// Session-wide grant recorded when the user answers an
     /// `agents_worktree` permission box with "Allow": later agent asks may
     /// rebind User-assigned panes for the rest of this app run without
@@ -371,7 +371,7 @@ pub struct App {
     /// (`routes::session::delete`) when it stops a deleted session's loop.
     pub(crate) queued_input: cosh::harness::queued_input::QueuedInput,
     /// True while the running main loop is parked in its pre-Done wait for
-    /// `/agents` pane reports (`HarnessEvent::AwaitingPaneReports`).
+    /// `/agents` pane reports (`HarnessEvent::AwaitingCoworkerReports`).
     ///
     /// The status stays `Working`, but the agent is idle: a submitted prompt
     /// must go straight to it, not into a queue. The harness's wait wakes on

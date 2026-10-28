@@ -34,8 +34,8 @@ impl Harness {
             active_call_ref: None,
             loop_queued_input: None,
             nested: false,
-            panes_requester: super::panes::MAIN,
-            panes_own_id: None,
+            coworkers_requester: super::agent_coworkers::MAIN,
+            own_coworker_id: None,
             tool_call_synthetic: 0,
             context_manager: ContextManager::new(MAX_CONTEXT_TOKENS),
             disabled_tools: HashSet::new(),
@@ -45,7 +45,7 @@ impl Harness {
             last_finish_reason: None,
             last_stream_unfinished: false,
             stop_nudges_left: super::limits::STOP_NUDGE_BUDGET,
-            pane_resumes_left: super::limits::PANE_RESUME_BUDGET,
+            coworker_resumes_left: super::limits::COWORKER_RESUME_BUDGET,
             stop_nudge_budget_override: None,
             prefix_cache_probe: PrefixCacheProbe::default(),
             #[cfg(test)]
@@ -115,8 +115,8 @@ impl Harness {
     /// Remaining improper-stop resumes for this loop (test accessor — the
     /// field is private to `core`).
     #[cfg(test)]
-    pub(crate) fn pane_resumes_left(&self) -> u32 {
-        self.pane_resumes_left
+    pub(crate) fn coworker_resumes_left(&self) -> u32 {
+        self.coworker_resumes_left
     }
 
     /// Force the natural-stop nudge budget the loop ENTERS with (test-only):
@@ -129,11 +129,11 @@ impl Harness {
         self.stop_nudge_budget_override = Some(left);
     }
 
-    /// The per-loop resume budget the pane tests assert against (test-only:
+    /// The per-loop resume budget the coworker tests assert against (test-only:
     /// `limits` is private to `core`, so the constant needs a door).
     #[cfg(test)]
-    pub(crate) const fn pane_resume_budget() -> u32 {
-        super::limits::PANE_RESUME_BUDGET
+    pub(crate) const fn coworker_resume_budget() -> u32 {
+        super::limits::COWORKER_RESUME_BUDGET
     }
 
     /// Seed the CURRENT attempt's reasoning (test-only): lets a test pin the

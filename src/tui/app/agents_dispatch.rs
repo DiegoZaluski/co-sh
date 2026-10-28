@@ -826,7 +826,7 @@ impl App {
         // sibling's removal while the box sat open, and the answer must
         // never redirect onto that pane (Issue 3).
         let pane_index = either_split(&self.agents_split, &self.parked_agents_split)
-            .and_then(|split| split.pane_index_by_id(op.pane_id));
+            .and_then(|split| split.pane_index_by_id(op.coworker_id));
         let outcome = match (approved, pane_index) {
             (true, Some(pane_index)) => {
                 // The session-wide grant latches ONLY on a real approval of
@@ -835,26 +835,26 @@ impl App {
                     self.worktree_agent_grant = true;
                 }
                 match op.action {
-                    cosh::harness::panes::WorktreeAction::Assign => {
+                    cosh::harness::agent_coworkers::WorktreeAction::Assign => {
                         let branch = op.branch.clone().unwrap_or_default();
                         self.assign_pane_worktree_for_agent(pane_index, &branch)
                     }
-                    cosh::harness::panes::WorktreeAction::Clear => {
+                    cosh::harness::agent_coworkers::WorktreeAction::Clear => {
                         self.clear_pane_worktree_for_agent(pane_index)
                     }
                 }
             }
             (true, None) => Err(format!(
                 "pane '{}' no longer exists — the binding cannot change",
-                op.pane
+                op.coworker
             )),
             (false, _) => Err(format!(
                 "the user DECLINED this ask — pane '{}' keeps its current worktree binding; \
                  do not retry the same ask",
-                op.pane
+                op.coworker
             )),
         };
-        cosh::harness::panes::complete_worktree_op(&op, outcome);
+        cosh::harness::agent_coworkers::complete_worktree_op(&op, outcome);
     }
 
     /// Test/inspection accessor for the session-wide worktree grant.
@@ -881,7 +881,7 @@ impl App {
 /// cosh pane runs a real agent session whose assembly takes the same
 /// per-pane cwd an ACP pane's does (`pane_effective_cwd`), so isolating it
 /// is honored rather than cosmetic. What keeps the user in charge is
-/// elsewhere and unchanged: `with_own_pane_id` strips `agents_worktree`
+/// elsewhere and unchanged: `with_own_coworker_id` strips `agents_worktree`
 /// from every pane loop (a pane never rebinds itself or a peer), and a
 /// User-assigned binding always goes through the permission box. Only an
 /// out-of-range index is refused.
@@ -1117,10 +1117,10 @@ impl App {
         // permission), so the agent-side request resolves cleanly.
         split.clear_permission(pane);
         // Ctrl+X IS the user's stop: `cancelled` here is the one place the
-        // word is literal (see `PaneTurnEnd`). The forced close must not
+        // word is literal (see `AgentCoworkerTurnEnd`). The forced close must not
         // pretend the pane failed on its own — that is exactly the
         // conflation this vocabulary removes.
-        split.finish_turn(pane, reason, cosh::harness::panes::PaneTurnEnd::Cancelled);
+        split.finish_turn(pane, reason, cosh::harness::agent_coworkers::AgentCoworkerTurnEnd::Cancelled);
         // The force-close DROPS the winding-down turn's terminal Done (the
         // pane-idle gate in the event handler), which used to drop its
         // session binding with it — the stale-binding bug (issue 1,
@@ -1137,7 +1137,7 @@ impl App {
             // and must wake the idle main agent), and the freed pane's next
             // queued message dispatches in this same frame — the same
             // follow-through as the normal `AgentsPaneDone` handler.
-            let requester = cosh::harness::panes::cancel_serving(&id, reason.to_string());
+            let requester = cosh::harness::agent_coworkers::cancel_serving(&id, reason.to_string());
             self.serve_agents_pane_queues();
             // Absorb ONCE MORE after the dispatch: the first absorb above
             // ran before any queued message was served, but the winding-
@@ -1270,7 +1270,7 @@ impl App {
         // same session record. The user's prompt is refused with the same
         // toast shape the busy gate uses (finding 1).
         if let Some(pane) = split.focused_pane()
-            && cosh::harness::panes::pane_is_compacting(pane.id)
+            && cosh::harness::agent_coworkers::coworker_is_compacting(pane.id)
         {
             self.toast_state.show(ToastOptions {
                 title: Some("Agents".into()),
@@ -1328,7 +1328,7 @@ impl App {
         // config (only when the focused pane IS the manager pane — the connector
         // resolution runs lazily so a split of ACP agents alone never
         // computes it).
-        let Some((agent, resume, picks, pane_cwd, handoff, pane_identity)) =
+        let Some((agent, resume, picks, pane_cwd, handoff, coworker_identity)) =
             either_split(&self.agents_split, &self.parked_agents_split)
                 .and_then(|split| split.panes.get(pane))
                 .map(|p| {
@@ -1409,7 +1409,7 @@ impl App {
         // manager harness carries it so it refuses to address itself (a
         // self-call would queue behind the very turn making it — deadlock).
         // The ACP branch uses the same id for the awareness preamble
-        // (`panes::take_preamble` keys the announced-generation bookkeeping
+        // (`agent_coworkers::take_preamble` keys the announced-generation bookkeeping
         // by it), so it is computed for EVERY pane, not just the manager.
         let pane_registry_id = either_split(&self.agents_split, &self.parked_agents_split)
             .and_then(|split| split.pane_registry_id(pane));
@@ -1664,7 +1664,7 @@ impl App {
                     recall: recall_inputs.clone(),
                     ctx_state: context,
                     as_manager: true,
-                    own_pane_id: own_registry_id,
+                    own_coworker_id: own_registry_id,
                 };
                 run_manager_turn(
                     index,
@@ -1701,7 +1701,7 @@ impl App {
             });
             let input = assemble_pane_input(
                 handoff_block,
-                cosh::harness::panes::take_preamble(pane_identity),
+                cosh::harness::agent_coworkers::take_preamble(coworker_identity),
                 msg,
             );
             // The permission channel rides the MODE (the split's Yolo
@@ -1778,7 +1778,7 @@ impl App {
                 // `acp::call`: an `Err` carries `session = None` and records
                 // nothing.
                 if let Some(id) = &session {
-                    cosh::harness::panes::record_session_binding(pane_id, id.clone());
+                    cosh::harness::agent_coworkers::record_session_binding(pane_id, id.clone());
                 }
                 let _ = event_tx.send(HarnessEvent::AgentsPaneDone {
                     pane: index,
@@ -1805,16 +1805,16 @@ impl App {
     /// alone — it drains its deliveries at its own natural points (the
     /// per-iteration drain and the pre-Done busy-guard).
     pub(super) fn wake_main_agent_if_promised(&mut self, requester: Option<&'static str>) {
-        if requester != Some(cosh::harness::panes::MAIN) {
+        if requester != Some(cosh::harness::agent_coworkers::MAIN) {
             return;
         }
         if self.state.status == crate::types::SessionStatus::Working {
             return;
         }
         let notes: Vec<String> =
-            cosh::harness::panes::take_ready_deliveries(cosh::harness::panes::MAIN)
+            cosh::harness::agent_coworkers::take_ready_deliveries(cosh::harness::agent_coworkers::MAIN)
                 .iter()
-                .map(cosh::harness::panes::delivery_note)
+                .map(cosh::harness::agent_coworkers::delivery_note)
                 .collect();
         if notes.is_empty() {
             // Nothing parked (a wait-mode resolution whose receiver died —
@@ -1826,7 +1826,7 @@ impl App {
     }
 
     /// Absorb the session-binding FACTS the pane turns recorded gate-free
-    /// (see `cosh::harness::panes::record_session_binding`): promote the
+    /// (see `cosh::harness::agent_coworkers::record_session_binding`): promote the
     /// matching pane object — LIVE, PARKED or HIDDEN — to the session the
     /// turn actually drove.
     ///
@@ -1851,7 +1851,7 @@ impl App {
     ///   anti-contamination verdict the event gates reach, reached
     ///   structurally.
     pub(super) fn absorb_pane_session_bindings(&mut self) {
-        let facts = cosh::harness::panes::drain_session_bindings();
+        let facts = cosh::harness::agent_coworkers::drain_session_bindings();
         if facts.is_empty() {
             return;
         }
@@ -1924,19 +1924,19 @@ impl App {
                 // rehydrating pane first finishes its replay. The cosh pane
                 // is a normal queue target — its own turn's `agents_call` to
                 // itself is rejected at the tool layer (see
-                // `Harness::with_own_pane_id`), so a queued request always
+                // `Harness::with_own_coworker_id`), so a queued request always
                 // belongs to a pane that CAN free itself.
                 .filter(|(_, p)| {
-                    !p.running && !p.rehydrating && !cosh::harness::panes::pane_is_compacting(p.id)
+                    !p.running && !p.rehydrating && !cosh::harness::agent_coworkers::coworker_is_compacting(p.id)
                 })
                 .filter_map(|(i, _)| {
                     let id = split.pane_registry_id(i)?;
-                    cosh::harness::panes::has_queued_request(&id).then_some((i, id))
+                    cosh::harness::agent_coworkers::has_queued_request(&id).then_some((i, id))
                 })
                 .collect()
         };
         for (pane, id) in targets {
-            let Some(request) = cosh::harness::panes::pop_next_request(&id) else {
+            let Some(request) = cosh::harness::agent_coworkers::pop_next_request(&id) else {
                 continue;
             };
             self.dispatch_to_pane(pane, request.text, true);
@@ -1969,19 +1969,19 @@ impl App {
         if self.dialog.visible() || self.permission_dialog.visible {
             return;
         }
-        let Some(op) = cosh::harness::panes::peek_worktree_op() else {
+        let Some(op) = cosh::harness::agent_coworkers::peek_worktree_op() else {
             return;
         };
         // Resolve the target pane by registry id (the tool speaks ids, the
         // split speaks indexes). A pane that vanished since the ask was
-        // parked fails the op — the registry's `set_panes` cleanup usually
+        // parked fails the op — the registry's `set_coworkers` cleanup usually
         // gets there first; this is the same net result.
         // Resolve the target by the op's stamped IDENTITY (`pane_index_by_id`):
         // a label recycled onto another pane by a sibling's removal must not
         // receive the ask (Issue 3).
         let resolved =
             either_split(&self.agents_split, &self.parked_agents_split).and_then(|split| {
-                let index = split.pane_index_by_id(op.pane_id)?;
+                let index = split.pane_index_by_id(op.coworker_id)?;
                 let mut needs_confirmation = split.panes[index]
                     .worktree
                     .as_ref()
@@ -1996,11 +1996,11 @@ impl App {
                 Some((index, needs_confirmation))
             });
         let Some((pane_index, needs_confirmation)) = resolved else {
-            let op = cosh::harness::panes::pop_worktree_op();
+            let op = cosh::harness::agent_coworkers::pop_worktree_op();
             if let Some(op) = op {
-                cosh::harness::panes::complete_worktree_op(
+                cosh::harness::agent_coworkers::complete_worktree_op(
                     &op,
-                    Err(format!("pane '{}' no longer exists", op.pane)),
+                    Err(format!("pane '{}' no longer exists", op.coworker)),
                 );
             }
             return;
@@ -2015,32 +2015,32 @@ impl App {
             // answer here instead of into the main loop's `perm_tx`
             // (this ask is resolved App-side, never by the harness).
             let description = match op.action {
-                cosh::harness::panes::WorktreeAction::Assign => format!(
+                cosh::harness::agent_coworkers::WorktreeAction::Assign => format!(
                     "An agent asks to move pane '{}' into a NEW worktree on branch '{}'. \
                      Allow for this whole session (the agent may then change any pane's \
                      worktree binding), only this once, or deny?",
-                    op.pane,
+                    op.coworker,
                     op.branch.as_deref().unwrap_or_default()
                 ),
-                cosh::harness::panes::WorktreeAction::Clear => format!(
+                cosh::harness::agent_coworkers::WorktreeAction::Clear => format!(
                     "An agent asks to move pane '{}' out of the worktree YOU assigned \
                      (the binding is dropped; nothing on disk is deleted). Allow for this \
                      whole session (the agent may then change any pane's worktree binding), \
                      only this once, or deny?",
-                    op.pane
+                    op.coworker
                 ),
             };
             self.permission_dialog.request =
                 Some(crate::routes::session::permission::PermissionRequest {
                     tool: "agents_worktree".to_string(),
                     description,
-                    args: format!("pane: {}", op.pane),
+                    args: format!("pane: {}", op.coworker),
                 });
             self.permission_dialog.visible = true;
             // Default to "Allow Once" (index 1), same default as the
             // harness permission requests.
             self.permission_dialog.selected = 1;
-            let op = cosh::harness::panes::pop_worktree_op();
+            let op = cosh::harness::agent_coworkers::pop_worktree_op();
             if let Some(op) = op {
                 // The index was only the resolution vehicle — the op's
                 // registry id is the durable handle (re-resolved at
@@ -2049,19 +2049,19 @@ impl App {
             }
             return;
         }
-        let Some(op) = cosh::harness::panes::pop_worktree_op() else {
+        let Some(op) = cosh::harness::agent_coworkers::pop_worktree_op() else {
             return;
         };
         let outcome = match op.action {
-            cosh::harness::panes::WorktreeAction::Assign => {
+            cosh::harness::agent_coworkers::WorktreeAction::Assign => {
                 let branch = op.branch.clone().unwrap_or_default();
                 self.assign_pane_worktree_for_agent(pane_index, &branch)
             }
-            cosh::harness::panes::WorktreeAction::Clear => {
+            cosh::harness::agent_coworkers::WorktreeAction::Clear => {
                 self.clear_pane_worktree_for_agent(pane_index)
             }
         };
-        cosh::harness::panes::complete_worktree_op(&op, outcome);
+        cosh::harness::agent_coworkers::complete_worktree_op(&op, outcome);
     }
 
     /// The App-side `agents_compact` drain: pop parked compaction asks and
@@ -2090,7 +2090,7 @@ impl App {
     /// records from its session, so the summary arrives as its new
     /// baseline without colliding with any live stream.
     pub(super) fn serve_agents_pane_compact_ops(&mut self) {
-        let Some(op) = cosh::harness::panes::peek_compact_op() else {
+        let Some(op) = cosh::harness::agent_coworkers::peek_compact_op() else {
             return;
         };
         // Resolve the target pane by the op's stamped IDENTITY
@@ -2098,18 +2098,18 @@ impl App {
         // sibling's removal must not receive the ask (Issue 3, same rule
         // the worktree drain applies).
         let resolved = either_split(&self.agents_split, &self.parked_agents_split)
-            .and_then(|split| split.pane_index_by_id(op.pane_id))
+            .and_then(|split| split.pane_index_by_id(op.coworker_id))
             .and_then(|pane_index| {
                 either_split(&self.agents_split, &self.parked_agents_split)
                     .and_then(|split| split.panes.get(pane_index))
                     .map(|pane| (pane_index, pane.running, pane.session_id.clone()))
             });
         let Some((pane_index, running, session_id)) = resolved else {
-            let op = cosh::harness::panes::pop_compact_op();
+            let op = cosh::harness::agent_coworkers::pop_compact_op();
             if let Some(op) = op {
-                cosh::harness::panes::complete_compact_op(
+                cosh::harness::agent_coworkers::complete_compact_op(
                     &op,
-                    Err(format!("pane '{}' no longer exists", op.pane)),
+                    Err(format!("pane '{}' no longer exists", op.coworker)),
                 );
             }
             return;
@@ -2121,23 +2121,23 @@ impl App {
             return;
         }
         let Some(session_id) = session_id else {
-            let op = cosh::harness::panes::pop_compact_op();
+            let op = cosh::harness::agent_coworkers::pop_compact_op();
             if let Some(op) = op {
-                cosh::harness::panes::complete_compact_op(
+                cosh::harness::agent_coworkers::complete_compact_op(
                     &op,
                     Err(format!(
                         "pane '{}' has no bound session yet — nothing to compact",
-                        op.pane
+                        op.coworker
                     )),
                 );
             }
             return;
         };
-        let Some(op) = cosh::harness::panes::pop_compact_op() else {
+        let Some(op) = cosh::harness::agent_coworkers::pop_compact_op() else {
             return;
         };
         let Some(ctx_state) = self.session_store.load_context(&session_id) else {
-            cosh::harness::panes::complete_compact_op(
+            cosh::harness::agent_coworkers::complete_compact_op(
                 &op,
                 Err("nothing to compact yet — the pane's session has no context records".into()),
             );
@@ -2158,7 +2158,7 @@ impl App {
         let cwd = self.state.working_directory.clone();
         let store = self.session_store.clone();
         let stop_signal = Arc::new(AtomicBool::new(false));
-        let pane = op.pane.clone();
+        let pane = op.coworker.clone();
         self.tokio_handle.spawn(async move {
             // A DEDICATED event channel, deliberately NOT the app's: the
             // compaction's lifecycle events (ContextInfo, ContextSnapshot,
@@ -2237,7 +2237,7 @@ impl App {
                     ),
                 }),
             };
-            cosh::harness::panes::complete_compact_op(&op, note);
+            cosh::harness::agent_coworkers::complete_compact_op(&op, note);
         });
         // `pane_index` is only the resolution vehicle (same as the
         // worktree drain): the registry pairs the outcome by op id.
@@ -2615,10 +2615,10 @@ fn close_pane_turn(
     cause: Option<&TerminalCause>,
     final_answer: Option<String>,
     fallback: Option<String>,
-) -> (String, cosh::harness::panes::PaneTurnEnd) {
-    use cosh::harness::panes::PaneTurnEnd;
+) -> (String, cosh::harness::agent_coworkers::AgentCoworkerTurnEnd) {
+    use cosh::harness::agent_coworkers::AgentCoworkerTurnEnd;
     if let Some(report) = final_answer {
-        return (report, PaneTurnEnd::EndTurn);
+        return (report, AgentCoworkerTurnEnd::EndTurn);
     }
     // No closure. From here the terminal cause decides, and the fallback
     // text (when the model wrote anything) becomes the report.
@@ -2628,21 +2628,21 @@ fn close_pane_turn(
             "The pane turn ended without any terminal event from the harness. \
              That is a bug, not a result: no report was produced."
                 .to_string(),
-            PaneTurnEnd::Error,
+            AgentCoworkerTurnEnd::Error,
         ),
         Some(TerminalKind::Error) => (
             cause
                 .and_then(|c| c.detail.clone())
                 .unwrap_or_else(|| "the pane turn failed".to_string()),
-            PaneTurnEnd::Error,
+            AgentCoworkerTurnEnd::Error,
         ),
         Some(TerminalKind::Stopped) => (
             "The user stopped this pane turn.".to_string(),
-            PaneTurnEnd::Cancelled,
+            AgentCoworkerTurnEnd::Cancelled,
         ),
         Some(TerminalKind::Done) => match fallback {
             // The model wrote something: deliver it as the report, marked.
-            Some(text) => (text, PaneTurnEnd::Partial),
+            Some(text) => (text, AgentCoworkerTurnEnd::Partial),
             None => {
                 let verdict = cause
                     .and_then(|c| c.detail.as_deref())
@@ -2653,7 +2653,7 @@ fn close_pane_turn(
                         "The pane turn ended without producing any text{verdict}. \
                          The model wrote no report at all."
                     ),
-                    PaneTurnEnd::Incomplete,
+                    AgentCoworkerTurnEnd::Incomplete,
                 )
             }
         },
@@ -2719,7 +2719,7 @@ fn run_manager_turn(
                     // Gate-free fact capture (see the external turn's record):
                     // the Done may be dropped by the handler's gates, the
                     // binding fact may not be lost with it.
-                    cosh::harness::panes::record_session_binding(pane_id, session_id.clone());
+                    cosh::harness::agent_coworkers::record_session_binding(pane_id, session_id.clone());
                     let _ = event_tx.send(HarnessEvent::AgentsPaneDone {
                         pane,
                         pane_id,
@@ -2923,7 +2923,7 @@ fn run_manager_turn(
 
             // The report is the loop's closure (its last post-tool-call
             // message). A loop that closed without one still OWES a report
-            // (see `PaneTurnEnd`), so the last assistant text is used as the
+            // (see `AgentCoworkerTurnEnd`), so the last assistant text is used as the
             // fallback — the same policy the ACP panes' `TurnClosure`
             // already applies (its `previous` segment).
             //
@@ -2953,7 +2953,7 @@ fn run_manager_turn(
             let (output, end) = close_pane_turn(cause.as_ref(), final_answer, fallback);
             // Gate-free fact capture (see the external turn's record): the
             // cosh pane's binding survives a Done the handler drops.
-            cosh::harness::panes::record_session_binding(pane_id, session_id.clone());
+            cosh::harness::agent_coworkers::record_session_binding(pane_id, session_id.clone());
             let _ = event_tx.send(HarnessEvent::AgentsPaneDone {
                 pane,
                 pane_id,
@@ -2975,7 +2975,7 @@ fn run_manager_turn(
         // The panic path binds too (issue 6's contract): capture the fact
         // gate-free so the binding lands even when the handler drops the
         // synthetic Done.
-        cosh::harness::panes::record_session_binding(pane_id, panic_session.clone());
+        cosh::harness::agent_coworkers::record_session_binding(pane_id, panic_session.clone());
         // A panicking turn must never leave the pane Running forever (the
         // spinner would spin with nothing behind it and Esc would have
         // nothing to stop).
@@ -3413,7 +3413,7 @@ mod tests {
     /// DID write text must never report "no report".
     #[test]
     fn a_pane_turn_is_classified_from_its_real_terminal_cause() {
-        use cosh::harness::panes::PaneTurnEnd;
+        use cosh::harness::agent_coworkers::AgentCoworkerTurnEnd;
 
         let done = TerminalCause {
             kind: TerminalKind::Done,
@@ -3438,7 +3438,7 @@ mod tests {
             Some("the final answer".to_string()),
             None,
         );
-        assert_eq!((text.as_str(), end), ("the final answer", PaneTurnEnd::EndTurn));
+        assert_eq!((text.as_str(), end), ("the final answer", AgentCoworkerTurnEnd::EndTurn));
 
         // 2. THE REGRESSION: no closure, but the model wrote text one item
         // earlier (the turn ended on a tool result). It must be delivered as
@@ -3450,34 +3450,34 @@ mod tests {
             Some("now I'll edit core.rs".to_string()),
         );
         assert_eq!(text, "now I'll edit core.rs");
-        assert_eq!(end, PaneTurnEnd::Partial);
+        assert_eq!(end, AgentCoworkerTurnEnd::Partial);
         assert!(!end.is_failure(), "a partial report is real content");
 
         // 3. Nothing written at all and a guard fired: `incomplete`, naming
         // the guard so "why did it stop?" stays answerable.
         let (text, end) = close_pane_turn(Some(&guard), None, None);
-        assert_eq!(end, PaneTurnEnd::Incomplete);
+        assert_eq!(end, AgentCoworkerTurnEnd::Incomplete);
         assert!(text.contains("max-iterations"), "{text}");
 
         // A whitespace-only "answer" is NOT a report (the same trim contract
         // the gate applies).
         let (_, end) = close_pane_turn(Some(&done), None, Some("   ".to_string()));
-        assert_eq!(end, PaneTurnEnd::Incomplete);
+        assert_eq!(end, AgentCoworkerTurnEnd::Incomplete);
 
         // 4. `Stopped` is the USER's stop and the ONLY legitimate
         // `cancelled` — for a pane the model cannot stop its own loop
         // (`stop_agent_loop` is blocked).
         let (_, end) = close_pane_turn(Some(&stopped), None, Some("half done".to_string()));
-        assert_eq!(end, PaneTurnEnd::Cancelled);
+        assert_eq!(end, AgentCoworkerTurnEnd::Cancelled);
 
         // 5. An error carries its real message as the report.
         let (text, end) = close_pane_turn(Some(&errored), None, Some("partial".to_string()));
         assert_eq!(text, "connector exploded");
-        assert_eq!(end, PaneTurnEnd::Error);
+        assert_eq!(end, AgentCoworkerTurnEnd::Error);
 
         // 6. No terminal event at all is a harness defect, surfaced as such.
         let (text, end) = close_pane_turn(None, None, Some("orphan text".to_string()));
-        assert_eq!(end, PaneTurnEnd::Error);
+        assert_eq!(end, AgentCoworkerTurnEnd::Error);
         assert!(text.contains("bug, not a result"), "{text}");
     }
 

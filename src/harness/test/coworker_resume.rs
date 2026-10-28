@@ -42,7 +42,7 @@ async fn drive(mut h: Harness) -> (Harness, Vec<HarnessEvent>) {
 /// A cosh pane: a loop bound to its own registry id — the shape whose stop
 /// hands a blocked `agents_call` requester an `incomplete` report.
 fn pane() -> Harness {
-    Harness::new_test().with_own_pane_id(Some("cosh".into()))
+    Harness::new_test().with_own_coworker_id(Some("cosh".into()))
 }
 
 fn has_toast(events: &[HarnessEvent], needle: &str) -> bool {
@@ -74,8 +74,8 @@ async fn a_pane_resumes_an_exhausted_empty_stop_instead_of_closing_incomplete() 
         "an improper stop must not degrade into the 'ends without an answer' toast: {events:?}"
     );
     assert_eq!(
-        h.pane_resumes_left(),
-        Harness::pane_resume_budget() - 1,
+        h.coworker_resumes_left(),
+        Harness::coworker_resume_budget() - 1,
         "the resume must consume exactly one unit of the bound"
     );
 }
@@ -105,8 +105,8 @@ async fn a_chat_loop_does_not_resume_an_exhausted_empty_stop() {
         "the chat turn's exhausted stop stays visible: {events:?}"
     );
     assert_eq!(
-        h.pane_resumes_left(),
-        Harness::pane_resume_budget(),
+        h.coworker_resumes_left(),
+        Harness::coworker_resume_budget(),
         "a loop that owes no report never touches the resume budget"
     );
 }
@@ -126,7 +126,7 @@ async fn a_pane_stops_once_its_resume_budget_is_spent() {
 
     let (h, events) = drive(h).await;
 
-    assert_eq!(h.pane_resumes_left(), 0, "every resume must consume budget");
+    assert_eq!(h.coworker_resumes_left(), 0, "every resume must consume budget");
     assert_eq!(
         h.context_manager.final_answer(),
         None,
@@ -150,8 +150,8 @@ async fn the_user_stop_is_never_resumed() {
         "a user stop must stand: resuming would override a deliberate interrupt"
     );
     assert_eq!(
-        h.pane_resumes_left(),
-        Harness::pane_resume_budget(),
+        h.coworker_resumes_left(),
+        Harness::coworker_resume_budget(),
         "a refusal must not consume the resume budget"
     );
 
@@ -224,8 +224,8 @@ async fn repetition_detection_resumes_a_pane_instead_of_stopping() {
          report: {events:?}"
     );
     assert_eq!(
-        h.pane_resumes_left(),
-        Harness::pane_resume_budget() - 1,
+        h.coworker_resumes_left(),
+        Harness::coworker_resume_budget() - 1,
         "the repetition resume must consume exactly one unit of the bound"
     );
 }

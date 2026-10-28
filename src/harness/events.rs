@@ -270,7 +270,7 @@ pub enum HarnessEvent {
     ///
     /// `false` is emitted as soon as the wait ends, whatever ended it, so the
     /// flag can never outlive the condition it describes.
-    AwaitingPaneReports { awaiting: bool },
+    AwaitingCoworkerReports { awaiting: bool },
     /// Context manager budget info for the TUI header bar.
     /// Sent after each [`ContextManager::run`] cycle during the agent loop.
     ContextInfo {

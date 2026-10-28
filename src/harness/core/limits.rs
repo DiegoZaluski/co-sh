@@ -69,7 +69,7 @@ pub(crate) const STOP_NUDGE_BUDGET: u32 = 10;
 /// that a chronically empty model still terminates visibly, reported as
 /// `incomplete` with its guard verdict. Never remove this bound; raise it
 /// only against a measured streak.
-pub(crate) const PANE_RESUME_BUDGET: u32 = 2;
+pub(crate) const COWORKER_RESUME_BUDGET: u32 = 2;
 
 /// Loop-detection window: the number of recent tool-call iterations watched
 /// for a repeated identical interaction, mirroring crush's

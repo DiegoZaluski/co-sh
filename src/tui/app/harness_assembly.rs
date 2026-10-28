@@ -103,7 +103,7 @@ pub(crate) struct HarnessAssembly {
     /// strips the `agents_call` tool and the panes context block — the
     /// mechanical anti-replication invariant (a pane never coordinates).
     /// `None` for the main loop: it owns no pane and keeps the tool.
-    pub own_pane_id: Option<String>,
+    pub own_coworker_id: Option<String>,
 }
 
 /// Build the connector this loop's requests ride: the user's tool-call
@@ -238,8 +238,8 @@ pub(crate) async fn assemble(
     if a.as_manager {
         harness = harness.as_manager();
     }
-    if let Some(ref pane_id) = a.own_pane_id {
-        harness = harness.with_own_pane_id(Some(pane_id.clone()));
+    if let Some(ref pane_id) = a.own_coworker_id {
+        harness = harness.with_own_coworker_id(Some(pane_id.clone()));
     }
 
     // The decision-model audit seam (`harness::checkup`), attached over

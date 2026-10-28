@@ -510,7 +510,7 @@ impl App {
                     // reason from its own terminal event now, so a guard stop
                     // or a cut stream arrives as `incomplete`/`partial` and
                     // can never be mistaken for a deliberate interrupt.
-                    let end = cosh::harness::panes::PaneTurnEnd::parse(&stop_reason);
+                    let end = cosh::harness::agent_coworkers::AgentCoworkerTurnEnd::parse(&stop_reason);
                     let target =
                         either_split_mut(&mut self.agents_split, &mut self.parked_agents_split);
                     if let Some(split) = target {
@@ -541,7 +541,7 @@ impl App {
                     // The pane id is computed from the live-or-parked split
                     // BEFORE the mutable borrow below — a pane that left
                     // the set resolves nothing (its requests were failed by
-                    // `set_panes` already).
+                    // `set_coworkers` already).
                     let registry_id = either_split(&self.agents_split, &self.parked_agents_split)
                         .and_then(|split| split.pane_registry_id(pane));
                     if let Some(id) = registry_id {
@@ -553,9 +553,9 @@ impl App {
                         } else {
                             Ok(output.clone())
                         };
-                        let requester = cosh::harness::panes::complete_request(
+                        let requester = cosh::harness::agent_coworkers::complete_request(
                             &id,
-                            cosh::harness::panes::PaneReport::new(report, end),
+                            cosh::harness::agent_coworkers::AgentCoworkerReport::new(report, end),
                         );
                         // The pane just freed: the queue service may
                         // dispatch its NEXT queued agent message in this
@@ -1901,7 +1901,7 @@ impl App {
                         notification::notify_stopped(self.terminal_focused);
                     }
                 }
-                HarnessEvent::AwaitingPaneReports { awaiting } => {
+                HarnessEvent::AwaitingCoworkerReports { awaiting } => {
                     // The main loop is only waiting for pane reports: it
                     // finished its own work and is idle as far as the user is
                     // concerned. Recorded so the submit path can send a

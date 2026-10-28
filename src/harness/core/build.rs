@@ -13,7 +13,7 @@ use crate::harness::tools::CoshTools;
 use super::{
     ContextManager, CorrectionMemory, Harness, MAX_CONTEXT_TOKENS, Mode, PrefixCacheProbe,
     PromptSystem, SUBAGENT_INTERNAL_NOTE, build_lsp, default_harness_tools,
-    limits::{PANE_RESUME_BUDGET, STOP_NUDGE_BUDGET},
+    limits::{COWORKER_RESUME_BUDGET, STOP_NUDGE_BUDGET},
 };
 
 impl Harness {
@@ -46,8 +46,8 @@ impl Harness {
             active_call_ref: None,
             loop_queued_input: None,
             nested: false,
-            panes_requester: super::panes::MAIN,
-            panes_own_id: None,
+            coworkers_requester: super::agent_coworkers::MAIN,
+            own_coworker_id: None,
             tool_call_synthetic: 0,
             context_manager: ContextManager::new(MAX_CONTEXT_TOKENS),
             disabled_tools,
@@ -57,7 +57,7 @@ impl Harness {
             last_finish_reason: None,
             last_stream_unfinished: false,
             stop_nudges_left: STOP_NUDGE_BUDGET,
-            pane_resumes_left: PANE_RESUME_BUDGET,
+            coworker_resumes_left: COWORKER_RESUME_BUDGET,
             #[cfg(test)]
             stop_nudge_budget_override: None,
             prefix_cache_probe: PrefixCacheProbe::default(),
@@ -114,21 +114,21 @@ impl Harness {
             test_tools: Vec::new(),
         };
         harness.install_summary_annotator();
-        // The /agents pane tool is registered ONLY when panes exist: with
+        // The /agents coworker tool is registered ONLY when coworkers exist: with
         // no agents bound to the session the harness — and its header —
         // stays byte-identical with the pre-feature one. No tool, no
         // context block, no interpolated noise for something that does
         // not exist.
-        if super::panes::has_panes() {
-            harness.harness_tools.push(super::panes::agents_call_tool());
+        if super::agent_coworkers::has_coworkers() {
+            harness.harness_tools.push(super::agent_coworkers::agents_call_tool());
             harness
                 .harness_tools
-                .push(super::panes::agents_worktree_tool());
+                .push(super::agent_coworkers::agents_worktree_tool());
             // The compaction ask is coordination tooling like the two above:
-            // registered with them, stripped with them (`with_own_pane_id`).
+            // registered with them, stripped with them (`with_own_coworker_id`).
             harness
                 .harness_tools
-                .push(super::panes::agents_compact_tool());
+                .push(super::agent_coworkers::agents_compact_tool());
         }
         harness
     }
@@ -343,42 +343,42 @@ impl Harness {
     }
 
     /// Mark this harness as the MANAGER loop (the `/agents` split's `cosh`
-    /// pane, at any position):
-    /// its `agents_call` requests are tagged [`super::panes::MANAGER`] so a
-    /// background pane report is drained only by this loop — the main
+    /// coworker, at any position):
+    /// its `agents_call` requests are tagged [`super::agent_coworkers::MANAGER`] so a
+    /// background coworker report is drained only by this loop — the main
     /// chat loop must never inject a report the manager asked for, and
-    /// vice versa. Default is [`super::panes::MAIN`] (the normal loop).
+    /// vice versa. Default is [`super::agent_coworkers::MAIN`] (the normal loop).
     #[must_use]
     pub const fn as_manager(mut self) -> Self {
-        self.panes_requester = super::panes::MANAGER;
+        self.coworkers_requester = super::agent_coworkers::MANAGER;
         self
     }
 
-    /// Bind this harness to the `/agents` pane it runs in (the pane's
+    /// Bind this harness to the `/agents` coworker it runs in (the coworker's
     /// registry id: `"cosh"`, `"cosh#2"`, …). A pane loop NEVER coordinates:
     /// binding the id strips the `agents_call` tool (registered in `new`
-    /// before the id was known) and the header's panes block (skipped in
+    /// before the id was known) and the header's coworkers block (skipped in
     /// `format_header_context`). The reported replication bug lived exactly
-    /// here: a cosh pane ran the manager instructions + the tool, so one
-    /// delegation from the main agent made the pane's own manager loop
+    /// here: a cosh coworker ran the manager instructions + the tool, so one
+    /// delegation from the main agent made the coworker's own manager loop
     /// re-delegate to EVERY sibling — the call propagated to all the cosh
     /// agents instead of staying in the addressed one. Coordination belongs
-    /// to the TOP-LEVEL agent alone; a pane does its work and reports back.
-    /// `None` for the MAIN loop, which owns no pane and keeps the tool.
+    /// to the TOP-LEVEL agent alone; a coworker does its work and reports back.
+    /// `None` for the MAIN loop, which owns no coworker and keeps the tool.
     #[must_use]
-    pub fn with_own_pane_id(mut self, id: Option<String>) -> Self {
-        self.panes_own_id = id;
-        if self.panes_own_id.is_some() {
+    pub fn with_own_coworker_id(mut self, id: Option<String>) -> Self {
+        self.own_coworker_id = id;
+        if self.own_coworker_id.is_some() {
             self.harness_tools.retain(|tool| tool.name != "agents_call");
-            // The worktree ask is coordination tooling: a pane never
+            // The worktree ask is coordination tooling: a coworker never
             // rebinds itself or a peer (same supremacy invariant as the
             // stripped `agents_call`).
             self.harness_tools
                 .retain(|tool| tool.name != "agents_worktree");
-            // Compaction belongs to the TOP-LEVEL coordinator alone: a pane
+            // Compaction belongs to the TOP-LEVEL coordinator alone: a coworker
             // must never compact a sibling's context (the same
             // anti-replication invariant that strips the two tools above —
-            // one delegation would fan the compact out to every pane).
+            // one delegation would fan the compact out to every coworker).
             self.harness_tools
                 .retain(|tool| tool.name != "agents_compact");
             // `stop_agent_loop` goes too, and NOT only as tidiness: the
@@ -386,11 +386,11 @@ impl Harness {
             // itself", which is what makes a stop it did take the USER's
             // stop (see `Harness::resume_pane_turn`). The TUI's
             // `MANAGER_BLOCKED_TOOLS` enforced that by disabling the tool
-            // per pane, but a pane harness built anywhere else would inherit
+            // per coworker, but a coworker harness built anywhere else would inherit
             // the model's ability to end its own turn with no report — and
             // the resume logic would then read that self-stop as a user stop
             // and correctly refuse, closing the turn with nothing. Stripping
-            // it HERE binds the invariant to the pane ROLE, where it belongs.
+            // it HERE binds the invariant to the coworker ROLE, where it belongs.
             self.harness_tools
                 .retain(|tool| tool.name != "stop_agent_loop");
         }

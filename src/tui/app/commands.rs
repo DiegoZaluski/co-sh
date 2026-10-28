@@ -223,15 +223,15 @@ impl App {
     /// registry: each pane's registry id (the agent name, `name#k` for
     /// same-CLI duplicates; the manager pane is addressable like every
     /// other agent) becomes
-    /// a [`cosh::harness::panes::PaneDescriptor`], with the pane's bound
+    /// a [`cosh::harness::agent_coworkers::AgentCoworkerDescriptor`], with the pane's bound
     /// state as the context block reports it. Called on EVERY split
     /// lifecycle change — open, replace, park, re-attach, close — so the
     /// registry tracks the LIVE or PARKED set exactly (a parked split keeps
     /// serving `agents_call`: the main agent coordinates with the mode
-    /// closed). `set_panes` fails queued/orphaned requests of panes that
+    /// closed). `set_coworkers` fails queued/orphaned requests of panes that
     /// left the set, so a removed pane never strands a waiter.
     pub(super) fn sync_agents_pane_registry(&mut self) {
-        let panes: Vec<cosh::harness::panes::PaneDescriptor> =
+        let panes: Vec<cosh::harness::agent_coworkers::AgentCoworkerDescriptor> =
             either_split(&self.agents_split, &self.parked_agents_split)
                 .map(|split| {
                     split
@@ -240,13 +240,13 @@ impl App {
                         .enumerate()
                         .filter_map(|(i, p)| {
                             let id = split.pane_registry_id(i)?;
-                            Some(cosh::harness::panes::PaneDescriptor {
+                            Some(cosh::harness::agent_coworkers::AgentCoworkerDescriptor {
                                 id,
                                 // The pane's IDENTITY rides the descriptor:
                                 // the registry reconciles by it, so a label
                                 // recycled by a sibling's removal can never
                                 // vouch for a dead pane's traffic (Issue 3).
-                                pane_id: p.id,
+                                coworker_id: p.id,
                                 agent: p.agent.clone(),
                                 is_manager: p.agent
                                     == crate::routes::session::agents_split::MANAGER_LABEL,
@@ -262,7 +262,7 @@ impl App {
                         .collect()
                 })
                 .unwrap_or_default();
-        cosh::harness::panes::set_panes(panes);
+        cosh::harness::agent_coworkers::set_coworkers(panes);
     }
 
     /// Mirror the `/agents` panes into the right panel's SHARED subagent
@@ -390,7 +390,7 @@ impl App {
             })
             .unwrap_or_default();
         for id in ids {
-            cosh::harness::panes::fail_serving(
+            cosh::harness::agent_coworkers::fail_serving(
                 &id,
                 "the pane's set was replaced or torn down".into(),
             );
@@ -421,7 +421,7 @@ impl App {
             })
             .unwrap_or_default();
         for id in ids {
-            cosh::harness::panes::fail_pane(
+            cosh::harness::agent_coworkers::fail_coworker(
                 &id,
                 "the session switched away — this pane's set is gone".into(),
             );
@@ -1029,7 +1029,7 @@ impl App {
         // explicitly instead).
         self.state.right_panel = crate::routes::session::right_panel::types::RightPanelState::new();
         // The registry follows the outgoing set out: it must stay EMPTY at
-        // Home (no session, no panes) — `has_panes()` false means the next
+        // Home (no session, no panes) — `has_coworkers()` false means the next
         // harness build carries no `agents_call` tool and no stale panes
         // context block, and `has_outstanding_requests` can no longer stick
         // true with nobody left to dispatch a queued request.
@@ -1147,7 +1147,7 @@ impl App {
         // The registry follows the NEW session's rebuilt slots (the missing
         // half of the fix above): the whole-set failure emptied it, so a
         // session restored WITH panes re-registers them and a session with
-        // none leaves the registry empty — `has_panes()` false, no
+        // none leaves the registry empty — `has_coworkers()` false, no
         // `agents_call` tool on the next harness build, no stale context
         // block, and `has_outstanding_requests` can no longer stick true.
         self.sync_agents_pane_registry();

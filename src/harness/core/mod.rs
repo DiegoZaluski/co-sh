@@ -1,5 +1,5 @@
 use super::{checkup, events};
-use super::{background, guardrails, hooks, panes, queued_input};
+use super::{background, guardrails, hooks, agent_coworkers, queued_input};
 use super::context;
 #[allow(unused_imports)]
 pub(crate) use loop_state::result_is_useless;
@@ -161,20 +161,20 @@ pub struct Harness {
     /// notifications are never drained — a sub-agent must not swallow a
     /// notification meant for the top-level agent's context.
     nested: bool,
-    /// Which loop this harness drives for the /agents pane bridge
-    /// ([`super::panes::MAIN`] for the normal chat loop,
-    /// [`super::panes::MANAGER`] for the split's cosh-pane manager loop). Tags
+    /// Which loop this harness drives for the /agents coworker bridge
+    /// ([`super::agent_coworkers::MAIN`] for the normal chat loop,
+    /// [`super::agent_coworkers::MANAGER`] for the split's cosh-coworker manager loop). Tags
     /// every `agents_call` request so a background report is drained ONLY
     /// by the loop that asked for it — the two loops never run
     /// concurrently (the `/agents` gate refuses to open while the main
     /// loop works), but a delivery can outlive its requester's turn.
-    panes_requester: &'static str,
-    /// The registry id of the /agents pane this harness itself runs in
+    coworkers_requester: &'static str,
+    /// The registry id of the /agents coworker this harness itself runs in
     /// (`Some("cosh")`, `Some("cosh#2")`, …) when the loop IS a pane; `None`
-    /// for the MAIN chat loop, which has no pane. `agents_call` refuses to
+    /// for the MAIN chat loop, which has no coworker. `agents_call` refuses to
     /// target this id: the manager would queue a turn behind the very turn
     /// making the call, deadlocking the wait.
-    panes_own_id: Option<String>,
+    own_coworker_id: Option<String>,
     /// PreToolUse hooks runner (empty when no hooks are configured).
     hook_runner: Option<super::hooks::HookRunner>,
 
@@ -240,12 +240,12 @@ pub struct Harness {
     stop_nudge_budget_override: Option<u32>,
 
     /// Remaining IMPROPER-STOP resumes granted to THIS loop when the loop
-    /// owes a REPORT (a `/agents` cosh pane, or the internal sub-agent). See
-    /// [`super::limits::PANE_RESUME_BUDGET`] for why such a loop continues
+    /// owes a REPORT (a `/agents` cosh coworker, or the internal sub-agent). See
+    /// [`super::limits::COWORKER_RESUME_BUDGET`] for why such a loop continues
     /// where a chat turn does not, and why the bound is what makes the
     /// continuation safe. Consumed only by [`Self::resume_pane_turn`]; a loop
     /// that owes no report never reaches it (the helper refuses).
-    pane_resumes_left: u32,
+    coworker_resumes_left: u32,
 
     /// Exact-prefix cache probe: the previous request's fingerprint and the
     /// running counters. See [`PrefixCacheProbe`].
@@ -535,10 +535,10 @@ impl Harness {
                 }
             }
         }
-        // NOTE: the /agents panes listing does NOT live in the header
+        // NOTE: the /agents coworkers listing does NOT live in the header
         // anymore. It moved to the context manager's TAIL (see
-        // `ContextManager::set_panes_block`): the system prompt is prefix
-        // position 0, so a pane binding/unbinding re-rendered this block
+        // `ContextManager::set_coworkers_block`): the system prompt is prefix
+        // position 0, so a coworker binding/unbinding re-rendered this block
         // mid-session and invalidated the provider's exact-prefix cache
         // for the WHOLE conversation on every such change. The tail costs
         // only itself — the same contract the corrections and TODO blocks

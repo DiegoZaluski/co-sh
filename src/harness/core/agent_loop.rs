@@ -119,7 +119,7 @@ impl Harness {
     /// public wrappers). The drain pops each entry right before injecting it,
     /// so a TUI-side delete/edit of a still-pending message is always honored.
     /// Sleep-poll until `outstanding()` clears, a user message arrives, or
-    /// stop is requested: the shared pre-Done wait for pane reports and
+    /// stop is requested: the shared pre-Done wait for coworker reports and
     /// background tasks alike.
     ///
     /// The `MessagePending` exit is why this takes `queued_input`. These
@@ -128,7 +128,7 @@ impl Harness {
     /// report to come back. Without this arm the wait polled only
     /// `outstanding()`, so a message typed then sat in the queue (the TUI
     /// still reported `Working`, so it never reached the shared drain either)
-    /// until the last pane answered — the user saw a message go unanswered
+    /// until the last coworker answered — the user saw a message go unanswered
     /// while the agent was plainly not doing anything. Waking on the message
     /// is the fix: the loop takes it immediately, as it would in any other
     /// inter-iteration gap.
@@ -222,11 +222,11 @@ impl Harness {
         let entry_nudge_budget = super::limits::STOP_NUDGE_BUDGET;
         self.stop_nudges_left = entry_nudge_budget;
         // Same contract for the improper-stop resumes: the budget is per
-        // LOOP, not per Harness lifetime (see `PANE_RESUME_BUDGET`). A pane
+        // LOOP, not per Harness lifetime (see `COWORKER_RESUME_BUDGET`). A coworker
         // turn builds a fresh harness today, so this only matters for a
         // reused one — which must not start with an already-spent budget and
         // close `incomplete` for a cut it never got the chance to recover.
-        self.pane_resumes_left = super::limits::PANE_RESUME_BUDGET;
+        self.coworker_resumes_left = super::limits::COWORKER_RESUME_BUDGET;
 
         // Whether ANY tool ran this turn. A turn with zero tool dispatches
         // is a pure text exchange — the request was answerable directly, so
@@ -395,16 +395,16 @@ impl Harness {
             () => {
                 if self.stop || stop_signal.load(Ordering::Relaxed) {
                     log::debug!("run_agent_loop STOPPED");
-                    // The dying requester's queued pane requests are dropped
+                    // The dying requester's queued coworker requests are dropped
                     // and their waits resolved with the stop failure — an
                     // `agents_call` enqueued by a turn that never gets to
                     // see the answer must not sit in the queue for a
                     // LATER turn to serve (the message was for THIS
                     // conversation's flow). In-flight requests stay: the
-                    // pane finishes its turn normally and the delivery
+                    // coworker finishes its turn normally and the delivery
                     // parks for this requester's tag (a later turn of the
                     // same loop drains it — the report is not lost).
-                    super::panes::cancel_requester(self.panes_requester);
+                    super::agent_coworkers::cancel_requester(self.coworkers_requester);
                     self.context_manager.close_loop();
                     let context = self.context_manager.save_state();
                     let _ = tx.send(HarnessEvent::Stopped { context });
@@ -453,7 +453,7 @@ impl Harness {
                 current_input.clear();
             }
 
-            // /agents pane reports (background `agents_call` calls): drain
+            // /agents coworker reports (background `agents_call` calls): drain
             // THIS requester's finished deliveries next to the background
             // sub-agent notes above — same contract, same shape. A delivery
             // tagged for the OTHER requester stays parked: the manager loop
@@ -464,11 +464,11 @@ impl Harness {
             let pane_deliveries = if self.nested {
                 Vec::new()
             } else {
-                super::panes::take_ready_deliveries(self.panes_requester)
+                super::agent_coworkers::take_ready_deliveries(self.coworkers_requester)
             };
             if !pane_deliveries.is_empty() {
                 for delivery in pane_deliveries {
-                    let note = super::panes::delivery_note(&delivery);
+                    let note = super::agent_coworkers::delivery_note(&delivery);
                     // Same channel the sub-agent completion notes ride: the
                     // TUI renders it as a chat line, the model gets it as a
                     // marked automated user turn.
@@ -499,13 +499,13 @@ impl Harness {
             // top-level loops ever run concurrently, a notification can land
             // in the other session's context — revisit then (e.g. an
             // owner-session tag on each task).
-            // The manager loop (the /agents split's cosh pane) must not drain
+            // The manager loop (the /agents split's cosh coworker) must not drain
             // the TOP-LEVEL background registry either: those notifications
             // belong to the main chat loop's context (the same rule a
             // nested loop obeys — the requester tag keeps the streams
             // separated).
             let background_notes =
-                if self.nested || self.panes_requester != super::panes::MAIN {
+                if self.nested || self.coworkers_requester != super::agent_coworkers::MAIN {
                     Vec::new()
                 } else {
                     background::take_ready_notifications()
@@ -1935,13 +1935,13 @@ impl Harness {
                     // completions terminates instead of looping to
                     // MAX_ITERATIONS — but that argument is about an
                     // UNBOUNDED continuation, not about this one: a `/agents`
-                    // cosh pane (or the internal sub-agent) has a requester
+                    // cosh coworker (or the internal sub-agent) has a requester
                     // blocked on its report and `stop_agent_loop` is blocked
                     // for it, so a stop nobody asked for is by definition
                     // improper. `resume_pane_turn` re-sends the context with
                     // one steering turn (the SAME mechanism every other
                     // continuation uses) under its own per-loop budget
-                    // (`PANE_RESUME_BUDGET`), and refuses when the USER
+                    // (`COWORKER_RESUME_BUDGET`), and refuses when the USER
                     // stopped the turn — the one legitimate early end.
                     if let Some(steering) =
                         self.resume_pane_turn(&stop_signal, super::guards::ResumeCause::EmptyStop)
@@ -1952,7 +1952,7 @@ impl Harness {
                     // Otherwise the stop STANDS (a chat turn, a user stop, or
                     // the resume budget spent), but it stops being silent
                     // here and is classified honestly downstream — no Closure
-                    // is recorded, so a pane turn reports `incomplete` (never
+                    // is recorded, so a coworker turn reports `incomplete` (never
                     // `cancelled`) and the failure is attributable in the log
                     // and on screen.
                     //
@@ -2058,33 +2058,33 @@ impl Harness {
                     }
                 }
                 // log::debug!("run_agent_loop DONE (no tools)");
-                // /agents pane requests still outstanding: the turn does
+                // /agents coworker requests still outstanding: the turn does
                 // NOT end while a queued or in-flight `agents_call` answer
                 // is missing — ending it would orphan the wait and lose
                 // the report (same nesting rule as the background
                 // sub-agents below). Wait for the completions; Esc
                 // interrupts the wait and ends the turn normally.
-                if !self.nested && super::panes::has_outstanding_requests(self.panes_requester) {
+                if !self.nested && super::agent_coworkers::has_outstanding_requests(self.coworkers_requester) {
                     log::debug!("run_agent_loop WAITING for /agents pane reports before Done");
                     // Tell the TUI the loop is only waiting: a prompt
                     // submitted now is meant for IMMEDIATE delivery, and the
                     // wait below wakes for it. The `false` on the way out is
                     // emitted for every exit — the flag must never outlive
                     // the condition it describes.
-                    let _ = tx.send(HarnessEvent::AwaitingPaneReports { awaiting: true });
+                    let _ = tx.send(HarnessEvent::AwaitingCoworkerReports { awaiting: true });
                     let exit = Self::wait_for_outstanding(&stop_signal, &queued_input, || {
-                        super::panes::has_outstanding_requests(self.panes_requester)
+                        super::agent_coworkers::has_outstanding_requests(self.coworkers_requester)
                     })
                     .await;
-                    let _ = tx.send(HarnessEvent::AwaitingPaneReports { awaiting: false });
+                    let _ = tx.send(HarnessEvent::AwaitingCoworkerReports { awaiting: false });
                     if exit != WaitExit::Stopped {
                         let notes: Vec<(String, String, Option<String>)> =
-                            super::panes::take_ready_deliveries(self.panes_requester)
+                            super::agent_coworkers::take_ready_deliveries(self.coworkers_requester)
                                 .iter()
                                 .map(|delivery| {
                                     (
                                         "agents_call".to_string(),
-                                        super::panes::delivery_note(delivery),
+                                        super::agent_coworkers::delivery_note(delivery),
                                         None,
                                     )
                                 })
@@ -2121,7 +2121,7 @@ impl Harness {
                     // would stay in a "running" state).
                     //
                     // A waiting user message means the same thing here as in
-                    // the pane guard above: take it now rather than sleeping
+                    // the coworker guard above: take it now rather than sleeping
                     // out the background tasks — `inject_completion_notes`
                     // finds nothing to inject, so the loop re-enters and the
                     // next iteration drains the message.
@@ -2269,7 +2269,7 @@ mod wait_tests {
         Arc::new(AtomicBool::new(false))
     }
 
-    /// The reported bug: a loop parked in the pre-Done wait for pane reports
+    /// The reported bug: a loop parked in the pre-Done wait for coworker reports
     /// must take a message the user sends now, instead of sleeping until the
     /// last report lands. Without the `MessagePending` arm this test hangs
     /// until its own timeout — which is exactly what the user experienced.
