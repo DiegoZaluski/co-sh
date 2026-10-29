@@ -139,9 +139,13 @@ const SHORTCUTS: &[ShortcutLine] = &[
     ShortcutLine::Key("Ctrl+\u{2191}/\u{2193}", "Prompt history"),
     ShortcutLine::Key("Ctrl+Z", "Undo prompt edit / revert correction"),
     ShortcutLine::Key("Ctrl+Y", "Redo prompt edit / reapply correction"),
+    ShortcutLine::Key("Ctrl+J", "Insert newline in prompt (Enter sends)"),
+    ShortcutLine::Key("Ctrl+W", "Delete word before cursor"),
     ShortcutLine::Gap,
     ShortcutLine::Header("Agent panes (/agents)"),
     ShortcutLine::Key("Ctrl+X", "Interrupt focused agent pane"),
+    ShortcutLine::Key("Ctrl+O", "Zoom focused pane (Esc or repeat restores)"),
+    ShortcutLine::Key("Alt+0..9", "Focus pane 1..9 / 0 = MAIN agent"),
     ShortcutLine::Gap,
     ShortcutLine::Header("Left panel"),
     ShortcutLine::Key("Ctrl+U", "Usage dashboard"),
@@ -4840,6 +4844,28 @@ mod shortcuts_tests {
                 ("F3", "Maximize TODO section"),
                 ("F4", "Restore mixed view"),
             ][..]
+        );
+    }
+
+    /// The `/agents` pane section must teach the zoom toggle (Ctrl+O) and
+    /// the pane-focus hotkeys: `Alt+0..9` is the ONLY chorded form — every
+    /// terminal encodes ESC+digit, while the legacy C0 encoding turns
+    /// Ctrl+digits into other keys (Ctrl+Space, Ctrl+A/B/C, Backspace,
+    /// Tab) before crossterm ever sees a digit.
+    #[test]
+    fn agents_panes_section_documents_zoom_and_pane_focus() {
+        let rows = section_keys("Agent panes (/agents)");
+        assert!(
+            rows.iter().any(|(k, _)| *k == "Ctrl+O"),
+            "the Ctrl+O pane zoom toggle must be documented"
+        );
+        assert!(
+            rows.iter().any(|(k, _)| *k == "Alt+0..9"),
+            "the Alt+digit pane-focus hotkeys must be documented"
+        );
+        assert!(
+            rows.iter().all(|(k, _)| !k.starts_with("Ctrl+0")),
+            "the removed Ctrl+digit shape must NOT be documented"
         );
     }
 }

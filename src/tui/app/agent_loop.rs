@@ -368,7 +368,7 @@ impl App {
 
         let mut disabled_tools = self.internal_tools_view.disabled.clone();
 
-        // Ctrl+0 (no pane focused) does NOT change this loop: the main
+        // Alt+0 (no pane focused) does NOT change this loop: the main
         // agent runs its own mode's normal prompt and tool set whether or
         // not the `/agents` split is open — the manager/pane prompts and
         // the coordinator blocklist are gone. Coordination stays available
@@ -456,7 +456,7 @@ impl App {
                         disabled_tools,
                         // The mode's OWN instructions (None = the harness
                         // applies the mode's default prompt): manager-mode
-                        // overrides are gone — Ctrl+0 with no focused pane
+                        // overrides are gone — Alt+0 with no focused pane
                         // runs the plain normal-mode agent, coordination
                         // rides `agents_call` and the anti-replication
                         // invariants live in the harness itself.

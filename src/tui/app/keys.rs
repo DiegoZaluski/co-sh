@@ -71,25 +71,25 @@ impl App {
                 return Ok(false);
             }
 
-            // /agents split: pane hotkeys are SOVEREIGN. `Ctrl+0` / `Alt+0`
-            // unfocus every pane (the shared prompt then targets the MAIN
-            // agent) and `Ctrl+1..Ctrl+9` / `Alt+1..Alt+9` move prompt
-            // focus to the numbered pane (1-based, picker order). The Alt
-            // shapes are exact aliases of the Ctrl ones — the reliable
-            // form where Ctrl+digits never arrive (no legacy encoding,
-            // or eaten by the emulator). The gate sits ABOVE the modal
-            // boxes and the slash menu on purpose: with the /agents picker
-            // or the slash menu open, the key used to be swallowed there
-            // and the pane never switched (the picker's handle_key ignores
-            // ctrl-modified chars, so `Ctrl+2` did nothing visible while
-            // looking consumed). Agent names never contain digits and the
-            // picker filter matches names only, so the digits are dead
-            // keys to every modal below — the split may have them.
+            // /agents split: pane hotkeys are SOVEREIGN. `Alt+0` unfocuses
+            // every pane (the shared prompt then targets the MAIN agent)
+            // and `Alt+1..Alt+9` move prompt focus to the numbered pane
+            // (1-based, picker order). Alt is the ONLY chorded form on
+            // purpose: Ctrl+digits have no legacy byte encoding (the C0
+            // control bytes turn into Ctrl+letters/space/Backspace/Tab
+            // before crossterm ever sees a digit), so a Ctrl shape could
+            // never be trusted across terminals. The gate sits ABOVE the
+            // modal boxes and the slash menu on purpose: with the /agents
+            // picker or the slash menu open, the key used to be swallowed
+            // there and the pane never switched. Agent names never contain
+            // digits and the picker filter matches names only, so the
+            // digits are dead keys to every modal below — the split may
+            // have them.
             // CTRL+ALT is excluded (AltGr), and the paste-burst gate above
             // already absorbed burst digits, so the plain-digit fallback
             // cannot corrupt a Windows-console paste. Unreachable pane indexes
             // still CONSUME the key (same rule as the split gate below):
-            // nothing else owns Ctrl/Alt+digit.
+            // nothing else owns Alt+digit.
             if self.focus_pane_hotkey(&key) {
                 return Ok(false);
             }
@@ -1379,7 +1379,7 @@ impl App {
                     // Toggle the FOCUSED pane's expansion (Ctrl+O): the
                     // pane takes the session area, the others keep
                     // running off-screen (the events never stopped).
-                    // The MAIN agent holds the focus (`Ctrl+0`) or no
+                    // The MAIN agent holds the focus (`Alt+0`) or no
                     // split is open: nothing to zoom — the key then does
                     // nothing rather than expanding an unfocused target.
                     if matches!(self.mode(), AppMode::Session) && self.agents_split.is_some() {
@@ -1588,7 +1588,7 @@ impl App {
                     // EVEN WHILE the main agent is working (issue 3:
                     // delegating to an idle pane mid-run must work; the
                     // main loop keeps streaming untouched). When NO pane
-                    // holds the focus (`Ctrl+0`, the MAIN agent), the
+                    // holds the focus (`Alt+0`, the MAIN agent), the
                     // Working branch below keeps its queue-choice dialog —
                     // the message targets the main loop, which is exactly
                     // what the queue serves.
@@ -2359,15 +2359,15 @@ impl App {
 
     /// Sovereign pane-hotkey dispatch for the `/agents` split (see the
     /// gate above `process_key_event`'s modal chain). Consumes the key when
-    /// the split exists and the press is a digit hotkey in one of three
-    /// shapes: `Ctrl+0` unfocuses every pane (the MAIN agent takes the
-    /// shared prompt) and `Ctrl+1..Ctrl+9` focus the numbered pane
-    /// (1-based, picker order); `Alt+0..Alt+9` are exact aliases of the
-    /// Ctrl shapes — the reliable form on terminals where Ctrl+digits
-    /// have no byte encoding or are eaten by the emulator (Ctrl+0 is
-    /// zoom-reset in several); or a plain `0..9` while the draft is empty
-    /// (the /agents picker hid the keyboard, so digit typing had nowhere
-    /// to live — the pane jump restores the number keys' meaning there).
+    /// the split exists and the press is a digit hotkey in one of two
+    /// shapes: `Alt+0` unfocuses every pane (the MAIN agent takes the
+    /// shared prompt) and `Alt+1..Alt+9` focus the numbered pane (1-based,
+    /// picker order) — Alt is the RELIABLE form because ESC+digit survives
+    /// every terminal encoding, while Ctrl+digits have no legacy byte
+    /// encoding (Ctrl+0/1/2/3/8/9 turn into other keys before crossterm
+    /// sees a digit); or a plain `0..9` while the draft is empty (the
+    /// /agents picker hid the keyboard, so digit typing had nowhere to
+    /// live — the pane jump restores the number keys' meaning there).
     /// Pane switching is the ONLY action: the split mode never changes,
     /// the prompt draft never changes, running turns keep running.
     fn focus_pane_hotkey(&mut self, key: &KeyEvent) -> bool {
@@ -2377,25 +2377,19 @@ impl App {
         if !ch.is_ascii_digit() || self.agents_split.is_none() {
             return false;
         }
-        // Three accepted shapes: CONTROL with modifiers that carry no text
-        // (ALT excluded — CTRL+ALT is the AltGr character signature on
-        // Windows consoles, never a hotkey), ALT alone as the EXACT alias
-        // of the Ctrl shapes (any extra modifier — CONTROL for AltGr,
-        // SHIFT/SUPER from shift-reporting terminals — disqualifies it, so
-        // only a bare Alt+digit jumps; this is the form that survives
-        // terminals where Ctrl+digits never arrive),
-        // or the raw unmodified digit
+        // Two accepted shapes: a bare ALT+digit (any extra modifier —
+        // CONTROL for AltGr, SHIFT/SUPER from shift-reporting terminals —
+        // disqualifies it, so only a bare Alt+digit jumps), or the raw
+        // unmodified digit
         // while the prompt holds nothing AND no modal box is open. The
         // plain fallback YIELDS to the /agents picker: with it open the
         // digits are that dialog's count input / filter, so pane jumping
-        // stays on the Ctrl/Alt shapes there. Every other MODAL that accepts
+        // stays on the Alt shape there. Every other MODAL that accepts
         // plain text (model filter, rename, router number input, …)
         // yields the same way — their digits are real input, not dead
         // keys, so the fallback must never swallow them. The slash menu
         // is NOT a text modal (it lists commands), so the fallback still
         // fires with it open.
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL)
-            && !key.modifiers.contains(KeyModifiers::ALT);
         let alt = key.modifiers == KeyModifiers::ALT;
         let no_text_modal = !self.dialog.visible()
             && !self.question_dialog.visible
@@ -2406,7 +2400,7 @@ impl App {
             && !self.agents_picker.visible
             && no_text_modal
             && self.prompt_view.input.trim().is_empty();
-        if !ctrl && !alt && !plain_fallback {
+        if !alt && !plain_fallback {
             return false;
         }
         // Out-of-range digits consume without moving — the split may not

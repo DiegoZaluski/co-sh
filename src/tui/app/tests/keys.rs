@@ -44,15 +44,15 @@ async fn toggled_mode_persists_and_restores_for_new_sessions() {
     assert_eq!(legacy.state.mode, Mode::Build);
 }
 
-/// Ctrl+digit pane hotkeys must work THROUGH the /agents picker and the
-/// slash menu: the modal boxes used to swallow `Ctrl+2` (their handlers
-/// ignore control-modified chars, so the key was consumed with no visible
+/// Alt+digit pane hotkeys must work THROUGH the /agents picker and the
+/// slash menu: the modal boxes used to swallow modified digit chords (their
+/// handlers ignore non-text chars, so the key was consumed with no visible
 /// effect and — with the picker open — the user could not leave picker mode
 /// via pane jumps either). The hotkeys are sovereign: with the split open,
-/// `Ctrl+0` unfocuses (the MAIN agent) and `Ctrl+1..Ctrl+9` focus a pane,
+/// `Alt+0` unfocuses (the MAIN agent) and `Alt+1..Alt+9` focus a pane,
 /// while the picker's own marks stay untouched.
 #[tokio::test]
-async fn ctrl_digit_switches_pan_even_with_the_agents_picker_open() {
+async fn alt_digit_switches_pane_even_with_the_agents_picker_open() {
     let _home = HOME_LOCK.lock();
     isolate_home();
     let mut app = App::new("/tmp".to_string());
@@ -67,10 +67,10 @@ async fn ctrl_digit_switches_pan_even_with_the_agents_picker_open() {
     app.agents_picker.open();
     assert!(app.agents_picker.visible);
 
-    // Ctrl+3 → the third pane (kilo, 1-based). The split FOCUSES the
+    // Alt+3 → the third pane (kilo, 1-based). The split FOCUSES the
     // pane; the mode never changes and the picker stays exactly as the
     // user left it.
-    app.process_key_event(mod_key(KeyCode::Char('3'), KeyModifiers::CONTROL))
+    app.process_key_event(mod_key(KeyCode::Char('3'), KeyModifiers::ALT))
         .unwrap();
     assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(Some(2)));
     assert!(app.agents_picker.visible, "the picker must stay open");
@@ -88,25 +88,25 @@ async fn ctrl_digit_switches_pan_even_with_the_agents_picker_open() {
         "the split stays (mode never changes)"
     );
 
-    // Ctrl+0 → UNFOCUSES every pane (the MAIN agent), still through the
+    // Alt+0 → UNFOCUSES every pane (the MAIN agent), still through the
     // open picker.
-    app.process_key_event(mod_key(KeyCode::Char('0'), KeyModifiers::CONTROL))
+    app.process_key_event(mod_key(KeyCode::Char('0'), KeyModifiers::ALT))
         .unwrap();
     assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(None));
     assert!(app.agents_picker.visible);
 
     // A digit the split does NOT own is consumed inertly: no pane moves,
     // the picker is undisturbed.
-    app.process_key_event(mod_key(KeyCode::Char('7'), KeyModifiers::CONTROL))
+    app.process_key_event(mod_key(KeyCode::Char('7'), KeyModifiers::ALT))
         .unwrap();
     assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(None));
     assert!(app.agents_picker.visible);
 }
 
-/// The slash menu gate, same sovereignty contract: `Ctrl+2` while the menu
+/// The slash menu gate, same sovereignty contract: `Alt+2` while the menu
 /// is filtered focuses the pane, never types into or closes the menu.
 #[tokio::test]
-async fn ctrl_digit_switches_pane_through_the_slash_menu() {
+async fn alt_digit_switches_pane_through_the_slash_menu() {
     let _home = HOME_LOCK.lock();
     isolate_home();
     let mut app = App::new("/tmp".to_string());
@@ -117,7 +117,7 @@ async fn ctrl_digit_switches_pane_through_the_slash_menu() {
     ));
 
     app.slash_menu.visible = true;
-    app.process_key_event(mod_key(KeyCode::Char('1'), KeyModifiers::CONTROL))
+    app.process_key_event(mod_key(KeyCode::Char('1'), KeyModifiers::ALT))
         .unwrap();
     assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(Some(0)));
     assert!(app.slash_menu.visible, "the menu stays open, unfiltered");
@@ -156,7 +156,7 @@ async fn plain_digit_targets_the_pane_only_with_an_empty_draft() {
     assert_eq!(app.prompt_view.input.trim(), "hel2");
 }
 
-/// Without the split (normal mode), digits are NEVER hotkeys: `Ctrl+2`
+/// Without the split (normal mode), digits are NEVER hotkeys: `Alt+2`
 /// is not bound in the keymap and plain typing interjects into the draft
 /// exactly as before.
 #[tokio::test]
@@ -168,7 +168,7 @@ async fn digits_never_act_as_hotkeys_without_the_split() {
     app.state.current_session_id = Some("t".into());
     assert!(app.agents_split.is_none());
 
-    app.process_key_event(mod_key(KeyCode::Char('2'), KeyModifiers::CONTROL))
+    app.process_key_event(mod_key(KeyCode::Char('2'), KeyModifiers::ALT))
         .unwrap();
     assert!(app.agents_split.is_none());
 
@@ -810,14 +810,14 @@ async fn esc_over_expanded_subagent_folds_and_stays_in_session_when_idle() {
     }
 }
 
-/// `Ctrl+0` is the MAIN-agent hotkey: it unfocuses every /agents pane, so
+/// `Alt+0` is the MAIN-agent hotkey: it unfocuses every /agents pane, so
 /// the shared prompt targets the plain normal-mode loop (unchanged by the
 /// split). This pins the CSI-u delivery shape
 /// (`Char('0')` + CONTROL — what kitty-protocol terminals send once the
 /// app negotiates `REPORT_ALL_KEYS_AS_ESCAPE_CODES`): the focus MUST
 /// clear even with a draft typed, and a pane hotkey must re-focus after.
 #[tokio::test]
-async fn ctrl_zero_unfocuses_every_pane_to_the_main_agent() {
+async fn alt_zero_unfocuses_every_pane_to_the_main_agent() {
     let _home = HOME_LOCK.lock();
     isolate_home();
     let mut app = App::new("/tmp".to_string());
@@ -828,26 +828,26 @@ async fn ctrl_zero_unfocuses_every_pane_to_the_main_agent() {
     ));
 
     // Focus the second pane first (1-based), with a draft typed: the
-    // Ctrl shape never consults the draft.
-    app.process_key_event(mod_key(KeyCode::Char('2'), KeyModifiers::CONTROL))
+    // Chorded hotkey never consults the draft.
+    app.process_key_event(mod_key(KeyCode::Char('2'), KeyModifiers::ALT))
         .unwrap();
     assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(Some(1)));
     app.prompt_view.handle_paste("do the thing");
 
-    // Ctrl+0 clears the focus — the draft is untouched (it now belongs to
+    // Alt+0 clears the focus — the draft is untouched (it now belongs to
     // the main agent's next turn).
-    app.process_key_event(mod_key(KeyCode::Char('0'), KeyModifiers::CONTROL))
+    app.process_key_event(mod_key(KeyCode::Char('0'), KeyModifiers::ALT))
         .unwrap();
     assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(None));
     assert_eq!(app.prompt_view.input.trim(), "do the thing");
 
     // A pane hotkey re-focuses from the unfocused state.
-    app.process_key_event(mod_key(KeyCode::Char('1'), KeyModifiers::CONTROL))
+    app.process_key_event(mod_key(KeyCode::Char('1'), KeyModifiers::ALT))
         .unwrap();
     assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(Some(0)));
 }
 
-/// Legacy terminals have no byte encoding for `Ctrl+0` — it arrives as a
+/// Legacy terminals have no byte encoding for chorded digits — `Alt+0`
 /// plain `0`. The plain-digit fallback must still unfocus while the draft
 /// is empty (picker closed, no modal): that is the ONLY shape those
 /// terminals can deliver.
@@ -900,10 +900,10 @@ async fn plain_zero_types_when_the_draft_is_not_empty() {
     assert_eq!(app.prompt_view.input.trim(), "hel0");
 }
 
-/// `Ctrl+0` stays sovereign through the open /agents picker (like every
+/// `Alt+0` stays sovereign through the open /agents picker (like every
 /// other pane hotkey): it unfocuses without touching the picker's marks.
 #[tokio::test]
-async fn ctrl_zero_unfocuses_through_the_open_picker() {
+async fn alt_zero_unfocuses_through_the_open_picker() {
     let _home = HOME_LOCK.lock();
     isolate_home();
     let mut app = App::new("/tmp".to_string());
@@ -915,7 +915,7 @@ async fn ctrl_zero_unfocuses_through_the_open_picker() {
     app.agents_picker.open();
     assert!(app.agents_picker.visible);
 
-    app.process_key_event(mod_key(KeyCode::Char('0'), KeyModifiers::CONTROL))
+    app.process_key_event(mod_key(KeyCode::Char('0'), KeyModifiers::ALT))
         .unwrap();
     assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(None));
     assert!(app.agents_picker.visible, "the picker must stay open");
@@ -940,7 +940,7 @@ async fn esc_with_main_focused_parks_and_never_stops_the_loop() {
     app.agents_split = Some(crate::routes::session::agents_split::AgentsSplitState::new(
         vec!["claude".into(), "kilo".into()],
     ));
-    app.process_key_event(mod_key(KeyCode::Char('0'), KeyModifiers::CONTROL))
+    app.process_key_event(mod_key(KeyCode::Char('0'), KeyModifiers::ALT))
         .unwrap();
     assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(None));
     app.state.status = crate::types::SessionStatus::Working;
@@ -979,7 +979,7 @@ async fn esc_with_main_focused_and_idle_parks_the_split() {
     app.agents_split = Some(crate::routes::session::agents_split::AgentsSplitState::new(
         vec!["claude".into(), "kilo".into()],
     ));
-    app.process_key_event(mod_key(KeyCode::Char('0'), KeyModifiers::CONTROL))
+    app.process_key_event(mod_key(KeyCode::Char('0'), KeyModifiers::ALT))
         .unwrap();
     assert_eq!(app.state.status, crate::types::SessionStatus::Idle);
 
@@ -996,13 +996,13 @@ async fn esc_with_main_focused_and_idle_parks_the_split() {
     );
 }
 
-/// `Alt+0..Alt+9` are exact aliases of the `Ctrl` pane hotkeys — the
-/// reliable form on terminals where Ctrl+digits have no byte encoding or
-/// are eaten by the emulator. `Alt+0` unfocuses (the MAIN agent),
+/// `Alt+0..Alt+9` are the ONLY chorded pane hotkeys — the reliable form
+/// because ESC+digit survives every terminal encoding (Ctrl+digits have
+/// no legacy byte encoding). `Alt+0` unfocuses (the MAIN agent),
 /// `Alt+1..` focus the numbered pane (1-based), never consulting the
 /// draft, the picker or the modals.
 #[tokio::test]
-async fn alt_digits_mirror_the_ctrl_pane_hotkeys() {
+async fn alt_digits_focus_and_unfocus_panes() {
     let _home = HOME_LOCK.lock();
     isolate_home();
     let mut app = App::new("/tmp".to_string());
@@ -1062,8 +1062,8 @@ async fn alt_digit_focuses_through_the_open_picker() {
 }
 
 /// `Ctrl+Alt+digit` is the AltGr character signature on Windows consoles,
-/// never a hotkey: neither the Ctrl shape (ALT excluded) nor the Alt
-/// shape (CONTROL excluded) may fire — the focus stays put.
+/// never a hotkey: the Alt shape requires a BARE ALT (CONTROL excluded)
+/// — the focus stays put.
 #[tokio::test]
 async fn ctrl_alt_digit_is_not_a_pane_hotkey() {
     let _home = HOME_LOCK.lock();
@@ -1139,7 +1139,7 @@ async fn enter_dispatches_to_a_focused_pane_while_the_main_loop_is_working() {
     app.agents_split = Some(crate::routes::session::agents_split::AgentsSplitState::new(
         vec!["claude".into(), "kilo".into()],
     ));
-    app.process_key_event(mod_key(KeyCode::Char('1'), KeyModifiers::CONTROL))
+    app.process_key_event(mod_key(KeyCode::Char('1'), KeyModifiers::ALT))
         .unwrap();
     assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(Some(0)));
     // The MAIN loop is mid-turn.
@@ -1181,7 +1181,7 @@ async fn enter_with_main_target_while_working_still_queues() {
     app.agents_split = Some(crate::routes::session::agents_split::AgentsSplitState::new(
         vec!["claude".into(), "kilo".into()],
     ));
-    app.process_key_event(mod_key(KeyCode::Char('0'), KeyModifiers::CONTROL))
+    app.process_key_event(mod_key(KeyCode::Char('0'), KeyModifiers::ALT))
         .unwrap();
     assert_eq!(app.agents_split.as_ref().map(|s| s.focused), Some(None));
     app.state.status = crate::types::SessionStatus::Working;
@@ -1339,7 +1339,7 @@ async fn ctrl_x_force_closes_a_stuck_focused_pane_turn() {
     app.agents_split = Some(crate::routes::session::agents_split::AgentsSplitState::new(
         vec!["claude".into(), "kilo".into()],
     ));
-    app.process_key_event(mod_key(KeyCode::Char('1'), KeyModifiers::CONTROL))
+    app.process_key_event(mod_key(KeyCode::Char('1'), KeyModifiers::ALT))
         .unwrap();
     // The focused pane's turn starts (the normal dispatch path), then
     // stalls: running with no further events.
@@ -1389,7 +1389,7 @@ async fn ctrl_x_is_inert_without_a_running_focused_pane() {
     ));
 
     // Focused but IDLE pane: no-op.
-    app.process_key_event(mod_key(KeyCode::Char('1'), KeyModifiers::CONTROL))
+    app.process_key_event(mod_key(KeyCode::Char('1'), KeyModifiers::ALT))
         .unwrap();
     app.process_key_event(mod_key(KeyCode::Char('x'), KeyModifiers::CONTROL))
         .unwrap();
@@ -1409,7 +1409,7 @@ async fn ctrl_x_is_inert_without_a_running_focused_pane() {
 
     // Unfocused (MAIN agent target) with a stuck-looking main loop: Ctrl+X
     // does NOT touch the main loop's stop signal.
-    app.process_key_event(mod_key(KeyCode::Char('0'), KeyModifiers::CONTROL))
+    app.process_key_event(mod_key(KeyCode::Char('0'), KeyModifiers::ALT))
         .unwrap();
     app.state.status = crate::types::SessionStatus::Working;
     app.process_key_event(mod_key(KeyCode::Char('x'), KeyModifiers::CONTROL))
@@ -1453,7 +1453,7 @@ async fn backspace_hides_the_focused_pane_and_ctrl_z_restores_it() {
     ]);
     // Selecting a pane blurs the prompt (a pane click does this); simulate it.
     app.prompt_view.blur();
-    app.process_key_event(mod_key(KeyCode::Char('2'), KeyModifiers::CONTROL))
+    app.process_key_event(mod_key(KeyCode::Char('2'), KeyModifiers::ALT))
         .unwrap();
     assert_eq!(app.agents_split.as_ref().and_then(|s| s.focused), Some(1));
 

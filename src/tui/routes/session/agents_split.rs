@@ -454,7 +454,7 @@ pub struct AgentsSplitState {
     pub pending_input_action: Option<(usize, InputBoxHit)>,
     /// Focused pane index. `None` means NO pane holds the focus: the
     /// shared prompt targets the MAIN agent (the same loop as the normal
-    /// mode, running as manager while the split is open). `Ctrl+0`
+    /// mode, running as manager while the split is open). `Alt+0`
     /// unfocuses; a pane hotkey or click focuses again. Fresh splits
     /// start on the first picked pane.
     pub focused: Option<usize>,

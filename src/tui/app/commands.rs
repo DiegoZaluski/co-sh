@@ -39,7 +39,7 @@ impl App {
     /// per-pane binding lands in task "binding"). The `cosh` manager pane is
     /// NOT inserted automatically: the Cosh Manager belongs to the user's
     /// own split choice: only an explicitly marked `cosh` entry creates
-    /// its block. The MAIN agent needs no pane: `Ctrl+0` unfocuses every
+    /// its block. The MAIN agent needs no pane: `Alt+0` unfocuses every
     /// pane and the shared prompt targets the normal-mode loop (running
     /// as manager while the split is open). Opening the split does NOT spawn any session — panes
     /// start idle and only receive work when the shared prompt is

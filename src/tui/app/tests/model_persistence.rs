@@ -695,7 +695,7 @@ async fn slash_models_on_a_focused_cosh_pane_opens_the_pane_picker() {
     };
 
     // No focused pane: the main agent's global picker. `AgentsSplitState::
-    // new` focuses pane 0 by default — the split's Ctrl+0 state is what
+    // new` focuses pane 0 by default — the split's Alt+0 state is what
     // routes to the main agent.
     app.agents_split.as_mut().unwrap().focused = None;
     assert!(

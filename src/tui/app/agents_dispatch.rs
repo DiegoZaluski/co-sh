@@ -1,5 +1,5 @@
 //! Dispatch for the `/agents` split-pane mode: one submitted prompt goes to
-//! the FOCUSED pane — or, when `Ctrl+0` left NO pane focused, to the MAIN
+//! the FOCUSED pane — or, when `Alt+0` left NO pane focused, to the MAIN
 //! agent itself (the normal-mode loop, unchanged). External agent CLIs each
 //! get an independent ACP turn (`cosh_tools::subagent::acp::call` — the
 //! same one-shot contract the prompt corrector uses); each cosh pane (at
@@ -1261,7 +1261,7 @@ impl App {
     }
 
     /// Send a submitted prompt to the FOCUSED pane of the active split —
-    /// or, when NO pane holds the focus (`Ctrl+0`), to the MAIN agent
+    /// or, when NO pane holds the focus (`Alt+0`), to the MAIN agent
     /// itself (the same normal-mode loop, running as manager while the
     /// split is open). The focus IS the routing decision: the digit
     /// hotkeys / a click select which agent receives the message, so a
@@ -1273,7 +1273,7 @@ impl App {
             return;
         };
         let Some(focused) = split.focused else {
-            // Unfocused (`Ctrl+0`): the message goes to the MAIN agent —
+            // Unfocused (`Alt+0`): the message goes to the MAIN agent —
             // the plain normal-mode loop on the current session (unchanged
             // by the split; no manager prompt or tool set).
             self.submit_prompt_message(msg);
