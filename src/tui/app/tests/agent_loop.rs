@@ -882,6 +882,121 @@ async fn agents_mode_right_panel_shows_the_main_agent_not_a_list() {
     );
 }
 
+/// The mirror's auto-scroll must behave EXACTLY like the subagent windows'
+/// in the same panel: every visible mirror event re-pins the viewport to
+/// the bottom (sentinel `i32::MAX`, rendered as the live edge) while the
+/// user has not scrolled away, and a user scroll-up pauses the follow.
+///
+/// The pre-fix defect: `sync_main_mirror_event` applied events WITHOUT the
+/// `applied && !is_scrolled_up() → scroll_to_bottom()` contract
+/// `update_subagent_activity` serves to real subagent traffic — the mirror
+/// only re-pinned as a side effect of the main-loop ToolCall/ToolResult
+/// handlers, so narration/thought streaming below a static viewport looked
+/// non-sequential and a tool-less turn never climbed at all.
+#[tokio::test]
+async fn mirror_follows_every_visible_event_like_the_subagents() {
+    let _guard = HOME_LOCK.lock();
+    isolate_home();
+    use cosh::harness::HarnessEvent;
+
+    let mut app = App::new("/tmp".to_string());
+    let id = crate::session::store::generate_session_id();
+    app.state.add_empty_session(
+        id.clone(),
+        "mirror follow test".into(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64,
+    );
+    app.state.current_session_id = Some(id);
+    app.agents_split = Some(crate::routes::session::agents_split::AgentsSplitState::new(
+        vec![crate::types::AgentPaneRef::Name("claude".into())],
+    ));
+
+    app.open_main_mirror();
+    assert!(app.main_mirror_open());
+    // Open re-pins to the live edge (the sticky-bottom rule every other
+    // window reveal gets): the sentinel is armed.
+    assert_eq!(
+        app.state.right_panel.subagent_scroll_y,
+        i32::MAX,
+        "opening the mirror pins the viewport to the bottom"
+    );
+    // The section band the render registers every frame (a 0-top 20-row
+    // Subagent band here): without it `scroll_up_at`/`scroll_down_at` find
+    // no section and are no-ops, so the wheel-driven follow pause below
+    // could not be driven like on a real screen.
+    app.state
+        .right_panel
+        .push_section_layout(crate::routes::session::right_panel::types::SectionKind::Subagent, 0, 20);
+
+    // Pure narration deltas (NO tool calls): each visible change must
+    // re-arm the sentinel — this is the case the old code left dead.
+    for chunk in ["pensando", " bem", " aqui"] {
+        app.event_tx
+            .send(HarnessEvent::Token { text: chunk.into() })
+            .ok();
+    }
+    app.poll_events();
+    assert_eq!(
+        app.state.right_panel.subagent_scroll_y,
+        i32::MAX,
+        "a token delta re-pins the follow even with no tool activity"
+    );
+
+    // Reasoning too (the other bulk of a stream the old path ignored).
+    app.event_tx
+        .send(HarnessEvent::Reasoning { text: "hmm".into() })
+        .ok();
+    app.poll_events();
+    assert_eq!(
+        app.state.right_panel.subagent_scroll_y,
+        i32::MAX,
+        "a reasoning delta re-pins the follow"
+    );
+
+    // A user scroll-UP pauses the follow: further deltas must NOT re-pin.
+    app.state.right_panel.scroll_up_at(5, 3);
+    assert!(app.state.right_panel.is_scrolled_up());
+    app.event_tx
+        .send(HarnessEvent::Token { text: "mais".into() })
+        .ok();
+    app.poll_events();
+    assert!(
+        app.state.right_panel.subagent_scroll_y != i32::MAX,
+        "a paused follow is never re-pinned by stream events"
+    );
+
+    // Reaching the live edge again re-arms it (the shared follow contract),
+    // and the next delta keeps the pin.
+    app.state.right_panel.scroll_to_bottom();
+    app.event_tx
+        .send(HarnessEvent::Token { text: " fim".into() })
+        .ok();
+    app.poll_events();
+    assert_eq!(
+        app.state.right_panel.subagent_scroll_y,
+        i32::MAX,
+        "the re-armed follow keeps climbing"
+    );
+
+    // A new turn's input echo RE-ENGAGES the follow after a user pin: the
+    // echo swap shifts the whole timeline, so the viewport must land on
+    // the fresh turn's tail, not mid-content (the pane mirror's
+    // auto_follow re-arm at dispatch).
+    app.state.right_panel.scroll_up_at(5, 3);
+    app.mirror_main_input("novo turno");
+    assert_eq!(
+        app.state.right_panel.subagent_scroll_y,
+        i32::MAX,
+        "a new turn's input echo re-engages the follow"
+    );
+
+    app.close_main_mirror();
+    assert!(!app.main_mirror_open());
+}
+
 /// A mid-stream reset during a Thought (long reasoning phases are where
 /// mid-stream retries are most likely) must not make the chat text blink:
 /// the failed attempt's partial message STAYS in place and the retried

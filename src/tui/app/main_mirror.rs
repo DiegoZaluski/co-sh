@@ -212,6 +212,12 @@ impl App {
     ///
     /// Idempotent for real: an already-open mirror is left exactly as it is
     /// (no second backfill stacking a duplicate transcript into the window).
+    ///
+    /// OPEN lands at the live edge: the backfill re-pins the viewport to the
+    /// bottom (the same sticky-bottom rule any newly opened subagent window
+    /// gets), so the mirror opens showing the conversation's TAIL, not its
+    /// top. The `user_scrolled_away` guard is honored: a pin the user set
+    /// through navigation stays.
     pub(super) fn open_main_mirror(&mut self) {
         if self.main_mirror_open() {
             return;
@@ -230,6 +236,12 @@ impl App {
                 self.state.right_panel.sync_main_mirror_event(&event, running);
             }
         }
+        // The backfilled transcript IS the newest content: pin the viewport
+        // to its tail exactly like every other window reveal does. (A pin
+        // the user deliberately armed is left alone.)
+        if !self.state.right_panel.is_scrolled_up() {
+            self.state.right_panel.scroll_to_bottom();
+        }
     }
 
     /// Close the mirror for good: the timeline resets, the next open starts
@@ -241,37 +253,70 @@ impl App {
     /// Feed ONE main-loop event into the mirror (a no-op while closed).
     /// The mirror is only projected while `/agents` is open — a turn run
     /// outside the mode builds no projection (the transcript is the view).
+    ///
+    /// A visible change re-pins the viewport to the bottom — the EXACT
+    /// contract `events.rs` applies to normal subagent traffic
+    /// (`update_subagent_activity(..) && !is_scrolled_up()`). This is what
+    /// makes the mirror's follow behave like the subagents': every token,
+    /// thought, tool row and usage line climbs the window instead of the
+    /// viewport only re-pinning at the tool-call/tool-result events the
+    /// main-loop handlers touch (the pre-fix behavior, which left narration
+    /// and thinking streaming below a static viewport — non-sequential,
+    /// and absent entirely on a tool-less turn).
     pub(super) fn mirror_main_event(&mut self, event: &HarnessEvent, running: bool) {
         if !self.agents_split.is_some() || !self.main_mirror_open() {
             return;
         }
         for sub in mirror_events(&mut self.main_mirror_bridge, event) {
-            self.state.right_panel.sync_main_mirror_event(&sub, running);
+            let applied = self
+                .state
+                .right_panel
+                .sync_main_mirror_event(&sub, running);
+            if applied && !self.state.right_panel.is_scrolled_up() {
+                self.state.right_panel.scroll_to_bottom();
+            }
         }
     }
 
     /// Echo the just-submitted prompt as the mirror's turn input (a no-op
     /// while closed). Called on the same submit path `start_agent_loop`
     /// serves.
+    ///
+    /// A new turn RE-ENGAGES the follow UNCONDITIONALLY — the pane mirror's
+    /// `auto_follow` re-arm at dispatch, and the same rule a freshly spawned
+    /// subagent window gets (`events.rs`'s unguarded pin on spawn). The
+    /// user just submitted the prompt, so the turn start is the natural
+    /// moment to land on the live edge; the echo swap also grows/shrinks
+    /// the window's head and shifts the whole timeline, so without the
+    /// re-pin the viewport would land mid-content — or worse, clamp to the
+    /// bottom only when the echo happened to shrink, the drift the
+    /// reported unpredictability came from. (A user pin still wins for
+    /// every STREAM event — only the turn start re-engages.)
     pub(super) fn mirror_main_input(&mut self, input: &str) {
         if !self.agents_split.is_some() || !self.main_mirror_open() {
             return;
         }
         self.main_mirror_bridge = MirrorBridge::default();
         self.state.right_panel.set_main_mirror_input_echo(Some(input));
+        self.state.right_panel.scroll_to_bottom();
     }
 
     /// Append a free-form line (a loop error, an interrupted-turn notice)
     /// to the mirror's transcript — the same `Message` entry a subagent
-    /// window renders for its failure text.
+    /// window renders for its failure text. A visible append re-pins the
+    /// follow like any other mirror event.
     pub(super) fn mirror_main_message(&mut self, text: &str) {
         if !self.agents_split.is_some() || !self.main_mirror_open() {
             return;
         }
         self.main_mirror_bridge = MirrorBridge::default();
-        self.state
-            .right_panel
-            .sync_main_mirror_event(&SubagentEvent::Message { text: text.to_string() }, false);
+        let applied = self.state.right_panel.sync_main_mirror_event(
+            &SubagentEvent::Message { text: text.to_string() },
+            false,
+        );
+        if applied && !self.state.right_panel.is_scrolled_up() {
+            self.state.right_panel.scroll_to_bottom();
+        }
     }
 
     /// Seal the mirror's terminal marker for the turn that just ended

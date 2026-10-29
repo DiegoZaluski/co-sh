@@ -3735,9 +3735,16 @@ impl RightPanelState {
     /// closed). `running` flips the window's live/terminal marker; a
     /// transition Running→finished here seals the transcript the same way
     /// a pane-mirror turn end does (no re-seal churn while idle).
-    pub(crate) fn sync_main_mirror_event(&mut self, event: &SubagentEvent, running: bool) {
+    ///
+    /// Returns whether the event changed any VISIBLE mirror state — the
+    /// SAME signal `update_subagent_activity` feeds the normal subagent
+    /// auto-follow. The mirror is the same window the subagents render,
+    /// so its follow contract is the same one: the caller re-pins the
+    /// viewport only on a visible change (and only while the user has
+    /// not scrolled away).
+    pub(crate) fn sync_main_mirror_event(&mut self, event: &SubagentEvent, running: bool) -> bool {
         let Some(idx) = self.main_mirror_index() else {
-            return;
+            return false;
         };
         let session = &mut self.pty_sessions[idx];
         let applied = session.subagent_activity.apply(event);
@@ -3773,6 +3780,7 @@ impl RightPanelState {
         if applied {
             self.mark_activity(SectionKind::Subagent);
         }
+        applied
     }
 
     /// Seal the mirror's terminal marker for the turn that just ended,
