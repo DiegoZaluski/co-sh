@@ -137,9 +137,7 @@ impl App {
             // ESC fall through so it still performs its normal local
             // action (clear selection, close menu/dialog). Regression:
             // those gates used to consume ESC without setting
-            // `stop_signal`, so the loop kept running. `Retry` is covered
-            // too: an Error event can flip the status while a loop is
-            // still winding down, and ESC must still stop it. (Idle
+            // `stop_signal`, so the loop kept running. (Idle
             // no-op: the flag is reset by `start_agent_loop`.)
             //
             // PRIORITY RULE: when a modal box IS open (model picker,
@@ -154,12 +152,14 @@ impl App {
             // question / permission dialogs are exempt on purpose: their
             // Esc is a semantic REJECT of the pending tool call /
             // permission request, not a mere close.
+            // ONLY `Working`: a live loop is the only thing this fast-stop
+            // exists for. `SessionStatus::Retry` is terminal — the
+            // `HarnessEvent::Error` handler already ran `handle_loop_end`
+            // and the harness thread has exited (the documented contract in
+            // `routes/session/delete.rs::deletion_stops_running_loop`) — so
+            // raising the shared stop signal for it would stop a dead loop.
             if key.code == KeyCode::Esc
-                && matches!(
-                    self.state.status,
-                    crate::types::SessionStatus::Working
-                        | crate::types::SessionStatus::Retry { .. }
-                )
+                && self.state.status == crate::types::SessionStatus::Working
                 && !self.modal_box_open()
                 // The /agents split owns Esc FIRST (issue 3): its Esc is
                 // PARK — leave the split with every turn (the main loop
@@ -360,6 +360,13 @@ impl App {
                     return Ok(false);
                 }
                 self.pending_delete = None;
+                // Deliberately NOT status-gated, unlike Esc's quit offer:
+                // Ctrl+C is the explicit, double-press exit idiom (empty
+                // draft → confirm). An "accidental" live-loop kill cannot
+                // happen the way Esc's could — the first Ctrl+C kills the
+                // prompt draft, and reaching this branch takes a deliberate
+                // second press on an empty draft; "Yes" in the confirm then
+                // quits while the loop runs by explicit choice.
                 self.dialog.show(DialogType::Confirm {
                     message: "Quit cosh?".into(),
                 });
@@ -1713,6 +1720,9 @@ impl App {
                         self.park_agents_split();
                         return Ok(false);
                     } else if self.state.status == crate::types::SessionStatus::Working {
+                        // ONLY `Working` — same contract as the Cancel arm
+                        // below: `Retry` is a terminal state (the harness
+                        // thread already exited), never a winding-down loop.
                         self.stop_signal.store(true, Ordering::Relaxed);
                     }
                 }
@@ -1768,6 +1778,16 @@ impl App {
                         self.park_agents_split();
                         return Ok(false);
                     } else if self.state.status == crate::types::SessionStatus::Working {
+                        // ONLY `Working`: a live loop owns Esc here.
+                        // `SessionStatus::Retry` is deliberately excluded —
+                        // it is TERMINAL (the `HarnessEvent::Error` handler
+                        // already ran `handle_loop_end` and the harness
+                        // thread has exited; see `deletion_stops_running_loop`
+                        // in `routes/session/delete.rs` for the documented
+                        // contract). Stopping a dead loop is meaningless, and
+                        // the Error path intentionally leaves the pending
+                        // queues PARKED for the user to decide — wiping them
+                        // here would silently destroy queued follow-ups.
                         self.stop_signal.store(true, Ordering::Relaxed);
                         // Clear pending queues: the user explicitly
                         // cancelled, so queued follow-ups should not
@@ -1819,7 +1839,21 @@ impl App {
                         #[cfg(not(feature = "home"))]
                         {
                             // No Home screen to return to: Esc suggests
-                            // quitting the app instead.
+                            // quitting the app instead. This is the
+                            // LOWEST-priority Esc job by STRUCTURE, not by
+                            // a status gate: every claimant above (modal
+                            // boxes, panel folds, split park, and the
+                            // `Working` loop-stop branch) already returned,
+                            // so this branch runs only when nothing else
+                            // claims Esc. Do NOT gate it on
+                            // `SessionStatus::Idle`: `Retry` is a TERMINAL
+                            // state (the harness thread already exited —
+                            // see `deletion_stops_running_loop` in
+                            // `routes/session/delete.rs`), it never
+                            // transitions back to `Idle` on its own, and
+                            // after an error this confirm is the no-home
+                            // build's only exit path — gating it there
+                            // would strand the user.
                             self.pending_delete = None;
                             self.dialog.show(DialogType::Confirm {
                                 message: "Quit cosh?".into(),

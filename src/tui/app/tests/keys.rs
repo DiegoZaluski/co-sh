@@ -787,13 +787,27 @@ async fn esc_over_expanded_subagent_folds_and_stays_in_session_when_idle() {
     );
 
     // Second Esc: the list is now active (nothing to fold), so Esc keeps
-    // its normal meaning — leave the session (agent still idle).
-    app.process_key_event(mod_key(KeyCode::Esc, KeyModifiers::NONE))
-        .unwrap();
-    assert!(
-        !matches!(app.mode(), AppMode::Session),
-        "with the list active, Esc falls through to the leave-to-Home path"
-    );
+    // its normal meaning — leave the session (agent still idle). The
+    // no-home build has no Home to return to: its lowest-priority Esc job
+    // is the quit confirm instead (same Idle precondition).
+    #[cfg(feature = "home")]
+    {
+        app.process_key_event(mod_key(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert!(
+            !matches!(app.mode(), AppMode::Session),
+            "with the list active, Esc falls through to the leave-to-Home path"
+        );
+    }
+    #[cfg(not(feature = "home"))]
+    {
+        app.process_key_event(mod_key(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert!(
+            app.is_confirm_dialog_visible(),
+            "with the list active, Idle Esc falls through to the quit confirm"
+        );
+    }
 }
 
 /// `Ctrl+0` is the MAIN-agent hotkey: it unfocuses every /agents pane, so
@@ -1705,4 +1719,98 @@ async fn slash_menu_declines_a_ctrl_letter_it_does_not_implement() {
     // Guard the equivalence is not vacuous: the menu genuinely handled the
     // key by declining it — it stayed open for the remaining arguments.
     assert!(shown.slash_menu.visible, "the menu was left open");
+}
+
+/// Esc during a `Retry` status must treat it as what it is: a TERMINAL
+/// state, not a running loop. The harness thread already exited when
+/// `HarnessEvent::Error` set `Retry` (see `deletion_stops_running_loop` in
+/// `routes/session/delete.rs`), so Esc must NOT raise the stop signal for a
+/// dead loop — and the Error path deliberately leaves the pending queues
+/// parked for the user to decide, so Esc must not wipe them either. What
+/// Esc DOES do with a terminal `Retry`: in the no-home build it opens the
+/// quit confirm (the build's only exit path — `Retry` never returns to
+/// `Idle` on its own); in the home build it shows the leave gate's
+/// "winding down" toast and stays in the session.
+#[tokio::test]
+async fn esc_during_terminal_retry_never_stops_or_wipes_but_exits() {
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+    app.state.status = crate::types::SessionStatus::Retry {
+        message: "provider exploded".into(),
+        action: None,
+    };
+    // The Error path parks queued follow-ups deliberately (events.rs): a
+    // Esc over the dead loop must leave them for the user.
+    if let Some(queues) = app
+        .state
+        .pending_queues
+        .get_mut(app.state.current_session_id.as_deref().unwrap())
+    {
+        queues.next_loop.push_back("queued follow-up".into());
+    }
+
+    app.process_key_event(mod_key(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+
+    assert!(
+        !app.stop_signal.load(std::sync::atomic::Ordering::Relaxed),
+        "ESC during Retry must not raise the stop signal for a dead loop"
+    );
+    assert!(
+        app.state
+            .pending_queues
+            .get(app.state.current_session_id.as_deref().unwrap())
+            .is_some_and(|q| !q.next_loop.is_empty()),
+        "ESC during Retry must keep the parked queues for the user"
+    );
+    #[cfg(not(feature = "home"))]
+    assert!(
+        app.is_confirm_dialog_visible(),
+        "no-home build: terminal-Retry Esc reaches the quit confirm — the only exit path"
+    );
+    #[cfg(feature = "home")]
+    {
+        use super::super::AppMode;
+        assert!(
+            matches!(app.mode(), AppMode::Session),
+            "home build: terminal-Retry Esc stays in the session (the leave gate)"
+        );
+    }
+}
+
+/// The no-home build's quit confirm is the LOWEST-priority Esc job by
+/// structure: every claimant above it in the Cancel chain returns first,
+/// so it can only be reached when nothing else claims Esc. The one live
+/// state that must never reach it is `Working` — the loop-stop branch
+/// intercepts Esc there. Compiled only without the `home` feature (with
+/// it, this chain's tail is the leave-to-Home path instead).
+#[cfg(not(feature = "home"))]
+#[tokio::test]
+async fn esc_while_working_never_offers_to_quit() {
+    let _home = HOME_LOCK.lock();
+    isolate_home();
+    let mut app = App::new("/tmp".to_string());
+    app.state.add_empty_session("t".into(), "t".into(), 0);
+    app.state.current_session_id = Some("t".into());
+
+    // Working: the loop owns Esc — the stop branch returns before the
+    // quit offer can ever show.
+    app.state.status = crate::types::SessionStatus::Working;
+    app.process_key_event(mod_key(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+    assert!(
+        app.stop_signal.load(std::sync::atomic::Ordering::Relaxed),
+        "ESC while Working must interrupt the live loop"
+    );
+    assert!(
+        !app.is_confirm_dialog_visible(),
+        "ESC while Working must interrupt the loop, not offer to quit"
+    );
+    assert!(
+        !app.should_quit,
+        "no quit may be pending while the loop was merely interrupted"
+    );
 }

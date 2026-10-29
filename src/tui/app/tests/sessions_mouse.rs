@@ -655,7 +655,11 @@ async fn hover_over_session_row_moves_the_selection() {
 
 /// Hover-follow on the home screen: the left panel overlays every route,
 /// so the same list must follow the cursor there too — not only inside a
-/// session. (No current session ⇒ home mode.)
+/// session. (No current session ⇒ home mode.) Home-only: without the
+/// `home` feature a fresh app boots straight into a session
+/// (`App::new` → `start_new_session`), so the no-current-session premise
+/// does not exist there.
+#[cfg(feature = "home")]
 #[tokio::test]
 async fn hover_over_session_row_moves_the_selection_on_home() {
     let _guard = HOME_LOCK.lock();
