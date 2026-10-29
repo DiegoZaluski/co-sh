@@ -4,10 +4,11 @@
 
 Cosh é um coding agent de propósito geral para o terminal, com ferramentas de engenharia de software e *computer tools* que permitem interagir com aplicações gráficas.
 
-<img width="560" height="315" alt="demo" src="https://github.com/user-attachments/assets/83b0e1c9-bbcc-422f-bef8-55012eca8647" />
+<img width="720" height="406" alt="demo" src="https://github.com/user-attachments/assets/9a9161fa-f2ac-43f4-8623-8ae54d64c8bc" />
 
 Destaques:
 
+- **Modo multi-agente (`/agents`)** — rode agentes externos (Gemini, Claude, Codex, Cline, …) junto com o agente principal em panes divididas, todos alcançáveis pelo mesmo prompt. Cada agente mantém sua própria sessão, modelo e git worktree opcional, e o agente principal os coordena — despachando tarefas e coletando relatórios como um time.
 - **Computer tools via accessibility tree** — o agente lê e opera interfaces gráficas por uma representação estruturada e compacta, e só recorre a screenshots como fallback. Menos imagens processadas, menos tokens consumidos.
 - **TUI construída do zero em Rust** (Ratatui), inspirada na UX do OpenCode. Configuração de providers, modelos e modos de operação direto na interface — quase zero configuração manual.
 - **Crates independentes** — as ferramentas de desenvolvimento vivem em crates desacoplados da aplicação, reutilizáveis como bibliotecas fora do Cosh.

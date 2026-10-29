@@ -4,10 +4,11 @@
 
 Cosh 是一个运行在终端中的通用编码智能体（coding agent），除软件工程工具外，还配备了 *computer tools*，使其能够与图形应用程序交互。
 
-<img width="560" height="315" alt="demo" src="https://github.com/user-attachments/assets/83b0e1c9-bbcc-422f-bef8-55012eca8647" />
+<img width="720" height="406" alt="demo" src="https://github.com/user-attachments/assets/9a9161fa-f2ac-43f4-8623-8ae54d64c8bc" />
 
 主要特性：
 
+- **多智能体模式（`/agents`）** — 让外部智能体（Gemini、Claude、Codex、Cline 等）与主智能体一起在分屏窗格中运行，全部可以通过同一个提示词触达。每个智能体保留自己的会话、模型和可选的 git worktree，由主智能体统一协调 — 像一个团队一样分派任务、收集报告。
 - **基于 accessibility tree 的 computer tools** — 智能体通过结构化、紧凑的表示形式读取并操作图形界面，仅在必要时才回退到截图。处理的图像更少，消耗的 token 更少。
 - **用 Rust 从零构建的 TUI**（Ratatui），交互设计受 OpenCode 启发。Provider、模型和运行模式都可以直接在界面中配置 — 几乎零手动配置。
 - **独立的 crates** — 开发工具被拆分为与应用解耦的 crates，可以作为库在 Cosh 之外复用。
